@@ -3,15 +3,17 @@
 > Goal: bring Sleigh-powered, typed lifting to radare2 with backward-compatible ESIL and a path to richer analysis.
 
 ## Snapshot (Jan 2025)
+
 - Core crates compile and lift via libsla; x86/x86-64/ARM available through `sleigh-config`.
 - CLI emits JSON/ESIL; P-code → r2il translation tested.
-- C-ABI exists only for loading `.r2il` (no per-instruction lifting exported yet).
-- No radare2 plugin or r2 commands are implemented; Makefiles in roadmap only.
+- **radare2 plugin complete**: FFI exports, C wrapper, Makefile, basic commands.
+- Plugin tested: `e anal.arch=sleigh` works with disassembly and ESIL output.
 
 ## Phase Overview
+
 - Phase 1: Foundation — **done** (types, translator, CLI, ESIL).
-- Phase 2: radare2 integration — **active** (FFI + plugin + commands).
-- Phase 3: Advanced analysis — **backlog** (SSA, symbolic, memory model, dataflow).
+- Phase 2: radare2 integration — **done** (FFI + plugin + commands).
+- Phase 3: Advanced analysis — **next** (SSA, symbolic, memory model, dataflow).
 - Phase 4: Native decompiler — **long-term** (AST, structuring, codegen).
 
 ---
@@ -24,13 +26,14 @@
 
 Crates:
 - `crates/r2il`: core types (`Varnode`, `SpaceId`, `R2ILOp`, `ArchSpec`, serialization).
-- `crates/r2sleigh-lift`: P-code translation + disasm wrapper around libsla.
-- `crates/r2sleigh-cli`: CLI (compile/disasm/info) + ESIL formatting.
-- `r2plugin`: Rust cdylib surface for radare2 (currently only arch load helpers).
+- `crates/r2sleigh-lift`: P-code translation + disasm wrapper + ESIL formatting.
+- `crates/r2sleigh-cli`: CLI (compile/disasm/info).
+- `r2plugin`: Rust cdylib + C wrapper for radare2 (`RAnalPlugin`).
 
 ---
 
 ## Phase 1 (Complete)
+
 - r2il opcodes (60+), spaces, varnodes, serialization with version/magic.
 - P-code translator + libsla disassembler wrapper.
 - ESIL output path in CLI.
@@ -39,47 +42,56 @@ Crates:
 
 ---
 
-## Phase 2: radare2 Integration (Current Focus)
+## Phase 2: radare2 Integration (Complete)
 
-Objective: ship a loadable radare2 plugin that uses r2sleigh for lifting and ESIL generation.
+### Deliverables (Done)
 
-### Deliverables
-- **FFI surface** (Rust cdylib):
-  - `r2il_arch_init(arch)` → load arch spec (from embedded sleigh-config or `.r2il` file).
-  - `r2il_lift(ctx, bytes, len, addr)` → `R2ILBlock`.
-  - `r2il_block_free`, `r2il_block_op_json`, `r2il_block_size`.
-  - `r2il_block_to_esil(block)` → ESIL string for radare2.
-  - Architecture introspection: register list, spaces, bits, endianness.
-- **C wrapper (radare2 plugin)**:
-  - `r_anal` plugin that maps `R2ILBlock` → `RAnalOp` (type, size, jump/fail, stack hints, ESIL).
-  - Handles libsla minimum-bytes requirement (pad/peek 16 bytes for x86-64).
-  - Caching lifted blocks keyed by `(pc, bytes)` to avoid relifting.
-- **Build integration**:
-  - `r2plugin/Makefile` to build `anal_sleigh` against produced cdylib.
-  - CI job or script to run `cargo build -p r2sleigh-plugin --features x86,arm` and compile plugin.
+- **FFI surface** (Rust cdylib `r2plugin/src/lib.rs`):
+  - `r2il_arch_init(arch)` — load arch spec from sleigh-config ✓
+  - `r2il_lift(ctx, bytes, len, addr)` — lift to `R2ILBlock` ✓
+  - `r2il_block_free`, `r2il_block_op_count`, `r2il_block_op_json` ✓
+  - `r2il_block_size`, `r2il_block_addr` ✓
+  - `r2il_block_type`, `r2il_block_jump`, `r2il_block_fail` ✓
+  - `r2il_block_to_esil(ctx, block)` — ESIL string ✓
+  - `r2il_block_mnemonic(ctx, bytes, len, addr)` — disassembly ✓
+  - `r2il_string_free` ✓
+
+- **C wrapper** (`r2plugin/r_anal_sleigh.c`):
+  - `RAnalPlugin` with `sleigh_op()` callback ✓
+  - Maps `R2ILBlock` → `RAnalOp` (type, size, jump/fail, ESIL) ✓
+  - Handles 16-byte minimum padding for libsla ✓
+  - Lazy architecture initialization with caching ✓
+
+- **Build integration** (`r2plugin/Makefile`):
+  - Builds Rust cdylib + C wrapper → `anal_sleigh.so` ✓
+  - `make install` / `make uninstall` targets ✓
+  - Feature flags for x86/arm/all-archs ✓
+
 - **User commands**:
-  - `asl` family (`asl`, `aslj`, `asle`, `asli`, `asls`) for dumping r2il/ESIL/register info.
-- **Tests**:
-  - Plugin loads: `r2 -qc "e anal.arch=sleigh; asl?" --`.
-  - Lift sanity: compare ESIL vs native `x86` for a few opcodes.
-  - Error paths: unsupported arch, short input (<16 bytes), bad sleigh data.
+  - `a:sleigh` — status ✓
+  - `a:sleigh.info` — architecture info ✓
+  - `a:sleigh.json` — r2il ops as JSON ✓
 
-### Open Questions / Decisions
-- Where to source `.r2il` specs at runtime: embed sleigh-config vs load from disk.
-- Mapping multi-op blocks to single `RAnalOp`: choose representative op type and set jump/fail/cond fields; expose full r2il via JSON command.
-- ESIL fidelity: prefer deterministic ASCII `-` and radare2 operators; ensure sign/zero-extend syntax matches `Agent.md`.
-- Versioning: stabilize `.r2il` format for C consumers (consider replacing `bincode + HashMap` with a deterministic layout).
+- **Documentation**:
+  - README with plugin installation and usage ✓
 
-### Immediate Task List
-1) Expand `r2plugin/src/lib.rs` to export lifting APIs and block inspection (ESIL + JSON).
-2) Add thin C shim `r2plugin/r_anal_sleigh.c` that calls FFI and fills `RAnalOp`.
-3) Wire Makefile to build `anal_sleigh.so` against the Rust cdylib.
-4) Implement `asl` commands in radare2 (or a minimal `asl` proof via `cmd_help`).
-5) Add integration tests and docs (`README` snippet + plugin usage).
+### Verified Working
+
+```bash
+$ r2 -qc 'e anal.arch=sleigh; pd 3' /tmp/test.bin
+            0x00000000      55             push rbp
+            0x00000001      4889e5         mov rbp, rsp
+            0x00000004      c3             ret
+
+$ r2 -qc 'e anal.arch=sleigh; e asm.esil=true; pd 3' /tmp/test.bin
+            0x00000000      55             rbp,8,rsp,-,=[8],8,rsp,-=
+            0x00000001      4889e5         rsp,rbp,=
+            0x00000004      c3             rsp,[8],rip,=,8,rsp,+=
+```
 
 ---
 
-## Phase 3: Advanced Analysis (Backlog)
+## Phase 3: Advanced Analysis (Next)
 
 Goal: typed analysis on top of r2il.
 
@@ -110,9 +122,9 @@ Prereqs: mature SSA + dataflow + type info; extensive tests per-arch.
 ## Technical Notes
 
 - `.r2il` today: `bincode` serialization with magic/version and `HashMap` for registers; not a stable C ABI. Either freeze a deterministic binary layout or add a JSON/CBOR export for C consumers.
-- libsla quirk: x86-64 needs 16 bytes minimum; plugin must pad/peek safely.
+- libsla quirk: x86-64 needs 16 bytes minimum; plugin pads input automatically.
 - Spaces: `SpaceId` maps `Const`, `Register`, `Ram`, `Unique`, `Custom(n)`; loads/stores carry a space constant operand.
-- ESIL syntax: stick to ASCII minus (`-`), signed shift `>>>`, sign-extend `val,bits,~~`, boolean vs bitwise correctness.
+- ESIL syntax: ASCII minus (`-`), signed shift `>>>`, sign-extend `val,bits,~~`, boolean vs bitwise correctness.
 
 ---
 

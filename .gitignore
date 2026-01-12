@@ -1,5 +1,6 @@
 # Rust build artifacts
-/target/
+target/*
+target/**/*
 **/*.rs.bk
 Cargo.lock
 
@@ -16,6 +17,10 @@ Thumbs.db
 
 # Generated files
 *.r2il
+
+# Plugin build artifacts
+r2plugin/*.so
+r2plugin/*.dylib
 
 # Debug
 *.log

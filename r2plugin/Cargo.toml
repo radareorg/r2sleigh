@@ -11,3 +11,14 @@ crate-type = ["cdylib"]
 [dependencies]
 r2il = { path = "../crates/r2il" }
 r2sleigh-lift = { path = "../crates/r2sleigh-lift" }
+serde_json = "1"
+
+[dependencies.sleigh-config]
+version = "1.0"
+optional = true
+
+[features]
+default = ["x86"]
+x86 = ["sleigh-config/x86"]
+arm = ["sleigh-config/ARM"]
+all-archs = ["x86", "arm"]

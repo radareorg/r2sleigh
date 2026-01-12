@@ -25,6 +25,7 @@
 
 pub mod context;
 pub mod disasm;
+pub mod esil;
 pub mod pcode;
 pub mod sleigh;
 
@@ -32,6 +33,7 @@ use thiserror::Error;
 
 pub use context::LiftContext;
 pub use disasm::Disassembler;
+pub use esil::{format_op, op_to_esil};
 pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
 pub use sleigh::{build_arch_spec, extract_arch_spec, get_sleigh_info, SleighInfo};
 use r2il::ArchSpec;
