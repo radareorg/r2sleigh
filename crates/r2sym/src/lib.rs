@@ -39,8 +39,8 @@ pub mod value;
 
 pub use executor::SymExecutor;
 pub use memory::SymMemory;
-pub use path::{ExploreConfig, PathExplorer, PathResult};
-pub use solver::{SatResult, SymSolver};
+pub use path::{ExploreConfig, PathExplorer, PathResult, SolvedPath};
+pub use solver::{SatResult, SymModel, SymSolver};
 pub use state::SymState;
 pub use value::SymValue;
 

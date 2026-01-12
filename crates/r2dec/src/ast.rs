@@ -22,10 +22,7 @@ pub enum CType {
     /// Array of elements.
     Array(Box<CType>, Option<usize>),
     /// Function type.
-    Function {
-        ret: Box<CType>,
-        params: Vec<CType>,
-    },
+    Function { ret: Box<CType>, params: Vec<CType> },
     /// Struct type.
     Struct(String),
     /// Union type.
@@ -171,10 +168,7 @@ pub enum CExpr {
     /// Variable reference.
     Var(String),
     /// Unary operation.
-    Unary {
-        op: UnaryOp,
-        operand: Box<CExpr>,
-    },
+    Unary { op: UnaryOp, operand: Box<CExpr> },
     /// Binary operation.
     Binary {
         op: BinaryOp,
@@ -188,30 +182,15 @@ pub enum CExpr {
         else_expr: Box<CExpr>,
     },
     /// Type cast: (type)expr.
-    Cast {
-        ty: CType,
-        expr: Box<CExpr>,
-    },
+    Cast { ty: CType, expr: Box<CExpr> },
     /// Function call.
-    Call {
-        func: Box<CExpr>,
-        args: Vec<CExpr>,
-    },
+    Call { func: Box<CExpr>, args: Vec<CExpr> },
     /// Array/pointer subscript: arr[index].
-    Subscript {
-        base: Box<CExpr>,
-        index: Box<CExpr>,
-    },
+    Subscript { base: Box<CExpr>, index: Box<CExpr> },
     /// Member access: obj.member.
-    Member {
-        base: Box<CExpr>,
-        member: String,
-    },
+    Member { base: Box<CExpr>, member: String },
     /// Pointer member access: ptr->member.
-    PtrMember {
-        base: Box<CExpr>,
-        member: String,
-    },
+    PtrMember { base: Box<CExpr>, member: String },
     /// Sizeof expression.
     Sizeof(Box<CExpr>),
     /// Sizeof type.
@@ -364,20 +343,70 @@ impl CExpr {
     pub fn precedence(&self) -> u8 {
         match self {
             Self::Comma(_) => 1,
-            Self::Binary { op: BinaryOp::Assign | BinaryOp::AddAssign | BinaryOp::SubAssign | BinaryOp::MulAssign | BinaryOp::DivAssign | BinaryOp::ModAssign | BinaryOp::BitAndAssign | BinaryOp::BitOrAssign | BinaryOp::BitXorAssign | BinaryOp::ShlAssign | BinaryOp::ShrAssign, .. } => 2,
+            Self::Binary {
+                op:
+                    BinaryOp::Assign
+                    | BinaryOp::AddAssign
+                    | BinaryOp::SubAssign
+                    | BinaryOp::MulAssign
+                    | BinaryOp::DivAssign
+                    | BinaryOp::ModAssign
+                    | BinaryOp::BitAndAssign
+                    | BinaryOp::BitOrAssign
+                    | BinaryOp::BitXorAssign
+                    | BinaryOp::ShlAssign
+                    | BinaryOp::ShrAssign,
+                ..
+            } => 2,
             Self::Ternary { .. } => 3,
-            Self::Binary { op: BinaryOp::Or, .. } => 4,
-            Self::Binary { op: BinaryOp::And, .. } => 5,
-            Self::Binary { op: BinaryOp::BitOr, .. } => 6,
-            Self::Binary { op: BinaryOp::BitXor, .. } => 7,
-            Self::Binary { op: BinaryOp::BitAnd, .. } => 8,
-            Self::Binary { op: BinaryOp::Eq | BinaryOp::Ne, .. } => 9,
-            Self::Binary { op: BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge, .. } => 10,
-            Self::Binary { op: BinaryOp::Shl | BinaryOp::Shr, .. } => 11,
-            Self::Binary { op: BinaryOp::Add | BinaryOp::Sub, .. } => 12,
-            Self::Binary { op: BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod, .. } => 13,
-            Self::Unary { .. } | Self::Cast { .. } | Self::Sizeof(_) | Self::SizeofType(_) | Self::AddrOf(_) | Self::Deref(_) => 14,
-            Self::Subscript { .. } | Self::Member { .. } | Self::PtrMember { .. } | Self::Call { .. } => 15,
+            Self::Binary {
+                op: BinaryOp::Or, ..
+            } => 4,
+            Self::Binary {
+                op: BinaryOp::And, ..
+            } => 5,
+            Self::Binary {
+                op: BinaryOp::BitOr,
+                ..
+            } => 6,
+            Self::Binary {
+                op: BinaryOp::BitXor,
+                ..
+            } => 7,
+            Self::Binary {
+                op: BinaryOp::BitAnd,
+                ..
+            } => 8,
+            Self::Binary {
+                op: BinaryOp::Eq | BinaryOp::Ne,
+                ..
+            } => 9,
+            Self::Binary {
+                op: BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge,
+                ..
+            } => 10,
+            Self::Binary {
+                op: BinaryOp::Shl | BinaryOp::Shr,
+                ..
+            } => 11,
+            Self::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                ..
+            } => 12,
+            Self::Binary {
+                op: BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod,
+                ..
+            } => 13,
+            Self::Unary { .. }
+            | Self::Cast { .. }
+            | Self::Sizeof(_)
+            | Self::SizeofType(_)
+            | Self::AddrOf(_)
+            | Self::Deref(_) => 14,
+            Self::Subscript { .. }
+            | Self::Member { .. }
+            | Self::PtrMember { .. }
+            | Self::Call { .. } => 15,
             _ => 16, // Literals, variables, parenthesized
         }
     }
@@ -462,15 +491,9 @@ pub enum CStmt {
         else_body: Option<Box<CStmt>>,
     },
     /// While loop.
-    While {
-        cond: CExpr,
-        body: Box<CStmt>,
-    },
+    While { cond: CExpr, body: Box<CStmt> },
     /// Do-while loop.
-    DoWhile {
-        body: Box<CStmt>,
-        cond: CExpr,
-    },
+    DoWhile { body: Box<CStmt>, cond: CExpr },
     /// For loop.
     For {
         init: Option<Box<CStmt>>,
@@ -653,7 +676,12 @@ mod tests {
             Some(CStmt::ret(Some(CExpr::int(0)))),
         );
 
-        if let CStmt::If { cond, then_body: _, else_body } = stmt {
+        if let CStmt::If {
+            cond,
+            then_body: _,
+            else_body,
+        } = stmt
+        {
             assert_eq!(cond, CExpr::var("x"));
             assert!(else_body.is_some());
         } else {

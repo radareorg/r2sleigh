@@ -37,7 +37,11 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            Load { dst, addr, space: _ } => {
+            Load {
+                dst,
+                addr,
+                space: _,
+            } => {
                 let addr_val = self.read_var(state, addr);
                 let size = dst.size;
                 let value = state.mem_read(&addr_val, size);
@@ -45,7 +49,11 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            Store { addr, val, space: _ } => {
+            Store {
+                addr,
+                val,
+                space: _,
+            } => {
                 let addr_val = self.read_var(state, addr);
                 let value = self.read_var(state, val);
                 let size = val.size;
@@ -489,7 +497,11 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            CallOther { output, userop: _, inputs: _ } => {
+            CallOther {
+                output,
+                userop: _,
+                inputs: _,
+            } => {
                 // User-defined operation - return symbolic result
                 if let Some(dst) = output {
                     let result = SymValue::new_symbolic(self.ctx, "callother", dst.size * 8);
@@ -498,7 +510,12 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            PtrAdd { dst, base, index, element_size } => {
+            PtrAdd {
+                dst,
+                base,
+                index,
+                element_size,
+            } => {
                 let base_val = self.read_var(state, base);
                 let index_val = self.read_var(state, index);
                 let size_val = SymValue::concrete(*element_size as u64, index_val.bits());
@@ -508,7 +525,12 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            PtrSub { dst, base, index, element_size } => {
+            PtrSub {
+                dst,
+                base,
+                index,
+                element_size,
+            } => {
                 let base_val = self.read_var(state, base);
                 let index_val = self.read_var(state, index);
                 let size_val = SymValue::concrete(*element_size as u64, index_val.bits());
@@ -518,7 +540,11 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            SegmentOp { dst, segment: _, offset } => {
+            SegmentOp {
+                dst,
+                segment: _,
+                offset,
+            } => {
                 // Simplified: just use offset
                 let val = self.read_var(state, offset);
                 self.write_var(state, dst, val);
@@ -562,7 +588,12 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            Insert { dst, src, value: _, position: _ } => {
+            Insert {
+                dst,
+                src,
+                value: _,
+                position: _,
+            } => {
                 // Bit field insertion - simplified
                 let src_val = self.read_var(state, src);
                 self.write_var(state, dst, src_val);
@@ -742,6 +773,6 @@ mod tests {
         let forked = executor.step(&mut state, &op).unwrap();
         assert_eq!(forked.len(), 1); // Fork created
         assert_eq!(forked[0].pc, 0x2000); // True branch goes to target
-        // Original state is false branch (PC unchanged in this test)
+                                          // Original state is false branch (PC unchanged in this test)
     }
 }

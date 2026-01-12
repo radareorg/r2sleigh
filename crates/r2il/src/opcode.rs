@@ -23,10 +23,7 @@ use crate::varnode::Varnode;
 pub enum R2ILOp {
     // ========== Data Movement ==========
     /// Copy src to dst: dst = src
-    Copy {
-        dst: Varnode,
-        src: Varnode,
-    },
+    Copy { dst: Varnode, src: Varnode },
 
     /// Load from memory: dst = *[space]addr
     Load {
@@ -93,10 +90,7 @@ pub enum R2ILOp {
     },
 
     /// Two's complement negation: dst = -src
-    IntNegate {
-        dst: Varnode,
-        src: Varnode,
-    },
+    IntNegate { dst: Varnode, src: Varnode },
 
     /// Addition with carry: dst = a + b + carry
     IntCarry {
@@ -142,10 +136,7 @@ pub enum R2ILOp {
     },
 
     /// Bitwise NOT: dst = ~src
-    IntNot {
-        dst: Varnode,
-        src: Varnode,
-    },
+    IntNot { dst: Varnode, src: Varnode },
 
     // ========== Shift Operations ==========
     /// Left shift: dst = a << b
@@ -214,23 +205,14 @@ pub enum R2ILOp {
 
     // ========== Extension Operations ==========
     /// Zero extension: dst = zext(src)
-    IntZExt {
-        dst: Varnode,
-        src: Varnode,
-    },
+    IntZExt { dst: Varnode, src: Varnode },
 
     /// Sign extension: dst = sext(src)
-    IntSExt {
-        dst: Varnode,
-        src: Varnode,
-    },
+    IntSExt { dst: Varnode, src: Varnode },
 
     // ========== Boolean Operations ==========
     /// Boolean NOT: dst = !src
-    BoolNot {
-        dst: Varnode,
-        src: Varnode,
-    },
+    BoolNot { dst: Varnode, src: Varnode },
 
     /// Boolean AND: dst = a && b
     BoolAnd {
@@ -269,48 +251,29 @@ pub enum R2ILOp {
     },
 
     /// Population count (number of 1 bits): dst = popcount(src)
-    PopCount {
-        dst: Varnode,
-        src: Varnode,
-    },
+    PopCount { dst: Varnode, src: Varnode },
 
     /// Count leading zeros: dst = clz(src)
-    Lzcount {
-        dst: Varnode,
-        src: Varnode,
-    },
+    Lzcount { dst: Varnode, src: Varnode },
 
     // ========== Control Flow ==========
     /// Unconditional branch to target
-    Branch {
-        target: Varnode,
-    },
+    Branch { target: Varnode },
 
     /// Conditional branch: if (cond) goto target
-    CBranch {
-        target: Varnode,
-        cond: Varnode,
-    },
+    CBranch { target: Varnode, cond: Varnode },
 
     /// Indirect branch: goto *target
-    BranchInd {
-        target: Varnode,
-    },
+    BranchInd { target: Varnode },
 
     /// Call a subroutine
-    Call {
-        target: Varnode,
-    },
+    Call { target: Varnode },
 
     /// Indirect call: call *target
-    CallInd {
-        target: Varnode,
-    },
+    CallInd { target: Varnode },
 
     /// Return from subroutine
-    Return {
-        target: Varnode,
-    },
+    Return { target: Varnode },
 
     // ========== Floating Point ==========
     /// Float addition: dst = a + b
@@ -342,46 +305,25 @@ pub enum R2ILOp {
     },
 
     /// Float negation: dst = -src
-    FloatNeg {
-        dst: Varnode,
-        src: Varnode,
-    },
+    FloatNeg { dst: Varnode, src: Varnode },
 
     /// Float absolute value: dst = |src|
-    FloatAbs {
-        dst: Varnode,
-        src: Varnode,
-    },
+    FloatAbs { dst: Varnode, src: Varnode },
 
     /// Float square root: dst = sqrt(src)
-    FloatSqrt {
-        dst: Varnode,
-        src: Varnode,
-    },
+    FloatSqrt { dst: Varnode, src: Varnode },
 
     /// Float ceiling: dst = ceil(src)
-    FloatCeil {
-        dst: Varnode,
-        src: Varnode,
-    },
+    FloatCeil { dst: Varnode, src: Varnode },
 
     /// Float floor: dst = floor(src)
-    FloatFloor {
-        dst: Varnode,
-        src: Varnode,
-    },
+    FloatFloor { dst: Varnode, src: Varnode },
 
     /// Float round: dst = round(src)
-    FloatRound {
-        dst: Varnode,
-        src: Varnode,
-    },
+    FloatRound { dst: Varnode, src: Varnode },
 
     /// Float is NaN: dst = isnan(src)
-    FloatNaN {
-        dst: Varnode,
-        src: Varnode,
-    },
+    FloatNaN { dst: Varnode, src: Varnode },
 
     /// Float equality: dst = (a == b) ? 1 : 0
     FloatEqual {
@@ -412,28 +354,16 @@ pub enum R2ILOp {
     },
 
     /// Convert int to float: dst = (float)src
-    Int2Float {
-        dst: Varnode,
-        src: Varnode,
-    },
+    Int2Float { dst: Varnode, src: Varnode },
 
     /// Convert float to int: dst = (int)src
-    Float2Int {
-        dst: Varnode,
-        src: Varnode,
-    },
+    Float2Int { dst: Varnode, src: Varnode },
 
     /// Convert float to different size float: dst = (float_new_size)src
-    FloatFloat {
-        dst: Varnode,
-        src: Varnode,
-    },
+    FloatFloat { dst: Varnode, src: Varnode },
 
     /// Truncate float to int: dst = trunc(src)
-    Trunc {
-        dst: Varnode,
-        src: Varnode,
-    },
+    Trunc { dst: Varnode, src: Varnode },
 
     // ========== Special Operations ==========
     /// Call a user-defined operation (CALLOTHER in P-code)
@@ -453,18 +383,13 @@ pub enum R2ILOp {
     Unimplemented,
 
     /// CPU identification (CPUID-like)
-    CpuId {
-        dst: Varnode,
-    },
+    CpuId { dst: Varnode },
 
     /// Insert a breakpoint
     Breakpoint,
 
     /// Multiequal (SSA phi function, used in analysis)
-    Multiequal {
-        dst: Varnode,
-        inputs: Vec<Varnode>,
-    },
+    Multiequal { dst: Varnode, inputs: Vec<Varnode> },
 
     /// Indirect reference (used in analysis)
     Indirect {
@@ -497,16 +422,10 @@ pub enum R2ILOp {
     },
 
     /// New (allocation, used in high-level analysis)
-    New {
-        dst: Varnode,
-        src: Varnode,
-    },
+    New { dst: Varnode, src: Varnode },
 
     /// Cast (type cast, used in high-level analysis)
-    Cast {
-        dst: Varnode,
-        src: Varnode,
-    },
+    Cast { dst: Varnode, src: Varnode },
 
     /// Extract (bit field extraction)
     Extract {

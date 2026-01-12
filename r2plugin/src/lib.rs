@@ -1811,6 +1811,19 @@ struct PathInfo {
     feasible: bool,
     depth: usize,
     exit_status: String,
+    final_pc: String,
+    num_constraints: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    solution: Option<PathSolution>,
+}
+
+/// Concrete solution for a path.
+#[derive(Serialize)]
+struct PathSolution {
+    /// Concrete input values that satisfy path constraints.
+    inputs: std::collections::HashMap<String, String>,
+    /// Register values at path end.
+    registers: std::collections::HashMap<String, String>,
 }
 
 /// Explore paths in a function and return detailed results as JSON.
@@ -1867,15 +1880,42 @@ pub extern "C" fn r2sym_paths(
     let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
     let results = explorer.explore(&ssa_func, initial_state);
 
-    // Build path info
+    // Build path info with solutions
     let paths: Vec<PathInfo> = results
         .iter()
         .enumerate()
-        .map(|(i, r)| PathInfo {
-            path_id: i,
-            feasible: r.feasible,
-            depth: r.depth,
-            exit_status: format!("{:?}", r.exit_status),
+        .map(|(i, r)| {
+            // Try to solve the path and get concrete values
+            let solution = if r.feasible {
+                explorer.solve_path(r).map(|solved| PathSolution {
+                    inputs: solved
+                        .inputs
+                        .into_iter()
+                        .map(|(k, v)| (k, format!("0x{:x}", v)))
+                        .collect(),
+                    registers: solved
+                        .registers
+                        .into_iter()
+                        .filter(|(name, _)| {
+                            // Filter to show only interesting registers (not temporaries)
+                            !name.starts_with("tmp:") && !name.contains("_0")
+                        })
+                        .map(|(k, v)| (k, format!("0x{:x}", v)))
+                        .collect(),
+                })
+            } else {
+                None
+            };
+
+            PathInfo {
+                path_id: i,
+                feasible: r.feasible,
+                depth: r.depth,
+                exit_status: format!("{:?}", r.exit_status),
+                final_pc: format!("0x{:x}", r.final_pc()),
+                num_constraints: r.num_constraints(),
+                solution,
+            }
         })
         .collect();
 

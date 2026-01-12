@@ -278,8 +278,7 @@ impl PcodeTranslator {
 
     /// Translate a single P-code operation to r2il.
     pub fn translate(&self, raw: &RawPcodeOp) -> Result<R2ILOp> {
-        let opcode = PcodeOp::from_u32(raw.opcode)
-            .ok_or(PcodeError::UnknownOpcode(raw.opcode))?;
+        let opcode = PcodeOp::from_u32(raw.opcode).ok_or(PcodeError::UnknownOpcode(raw.opcode))?;
 
         match opcode {
             PcodeOp::Copy => {
@@ -333,7 +332,11 @@ impl PcodeTranslator {
             PcodeOp::CallOther => {
                 let userop_vn = self.require_raw_input(raw, 0, "CALLOTHER")?;
                 let userop = userop_vn.offset as u32;
-                let output = raw.output.as_ref().map(|o| self.convert_varnode(o)).transpose()?;
+                let output = raw
+                    .output
+                    .as_ref()
+                    .map(|o| self.convert_varnode(o))
+                    .transpose()?;
                 let inputs: Result<Vec<Varnode>> = raw.inputs[1..]
                     .iter()
                     .map(|v| self.convert_varnode(v))
@@ -351,71 +354,167 @@ impl PcodeTranslator {
             }
 
             // Integer comparison
-            PcodeOp::IntEqual => self.binary_op(raw, "INT_EQUAL", |dst, a, b| R2ILOp::IntEqual { dst, a, b }),
-            PcodeOp::IntNotEqual => self.binary_op(raw, "INT_NOTEQUAL", |dst, a, b| R2ILOp::IntNotEqual { dst, a, b }),
-            PcodeOp::IntSLess => self.binary_op(raw, "INT_SLESS", |dst, a, b| R2ILOp::IntSLess { dst, a, b }),
-            PcodeOp::IntSLessEqual => self.binary_op(raw, "INT_SLESSEQUAL", |dst, a, b| R2ILOp::IntSLessEqual { dst, a, b }),
-            PcodeOp::IntLess => self.binary_op(raw, "INT_LESS", |dst, a, b| R2ILOp::IntLess { dst, a, b }),
-            PcodeOp::IntLessEqual => self.binary_op(raw, "INT_LESSEQUAL", |dst, a, b| R2ILOp::IntLessEqual { dst, a, b }),
+            PcodeOp::IntEqual => {
+                self.binary_op(raw, "INT_EQUAL", |dst, a, b| R2ILOp::IntEqual { dst, a, b })
+            }
+            PcodeOp::IntNotEqual => self.binary_op(raw, "INT_NOTEQUAL", |dst, a, b| {
+                R2ILOp::IntNotEqual { dst, a, b }
+            }),
+            PcodeOp::IntSLess => {
+                self.binary_op(raw, "INT_SLESS", |dst, a, b| R2ILOp::IntSLess { dst, a, b })
+            }
+            PcodeOp::IntSLessEqual => self.binary_op(raw, "INT_SLESSEQUAL", |dst, a, b| {
+                R2ILOp::IntSLessEqual { dst, a, b }
+            }),
+            PcodeOp::IntLess => {
+                self.binary_op(raw, "INT_LESS", |dst, a, b| R2ILOp::IntLess { dst, a, b })
+            }
+            PcodeOp::IntLessEqual => self.binary_op(raw, "INT_LESSEQUAL", |dst, a, b| {
+                R2ILOp::IntLessEqual { dst, a, b }
+            }),
 
             // Integer extension
-            PcodeOp::IntZExt => self.unary_op(raw, "INT_ZEXT", |dst, src| R2ILOp::IntZExt { dst, src }),
-            PcodeOp::IntSExt => self.unary_op(raw, "INT_SEXT", |dst, src| R2ILOp::IntSExt { dst, src }),
+            PcodeOp::IntZExt => {
+                self.unary_op(raw, "INT_ZEXT", |dst, src| R2ILOp::IntZExt { dst, src })
+            }
+            PcodeOp::IntSExt => {
+                self.unary_op(raw, "INT_SEXT", |dst, src| R2ILOp::IntSExt { dst, src })
+            }
 
             // Integer arithmetic
-            PcodeOp::IntAdd => self.binary_op(raw, "INT_ADD", |dst, a, b| R2ILOp::IntAdd { dst, a, b }),
-            PcodeOp::IntSub => self.binary_op(raw, "INT_SUB", |dst, a, b| R2ILOp::IntSub { dst, a, b }),
-            PcodeOp::IntCarry => self.binary_op(raw, "INT_CARRY", |dst, a, b| R2ILOp::IntCarry { dst, a, b }),
-            PcodeOp::IntSCarry => self.binary_op(raw, "INT_SCARRY", |dst, a, b| R2ILOp::IntSCarry { dst, a, b }),
-            PcodeOp::IntSBorrow => self.binary_op(raw, "INT_SBORROW", |dst, a, b| R2ILOp::IntSBorrow { dst, a, b }),
-            PcodeOp::Int2Comp | PcodeOp::IntNegate => self.unary_op(raw, "INT_NEGATE", |dst, src| R2ILOp::IntNegate { dst, src }),
-            PcodeOp::IntMult => self.binary_op(raw, "INT_MULT", |dst, a, b| R2ILOp::IntMult { dst, a, b }),
-            PcodeOp::IntDiv => self.binary_op(raw, "INT_DIV", |dst, a, b| R2ILOp::IntDiv { dst, a, b }),
-            PcodeOp::IntSDiv => self.binary_op(raw, "INT_SDIV", |dst, a, b| R2ILOp::IntSDiv { dst, a, b }),
-            PcodeOp::IntRem => self.binary_op(raw, "INT_REM", |dst, a, b| R2ILOp::IntRem { dst, a, b }),
-            PcodeOp::IntSRem => self.binary_op(raw, "INT_SREM", |dst, a, b| R2ILOp::IntSRem { dst, a, b }),
+            PcodeOp::IntAdd => {
+                self.binary_op(raw, "INT_ADD", |dst, a, b| R2ILOp::IntAdd { dst, a, b })
+            }
+            PcodeOp::IntSub => {
+                self.binary_op(raw, "INT_SUB", |dst, a, b| R2ILOp::IntSub { dst, a, b })
+            }
+            PcodeOp::IntCarry => {
+                self.binary_op(raw, "INT_CARRY", |dst, a, b| R2ILOp::IntCarry { dst, a, b })
+            }
+            PcodeOp::IntSCarry => self.binary_op(raw, "INT_SCARRY", |dst, a, b| {
+                R2ILOp::IntSCarry { dst, a, b }
+            }),
+            PcodeOp::IntSBorrow => self.binary_op(raw, "INT_SBORROW", |dst, a, b| {
+                R2ILOp::IntSBorrow { dst, a, b }
+            }),
+            PcodeOp::Int2Comp | PcodeOp::IntNegate => {
+                self.unary_op(raw, "INT_NEGATE", |dst, src| R2ILOp::IntNegate { dst, src })
+            }
+            PcodeOp::IntMult => {
+                self.binary_op(raw, "INT_MULT", |dst, a, b| R2ILOp::IntMult { dst, a, b })
+            }
+            PcodeOp::IntDiv => {
+                self.binary_op(raw, "INT_DIV", |dst, a, b| R2ILOp::IntDiv { dst, a, b })
+            }
+            PcodeOp::IntSDiv => {
+                self.binary_op(raw, "INT_SDIV", |dst, a, b| R2ILOp::IntSDiv { dst, a, b })
+            }
+            PcodeOp::IntRem => {
+                self.binary_op(raw, "INT_REM", |dst, a, b| R2ILOp::IntRem { dst, a, b })
+            }
+            PcodeOp::IntSRem => {
+                self.binary_op(raw, "INT_SREM", |dst, a, b| R2ILOp::IntSRem { dst, a, b })
+            }
 
             // Bitwise operations
-            PcodeOp::IntXor => self.binary_op(raw, "INT_XOR", |dst, a, b| R2ILOp::IntXor { dst, a, b }),
-            PcodeOp::IntAnd => self.binary_op(raw, "INT_AND", |dst, a, b| R2ILOp::IntAnd { dst, a, b }),
-            PcodeOp::IntOr => self.binary_op(raw, "INT_OR", |dst, a, b| R2ILOp::IntOr { dst, a, b }),
-            PcodeOp::IntLeft => self.binary_op(raw, "INT_LEFT", |dst, a, b| R2ILOp::IntLeft { dst, a, b }),
-            PcodeOp::IntRight => self.binary_op(raw, "INT_RIGHT", |dst, a, b| R2ILOp::IntRight { dst, a, b }),
-            PcodeOp::IntSRight => self.binary_op(raw, "INT_SRIGHT", |dst, a, b| R2ILOp::IntSRight { dst, a, b }),
+            PcodeOp::IntXor => {
+                self.binary_op(raw, "INT_XOR", |dst, a, b| R2ILOp::IntXor { dst, a, b })
+            }
+            PcodeOp::IntAnd => {
+                self.binary_op(raw, "INT_AND", |dst, a, b| R2ILOp::IntAnd { dst, a, b })
+            }
+            PcodeOp::IntOr => {
+                self.binary_op(raw, "INT_OR", |dst, a, b| R2ILOp::IntOr { dst, a, b })
+            }
+            PcodeOp::IntLeft => {
+                self.binary_op(raw, "INT_LEFT", |dst, a, b| R2ILOp::IntLeft { dst, a, b })
+            }
+            PcodeOp::IntRight => {
+                self.binary_op(raw, "INT_RIGHT", |dst, a, b| R2ILOp::IntRight { dst, a, b })
+            }
+            PcodeOp::IntSRight => self.binary_op(raw, "INT_SRIGHT", |dst, a, b| {
+                R2ILOp::IntSRight { dst, a, b }
+            }),
 
             // Boolean operations
-            PcodeOp::BoolNot => self.unary_op(raw, "BOOL_NEGATE", |dst, src| R2ILOp::BoolNot { dst, src }),
-            PcodeOp::BoolXor => self.binary_op(raw, "BOOL_XOR", |dst, a, b| R2ILOp::BoolXor { dst, a, b }),
-            PcodeOp::BoolAnd => self.binary_op(raw, "BOOL_AND", |dst, a, b| R2ILOp::BoolAnd { dst, a, b }),
-            PcodeOp::BoolOr => self.binary_op(raw, "BOOL_OR", |dst, a, b| R2ILOp::BoolOr { dst, a, b }),
+            PcodeOp::BoolNot => {
+                self.unary_op(raw, "BOOL_NEGATE", |dst, src| R2ILOp::BoolNot { dst, src })
+            }
+            PcodeOp::BoolXor => {
+                self.binary_op(raw, "BOOL_XOR", |dst, a, b| R2ILOp::BoolXor { dst, a, b })
+            }
+            PcodeOp::BoolAnd => {
+                self.binary_op(raw, "BOOL_AND", |dst, a, b| R2ILOp::BoolAnd { dst, a, b })
+            }
+            PcodeOp::BoolOr => {
+                self.binary_op(raw, "BOOL_OR", |dst, a, b| R2ILOp::BoolOr { dst, a, b })
+            }
 
             // Floating point comparison
-            PcodeOp::FloatEqual => self.binary_op(raw, "FLOAT_EQUAL", |dst, a, b| R2ILOp::FloatEqual { dst, a, b }),
-            PcodeOp::FloatNotEqual => self.binary_op(raw, "FLOAT_NOTEQUAL", |dst, a, b| R2ILOp::FloatNotEqual { dst, a, b }),
-            PcodeOp::FloatLess => self.binary_op(raw, "FLOAT_LESS", |dst, a, b| R2ILOp::FloatLess { dst, a, b }),
-            PcodeOp::FloatLessEqual => self.binary_op(raw, "FLOAT_LESSEQUAL", |dst, a, b| R2ILOp::FloatLessEqual { dst, a, b }),
+            PcodeOp::FloatEqual => self.binary_op(raw, "FLOAT_EQUAL", |dst, a, b| {
+                R2ILOp::FloatEqual { dst, a, b }
+            }),
+            PcodeOp::FloatNotEqual => self.binary_op(raw, "FLOAT_NOTEQUAL", |dst, a, b| {
+                R2ILOp::FloatNotEqual { dst, a, b }
+            }),
+            PcodeOp::FloatLess => self.binary_op(raw, "FLOAT_LESS", |dst, a, b| {
+                R2ILOp::FloatLess { dst, a, b }
+            }),
+            PcodeOp::FloatLessEqual => self.binary_op(raw, "FLOAT_LESSEQUAL", |dst, a, b| {
+                R2ILOp::FloatLessEqual { dst, a, b }
+            }),
 
             // Floating point operations
-            PcodeOp::FloatNaN => self.unary_op(raw, "FLOAT_NAN", |dst, src| R2ILOp::FloatNaN { dst, src }),
-            PcodeOp::FloatAdd => self.binary_op(raw, "FLOAT_ADD", |dst, a, b| R2ILOp::FloatAdd { dst, a, b }),
-            PcodeOp::FloatSub => self.binary_op(raw, "FLOAT_SUB", |dst, a, b| R2ILOp::FloatSub { dst, a, b }),
-            PcodeOp::FloatMult => self.binary_op(raw, "FLOAT_MULT", |dst, a, b| R2ILOp::FloatMult { dst, a, b }),
-            PcodeOp::FloatDiv => self.binary_op(raw, "FLOAT_DIV", |dst, a, b| R2ILOp::FloatDiv { dst, a, b }),
-            PcodeOp::FloatNeg => self.unary_op(raw, "FLOAT_NEG", |dst, src| R2ILOp::FloatNeg { dst, src }),
-            PcodeOp::FloatAbs => self.unary_op(raw, "FLOAT_ABS", |dst, src| R2ILOp::FloatAbs { dst, src }),
-            PcodeOp::FloatSqrt => self.unary_op(raw, "FLOAT_SQRT", |dst, src| R2ILOp::FloatSqrt { dst, src }),
-            PcodeOp::FloatCeil => self.unary_op(raw, "FLOAT_CEIL", |dst, src| R2ILOp::FloatCeil { dst, src }),
-            PcodeOp::FloatFloor => self.unary_op(raw, "FLOAT_FLOOR", |dst, src| R2ILOp::FloatFloor { dst, src }),
-            PcodeOp::FloatRound => self.unary_op(raw, "FLOAT_ROUND", |dst, src| R2ILOp::FloatRound { dst, src }),
+            PcodeOp::FloatNaN => {
+                self.unary_op(raw, "FLOAT_NAN", |dst, src| R2ILOp::FloatNaN { dst, src })
+            }
+            PcodeOp::FloatAdd => {
+                self.binary_op(raw, "FLOAT_ADD", |dst, a, b| R2ILOp::FloatAdd { dst, a, b })
+            }
+            PcodeOp::FloatSub => {
+                self.binary_op(raw, "FLOAT_SUB", |dst, a, b| R2ILOp::FloatSub { dst, a, b })
+            }
+            PcodeOp::FloatMult => self.binary_op(raw, "FLOAT_MULT", |dst, a, b| {
+                R2ILOp::FloatMult { dst, a, b }
+            }),
+            PcodeOp::FloatDiv => {
+                self.binary_op(raw, "FLOAT_DIV", |dst, a, b| R2ILOp::FloatDiv { dst, a, b })
+            }
+            PcodeOp::FloatNeg => {
+                self.unary_op(raw, "FLOAT_NEG", |dst, src| R2ILOp::FloatNeg { dst, src })
+            }
+            PcodeOp::FloatAbs => {
+                self.unary_op(raw, "FLOAT_ABS", |dst, src| R2ILOp::FloatAbs { dst, src })
+            }
+            PcodeOp::FloatSqrt => {
+                self.unary_op(raw, "FLOAT_SQRT", |dst, src| R2ILOp::FloatSqrt { dst, src })
+            }
+            PcodeOp::FloatCeil => {
+                self.unary_op(raw, "FLOAT_CEIL", |dst, src| R2ILOp::FloatCeil { dst, src })
+            }
+            PcodeOp::FloatFloor => self.unary_op(raw, "FLOAT_FLOOR", |dst, src| {
+                R2ILOp::FloatFloor { dst, src }
+            }),
+            PcodeOp::FloatRound => self.unary_op(raw, "FLOAT_ROUND", |dst, src| {
+                R2ILOp::FloatRound { dst, src }
+            }),
 
             // Conversions
-            PcodeOp::Int2Float => self.unary_op(raw, "INT2FLOAT", |dst, src| R2ILOp::Int2Float { dst, src }),
-            PcodeOp::Float2Int => self.unary_op(raw, "FLOAT2INT", |dst, src| R2ILOp::Float2Int { dst, src }),
-            PcodeOp::FloatFloat => self.unary_op(raw, "FLOAT_FLOAT", |dst, src| R2ILOp::FloatFloat { dst, src }),
+            PcodeOp::Int2Float => {
+                self.unary_op(raw, "INT2FLOAT", |dst, src| R2ILOp::Int2Float { dst, src })
+            }
+            PcodeOp::Float2Int => {
+                self.unary_op(raw, "FLOAT2INT", |dst, src| R2ILOp::Float2Int { dst, src })
+            }
+            PcodeOp::FloatFloat => self.unary_op(raw, "FLOAT_FLOAT", |dst, src| {
+                R2ILOp::FloatFloat { dst, src }
+            }),
             PcodeOp::Trunc => self.unary_op(raw, "TRUNC", |dst, src| R2ILOp::Trunc { dst, src }),
 
             // Bit manipulation
-            PcodeOp::Piece => self.binary_op(raw, "PIECE", |dst, hi, lo| R2ILOp::Piece { dst, hi, lo }),
+            PcodeOp::Piece => {
+                self.binary_op(raw, "PIECE", |dst, hi, lo| R2ILOp::Piece { dst, hi, lo })
+            }
             PcodeOp::Subpiece => {
                 let dst = self.require_output(raw, "SUBPIECE")?;
                 let src = self.require_input(raw, 0, "SUBPIECE")?;
@@ -423,17 +522,22 @@ impl PcodeTranslator {
                 let offset = offset_vn.offset as u32;
                 Ok(R2ILOp::Subpiece { dst, src, offset })
             }
-            PcodeOp::PopCount => self.unary_op(raw, "POPCOUNT", |dst, src| R2ILOp::PopCount { dst, src }),
-            PcodeOp::Lzcount => self.unary_op(raw, "LZCOUNT", |dst, src| R2ILOp::Lzcount { dst, src }),
+            PcodeOp::PopCount => {
+                self.unary_op(raw, "POPCOUNT", |dst, src| R2ILOp::PopCount { dst, src })
+            }
+            PcodeOp::Lzcount => {
+                self.unary_op(raw, "LZCOUNT", |dst, src| R2ILOp::Lzcount { dst, src })
+            }
 
             // Analysis operations
             PcodeOp::Multiequal => {
                 let dst = self.require_output(raw, "MULTIEQUAL")?;
-                let inputs: Result<Vec<Varnode>> = raw.inputs
-                    .iter()
-                    .map(|v| self.convert_varnode(v))
-                    .collect();
-                Ok(R2ILOp::Multiequal { dst, inputs: inputs? })
+                let inputs: Result<Vec<Varnode>> =
+                    raw.inputs.iter().map(|v| self.convert_varnode(v)).collect();
+                Ok(R2ILOp::Multiequal {
+                    dst,
+                    inputs: inputs?,
+                })
             }
 
             PcodeOp::Indirect => {
@@ -456,7 +560,12 @@ impl PcodeTranslator {
                 let index = self.require_input(raw, 1, "PTRADD")?;
                 let size_vn = self.require_raw_input(raw, 2, "PTRADD")?;
                 let element_size = size_vn.offset as u32;
-                Ok(R2ILOp::PtrAdd { dst, base, index, element_size })
+                Ok(R2ILOp::PtrAdd {
+                    dst,
+                    base,
+                    index,
+                    element_size,
+                })
             }
 
             PcodeOp::PtrSub => {
@@ -465,14 +574,23 @@ impl PcodeTranslator {
                 let index = self.require_input(raw, 1, "PTRSUB")?;
                 let size_vn = self.require_raw_input(raw, 2, "PTRSUB")?;
                 let element_size = size_vn.offset as u32;
-                Ok(R2ILOp::PtrSub { dst, base, index, element_size })
+                Ok(R2ILOp::PtrSub {
+                    dst,
+                    base,
+                    index,
+                    element_size,
+                })
             }
 
             PcodeOp::SegmentOp => {
                 let dst = self.require_output(raw, "SEGMENTOP")?;
                 let segment = self.require_input(raw, 0, "SEGMENTOP")?;
                 let offset = self.require_input(raw, 1, "SEGMENTOP")?;
-                Ok(R2ILOp::SegmentOp { dst, segment, offset })
+                Ok(R2ILOp::SegmentOp {
+                    dst,
+                    segment,
+                    offset,
+                })
             }
 
             PcodeOp::Insert => {
@@ -480,7 +598,12 @@ impl PcodeTranslator {
                 let src = self.require_input(raw, 0, "INSERT")?;
                 let value = self.require_input(raw, 1, "INSERT")?;
                 let position = self.require_input(raw, 2, "INSERT")?;
-                Ok(R2ILOp::Insert { dst, src, value, position })
+                Ok(R2ILOp::Insert {
+                    dst,
+                    src,
+                    value,
+                    position,
+                })
             }
 
             PcodeOp::Extract => {
@@ -534,7 +657,12 @@ impl PcodeTranslator {
     }
 
     /// Require a raw input varnode at the given index (for constants like space IDs).
-    fn require_raw_input<'a>(&self, raw: &'a RawPcodeOp, idx: usize, name: &'static str) -> Result<&'a RawVarnode> {
+    fn require_raw_input<'a>(
+        &self,
+        raw: &'a RawPcodeOp,
+        idx: usize,
+        name: &'static str,
+    ) -> Result<&'a RawVarnode> {
         raw.inputs.get(idx).ok_or(PcodeError::InvalidOperandCount {
             op: name,
             expected: idx + 1,

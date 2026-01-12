@@ -172,9 +172,20 @@ impl<'ctx> SymSolver<'ctx> {
     }
 
     /// Check if two symbolic values can be equal.
-    pub fn can_be_equal(&self, state: &SymState<'ctx>, a: &SymValue<'ctx>, b: &SymValue<'ctx>) -> bool {
-        let a_bv = a.to_bv(self.ctx);
-        let b_bv = b.to_bv(self.ctx);
+    pub fn can_be_equal(
+        &self,
+        state: &SymState<'ctx>,
+        a: &SymValue<'ctx>,
+        b: &SymValue<'ctx>,
+    ) -> bool {
+        // Normalize bit widths before comparison
+        let (a_bv, b_bv) = if a.bits() == b.bits() {
+            (a.to_bv(self.ctx), b.to_bv(self.ctx))
+        } else if a.bits() > b.bits() {
+            (a.to_bv(self.ctx), b.to_bv(self.ctx).zero_ext(a.bits() - b.bits()))
+        } else {
+            (a.to_bv(self.ctx).zero_ext(b.bits() - a.bits()), b.to_bv(self.ctx))
+        };
         let eq = a_bv._eq(&b_bv);
 
         self.push();
@@ -227,7 +238,11 @@ impl<'ctx> SymSolver<'ctx> {
 
         // Start with full range
         let mut lo: u64 = 0;
-        let mut hi: u64 = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let mut hi: u64 = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         let mut result = None;
 
         while lo <= hi {
@@ -265,7 +280,11 @@ impl<'ctx> SymSolver<'ctx> {
         let bits = value.bits();
 
         let mut lo: u64 = 0;
-        let mut hi: u64 = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let mut hi: u64 = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         let mut result = None;
 
         while lo <= hi {
@@ -334,9 +353,7 @@ impl<'ctx> SymModel<'ctx> {
 impl<'ctx> std::fmt::Debug for SymModel<'ctx> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let values = self.get_values();
-        f.debug_struct("SymModel")
-            .field("values", &values)
-            .finish()
+        f.debug_struct("SymModel").field("values", &values).finish()
     }
 }
 

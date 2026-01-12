@@ -70,6 +70,46 @@ impl<'ctx> SymValue<'ctx> {
         }
     }
 
+    /// Normalize two values to the same bit width for binary operations.
+    /// Returns (self_normalized, other_normalized, result_bits).
+    /// Uses zero-extension to match the larger width.
+    fn normalize_widths<'a>(
+        &'a self,
+        ctx: &'ctx Context,
+        other: &'a Self,
+    ) -> (BV<'ctx>, BV<'ctx>, u32) {
+        let self_bits = self.bits();
+        let other_bits = other.bits();
+
+        if self_bits == other_bits {
+            (self.to_bv(ctx), other.to_bv(ctx), self_bits)
+        } else if self_bits > other_bits {
+            let self_bv = self.to_bv(ctx);
+            let other_bv = other.to_bv(ctx).zero_ext(self_bits - other_bits);
+            (self_bv, other_bv, self_bits)
+        } else {
+            let self_bv = self.to_bv(ctx).zero_ext(other_bits - self_bits);
+            let other_bv = other.to_bv(ctx);
+            (self_bv, other_bv, other_bits)
+        }
+    }
+
+    /// Normalize shift amount to match value width.
+    /// Shift amounts are often smaller (e.g., 8-bit) than the value being shifted.
+    fn normalize_shift_amount(&self, ctx: &'ctx Context, amount: &Self) -> BV<'ctx> {
+        let value_bits = self.bits();
+        let amount_bits = amount.bits();
+
+        if amount_bits == value_bits {
+            amount.to_bv(ctx)
+        } else if amount_bits < value_bits {
+            amount.to_bv(ctx).zero_ext(value_bits - amount_bits)
+        } else {
+            // Truncate if shift amount is larger (unusual but handle it)
+            amount.to_bv(ctx).extract(value_bits - 1, 0)
+        }
+    }
+
     /// Check if this value is concrete.
     pub fn is_concrete(&self) -> bool {
         matches!(self, Self::Concrete { .. })
@@ -194,7 +234,13 @@ impl<'ctx> SymValue<'ctx> {
     pub fn concat(&self, ctx: &'ctx Context, other: &Self) -> Self {
         let new_bits = self.bits() + other.bits();
         match (self, other) {
-            (Self::Concrete { value: hi, bits: _ }, Self::Concrete { value: lo, bits: lo_bits }) => {
+            (
+                Self::Concrete { value: hi, bits: _ },
+                Self::Concrete {
+                    value: lo,
+                    bits: lo_bits,
+                },
+            ) => {
                 let new_value = (*hi << *lo_bits) | *lo;
                 Self::Concrete {
                     value: new_value,
@@ -218,19 +264,23 @@ impl<'ctx> SymValue<'ctx> {
     /// Add two values.
     pub fn add(&self, ctx: &'ctx Context, other: &Self) -> Self {
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, .. }) => {
-                let mask = if *bits >= 64 { u64::MAX } else { (1u64 << *bits) - 1 };
+            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+                let result_bits = (*bits).max(*b_bits);
+                let mask = if result_bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << result_bits) - 1
+                };
                 Self::Concrete {
                     value: a.wrapping_add(*b) & mask,
-                    bits: *bits,
+                    bits: result_bits,
                 }
             }
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvadd(&b_bv),
-                    bits: self.bits(),
+                    bits: result_bits,
                 }
             }
         }
@@ -239,19 +289,23 @@ impl<'ctx> SymValue<'ctx> {
     /// Subtract two values.
     pub fn sub(&self, ctx: &'ctx Context, other: &Self) -> Self {
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, .. }) => {
-                let mask = if *bits >= 64 { u64::MAX } else { (1u64 << *bits) - 1 };
+            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+                let result_bits = (*bits).max(*b_bits);
+                let mask = if result_bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << result_bits) - 1
+                };
                 Self::Concrete {
                     value: a.wrapping_sub(*b) & mask,
-                    bits: *bits,
+                    bits: result_bits,
                 }
             }
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvsub(&b_bv),
-                    bits: self.bits(),
+                    bits: result_bits,
                 }
             }
         }
@@ -260,19 +314,23 @@ impl<'ctx> SymValue<'ctx> {
     /// Multiply two values.
     pub fn mul(&self, ctx: &'ctx Context, other: &Self) -> Self {
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, .. }) => {
-                let mask = if *bits >= 64 { u64::MAX } else { (1u64 << *bits) - 1 };
+            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+                let result_bits = (*bits).max(*b_bits);
+                let mask = if result_bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << result_bits) - 1
+                };
                 Self::Concrete {
                     value: a.wrapping_mul(*b) & mask,
-                    bits: *bits,
+                    bits: result_bits,
                 }
             }
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvmul(&b_bv),
-                    bits: self.bits(),
+                    bits: result_bits,
                 }
             }
         }
@@ -281,22 +339,22 @@ impl<'ctx> SymValue<'ctx> {
     /// Unsigned division.
     pub fn udiv(&self, ctx: &'ctx Context, other: &Self) -> Self {
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, .. }) => {
+            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+                let result_bits = (*bits).max(*b_bits);
                 if *b == 0 {
-                    Self::Unknown { bits: *bits }
+                    Self::Unknown { bits: result_bits }
                 } else {
                     Self::Concrete {
                         value: *a / *b,
-                        bits: *bits,
+                        bits: result_bits,
                     }
                 }
             }
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvudiv(&b_bv),
-                    bits: self.bits(),
+                    bits: result_bits,
                 }
             }
         }
@@ -304,33 +362,32 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Signed division.
     pub fn sdiv(&self, ctx: &'ctx Context, other: &Self) -> Self {
-        let a_bv = self.to_bv(ctx);
-        let b_bv = other.to_bv(ctx);
+        let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
         Self::Symbolic {
             ast: a_bv.bvsdiv(&b_bv),
-            bits: self.bits(),
+            bits: result_bits,
         }
     }
 
     /// Unsigned remainder.
     pub fn urem(&self, ctx: &'ctx Context, other: &Self) -> Self {
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, .. }) => {
+            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+                let result_bits = (*bits).max(*b_bits);
                 if *b == 0 {
-                    Self::Unknown { bits: *bits }
+                    Self::Unknown { bits: result_bits }
                 } else {
                     Self::Concrete {
                         value: *a % *b,
-                        bits: *bits,
+                        bits: result_bits,
                     }
                 }
             }
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvurem(&b_bv),
-                    bits: self.bits(),
+                    bits: result_bits,
                 }
             }
         }
@@ -338,11 +395,10 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Signed remainder.
     pub fn srem(&self, ctx: &'ctx Context, other: &Self) -> Self {
-        let a_bv = self.to_bv(ctx);
-        let b_bv = other.to_bv(ctx);
+        let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
         Self::Symbolic {
             ast: a_bv.bvsrem(&b_bv),
-            bits: self.bits(),
+            bits: result_bits,
         }
     }
 
@@ -350,7 +406,11 @@ impl<'ctx> SymValue<'ctx> {
     pub fn neg(&self, ctx: &'ctx Context) -> Self {
         match self {
             Self::Concrete { value, bits } => {
-                let mask = if *bits >= 64 { u64::MAX } else { (1u64 << *bits) - 1 };
+                let mask = if *bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << *bits) - 1
+                };
                 Self::Concrete {
                     value: (!*value).wrapping_add(1) & mask,
                     bits: *bits,
@@ -371,16 +431,17 @@ impl<'ctx> SymValue<'ctx> {
     /// Bitwise AND.
     pub fn and(&self, ctx: &'ctx Context, other: &Self) -> Self {
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, .. }) => Self::Concrete {
-                value: *a & *b,
-                bits: *bits,
-            },
+            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+                Self::Concrete {
+                    value: *a & *b,
+                    bits: (*bits).max(*b_bits),
+                }
+            }
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvand(&b_bv),
-                    bits: self.bits(),
+                    bits: result_bits,
                 }
             }
         }
@@ -389,16 +450,17 @@ impl<'ctx> SymValue<'ctx> {
     /// Bitwise OR.
     pub fn or(&self, ctx: &'ctx Context, other: &Self) -> Self {
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, .. }) => Self::Concrete {
-                value: *a | *b,
-                bits: *bits,
-            },
+            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+                Self::Concrete {
+                    value: *a | *b,
+                    bits: (*bits).max(*b_bits),
+                }
+            }
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvor(&b_bv),
-                    bits: self.bits(),
+                    bits: result_bits,
                 }
             }
         }
@@ -407,16 +469,17 @@ impl<'ctx> SymValue<'ctx> {
     /// Bitwise XOR.
     pub fn xor(&self, ctx: &'ctx Context, other: &Self) -> Self {
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, .. }) => Self::Concrete {
-                value: *a ^ *b,
-                bits: *bits,
-            },
+            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+                Self::Concrete {
+                    value: *a ^ *b,
+                    bits: (*bits).max(*b_bits),
+                }
+            }
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvxor(&b_bv),
-                    bits: self.bits(),
+                    bits: result_bits,
                 }
             }
         }
@@ -426,7 +489,11 @@ impl<'ctx> SymValue<'ctx> {
     pub fn not(&self, ctx: &'ctx Context) -> Self {
         match self {
             Self::Concrete { value, bits } => {
-                let mask = if *bits >= 64 { u64::MAX } else { (1u64 << *bits) - 1 };
+                let mask = if *bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << *bits) - 1
+                };
                 Self::Concrete {
                     value: !*value & mask,
                     bits: *bits,
@@ -448,7 +515,11 @@ impl<'ctx> SymValue<'ctx> {
     pub fn shl(&self, ctx: &'ctx Context, amount: &Self) -> Self {
         match (self, amount) {
             (Self::Concrete { value, bits }, Self::Concrete { value: amt, .. }) => {
-                let mask = if *bits >= 64 { u64::MAX } else { (1u64 << *bits) - 1 };
+                let mask = if *bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << *bits) - 1
+                };
                 Self::Concrete {
                     value: (*value << (*amt as u32)) & mask,
                     bits: *bits,
@@ -456,7 +527,7 @@ impl<'ctx> SymValue<'ctx> {
             }
             _ => {
                 let a_bv = self.to_bv(ctx);
-                let b_bv = amount.to_bv(ctx);
+                let b_bv = self.normalize_shift_amount(ctx, amount);
                 Self::Symbolic {
                     ast: a_bv.bvshl(&b_bv),
                     bits: self.bits(),
@@ -474,7 +545,7 @@ impl<'ctx> SymValue<'ctx> {
             },
             _ => {
                 let a_bv = self.to_bv(ctx);
-                let b_bv = amount.to_bv(ctx);
+                let b_bv = self.normalize_shift_amount(ctx, amount);
                 Self::Symbolic {
                     ast: a_bv.bvlshr(&b_bv),
                     bits: self.bits(),
@@ -486,7 +557,7 @@ impl<'ctx> SymValue<'ctx> {
     /// Arithmetic right shift.
     pub fn ashr(&self, ctx: &'ctx Context, amount: &Self) -> Self {
         let a_bv = self.to_bv(ctx);
-        let b_bv = amount.to_bv(ctx);
+        let b_bv = self.normalize_shift_amount(ctx, amount);
         Self::Symbolic {
             ast: a_bv.bvashr(&b_bv),
             bits: self.bits(),
@@ -503,8 +574,7 @@ impl<'ctx> SymValue<'ctx> {
                 bits: 1,
             },
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
                 let cond = a_bv._eq(&b_bv);
                 let one = BV::from_u64(ctx, 1, 1);
                 let zero = BV::from_u64(ctx, 0, 1);
@@ -524,8 +594,7 @@ impl<'ctx> SymValue<'ctx> {
                 bits: 1,
             },
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
                 let cond = a_bv.bvult(&b_bv);
                 let one = BV::from_u64(ctx, 1, 1);
                 let zero = BV::from_u64(ctx, 0, 1);
@@ -545,8 +614,7 @@ impl<'ctx> SymValue<'ctx> {
                 bits: 1,
             },
             _ => {
-                let a_bv = self.to_bv(ctx);
-                let b_bv = other.to_bv(ctx);
+                let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
                 let cond = a_bv.bvule(&b_bv);
                 let one = BV::from_u64(ctx, 1, 1);
                 let zero = BV::from_u64(ctx, 0, 1);
@@ -560,8 +628,7 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Signed less than comparison.
     pub fn slt(&self, ctx: &'ctx Context, other: &Self) -> Self {
-        let a_bv = self.to_bv(ctx);
-        let b_bv = other.to_bv(ctx);
+        let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
         let cond = a_bv.bvslt(&b_bv);
         let one = BV::from_u64(ctx, 1, 1);
         let zero = BV::from_u64(ctx, 0, 1);
@@ -573,8 +640,7 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Signed less than or equal comparison.
     pub fn sle(&self, ctx: &'ctx Context, other: &Self) -> Self {
-        let a_bv = self.to_bv(ctx);
-        let b_bv = other.to_bv(ctx);
+        let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
         let cond = a_bv.bvsle(&b_bv);
         let one = BV::from_u64(ctx, 1, 1);
         let zero = BV::from_u64(ctx, 0, 1);
@@ -706,7 +772,7 @@ mod tests {
         let ctx = Context::new(&cfg);
 
         let a = SymValue::concrete(0xFF, 8);
-        
+
         let zext = a.zero_extend(&ctx, 16);
         assert_eq!(zext.as_concrete(), Some(0xFF));
         assert_eq!(zext.bits(), 16);
@@ -729,5 +795,109 @@ mod tests {
 
         let high = a.extract(&ctx, 15, 8);
         assert_eq!(high.as_concrete(), Some(0xAB));
+    }
+}
+
+#[cfg(test)]
+mod bitwidth_tests {
+    use super::*;
+    use z3::Config;
+
+    #[test]
+    fn test_add_different_bitwidths_concrete() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        // Create values of different widths
+        let val8 = SymValue::concrete(5, 8);
+        let val64 = SymValue::concrete(10, 64);
+
+        // This should handle the mismatch gracefully
+        let result = val8.add(&ctx, &val64);
+        assert_eq!(result.as_concrete(), Some(15));
+        assert_eq!(result.bits(), 64); // Result should use larger width
+    }
+
+    #[test]
+    fn test_shl_different_bitwidths_concrete() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        // Create values of different widths - this is common in real code
+        // where shift amount might be 8-bit but value is 64-bit
+        let val64 = SymValue::concrete(5, 64);
+        let shift8 = SymValue::concrete(2, 8);
+
+        // This should handle the mismatch gracefully
+        let result = val64.shl(&ctx, &shift8);
+        assert_eq!(result.as_concrete(), Some(20)); // 5 << 2 = 20
+        assert_eq!(result.bits(), 64); // Result keeps value's width
+    }
+
+    #[test]
+    fn test_symbolic_different_bitwidths() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        // Create symbolic values of different widths
+        let sym8 = SymValue::new_symbolic(&ctx, "x", 8);
+        let sym64 = SymValue::new_symbolic(&ctx, "y", 64);
+
+        // This should NOT crash with Z3 assertion anymore!
+        let result = sym8.add(&ctx, &sym64);
+        assert!(result.is_symbolic());
+        assert_eq!(result.bits(), 64); // Result should use larger width
+    }
+
+    #[test]
+    fn test_symbolic_shift_different_bitwidths() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        // Symbolic value with smaller shift amount
+        let sym64 = SymValue::new_symbolic(&ctx, "val", 64);
+        let shift8 = SymValue::new_symbolic(&ctx, "shift", 8);
+
+        // This should NOT crash with Z3 assertion anymore!
+        let result = sym64.shl(&ctx, &shift8);
+        assert!(result.is_symbolic());
+        assert_eq!(result.bits(), 64); // Shift preserves value width
+    }
+
+    #[test]
+    fn test_comparison_different_bitwidths() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        // Create symbolic values of different widths
+        let sym8 = SymValue::new_symbolic(&ctx, "x", 8);
+        let sym64 = SymValue::new_symbolic(&ctx, "y", 64);
+
+        // Comparison should NOT crash
+        let result = sym8.ult(&ctx, &sym64);
+        assert!(result.is_symbolic());
+        assert_eq!(result.bits(), 1); // Comparison returns 1-bit
+    }
+
+    #[test]
+    fn test_bitwise_different_bitwidths() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let sym8 = SymValue::new_symbolic(&ctx, "x", 8);
+        let sym32 = SymValue::new_symbolic(&ctx, "y", 32);
+
+        // AND, OR, XOR should NOT crash
+        let and_result = sym8.and(&ctx, &sym32);
+        assert!(and_result.is_symbolic());
+        assert_eq!(and_result.bits(), 32);
+
+        let or_result = sym8.or(&ctx, &sym32);
+        assert!(or_result.is_symbolic());
+        assert_eq!(or_result.bits(), 32);
+
+        let xor_result = sym8.xor(&ctx, &sym32);
+        assert!(xor_result.is_symbolic());
+        assert_eq!(xor_result.bits(), 32);
     }
 }

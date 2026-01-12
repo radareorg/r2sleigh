@@ -91,15 +91,13 @@ impl TypeInference {
                 self.set_type(a, ty.clone());
                 self.set_type(b, ty);
             }
-            SSAOp::IntDiv { dst, a, b }
-            | SSAOp::IntRem { dst, a, b } => {
+            SSAOp::IntDiv { dst, a, b } | SSAOp::IntRem { dst, a, b } => {
                 let ty = CType::UInt(dst.size);
                 self.set_type(dst, ty.clone());
                 self.set_type(a, ty.clone());
                 self.set_type(b, ty);
             }
-            SSAOp::IntSDiv { dst, a, b }
-            | SSAOp::IntSRem { dst, a, b } => {
+            SSAOp::IntSDiv { dst, a, b } | SSAOp::IntSRem { dst, a, b } => {
                 let ty = CType::Int(dst.size);
                 self.set_type(dst, ty.clone());
                 self.set_type(a, ty.clone());
@@ -114,15 +112,13 @@ impl TypeInference {
                 self.set_type(a, ty.clone());
                 self.set_type(b, ty);
             }
-            SSAOp::IntSLess { dst, a, b }
-            | SSAOp::IntSLessEqual { dst, a, b } => {
+            SSAOp::IntSLess { dst, a, b } | SSAOp::IntSLessEqual { dst, a, b } => {
                 self.set_type(dst, CType::Bool);
                 let ty = CType::Int(a.size);
                 self.set_type(a, ty.clone());
                 self.set_type(b, ty);
             }
-            SSAOp::IntNegate { dst, src }
-            | SSAOp::IntNot { dst, src } => {
+            SSAOp::IntNegate { dst, src } | SSAOp::IntNot { dst, src } => {
                 let ty = self.type_from_size(dst.size);
                 self.set_type(dst, ty.clone());
                 self.set_type(src, ty);
@@ -329,15 +325,9 @@ mod tests {
         let ti = TypeInference::new(64);
 
         // Pointer is more specific than int
-        assert!(ti.is_more_specific(
-            &CType::ptr(CType::Void),
-            &CType::Int(64)
-        ));
+        assert!(ti.is_more_specific(&CType::ptr(CType::Void), &CType::Int(64)));
 
         // Signed is more specific than unsigned
-        assert!(ti.is_more_specific(
-            &CType::Int(32),
-            &CType::UInt(32)
-        ));
+        assert!(ti.is_more_specific(&CType::Int(32), &CType::UInt(32)));
     }
 }

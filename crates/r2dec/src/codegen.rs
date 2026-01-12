@@ -318,7 +318,11 @@ impl CodeGenerator {
                     self.emit_expr(init_expr, 0);
                 }
             }
-            CStmt::If { cond, then_body, else_body } => {
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 self.output.push_str("if (");
                 self.emit_expr(cond, 0);
                 self.output.push_str(") ");

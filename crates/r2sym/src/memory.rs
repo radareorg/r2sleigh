@@ -76,7 +76,9 @@ impl<'ctx> SymMemory<'ctx> {
             for (write_addr, write_val, write_size) in self.symbolic_writes.iter().rev() {
                 if let Some(wa) = write_addr.as_concrete() {
                     // Check if this write covers our read
-                    if wa <= concrete_addr && wa + (*write_size as u64) >= concrete_addr + (size as u64) {
+                    if wa <= concrete_addr
+                        && wa + (*write_size as u64) >= concrete_addr + (size as u64)
+                    {
                         let offset = concrete_addr - wa;
                         if offset == 0 && *write_size == size {
                             return write_val.clone();
@@ -109,7 +111,9 @@ impl<'ctx> SymMemory<'ctx> {
     /// * `value` - The value to write
     /// * `size` - The size in bytes to write
     pub fn write(&mut self, addr: &SymValue<'ctx>, value: &SymValue<'ctx>, size: u32) {
-        if let (Some(concrete_addr), Some(concrete_value)) = (addr.as_concrete(), value.as_concrete()) {
+        if let (Some(concrete_addr), Some(concrete_value)) =
+            (addr.as_concrete(), value.as_concrete())
+        {
             // Concrete write
             for i in 0..size {
                 let byte_addr = concrete_addr.wrapping_add(i as u64);
@@ -118,7 +122,8 @@ impl<'ctx> SymMemory<'ctx> {
             }
         } else {
             // Symbolic write - record it
-            self.symbolic_writes.push((addr.clone(), value.clone(), size));
+            self.symbolic_writes
+                .push((addr.clone(), value.clone(), size));
         }
     }
 

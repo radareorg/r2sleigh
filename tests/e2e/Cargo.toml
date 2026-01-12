@@ -1,0 +1,13 @@
+[package]
+name = "r2sleigh-e2e-tests"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "e2e_test"
+path = "main.rs"
+
+[workspace]
+
+[dependencies]
+libloading = "0.8"

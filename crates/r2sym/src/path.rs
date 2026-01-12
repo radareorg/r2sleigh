@@ -79,6 +79,44 @@ impl<'ctx> PathResult<'ctx> {
             feasible,
         }
     }
+
+    /// Get the final program counter.
+    pub fn final_pc(&self) -> u64 {
+        self.state.pc
+    }
+
+    /// Get the number of path constraints.
+    pub fn num_constraints(&self) -> usize {
+        self.state.num_constraints()
+    }
+
+    /// Get all register names in the final state.
+    pub fn register_names(&self) -> Vec<String> {
+        self.state.register_names().cloned().collect()
+    }
+
+    /// Get a register value (returns None if symbolic or not set).
+    pub fn get_concrete_register(&self, name: &str) -> Option<u64> {
+        self.state.get_register(name).as_concrete()
+    }
+
+    /// Check if a register is symbolic.
+    pub fn is_register_symbolic(&self, name: &str) -> bool {
+        self.state.get_register(name).is_symbolic()
+    }
+}
+
+/// Concrete values extracted from a solved path.
+#[derive(Debug, Clone, Default)]
+pub struct SolvedPath {
+    /// Concrete input values (symbolic variable name -> value).
+    pub inputs: std::collections::HashMap<String, u64>,
+    /// Concrete register values at path end.
+    pub registers: std::collections::HashMap<String, u64>,
+    /// Final program counter.
+    pub final_pc: u64,
+    /// Path constraints that were satisfied.
+    pub num_constraints: usize,
 }
 
 /// Path explorer for symbolic execution.
@@ -151,8 +189,53 @@ impl<'ctx> PathExplorer<'ctx> {
         &self.solver
     }
 
+    /// Solve a path's constraints and extract concrete values.
+    ///
+    /// Returns None if the path is infeasible.
+    pub fn solve_path(&self, path: &PathResult<'ctx>) -> Option<SolvedPath> {
+        if !path.feasible {
+            return None;
+        }
+
+        // Get a model from the solver
+        let model = self.solver.solve(&path.state)?;
+
+        let mut solved = SolvedPath {
+            final_pc: path.state.pc,
+            num_constraints: path.state.num_constraints(),
+            ..Default::default()
+        };
+
+        // Extract concrete register values
+        for (name, value) in path.state.registers() {
+            if let Some(concrete) = model.eval(value) {
+                solved.registers.insert(name.clone(), concrete);
+            }
+        }
+
+        // Try to identify symbolic inputs (variables starting with "sym_")
+        for (name, value) in path.state.registers() {
+            if name.starts_with("sym_") || value.is_symbolic() {
+                if let Some(concrete) = model.eval(value) {
+                    solved.inputs.insert(name.clone(), concrete);
+                }
+            }
+        }
+
+        Some(solved)
+    }
+
+    /// Solve all feasible paths and return concrete solutions.
+    pub fn solve_all_paths(&self, paths: &[PathResult<'ctx>]) -> Vec<Option<SolvedPath>> {
+        paths.iter().map(|p| self.solve_path(p)).collect()
+    }
+
     /// Explore all paths in a function.
-    pub fn explore(&mut self, func: &SSAFunction, initial_state: SymState<'ctx>) -> Vec<PathResult<'ctx>> {
+    pub fn explore(
+        &mut self,
+        func: &SSAFunction,
+        initial_state: SymState<'ctx>,
+    ) -> Vec<PathResult<'ctx>> {
         let start_time = Instant::now();
         let mut results = Vec::new();
         let mut worklist: VecDeque<SymState<'ctx>> = VecDeque::new();
@@ -409,6 +492,7 @@ impl<'ctx> PathExplorer<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SymValue;
     use z3::Config;
 
     #[test]
@@ -433,5 +517,62 @@ mod tests {
         let stats = ExploreStats::default();
         assert_eq!(stats.states_explored, 0);
         assert_eq!(stats.paths_completed, 0);
+    }
+
+    #[test]
+    fn test_path_result_methods() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let mut state = SymState::new(&ctx, 0x1000);
+        state.set_register("rax", SymValue::concrete(42, 64));
+        state.make_symbolic("rbx", 64);
+
+        let result = PathResult::new(state, true);
+
+        assert_eq!(result.final_pc(), 0x1000);
+        assert_eq!(result.num_constraints(), 0);
+        assert!(result.register_names().contains(&"rax".to_string()));
+        assert_eq!(result.get_concrete_register("rax"), Some(42));
+        assert!(result.is_register_symbolic("rbx"));
+    }
+
+    #[test]
+    fn test_solve_path_with_constraints() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let mut state = SymState::new(&ctx, 0x1000);
+        state.make_symbolic("sym_input", 64);
+
+        // Add constraint: sym_input < 100
+        let input = state.get_register("sym_input");
+        let hundred = SymValue::concrete(100, 64);
+        let cmp = input.ult(&ctx, &hundred);
+        state.add_true_constraint(&cmp);
+
+        let result = PathResult::new(state, true);
+        let explorer = PathExplorer::new(&ctx);
+
+        let solved = explorer.solve_path(&result);
+        assert!(solved.is_some());
+
+        let solved = solved.unwrap();
+        assert_eq!(solved.final_pc, 0x1000);
+        assert_eq!(solved.num_constraints, 1);
+
+        // The input should be less than 100
+        if let Some(&value) = solved.inputs.get("sym_input") {
+            assert!(value < 100, "Input should be < 100, got {}", value);
+        }
+    }
+
+    #[test]
+    fn test_solved_path_default() {
+        let solved = SolvedPath::default();
+        assert!(solved.inputs.is_empty());
+        assert!(solved.registers.is_empty());
+        assert_eq!(solved.final_pc, 0);
+        assert_eq!(solved.num_constraints, 0);
     }
 }

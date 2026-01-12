@@ -26,7 +26,11 @@ pub struct Varnode {
 impl Varnode {
     /// Create a new varnode.
     pub fn new(space: SpaceId, offset: u64, size: u32) -> Self {
-        Self { space, offset, size }
+        Self {
+            space,
+            offset,
+            size,
+        }
     }
 
     /// Create a constant varnode.

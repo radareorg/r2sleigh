@@ -16,17 +16,11 @@ pub enum SSAOp {
     // ========== SSA-specific Operations ==========
     /// Phi function: merges values from different control flow paths.
     /// dst = phi(sources[0], sources[1], ...)
-    Phi {
-        dst: SSAVar,
-        sources: Vec<SSAVar>,
-    },
+    Phi { dst: SSAVar, sources: Vec<SSAVar> },
 
     // ========== Data Movement ==========
     /// Copy src to dst: dst = src
-    Copy {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    Copy { dst: SSAVar, src: SSAVar },
 
     /// Load from memory: dst = *[space]addr
     Load {
@@ -44,222 +38,103 @@ pub enum SSAOp {
 
     // ========== Integer Arithmetic ==========
     /// Integer addition: dst = a + b
-    IntAdd {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntAdd { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Integer subtraction: dst = a - b
-    IntSub {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntSub { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Integer multiplication: dst = a * b
-    IntMult {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntMult { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Unsigned integer division: dst = a / b
-    IntDiv {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntDiv { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Signed integer division: dst = a / b (signed)
-    IntSDiv {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntSDiv { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Unsigned integer remainder: dst = a % b
-    IntRem {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntRem { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Signed integer remainder: dst = a % b (signed)
-    IntSRem {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntSRem { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Two's complement negation: dst = -src
-    IntNegate {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    IntNegate { dst: SSAVar, src: SSAVar },
 
     /// Addition with carry: dst = a + b + carry
-    IntCarry {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntCarry { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Signed carry (overflow): dst = overflow(a + b)
-    IntSCarry {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntSCarry { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Signed borrow: dst = borrow(a - b)
-    IntSBorrow {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntSBorrow { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     // ========== Logical Operations ==========
     /// Bitwise AND: dst = a & b
-    IntAnd {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntAnd { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Bitwise OR: dst = a | b
-    IntOr {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntOr { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Bitwise XOR: dst = a ^ b
-    IntXor {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntXor { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Bitwise NOT: dst = ~src
-    IntNot {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    IntNot { dst: SSAVar, src: SSAVar },
 
     // ========== Shift Operations ==========
     /// Left shift: dst = a << b
-    IntLeft {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntLeft { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Logical right shift: dst = a >> b (unsigned)
-    IntRight {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntRight { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Arithmetic right shift: dst = a >> b (signed)
-    IntSRight {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntSRight { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     // ========== Comparison Operations ==========
     /// Equality: dst = (a == b) ? 1 : 0
-    IntEqual {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Inequality: dst = (a != b) ? 1 : 0
-    IntNotEqual {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntNotEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Unsigned less than: dst = (a < b) ? 1 : 0
-    IntLess {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntLess { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Signed less than: dst = (a < b) ? 1 : 0 (signed)
-    IntSLess {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntSLess { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Unsigned less or equal: dst = (a <= b) ? 1 : 0
-    IntLessEqual {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntLessEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Signed less or equal: dst = (a <= b) ? 1 : 0 (signed)
-    IntSLessEqual {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    IntSLessEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     // ========== Extension Operations ==========
     /// Zero extension: dst = zext(src)
-    IntZExt {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    IntZExt { dst: SSAVar, src: SSAVar },
 
     /// Sign extension: dst = sext(src)
-    IntSExt {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    IntSExt { dst: SSAVar, src: SSAVar },
 
     // ========== Boolean Operations ==========
     /// Boolean NOT: dst = !src
-    BoolNot {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    BoolNot { dst: SSAVar, src: SSAVar },
 
     /// Boolean AND: dst = a && b
-    BoolAnd {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    BoolAnd { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Boolean OR: dst = a || b
-    BoolOr {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    BoolOr { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Boolean XOR: dst = a ^^ b
-    BoolXor {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    BoolXor { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     // ========== Bit Manipulation ==========
     /// Concatenate two values: dst = (hi << lo.size*8) | lo
-    Piece {
-        dst: SSAVar,
-        hi: SSAVar,
-        lo: SSAVar,
-    },
+    Piece { dst: SSAVar, hi: SSAVar, lo: SSAVar },
 
     /// Extract a portion of a value: dst = src[offset:size]
     Subpiece {
@@ -269,171 +144,87 @@ pub enum SSAOp {
     },
 
     /// Population count (number of 1 bits): dst = popcount(src)
-    PopCount {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    PopCount { dst: SSAVar, src: SSAVar },
 
     /// Count leading zeros: dst = clz(src)
-    Lzcount {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    Lzcount { dst: SSAVar, src: SSAVar },
 
     // ========== Control Flow ==========
     /// Unconditional branch to target
-    Branch {
-        target: SSAVar,
-    },
+    Branch { target: SSAVar },
 
     /// Conditional branch: if (cond) goto target
-    CBranch {
-        target: SSAVar,
-        cond: SSAVar,
-    },
+    CBranch { target: SSAVar, cond: SSAVar },
 
     /// Indirect branch: goto *target
-    BranchInd {
-        target: SSAVar,
-    },
+    BranchInd { target: SSAVar },
 
     /// Call a subroutine
-    Call {
-        target: SSAVar,
-    },
+    Call { target: SSAVar },
 
     /// Indirect call: call *target
-    CallInd {
-        target: SSAVar,
-    },
+    CallInd { target: SSAVar },
 
     /// Return from subroutine
-    Return {
-        target: SSAVar,
-    },
+    Return { target: SSAVar },
 
     // ========== Floating Point ==========
     /// Float addition: dst = a + b
-    FloatAdd {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    FloatAdd { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Float subtraction: dst = a - b
-    FloatSub {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    FloatSub { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Float multiplication: dst = a * b
-    FloatMult {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    FloatMult { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Float division: dst = a / b
-    FloatDiv {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    FloatDiv { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Float negation: dst = -src
-    FloatNeg {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    FloatNeg { dst: SSAVar, src: SSAVar },
 
     /// Float absolute value: dst = |src|
-    FloatAbs {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    FloatAbs { dst: SSAVar, src: SSAVar },
 
     /// Float square root: dst = sqrt(src)
-    FloatSqrt {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    FloatSqrt { dst: SSAVar, src: SSAVar },
 
     /// Float ceiling: dst = ceil(src)
-    FloatCeil {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    FloatCeil { dst: SSAVar, src: SSAVar },
 
     /// Float floor: dst = floor(src)
-    FloatFloor {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    FloatFloor { dst: SSAVar, src: SSAVar },
 
     /// Float round: dst = round(src)
-    FloatRound {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    FloatRound { dst: SSAVar, src: SSAVar },
 
     /// Float is NaN: dst = isnan(src)
-    FloatNaN {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    FloatNaN { dst: SSAVar, src: SSAVar },
 
     /// Float equality: dst = (a == b) ? 1 : 0
-    FloatEqual {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    FloatEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Float not equal: dst = (a != b) ? 1 : 0
-    FloatNotEqual {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    FloatNotEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Float less than: dst = (a < b) ? 1 : 0
-    FloatLess {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    FloatLess { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Float less or equal: dst = (a <= b) ? 1 : 0
-    FloatLessEqual {
-        dst: SSAVar,
-        a: SSAVar,
-        b: SSAVar,
-    },
+    FloatLessEqual { dst: SSAVar, a: SSAVar, b: SSAVar },
 
     /// Convert int to float: dst = (float)src
-    Int2Float {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    Int2Float { dst: SSAVar, src: SSAVar },
 
     /// Convert float to int: dst = (int)src
-    Float2Int {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    Float2Int { dst: SSAVar, src: SSAVar },
 
     /// Convert float to different size float: dst = (float_new_size)src
-    FloatFloat {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    FloatFloat { dst: SSAVar, src: SSAVar },
 
     /// Truncate float to int: dst = trunc(src)
-    Trunc {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    Trunc { dst: SSAVar, src: SSAVar },
 
     // ========== Special Operations ==========
     /// Call a user-defined operation (CALLOTHER in P-code)
@@ -453,9 +244,7 @@ pub enum SSAOp {
     Unimplemented,
 
     /// CPU identification (CPUID-like)
-    CpuId {
-        dst: SSAVar,
-    },
+    CpuId { dst: SSAVar },
 
     /// Insert a breakpoint
     Breakpoint,
@@ -484,16 +273,10 @@ pub enum SSAOp {
     },
 
     /// New (allocation, used in high-level analysis)
-    New {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    New { dst: SSAVar, src: SSAVar },
 
     /// Cast (type cast, used in high-level analysis)
-    Cast {
-        dst: SSAVar,
-        src: SSAVar,
-    },
+    Cast { dst: SSAVar, src: SSAVar },
 
     /// Extract (bit field extraction)
     Extract {
@@ -680,7 +463,11 @@ impl SSAOp {
                 segment, offset, ..
             } => vec![segment, offset],
 
-            Branch { target } | BranchInd { target } | Call { target } | CallInd { target } | Return { target } => {
+            Branch { target }
+            | BranchInd { target }
+            | Call { target }
+            | CallInd { target }
+            | Return { target } => {
                 vec![target]
             }
 

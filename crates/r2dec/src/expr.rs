@@ -16,7 +16,9 @@ pub struct ExpressionBuilder {
 impl ExpressionBuilder {
     /// Create a new expression builder.
     pub fn new(ptr_size: u32) -> Self {
-        Self { _ptr_size: ptr_size }
+        Self {
+            _ptr_size: ptr_size,
+        }
     }
 
     /// Convert an SSA variable to a C expression.
@@ -64,53 +66,30 @@ impl ExpressionBuilder {
                 let lhs = CExpr::Deref(Box::new(addr_expr));
                 Some(CStmt::Expr(CExpr::assign(lhs, val_expr)))
             }
-            SSAOp::IntAdd { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Add)
-            }
-            SSAOp::IntSub { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Sub)
-            }
-            SSAOp::IntMult { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Mul)
-            }
-            SSAOp::IntDiv { dst, a, b }
-            | SSAOp::IntSDiv { dst, a, b } => {
+            SSAOp::IntAdd { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Add),
+            SSAOp::IntSub { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Sub),
+            SSAOp::IntMult { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Mul),
+            SSAOp::IntDiv { dst, a, b } | SSAOp::IntSDiv { dst, a, b } => {
                 self.binary_op_stmt(dst, a, b, BinaryOp::Div)
             }
-            SSAOp::IntRem { dst, a, b }
-            | SSAOp::IntSRem { dst, a, b } => {
+            SSAOp::IntRem { dst, a, b } | SSAOp::IntSRem { dst, a, b } => {
                 self.binary_op_stmt(dst, a, b, BinaryOp::Mod)
             }
-            SSAOp::IntAnd { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::BitAnd)
-            }
-            SSAOp::IntOr { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::BitOr)
-            }
-            SSAOp::IntXor { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::BitXor)
-            }
-            SSAOp::IntLeft { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Shl)
-            }
-            SSAOp::IntRight { dst, a, b }
-            | SSAOp::IntSRight { dst, a, b } => {
+            SSAOp::IntAnd { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::BitAnd),
+            SSAOp::IntOr { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::BitOr),
+            SSAOp::IntXor { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::BitXor),
+            SSAOp::IntLeft { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Shl),
+            SSAOp::IntRight { dst, a, b } | SSAOp::IntSRight { dst, a, b } => {
                 self.binary_op_stmt(dst, a, b, BinaryOp::Shr)
             }
-            SSAOp::IntLess { dst, a, b }
-            | SSAOp::IntSLess { dst, a, b } => {
+            SSAOp::IntLess { dst, a, b } | SSAOp::IntSLess { dst, a, b } => {
                 self.binary_op_stmt(dst, a, b, BinaryOp::Lt)
             }
-            SSAOp::IntLessEqual { dst, a, b }
-            | SSAOp::IntSLessEqual { dst, a, b } => {
+            SSAOp::IntLessEqual { dst, a, b } | SSAOp::IntSLessEqual { dst, a, b } => {
                 self.binary_op_stmt(dst, a, b, BinaryOp::Le)
             }
-            SSAOp::IntEqual { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Eq)
-            }
-            SSAOp::IntNotEqual { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Ne)
-            }
+            SSAOp::IntEqual { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Eq),
+            SSAOp::IntNotEqual { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Ne),
             SSAOp::IntNegate { dst, src } => {
                 let lhs = self.var_to_expr(dst);
                 let rhs = CExpr::unary(UnaryOp::Neg, self.var_to_expr(src));
@@ -121,15 +100,9 @@ impl ExpressionBuilder {
                 let rhs = CExpr::unary(UnaryOp::BitNot, self.var_to_expr(src));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
-            SSAOp::BoolAnd { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::And)
-            }
-            SSAOp::BoolOr { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Or)
-            }
-            SSAOp::BoolXor { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::BitXor)
-            }
+            SSAOp::BoolAnd { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::And),
+            SSAOp::BoolOr { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Or),
+            SSAOp::BoolXor { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::BitXor),
             SSAOp::BoolNot { dst, src } => {
                 let lhs = self.var_to_expr(dst);
                 let rhs = CExpr::unary(UnaryOp::Not, self.var_to_expr(src));
@@ -149,35 +122,19 @@ impl ExpressionBuilder {
                 let rhs = CExpr::cast(ty, self.var_to_expr(src));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
-            SSAOp::FloatAdd { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Add)
-            }
-            SSAOp::FloatSub { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Sub)
-            }
-            SSAOp::FloatMult { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Mul)
-            }
-            SSAOp::FloatDiv { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Div)
-            }
+            SSAOp::FloatAdd { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Add),
+            SSAOp::FloatSub { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Sub),
+            SSAOp::FloatMult { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Mul),
+            SSAOp::FloatDiv { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Div),
             SSAOp::FloatNeg { dst, src } => {
                 let lhs = self.var_to_expr(dst);
                 let rhs = CExpr::unary(UnaryOp::Neg, self.var_to_expr(src));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
-            SSAOp::FloatLess { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Lt)
-            }
-            SSAOp::FloatLessEqual { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Le)
-            }
-            SSAOp::FloatEqual { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Eq)
-            }
-            SSAOp::FloatNotEqual { dst, a, b } => {
-                self.binary_op_stmt(dst, a, b, BinaryOp::Ne)
-            }
+            SSAOp::FloatLess { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Lt),
+            SSAOp::FloatLessEqual { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Le),
+            SSAOp::FloatEqual { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Eq),
+            SSAOp::FloatNotEqual { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Ne),
             SSAOp::Int2Float { dst, src } => {
                 let lhs = self.var_to_expr(dst);
                 let ty = CType::Float(dst.size);
@@ -201,9 +158,7 @@ impl ExpressionBuilder {
                 let call = CExpr::call(self.var_to_expr(target), vec![]);
                 Some(CStmt::Expr(call))
             }
-            SSAOp::Return { target } => {
-                Some(CStmt::Return(Some(self.var_to_expr(target))))
-            }
+            SSAOp::Return { target } => Some(CStmt::Return(Some(self.var_to_expr(target)))),
             SSAOp::Branch { .. } | SSAOp::CBranch { .. } => {
                 // Branches are handled by control flow structuring
                 None
@@ -213,9 +168,7 @@ impl ExpressionBuilder {
                 None
             }
             SSAOp::Nop => None,
-            SSAOp::Unimplemented => {
-                Some(CStmt::comment("Unimplemented operation"))
-            }
+            SSAOp::Unimplemented => Some(CStmt::comment("Unimplemented operation")),
             _ => None,
         }
     }
@@ -261,115 +214,99 @@ impl ExpressionBuilder {
                 op: BinaryOp::Add,
                 left,
                 right,
-            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                self.simplify(*left)
-            }
+            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => self.simplify(*left),
             // 0 + x = x
             CExpr::Binary {
                 op: BinaryOp::Add,
                 left,
                 right,
-            } if matches!(*left, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                self.simplify(*right)
-            }
+            } if matches!(*left, CExpr::IntLit(0) | CExpr::UIntLit(0)) => self.simplify(*right),
             // x - 0 = x
             CExpr::Binary {
                 op: BinaryOp::Sub,
                 left,
                 right,
-            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                self.simplify(*left)
-            }
+            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => self.simplify(*left),
             // x * 1 = x
             CExpr::Binary {
                 op: BinaryOp::Mul,
                 left,
                 right,
-            } if matches!(*right, CExpr::IntLit(1) | CExpr::UIntLit(1)) => {
-                self.simplify(*left)
-            }
+            } if matches!(*right, CExpr::IntLit(1) | CExpr::UIntLit(1)) => self.simplify(*left),
             // 1 * x = x
             CExpr::Binary {
                 op: BinaryOp::Mul,
                 left,
                 right,
-            } if matches!(*left, CExpr::IntLit(1) | CExpr::UIntLit(1)) => {
-                self.simplify(*right)
-            }
+            } if matches!(*left, CExpr::IntLit(1) | CExpr::UIntLit(1)) => self.simplify(*right),
             // x * 0 = 0
             CExpr::Binary {
                 op: BinaryOp::Mul,
                 right,
                 ..
-            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                CExpr::IntLit(0)
-            }
+            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => CExpr::IntLit(0),
             // 0 * x = 0
             CExpr::Binary {
                 op: BinaryOp::Mul,
                 left,
                 ..
-            } if matches!(*left, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                CExpr::IntLit(0)
-            }
+            } if matches!(*left, CExpr::IntLit(0) | CExpr::UIntLit(0)) => CExpr::IntLit(0),
             // x / 1 = x
             CExpr::Binary {
                 op: BinaryOp::Div,
                 left,
                 right,
-            } if matches!(*right, CExpr::IntLit(1) | CExpr::UIntLit(1)) => {
-                self.simplify(*left)
-            }
+            } if matches!(*right, CExpr::IntLit(1) | CExpr::UIntLit(1)) => self.simplify(*left),
             // x & 0 = 0
             CExpr::Binary {
                 op: BinaryOp::BitAnd,
                 right,
                 ..
-            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                CExpr::IntLit(0)
-            }
+            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => CExpr::IntLit(0),
             // x | 0 = x
             CExpr::Binary {
                 op: BinaryOp::BitOr,
                 left,
                 right,
-            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                self.simplify(*left)
-            }
+            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => self.simplify(*left),
             // x ^ 0 = x
             CExpr::Binary {
                 op: BinaryOp::BitXor,
                 left,
                 right,
-            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                self.simplify(*left)
-            }
+            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => self.simplify(*left),
             // x << 0 = x
             CExpr::Binary {
                 op: BinaryOp::Shl,
                 left,
                 right,
-            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                self.simplify(*left)
-            }
+            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => self.simplify(*left),
             // x >> 0 = x
             CExpr::Binary {
                 op: BinaryOp::Shr,
                 left,
                 right,
-            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
-                self.simplify(*left)
-            }
+            } if matches!(*right, CExpr::IntLit(0) | CExpr::UIntLit(0)) => self.simplify(*left),
             // !!x = x (for boolean)
             CExpr::Unary {
                 op: UnaryOp::Not,
                 ref operand,
-            } if matches!(operand.as_ref(), CExpr::Unary { op: UnaryOp::Not, .. }) => {
+            } if matches!(
+                operand.as_ref(),
+                CExpr::Unary {
+                    op: UnaryOp::Not,
+                    ..
+                }
+            ) =>
+            {
                 if let CExpr::Unary { operand, .. } = expr {
                     if let CExpr::Unary { operand: inner, .. } = *operand {
                         self.simplify(*inner)
                     } else {
-                        CExpr::Unary { op: UnaryOp::Not, operand }
+                        CExpr::Unary {
+                            op: UnaryOp::Not,
+                            operand,
+                        }
                     }
                 } else {
                     expr
@@ -379,12 +316,22 @@ impl ExpressionBuilder {
             CExpr::Unary {
                 op: UnaryOp::Neg,
                 ref operand,
-            } if matches!(operand.as_ref(), CExpr::Unary { op: UnaryOp::Neg, .. }) => {
+            } if matches!(
+                operand.as_ref(),
+                CExpr::Unary {
+                    op: UnaryOp::Neg,
+                    ..
+                }
+            ) =>
+            {
                 if let CExpr::Unary { operand, .. } = expr {
                     if let CExpr::Unary { operand: inner, .. } = *operand {
                         self.simplify(*inner)
                     } else {
-                        CExpr::Unary { op: UnaryOp::Neg, operand }
+                        CExpr::Unary {
+                            op: UnaryOp::Neg,
+                            operand,
+                        }
                     }
                 } else {
                     expr
@@ -394,12 +341,22 @@ impl ExpressionBuilder {
             CExpr::Unary {
                 op: UnaryOp::BitNot,
                 ref operand,
-            } if matches!(operand.as_ref(), CExpr::Unary { op: UnaryOp::BitNot, .. }) => {
+            } if matches!(
+                operand.as_ref(),
+                CExpr::Unary {
+                    op: UnaryOp::BitNot,
+                    ..
+                }
+            ) =>
+            {
                 if let CExpr::Unary { operand, .. } = expr {
                     if let CExpr::Unary { operand: inner, .. } = *operand {
                         self.simplify(*inner)
                     } else {
-                        CExpr::Unary { op: UnaryOp::BitNot, operand }
+                        CExpr::Unary {
+                            op: UnaryOp::BitNot,
+                            operand,
+                        }
                     }
                 } else {
                     expr
@@ -410,7 +367,9 @@ impl ExpressionBuilder {
                 op,
                 ref left,
                 ref right,
-            } if matches!(left.as_ref(), CExpr::IntLit(_)) && matches!(right.as_ref(), CExpr::IntLit(_)) => {
+            } if matches!(left.as_ref(), CExpr::IntLit(_))
+                && matches!(right.as_ref(), CExpr::IntLit(_)) =>
+            {
                 if let (CExpr::IntLit(a), CExpr::IntLit(b)) = (left.as_ref(), right.as_ref()) {
                     match op {
                         BinaryOp::Add => CExpr::IntLit(a.wrapping_add(*b)),

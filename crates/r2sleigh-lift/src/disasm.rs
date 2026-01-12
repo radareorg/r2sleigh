@@ -4,9 +4,8 @@
 //! and translation to r2il using Ghidra's libsla library.
 
 use libsla::{
-    Address, AddressSpace, AddressSpaceType, BoolOp, FloatOp, GhidraSleigh,
-    InstructionLoader, IntOp, IntSign, OpCode, PcodeDisassembly, PcodeInstruction,
-    PseudoOp, Sleigh, VarnodeData,
+    Address, AddressSpace, AddressSpaceType, BoolOp, FloatOp, GhidraSleigh, InstructionLoader,
+    IntOp, IntSign, OpCode, PcodeDisassembly, PcodeInstruction, PseudoOp, Sleigh, VarnodeData,
 };
 use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 
@@ -97,10 +96,7 @@ impl Disassembler {
         let reg_space = self.sleigh.address_space_by_name("register")?;
 
         // Create a VarnodeData to query libsla
-        let varnode_data = VarnodeData::new(
-            Address::new(reg_space, vn.offset),
-            vn.size as usize,
-        );
+        let varnode_data = VarnodeData::new(Address::new(reg_space, vn.offset), vn.size as usize);
 
         self.sleigh.register_name(&varnode_data)
     }
@@ -143,10 +139,15 @@ impl Disassembler {
         let loader = ByteLoader::new(bytes, addr);
 
         // Disassemble to P-code
-        let pcode = self.sleigh.disassemble_pcode(&loader, address)
-            .map_err(|e| LiftError::Pcode(crate::pcode::PcodeError::InvalidOpcode(
-                format!("Disassembly failed: {}", e)
-            )))?;
+        let pcode = self
+            .sleigh
+            .disassemble_pcode(&loader, address)
+            .map_err(|e| {
+                LiftError::Pcode(crate::pcode::PcodeError::InvalidOpcode(format!(
+                    "Disassembly failed: {}",
+                    e
+                )))
+            })?;
 
         // Translate P-code to r2il
         self.translate_pcode(pcode, addr)
@@ -158,10 +159,15 @@ impl Disassembler {
         let address = Address::new(code_space, addr);
         let loader = ByteLoader::new(bytes, addr);
 
-        let native = self.sleigh.disassemble_native(&loader, address)
+        let native = self
+            .sleigh
+            .disassemble_native(&loader, address)
             .map_err(|e| LiftError::Parse(format!("Disassembly failed: {}", e)))?;
 
-        let mnemonic = format!("{} {}", native.instruction.mnemonic, native.instruction.body);
+        let mnemonic = format!(
+            "{} {}",
+            native.instruction.mnemonic, native.instruction.body
+        );
         let size = native.origin.size;
 
         Ok((mnemonic.trim().to_string(), size))
@@ -184,13 +190,20 @@ impl Disassembler {
     /// Translate a single P-code instruction to an r2il operation.
     fn translate_pcode_op(&self, instr: &PcodeInstruction) -> Result<Option<R2ILOp>> {
         let output = instr.output.as_ref().map(|v| self.translate_varnode(v));
-        let inputs: Vec<Varnode> = instr.inputs.iter().map(|v| self.translate_varnode(v)).collect();
+        let inputs: Vec<Varnode> = instr
+            .inputs
+            .iter()
+            .map(|v| self.translate_varnode(v))
+            .collect();
 
         let op = match &instr.op_code {
             // Data movement
             OpCode::Copy => {
                 let dst = output.ok_or_else(|| missing_output("COPY"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("COPY", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("COPY", 0))?;
                 Some(R2ILOp::Copy { dst, src })
             }
 
@@ -198,275 +211,487 @@ impl Disassembler {
                 let dst = output.ok_or_else(|| missing_output("LOAD"))?;
                 // First input is space ID (constant), second is address
                 let space_id = inputs.first().ok_or_else(|| missing_input("LOAD", 0))?;
-                let addr_varnode = inputs.get(1).cloned().ok_or_else(|| missing_input("LOAD", 1))?;
+                let addr_varnode = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("LOAD", 1))?;
                 let space = self.space_from_constant(space_id);
-                Some(R2ILOp::Load { dst, space, addr: addr_varnode })
+                Some(R2ILOp::Load {
+                    dst,
+                    space,
+                    addr: addr_varnode,
+                })
             }
 
             OpCode::Store => {
                 // First input is space ID, second is address, third is value
                 let space_id = inputs.first().ok_or_else(|| missing_input("STORE", 0))?;
-                let addr_varnode = inputs.get(1).cloned().ok_or_else(|| missing_input("STORE", 1))?;
-                let val = inputs.get(2).cloned().ok_or_else(|| missing_input("STORE", 2))?;
+                let addr_varnode = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("STORE", 1))?;
+                let val = inputs
+                    .get(2)
+                    .cloned()
+                    .ok_or_else(|| missing_input("STORE", 2))?;
                 let space = self.space_from_constant(space_id);
-                Some(R2ILOp::Store { space, addr: addr_varnode, val })
+                Some(R2ILOp::Store {
+                    space,
+                    addr: addr_varnode,
+                    val,
+                })
             }
 
             // Control flow
             OpCode::Branch => {
-                let target = inputs.first().cloned().ok_or_else(|| missing_input("BRANCH", 0))?;
+                let target = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("BRANCH", 0))?;
                 Some(R2ILOp::Branch { target })
             }
 
             OpCode::BranchConditional => {
-                let cond = inputs.first().cloned().ok_or_else(|| missing_input("CBRANCH", 0))?;
-                let target = inputs.get(1).cloned().ok_or_else(|| missing_input("CBRANCH", 1))?;
+                let cond = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("CBRANCH", 0))?;
+                let target = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("CBRANCH", 1))?;
                 Some(R2ILOp::CBranch { cond, target })
             }
 
             OpCode::BranchIndirect => {
-                let target = inputs.first().cloned().ok_or_else(|| missing_input("BRANCHIND", 0))?;
+                let target = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("BRANCHIND", 0))?;
                 Some(R2ILOp::BranchInd { target })
             }
 
             OpCode::Call => {
-                let target = inputs.first().cloned().ok_or_else(|| missing_input("CALL", 0))?;
+                let target = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("CALL", 0))?;
                 Some(R2ILOp::Call { target })
             }
 
             OpCode::CallIndirect => {
-                let target = inputs.first().cloned().ok_or_else(|| missing_input("CALLIND", 0))?;
+                let target = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("CALLIND", 0))?;
                 Some(R2ILOp::CallInd { target })
             }
 
             OpCode::Return => {
-                let target = inputs.first().cloned().ok_or_else(|| missing_input("RETURN", 0))?;
+                let target = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("RETURN", 0))?;
                 Some(R2ILOp::Return { target })
             }
 
             // Integer arithmetic
             OpCode::Int(IntOp::Add) => {
                 let dst = output.ok_or_else(|| missing_output("INT_ADD"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_ADD", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_ADD", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_ADD", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_ADD", 1))?;
                 Some(R2ILOp::IntAdd { dst, a, b })
             }
 
             OpCode::Int(IntOp::Subtract) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SUB"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_SUB", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_SUB", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SUB", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SUB", 1))?;
                 Some(R2ILOp::IntSub { dst, a, b })
             }
 
             OpCode::Int(IntOp::Multiply) => {
                 let dst = output.ok_or_else(|| missing_output("INT_MULT"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_MULT", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_MULT", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_MULT", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_MULT", 1))?;
                 Some(R2ILOp::IntMult { dst, a, b })
             }
 
             OpCode::Int(IntOp::Divide(IntSign::Unsigned)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_DIV"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_DIV", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_DIV", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_DIV", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_DIV", 1))?;
                 Some(R2ILOp::IntDiv { dst, a, b })
             }
 
             OpCode::Int(IntOp::Divide(IntSign::Signed)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SDIV"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_SDIV", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_SDIV", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SDIV", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SDIV", 1))?;
                 Some(R2ILOp::IntSDiv { dst, a, b })
             }
 
             OpCode::Int(IntOp::Remainder(IntSign::Unsigned)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_REM"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_REM", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_REM", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_REM", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_REM", 1))?;
                 Some(R2ILOp::IntRem { dst, a, b })
             }
 
             OpCode::Int(IntOp::Remainder(IntSign::Signed)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SREM"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_SREM", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_SREM", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SREM", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SREM", 1))?;
                 Some(R2ILOp::IntSRem { dst, a, b })
             }
 
             OpCode::Int(IntOp::Negate) => {
                 let dst = output.ok_or_else(|| missing_output("INT_2COMP"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("INT_2COMP", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_2COMP", 0))?;
                 Some(R2ILOp::IntNegate { dst, src })
             }
 
             // Bitwise operations
             OpCode::Int(IntOp::Bitwise(BoolOp::And)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_AND"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_AND", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_AND", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_AND", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_AND", 1))?;
                 Some(R2ILOp::IntAnd { dst, a, b })
             }
 
             OpCode::Int(IntOp::Bitwise(BoolOp::Or)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_OR"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_OR", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_OR", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_OR", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_OR", 1))?;
                 Some(R2ILOp::IntOr { dst, a, b })
             }
 
             OpCode::Int(IntOp::Bitwise(BoolOp::Xor)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_XOR"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_XOR", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_XOR", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_XOR", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_XOR", 1))?;
                 Some(R2ILOp::IntXor { dst, a, b })
             }
 
             OpCode::Int(IntOp::Bitwise(BoolOp::Negate)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_NEGATE"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("INT_NEGATE", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_NEGATE", 0))?;
                 Some(R2ILOp::IntNot { dst, src })
             }
 
             // Shift operations
             OpCode::Int(IntOp::ShiftLeft) => {
                 let dst = output.ok_or_else(|| missing_output("INT_LEFT"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_LEFT", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_LEFT", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_LEFT", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_LEFT", 1))?;
                 Some(R2ILOp::IntLeft { dst, a, b })
             }
 
             OpCode::Int(IntOp::ShiftRight(IntSign::Unsigned)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_RIGHT"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_RIGHT", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_RIGHT", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_RIGHT", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_RIGHT", 1))?;
                 Some(R2ILOp::IntRight { dst, a, b })
             }
 
             OpCode::Int(IntOp::ShiftRight(IntSign::Signed)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SRIGHT"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_SRIGHT", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_SRIGHT", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SRIGHT", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SRIGHT", 1))?;
                 Some(R2ILOp::IntSRight { dst, a, b })
             }
 
             // Comparison operations
             OpCode::Int(IntOp::Equal) => {
                 let dst = output.ok_or_else(|| missing_output("INT_EQUAL"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_EQUAL", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_EQUAL", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_EQUAL", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_EQUAL", 1))?;
                 Some(R2ILOp::IntEqual { dst, a, b })
             }
 
             OpCode::Int(IntOp::NotEqual) => {
                 let dst = output.ok_or_else(|| missing_output("INT_NOTEQUAL"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_NOTEQUAL", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_NOTEQUAL", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_NOTEQUAL", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_NOTEQUAL", 1))?;
                 Some(R2ILOp::IntNotEqual { dst, a, b })
             }
 
             OpCode::Int(IntOp::LessThan(IntSign::Unsigned)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_LESS"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_LESS", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_LESS", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_LESS", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_LESS", 1))?;
                 Some(R2ILOp::IntLess { dst, a, b })
             }
 
             OpCode::Int(IntOp::LessThan(IntSign::Signed)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SLESS"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_SLESS", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_SLESS", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SLESS", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SLESS", 1))?;
                 Some(R2ILOp::IntSLess { dst, a, b })
             }
 
             OpCode::Int(IntOp::LessThanOrEqual(IntSign::Unsigned)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_LESSEQUAL"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_LESSEQUAL", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_LESSEQUAL", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_LESSEQUAL", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_LESSEQUAL", 1))?;
                 Some(R2ILOp::IntLessEqual { dst, a, b })
             }
 
             OpCode::Int(IntOp::LessThanOrEqual(IntSign::Signed)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SLESSEQUAL"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_SLESSEQUAL", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_SLESSEQUAL", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SLESSEQUAL", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SLESSEQUAL", 1))?;
                 Some(R2ILOp::IntSLessEqual { dst, a, b })
             }
 
             // Extension operations
             OpCode::Int(IntOp::Extension(IntSign::Unsigned)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_ZEXT"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("INT_ZEXT", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_ZEXT", 0))?;
                 Some(R2ILOp::IntZExt { dst, src })
             }
 
             OpCode::Int(IntOp::Extension(IntSign::Signed)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SEXT"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("INT_SEXT", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SEXT", 0))?;
                 Some(R2ILOp::IntSExt { dst, src })
             }
 
             // Carry/Borrow
             OpCode::Int(IntOp::Carry(IntSign::Unsigned)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_CARRY"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_CARRY", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_CARRY", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_CARRY", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_CARRY", 1))?;
                 Some(R2ILOp::IntCarry { dst, a, b })
             }
 
             OpCode::Int(IntOp::Carry(IntSign::Signed)) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SCARRY"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_SCARRY", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_SCARRY", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SCARRY", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SCARRY", 1))?;
                 Some(R2ILOp::IntSCarry { dst, a, b })
             }
 
             OpCode::Int(IntOp::Borrow) => {
                 let dst = output.ok_or_else(|| missing_output("INT_SBORROW"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("INT_SBORROW", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("INT_SBORROW", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SBORROW", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("INT_SBORROW", 1))?;
                 Some(R2ILOp::IntSBorrow { dst, a, b })
             }
 
             // Boolean operations
             OpCode::Bool(BoolOp::And) => {
                 let dst = output.ok_or_else(|| missing_output("BOOL_AND"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("BOOL_AND", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("BOOL_AND", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("BOOL_AND", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("BOOL_AND", 1))?;
                 Some(R2ILOp::BoolAnd { dst, a, b })
             }
 
             OpCode::Bool(BoolOp::Or) => {
                 let dst = output.ok_or_else(|| missing_output("BOOL_OR"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("BOOL_OR", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("BOOL_OR", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("BOOL_OR", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("BOOL_OR", 1))?;
                 Some(R2ILOp::BoolOr { dst, a, b })
             }
 
             OpCode::Bool(BoolOp::Xor) => {
                 let dst = output.ok_or_else(|| missing_output("BOOL_XOR"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("BOOL_XOR", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("BOOL_XOR", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("BOOL_XOR", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("BOOL_XOR", 1))?;
                 Some(R2ILOp::BoolXor { dst, a, b })
             }
 
             OpCode::Bool(BoolOp::Negate) => {
                 let dst = output.ok_or_else(|| missing_output("BOOL_NEGATE"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("BOOL_NEGATE", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("BOOL_NEGATE", 0))?;
                 Some(R2ILOp::BoolNot { dst, src })
             }
 
             // Piece/Subpiece
             OpCode::Piece => {
                 let dst = output.ok_or_else(|| missing_output("PIECE"))?;
-                let hi = inputs.first().cloned().ok_or_else(|| missing_input("PIECE", 0))?;
-                let lo = inputs.get(1).cloned().ok_or_else(|| missing_input("PIECE", 1))?;
+                let hi = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("PIECE", 0))?;
+                let lo = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("PIECE", 1))?;
                 Some(R2ILOp::Piece { dst, hi, lo })
             }
 
             OpCode::Subpiece => {
                 let dst = output.ok_or_else(|| missing_output("SUBPIECE"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("SUBPIECE", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("SUBPIECE", 0))?;
                 let offset_vn = inputs.get(1).ok_or_else(|| missing_input("SUBPIECE", 1))?;
                 // The offset is a constant - extract the value
                 let offset = offset_vn.offset as u32;
@@ -476,137 +701,223 @@ impl Disassembler {
             // Popcount/LzCount
             OpCode::Popcount => {
                 let dst = output.ok_or_else(|| missing_output("POPCOUNT"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("POPCOUNT", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("POPCOUNT", 0))?;
                 Some(R2ILOp::PopCount { dst, src })
             }
 
             OpCode::LzCount => {
                 let dst = output.ok_or_else(|| missing_output("LZCOUNT"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("LZCOUNT", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("LZCOUNT", 0))?;
                 Some(R2ILOp::Lzcount { dst, src })
             }
 
             // Floating point operations
             OpCode::Float(FloatOp::Add) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_ADD"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_ADD", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("FLOAT_ADD", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_ADD", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_ADD", 1))?;
                 Some(R2ILOp::FloatAdd { dst, a, b })
             }
 
             OpCode::Float(FloatOp::Subtract) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_SUB"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_SUB", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("FLOAT_SUB", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_SUB", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_SUB", 1))?;
                 Some(R2ILOp::FloatSub { dst, a, b })
             }
 
             OpCode::Float(FloatOp::Multiply) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_MULT"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_MULT", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("FLOAT_MULT", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_MULT", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_MULT", 1))?;
                 Some(R2ILOp::FloatMult { dst, a, b })
             }
 
             OpCode::Float(FloatOp::Divide) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_DIV"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_DIV", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("FLOAT_DIV", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_DIV", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_DIV", 1))?;
                 Some(R2ILOp::FloatDiv { dst, a, b })
             }
 
             OpCode::Float(FloatOp::Negate) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_NEG"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_NEG", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_NEG", 0))?;
                 Some(R2ILOp::FloatNeg { dst, src })
             }
 
             OpCode::Float(FloatOp::AbsoluteValue) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_ABS"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_ABS", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_ABS", 0))?;
                 Some(R2ILOp::FloatAbs { dst, src })
             }
 
             OpCode::Float(FloatOp::SquareRoot) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_SQRT"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_SQRT", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_SQRT", 0))?;
                 Some(R2ILOp::FloatSqrt { dst, src })
             }
 
             OpCode::Float(FloatOp::Equal) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_EQUAL"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_EQUAL", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("FLOAT_EQUAL", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_EQUAL", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_EQUAL", 1))?;
                 Some(R2ILOp::FloatEqual { dst, a, b })
             }
 
             OpCode::Float(FloatOp::NotEqual) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_NOTEQUAL"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_NOTEQUAL", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("FLOAT_NOTEQUAL", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_NOTEQUAL", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_NOTEQUAL", 1))?;
                 Some(R2ILOp::FloatNotEqual { dst, a, b })
             }
 
             OpCode::Float(FloatOp::LessThan) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_LESS"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_LESS", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("FLOAT_LESS", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_LESS", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_LESS", 1))?;
                 Some(R2ILOp::FloatLess { dst, a, b })
             }
 
             OpCode::Float(FloatOp::LessThanOrEqual) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_LESSEQUAL"))?;
-                let a = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_LESSEQUAL", 0))?;
-                let b = inputs.get(1).cloned().ok_or_else(|| missing_input("FLOAT_LESSEQUAL", 1))?;
+                let a = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_LESSEQUAL", 0))?;
+                let b = inputs
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_LESSEQUAL", 1))?;
                 Some(R2ILOp::FloatLessEqual { dst, a, b })
             }
 
             OpCode::Float(FloatOp::IsNaN) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_NAN"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_NAN", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_NAN", 0))?;
                 Some(R2ILOp::FloatNaN { dst, src })
             }
 
             OpCode::Float(FloatOp::IntToFloat) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_INT2FLOAT"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_INT2FLOAT", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_INT2FLOAT", 0))?;
                 Some(R2ILOp::Int2Float { dst, src })
             }
 
             OpCode::Float(FloatOp::FloatToFloat) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_FLOAT2FLOAT"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_FLOAT2FLOAT", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_FLOAT2FLOAT", 0))?;
                 Some(R2ILOp::FloatFloat { dst, src })
             }
 
             OpCode::Float(FloatOp::Truncate) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_TRUNC"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_TRUNC", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_TRUNC", 0))?;
                 Some(R2ILOp::Trunc { dst, src })
             }
 
             OpCode::Float(FloatOp::Ceiling) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_CEIL"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_CEIL", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_CEIL", 0))?;
                 Some(R2ILOp::FloatCeil { dst, src })
             }
 
             OpCode::Float(FloatOp::Floor) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_FLOOR"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_FLOOR", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_FLOOR", 0))?;
                 Some(R2ILOp::FloatFloor { dst, src })
             }
 
             OpCode::Float(FloatOp::Round) => {
                 let dst = output.ok_or_else(|| missing_output("FLOAT_ROUND"))?;
-                let src = inputs.first().cloned().ok_or_else(|| missing_input("FLOAT_ROUND", 0))?;
+                let src = inputs
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| missing_input("FLOAT_ROUND", 0))?;
                 Some(R2ILOp::FloatRound { dst, src })
             }
 
             // Pseudo operations
             OpCode::Pseudo(PseudoOp::CallOther) => {
                 // CALLOTHER: first input is userop index, rest are arguments
-                let userop_id = inputs.first().ok_or_else(|| missing_input("CALLOTHER", 0))?;
+                let userop_id = inputs
+                    .first()
+                    .ok_or_else(|| missing_input("CALLOTHER", 0))?;
                 let args: Vec<Varnode> = inputs.iter().skip(1).cloned().collect();
                 Some(R2ILOp::CallOther {
                     userop: userop_id.offset as u32,
@@ -650,7 +961,10 @@ impl Disassembler {
             AddressSpaceType::Internal => SpaceId::Unique,
             _ => {
                 // Use custom space with a hash of the name for unknown space types
-                let hash = space.name.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32));
+                let hash = space
+                    .name
+                    .bytes()
+                    .fold(0u32, |acc, b| acc.wrapping_add(b as u32));
                 SpaceId::Custom(hash)
             }
         }
@@ -685,33 +999,47 @@ impl ByteLoader {
 }
 
 impl InstructionLoader for ByteLoader {
-    fn load_instruction_bytes(&self, varnode: &VarnodeData) -> std::result::Result<Vec<u8>, String> {
-        let offset = varnode.address.offset.checked_sub(self.base_addr)
+    fn load_instruction_bytes(
+        &self,
+        varnode: &VarnodeData,
+    ) -> std::result::Result<Vec<u8>, String> {
+        let offset = varnode
+            .address
+            .offset
+            .checked_sub(self.base_addr)
             .ok_or_else(|| "Address underflow".to_string())?;
         let start = offset as usize;
-        let end = start.checked_add(varnode.size)
+        let end = start
+            .checked_add(varnode.size)
             .ok_or_else(|| "Size overflow".to_string())?;
 
         if end <= self.bytes.len() {
             Ok(self.bytes[start..end].to_vec())
         } else {
-            Err(format!("Out of bounds: requested {}..{}, have {}", start, end, self.bytes.len()))
+            Err(format!(
+                "Out of bounds: requested {}..{}, have {}",
+                start,
+                end,
+                self.bytes.len()
+            ))
         }
     }
 }
 
 /// Helper for missing output error.
 fn missing_output(op: &str) -> LiftError {
-    LiftError::Pcode(crate::pcode::PcodeError::InvalidOpcode(
-        format!("{} requires an output", op)
-    ))
+    LiftError::Pcode(crate::pcode::PcodeError::InvalidOpcode(format!(
+        "{} requires an output",
+        op
+    )))
 }
 
 /// Helper for missing input error.
 fn missing_input(op: &str, index: usize) -> LiftError {
-    LiftError::Pcode(crate::pcode::PcodeError::InvalidOpcode(
-        format!("{} requires input at index {}", op, index)
-    ))
+    LiftError::Pcode(crate::pcode::PcodeError::InvalidOpcode(format!(
+        "{} requires input at index {}",
+        op, index
+    )))
 }
 
 #[cfg(test)]

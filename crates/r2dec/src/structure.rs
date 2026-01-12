@@ -84,9 +84,7 @@ impl<'a> ControlFlowStructurer<'a> {
                     cond,
                 }
             }
-            Region::Irreducible { entry, blocks } => {
-                self.structure_irreducible(*entry, blocks)
-            }
+            Region::Irreducible { entry, blocks } => self.structure_irreducible(*entry, blocks),
         }
     }
 

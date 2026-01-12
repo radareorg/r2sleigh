@@ -35,7 +35,10 @@ pub enum BlockTerminator {
     /// Indirect branch (target unknown at compile time).
     IndirectBranch,
     /// Call to a function (may have fallthrough).
-    Call { target: u64, fallthrough: Option<u64> },
+    Call {
+        target: u64,
+        fallthrough: Option<u64>,
+    },
     /// Indirect call.
     IndirectCall { fallthrough: Option<u64> },
     /// Return from function.
@@ -142,12 +145,8 @@ impl BasicBlock {
                 true_target,
                 false_target,
             } => vec![*true_target, *false_target],
-            BlockTerminator::Call { fallthrough, .. } => {
-                fallthrough.iter().copied().collect()
-            }
-            BlockTerminator::IndirectCall { fallthrough } => {
-                fallthrough.iter().copied().collect()
-            }
+            BlockTerminator::Call { fallthrough, .. } => fallthrough.iter().copied().collect(),
+            BlockTerminator::IndirectCall { fallthrough } => fallthrough.iter().copied().collect(),
             BlockTerminator::IndirectBranch | BlockTerminator::Return | BlockTerminator::None => {
                 vec![]
             }
@@ -350,7 +349,9 @@ impl CFG {
     pub fn edge_type(&self, from: u64, to: u64) -> Option<CFGEdge> {
         let from_idx = self.addr_to_node.get(&from)?;
         let to_idx = self.addr_to_node.get(&to)?;
-        self.graph.find_edge(*from_idx, *to_idx).map(|e| self.graph[e])
+        self.graph
+            .find_edge(*from_idx, *to_idx)
+            .map(|e| self.graph[e])
     }
 
     /// Iterate over blocks in reverse post-order (topological order for acyclic parts).
@@ -428,10 +429,7 @@ mod tests {
 
         let bb = BasicBlock::from_r2il(&block);
         assert_eq!(bb.addr, 0x1000);
-        assert_eq!(
-            bb.terminator,
-            BlockTerminator::Fallthrough { next: 0x1004 }
-        );
+        assert_eq!(bb.terminator, BlockTerminator::Fallthrough { next: 0x1004 });
         assert_eq!(bb.successors(), vec![0x1004]);
     }
 

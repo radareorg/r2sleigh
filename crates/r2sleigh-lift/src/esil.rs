@@ -254,7 +254,11 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
         Trunc { dst, src } => format!("{},FTRUNC,{},=", vn(src), vn(dst)),
 
         // ========== Special Operations ==========
-        CallOther { output, userop, inputs } => {
+        CallOther {
+            output,
+            userop,
+            inputs,
+        } => {
             let args: Vec<String> = inputs.iter().map(|v| vn(v)).collect();
             let args_str = args.join(",");
             match output {
@@ -276,15 +280,41 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
 
         Indirect { dst, src, .. } => format!("{},{},=", vn(src), vn(dst)),
 
-        PtrAdd { dst, base, index, element_size } => {
-            format!("{},{},{},*,+,{},=", vn(base), vn(index), element_size, vn(dst))
+        PtrAdd {
+            dst,
+            base,
+            index,
+            element_size,
+        } => {
+            format!(
+                "{},{},{},*,+,{},=",
+                vn(base),
+                vn(index),
+                element_size,
+                vn(dst)
+            )
         }
 
-        PtrSub { dst, base, index, element_size } => {
-            format!("{},{},{},*,-,{},=", vn(base), vn(index), element_size, vn(dst))
+        PtrSub {
+            dst,
+            base,
+            index,
+            element_size,
+        } => {
+            format!(
+                "{},{},{},*,-,{},=",
+                vn(base),
+                vn(index),
+                element_size,
+                vn(dst)
+            )
         }
 
-        SegmentOp { dst, segment, offset } => {
+        SegmentOp {
+            dst,
+            segment,
+            offset,
+        } => {
             // Segment:offset calculation (x86 real mode style)
             format!("{},4,<<,{},+,{},=", vn(segment), vn(offset), vn(dst))
         }
@@ -296,9 +326,20 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
             format!("{},{},>>,{},=", vn(src), vn(position), vn(dst))
         }
 
-        Insert { dst, src, value, position } => {
+        Insert {
+            dst,
+            src,
+            value,
+            position,
+        } => {
             // Insert value into src at position
-            format!("{},{},<<,{},|,{},=", vn(value), vn(position), vn(src), vn(dst))
+            format!(
+                "{},{},<<,{},|,{},=",
+                vn(value),
+                vn(position),
+                vn(src),
+                vn(dst)
+            )
         }
     }
 }

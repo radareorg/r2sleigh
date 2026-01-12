@@ -196,7 +196,10 @@ impl DomTree {
 
     /// Get the children of a block in the dominator tree.
     pub fn children(&self, block: u64) -> &[u64] {
-        self.children.get(&block).map(|v| v.as_slice()).unwrap_or(&[])
+        self.children
+            .get(&block)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Get the dominance frontier of a block.

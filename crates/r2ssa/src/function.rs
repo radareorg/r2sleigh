@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use r2il::R2ILBlock;
 use serde::{Deserialize, Serialize};
 
-use crate::cfg::{CFG, CFGEdge};
+use crate::cfg::{CFGEdge, CFG};
 use crate::domtree::DomTree;
 use crate::op::SSAOp;
 use crate::phi::{collect_defs_from_cfg, PhiPlacement};
@@ -94,8 +94,9 @@ impl SSAFunction {
             let ops = renamed.blocks.get(&addr).cloned().unwrap_or_default();
 
             // Separate phi nodes from other ops
-            let (phi_ops, other_ops): (Vec<_>, Vec<_>) =
-                ops.into_iter().partition(|op| matches!(op, SSAOp::Phi { .. }));
+            let (phi_ops, other_ops): (Vec<_>, Vec<_>) = ops
+                .into_iter()
+                .partition(|op| matches!(op, SSAOp::Phi { .. }));
 
             // Convert phi ops to PhiNode structs
             let preds = cfg.predecessors(addr);
@@ -155,7 +156,9 @@ impl SSAFunction {
 
     /// Get all blocks in reverse postorder.
     pub fn blocks(&self) -> impl Iterator<Item = &SSABlock> {
-        self.block_order.iter().filter_map(|&addr| self.blocks.get(&addr))
+        self.block_order
+            .iter()
+            .filter_map(|&addr| self.blocks.get(&addr))
     }
 
     /// Get block addresses in reverse postorder.
