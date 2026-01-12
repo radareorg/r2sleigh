@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/r2il",
+    "crates/r2sleigh-lift",
+    "crates/r2sleigh-cli",
+    "r2plugin",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-only"
+authors = ["radare2 contributors"]
+repository = "https://github.com/radareorg/r2sleigh"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+thiserror = "1.0"
+clap = { version = "4", features = ["derive"] }
+sleigh-rs = "0.1"

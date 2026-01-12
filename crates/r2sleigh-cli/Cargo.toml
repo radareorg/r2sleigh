@@ -1,0 +1,16 @@
+[package]
+name = "r2sleigh-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI tool for compiling Sleigh specs to r2il"
+
+[[bin]]
+name = "r2sleigh"
+path = "src/main.rs"
+
+[dependencies]
+r2il = { path = "../r2il" }
+r2sleigh-lift = { path = "../r2sleigh-lift" }
+clap.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,47 @@
+//! r2il - Intermediate Language for r2sleigh
+//!
+//! This crate provides the core types for the r2il intermediate language,
+//! which represents processor instruction semantics in a strongly-typed format.
+//!
+//! # Architecture
+//!
+//! r2il is based on Ghidra's P-code, with the following components:
+//!
+//! - [`Varnode`]: A sized piece of data at a specific location (register, memory, constant, or temporary)
+//! - [`SpaceId`]: Identifies the address space (RAM, register, unique, const)
+//! - [`R2ILOp`]: A single semantic operation (copy, add, load, store, branch, etc.)
+//! - [`R2ILBlock`]: A sequence of operations for a single instruction
+//! - [`ArchSpec`]: Full architecture specification with registers and instruction semantics
+//!
+//! # Example
+//!
+//! ```rust
+//! use r2il::{Varnode, R2ILOp, R2ILBlock};
+//!
+//! // Represent: MOV EAX, 42
+//! let eax = Varnode::register(0, 4);  // EAX at offset 0, size 4
+//! let imm = Varnode::constant(42, 4); // Immediate value 42, size 4
+//!
+//! let mut block = R2ILBlock::new(0x1000, 5);
+//! block.push(R2ILOp::Copy { dst: eax, src: imm });
+//! ```
+
+pub mod opcode;
+pub mod serialize;
+pub mod space;
+pub mod varnode;
+
+// Re-export main types at crate root
+pub use opcode::{R2ILBlock, R2ILOp};
+pub use serialize::{ArchSpec, RegisterDef};
+pub use space::{AddressSpace, SpaceId};
+pub use varnode::Varnode;
+
+/// Crate version for binary format compatibility checks.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Magic bytes for r2il binary files.
+pub const MAGIC: &[u8; 4] = b"R2IL";
+
+/// Current binary format version.
+pub const FORMAT_VERSION: u32 = 1;

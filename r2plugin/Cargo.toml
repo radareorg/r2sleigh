@@ -1,0 +1,13 @@
+[package]
+name = "r2sleigh-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C-ABI plugin for radare2 integration"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+r2il = { path = "../crates/r2il" }
+r2sleigh-lift = { path = "../crates/r2sleigh-lift" }

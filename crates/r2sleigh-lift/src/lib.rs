@@ -1,0 +1,253 @@
+//! r2sleigh-lift - Sleigh to r2il translator
+//!
+//! This crate provides functionality to parse Ghidra Sleigh specifications
+//! and translate them into r2il intermediate language.
+//!
+//! # Architecture
+//!
+//! The lifting process works in two stages:
+//!
+//! 1. **Parsing**: Use `sleigh-rs` to parse `.slaspec` files into an AST
+//! 2. **Translation**: Convert P-code semantics to r2il operations
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use r2sleigh_lift::Lifter;
+//!
+//! let lifter = Lifter::from_file("x86-64.slaspec")?;
+//! let arch = lifter.compile()?;
+//! r2il::serialize::save(&arch, "x86-64.r2il")?;
+//! ```
+
+pub mod context;
+pub mod pcode;
+
+use std::path::Path;
+use thiserror::Error;
+
+pub use context::LiftContext;
+pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
+use r2il::ArchSpec;
+
+/// Errors that can occur during lifting.
+#[derive(Debug, Error)]
+pub enum LiftError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Parse error: {0}")]
+    Parse(String),
+
+    #[error("P-code translation error: {0}")]
+    Pcode(#[from] pcode::PcodeError),
+
+    #[error("Unsupported feature: {0}")]
+    Unsupported(String),
+}
+
+/// Result type for lifting operations.
+pub type Result<T> = std::result::Result<T, LiftError>;
+
+/// Main lifter for converting Sleigh specs to r2il.
+pub struct Lifter {
+    /// The architecture context being built
+    ctx: LiftContext,
+    /// Source file path
+    source_path: String,
+}
+
+impl Lifter {
+    /// Create a new lifter for the given architecture name.
+    pub fn new(arch_name: impl Into<String>) -> Self {
+        Self {
+            ctx: LiftContext::new(arch_name),
+            source_path: String::new(),
+        }
+    }
+
+    /// Create a lifter from a Sleigh specification file.
+    ///
+    /// Note: This is a placeholder. Full implementation requires
+    /// integrating with sleigh-rs to parse the .slaspec file.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let arch_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+
+        let mut lifter = Self::new(arch_name);
+        lifter.source_path = path.display().to_string();
+        lifter.ctx.add_source_file(&lifter.source_path);
+
+        // TODO: Parse the Sleigh file using sleigh-rs
+        // For now, we set up a basic architecture spec
+        // that can be extended when sleigh-rs parsing is integrated
+
+        Ok(lifter)
+    }
+
+    /// Get mutable access to the lift context.
+    pub fn context_mut(&mut self) -> &mut LiftContext {
+        &mut self.ctx
+    }
+
+    /// Get read access to the lift context.
+    pub fn context(&self) -> &LiftContext {
+        &self.ctx
+    }
+
+    /// Set the endianness.
+    pub fn set_big_endian(&mut self, big_endian: bool) -> &mut Self {
+        self.ctx.set_big_endian(big_endian);
+        self
+    }
+
+    /// Set the address size.
+    pub fn set_addr_size(&mut self, size: u32) -> &mut Self {
+        self.ctx.set_addr_size(size);
+        self
+    }
+
+    /// Add a register definition.
+    pub fn add_register(&mut self, name: &str, offset: u64, size: u32) -> &mut Self {
+        self.ctx.add_register(name, offset, size);
+        self
+    }
+
+    /// Compile the specification and return the architecture spec.
+    pub fn compile(self) -> Result<ArchSpec> {
+        Ok(self.ctx.finish())
+    }
+}
+
+/// Create a basic x86-64 architecture specification for testing.
+///
+/// This provides a minimal x86-64 spec with common registers.
+pub fn create_x86_64_spec() -> ArchSpec {
+    let mut ctx = LiftContext::new("x86-64");
+    ctx.set_big_endian(false);
+    ctx.set_addr_size(8);
+
+    // Add standard address spaces
+    ctx.add_space("ram", 8, true);
+    ctx.add_space("register", 4, false);
+    ctx.add_space("unique", 4, false);
+
+    // General purpose registers (64-bit)
+    ctx.add_register("RAX", 0x00, 8);
+    ctx.add_register("RCX", 0x08, 8);
+    ctx.add_register("RDX", 0x10, 8);
+    ctx.add_register("RBX", 0x18, 8);
+    ctx.add_register("RSP", 0x20, 8);
+    ctx.add_register("RBP", 0x28, 8);
+    ctx.add_register("RSI", 0x30, 8);
+    ctx.add_register("RDI", 0x38, 8);
+    ctx.add_register("R8", 0x80, 8);
+    ctx.add_register("R9", 0x88, 8);
+    ctx.add_register("R10", 0x90, 8);
+    ctx.add_register("R11", 0x98, 8);
+    ctx.add_register("R12", 0xa0, 8);
+    ctx.add_register("R13", 0xa8, 8);
+    ctx.add_register("R14", 0xb0, 8);
+    ctx.add_register("R15", 0xb8, 8);
+
+    // 32-bit sub-registers
+    ctx.add_sub_register("EAX", 0x00, 4, "RAX");
+    ctx.add_sub_register("ECX", 0x08, 4, "RCX");
+    ctx.add_sub_register("EDX", 0x10, 4, "RDX");
+    ctx.add_sub_register("EBX", 0x18, 4, "RBX");
+    ctx.add_sub_register("ESP", 0x20, 4, "RSP");
+    ctx.add_sub_register("EBP", 0x28, 4, "RBP");
+    ctx.add_sub_register("ESI", 0x30, 4, "RSI");
+    ctx.add_sub_register("EDI", 0x38, 4, "RDI");
+
+    // Instruction pointer
+    ctx.add_register("RIP", 0x280, 8);
+    ctx.add_sub_register("EIP", 0x280, 4, "RIP");
+
+    // Flags register
+    ctx.add_register("rflags", 0x288, 8);
+    ctx.add_sub_register("eflags", 0x288, 4, "rflags");
+
+    // Individual flags
+    ctx.add_register("CF", 0x200, 1);
+    ctx.add_register("PF", 0x202, 1);
+    ctx.add_register("AF", 0x204, 1);
+    ctx.add_register("ZF", 0x206, 1);
+    ctx.add_register("SF", 0x207, 1);
+    ctx.add_register("OF", 0x20b, 1);
+
+    ctx.finish()
+}
+
+/// Create a basic ARM architecture specification for testing.
+pub fn create_arm_spec() -> ArchSpec {
+    let mut ctx = LiftContext::new("ARM");
+    ctx.set_big_endian(false);
+    ctx.set_addr_size(4);
+
+    // Add standard address spaces
+    ctx.add_space("ram", 4, true);
+    ctx.add_space("register", 4, false);
+    ctx.add_space("unique", 4, false);
+
+    // General purpose registers
+    for i in 0..=12 {
+        ctx.add_register(&format!("r{}", i), (i * 4) as u64, 4);
+    }
+
+    // Special registers
+    ctx.add_register("sp", 0x34, 4); // r13
+    ctx.add_register("lr", 0x38, 4); // r14
+    ctx.add_register("pc", 0x3c, 4); // r15
+
+    // Status register
+    ctx.add_register("cpsr", 0x40, 4);
+
+    // Condition flags
+    ctx.add_register("NG", 0x44, 1); // Negative
+    ctx.add_register("ZR", 0x45, 1); // Zero
+    ctx.add_register("CY", 0x46, 1); // Carry
+    ctx.add_register("OV", 0x47, 1); // Overflow
+
+    ctx.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lifter_creation() {
+        let lifter = Lifter::new("test-arch");
+        assert_eq!(lifter.context().arch.name, "test-arch");
+    }
+
+    #[test]
+    fn test_x86_64_spec() {
+        let spec = create_x86_64_spec();
+        assert_eq!(spec.name, "x86-64");
+        assert!(!spec.big_endian);
+        assert_eq!(spec.addr_size, 8);
+
+        // Check some registers exist
+        assert!(spec.get_register("RAX").is_some());
+        assert!(spec.get_register("RSP").is_some());
+        assert!(spec.get_register("RIP").is_some());
+    }
+
+    #[test]
+    fn test_arm_spec() {
+        let spec = create_arm_spec();
+        assert_eq!(spec.name, "ARM");
+        assert!(!spec.big_endian);
+        assert_eq!(spec.addr_size, 4);
+
+        // Check some registers exist
+        assert!(spec.get_register("r0").is_some());
+        assert!(spec.get_register("sp").is_some());
+        assert!(spec.get_register("pc").is_some());
+    }
+}

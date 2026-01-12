@@ -1,0 +1,11 @@
+[package]
+name = "r2sleigh-lift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sleigh to r2il translator"
+
+[dependencies]
+r2il = { path = "../r2il" }
+sleigh-rs = "0.1"
+thiserror.workspace = true

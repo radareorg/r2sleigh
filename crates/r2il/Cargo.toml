@@ -1,0 +1,11 @@
+[package]
+name = "r2il"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Intermediate Language types for r2sleigh"
+
+[dependencies]
+serde.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
