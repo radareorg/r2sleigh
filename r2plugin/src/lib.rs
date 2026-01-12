@@ -508,6 +508,516 @@ pub extern "C" fn r2il_string_free(s: *mut c_char) {
     }
 }
 
+// ========== Typed Analysis FFI ==========
+
+use std::collections::HashSet;
+use r2il::Varnode;
+
+/// Helper: extract all register varnodes that are read by an operation.
+fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
+    let mut regs = Vec::new();
+    
+    match op {
+        // Data movement - src is read
+        R2ILOp::Copy { src, .. } => {
+            if src.is_register() { regs.push(src); }
+        }
+        R2ILOp::Load { addr, .. } => {
+            if addr.is_register() { regs.push(addr); }
+        }
+        R2ILOp::Store { addr, val, .. } => {
+            if addr.is_register() { regs.push(addr); }
+            if val.is_register() { regs.push(val); }
+        }
+        
+        // Binary ops - a and b are read
+        R2ILOp::IntAdd { a, b, .. } |
+        R2ILOp::IntSub { a, b, .. } |
+        R2ILOp::IntMult { a, b, .. } |
+        R2ILOp::IntDiv { a, b, .. } |
+        R2ILOp::IntSDiv { a, b, .. } |
+        R2ILOp::IntRem { a, b, .. } |
+        R2ILOp::IntSRem { a, b, .. } |
+        R2ILOp::IntAnd { a, b, .. } |
+        R2ILOp::IntOr { a, b, .. } |
+        R2ILOp::IntXor { a, b, .. } |
+        R2ILOp::IntLeft { a, b, .. } |
+        R2ILOp::IntRight { a, b, .. } |
+        R2ILOp::IntSRight { a, b, .. } |
+        R2ILOp::IntEqual { a, b, .. } |
+        R2ILOp::IntNotEqual { a, b, .. } |
+        R2ILOp::IntLess { a, b, .. } |
+        R2ILOp::IntSLess { a, b, .. } |
+        R2ILOp::IntLessEqual { a, b, .. } |
+        R2ILOp::IntSLessEqual { a, b, .. } |
+        R2ILOp::IntCarry { a, b, .. } |
+        R2ILOp::IntSCarry { a, b, .. } |
+        R2ILOp::IntSBorrow { a, b, .. } |
+        R2ILOp::BoolAnd { a, b, .. } |
+        R2ILOp::BoolOr { a, b, .. } |
+        R2ILOp::BoolXor { a, b, .. } |
+        R2ILOp::Piece { hi: a, lo: b, .. } |
+        R2ILOp::FloatAdd { a, b, .. } |
+        R2ILOp::FloatSub { a, b, .. } |
+        R2ILOp::FloatMult { a, b, .. } |
+        R2ILOp::FloatDiv { a, b, .. } |
+        R2ILOp::FloatEqual { a, b, .. } |
+        R2ILOp::FloatNotEqual { a, b, .. } |
+        R2ILOp::FloatLess { a, b, .. } |
+        R2ILOp::FloatLessEqual { a, b, .. } => {
+            if a.is_register() { regs.push(a); }
+            if b.is_register() { regs.push(b); }
+        }
+        
+        // Unary ops - src is read
+        R2ILOp::IntNegate { src, .. } |
+        R2ILOp::IntNot { src, .. } |
+        R2ILOp::IntZExt { src, .. } |
+        R2ILOp::IntSExt { src, .. } |
+        R2ILOp::BoolNot { src, .. } |
+        R2ILOp::PopCount { src, .. } |
+        R2ILOp::Lzcount { src, .. } |
+        R2ILOp::Subpiece { src, .. } |
+        R2ILOp::FloatNeg { src, .. } |
+        R2ILOp::FloatAbs { src, .. } |
+        R2ILOp::FloatSqrt { src, .. } |
+        R2ILOp::FloatNaN { src, .. } |
+        R2ILOp::Int2Float { src, .. } |
+        R2ILOp::FloatFloat { src, .. } |
+        R2ILOp::Trunc { src, .. } |
+        R2ILOp::FloatCeil { src, .. } |
+        R2ILOp::FloatFloor { src, .. } |
+        R2ILOp::FloatRound { src, .. } => {
+            if src.is_register() { regs.push(src); }
+        }
+        
+        // Control flow - target/cond are read
+        R2ILOp::Branch { target } |
+        R2ILOp::BranchInd { target } |
+        R2ILOp::Call { target } |
+        R2ILOp::CallInd { target } |
+        R2ILOp::Return { target } => {
+            if target.is_register() { regs.push(target); }
+        }
+        R2ILOp::CBranch { cond, target } => {
+            if cond.is_register() { regs.push(cond); }
+            if target.is_register() { regs.push(target); }
+        }
+        
+        // CallOther - inputs are read
+        R2ILOp::CallOther { inputs, .. } => {
+            for inp in inputs {
+                if inp.is_register() { regs.push(inp); }
+            }
+        }
+        
+        // Float2Int - src is read
+        R2ILOp::Float2Int { src, .. } |
+        R2ILOp::New { src, .. } |
+        R2ILOp::Cast { src, .. } => {
+            if src.is_register() { regs.push(src); }
+        }
+        
+        // Extract - src and position are read
+        R2ILOp::Extract { src, position, .. } => {
+            if src.is_register() { regs.push(src); }
+            if position.is_register() { regs.push(position); }
+        }
+        
+        // Insert - src, value, position are read
+        R2ILOp::Insert { src, value, position, .. } => {
+            if src.is_register() { regs.push(src); }
+            if value.is_register() { regs.push(value); }
+            if position.is_register() { regs.push(position); }
+        }
+        
+        // SegmentOp - segment and offset are read
+        R2ILOp::SegmentOp { segment, offset, .. } => {
+            if segment.is_register() { regs.push(segment); }
+            if offset.is_register() { regs.push(offset); }
+        }
+        
+        // PtrAdd/PtrSub - base and index are read
+        R2ILOp::PtrAdd { base, index, .. } |
+        R2ILOp::PtrSub { base, index, .. } => {
+            if base.is_register() { regs.push(base); }
+            if index.is_register() { regs.push(index); }
+        }
+        
+        // Multiequal - inputs are read
+        R2ILOp::Multiequal { inputs, .. } => {
+            for inp in inputs {
+                if inp.is_register() { regs.push(inp); }
+            }
+        }
+        
+        // Indirect - src and indirect are read
+        R2ILOp::Indirect { src, indirect, .. } => {
+            if src.is_register() { regs.push(src); }
+            if indirect.is_register() { regs.push(indirect); }
+        }
+        
+        // Ops with no register reads
+        R2ILOp::Nop |
+        R2ILOp::Unimplemented |
+        R2ILOp::Breakpoint |
+        R2ILOp::CpuId { .. } => {}
+    }
+    
+    regs
+}
+
+/// Helper: extract all register varnodes that are written by an operation.
+fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
+    let mut regs = Vec::new();
+    
+    match op {
+        // All ops with dst field write to dst
+        R2ILOp::Copy { dst, .. } |
+        R2ILOp::Load { dst, .. } |
+        R2ILOp::IntAdd { dst, .. } |
+        R2ILOp::IntSub { dst, .. } |
+        R2ILOp::IntMult { dst, .. } |
+        R2ILOp::IntDiv { dst, .. } |
+        R2ILOp::IntSDiv { dst, .. } |
+        R2ILOp::IntRem { dst, .. } |
+        R2ILOp::IntSRem { dst, .. } |
+        R2ILOp::IntNegate { dst, .. } |
+        R2ILOp::IntAnd { dst, .. } |
+        R2ILOp::IntOr { dst, .. } |
+        R2ILOp::IntXor { dst, .. } |
+        R2ILOp::IntNot { dst, .. } |
+        R2ILOp::IntLeft { dst, .. } |
+        R2ILOp::IntRight { dst, .. } |
+        R2ILOp::IntSRight { dst, .. } |
+        R2ILOp::IntEqual { dst, .. } |
+        R2ILOp::IntNotEqual { dst, .. } |
+        R2ILOp::IntLess { dst, .. } |
+        R2ILOp::IntSLess { dst, .. } |
+        R2ILOp::IntLessEqual { dst, .. } |
+        R2ILOp::IntSLessEqual { dst, .. } |
+        R2ILOp::IntZExt { dst, .. } |
+        R2ILOp::IntSExt { dst, .. } |
+        R2ILOp::IntCarry { dst, .. } |
+        R2ILOp::IntSCarry { dst, .. } |
+        R2ILOp::IntSBorrow { dst, .. } |
+        R2ILOp::BoolAnd { dst, .. } |
+        R2ILOp::BoolOr { dst, .. } |
+        R2ILOp::BoolXor { dst, .. } |
+        R2ILOp::BoolNot { dst, .. } |
+        R2ILOp::PopCount { dst, .. } |
+        R2ILOp::Lzcount { dst, .. } |
+        R2ILOp::Piece { dst, .. } |
+        R2ILOp::Subpiece { dst, .. } |
+        R2ILOp::FloatAdd { dst, .. } |
+        R2ILOp::FloatSub { dst, .. } |
+        R2ILOp::FloatMult { dst, .. } |
+        R2ILOp::FloatDiv { dst, .. } |
+        R2ILOp::FloatNeg { dst, .. } |
+        R2ILOp::FloatAbs { dst, .. } |
+        R2ILOp::FloatSqrt { dst, .. } |
+        R2ILOp::FloatEqual { dst, .. } |
+        R2ILOp::FloatNotEqual { dst, .. } |
+        R2ILOp::FloatLess { dst, .. } |
+        R2ILOp::FloatLessEqual { dst, .. } |
+        R2ILOp::FloatNaN { dst, .. } |
+        R2ILOp::Int2Float { dst, .. } |
+        R2ILOp::FloatFloat { dst, .. } |
+        R2ILOp::Trunc { dst, .. } |
+        R2ILOp::FloatCeil { dst, .. } |
+        R2ILOp::FloatFloor { dst, .. } |
+        R2ILOp::FloatRound { dst, .. } => {
+            if dst.is_register() { regs.push(dst); }
+        }
+        
+        // Store doesn't have a register dst
+        R2ILOp::Store { .. } => {}
+        
+        // Control flow ops don't write registers directly
+        R2ILOp::Branch { .. } |
+        R2ILOp::BranchInd { .. } |
+        R2ILOp::CBranch { .. } |
+        R2ILOp::Call { .. } |
+        R2ILOp::CallInd { .. } |
+        R2ILOp::Return { .. } => {}
+        
+        // CallOther may have output
+        R2ILOp::CallOther { output, .. } => {
+            if let Some(out) = output {
+                if out.is_register() { regs.push(out); }
+            }
+        }
+        
+        // Ops with dst field that write
+        R2ILOp::Float2Int { dst, .. } |
+        R2ILOp::CpuId { dst, .. } |
+        R2ILOp::SegmentOp { dst, .. } |
+        R2ILOp::New { dst, .. } |
+        R2ILOp::Cast { dst, .. } |
+        R2ILOp::Extract { dst, .. } |
+        R2ILOp::Insert { dst, .. } |
+        R2ILOp::Multiequal { dst, .. } |
+        R2ILOp::Indirect { dst, .. } |
+        R2ILOp::PtrAdd { dst, .. } |
+        R2ILOp::PtrSub { dst, .. } => {
+            if dst.is_register() { regs.push(dst); }
+        }
+        
+        // Ops with no register writes
+        R2ILOp::Nop |
+        R2ILOp::Unimplemented |
+        R2ILOp::Breakpoint => {}
+    }
+    
+    regs
+}
+
+/// Get registers read by the block as JSON array of names.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_regs_read(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+    
+    let blk = unsafe { &*block };
+    let mut seen: HashSet<(u64, u32)> = HashSet::new();
+    let mut names: Vec<String> = Vec::new();
+    
+    for op in &blk.ops {
+        for vn in op_regs_read(op) {
+            let key = (vn.offset, vn.size);
+            if !seen.contains(&key) {
+                seen.insert(key);
+                let name = disasm.register_name(vn)
+                    .unwrap_or_else(|| format!("reg:0x{:x}:{}", vn.offset, vn.size));
+                names.push(name);
+            }
+        }
+    }
+    
+    match serde_json::to_string(&names) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Get registers written by the block as JSON array of names.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_regs_write(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+    
+    let blk = unsafe { &*block };
+    let mut seen: HashSet<(u64, u32)> = HashSet::new();
+    let mut names: Vec<String> = Vec::new();
+    
+    for op in &blk.ops {
+        for vn in op_regs_write(op) {
+            let key = (vn.offset, vn.size);
+            if !seen.contains(&key) {
+                seen.insert(key);
+                let name = disasm.register_name(vn)
+                    .unwrap_or_else(|| format!("reg:0x{:x}:{}", vn.offset, vn.size));
+                names.push(name);
+            }
+        }
+    }
+    
+    match serde_json::to_string(&names) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+use serde::Serialize;
+
+/// Memory access info for JSON output.
+#[derive(Serialize)]
+struct MemAccess {
+    addr: String,
+    size: u32,
+    write: bool,
+}
+
+/// Get memory accesses (loads/stores) as JSON array.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_mem_access(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+    
+    let blk = unsafe { &*block };
+    let mut accesses: Vec<MemAccess> = Vec::new();
+    
+    for op in &blk.ops {
+        match op {
+            R2ILOp::Load { dst, addr, .. } => {
+                let addr_str = disasm.format_varnode(addr);
+                accesses.push(MemAccess {
+                    addr: addr_str,
+                    size: dst.size,
+                    write: false,
+                });
+            }
+            R2ILOp::Store { addr, val, .. } => {
+                let addr_str = disasm.format_varnode(addr);
+                accesses.push(MemAccess {
+                    addr: addr_str,
+                    size: val.size,
+                    write: true,
+                });
+            }
+            _ => {}
+        }
+    }
+    
+    match serde_json::to_string(&accesses) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Varnode info for JSON output.
+#[derive(Serialize)]
+struct VarnodeInfo {
+    name: String,
+    space: String,
+    offset: u64,
+    size: u32,
+}
+
+/// Helper: collect all varnodes from an operation.
+fn op_all_varnodes(op: &R2ILOp) -> Vec<&Varnode> {
+    let mut vns = Vec::new();
+    
+    // Combine read and write varnodes
+    vns.extend(op_regs_read(op));
+    vns.extend(op_regs_write(op));
+    
+    // Also get non-register varnodes
+    match op {
+        R2ILOp::Copy { dst, src } => {
+            if !dst.is_register() { vns.push(dst); }
+            if !src.is_register() { vns.push(src); }
+        }
+        R2ILOp::Load { dst, addr, .. } => {
+            if !dst.is_register() { vns.push(dst); }
+            if !addr.is_register() { vns.push(addr); }
+        }
+        R2ILOp::Store { addr, val, .. } => {
+            if !addr.is_register() { vns.push(addr); }
+            if !val.is_register() { vns.push(val); }
+        }
+        // For binary ops, get non-register operands
+        R2ILOp::IntAdd { dst, a, b } |
+        R2ILOp::IntSub { dst, a, b } |
+        R2ILOp::IntAnd { dst, a, b } |
+        R2ILOp::IntOr { dst, a, b } |
+        R2ILOp::IntXor { dst, a, b } => {
+            if !dst.is_register() { vns.push(dst); }
+            if !a.is_register() { vns.push(a); }
+            if !b.is_register() { vns.push(b); }
+        }
+        _ => {} // Other ops handled by op_regs_read/write
+    }
+    
+    vns
+}
+
+/// Get all varnodes used in the block as JSON array.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_varnodes(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+    
+    let blk = unsafe { &*block };
+    let mut seen: HashSet<(u8, u64, u32)> = HashSet::new(); // (space_id, offset, size)
+    let mut varnodes: Vec<VarnodeInfo> = Vec::new();
+    
+    for op in &blk.ops {
+        for vn in op_all_varnodes(op) {
+            let space_id = match vn.space {
+                r2il::SpaceId::Const => 0,
+                r2il::SpaceId::Register => 1,
+                r2il::SpaceId::Ram => 2,
+                r2il::SpaceId::Unique => 3,
+                r2il::SpaceId::Custom(n) => 4 + (n as u8),
+            };
+            let key = (space_id, vn.offset, vn.size);
+            
+            if !seen.contains(&key) {
+                seen.insert(key);
+                
+                let (name, space_str) = match vn.space {
+                    r2il::SpaceId::Const => (format!("0x{:x}", vn.offset), "const".to_string()),
+                    r2il::SpaceId::Register => {
+                        let name = disasm.register_name(vn)
+                            .unwrap_or_else(|| format!("reg:0x{:x}", vn.offset));
+                        (name, "register".to_string())
+                    }
+                    r2il::SpaceId::Ram => (format!("[0x{:x}]", vn.offset), "ram".to_string()),
+                    r2il::SpaceId::Unique => (format!("tmp:0x{:x}", vn.offset), "unique".to_string()),
+                    r2il::SpaceId::Custom(n) => (format!("space{}:0x{:x}", n, vn.offset), format!("custom:{}", n)),
+                };
+                
+                varnodes.push(VarnodeInfo {
+                    name,
+                    space: space_str,
+                    offset: vn.offset,
+                    size: vn.size,
+                });
+            }
+        }
+    }
+    
+    match serde_json::to_string(&varnodes) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 /// Helper: build a disassembler and ArchSpec for a given arch string.
 fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), String> {
     match arch.to_lowercase().as_str() {

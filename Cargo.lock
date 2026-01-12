@@ -344,6 +344,7 @@ version = "0.1.0"
 dependencies = [
  "r2il",
  "r2sleigh-lift",
+ "serde",
  "serde_json",
  "sleigh-config",
 ]
