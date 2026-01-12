@@ -31,6 +31,11 @@ impl SSAVar {
         Self::new(name, 0, size)
     }
 
+    /// Create a constant SSA variable.
+    pub fn constant(value: u64, size: u32) -> Self {
+        Self::new(format!("const:{:x}", value), 0, size)
+    }
+
     /// Create the next version of this variable.
     pub fn next_version(&self) -> Self {
         Self {

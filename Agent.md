@@ -17,7 +17,8 @@ Output: r2il binary format + ESIL text
 crates/
 ├── r2il/           # Core IL types (Varnode, R2ILOp, ArchSpec)
 ├── r2sleigh-lift/  # P-code → r2il translation
-└── r2sleigh-cli/   # CLI tool (compile, disasm, info)
+├── r2sleigh-cli/   # CLI tool (compile, disasm, info)
+└── r2ssa/          # SSA transformation and analysis
 r2plugin/           # C-ABI for radare2 integration
 ```
 
@@ -25,6 +26,10 @@ r2plugin/           # C-ABI for radare2 integration
 
 ```
 .sla (Ghidra) → libsla → P-code ops → PcodeTranslator → R2ILOp → ESIL string
+                                                              ↓
+                                                          to_ssa()
+                                                              ↓
+                                                         SSABlock → def_use()
 ```
 
 ### Key Types
@@ -34,8 +39,13 @@ r2plugin/           # C-ABI for radare2 integration
 | `Varnode` | `r2il/varnode.rs` | Sized data location (reg/mem/const/temp) |
 | `SpaceId` | `r2il/space.rs` | Address space enum (Ram, Register, Unique, Const) |
 | `R2ILOp` | `r2il/opcode.rs` | 60+ semantic operations (Copy, IntAdd, Load, Branch...) |
+| `R2ILBlock` | `r2il/opcode.rs` | Sequence of ops for one instruction |
 | `Disassembler` | `r2sleigh-lift/disasm.rs` | Wraps libsla for P-code generation |
-| `op_to_esil()` | `r2sleigh-cli/main.rs:451` | Converts R2ILOp → ESIL string |
+| `op_to_esil()` | `r2sleigh-lift/esil.rs` | Converts R2ILOp → ESIL string |
+| `SSAVar` | `r2ssa/var.rs` | Versioned variable (name_version) |
+| `SSAOp` | `r2ssa/op.rs` | SSA operation with versioned vars |
+| `SSABlock` | `r2ssa/block.rs` | SSA form of an instruction |
+| `DefUseInfo` | `r2ssa/defuse.rs` | Def-use chain analysis results |
 
 ## Build Commands
 
@@ -95,7 +105,7 @@ a,?{,x,}  → if a then x
 ### Add ESIL for new opcode
 
 ```rust
-// In op_to_esil() match arm:
+// In op_to_esil() in r2sleigh-lift/esil.rs:
 IntFoo { dst, a, b } => format!("{},{},FOO,{},=", vn(a), vn(b), vn(dst)),
 ```
 
@@ -105,11 +115,25 @@ IntFoo { dst, a, b } => format!("{},{},FOO,{},=", vn(a), vn(b), vn(dst)),
 2. Add match arm in `get_disassembler()` in `main.rs`
 3. Add to supported list in error message
 
+### Add SSA support for new opcode
+
+1. Add variant to `SSAOp` in `r2ssa/op.rs`
+2. Add conversion in `convert_op()` in `r2ssa/block.rs`
+3. Update `dst()` and `sources()` methods in `SSAOp`
+
 ### Debug P-code output
 
 ```bash
 # JSON shows raw R2ILOp structure
 cargo run --features x86 -- disasm --arch x86-64 --bytes "..." --format json
+```
+
+### Debug SSA output
+
+```bash
+# In radare2
+r2 -qc 's entry0+4; a:sleigh.ssa' /bin/ls
+r2 -qc 's entry0+4; a:sleigh.defuse' /bin/ls
 ```
 
 ## File Quick Reference
@@ -118,9 +142,15 @@ cargo run --features x86 -- disasm --arch x86-64 --bytes "..." --format json
 |------|-------|---------------------|
 | `r2il/opcode.rs` | ~650 | New IL opcodes |
 | `r2sleigh-lift/pcode.rs` | ~300 | P-code → R2ILOp translation |
-| `r2sleigh-lift/disasm.rs` | ~200 | Disassembler wrapper, register names |
-| `r2sleigh-cli/main.rs` | ~700 | CLI commands, ESIL output |
-| `r2plugin/lib.rs` | ~150 | C-ABI exports for radare2 |
+| `r2sleigh-lift/disasm.rs` | ~700 | Disassembler wrapper, register names |
+| `r2sleigh-lift/esil.rs` | ~200 | ESIL output formatting |
+| `r2sleigh-cli/main.rs` | ~400 | CLI commands |
+| `r2ssa/var.rs` | ~100 | SSA variable type |
+| `r2ssa/op.rs` | ~600 | SSA operations |
+| `r2ssa/block.rs` | ~500 | SSA conversion |
+| `r2ssa/defuse.rs` | ~200 | Def-use analysis |
+| `r2plugin/lib.rs` | ~1200 | C-ABI exports for radare2 |
+| `r2plugin/r_anal_sleigh.c` | ~400 | radare2 RAnalPlugin wrapper |
 
 ## Testing Checklist
 
@@ -130,12 +160,15 @@ Before committing changes:
 # 1. Build succeeds
 cargo build --features x86
 
-# 2. No warnings
-cargo build --features x86 2>&1 | grep -i warning
+# 2. Run tests
+cargo test --features x86
 
-# 3. Test common instructions
+# 3. Test CLI
 cargo run --features x86 -- disasm --arch x86-64 --bytes "31c0000000000000000000000000000000" --format esil
-cargo run --features x86 -- disasm --arch x86-64 --bytes "55000000000000000000000000000000" --format esil
+
+# 4. Test plugin (after make install in r2plugin/)
+r2 -qc 'a:sleigh.info' /bin/ls
+r2 -qc 's entry0+4; a:sleigh.ssa' /bin/ls
 ```
 
 ## Gotchas
@@ -154,6 +187,21 @@ cargo run --features x86 -- disasm --arch x86-64 --bytes "5500000000000000000000
 | `bincode` | Binary serialization |
 | `clap` | CLI argument parsing |
 | `thiserror` | Error derive macros |
+| `serde` | Serialization traits |
+| `serde_json` | JSON output |
+
+## Plugin Commands
+
+| Command | Output | Purpose |
+|---------|--------|---------|
+| `a:sleigh` | text | Status |
+| `a:sleigh.info` | text | Architecture info |
+| `a:sleigh.json` | JSON | Raw r2il ops |
+| `a:sleigh.regs` | JSON | Registers read/written |
+| `a:sleigh.mem` | JSON | Memory accesses |
+| `a:sleigh.vars` | JSON | All varnodes |
+| `a:sleigh.ssa` | JSON | SSA form |
+| `a:sleigh.defuse` | JSON | Def-use analysis |
 
 ## Links
 

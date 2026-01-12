@@ -1,0 +1,421 @@
+//! Z3 solver wrapper for constraint solving.
+//!
+//! This module provides a high-level interface to Z3 for checking
+//! path feasibility and extracting concrete values.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use z3::ast::{Ast, Bool, BV};
+use z3::{Context, Model, Params, Solver};
+
+use crate::state::SymState;
+use crate::value::SymValue;
+
+/// Result of a satisfiability check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SatResult {
+    /// The constraints are satisfiable.
+    Sat,
+    /// The constraints are unsatisfiable.
+    Unsat,
+    /// The solver could not determine satisfiability (timeout, etc.).
+    Unknown,
+}
+
+impl From<z3::SatResult> for SatResult {
+    fn from(r: z3::SatResult) -> Self {
+        match r {
+            z3::SatResult::Sat => SatResult::Sat,
+            z3::SatResult::Unsat => SatResult::Unsat,
+            z3::SatResult::Unknown => SatResult::Unknown,
+        }
+    }
+}
+
+/// A wrapper around Z3's solver with convenience methods.
+pub struct SymSolver<'ctx> {
+    /// The Z3 context.
+    ctx: &'ctx Context,
+    /// The underlying Z3 solver.
+    solver: Solver<'ctx>,
+    /// Timeout in milliseconds (0 = no timeout).
+    _timeout_ms: u32,
+}
+
+impl<'ctx> SymSolver<'ctx> {
+    /// Create a new solver.
+    pub fn new(ctx: &'ctx Context) -> Self {
+        let solver = Solver::new(ctx);
+        Self {
+            ctx,
+            solver,
+            _timeout_ms: 0,
+        }
+    }
+
+    /// Create a solver with a timeout.
+    pub fn with_timeout(ctx: &'ctx Context, timeout: Duration) -> Self {
+        let solver = Solver::new(ctx);
+        let timeout_ms = timeout.as_millis() as u32;
+
+        // Set timeout parameter
+        let mut params = Params::new(ctx);
+        params.set_u32("timeout", timeout_ms);
+        solver.set_params(&params);
+
+        Self {
+            ctx,
+            solver,
+            _timeout_ms: timeout_ms,
+        }
+    }
+
+    /// Get the Z3 context.
+    pub fn context(&self) -> &'ctx Context {
+        self.ctx
+    }
+
+    /// Add a constraint to the solver.
+    pub fn assert(&self, constraint: &Bool<'ctx>) {
+        self.solver.assert(constraint);
+    }
+
+    /// Add multiple constraints.
+    pub fn assert_all(&self, constraints: &[Bool<'ctx>]) {
+        for c in constraints {
+            self.solver.assert(c);
+        }
+    }
+
+    /// Check if the current constraints are satisfiable.
+    pub fn check(&self) -> SatResult {
+        self.solver.check().into()
+    }
+
+    /// Check with additional assumptions (without modifying the solver state).
+    pub fn check_assumptions(&self, assumptions: &[Bool<'ctx>]) -> SatResult {
+        self.solver.check_assumptions(assumptions).into()
+    }
+
+    /// Get the model if the constraints are satisfiable.
+    pub fn get_model(&self) -> Option<Model<'ctx>> {
+        self.solver.get_model()
+    }
+
+    /// Push a new scope (for backtracking).
+    pub fn push(&self) {
+        self.solver.push();
+    }
+
+    /// Pop a scope.
+    pub fn pop(&self, n: u32) {
+        self.solver.pop(n);
+    }
+
+    /// Reset the solver.
+    pub fn reset(&self) {
+        self.solver.reset();
+    }
+
+    /// Check if a state's path constraints are satisfiable.
+    pub fn is_sat(&self, state: &SymState<'ctx>) -> bool {
+        self.push();
+        self.assert_all(state.constraints());
+        let result = self.check();
+        self.pop(1);
+        result == SatResult::Sat
+    }
+
+    /// Get a concrete model for a state's constraints.
+    pub fn solve(&self, state: &SymState<'ctx>) -> Option<SymModel<'ctx>> {
+        self.push();
+        self.assert_all(state.constraints());
+
+        let result = if self.check() == SatResult::Sat {
+            self.get_model().map(|m| SymModel::new(self.ctx, m))
+        } else {
+            None
+        };
+
+        self.pop(1);
+        result
+    }
+
+    /// Evaluate a symbolic value under the current model.
+    pub fn eval(&self, value: &SymValue<'ctx>) -> Option<u64> {
+        let model = self.get_model()?;
+        let bv = value.to_bv(self.ctx);
+        let result = model.eval(&bv, true)?;
+        result.as_u64()
+    }
+
+    /// Find a value that satisfies additional constraints.
+    pub fn find_value(
+        &self,
+        state: &SymState<'ctx>,
+        target: &SymValue<'ctx>,
+        constraint: &Bool<'ctx>,
+    ) -> Option<u64> {
+        self.push();
+        self.assert_all(state.constraints());
+        self.assert(constraint);
+
+        let result = if self.check() == SatResult::Sat {
+            self.eval(target)
+        } else {
+            None
+        };
+
+        self.pop(1);
+        result
+    }
+
+    /// Check if two symbolic values can be equal.
+    pub fn can_be_equal(&self, state: &SymState<'ctx>, a: &SymValue<'ctx>, b: &SymValue<'ctx>) -> bool {
+        let a_bv = a.to_bv(self.ctx);
+        let b_bv = b.to_bv(self.ctx);
+        let eq = a_bv._eq(&b_bv);
+
+        self.push();
+        self.assert_all(state.constraints());
+        self.assert(&eq);
+        let result = self.check() == SatResult::Sat;
+        self.pop(1);
+
+        result
+    }
+
+    /// Check if a value can be zero.
+    pub fn can_be_zero(&self, state: &SymState<'ctx>, value: &SymValue<'ctx>) -> bool {
+        let bv = value.to_bv(self.ctx);
+        let zero = BV::from_u64(self.ctx, 0, value.bits());
+        let eq = bv._eq(&zero);
+
+        self.push();
+        self.assert_all(state.constraints());
+        self.assert(&eq);
+        let result = self.check() == SatResult::Sat;
+        self.pop(1);
+
+        result
+    }
+
+    /// Check if a value must be zero (cannot be non-zero).
+    pub fn must_be_zero(&self, state: &SymState<'ctx>, value: &SymValue<'ctx>) -> bool {
+        let bv = value.to_bv(self.ctx);
+        let zero = BV::from_u64(self.ctx, 0, value.bits());
+        let neq = bv._eq(&zero).not();
+
+        self.push();
+        self.assert_all(state.constraints());
+        self.assert(&neq);
+        let result = self.check() == SatResult::Unsat;
+        self.pop(1);
+
+        result
+    }
+
+    /// Get the minimum value for a symbolic expression.
+    pub fn minimize(&self, state: &SymState<'ctx>, value: &SymValue<'ctx>) -> Option<u64> {
+        // Binary search for minimum
+        self.push();
+        self.assert_all(state.constraints());
+
+        let bv = value.to_bv(self.ctx);
+        let bits = value.bits();
+
+        // Start with full range
+        let mut lo: u64 = 0;
+        let mut hi: u64 = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let mut result = None;
+
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let mid_bv = BV::from_u64(self.ctx, mid, bits);
+            let constraint = bv.bvule(&mid_bv);
+
+            self.push();
+            self.assert(&constraint);
+
+            if self.check() == SatResult::Sat {
+                result = self.eval(value);
+                hi = mid.saturating_sub(1);
+            } else {
+                lo = mid.saturating_add(1);
+            }
+
+            self.pop(1);
+
+            if lo == 0 && hi == u64::MAX {
+                break; // Prevent infinite loop
+            }
+        }
+
+        self.pop(1);
+        result
+    }
+
+    /// Get the maximum value for a symbolic expression.
+    pub fn maximize(&self, state: &SymState<'ctx>, value: &SymValue<'ctx>) -> Option<u64> {
+        self.push();
+        self.assert_all(state.constraints());
+
+        let bv = value.to_bv(self.ctx);
+        let bits = value.bits();
+
+        let mut lo: u64 = 0;
+        let mut hi: u64 = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let mut result = None;
+
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let mid_bv = BV::from_u64(self.ctx, mid, bits);
+            let constraint = bv.bvuge(&mid_bv);
+
+            self.push();
+            self.assert(&constraint);
+
+            if self.check() == SatResult::Sat {
+                result = self.eval(value);
+                lo = mid.saturating_add(1);
+            } else {
+                hi = mid.saturating_sub(1);
+            }
+
+            self.pop(1);
+
+            if lo == 0 && hi == u64::MAX {
+                break;
+            }
+        }
+
+        self.pop(1);
+        result
+    }
+}
+
+/// A model (concrete assignment) from the solver.
+pub struct SymModel<'ctx> {
+    ctx: &'ctx Context,
+    model: Model<'ctx>,
+}
+
+impl<'ctx> SymModel<'ctx> {
+    /// Create a new model wrapper.
+    pub fn new(ctx: &'ctx Context, model: Model<'ctx>) -> Self {
+        Self { ctx, model }
+    }
+
+    /// Evaluate a bitvector in this model.
+    pub fn eval_bv(&self, bv: &BV<'ctx>) -> Option<u64> {
+        self.model.eval(bv, true)?.as_u64()
+    }
+
+    /// Evaluate a symbolic value in this model.
+    pub fn eval(&self, value: &SymValue<'ctx>) -> Option<u64> {
+        let bv = value.to_bv(self.ctx);
+        self.eval_bv(&bv)
+    }
+
+    /// Get all concrete values from the model.
+    ///
+    /// Note: This is a simplified implementation that returns an empty map.
+    /// Full model enumeration requires iterating over model constants,
+    /// which varies by z3 version.
+    pub fn get_values(&self) -> HashMap<String, u64> {
+        // In z3 0.12, the API for iterating over model constants is different.
+        // For now, return an empty map. Users should call eval() directly
+        // with the specific values they want to extract.
+        HashMap::new()
+    }
+}
+
+impl<'ctx> std::fmt::Debug for SymModel<'ctx> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let values = self.get_values();
+        f.debug_struct("SymModel")
+            .field("values", &values)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use z3::Config;
+
+    #[test]
+    fn test_simple_sat() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = SymSolver::new(&ctx);
+
+        // x > 5
+        let x = BV::new_const(&ctx, "x", 32);
+        let five = BV::from_u64(&ctx, 5, 32);
+        let constraint = x.bvugt(&five);
+
+        solver.assert(&constraint);
+        assert_eq!(solver.check(), SatResult::Sat);
+
+        let model = solver.get_model().unwrap();
+        let x_val = model.eval(&x, true).unwrap().as_u64().unwrap();
+        assert!(x_val > 5);
+    }
+
+    #[test]
+    fn test_unsat() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+        let solver = SymSolver::new(&ctx);
+
+        // x > 5 AND x < 3 (impossible)
+        let x = BV::new_const(&ctx, "x", 32);
+        let five = BV::from_u64(&ctx, 5, 32);
+        let three = BV::from_u64(&ctx, 3, 32);
+
+        solver.assert(&x.bvugt(&five));
+        solver.assert(&x.bvult(&three));
+
+        assert_eq!(solver.check(), SatResult::Unsat);
+    }
+
+    #[test]
+    fn test_state_sat() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let mut state = SymState::new(&ctx, 0x1000);
+        state.make_symbolic("x", 32);
+
+        let x = state.get_register("x");
+        let five = SymValue::concrete(5, 32);
+        let cond = x.ult(&ctx, &five); // x < 5
+        state.add_true_constraint(&cond);
+
+        let solver = SymSolver::new(&ctx);
+        assert!(solver.is_sat(&state));
+    }
+
+    #[test]
+    fn test_solve() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let mut state = SymState::new(&ctx, 0x1000);
+        state.make_symbolic("x", 32);
+
+        let x = state.get_register("x");
+        let ten = SymValue::concrete(10, 32);
+        let eq = x.eq(&ctx, &ten); // x == 10
+        state.add_true_constraint(&eq);
+
+        let solver = SymSolver::new(&ctx);
+        let model = solver.solve(&state).unwrap();
+
+        // Evaluate x directly from the model
+        let x_value = model.eval(&x);
+        assert_eq!(x_value, Some(10));
+    }
+}

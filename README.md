@@ -10,6 +10,7 @@ r2sleigh compiles Ghidra Sleigh processor specifications into a typed intermedia
 
 - Pure Rust implementation (edition 2024) using `libsla` (Ghidra native bindings)
 - Strongly-typed intermediate language (r2il)
+- **SSA (Static Single Assignment)** transformation with def-use analysis
 - Compact binary serialization with `bincode`
 - CLI tool for compiling and testing Sleigh specs
 - **radare2 plugin** for analysis with ESIL output
@@ -24,7 +25,8 @@ r2sleigh/
 ├── crates/
 │   ├── r2il/              # Core IL definitions
 │   ├── r2sleigh-lift/     # Sleigh -> r2il translator + ESIL
-│   └── r2sleigh-cli/      # CLI tool
+│   ├── r2sleigh-cli/      # CLI tool
+│   └── r2ssa/             # SSA transformation and analysis
 └── r2plugin/              # radare2 plugin (Rust cdylib + C wrapper)
     ├── src/lib.rs         # Rust FFI exports
     ├── r_anal_sleigh.c    # C RAnalPlugin wrapper
@@ -128,19 +130,33 @@ r2 -qc 'e anal.arch=sleigh; e asm.esil=true; pd 5' /bin/ls
 a:sleigh        - Show r2sleigh status
 a:sleigh.info   - Show current architecture info
 a:sleigh.json   - Dump r2il ops as JSON for current instruction
+a:sleigh.regs   - Show registers read/written by instruction
+a:sleigh.mem    - Show memory accesses by instruction
+a:sleigh.vars   - Show all varnodes used by instruction
+a:sleigh.ssa    - Show SSA form of instruction
+a:sleigh.defuse - Show def-use analysis of instruction
 ```
 
 Example:
 
 ```bash
-$ r2 -qc 'e anal.arch=sleigh; a:sleigh.info' /bin/ls
+$ r2 -qc 'a:sleigh.info' /bin/ls
 r2sleigh: loaded architecture 'x86-64'
 
-$ r2 -qc 'e anal.arch=sleigh; a:sleigh.json' /bin/ls
+$ r2 -qc 's entry0+4; a:sleigh.ssa' /bin/ls
 [
-  {"Copy":{"dst":{"space":"Unique","offset":163072,"size":8},"src":{"space":"Register","offset":40,"size":8}}},
+  {"op": "Copy", "dst": "cf_1", "sources": ["0x0_0"]},
+  {"op": "IntXor", "dst": "ebp_1", "sources": ["ebp_0", "ebp_0"]},
+  {"op": "IntZExt", "dst": "rbp_1", "sources": ["ebp_1"]},
   ...
 ]
+
+$ r2 -qc 's entry0+4; a:sleigh.defuse' /bin/ls
+{
+  "inputs": ["0x0_0", "ebp_0"],
+  "outputs": ["rbp_1", "cf_1", "zf_1", "sf_1", "pf_1", "of_1"],
+  "live": ["ebp_1", "tmp:0x2c200_1", "tmp:0x2c280_1", "tmp:0x2c300_1"]
+}
 ```
 
 ## Example Output

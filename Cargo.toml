@@ -5,6 +5,8 @@ members = [
     "crates/r2sleigh-lift",
     "crates/r2sleigh-cli",
     "crates/r2ssa",
+    "crates/r2sym",
+    "crates/r2dec",
     "r2plugin",
 ]
 
@@ -23,3 +25,4 @@ clap = { version = "4", features = ["derive"] }
 libsla = "1.2"
 sleigh-config = "1.0"
 sleigh-compiler = "2.0"
+libloading = "0.8"

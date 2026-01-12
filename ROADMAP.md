@@ -6,14 +6,16 @@
 
 - Core crates compile and lift via libsla; x86/x86-64/ARM available through `sleigh-config`.
 - CLI emits JSON/ESIL; P-code → r2il translation tested.
-- **radare2 plugin complete**: FFI exports, C wrapper, Makefile, basic commands.
-- Plugin tested: `e anal.arch=sleigh` works with disassembly and ESIL output.
+- **radare2 plugin complete**: FFI exports, C wrapper, Makefile, full command set.
+- **SSA foundation complete**: `r2ssa` crate with versioned variables, def-use chains.
+- Plugin tested: disassembly, ESIL, typed analysis, SSA commands all working.
 
 ## Phase Overview
 
 - Phase 1: Foundation — **done** (types, translator, CLI, ESIL).
-- Phase 2: radare2 integration — **done** (FFI + plugin + commands).
-- Phase 3: Advanced analysis — **next** (SSA, symbolic, memory model, dataflow).
+- Phase 2: radare2 integration — **done** (FFI + plugin + commands + typed analysis).
+- Phase 2.5: SSA foundation — **done** (SSA types, conversion, def-use, plugin commands).
+- Phase 3: Advanced analysis — **next** (inter-block SSA, symbolic, memory model).
 - Phase 4: Native decompiler — **long-term** (AST, structuring, codegen).
 
 ---
@@ -28,6 +30,7 @@ Crates:
 - `crates/r2il`: core types (`Varnode`, `SpaceId`, `R2ILOp`, `ArchSpec`, serialization).
 - `crates/r2sleigh-lift`: P-code translation + disasm wrapper + ESIL formatting.
 - `crates/r2sleigh-cli`: CLI (compile/disasm/info).
+- `crates/r2ssa`: SSA transformation (`SSAVar`, `SSAOp`, `SSABlock`, def-use analysis).
 - `r2plugin`: Rust cdylib + C wrapper for radare2 (`RAnalPlugin`).
 
 ---
@@ -71,6 +74,11 @@ Crates:
   - `a:sleigh` — status ✓
   - `a:sleigh.info` — architecture info ✓
   - `a:sleigh.json` — r2il ops as JSON ✓
+  - `a:sleigh.regs` — registers read/written ✓
+  - `a:sleigh.mem` — memory accesses ✓
+  - `a:sleigh.vars` — all varnodes ✓
+  - `a:sleigh.ssa` — SSA form ✓
+  - `a:sleigh.defuse` — def-use analysis ✓
 
 - **Documentation**:
   - README with plugin installation and usage ✓
@@ -91,16 +99,44 @@ $ r2 -qc 'e anal.arch=sleigh; e asm.esil=true; pd 3' /tmp/test.bin
 
 ---
 
+## Phase 2.5: SSA Foundation (Complete)
+
+Goal: single-block SSA transformation with analysis primitives.
+
+### Deliverables (Done)
+
+- **`r2ssa` crate** (`crates/r2ssa/`):
+  - `SSAVar`: versioned variable with name, version, size ✓
+  - `SSAOp`: all R2ILOp variants with SSAVar + Phi node ✓
+  - `SSABlock`: container for SSA operations ✓
+  - `to_ssa()`: convert R2ILBlock to SSABlock ✓
+  - `SSAContext`: version tracking during conversion ✓
+
+- **Def-use analysis** (`defuse.rs`):
+  - `DefUseInfo`: inputs, outputs, live variables ✓
+  - `def_use()`: compute def-use chains ✓
+  - `dead_ops()`: identify dead code ✓
+  - `find_constants()`: constant propagation info ✓
+
+- **Plugin integration**:
+  - `r2il_block_to_ssa_json()` FFI function ✓
+  - `r2il_block_defuse_json()` FFI function ✓
+  - `a:sleigh.ssa` command ✓
+  - `a:sleigh.defuse` command ✓
+
+- **Tests**: 18 tests (12 unit + 6 integration) ✓
+
+---
+
 ## Phase 3: Advanced Analysis (Next)
 
-Goal: typed analysis on top of r2il.
+Goal: inter-block analysis and symbolic execution.
 
-- SSA: insert phi, rename, expose SSA blocks; conversions to/from r2il.
-- Dataflow: def-use, reaching defs, taint scaffolding on SSA.
+- Inter-block SSA: CFG construction, phi nodes at block boundaries.
+- Dataflow: reaching defs, liveness analysis, taint scaffolding.
 - Memory model: regions + permission checks; hook loads/stores.
 - Symbolic execution: expression domain + optional solver bridge; branch forking.
 - IR hygiene: normalize flag semantics, consistent bit-width ops.
-- Integration points: r2 commands to show SSA/taint summaries; JSON outputs for scripting.
 
 Prereqs: stable r2il schema, consistent varnode naming, cross-arch register metadata.
 

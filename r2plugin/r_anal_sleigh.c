@@ -39,9 +39,25 @@ extern char *r2il_block_regs_write(const R2ILContext *ctx, const R2ILBlock *bloc
 extern char *r2il_block_mem_access(const R2ILContext *ctx, const R2ILBlock *block);
 extern char *r2il_block_varnodes(const R2ILContext *ctx, const R2ILBlock *block);
 
-/* SSA analysis */
+/* SSA analysis (instruction-level) */
 extern char *r2il_block_to_ssa_json(const R2ILContext *ctx, const R2ILBlock *block);
 extern char *r2il_block_defuse_json(const R2ILContext *ctx, const R2ILBlock *block);
+
+/* SSA analysis (function-level) */
+extern char *r2ssa_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+extern char *r2ssa_defuse_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+extern char *r2ssa_domtree_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+
+/* Symbolic execution */
+extern char *r2sym_function(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long entry_addr);
+extern char *r2sym_paths(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long entry_addr);
+
+/* Decompiler */
+extern char *r2dec_function(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, const char *func_name);
+
+/* CFG */
+extern char *r2cfg_function_ascii(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+extern char *r2cfg_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 
 /* Per-architecture context (lazy init) */
 static R2ILContext *sleigh_ctx = NULL;
@@ -49,13 +65,79 @@ static char *sleigh_arch = NULL;
 
 /* Minimum bytes to pass to libsla (it reads ahead for variable-length instructions) */
 #define SLEIGH_MIN_BYTES 16
+#define SLEIGH_BLOCK_MAX_BYTES 256
+
+/* Helper to lift all basic blocks of a function */
+typedef struct {
+	R2ILBlock **blocks;
+	size_t count;
+	size_t capacity;
+} BlockArray;
+
+static void block_array_init(BlockArray *arr) {
+	arr->blocks = NULL;
+	arr->count = 0;
+	arr->capacity = 0;
+}
+
+static void block_array_push(BlockArray *arr, R2ILBlock *block) {
+	if (arr->count >= arr->capacity) {
+		arr->capacity = arr->capacity ? arr->capacity * 2 : 8;
+		arr->blocks = realloc (arr->blocks, arr->capacity * sizeof (R2ILBlock *));
+	}
+	arr->blocks[arr->count++] = block;
+}
+
+static void block_array_free(BlockArray *arr) {
+	size_t i;
+	for (i = 0; i < arr->count; i++) {
+		r2il_block_free (arr->blocks[i]);
+	}
+	free (arr->blocks);
+	arr->blocks = NULL;
+	arr->count = 0;
+	arr->capacity = 0;
+}
+
+/* Lift all basic blocks of a function */
+static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *ctx, BlockArray *out) {
+	R_RETURN_VAL_IF_FAIL (anal && fcn && ctx && out, false);
+
+	RListIter *iter;
+	RAnalBlock *bb;
+
+	block_array_init (out);
+
+	r_list_foreach (fcn->bbs, iter, bb) {
+		ut8 buf[SLEIGH_BLOCK_MAX_BYTES];
+		size_t to_read = R_MIN (bb->size, sizeof (buf));
+
+		if (!anal->iob.read_at (anal->iob.io, bb->addr, buf, to_read)) {
+			R_LOG_ERROR ("r2sleigh: failed to read block at 0x%"PFMT64x, bb->addr);
+			continue;
+		}
+
+		/* Ensure minimum bytes for libsla */
+		if (to_read < SLEIGH_MIN_BYTES) {
+			memset (buf + to_read, 0, SLEIGH_MIN_BYTES - to_read);
+			to_read = SLEIGH_MIN_BYTES;
+		}
+
+		R2ILBlock *block = r2il_lift (ctx, buf, to_read, bb->addr);
+		if (block) {
+			block_array_push (out, block);
+		}
+	}
+
+	return out->count > 0;
+}
 
 static R2ILContext *get_context(RAnal *anal) {
 	const char *arch = anal->config->arch;
 	int bits = anal->config->bits;
 
 	/* Determine sleigh arch string */
-	const char *sleigh_arch_str = NULL;
+	const char *sleigh_arch_str;
 	if (!strcmp (arch, "x86")) {
 		sleigh_arch_str = (bits == 64) ? "x86-64" : "x86";
 	} else if (!strcmp (arch, "arm")) {
@@ -191,6 +273,14 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sleigh.vars   - Show all varnodes used by instruction");
 			r_cons_println (cons, "| a:sleigh.ssa    - Show SSA form of instruction");
 			r_cons_println (cons, "| a:sleigh.defuse - Show def-use analysis of instruction");
+			r_cons_println (cons, "| a:sleigh.ssa.func - Show function SSA with phi nodes");
+			r_cons_println (cons, "| a:sleigh.defuse.func - Show function-wide def-use analysis");
+			r_cons_println (cons, "| a:sleigh.dom    - Show dominator tree for current function");
+			r_cons_println (cons, "| a:sleigh.sym    - Symbolic execution summary for current function");
+			r_cons_println (cons, "| a:sleigh.sym.paths - Explore paths in current function");
+			r_cons_println (cons, "| a:sleigh.dec    - Decompile current function to C");
+			r_cons_println (cons, "| a:sleigh.cfg    - Show ASCII CFG for current function");
+			r_cons_println (cons, "| a:sleigh.cfg.json - Show CFG as JSON for current function");
 		}
 		return true;
 	}
@@ -404,6 +494,218 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (defuse_json);
 		r2il_block_free (block);
+		return true;
+	}
+
+	/* ========== Function-level SSA commands ========== */
+
+	if (!strcmp (cmd, "sleigh.ssa.func")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		/* Get current function */
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		/* Lift all blocks */
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		/* Get function SSA */
+		char *result = r2ssa_function_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sleigh.defuse.func")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		/* Get current function */
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		/* Lift all blocks */
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		/* Get function def-use analysis */
+		char *result = r2ssa_defuse_function_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sleigh.dom")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		/* Get current function */
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		/* Lift all blocks */
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		/* Get dominator tree */
+		char *result = r2ssa_domtree_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
+		return true;
+	}
+
+	/* ========== Function-level commands ========== */
+
+	if (!strcmp (cmd, "sleigh.sym") || !strcmp (cmd, "sleigh.sym.paths")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		/* Get current function */
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		/* Lift all blocks */
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		/* Call symbolic execution */
+		char *result;
+		if (!strcmp (cmd, "sleigh.sym.paths")) {
+			result = r2sym_paths (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+		} else {
+			result = r2sym_function (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+		}
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sleigh.dec")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		/* Get current function */
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		/* Lift all blocks */
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		/* Decompile */
+		char *result = r2dec_function (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->name);
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sleigh.cfg") || !strcmp (cmd, "sleigh.cfg.json")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		/* Get current function */
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		/* Lift all blocks */
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		/* Generate CFG */
+		char *result;
+		if (!strcmp (cmd, "sleigh.cfg.json")) {
+			result = r2cfg_function_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
+		} else {
+			result = r2cfg_function_ascii (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
+		}
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
 		return true;
 	}
 

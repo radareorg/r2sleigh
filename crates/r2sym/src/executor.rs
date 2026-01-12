@@ -1,0 +1,747 @@
+//! Symbolic executor for SSA operations.
+//!
+//! This module implements the core symbolic execution logic,
+//! stepping through SSA operations and updating state.
+
+use r2ssa::{FunctionSSABlock, SSAOp, SSAVar};
+use z3::ast::{Ast, BV};
+use z3::Context;
+
+use crate::state::{ExitStatus, SymState};
+use crate::value::SymValue;
+use crate::SymResult;
+
+/// Symbolic executor for SSA functions.
+pub struct SymExecutor<'ctx> {
+    /// The Z3 context.
+    ctx: &'ctx Context,
+}
+
+impl<'ctx> SymExecutor<'ctx> {
+    /// Create a new symbolic executor.
+    pub fn new(ctx: &'ctx Context) -> Self {
+        Self { ctx }
+    }
+
+    /// Execute a single SSA operation on the given state.
+    ///
+    /// Returns a list of successor states (multiple for branches).
+    pub fn step(&self, state: &mut SymState<'ctx>, op: &SSAOp) -> SymResult<Vec<SymState<'ctx>>> {
+        use SSAOp::*;
+
+        match op {
+            // ==================== Data Movement ====================
+            Copy { dst, src } => {
+                let value = self.read_var(state, src);
+                self.write_var(state, dst, value);
+                Ok(vec![])
+            }
+
+            Load { dst, addr, space: _ } => {
+                let addr_val = self.read_var(state, addr);
+                let size = dst.size;
+                let value = state.mem_read(&addr_val, size);
+                self.write_var(state, dst, value);
+                Ok(vec![])
+            }
+
+            Store { addr, val, space: _ } => {
+                let addr_val = self.read_var(state, addr);
+                let value = self.read_var(state, val);
+                let size = val.size;
+                state.mem_write(&addr_val, &value, size);
+                Ok(vec![])
+            }
+
+            // ==================== Integer Arithmetic ====================
+            IntAdd { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.add(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntSub { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.sub(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntMult { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.mul(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntDiv { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.udiv(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntSDiv { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.sdiv(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntRem { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.urem(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntSRem { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.srem(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntNegate { dst, src } => {
+                let val = self.read_var(state, src);
+                let result = val.neg(self.ctx);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntCarry { dst, a, b } => {
+                // Carry flag: result < a (unsigned overflow)
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let sum = a_val.add(self.ctx, &b_val);
+                let carry = sum.ult(self.ctx, &a_val);
+                self.write_var(state, dst, carry);
+                Ok(vec![])
+            }
+
+            IntSCarry { dst, a, b } => {
+                // Signed carry (overflow)
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                // Signed overflow occurs when signs of operands are same but result sign differs
+                let a_bv = a_val.to_bv(self.ctx);
+                let b_bv = b_val.to_bv(self.ctx);
+                let sum_bv = a_bv.bvadd(&b_bv);
+                let bits = a_val.bits();
+                let a_sign = a_bv.extract(bits - 1, bits - 1);
+                let b_sign = b_bv.extract(bits - 1, bits - 1);
+                let sum_sign = sum_bv.extract(bits - 1, bits - 1);
+                let same_signs = a_sign._eq(&b_sign);
+                let diff_result = a_sign._eq(&sum_sign).not();
+                let overflow = same_signs & diff_result;
+                let one = BV::from_u64(self.ctx, 1, 1);
+                let zero = BV::from_u64(self.ctx, 0, 1);
+                let result = SymValue::symbolic(overflow.ite(&one, &zero), 1);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntSBorrow { dst, a, b } => {
+                // Signed borrow
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let a_bv = a_val.to_bv(self.ctx);
+                let b_bv = b_val.to_bv(self.ctx);
+                let diff_bv = a_bv.bvsub(&b_bv);
+                let bits = a_val.bits();
+                let a_sign = a_bv.extract(bits - 1, bits - 1);
+                let b_sign = b_bv.extract(bits - 1, bits - 1);
+                let diff_sign = diff_bv.extract(bits - 1, bits - 1);
+                let diff_signs = a_sign._eq(&b_sign).not();
+                let diff_result = a_sign._eq(&diff_sign).not();
+                let borrow = diff_signs & diff_result;
+                let one = BV::from_u64(self.ctx, 1, 1);
+                let zero = BV::from_u64(self.ctx, 0, 1);
+                let result = SymValue::symbolic(borrow.ite(&one, &zero), 1);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            // ==================== Bitwise Operations ====================
+            IntAnd { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.and(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntOr { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.or(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntXor { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.xor(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntNot { dst, src } => {
+                let val = self.read_var(state, src);
+                let result = val.not(self.ctx);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            // ==================== Shift Operations ====================
+            IntLeft { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.shl(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntRight { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.lshr(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntSRight { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.ashr(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            // ==================== Comparison Operations ====================
+            IntEqual { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.eq(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntNotEqual { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let eq = a_val.eq(self.ctx, &b_val);
+                // NOT of equality
+                let result = match eq.as_concrete() {
+                    Some(v) => SymValue::concrete(if v == 0 { 1 } else { 0 }, 1),
+                    None => {
+                        let bv = eq.to_bv(self.ctx);
+                        let zero = BV::from_u64(self.ctx, 0, 1);
+                        let one = BV::from_u64(self.ctx, 1, 1);
+                        let is_zero = bv._eq(&zero);
+                        SymValue::symbolic(is_zero.ite(&one, &zero), 1)
+                    }
+                };
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntLess { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.ult(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntSLess { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.slt(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntLessEqual { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.ule(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntSLessEqual { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.sle(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            // ==================== Extension Operations ====================
+            IntZExt { dst, src } => {
+                let val = self.read_var(state, src);
+                let result = val.zero_extend(self.ctx, dst.size * 8);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            IntSExt { dst, src } => {
+                let val = self.read_var(state, src);
+                let result = val.sign_extend(self.ctx, dst.size * 8);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            // ==================== Boolean Operations ====================
+            BoolNot { dst, src } => {
+                let val = self.read_var(state, src);
+                let result = match val.as_concrete() {
+                    Some(v) => SymValue::concrete(if v == 0 { 1 } else { 0 }, 1),
+                    None => val.not(self.ctx),
+                };
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            BoolAnd { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.and(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            BoolOr { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.or(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            BoolXor { dst, a, b } => {
+                let a_val = self.read_var(state, a);
+                let b_val = self.read_var(state, b);
+                let result = a_val.xor(self.ctx, &b_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            // ==================== Bit Manipulation ====================
+            Piece { dst, hi, lo } => {
+                let hi_val = self.read_var(state, hi);
+                let lo_val = self.read_var(state, lo);
+                let result = hi_val.concat(self.ctx, &lo_val);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            Subpiece { dst, src, offset } => {
+                let val = self.read_var(state, src);
+                let low = *offset * 8;
+                let high = low + (dst.size * 8) - 1;
+                let result = val.extract(self.ctx, high, low);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            PopCount { dst, src } => {
+                // Population count - count set bits
+                let val = self.read_var(state, src);
+                if let Some(v) = val.as_concrete() {
+                    let count = v.count_ones() as u64;
+                    self.write_var(state, dst, SymValue::concrete(count, dst.size * 8));
+                } else {
+                    // Symbolic popcount - create fresh symbolic
+                    let result = SymValue::new_symbolic(self.ctx, "popcount", dst.size * 8);
+                    self.write_var(state, dst, result);
+                }
+                Ok(vec![])
+            }
+
+            Lzcount { dst, src } => {
+                // Leading zero count
+                let val = self.read_var(state, src);
+                if let Some(v) = val.as_concrete() {
+                    let count = v.leading_zeros() as u64;
+                    self.write_var(state, dst, SymValue::concrete(count, dst.size * 8));
+                } else {
+                    let result = SymValue::new_symbolic(self.ctx, "lzcount", dst.size * 8);
+                    self.write_var(state, dst, result);
+                }
+                Ok(vec![])
+            }
+
+            // ==================== Control Flow ====================
+            Branch { target } => {
+                let target_val = self.read_var(state, target);
+                if let Some(addr) = target_val.as_concrete() {
+                    state.pc = addr;
+                }
+                Ok(vec![])
+            }
+
+            CBranch { target, cond } => {
+                let target_val = self.read_var(state, target);
+                let cond_val = self.read_var(state, cond);
+
+                // Check if condition is concrete
+                if let Some(c) = cond_val.as_concrete() {
+                    if c != 0 {
+                        // Branch taken
+                        if let Some(addr) = target_val.as_concrete() {
+                            state.pc = addr;
+                        }
+                    }
+                    // If c == 0, fall through (don't change PC)
+                    Ok(vec![])
+                } else {
+                    // Symbolic condition - fork execution
+                    let target_addr = target_val.as_concrete();
+
+                    // Create true branch state
+                    let mut true_state = state.fork();
+                    true_state.add_true_constraint(&cond_val);
+                    if let Some(addr) = target_addr {
+                        true_state.pc = addr;
+                    }
+
+                    // Current state becomes false branch
+                    state.add_false_constraint(&cond_val);
+
+                    Ok(vec![true_state])
+                }
+            }
+
+            BranchInd { target } => {
+                let target_val = self.read_var(state, target);
+                if let Some(addr) = target_val.as_concrete() {
+                    state.pc = addr;
+                } else {
+                    // Indirect branch with symbolic target - terminate
+                    state.terminate(ExitStatus::Error("Symbolic indirect branch".to_string()));
+                }
+                Ok(vec![])
+            }
+
+            Call { target } => {
+                // For now, just update PC (simplified - no call stack)
+                let target_val = self.read_var(state, target);
+                if let Some(addr) = target_val.as_concrete() {
+                    state.pc = addr;
+                }
+                Ok(vec![])
+            }
+
+            CallInd { target } => {
+                let target_val = self.read_var(state, target);
+                if let Some(addr) = target_val.as_concrete() {
+                    state.pc = addr;
+                } else {
+                    state.terminate(ExitStatus::Error("Symbolic indirect call".to_string()));
+                }
+                Ok(vec![])
+            }
+
+            Return { target: _ } => {
+                state.terminate(ExitStatus::Return);
+                Ok(vec![])
+            }
+
+            // ==================== Phi Nodes ====================
+            Phi { dst, sources } => {
+                // In symbolic execution, phi nodes are handled by the path explorer
+                // For a single path, we just pick the first source
+                if let Some(src) = sources.first() {
+                    let val = self.read_var(state, src);
+                    self.write_var(state, dst, val);
+                }
+                Ok(vec![])
+            }
+
+            // ==================== Special Operations ====================
+            Nop => Ok(vec![]),
+
+            Unimplemented => {
+                state.terminate(ExitStatus::Unimplemented);
+                Ok(vec![])
+            }
+
+            Breakpoint => {
+                // Could add breakpoint handling here
+                Ok(vec![])
+            }
+
+            CpuId { dst } => {
+                // Return symbolic CPUID result
+                let result = SymValue::new_symbolic(self.ctx, "cpuid", dst.size * 8);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            CallOther { output, userop: _, inputs: _ } => {
+                // User-defined operation - return symbolic result
+                if let Some(dst) = output {
+                    let result = SymValue::new_symbolic(self.ctx, "callother", dst.size * 8);
+                    self.write_var(state, dst, result);
+                }
+                Ok(vec![])
+            }
+
+            PtrAdd { dst, base, index, element_size } => {
+                let base_val = self.read_var(state, base);
+                let index_val = self.read_var(state, index);
+                let size_val = SymValue::concrete(*element_size as u64, index_val.bits());
+                let offset = index_val.mul(self.ctx, &size_val);
+                let result = base_val.add(self.ctx, &offset);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            PtrSub { dst, base, index, element_size } => {
+                let base_val = self.read_var(state, base);
+                let index_val = self.read_var(state, index);
+                let size_val = SymValue::concrete(*element_size as u64, index_val.bits());
+                let offset = index_val.mul(self.ctx, &size_val);
+                let result = base_val.sub(self.ctx, &offset);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            SegmentOp { dst, segment: _, offset } => {
+                // Simplified: just use offset
+                let val = self.read_var(state, offset);
+                self.write_var(state, dst, val);
+                Ok(vec![])
+            }
+
+            New { dst, src: _ } => {
+                // Allocation - return symbolic pointer
+                let result = SymValue::new_symbolic(self.ctx, "alloc", dst.size * 8);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            Cast { dst, src } => {
+                let val = self.read_var(state, src);
+                let dst_bits = dst.size * 8;
+                let result = if dst_bits > val.bits() {
+                    val.zero_extend(self.ctx, dst_bits)
+                } else if dst_bits < val.bits() {
+                    val.extract(self.ctx, dst_bits - 1, 0)
+                } else {
+                    val
+                };
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+
+            Extract { dst, src, position } => {
+                let val = self.read_var(state, src);
+                let pos = self.read_var(state, position);
+                if let Some(p) = pos.as_concrete() {
+                    let low = p as u32;
+                    let high = low + (dst.size * 8) - 1;
+                    let result = val.extract(self.ctx, high, low);
+                    self.write_var(state, dst, result);
+                } else {
+                    // Symbolic position - return symbolic
+                    let result = SymValue::new_symbolic(self.ctx, "extract", dst.size * 8);
+                    self.write_var(state, dst, result);
+                }
+                Ok(vec![])
+            }
+
+            Insert { dst, src, value: _, position: _ } => {
+                // Bit field insertion - simplified
+                let src_val = self.read_var(state, src);
+                self.write_var(state, dst, src_val);
+                Ok(vec![])
+            }
+
+            // Floating point operations - return symbolic for now
+            FloatAdd { dst, .. }
+            | FloatSub { dst, .. }
+            | FloatMult { dst, .. }
+            | FloatDiv { dst, .. }
+            | FloatNeg { dst, .. }
+            | FloatAbs { dst, .. }
+            | FloatSqrt { dst, .. }
+            | FloatCeil { dst, .. }
+            | FloatFloor { dst, .. }
+            | FloatRound { dst, .. }
+            | FloatNaN { dst, .. }
+            | FloatEqual { dst, .. }
+            | FloatNotEqual { dst, .. }
+            | FloatLess { dst, .. }
+            | FloatLessEqual { dst, .. }
+            | Int2Float { dst, .. }
+            | Float2Int { dst, .. }
+            | FloatFloat { dst, .. }
+            | Trunc { dst, .. } => {
+                let result = SymValue::new_symbolic(self.ctx, "float_op", dst.size * 8);
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+        }
+    }
+
+    /// Read an SSA variable from state.
+    fn read_var(&self, state: &SymState<'ctx>, var: &SSAVar) -> SymValue<'ctx> {
+        if var.is_const() {
+            // Parse constant value from name
+            if let Some(hex) = var.name.strip_prefix("const:") {
+                if let Ok(value) = u64::from_str_radix(hex, 16) {
+                    return SymValue::concrete(value, var.size * 8);
+                }
+            }
+            SymValue::concrete(0, var.size * 8)
+        } else {
+            let key = var.display_name();
+            state.get_register(&key)
+        }
+    }
+
+    /// Write an SSA variable to state.
+    fn write_var(&self, state: &mut SymState<'ctx>, var: &SSAVar, value: SymValue<'ctx>) {
+        let key = var.display_name();
+        state.set_register(&key, value);
+    }
+
+    /// Execute a block of SSA operations.
+    pub fn execute_block(
+        &self,
+        state: &mut SymState<'ctx>,
+        block: &FunctionSSABlock,
+    ) -> SymResult<Vec<SymState<'ctx>>> {
+        let mut forked_states = Vec::new();
+
+        // Execute phi nodes first
+        for phi in &block.phis {
+            // In single-path execution, we need to know which predecessor we came from
+            // For now, just use the first source
+            if let Some((_, src)) = phi.sources.first() {
+                let val = self.read_var(state, src);
+                let key = phi.dst.display_name();
+                state.set_register(&key, val);
+            }
+        }
+
+        // Execute operations
+        for op in &block.ops {
+            if !state.active {
+                break;
+            }
+
+            let new_states = self.step(state, op)?;
+            forked_states.extend(new_states);
+            state.step();
+        }
+
+        Ok(forked_states)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use z3::Config;
+
+    #[test]
+    fn test_copy_op() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let executor = SymExecutor::new(&ctx);
+        let mut state = SymState::new(&ctx, 0x1000);
+
+        // Set up source variable
+        state.set_register("src_0", SymValue::concrete(42, 64));
+
+        let op = SSAOp::Copy {
+            dst: SSAVar::new("dst", 1, 8),
+            src: SSAVar::new("src", 0, 8),
+        };
+
+        let _ = executor.step(&mut state, &op);
+
+        let dst_val = state.get_register("dst_1");
+        assert_eq!(dst_val.as_concrete(), Some(42));
+    }
+
+    #[test]
+    fn test_add_op() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let executor = SymExecutor::new(&ctx);
+        let mut state = SymState::new(&ctx, 0x1000);
+
+        state.set_register("a_0", SymValue::concrete(10, 64));
+        state.set_register("b_0", SymValue::concrete(20, 64));
+
+        let op = SSAOp::IntAdd {
+            dst: SSAVar::new("result", 1, 8),
+            a: SSAVar::new("a", 0, 8),
+            b: SSAVar::new("b", 0, 8),
+        };
+
+        let _ = executor.step(&mut state, &op);
+
+        let result = state.get_register("result_1");
+        assert_eq!(result.as_concrete(), Some(30));
+    }
+
+    #[test]
+    fn test_cbranch_concrete() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let executor = SymExecutor::new(&ctx);
+        let mut state = SymState::new(&ctx, 0x1000);
+
+        // Condition is true (non-zero)
+        state.set_register("cond_0", SymValue::concrete(1, 1));
+
+        let op = SSAOp::CBranch {
+            target: SSAVar::constant(0x2000, 8),
+            cond: SSAVar::new("cond", 0, 1),
+        };
+
+        let forked = executor.step(&mut state, &op).unwrap();
+        assert!(forked.is_empty()); // No fork for concrete condition
+        assert_eq!(state.pc, 0x2000); // Branch taken
+    }
+
+    #[test]
+    fn test_cbranch_symbolic() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        let executor = SymExecutor::new(&ctx);
+        let mut state = SymState::new(&ctx, 0x1000);
+
+        // Symbolic condition
+        state.make_symbolic("cond", 1);
+
+        let op = SSAOp::CBranch {
+            target: SSAVar::constant(0x2000, 8),
+            cond: SSAVar::new("cond", 0, 1),
+        };
+
+        let forked = executor.step(&mut state, &op).unwrap();
+        assert_eq!(forked.len(), 1); // Fork created
+        assert_eq!(forked[0].pc, 0x2000); // True branch goes to target
+        // Original state is false branch (PC unchanged in this test)
+    }
+}

@@ -1198,6 +1198,341 @@ pub extern "C" fn r2il_block_defuse_json(
 }
 
 // ============================================================================
+// Function-Level SSA Functions
+// ============================================================================
+
+/// Phi node info for JSON output.
+#[derive(Serialize)]
+struct PhiNodeJson {
+    dst: String,
+    sources: Vec<(String, String)>, // (predecessor_addr_hex, var_name)
+}
+
+/// SSA block info for JSON output.
+#[derive(Serialize)]
+struct SSABlockJson {
+    addr: u64,
+    addr_hex: String,
+    size: u32,
+    phis: Vec<PhiNodeJson>,
+    ops: Vec<SSAOpInfo>,
+}
+
+/// Function SSA info for JSON output.
+#[derive(Serialize)]
+struct SSAFunctionJson {
+    name: Option<String>,
+    entry: u64,
+    entry_hex: String,
+    num_blocks: usize,
+    blocks: Vec<SSABlockJson>,
+}
+
+/// Get function-level SSA as JSON (includes phi nodes).
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2ssa_function_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function
+    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
+    };
+
+    // Build JSON representation
+    let mut json_blocks = Vec::new();
+    for &addr in ssa_func.block_addrs() {
+        if let Some(block) = ssa_func.get_block(addr) {
+            // Convert phi nodes
+            let phis: Vec<PhiNodeJson> = block.phis.iter().map(|phi| {
+                PhiNodeJson {
+                    dst: phi.dst.display_name(),
+                    sources: phi.sources.iter().map(|(pred, var)| {
+                        (format!("0x{:x}", pred), var.display_name())
+                    }).collect(),
+                }
+            }).collect();
+
+            // Convert ops
+            let ops: Vec<SSAOpInfo> = block.ops.iter().map(ssa_op_to_info).collect();
+
+            json_blocks.push(SSABlockJson {
+                addr,
+                addr_hex: format!("0x{:x}", addr),
+                size: block.size,
+                phis,
+                ops,
+            });
+        }
+    }
+
+    let json = SSAFunctionJson {
+        name: ssa_func.name.clone(),
+        entry: ssa_func.entry,
+        entry_hex: format!("0x{:x}", ssa_func.entry),
+        num_blocks: ssa_func.num_blocks(),
+        blocks: json_blocks,
+    };
+
+    match serde_json::to_string_pretty(&json) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Definition location for JSON output.
+#[derive(Serialize)]
+struct DefLocationJson {
+    block: u64,
+    block_hex: String,
+    op_idx: usize,
+}
+
+/// Use location for JSON output.
+#[derive(Serialize)]
+struct UseLocationJson {
+    block: u64,
+    block_hex: String,
+    op_idx: usize,
+}
+
+/// Function-wide def-use info for JSON output.
+#[derive(Serialize)]
+struct FunctionDefUseJson {
+    definitions: std::collections::HashMap<String, DefLocationJson>,
+    uses: std::collections::HashMap<String, Vec<UseLocationJson>>,
+    live_in: std::collections::HashMap<String, Vec<String>>,  // block_hex -> vars
+    live_out: std::collections::HashMap<String, Vec<String>>, // block_hex -> vars
+}
+
+/// Get function-wide def-use analysis as JSON.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2ssa_defuse_function_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function
+    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
+    };
+
+    // Collect definitions and uses across all blocks
+    let mut definitions = std::collections::HashMap::new();
+    let mut uses: std::collections::HashMap<String, Vec<UseLocationJson>> = std::collections::HashMap::new();
+    let mut live_in = std::collections::HashMap::new();
+    let mut live_out = std::collections::HashMap::new();
+
+    for &addr in ssa_func.block_addrs() {
+        if let Some(block) = ssa_func.get_block(addr) {
+            let block_hex = format!("0x{:x}", addr);
+            let mut block_inputs = Vec::new();
+            let mut block_outputs = Vec::new();
+            let mut defined_in_block = std::collections::HashSet::new();
+
+            // Process phi nodes
+            for phi in &block.phis {
+                let dst_name = phi.dst.display_name();
+                definitions.insert(dst_name.clone(), DefLocationJson {
+                    block: addr,
+                    block_hex: block_hex.clone(),
+                    op_idx: 0, // Phi nodes are at the start
+                });
+                defined_in_block.insert(dst_name.clone());
+                block_outputs.push(dst_name);
+
+                // Sources are uses
+                for (_pred, src) in &phi.sources {
+                    let src_name = src.display_name();
+                    uses.entry(src_name.clone()).or_default().push(UseLocationJson {
+                        block: addr,
+                        block_hex: block_hex.clone(),
+                        op_idx: 0,
+                    });
+                }
+            }
+
+            // Process ops
+            for (op_idx, op) in block.ops.iter().enumerate() {
+                // Record definition
+                if let Some(dst) = op.dst() {
+                    let dst_name = dst.display_name();
+                    definitions.insert(dst_name.clone(), DefLocationJson {
+                        block: addr,
+                        block_hex: block_hex.clone(),
+                        op_idx: op_idx + 1, // +1 because phi nodes are at 0
+                    });
+                    defined_in_block.insert(dst_name.clone());
+                    block_outputs.push(dst_name);
+                }
+
+                // Record uses
+                for src in op.sources() {
+                    let src_name = src.display_name();
+                    uses.entry(src_name.clone()).or_default().push(UseLocationJson {
+                        block: addr,
+                        block_hex: block_hex.clone(),
+                        op_idx: op_idx + 1,
+                    });
+
+                    // If used before defined in this block, it's a live-in
+                    if !defined_in_block.contains(&src_name) && !block_inputs.contains(&src_name) {
+                        block_inputs.push(src_name);
+                    }
+                }
+            }
+
+            live_in.insert(block_hex.clone(), block_inputs);
+            live_out.insert(block_hex, block_outputs);
+        }
+    }
+
+    let json = FunctionDefUseJson {
+        definitions,
+        uses,
+        live_in,
+        live_out,
+    };
+
+    match serde_json::to_string_pretty(&json) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Dominator tree info for JSON output.
+#[derive(Serialize)]
+struct DomTreeJson {
+    entry: u64,
+    entry_hex: String,
+    idom: std::collections::HashMap<String, String>,  // block_hex -> idom_hex
+    children: std::collections::HashMap<String, Vec<String>>,  // block_hex -> children_hex
+    dominance_frontier: std::collections::HashMap<String, Vec<String>>,  // block_hex -> frontier_hex
+    depth: std::collections::HashMap<String, usize>,  // block_hex -> depth
+}
+
+/// Get dominator tree as JSON.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2ssa_domtree_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function to get dominator tree
+    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
+    };
+
+    let domtree = ssa_func.domtree();
+
+    // Build JSON representation
+    let mut idom_map = std::collections::HashMap::new();
+    let mut children_map = std::collections::HashMap::new();
+    let mut frontier_map = std::collections::HashMap::new();
+    let mut depth_map = std::collections::HashMap::new();
+
+    for &addr in ssa_func.block_addrs() {
+        let block_hex = format!("0x{:x}", addr);
+
+        // Immediate dominator
+        if let Some(idom) = domtree.idom(addr) {
+            idom_map.insert(block_hex.clone(), format!("0x{:x}", idom));
+        }
+
+        // Children
+        let children: Vec<String> = domtree.children(addr)
+            .iter()
+            .map(|c| format!("0x{:x}", c))
+            .collect();
+        children_map.insert(block_hex.clone(), children);
+
+        // Dominance frontier
+        let frontier: Vec<String> = domtree.frontier(addr)
+            .map(|f| format!("0x{:x}", f))
+            .collect();
+        frontier_map.insert(block_hex.clone(), frontier);
+
+        // Depth
+        depth_map.insert(block_hex, domtree.depth(addr));
+    }
+
+    let json = DomTreeJson {
+        entry: ssa_func.entry,
+        entry_hex: format!("0x{:x}", ssa_func.entry),
+        idom: idom_map,
+        children: children_map,
+        dominance_frontier: frontier_map,
+        depth: depth_map,
+    };
+
+    match serde_json::to_string_pretty(&json) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// ============================================================================
 // Architecture Helpers
 // ============================================================================
 
@@ -1265,6 +1600,719 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
                 Err(format!("Unknown architecture '{}'. Supported: {}", arch, supported.join(", ")))
             }
         }
+    }
+}
+
+// ============================================================================
+// Symbolic Execution Functions
+// ============================================================================
+
+use z3::{Config, Context};
+
+/// Opaque symbolic state handle for C API.
+/// Each context owns its own Z3 context for thread safety.
+pub struct R2SymContext {
+    _config: Config,
+    _context: Context,
+    entry_pc: u64,
+    error: Option<CString>,
+}
+
+/// Initialize the symbolic execution engine.
+/// Returns 1 on success, 0 on failure.
+/// Note: This is a no-op as contexts are created per-state.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_init() -> i32 {
+    1
+}
+
+/// Clean up the symbolic execution engine.
+/// Note: This is a no-op as contexts are cleaned up with their states.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_fini() {
+    // No-op
+}
+
+/// Create a new symbolic state starting at the given address.
+/// Returns NULL on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_state_new(entry_pc: u64) -> *mut R2SymContext {
+    let config = Config::new();
+    let context = Context::new(&config);
+
+    Box::into_raw(Box::new(R2SymContext {
+        _config: config,
+        _context: context,
+        entry_pc,
+        error: None,
+    }))
+}
+
+/// Free a symbolic state.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_state_free(state: *mut R2SymContext) {
+    if !state.is_null() {
+        unsafe { drop(Box::from_raw(state)) }
+    }
+}
+
+/// Get the last error from symbolic execution.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_error(state: *const R2SymContext) -> *const c_char {
+    if state.is_null() {
+        return ptr::null();
+    }
+
+    unsafe {
+        match &(*state).error {
+            Some(s) => s.as_ptr(),
+            None => ptr::null(),
+        }
+    }
+}
+
+/// Get the current PC from the symbolic state.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_get_pc(state: *const R2SymContext) -> u64 {
+    if state.is_null() {
+        return 0;
+    }
+    unsafe { (*state).entry_pc }
+}
+
+/// Check if the symbolic execution engine is available.
+/// Returns 1 if available, 0 otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_available() -> i32 {
+    1
+}
+
+/// Symbolic execution summary for JSON output.
+#[derive(Serialize)]
+struct SymExecSummary {
+    paths_explored: usize,
+    paths_feasible: usize,
+    paths_pruned: usize,
+    max_depth: usize,
+    states_explored: usize,
+    time_ms: u64,
+}
+
+/// Symbolically analyze a function and return path summary as JSON.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_function(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    entry_addr: u64,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let _disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function
+    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
+    };
+
+    // Create Z3 context and run symbolic execution
+    let z3_config = Config::new();
+    let z3_ctx = Context::new(&z3_config);
+
+    let initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
+    let config = r2sym::ExploreConfig {
+        max_states: 100,
+        max_depth: 50,
+        timeout: Some(std::time::Duration::from_secs(5)),
+        ..Default::default()
+    };
+
+    let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
+    let results = explorer.explore(&ssa_func, initial_state);
+
+    // Build summary
+    let stats = explorer.stats();
+    let feasible_count = results.iter().filter(|r| r.feasible).count();
+
+    let summary = SymExecSummary {
+        paths_explored: stats.paths_completed,
+        paths_feasible: feasible_count,
+        paths_pruned: stats.paths_pruned,
+        max_depth: stats.max_depth_reached,
+        states_explored: stats.states_explored,
+        time_ms: stats.total_time.as_millis() as u64,
+    };
+
+    match serde_json::to_string_pretty(&summary) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Symbolic state info for JSON output.
+#[derive(Serialize)]
+struct SymStateInfo {
+    pc: u64,
+    depth: usize,
+    num_constraints: usize,
+    registers: std::collections::HashMap<String, String>,
+}
+
+/// Get symbolic state as JSON.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_state_json(state: *const R2SymContext) -> *mut c_char {
+    if state.is_null() {
+        return ptr::null_mut();
+    }
+
+    let state_ref = unsafe { &*state };
+
+    // Build state info
+    let info = SymStateInfo {
+        pc: state_ref.entry_pc,
+        depth: 0,
+        num_constraints: 0,
+        registers: std::collections::HashMap::new(),
+    };
+
+    match serde_json::to_string_pretty(&info) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Path info for JSON output.
+#[derive(Serialize)]
+struct PathInfo {
+    path_id: usize,
+    feasible: bool,
+    depth: usize,
+    exit_status: String,
+}
+
+/// Explore paths in a function and return detailed results as JSON.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_paths(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    entry_addr: u64,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let _disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function
+    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
+    };
+
+    // Create Z3 context and run symbolic execution
+    let z3_config = Config::new();
+    let z3_ctx = Context::new(&z3_config);
+
+    let initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
+    let config = r2sym::ExploreConfig {
+        max_states: 100,
+        max_depth: 50,
+        timeout: Some(std::time::Duration::from_secs(5)),
+        ..Default::default()
+    };
+
+    let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
+    let results = explorer.explore(&ssa_func, initial_state);
+
+    // Build path info
+    let paths: Vec<PathInfo> = results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| PathInfo {
+            path_id: i,
+            feasible: r.feasible,
+            depth: r.depth,
+            exit_status: format!("{:?}", r.exit_status),
+        })
+        .collect();
+
+    match serde_json::to_string_pretty(&paths) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// ============================================================================
+// CFG Functions
+// ============================================================================
+
+/// Generate ASCII CFG for a function.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2cfg_function_ascii(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build CFG
+    let cfg = match r2ssa::CFG::from_blocks(&r2il_blocks) {
+        Some(c) => c,
+        None => return ptr::null_mut(),
+    };
+
+    // Render ASCII
+    let output = render_cfg_ascii(&cfg, disasm);
+
+    CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+/// Render a CFG as ASCII art.
+fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> String {
+    use std::fmt::Write;
+
+    let mut output = String::new();
+
+    // Get blocks in order (reverse postorder for better visualization)
+    let block_addrs = cfg.reverse_postorder();
+
+    if block_addrs.is_empty() {
+        return "Empty CFG\n".to_string();
+    }
+
+    // Render each block
+    for addr in &block_addrs {
+        if let Some(block) = cfg.get_block(*addr) {
+            // Block header
+            let is_entry = cfg.entry == *addr;
+            let entry_marker = if is_entry { " [entry]" } else { "" };
+            let _ = writeln!(output, "┌─────────────────────────────────────────────────┐");
+            let _ = writeln!(output, "│ 0x{:x}{:<30} │", addr, entry_marker);
+            let _ = writeln!(output, "├─────────────────────────────────────────────────┤");
+
+            // Show a few representative operations
+            let ops_to_show = std::cmp::min(5, block.ops.len());
+            for op in block.ops.iter().take(ops_to_show) {
+                let op_str = format_r2il_op_short(op, disasm);
+                let truncated = if op_str.len() > 45 {
+                    format!("{}...", &op_str[..42])
+                } else {
+                    op_str
+                };
+                let _ = writeln!(output, "│ {:<47} │", truncated);
+            }
+            if block.ops.len() > ops_to_show {
+                let _ = writeln!(output, "│ ... ({} more ops)                               │", block.ops.len() - ops_to_show);
+            }
+
+            // Block terminator
+            let term_str = match &block.terminator {
+                r2ssa::cfg::BlockTerminator::Fallthrough { next } => format!("→ 0x{:x}", next),
+                r2ssa::cfg::BlockTerminator::Branch { target } => format!("jmp 0x{:x}", target),
+                r2ssa::cfg::BlockTerminator::ConditionalBranch { true_target, false_target } => {
+                    format!("jcc t:0x{:x} f:0x{:x}", true_target, false_target)
+                }
+                r2ssa::cfg::BlockTerminator::Return => "ret".to_string(),
+                r2ssa::cfg::BlockTerminator::Call { target, .. } => format!("call 0x{:x}", target),
+                r2ssa::cfg::BlockTerminator::IndirectBranch => "jmp [reg]".to_string(),
+                r2ssa::cfg::BlockTerminator::IndirectCall { .. } => "call [reg]".to_string(),
+                r2ssa::cfg::BlockTerminator::None => "???".to_string(),
+            };
+            let _ = writeln!(output, "│ {:<47} │", term_str);
+            let _ = writeln!(output, "└─────────────────────────────────────────────────┘");
+
+            // Draw edges
+            match &block.terminator {
+                r2ssa::cfg::BlockTerminator::ConditionalBranch { true_target, false_target } => {
+                    let _ = writeln!(output, "        │ t         f │");
+                    let _ = writeln!(output, "        ├─────┐ ┌─────┤");
+                    let _ = writeln!(output, "        v     │ │     v");
+                    let _ = writeln!(output, "   [0x{:x}]    [0x{:x}]", true_target, false_target);
+                }
+                r2ssa::cfg::BlockTerminator::Branch { target } => {
+                    let _ = writeln!(output, "        │");
+                    let _ = writeln!(output, "        v");
+                    let _ = writeln!(output, "   [0x{:x}]", target);
+                }
+                r2ssa::cfg::BlockTerminator::Fallthrough { next } => {
+                    let _ = writeln!(output, "        │");
+                    let _ = writeln!(output, "        v");
+                    let _ = writeln!(output, "   [0x{:x}]", next);
+                }
+                _ => {}
+            }
+            let _ = writeln!(output);
+        }
+    }
+
+    output
+}
+
+/// Format an R2ILOp in a short form for display.
+fn format_r2il_op_short(op: &R2ILOp, disasm: &r2sleigh_lift::Disassembler) -> String {
+    match op {
+        R2ILOp::Copy { dst, src } => {
+            format!("{} = {}", disasm.format_varnode(dst), disasm.format_varnode(src))
+        }
+        R2ILOp::Load { dst, addr, .. } => {
+            format!("{} = [{}]", disasm.format_varnode(dst), disasm.format_varnode(addr))
+        }
+        R2ILOp::Store { addr, val, .. } => {
+            format!("[{}] = {}", disasm.format_varnode(addr), disasm.format_varnode(val))
+        }
+        R2ILOp::IntAdd { dst, a, b } => {
+            format!("{} = {} + {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+        }
+        R2ILOp::IntSub { dst, a, b } => {
+            format!("{} = {} - {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+        }
+        R2ILOp::IntAnd { dst, a, b } => {
+            format!("{} = {} & {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+        }
+        R2ILOp::IntOr { dst, a, b } => {
+            format!("{} = {} | {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+        }
+        R2ILOp::IntXor { dst, a, b } => {
+            format!("{} = {} ^ {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+        }
+        R2ILOp::IntEqual { dst, a, b } => {
+            format!("{} = {} == {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+        }
+        R2ILOp::IntLess { dst, a, b } => {
+            format!("{} = {} < {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+        }
+        R2ILOp::Branch { target } => {
+            format!("jmp {}", disasm.format_varnode(target))
+        }
+        R2ILOp::CBranch { cond, target } => {
+            format!("if {} jmp {}", disasm.format_varnode(cond), disasm.format_varnode(target))
+        }
+        R2ILOp::Call { target } => {
+            format!("call {}", disasm.format_varnode(target))
+        }
+        R2ILOp::Return { .. } => "ret".to_string(),
+        R2ILOp::Nop => "nop".to_string(),
+        _ => format!("{:?}", op).chars().take(40).collect(),
+    }
+}
+
+/// CFG JSON representation.
+#[derive(Serialize)]
+struct CFGJson {
+    entry: u64,
+    num_blocks: usize,
+    blocks: Vec<CFGBlockJson>,
+    edges: Vec<CFGEdgeJson>,
+}
+
+#[derive(Serialize)]
+struct CFGBlockJson {
+    addr: u64,
+    size: u32,
+    num_ops: usize,
+    terminator: String,
+    successors: Vec<u64>,
+}
+
+#[derive(Serialize)]
+struct CFGEdgeJson {
+    from: u64,
+    to: u64,
+    edge_type: String,
+}
+
+/// Get CFG as JSON.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2cfg_function_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build CFG
+    let cfg = match r2ssa::CFG::from_blocks(&r2il_blocks) {
+        Some(c) => c,
+        None => return ptr::null_mut(),
+    };
+
+    // Build JSON representation
+    let mut json_blocks = Vec::new();
+    let mut json_edges = Vec::new();
+
+    for addr in cfg.block_addrs() {
+        if let Some(block) = cfg.get_block(addr) {
+            let term_str = match &block.terminator {
+                r2ssa::cfg::BlockTerminator::Fallthrough { .. } => "fallthrough",
+                r2ssa::cfg::BlockTerminator::Branch { .. } => "branch",
+                r2ssa::cfg::BlockTerminator::ConditionalBranch { .. } => "conditional",
+                r2ssa::cfg::BlockTerminator::Return => "return",
+                r2ssa::cfg::BlockTerminator::Call { .. } => "call",
+                r2ssa::cfg::BlockTerminator::IndirectBranch => "indirect_branch",
+                r2ssa::cfg::BlockTerminator::IndirectCall { .. } => "indirect_call",
+                r2ssa::cfg::BlockTerminator::None => "none",
+            };
+
+            json_blocks.push(CFGBlockJson {
+                addr,
+                size: block.size,
+                num_ops: block.ops.len(),
+                terminator: term_str.to_string(),
+                successors: cfg.successors(addr),
+            });
+
+            // Add edges
+            for succ in cfg.successors(addr) {
+                let edge_type = cfg.edge_type(addr, succ)
+                    .map(|e| format!("{:?}", e))
+                    .unwrap_or_else(|| "unknown".to_string());
+                json_edges.push(CFGEdgeJson {
+                    from: addr,
+                    to: succ,
+                    edge_type,
+                });
+            }
+        }
+    }
+
+    let cfg_json = CFGJson {
+        entry: cfg.entry,
+        num_blocks: cfg.num_blocks(),
+        blocks: json_blocks,
+        edges: json_edges,
+    };
+
+    match serde_json::to_string_pretty(&cfg_json) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// ============================================================================
+// Decompiler Functions
+// ============================================================================
+
+/// Decompile a function given its SSA representation.
+/// Returns C code as a string. Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2dec_function(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    func_name: *const c_char,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let _disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let func_name_str = if func_name.is_null() {
+        "func".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(func_name)
+                .to_str()
+                .unwrap_or("func")
+                .to_string()
+        }
+    };
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function
+    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+        Some(f) => f.with_name(&func_name_str),
+        None => return ptr::null_mut(),
+    };
+
+    // Create decompiler with default config
+    let config = r2dec::DecompilerConfig::default();
+    let decompiler = r2dec::Decompiler::new(config);
+
+    // Decompile to C code
+    let output = decompiler.decompile(&ssa_func);
+
+    CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+/// Decompile a single basic block to C code.
+/// Returns C code as a string. Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2dec_block(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let blk = unsafe { &*block };
+
+    // Convert to SSA
+    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+
+    // Build statements from SSA ops
+    let expr_builder = r2dec::ExpressionBuilder::new(64); // Assume 64-bit
+    let mut stmts = Vec::new();
+
+    for op in &ssa_block.ops {
+        if let Some(stmt) = expr_builder.op_to_stmt(op) {
+            stmts.push(stmt);
+        }
+    }
+
+    // Generate C code for statements
+    let mut codegen = r2dec::CodeGenerator::new(r2dec::CodeGenConfig::default());
+    let mut output = String::new();
+    for stmt in &stmts {
+        output.push_str(&codegen.generate_stmt(stmt));
+        output.push('\n');
+    }
+
+    CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+/// Get the C AST for a block as JSON.
+/// Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2dec_block_ast_json(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let blk = unsafe { &*block };
+
+    // Convert to SSA
+    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+
+    // Build statements from SSA ops
+    let expr_builder = r2dec::ExpressionBuilder::new(64);
+    let mut stmts: Vec<r2dec::CStmt> = Vec::new();
+
+    for op in &ssa_block.ops {
+        if let Some(stmt) = expr_builder.op_to_stmt(op) {
+            stmts.push(stmt);
+        }
+    }
+
+    match serde_json::to_string_pretty(&stmts) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
     }
 }
 
