@@ -21,13 +21,17 @@
 //! ```
 
 pub mod context;
+pub mod disasm;
 pub mod pcode;
+pub mod sleigh;
 
 use std::path::Path;
 use thiserror::Error;
 
 pub use context::LiftContext;
+pub use disasm::Disassembler;
 pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
+pub use sleigh::{parse_sleigh_spec, parse_sleigh_spec_detailed, SleighParseResult};
 use r2il::ArchSpec;
 
 /// Errors that can occur during lifting.
@@ -68,24 +72,47 @@ impl Lifter {
 
     /// Create a lifter from a Sleigh specification file.
     ///
-    /// Note: This is a placeholder. Full implementation requires
-    /// integrating with sleigh-rs to parse the .slaspec file.
+    /// This parses the `.slaspec` file using `sleigh-rs` and extracts
+    /// architecture metadata including registers, address spaces, and
+    /// user-defined operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the `.slaspec` file
+    ///
+    /// # Returns
+    ///
+    /// A `Lifter` with the parsed architecture context, or an error if parsing fails.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let arch_name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
+        let source_path = path.display().to_string();
 
-        let mut lifter = Self::new(arch_name);
-        lifter.source_path = path.display().to_string();
-        lifter.ctx.add_source_file(&lifter.source_path);
+        // Try to parse the Sleigh specification
+        match sleigh::parse_sleigh_spec(path) {
+            Ok(arch) => {
+                // Successfully parsed - create lifter with the parsed spec
+                let ctx = LiftContext::from_arch_spec(arch);
+                Ok(Self {
+                    ctx,
+                    source_path,
+                })
+            }
+            Err(e) => {
+                // Parsing failed - log warning and fall back to basic spec
+                eprintln!("Warning: Failed to parse Sleigh spec: {}. Using fallback.", e);
 
-        // TODO: Parse the Sleigh file using sleigh-rs
-        // For now, we set up a basic architecture spec
-        // that can be extended when sleigh-rs parsing is integrated
+                let arch_name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
 
-        Ok(lifter)
+                let mut lifter = Self::new(arch_name);
+                lifter.source_path = source_path;
+                lifter.ctx.add_source_file(&lifter.source_path);
+
+                Ok(lifter)
+            }
+        }
     }
 
     /// Get mutable access to the lift context.

@@ -14,3 +14,16 @@ r2il = { path = "../r2il" }
 r2sleigh-lift = { path = "../r2sleigh-lift" }
 clap.workspace = true
 thiserror.workspace = true
+hex = "0.4"
+
+[features]
+default = []
+# Enable specific architecture support for disasm command
+x86 = ["sleigh-config/x86"]
+arm = ["sleigh-config/ARM"]
+mips = ["sleigh-config/MIPS"]
+all-archs = ["x86", "arm", "mips"]
+
+[dependencies.sleigh-config]
+version = "1.0"
+optional = true

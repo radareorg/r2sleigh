@@ -38,6 +38,44 @@ impl LiftContext {
         ctx
     }
 
+    /// Create a lift context from an existing ArchSpec.
+    ///
+    /// This is used when we've already parsed a Sleigh spec and have
+    /// an ArchSpec ready.
+    pub fn from_arch_spec(arch: ArchSpec) -> Self {
+        let mut space_map = HashMap::new();
+
+        // Rebuild space map from the arch spec
+        for space in &arch.spaces {
+            space_map.insert(space.name.clone(), space.id);
+        }
+
+        // Also add standard space aliases
+        space_map.insert("ram".into(), SpaceId::Ram);
+        space_map.insert("register".into(), SpaceId::Register);
+        space_map.insert("unique".into(), SpaceId::Unique);
+        space_map.insert("const".into(), SpaceId::Const);
+        space_map.insert("constant".into(), SpaceId::Const);
+
+        // Find the highest custom space ID
+        let next_custom_space = arch
+            .spaces
+            .iter()
+            .filter_map(|s| match s.id {
+                SpaceId::Custom(n) => Some(n + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+
+        Self {
+            arch,
+            space_map,
+            next_custom_space,
+            next_unique_offset: 0x10000000,
+        }
+    }
+
     /// Add the standard address spaces.
     fn add_standard_spaces(&mut self) {
         self.space_map.insert("ram".into(), SpaceId::Ram);

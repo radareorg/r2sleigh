@@ -11,6 +11,9 @@ pub enum PcodeError {
     #[error("Unknown P-code opcode: {0}")]
     UnknownOpcode(u32),
 
+    #[error("Invalid opcode: {0}")]
+    InvalidOpcode(String),
+
     #[error("Invalid operand count for {op}: expected {expected}, got {got}")]
     InvalidOperandCount {
         op: &'static str,

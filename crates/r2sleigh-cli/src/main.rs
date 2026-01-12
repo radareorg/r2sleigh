@@ -4,11 +4,15 @@
 //!   r2sleigh compile <input.slaspec> -o <output.r2il>
 //!   r2sleigh info <input.r2il>
 //!   r2sleigh test-arch <arch>
+//!   r2sleigh disasm --arch x86-64 --bytes "554889e5"
 
 use clap::{Parser, Subcommand};
 use r2il::serialize;
 use r2sleigh_lift::{create_arm_spec, create_x86_64_spec, Lifter};
 use std::path::PathBuf;
+
+#[cfg(feature = "sleigh-config")]
+use r2sleigh_lift::Disassembler;
 
 /// r2sleigh - Sleigh to r2il compiler for radare2
 #[derive(Parser)]
@@ -61,6 +65,26 @@ enum Commands {
 
     /// Show version and format information
     Version,
+
+    /// Disassemble instruction bytes to r2il
+    #[cfg(feature = "sleigh-config")]
+    Disasm {
+        /// Architecture (e.g., x86-64, ARM)
+        #[arg(short, long)]
+        arch: String,
+
+        /// Hex-encoded instruction bytes
+        #[arg(short, long)]
+        bytes: String,
+
+        /// Base address for disassembly
+        #[arg(long, default_value = "0x1000")]
+        addr: String,
+
+        /// Output format: text, json, or esil
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
 }
 
 fn main() {
@@ -82,6 +106,14 @@ fn main() {
         Commands::TestArch { arch, output } => cmd_test_arch(&arch, output.as_ref()),
 
         Commands::Version => cmd_version(),
+
+        #[cfg(feature = "sleigh-config")]
+        Commands::Disasm {
+            arch,
+            bytes,
+            addr,
+            format,
+        } => cmd_disasm(&arch, &bytes, &addr, &format),
     };
 
     if let Err(e) = result {
@@ -238,5 +270,150 @@ fn cmd_version() -> Result<(), String> {
     println!("r2sleigh {}", env!("CARGO_PKG_VERSION"));
     println!("r2il format version: {}", r2il::FORMAT_VERSION);
     println!("Magic bytes: {:?}", std::str::from_utf8(r2il::MAGIC).unwrap_or("R2IL"));
+
+    #[cfg(feature = "sleigh-config")]
+    println!("Disasm support: enabled");
+    #[cfg(not(feature = "sleigh-config"))]
+    println!("Disasm support: disabled (build with --features x86 to enable)");
+
     Ok(())
+}
+
+#[cfg(feature = "sleigh-config")]
+fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Result<(), String> {
+    // Parse the address
+    let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
+        u64::from_str_radix(&addr_str[2..], 16).map_err(|e| format!("Invalid address: {}", e))?
+    } else {
+        addr_str.parse::<u64>().map_err(|e| format!("Invalid address: {}", e))?
+    };
+
+    // Parse hex bytes
+    let bytes = hex::decode(bytes_hex.replace(" ", "").replace("0x", ""))
+        .map_err(|e| format!("Invalid hex bytes: {}", e))?;
+
+    if bytes.is_empty() {
+        return Err("No bytes provided".to_string());
+    }
+
+    // Get the disassembler for the requested architecture
+    let disasm = get_disassembler(arch)?;
+
+    // Lift the instruction
+    let block = disasm.lift(&bytes, addr).map_err(|e| format!("Lift failed: {}", e))?;
+
+    // Also get the native disassembly for display
+    let (mnemonic, size) = disasm.disasm_native(&bytes, addr)
+        .map_err(|e| format!("Native disasm failed: {}", e))?;
+
+    match format {
+        "json" => {
+            // Simple JSON output
+            println!("{{");
+            println!("  \"addr\": \"0x{:x}\",", block.addr);
+            println!("  \"size\": {},", size);
+            println!("  \"mnemonic\": \"{}\",", mnemonic);
+            println!("  \"ops\": [");
+            for (i, op) in block.ops.iter().enumerate() {
+                let comma = if i < block.ops.len() - 1 { "," } else { "" };
+                println!("    \"{:?}\"{}", op, comma);
+            }
+            println!("  ]");
+            println!("}}");
+        }
+        "esil" => {
+            // Convert to ESIL-like format (simplified)
+            println!("# 0x{:x}: {} (size={})", addr, mnemonic, size);
+            for op in &block.ops {
+                println!("{}", op_to_esil(op));
+            }
+        }
+        _ => {
+            // Text format (default)
+            println!("0x{:x}  {}  (size={})", addr, mnemonic, size);
+            println!("P-code ({} ops):", block.ops.len());
+            for (i, op) in block.ops.iter().enumerate() {
+                println!("  {}: {:?}", i, op);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Convert an R2ILOp to a simplified ESIL-like string
+#[cfg(feature = "sleigh-config")]
+fn op_to_esil(op: &r2il::R2ILOp) -> String {
+    use r2il::R2ILOp::*;
+
+    match op {
+        Copy { dst, src } => format!("{},{},=", varnode_str(src), varnode_str(dst)),
+        IntAdd { dst, a, b } => format!("{},{},+,{},=", varnode_str(a), varnode_str(b), varnode_str(dst)),
+        IntSub { dst, a, b } => format!("{},{},-,{},=", varnode_str(b), varnode_str(a), varnode_str(dst)),
+        IntAnd { dst, a, b } => format!("{},{},&,{},=", varnode_str(a), varnode_str(b), varnode_str(dst)),
+        IntOr { dst, a, b } => format!("{},{},|,{},=", varnode_str(a), varnode_str(b), varnode_str(dst)),
+        IntXor { dst, a, b } => format!("{},{},^,{},=", varnode_str(a), varnode_str(b), varnode_str(dst)),
+        Load { dst, addr, .. } => format!("[{}],{},=", varnode_str(addr), varnode_str(dst)),
+        Store { addr, val, .. } => format!("{},[{}],=", varnode_str(val), varnode_str(addr)),
+        Branch { target } => format!("{},pc,=", varnode_str(target)),
+        Call { target } => format!("{},pc,=,CALL", varnode_str(target)),
+        Return { .. } => "RET".to_string(),
+        _ => format!("{:?}", op),
+    }
+}
+
+#[cfg(feature = "sleigh-config")]
+fn varnode_str(vn: &r2il::Varnode) -> String {
+    use r2il::SpaceId;
+
+    match vn.space {
+        SpaceId::Const => format!("0x{:x}", vn.offset),
+        SpaceId::Register => format!("reg:0x{:x}:{}", vn.offset, vn.size),
+        SpaceId::Unique => format!("tmp:0x{:x}", vn.offset),
+        SpaceId::Ram => format!("[0x{:x}]:{}", vn.offset, vn.size),
+        SpaceId::Custom(n) => format!("space{}:0x{:x}", n, vn.offset),
+    }
+}
+
+#[cfg(feature = "sleigh-config")]
+fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
+    match arch.to_lowercase().as_str() {
+        #[cfg(feature = "x86")]
+        "x86-64" | "x86_64" | "x64" | "amd64" => {
+            Disassembler::from_sla(
+                sleigh_config::processor_x86::SLA_X86_64,
+                sleigh_config::processor_x86::PSPEC_X86_64,
+                "x86-64"
+            ).map_err(|e| e.to_string())
+        }
+        #[cfg(feature = "x86")]
+        "x86" | "x86-32" | "i386" | "i686" => {
+            Disassembler::from_sla(
+                sleigh_config::processor_x86::SLA_X86,
+                sleigh_config::processor_x86::PSPEC_X86,
+                "x86"
+            ).map_err(|e| e.to_string())
+        }
+        #[cfg(feature = "arm")]
+        "arm" | "arm32" | "arm-le" => {
+            Disassembler::from_sla(
+                sleigh_config::processor_arm::SLA_ARM8_LE,
+                sleigh_config::processor_arm::PSPEC_ARM8_LE,
+                "ARM"
+            ).map_err(|e| e.to_string())
+        }
+        _ => {
+            let mut supported = vec![];
+            #[cfg(feature = "x86")]
+            supported.extend(["x86-64", "x86"]);
+            #[cfg(feature = "arm")]
+            supported.push("arm");
+
+            if supported.is_empty() {
+                Err("No architectures enabled. Build with --features x86 or --features arm".to_string())
+            } else {
+                Err(format!("Unknown architecture '{}'. Supported: {}", arch, supported.join(", ")))
+            }
+        }
+    }
 }
