@@ -4,6 +4,7 @@ members = [
     "crates/r2il",
     "crates/r2sleigh-lift",
     "crates/r2sleigh-cli",
+    "crates/r2ssa",
     "r2plugin",
 ]
 

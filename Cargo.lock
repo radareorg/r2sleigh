@@ -344,9 +344,21 @@ version = "0.1.0"
 dependencies = [
  "r2il",
  "r2sleigh-lift",
+ "r2ssa",
  "serde",
  "serde_json",
  "sleigh-config",
+]
+
+[[package]]
+name = "r2ssa"
+version = "0.1.0"
+dependencies = [
+ "r2il",
+ "r2sleigh-lift",
+ "serde",
+ "sleigh-config",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

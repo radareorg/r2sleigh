@@ -39,6 +39,10 @@ extern char *r2il_block_regs_write(const R2ILContext *ctx, const R2ILBlock *bloc
 extern char *r2il_block_mem_access(const R2ILContext *ctx, const R2ILBlock *block);
 extern char *r2il_block_varnodes(const R2ILContext *ctx, const R2ILBlock *block);
 
+/* SSA analysis */
+extern char *r2il_block_to_ssa_json(const R2ILContext *ctx, const R2ILBlock *block);
+extern char *r2il_block_defuse_json(const R2ILContext *ctx, const R2ILBlock *block);
+
 /* Per-architecture context (lazy init) */
 static R2ILContext *sleigh_ctx = NULL;
 static char *sleigh_arch = NULL;
@@ -185,6 +189,8 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sleigh.regs   - Show registers read/written by instruction");
 			r_cons_println (cons, "| a:sleigh.mem    - Show memory accesses by instruction");
 			r_cons_println (cons, "| a:sleigh.vars   - Show all varnodes used by instruction");
+			r_cons_println (cons, "| a:sleigh.ssa    - Show SSA form of instruction");
+			r_cons_println (cons, "| a:sleigh.defuse - Show def-use analysis of instruction");
 		}
 		return true;
 	}
@@ -337,6 +343,66 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		}
 
 		r2il_string_free (vars_json);
+		r2il_block_free (block);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sleigh.ssa")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		ut64 addr = core->addr;
+		ut8 buf[SLEIGH_MIN_BYTES];
+		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
+			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
+			return true;
+		}
+
+		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
+		if (!block) {
+			R_LOG_ERROR ("r2sleigh: lift failed");
+			return true;
+		}
+
+		char *ssa_json = r2il_block_to_ssa_json (ctx, block);
+		if (cons && ssa_json) {
+			r_cons_printf (cons, "%s\n", ssa_json);
+		}
+
+		r2il_string_free (ssa_json);
+		r2il_block_free (block);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sleigh.defuse")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		ut64 addr = core->addr;
+		ut8 buf[SLEIGH_MIN_BYTES];
+		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
+			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
+			return true;
+		}
+
+		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
+		if (!block) {
+			R_LOG_ERROR ("r2sleigh: lift failed");
+			return true;
+		}
+
+		char *defuse_json = r2il_block_defuse_json (ctx, block);
+		if (cons && defuse_json) {
+			r_cons_printf (cons, "%s\n", defuse_json);
+		}
+
+		r2il_string_free (defuse_json);
 		r2il_block_free (block);
 		return true;
 	}

@@ -1018,6 +1018,189 @@ pub extern "C" fn r2il_block_varnodes(
     }
 }
 
+// ============================================================================
+// SSA Functions
+// ============================================================================
+
+/// SSA operation info for JSON output.
+#[derive(Serialize)]
+struct SSAOpInfo {
+    op: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dst: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<String>,
+}
+
+/// Convert SSAOp to JSON-serializable info.
+fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
+    use r2ssa::SSAOp::*;
+
+    let op_name = match op {
+        Phi { .. } => "Phi",
+        Copy { .. } => "Copy",
+        Load { .. } => "Load",
+        Store { .. } => "Store",
+        IntAdd { .. } => "IntAdd",
+        IntSub { .. } => "IntSub",
+        IntMult { .. } => "IntMult",
+        IntDiv { .. } => "IntDiv",
+        IntSDiv { .. } => "IntSDiv",
+        IntRem { .. } => "IntRem",
+        IntSRem { .. } => "IntSRem",
+        IntNegate { .. } => "IntNegate",
+        IntCarry { .. } => "IntCarry",
+        IntSCarry { .. } => "IntSCarry",
+        IntSBorrow { .. } => "IntSBorrow",
+        IntAnd { .. } => "IntAnd",
+        IntOr { .. } => "IntOr",
+        IntXor { .. } => "IntXor",
+        IntNot { .. } => "IntNot",
+        IntLeft { .. } => "IntLeft",
+        IntRight { .. } => "IntRight",
+        IntSRight { .. } => "IntSRight",
+        IntEqual { .. } => "IntEqual",
+        IntNotEqual { .. } => "IntNotEqual",
+        IntLess { .. } => "IntLess",
+        IntSLess { .. } => "IntSLess",
+        IntLessEqual { .. } => "IntLessEqual",
+        IntSLessEqual { .. } => "IntSLessEqual",
+        IntZExt { .. } => "IntZExt",
+        IntSExt { .. } => "IntSExt",
+        BoolNot { .. } => "BoolNot",
+        BoolAnd { .. } => "BoolAnd",
+        BoolOr { .. } => "BoolOr",
+        BoolXor { .. } => "BoolXor",
+        Piece { .. } => "Piece",
+        Subpiece { .. } => "Subpiece",
+        PopCount { .. } => "PopCount",
+        Lzcount { .. } => "Lzcount",
+        Branch { .. } => "Branch",
+        CBranch { .. } => "CBranch",
+        BranchInd { .. } => "BranchInd",
+        Call { .. } => "Call",
+        CallInd { .. } => "CallInd",
+        Return { .. } => "Return",
+        FloatAdd { .. } => "FloatAdd",
+        FloatSub { .. } => "FloatSub",
+        FloatMult { .. } => "FloatMult",
+        FloatDiv { .. } => "FloatDiv",
+        FloatNeg { .. } => "FloatNeg",
+        FloatAbs { .. } => "FloatAbs",
+        FloatSqrt { .. } => "FloatSqrt",
+        FloatCeil { .. } => "FloatCeil",
+        FloatFloor { .. } => "FloatFloor",
+        FloatRound { .. } => "FloatRound",
+        FloatNaN { .. } => "FloatNaN",
+        FloatEqual { .. } => "FloatEqual",
+        FloatNotEqual { .. } => "FloatNotEqual",
+        FloatLess { .. } => "FloatLess",
+        FloatLessEqual { .. } => "FloatLessEqual",
+        Int2Float { .. } => "Int2Float",
+        Float2Int { .. } => "Float2Int",
+        FloatFloat { .. } => "FloatFloat",
+        Trunc { .. } => "Trunc",
+        CallOther { .. } => "CallOther",
+        Nop => "Nop",
+        Unimplemented => "Unimplemented",
+        CpuId { .. } => "CpuId",
+        Breakpoint => "Breakpoint",
+        PtrAdd { .. } => "PtrAdd",
+        PtrSub { .. } => "PtrSub",
+        SegmentOp { .. } => "SegmentOp",
+        New { .. } => "New",
+        Cast { .. } => "Cast",
+        Extract { .. } => "Extract",
+        Insert { .. } => "Insert",
+    };
+
+    SSAOpInfo {
+        op: op_name.to_string(),
+        dst: op.dst().map(|v| v.display_name()),
+        sources: op.sources().iter().map(|v| v.display_name()).collect(),
+    }
+}
+
+/// Convert block to SSA and return JSON representation.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_to_ssa_json(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let blk = unsafe { &*block };
+
+    // Convert to SSA
+    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+
+    // Convert ops to JSON-serializable format
+    let ops_info: Vec<SSAOpInfo> = ssa_block.ops.iter().map(ssa_op_to_info).collect();
+
+    match serde_json::to_string_pretty(&ops_info) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Def-use analysis info for JSON output.
+#[derive(Serialize)]
+struct DefUseInfoJson {
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    live: Vec<String>,
+}
+
+/// Get def-use analysis for block as JSON.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_defuse_json(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let blk = unsafe { &*block };
+
+    // Convert to SSA
+    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+
+    // Compute def-use chains
+    let info = r2ssa::def_use(&ssa_block);
+
+    let json_info = DefUseInfoJson {
+        inputs: info.inputs.iter().cloned().collect(),
+        outputs: info.outputs.iter().cloned().collect(),
+        live: info.live.iter().cloned().collect(),
+    };
+
+    match serde_json::to_string_pretty(&json_info) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+// ============================================================================
+// Architecture Helpers
+// ============================================================================
+
 /// Helper: build a disassembler and ArchSpec for a given arch string.
 fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), String> {
     match arch.to_lowercase().as_str() {
