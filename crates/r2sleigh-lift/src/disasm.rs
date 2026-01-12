@@ -76,6 +76,55 @@ impl Disassembler {
             .map_err(|e| LiftError::Parse(format!("Unknown register '{}': {}", name, e)))
     }
 
+    /// Get the register name for a varnode in the register space.
+    ///
+    /// Returns `None` if the varnode is not in the register space or if
+    /// no register name is found for the given offset and size.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let vn = Varnode::register(0x20, 8); // RSP on x86-64
+    /// let name = disasm.register_name(&vn);
+    /// assert_eq!(name, Some("RSP".to_string()));
+    /// ```
+    pub fn register_name(&self, vn: &Varnode) -> Option<String> {
+        if vn.space != SpaceId::Register {
+            return None;
+        }
+
+        // Get the register address space
+        let reg_space = self.sleigh.address_space_by_name("register")?;
+
+        // Create a VarnodeData to query libsla
+        let varnode_data = VarnodeData::new(
+            Address::new(reg_space, vn.offset),
+            vn.size as usize,
+        );
+
+        self.sleigh.register_name(&varnode_data)
+    }
+
+    /// Format a varnode as a human-readable string, resolving register names.
+    ///
+    /// This is useful for pretty-printing P-code operations.
+    pub fn format_varnode(&self, vn: &Varnode) -> String {
+        match vn.space {
+            SpaceId::Const => format!("0x{:x}", vn.offset),
+            SpaceId::Register => {
+                // Try to resolve the register name
+                if let Some(name) = self.register_name(vn) {
+                    name
+                } else {
+                    format!("reg:0x{:x}:{}", vn.offset, vn.size)
+                }
+            }
+            SpaceId::Unique => format!("tmp:0x{:x}", vn.offset),
+            SpaceId::Ram => format!("[0x{:x}]:{}", vn.offset, vn.size),
+            SpaceId::Custom(n) => format!("space{}:0x{:x}", n, vn.offset),
+        }
+    }
+
     /// Disassemble instruction bytes at a given address and return r2il.
     ///
     /// # Arguments
@@ -667,8 +716,6 @@ fn missing_input(op: &str, index: usize) -> LiftError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // Tests require sleigh-config feature flags to be enabled
     // They are skipped by default
 

@@ -64,7 +64,7 @@ impl R2ILContext {
 /// Load an r2il file and return a context handle.
 ///
 /// Returns NULL on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn r2il_load(path: *const c_char) -> *mut R2ILContext {
     if path.is_null() {
         return ptr::null_mut();
@@ -84,7 +84,7 @@ pub extern "C" fn r2il_load(path: *const c_char) -> *mut R2ILContext {
 }
 
 /// Free a context handle.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn r2il_free(ctx: *mut R2ILContext) {
     if !ctx.is_null() {
         unsafe {
@@ -96,7 +96,7 @@ pub extern "C" fn r2il_free(ctx: *mut R2ILContext) {
 /// Check if the context has a loaded architecture.
 ///
 /// Returns 1 if loaded, 0 otherwise.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn r2il_is_loaded(ctx: *const R2ILContext) -> i32 {
     if ctx.is_null() {
         return 0;
@@ -114,7 +114,7 @@ pub extern "C" fn r2il_is_loaded(ctx: *const R2ILContext) -> i32 {
 /// Get the architecture name.
 ///
 /// Returns NULL if not loaded.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn r2il_arch_name(ctx: *const R2ILContext) -> *const c_char {
     if ctx.is_null() {
         return ptr::null();
@@ -131,7 +131,7 @@ pub extern "C" fn r2il_arch_name(ctx: *const R2ILContext) -> *const c_char {
 /// Get the last error message.
 ///
 /// Returns NULL if no error.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn r2il_error(ctx: *const R2ILContext) -> *const c_char {
     if ctx.is_null() {
         return ptr::null();
@@ -148,7 +148,7 @@ pub extern "C" fn r2il_error(ctx: *const R2ILContext) -> *const c_char {
 /// Get the address size in bytes.
 ///
 /// Returns 0 if not loaded.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn r2il_addr_size(ctx: *const R2ILContext) -> u32 {
     if ctx.is_null() {
         return 0;
@@ -165,7 +165,7 @@ pub extern "C" fn r2il_addr_size(ctx: *const R2ILContext) -> u32 {
 /// Check if the architecture is big-endian.
 ///
 /// Returns 1 for big-endian, 0 for little-endian or if not loaded.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn r2il_is_big_endian(ctx: *const R2ILContext) -> i32 {
     if ctx.is_null() {
         return 0;
@@ -188,7 +188,7 @@ pub extern "C" fn r2il_is_big_endian(ctx: *const R2ILContext) -> i32 {
 /// Get the number of registers.
 ///
 /// Returns 0 if not loaded.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn r2il_register_count(ctx: *const R2ILContext) -> usize {
     if ctx.is_null() {
         return 0;

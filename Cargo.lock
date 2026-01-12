@@ -272,28 +272,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "memchr"
-version = "2.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
-
-[[package]]
-name = "minimal-lexical"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
-
-[[package]]
-name = "nom"
-version = "7.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
-dependencies = [
- "memchr",
- "minimal-lexical",
-]
-
-[[package]]
 name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,7 +323,6 @@ dependencies = [
  "libsla",
  "r2il",
  "sleigh-config",
- "sleigh-rs",
  "thiserror 1.0.69",
 ]
 
@@ -419,16 +396,6 @@ checksum = "36c03500e884ff5312b820b4cdd329e119522ec109b7869333d4a889bdb62fe1"
 dependencies = [
  "heck",
  "sleigh-compiler",
-]
-
-[[package]]
-name = "sleigh-rs"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee60b8e968946b4016e291184fe9c6b7464ea5fb242f424283934d0d22156b82"
-dependencies = [
- "nom",
- "thiserror 1.0.69",
 ]
 
 [[package]]

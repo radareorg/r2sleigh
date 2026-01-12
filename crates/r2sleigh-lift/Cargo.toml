@@ -7,7 +7,6 @@ description = "Sleigh to r2il translator"
 
 [dependencies]
 r2il = { path = "../r2il" }
-sleigh-rs = "0.1"
 libsla.workspace = true
 sleigh-config.workspace = true
 thiserror.workspace = true

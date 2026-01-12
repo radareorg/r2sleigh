@@ -1,23 +1,26 @@
 //! r2sleigh-lift - Sleigh to r2il translator
 //!
-//! This crate provides functionality to parse Ghidra Sleigh specifications
-//! and translate them into r2il intermediate language.
+//! This crate provides functionality to work with Ghidra Sleigh specifications
+//! and translate P-code into r2il intermediate language.
 //!
 //! # Architecture
 //!
-//! The lifting process works in two stages:
-//!
-//! 1. **Parsing**: Use `sleigh-rs` to parse `.slaspec` files into an AST
-//! 2. **Translation**: Convert P-code semantics to r2il operations
+//! The lifting process uses `libsla` (Ghidra's native Sleigh library) with
+//! pre-compiled `.sla` files from `sleigh-config` for disassembly and P-code
+//! generation.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use r2sleigh_lift::Lifter;
+//! use r2sleigh_lift::{Lifter, sleigh::build_arch_spec};
 //!
-//! let lifter = Lifter::from_file("x86-64.slaspec")?;
-//! let arch = lifter.compile()?;
-//! r2il::serialize::save(&arch, "x86-64.r2il")?;
+//! // Build an architecture spec from pre-compiled SLA data
+//! let spec = build_arch_spec(
+//!     sleigh_config::processor_x86::SLA_X86_64,
+//!     sleigh_config::processor_x86::PSPEC_X86_64,
+//!     "x86-64"
+//! )?;
+//! r2il::serialize::save(&spec, "x86-64.r2il")?;
 //! ```
 
 pub mod context;
@@ -25,13 +28,12 @@ pub mod disasm;
 pub mod pcode;
 pub mod sleigh;
 
-use std::path::Path;
 use thiserror::Error;
 
 pub use context::LiftContext;
 pub use disasm::Disassembler;
 pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
-pub use sleigh::{parse_sleigh_spec, parse_sleigh_spec_detailed, SleighParseResult};
+pub use sleigh::{build_arch_spec, extract_arch_spec, get_sleigh_info, SleighInfo};
 use r2il::ArchSpec;
 
 /// Errors that can occur during lifting.
@@ -57,8 +59,6 @@ pub type Result<T> = std::result::Result<T, LiftError>;
 pub struct Lifter {
     /// The architecture context being built
     ctx: LiftContext,
-    /// Source file path
-    source_path: String,
 }
 
 impl Lifter {
@@ -66,53 +66,40 @@ impl Lifter {
     pub fn new(arch_name: impl Into<String>) -> Self {
         Self {
             ctx: LiftContext::new(arch_name),
-            source_path: String::new(),
         }
     }
 
-    /// Create a lifter from a Sleigh specification file.
+    /// Create a lifter from an existing ArchSpec.
     ///
-    /// This parses the `.slaspec` file using `sleigh-rs` and extracts
-    /// architecture metadata including registers, address spaces, and
-    /// user-defined operations.
+    /// This is the preferred way to create a Lifter when you have
+    /// pre-compiled SLA data available via `sleigh-config`.
     ///
     /// # Arguments
     ///
-    /// * `path` - Path to the `.slaspec` file
+    /// * `spec` - An `ArchSpec` built from `build_arch_spec()`
     ///
     /// # Returns
     ///
-    /// A `Lifter` with the parsed architecture context, or an error if parsing fails.
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let source_path = path.display().to_string();
+    /// A `Lifter` with the architecture context.
+    pub fn from_spec(spec: ArchSpec) -> Self {
+        let ctx = LiftContext::from_arch_spec(spec);
+        Self { ctx }
+    }
 
-        // Try to parse the Sleigh specification
-        match sleigh::parse_sleigh_spec(path) {
-            Ok(arch) => {
-                // Successfully parsed - create lifter with the parsed spec
-                let ctx = LiftContext::from_arch_spec(arch);
-                Ok(Self {
-                    ctx,
-                    source_path,
-                })
-            }
-            Err(e) => {
-                // Parsing failed - log warning and fall back to basic spec
-                eprintln!("Warning: Failed to parse Sleigh spec: {}. Using fallback.", e);
-
-                let arch_name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-
-                let mut lifter = Self::new(arch_name);
-                lifter.source_path = source_path;
-                lifter.ctx.add_source_file(&lifter.source_path);
-
-                Ok(lifter)
-            }
-        }
+    /// Create a lifter from pre-compiled SLA data.
+    ///
+    /// # Arguments
+    ///
+    /// * `sla_data` - Compiled SLA specification bytes
+    /// * `pspec_data` - Processor specification string
+    /// * `arch_name` - Name for the architecture
+    ///
+    /// # Returns
+    ///
+    /// A `Lifter` with the parsed architecture context, or an error if loading fails.
+    pub fn from_sla(sla_data: &[u8], pspec_data: &str, arch_name: &str) -> Result<Self> {
+        let spec = sleigh::build_arch_spec(sla_data, pspec_data, arch_name)?;
+        Ok(Self::from_spec(spec))
     }
 
     /// Get mutable access to the lift context.
