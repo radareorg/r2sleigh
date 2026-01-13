@@ -24,3 +24,8 @@ r2plugin/*.dylib
 
 # Debug
 *.log
+
+# Test binaries (compiled from .c files)
+tests/e2e/test_func
+tests/e2e/sym_test
+tests/e2e/target/
