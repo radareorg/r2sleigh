@@ -6,14 +6,15 @@
 
 use std::collections::HashMap;
 
-use r2il::R2ILBlock;
+use r2il::{ArchSpec, R2ILBlock};
 use serde::{Deserialize, Serialize};
 
 use crate::cfg::{CFGEdge, CFG};
 use crate::domtree::DomTree;
 use crate::op::SSAOp;
-use crate::phi::{collect_defs_from_cfg, PhiPlacement};
-use crate::rename::rename_function;
+use crate::naming::build_register_name_map;
+use crate::phi::{collect_defs_from_cfg_with_names, PhiPlacement};
+use crate::rename::rename_function_with_names;
 use crate::var::SSAVar;
 
 /// A function in SSA form.
@@ -67,6 +68,11 @@ impl SSAFunction {
     /// 3. Place phi nodes
     /// 4. Rename variables
     pub fn from_blocks(blocks: &[R2ILBlock]) -> Option<Self> {
+        Self::from_blocks_with_arch(blocks, None)
+    }
+
+    /// Build an SSA function from a sequence of r2il blocks with an optional ArchSpec.
+    pub fn from_blocks_with_arch(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
         if blocks.is_empty() {
             return None;
         }
@@ -78,14 +84,17 @@ impl SSAFunction {
         // Compute dominator tree
         let domtree = DomTree::compute(&cfg);
 
+        let reg_names = arch.map(build_register_name_map);
+        let reg_names_ref = reg_names.as_ref();
+
         // Collect variable definitions and sizes
-        let (defs, var_sizes) = collect_defs_from_cfg(&cfg);
+        let (defs, var_sizes) = collect_defs_from_cfg_with_names(&cfg, reg_names_ref);
 
         // Place phi nodes
         let phi_placement = PhiPlacement::compute(&cfg, &domtree, &defs, &var_sizes);
 
         // Rename variables
-        let renamed = rename_function(&cfg, &domtree, &phi_placement, &var_sizes);
+        let renamed = rename_function_with_names(&cfg, &domtree, &phi_placement, &var_sizes, reg_names_ref);
 
         // Build SSA blocks
         let mut ssa_blocks = HashMap::new();

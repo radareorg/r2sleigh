@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::cfg::CFG;
 use crate::domtree::DomTree;
+use crate::naming::{varnode_to_name, RegisterNameMap};
 use crate::op::SSAOp;
 use crate::phi::PhiPlacement;
 use crate::var::SSAVar;
@@ -132,6 +133,17 @@ pub fn rename_function(
     phi_placement: &PhiPlacement,
     var_sizes: &HashMap<String, u32>,
 ) -> RenamedFunction {
+    rename_function_with_names(cfg, domtree, phi_placement, var_sizes, None)
+}
+
+/// Perform SSA renaming on a CFG with optional register names.
+pub fn rename_function_with_names(
+    cfg: &CFG,
+    domtree: &DomTree,
+    phi_placement: &PhiPlacement,
+    var_sizes: &HashMap<String, u32>,
+    reg_names: Option<&RegisterNameMap>,
+) -> RenamedFunction {
     let mut ctx = RenameContext::new();
     let mut result = RenamedFunction::new(cfg.entry);
 
@@ -163,6 +175,7 @@ pub fn rename_function(
         phi_placement,
         &mut ctx,
         &mut result,
+        reg_names,
     );
 
     result
@@ -176,6 +189,7 @@ fn rename_block(
     phi_placement: &PhiPlacement,
     ctx: &mut RenameContext,
     result: &mut RenamedFunction,
+    reg_names: Option<&RegisterNameMap>,
 ) {
     // Track variables defined in this block for cleanup
     let mut defined_vars: Vec<String> = Vec::new();
@@ -203,7 +217,7 @@ fn rename_block(
     // 2. Rename operations in the block
     if let Some(block) = cfg.get_block(block_addr) {
         for op in &block.ops {
-            let renamed_op = rename_op(op, ctx, &mut defined_vars);
+            let renamed_op = rename_op(op, ctx, &mut defined_vars, reg_names);
             result.blocks.get_mut(&block_addr).unwrap().push(renamed_op);
         }
     }
@@ -215,7 +229,7 @@ fn rename_block(
 
     // 4. Recursively rename dominated blocks
     for &child in domtree.children(block_addr) {
-        rename_block(child, cfg, domtree, phi_placement, ctx, result);
+        rename_block(child, cfg, domtree, phi_placement, ctx, result, reg_names);
     }
 
     // 5. Pop versions defined in this block
@@ -264,13 +278,18 @@ fn fill_phi_sources(
 }
 
 /// Rename a single r2il operation to an SSA operation.
-fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<String>) -> SSAOp {
+fn rename_op(
+    op: &r2il::R2ILOp,
+    ctx: &mut RenameContext,
+    defined_vars: &mut Vec<String>,
+    reg_names: Option<&RegisterNameMap>,
+) -> SSAOp {
     use r2il::R2ILOp::*;
 
     match op {
         Copy { dst, src } => {
-            let src_ssa = read_varnode(src, ctx);
-            let dst_name = varnode_to_name(dst);
+            let src_ssa = read_varnode(src, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::Copy {
@@ -280,8 +299,8 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         Load { dst, addr, space } => {
-            let addr_ssa = read_varnode(addr, ctx);
-            let dst_name = varnode_to_name(dst);
+            let addr_ssa = read_varnode(addr, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::Load {
@@ -292,8 +311,8 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         Store { addr, val, space } => {
-            let addr_ssa = read_varnode(addr, ctx);
-            let val_ssa = read_varnode(val, ctx);
+            let addr_ssa = read_varnode(addr, ctx, reg_names);
+            let val_ssa = read_varnode(val, ctx, reg_names);
             SSAOp::Store {
                 addr: addr_ssa,
                 val: val_ssa,
@@ -302,13 +321,13 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         Branch { target } => {
-            let target_ssa = read_varnode(target, ctx);
+            let target_ssa = read_varnode(target, ctx, reg_names);
             SSAOp::Branch { target: target_ssa }
         }
 
         CBranch { target, cond } => {
-            let target_ssa = read_varnode(target, ctx);
-            let cond_ssa = read_varnode(cond, ctx);
+            let target_ssa = read_varnode(target, ctx, reg_names);
+            let cond_ssa = read_varnode(cond, ctx, reg_names);
             SSAOp::CBranch {
                 target: target_ssa,
                 cond: cond_ssa,
@@ -316,27 +335,27 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         BranchInd { target } => {
-            let target_ssa = read_varnode(target, ctx);
+            let target_ssa = read_varnode(target, ctx, reg_names);
             SSAOp::BranchInd { target: target_ssa }
         }
 
         Call { target } => {
-            let target_ssa = read_varnode(target, ctx);
+            let target_ssa = read_varnode(target, ctx, reg_names);
             SSAOp::Call { target: target_ssa }
         }
 
         CallInd { target } => {
-            let target_ssa = read_varnode(target, ctx);
+            let target_ssa = read_varnode(target, ctx, reg_names);
             SSAOp::CallInd { target: target_ssa }
         }
 
         Return { target } => {
-            let target_ssa = read_varnode(target, ctx);
+            let target_ssa = read_varnode(target, ctx, reg_names);
             SSAOp::Return { target: target_ssa }
         }
 
         IntAdd { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntAdd {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntAdd {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -344,7 +363,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntSub { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntSub {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntSub {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -352,7 +371,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntMult { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntMult {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntMult {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -360,7 +379,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntDiv { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntDiv {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntDiv {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -368,7 +387,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntSDiv { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntSDiv {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntSDiv {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -376,7 +395,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntRem { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntRem {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntRem {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -384,7 +403,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntSRem { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntSRem {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntSRem {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -392,7 +411,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntAnd { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntAnd {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntAnd {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -400,7 +419,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntOr { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntOr {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntOr {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -408,7 +427,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntXor { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntXor {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntXor {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -416,7 +435,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntLeft { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntLeft {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntLeft {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -424,7 +443,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntRight { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntRight {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntRight {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -432,7 +451,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntSRight { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntSRight {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntSRight {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -440,14 +459,14 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntEqual { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntEqual {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntEqual {
                 dst: d,
                 a: s1,
                 b: s2,
             })
         }
 
-        IntNotEqual { dst, a, b } => rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| {
+        IntNotEqual { dst, a, b } => rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| {
             SSAOp::IntNotEqual {
                 dst: d,
                 a: s1,
@@ -456,7 +475,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }),
 
         IntLess { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntLess {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntLess {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -464,7 +483,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntSLess { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntSLess {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntSLess {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -472,7 +491,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntLessEqual { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| {
                 SSAOp::IntLessEqual {
                     dst: d,
                     a: s1,
@@ -482,7 +501,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntSLessEqual { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| {
                 SSAOp::IntSLessEqual {
                     dst: d,
                     a: s1,
@@ -492,7 +511,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntCarry { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntCarry {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntCarry {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -500,14 +519,14 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         IntSCarry { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::IntSCarry {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::IntSCarry {
                 dst: d,
                 a: s1,
                 b: s2,
             })
         }
 
-        IntSBorrow { dst, a, b } => rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| {
+        IntSBorrow { dst, a, b } => rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| {
             SSAOp::IntSBorrow {
                 dst: d,
                 a: s1,
@@ -515,29 +534,29 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             }
         }),
 
-        IntNegate { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        IntNegate { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::IntNegate { dst: d, src: s }
         }),
 
-        IntNot { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| SSAOp::IntNot {
+        IntNot { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| SSAOp::IntNot {
             dst: d,
             src: s,
         }),
 
-        IntZExt { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        IntZExt { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::IntZExt { dst: d, src: s }
         }),
 
-        IntSExt { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        IntSExt { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::IntSExt { dst: d, src: s }
         }),
 
-        BoolNot { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        BoolNot { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::BoolNot { dst: d, src: s }
         }),
 
         BoolAnd { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::BoolAnd {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::BoolAnd {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -545,7 +564,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         BoolOr { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::BoolOr {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::BoolOr {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -553,7 +572,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         BoolXor { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::BoolXor {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::BoolXor {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -561,9 +580,9 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         Piece { dst, hi, lo } => {
-            let hi_ssa = read_varnode(hi, ctx);
-            let lo_ssa = read_varnode(lo, ctx);
-            let dst_name = varnode_to_name(dst);
+            let hi_ssa = read_varnode(hi, ctx, reg_names);
+            let lo_ssa = read_varnode(lo, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::Piece {
@@ -574,8 +593,8 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         Subpiece { dst, src, offset } => {
-            let src_ssa = read_varnode(src, ctx);
-            let dst_name = varnode_to_name(dst);
+            let src_ssa = read_varnode(src, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::Subpiece {
@@ -585,17 +604,17 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             }
         }
 
-        PopCount { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        PopCount { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::PopCount { dst: d, src: s }
         }),
 
-        Lzcount { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        Lzcount { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::Lzcount { dst: d, src: s }
         }),
 
         // Floating point operations
         FloatAdd { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::FloatAdd {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::FloatAdd {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -603,7 +622,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         FloatSub { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::FloatSub {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::FloatSub {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -611,7 +630,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         FloatMult { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::FloatMult {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::FloatMult {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -619,42 +638,42 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         FloatDiv { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::FloatDiv {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::FloatDiv {
                 dst: d,
                 a: s1,
                 b: s2,
             })
         }
 
-        FloatNeg { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        FloatNeg { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::FloatNeg { dst: d, src: s }
         }),
 
-        FloatAbs { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        FloatAbs { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::FloatAbs { dst: d, src: s }
         }),
 
-        FloatSqrt { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        FloatSqrt { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::FloatSqrt { dst: d, src: s }
         }),
 
-        FloatCeil { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        FloatCeil { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::FloatCeil { dst: d, src: s }
         }),
 
-        FloatFloor { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        FloatFloor { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::FloatFloor { dst: d, src: s }
         }),
 
-        FloatRound { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        FloatRound { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::FloatRound { dst: d, src: s }
         }),
 
-        FloatNaN { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        FloatNaN { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::FloatNaN { dst: d, src: s }
         }),
 
-        FloatEqual { dst, a, b } => rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| {
+        FloatEqual { dst, a, b } => rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| {
             SSAOp::FloatEqual {
                 dst: d,
                 a: s1,
@@ -663,7 +682,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }),
 
         FloatNotEqual { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| {
                 SSAOp::FloatNotEqual {
                     dst: d,
                     a: s1,
@@ -673,7 +692,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         FloatLess { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| SSAOp::FloatLess {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| SSAOp::FloatLess {
                 dst: d,
                 a: s1,
                 b: s2,
@@ -681,7 +700,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         FloatLessEqual { dst, a, b } => {
-            rename_binary_op(dst, a, b, ctx, defined_vars, |d, s1, s2| {
+            rename_binary_op(dst, a, b, ctx, defined_vars, reg_names, |d, s1, s2| {
                 SSAOp::FloatLessEqual {
                     dst: d,
                     a: s1,
@@ -690,19 +709,19 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             })
         }
 
-        Int2Float { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        Int2Float { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::Int2Float { dst: d, src: s }
         }),
 
-        Float2Int { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        Float2Int { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::Float2Int { dst: d, src: s }
         }),
 
-        FloatFloat { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| {
+        FloatFloat { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| {
             SSAOp::FloatFloat { dst: d, src: s }
         }),
 
-        Trunc { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| SSAOp::Trunc {
+        Trunc { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| SSAOp::Trunc {
             dst: d,
             src: s,
         }),
@@ -714,7 +733,7 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         Breakpoint => SSAOp::Breakpoint,
 
         CpuId { dst } => {
-            let dst_name = varnode_to_name(dst);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::CpuId { dst: dst_ssa }
@@ -725,9 +744,12 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             userop,
             inputs,
         } => {
-            let inputs_ssa: Vec<SSAVar> = inputs.iter().map(|v| read_varnode(v, ctx)).collect();
+            let inputs_ssa: Vec<SSAVar> = inputs
+                .iter()
+                .map(|v| read_varnode(v, ctx, reg_names))
+                .collect();
             let output_ssa = output.as_ref().map(|v| {
-                let name = varnode_to_name(v);
+                let name = varnode_to_name(v, reg_names);
                 let ssa = ctx.write_var(&name);
                 defined_vars.push(name);
                 ssa
@@ -740,8 +762,11 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         Multiequal { dst, inputs } => {
-            let inputs_ssa: Vec<SSAVar> = inputs.iter().map(|v| read_varnode(v, ctx)).collect();
-            let dst_name = varnode_to_name(dst);
+            let inputs_ssa: Vec<SSAVar> = inputs
+                .iter()
+                .map(|v| read_varnode(v, ctx, reg_names))
+                .collect();
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::Phi {
@@ -756,8 +781,8 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             indirect: _,
         } => {
             // Indirect is used for aliasing - treat as a copy for SSA purposes
-            let src_ssa = read_varnode(src, ctx);
-            let dst_name = varnode_to_name(dst);
+            let src_ssa = read_varnode(src, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::Copy {
@@ -772,9 +797,9 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             index,
             element_size,
         } => {
-            let base_ssa = read_varnode(base, ctx);
-            let index_ssa = read_varnode(index, ctx);
-            let dst_name = varnode_to_name(dst);
+            let base_ssa = read_varnode(base, ctx, reg_names);
+            let index_ssa = read_varnode(index, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::PtrAdd {
@@ -791,9 +816,9 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             index,
             element_size,
         } => {
-            let base_ssa = read_varnode(base, ctx);
-            let index_ssa = read_varnode(index, ctx);
-            let dst_name = varnode_to_name(dst);
+            let base_ssa = read_varnode(base, ctx, reg_names);
+            let index_ssa = read_varnode(index, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::PtrSub {
@@ -809,9 +834,9 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             segment,
             offset,
         } => {
-            let seg_ssa = read_varnode(segment, ctx);
-            let off_ssa = read_varnode(offset, ctx);
-            let dst_name = varnode_to_name(dst);
+            let seg_ssa = read_varnode(segment, ctx, reg_names);
+            let off_ssa = read_varnode(offset, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::SegmentOp {
@@ -822,8 +847,8 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
         }
 
         New { dst, src } => {
-            let src_ssa = read_varnode(src, ctx);
-            let dst_name = varnode_to_name(dst);
+            let src_ssa = read_varnode(src, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::New {
@@ -832,15 +857,15 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             }
         }
 
-        Cast { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, |d, s| SSAOp::Cast {
+        Cast { dst, src } => rename_unary_op(dst, src, ctx, defined_vars, reg_names, |d, s| SSAOp::Cast {
             dst: d,
             src: s,
         }),
 
         Extract { dst, src, position } => {
-            let src_ssa = read_varnode(src, ctx);
-            let pos_ssa = read_varnode(position, ctx);
-            let dst_name = varnode_to_name(dst);
+            let src_ssa = read_varnode(src, ctx, reg_names);
+            let pos_ssa = read_varnode(position, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::Extract {
@@ -856,10 +881,10 @@ fn rename_op(op: &r2il::R2ILOp, ctx: &mut RenameContext, defined_vars: &mut Vec<
             value,
             position,
         } => {
-            let src_ssa = read_varnode(src, ctx);
-            let val_ssa = read_varnode(value, ctx);
-            let pos_ssa = read_varnode(position, ctx);
-            let dst_name = varnode_to_name(dst);
+            let src_ssa = read_varnode(src, ctx, reg_names);
+            let val_ssa = read_varnode(value, ctx, reg_names);
+            let pos_ssa = read_varnode(position, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
             let dst_ssa = ctx.write_var(&dst_name);
             defined_vars.push(dst_name);
             SSAOp::Insert {
@@ -879,14 +904,15 @@ fn rename_binary_op<F>(
     src2: &r2il::Varnode,
     ctx: &mut RenameContext,
     defined_vars: &mut Vec<String>,
+    reg_names: Option<&RegisterNameMap>,
     f: F,
 ) -> SSAOp
 where
     F: FnOnce(SSAVar, SSAVar, SSAVar) -> SSAOp,
 {
-    let src1_ssa = read_varnode(src1, ctx);
-    let src2_ssa = read_varnode(src2, ctx);
-    let dst_name = varnode_to_name(dst);
+    let src1_ssa = read_varnode(src1, ctx, reg_names);
+    let src2_ssa = read_varnode(src2, ctx, reg_names);
+    let dst_name = varnode_to_name(dst, reg_names);
     let dst_ssa = ctx.write_var(&dst_name);
     defined_vars.push(dst_name);
     f(dst_ssa, src1_ssa, src2_ssa)
@@ -898,20 +924,25 @@ fn rename_unary_op<F>(
     src: &r2il::Varnode,
     ctx: &mut RenameContext,
     defined_vars: &mut Vec<String>,
+    reg_names: Option<&RegisterNameMap>,
     f: F,
 ) -> SSAOp
 where
     F: FnOnce(SSAVar, SSAVar) -> SSAOp,
 {
-    let src_ssa = read_varnode(src, ctx);
-    let dst_name = varnode_to_name(dst);
+    let src_ssa = read_varnode(src, ctx, reg_names);
+    let dst_name = varnode_to_name(dst, reg_names);
     let dst_ssa = ctx.write_var(&dst_name);
     defined_vars.push(dst_name);
     f(dst_ssa, src_ssa)
 }
 
 /// Read a varnode and return an SSAVar.
-fn read_varnode(vn: &r2il::Varnode, ctx: &RenameContext) -> SSAVar {
+fn read_varnode(
+    vn: &r2il::Varnode,
+    ctx: &RenameContext,
+    reg_names: Option<&RegisterNameMap>,
+) -> SSAVar {
     use r2il::SpaceId;
 
     match vn.space {
@@ -920,21 +951,9 @@ fn read_varnode(vn: &r2il::Varnode, ctx: &RenameContext) -> SSAVar {
             SSAVar::constant(vn.offset, vn.size)
         }
         _ => {
-            let name = varnode_to_name(vn);
+            let name = varnode_to_name(vn, reg_names);
             ctx.read_var(&name)
         }
-    }
-}
-
-/// Convert a varnode to a variable name.
-fn varnode_to_name(vn: &r2il::Varnode) -> String {
-    use r2il::SpaceId;
-    match vn.space {
-        SpaceId::Register => format!("reg:{:x}", vn.offset),
-        SpaceId::Unique => format!("tmp:{:x}", vn.offset),
-        SpaceId::Const => format!("const:{:x}", vn.offset),
-        SpaceId::Ram => format!("ram:{:x}", vn.offset),
-        SpaceId::Custom(id) => format!("space{}:{:x}", id, vn.offset),
     }
 }
 

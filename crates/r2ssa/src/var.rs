@@ -47,6 +47,12 @@ impl SSAVar {
 
     /// Get a display name like "RAX_0" or "RAX_1".
     pub fn display_name(&self) -> String {
+        if let Some(reg_name) = self.name.strip_prefix("reg:") {
+            if is_hex_name(reg_name) {
+                return format!("reg:{}_{}", reg_name, self.version);
+            }
+            return format!("{}_{}", reg_name.to_uppercase(), self.version);
+        }
         format!("{}_{}", self.name, self.version)
     }
 
@@ -70,6 +76,10 @@ impl std::fmt::Display for SSAVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.display_name())
     }
+}
+
+fn is_hex_name(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
