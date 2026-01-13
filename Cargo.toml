@@ -14,8 +14,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "LGPL-3.0-only"
-authors = ["radare2 contributors"]
-repository = "https://github.com/radareorg/r2sleigh"
+authors = ["radare2 contributors", "0verflowme"]
+repository = "https://github.com/0verflowme/r2sleigh"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -25,4 +25,10 @@ clap = { version = "4", features = ["derive"] }
 libsla = "1.2"
 sleigh-config = "1.0"
 sleigh-compiler = "2.0"
-libloading = "0.8"
+libloading = "0.9"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
