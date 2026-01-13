@@ -2616,7 +2616,7 @@ pub extern "C" fn r2sym_paths(
         (results, explorer)
     }));
 
-    let (results, mut explorer) = match explore_result {
+    let (results, explorer) = match explore_result {
         Ok(r) => r,
         Err(_) => {
             let error_msg = r#"[{"error": "symbolic execution failed (z3 context error)"}]"#;

@@ -554,14 +554,14 @@ fn parse_byte_ranges(pattern: &str) -> Vec<(u8, u8)> {
 fn bool_true() -> Bool {
     // Create true using z3 0.19 API (uses thread-local context)
     let one = BV::from_u64(1, 8);
-    one._eq(&one)
+    one.eq(&one)
 }
 
 fn bool_false() -> Bool {
     // Create false using z3 0.19 API (uses thread-local context)
     let zero = BV::from_u64(0, 8);
     let one = BV::from_u64(1, 8);
-    zero._eq(&one)
+    zero.eq(&one)
 }
 
 fn and_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {

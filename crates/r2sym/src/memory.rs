@@ -145,7 +145,7 @@ impl<'ctx> SymMemory<'ctx> {
             return (Vec::new(), true);
         }
 
-        let mut solver = Solver::new();
+        let solver = Solver::new();
         for constraint in constraints {
             solver.assert(constraint);
         }
