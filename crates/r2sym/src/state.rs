@@ -57,6 +57,8 @@ pub struct SymState<'ctx> {
 pub enum ExitStatus {
     /// Normal return.
     Return,
+    /// Program called exit() with the given code.
+    Exit(u64),
     /// Hit an error/exception.
     Error(String),
     /// Hit an unimplemented operation.
@@ -176,7 +178,8 @@ impl<'ctx> SymState<'ctx> {
 
     /// Read from memory.
     pub fn mem_read(&self, addr: &SymValue<'ctx>, size: u32) -> SymValue<'ctx> {
-        self.memory.read_with_constraints(addr, size, &self.constraints)
+        self.memory
+            .read_with_constraints(addr, size, &self.constraints)
     }
 
     /// Write to memory.
@@ -222,7 +225,12 @@ impl<'ctx> SymState<'ctx> {
                 .registers
                 .get(&key)
                 .cloned()
-                .or_else(|| other.registers.get(&key).map(|v| SymValue::unknown(v.bits())))
+                .or_else(|| {
+                    other
+                        .registers
+                        .get(&key)
+                        .map(|v| SymValue::unknown(v.bits()))
+                })
                 .unwrap_or_else(|| SymValue::unknown(1));
             let val_other = other
                 .registers
