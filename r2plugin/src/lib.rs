@@ -5,12 +5,14 @@
 //! bytes into r2il blocks with ESIL rendering.
 
 use r2il::{serialize, ArchSpec, R2ILBlock, R2ILOp};
+use r2ssa::TaintPolicy;
 use r2sleigh_lift::{build_arch_spec, op_to_esil, Disassembler};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
 use std::slice;
+use std::sync::{Mutex, OnceLock};
 
 /// Opaque context handle for C API.
 pub struct R2ILContext {
@@ -850,7 +852,7 @@ pub extern "C" fn r2il_block_regs_write(
     }
 }
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Memory access info for JSON output.
 #[derive(Serialize)]
@@ -1121,6 +1123,274 @@ fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
     }
 }
 
+// ============================================================================
+// Taint Analysis Functions
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct TaintConfig {
+    sources: Vec<String>,
+    sink_calls: bool,
+    sink_stores: bool,
+}
+
+impl Default for TaintConfig {
+    fn default() -> Self {
+        Self {
+            sources: Vec::new(),
+            sink_calls: true,
+            sink_stores: true,
+        }
+    }
+}
+
+fn taint_config() -> &'static Mutex<TaintConfig> {
+    static CONFIG: OnceLock<Mutex<TaintConfig>> = OnceLock::new();
+    CONFIG.get_or_init(|| Mutex::new(TaintConfig::default()))
+}
+
+/// Configure taint sources/sinks via JSON.
+/// If `json` is NULL or empty, returns the current configuration.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2taint_sources_sinks_json(json: *const c_char) -> *mut c_char {
+    if !json.is_null() {
+        let json_str = unsafe {
+            match CStr::from_ptr(json).to_str() {
+                Ok(s) => s.trim(),
+                Err(_) => return ptr::null_mut(),
+            }
+        };
+
+        if !json_str.is_empty() {
+            match serde_json::from_str::<TaintConfig>(json_str) {
+                Ok(new_cfg) => {
+                    if let Ok(mut cfg) = taint_config().lock() {
+                        *cfg = new_cfg;
+                    }
+                }
+                Err(_) => return ptr::null_mut(),
+            }
+        }
+    }
+
+    let cfg = match taint_config().lock() {
+        Ok(cfg) => cfg.clone(),
+        Err(_) => return ptr::null_mut(),
+    };
+
+    match serde_json::to_string_pretty(&cfg) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+#[derive(Serialize)]
+struct TaintSourceJson {
+    var: String,
+    labels: Vec<String>,
+    block: u64,
+    block_hex: String,
+}
+
+#[derive(Serialize)]
+struct TaintSinkJson {
+    block: u64,
+    block_hex: String,
+    op_idx: usize,
+    op: SSAOpInfo,
+}
+
+#[derive(Serialize)]
+struct TaintedVarJson {
+    var: String,
+    labels: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SinkHitJson {
+    block: u64,
+    block_hex: String,
+    op_idx: usize,
+    op: SSAOpInfo,
+    tainted_vars: Vec<TaintedVarJson>,
+}
+
+#[derive(Serialize)]
+struct TaintReportJson {
+    sources: Vec<TaintSourceJson>,
+    sinks: Vec<TaintSinkJson>,
+    sink_hits: Vec<SinkHitJson>,
+    tainted_vars: Vec<TaintedVarJson>,
+}
+
+fn labels_to_strings(labels: &r2ssa::taint::TaintSet) -> Vec<String> {
+    let mut out: Vec<String> = labels.iter().map(|l| l.id.clone()).collect();
+    out.sort();
+    out
+}
+
+/// Run taint analysis and return results as JSON.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2taint_function_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+    let ctx = unsafe { &*ctx };
+    let ctx = unsafe { &*ctx };
+    let ctx = unsafe { &*ctx };
+    let ctx = unsafe { &*ctx };
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx.arch.as_ref()) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
+    };
+
+    let cfg = match taint_config().lock() {
+        Ok(cfg) => cfg.clone(),
+        Err(_) => return ptr::null_mut(),
+    };
+
+    let mut policy = if cfg.sources.is_empty() {
+        r2ssa::DefaultTaintPolicy::all_inputs()
+    } else {
+        r2ssa::DefaultTaintPolicy::new()
+    };
+    policy = policy
+        .with_sink_calls(cfg.sink_calls)
+        .with_sink_stores(cfg.sink_stores);
+    for src in &cfg.sources {
+        policy = policy.with_source(src.clone());
+    }
+
+    let analysis = r2ssa::TaintAnalysis::new(&ssa_func, policy.clone());
+    let result = analysis.analyze();
+
+    // Collect sources
+    let mut source_map: std::collections::HashMap<String, TaintSourceJson> = std::collections::HashMap::new();
+    for block in ssa_func.blocks() {
+        for phi in &block.phis {
+            for (_, src) in &phi.sources {
+                if let Some(labels) = policy.is_source(src, block.addr) {
+                    let entry = source_map.entry(src.display_name()).or_insert(TaintSourceJson {
+                        var: src.display_name(),
+                        labels: Vec::new(),
+                        block: block.addr,
+                        block_hex: format!("0x{:x}", block.addr),
+                    });
+                    for label in labels {
+                        entry.labels.push(label.id);
+                    }
+                    entry.labels.sort();
+                    entry.labels.dedup();
+                }
+            }
+        }
+
+        for op in &block.ops {
+            for src in op.sources() {
+                if let Some(labels) = policy.is_source(src, block.addr) {
+                    let entry = source_map.entry(src.display_name()).or_insert(TaintSourceJson {
+                        var: src.display_name(),
+                        labels: Vec::new(),
+                        block: block.addr,
+                        block_hex: format!("0x{:x}", block.addr),
+                    });
+                    for label in labels {
+                        entry.labels.push(label.id);
+                    }
+                    entry.labels.sort();
+                    entry.labels.dedup();
+                }
+            }
+        }
+    }
+
+    let mut sources: Vec<TaintSourceJson> = source_map.into_values().collect();
+    sources.sort_by(|a, b| a.var.cmp(&b.var));
+
+    // Collect sinks
+    let mut sinks = Vec::new();
+    for block in ssa_func.blocks() {
+        for (op_idx, op) in block.ops.iter().enumerate() {
+            if policy.is_sink(op, block.addr) {
+                sinks.push(TaintSinkJson {
+                    block: block.addr,
+                    block_hex: format!("0x{:x}", block.addr),
+                    op_idx,
+                    op: ssa_op_to_info(op),
+                });
+            }
+        }
+    }
+
+    // Collect tainted vars
+    let mut tainted_vars = Vec::new();
+    for (name, labels) in result.var_taints.iter() {
+        if labels.is_empty() {
+            continue;
+        }
+        tainted_vars.push(TaintedVarJson {
+            var: name.clone(),
+            labels: labels_to_strings(labels),
+        });
+    }
+    tainted_vars.sort_by(|a, b| a.var.cmp(&b.var));
+
+    // Collect sink hits
+    let sink_hits = result
+        .sink_hits
+        .iter()
+        .map(|hit| SinkHitJson {
+            block: hit.block_addr,
+            block_hex: format!("0x{:x}", hit.block_addr),
+            op_idx: hit.op_idx,
+            op: ssa_op_to_info(&hit.op),
+            tainted_vars: hit
+                .tainted_vars
+                .iter()
+                .map(|(var, labels)| TaintedVarJson {
+                    var: var.display_name(),
+                    labels: labels_to_strings(labels),
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    let report = TaintReportJson {
+        sources,
+        sinks,
+        sink_hits,
+        tainted_vars,
+    };
+
+    match serde_json::to_string_pretty(&report) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 /// Convert block to SSA and return JSON representation.
 /// Caller must free the returned string with r2il_string_free().
 #[unsafe(no_mangle)]
@@ -1255,7 +1525,7 @@ pub extern "C" fn r2ssa_function_json(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -1353,7 +1623,7 @@ pub extern "C" fn r2ssa_defuse_function_json(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -1479,7 +1749,7 @@ pub extern "C" fn r2ssa_domtree_json(
     }
 
     // Build SSA function to get dominator tree
-    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -1732,7 +2002,7 @@ pub extern "C" fn r2sym_function(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -1860,7 +2130,7 @@ pub extern "C" fn r2sym_paths(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -2260,7 +2530,7 @@ pub extern "C" fn r2dec_function(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks(&r2il_blocks) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
         Some(f) => f.with_name(&func_name_str),
         None => return ptr::null_mut(),
     };
