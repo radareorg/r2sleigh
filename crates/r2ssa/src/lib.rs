@@ -21,6 +21,7 @@ pub mod cfg;
 pub mod defuse;
 pub mod domtree;
 pub mod function;
+mod naming;
 pub mod op;
 pub mod phi;
 pub mod rename;

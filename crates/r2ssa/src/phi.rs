@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::cfg::{BasicBlock, CFG};
 use crate::domtree::DomTree;
+use crate::naming::{varnode_to_name, RegisterNameMap};
 use crate::op::SSAOp;
 use crate::var::SSAVar;
 
@@ -112,12 +113,20 @@ pub fn collect_defs_from_block(block: &BasicBlock) -> HashSet<String> {
 /// - `defs`: Map from variable name to set of blocks where it's defined
 /// - `var_sizes`: Map from variable name to its size
 pub fn collect_defs_from_cfg(cfg: &CFG) -> (HashMap<String, HashSet<u64>>, HashMap<String, u32>) {
+    collect_defs_from_cfg_with_names(cfg, None)
+}
+
+/// Collect variable definitions from a CFG with optional register names.
+pub fn collect_defs_from_cfg_with_names(
+    cfg: &CFG,
+    reg_names: Option<&RegisterNameMap>,
+) -> (HashMap<String, HashSet<u64>>, HashMap<String, u32>) {
     let mut defs: HashMap<String, HashSet<u64>> = HashMap::new();
     let mut var_sizes: HashMap<String, u32> = HashMap::new();
 
     for block in cfg.blocks() {
         for op in &block.ops {
-            if let Some((name, size)) = get_op_output_with_size(op) {
+            if let Some((name, size)) = get_op_output_with_size(op, reg_names) {
                 defs.entry(name.clone()).or_default().insert(block.addr);
                 var_sizes.insert(name, size);
             }
@@ -129,11 +138,14 @@ pub fn collect_defs_from_cfg(cfg: &CFG) -> (HashMap<String, HashSet<u64>>, HashM
 
 /// Get the output variable name from an r2il operation.
 fn get_op_output(op: &r2il::R2ILOp) -> Option<String> {
-    get_op_output_with_size(op).map(|(name, _)| name)
+    get_op_output_with_size(op, None).map(|(name, _)| name)
 }
 
 /// Get the output variable name and size from an r2il operation.
-fn get_op_output_with_size(op: &r2il::R2ILOp) -> Option<(String, u32)> {
+fn get_op_output_with_size(
+    op: &r2il::R2ILOp,
+    reg_names: Option<&RegisterNameMap>,
+) -> Option<(String, u32)> {
     use r2il::R2ILOp::*;
 
     let varnode = match op {
@@ -206,19 +218,7 @@ fn get_op_output_with_size(op: &r2il::R2ILOp) -> Option<(String, u32)> {
         _ => None,
     };
 
-    varnode.map(|vn| (varnode_to_name(vn), vn.size))
-}
-
-/// Convert a varnode to a variable name.
-fn varnode_to_name(vn: &r2il::Varnode) -> String {
-    use r2il::SpaceId;
-    match vn.space {
-        SpaceId::Register => format!("reg:{:x}", vn.offset),
-        SpaceId::Unique => format!("tmp:{:x}", vn.offset),
-        SpaceId::Const => format!("const:{:x}", vn.offset),
-        SpaceId::Ram => format!("ram:{:x}", vn.offset),
-        SpaceId::Custom(id) => format!("space{}:{:x}", id, vn.offset),
-    }
+    varnode.map(|vn| (varnode_to_name(vn, reg_names), vn.size))
 }
 
 /// Create SSA phi operations from phi placement info.
