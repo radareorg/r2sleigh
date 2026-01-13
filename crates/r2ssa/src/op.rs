@@ -555,7 +555,9 @@ impl std::fmt::Display for SSAOp {
             SSAOp::BoolOr { dst, a, b } => write!(f, "{} = {} || {}", dst, a, b),
             SSAOp::BoolXor { dst, a, b } => write!(f, "{} = {} ^^ {}", dst, a, b),
             SSAOp::Piece { dst, hi, lo } => write!(f, "{} = PIECE({}, {})", dst, hi, lo),
-            SSAOp::Subpiece { dst, src, offset } => write!(f, "{} = SUBPIECE({}, {})", dst, src, offset),
+            SSAOp::Subpiece { dst, src, offset } => {
+                write!(f, "{} = SUBPIECE({}, {})", dst, src, offset)
+            }
             SSAOp::PopCount { dst, src } => write!(f, "{} = POPCOUNT({})", dst, src),
             SSAOp::Lzcount { dst, src } => write!(f, "{} = LZCOUNT({})", dst, src),
             SSAOp::Branch { target } => write!(f, "BRANCH {}", target),
@@ -583,7 +585,11 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Float2Int { dst, src } => write!(f, "{} = FLOAT2INT({})", dst, src),
             SSAOp::FloatFloat { dst, src } => write!(f, "{} = FLOAT2FLOAT({})", dst, src),
             SSAOp::Trunc { dst, src } => write!(f, "{} = TRUNC({})", dst, src),
-            SSAOp::CallOther { output, userop, inputs } => {
+            SSAOp::CallOther {
+                output,
+                userop,
+                inputs,
+            } => {
                 if let Some(out) = output {
                     write!(f, "{} = ", out)?;
                 }
@@ -591,24 +597,47 @@ impl std::fmt::Display for SSAOp {
                 if !inputs.is_empty() {
                     write!(f, " [")?;
                     for (i, inp) in inputs.iter().enumerate() {
-                        if i > 0 { write!(f, ", ")?; }
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
                         write!(f, "{}", inp)?;
                     }
                     write!(f, "]")?;
                 }
                 Ok(())
-            },
+            }
             SSAOp::Nop => write!(f, "NOP"),
             SSAOp::Unimplemented => write!(f, "UNIMPLEMENTED"),
             SSAOp::CpuId { dst } => write!(f, "{} = CPUID", dst),
             SSAOp::Breakpoint => write!(f, "BREAKPOINT"),
-            SSAOp::PtrAdd { dst, base, index, element_size } => write!(f, "{} = PTRADD({}, {}, {})", dst, base, index, element_size),
-            SSAOp::PtrSub { dst, base, index, element_size } => write!(f, "{} = PTRSUB({}, {}, {})", dst, base, index, element_size),
-            SSAOp::SegmentOp { dst, segment, offset } => write!(f, "{} = SEGMENT({}, {})", dst, segment, offset),
+            SSAOp::PtrAdd {
+                dst,
+                base,
+                index,
+                element_size,
+            } => write!(f, "{} = PTRADD({}, {}, {})", dst, base, index, element_size),
+            SSAOp::PtrSub {
+                dst,
+                base,
+                index,
+                element_size,
+            } => write!(f, "{} = PTRSUB({}, {}, {})", dst, base, index, element_size),
+            SSAOp::SegmentOp {
+                dst,
+                segment,
+                offset,
+            } => write!(f, "{} = SEGMENT({}, {})", dst, segment, offset),
             SSAOp::New { dst, src } => write!(f, "{} = NEW({})", dst, src),
             SSAOp::Cast { dst, src } => write!(f, "{} = CAST({})", dst, src),
-            SSAOp::Extract { dst, src, position } => write!(f, "{} = EXTRACT({}, {})", dst, src, position),
-            SSAOp::Insert { dst, src, value, position } => write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position),
+            SSAOp::Extract { dst, src, position } => {
+                write!(f, "{} = EXTRACT({}, {})", dst, src, position)
+            }
+            SSAOp::Insert {
+                dst,
+                src,
+                value,
+                position,
+            } => write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position),
         }
     }
 }
@@ -678,10 +707,7 @@ mod tests {
     fn test_display_phi() {
         let op = SSAOp::Phi {
             dst: SSAVar::new("RAX", 2, 8),
-            sources: vec![
-                SSAVar::new("RAX", 0, 8),
-                SSAVar::new("RAX", 1, 8),
-            ],
+            sources: vec![SSAVar::new("RAX", 0, 8), SSAVar::new("RAX", 1, 8)],
         };
         assert_eq!(format!("{}", op), "RAX_2 = PHI(RAX_0, RAX_1)");
     }

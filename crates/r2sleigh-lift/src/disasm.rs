@@ -61,7 +61,9 @@ impl<'a> PcodeSource for DisasmInstructionWrapper<'a> {
 
 fn translate_err(e: translate::TranslateError) -> LiftError {
     match e {
-        translate::TranslateError::MissingOutput(op) => LiftError::Parse(format!("{} requires output", op)),
+        translate::TranslateError::MissingOutput(op) => {
+            LiftError::Parse(format!("{} requires output", op))
+        }
         translate::TranslateError::MissingInput(op, idx) => {
             LiftError::Parse(format!("{} requires input at index {}", op, idx))
         }
@@ -426,9 +428,9 @@ impl Disassembler {
             OpCode::Int(IntOp::Equal) => {
                 binary("INT_EQUAL", |dst, a, b| R2ILOp::IntEqual { dst, a, b })
             }
-            OpCode::Int(IntOp::NotEqual) => {
-                binary("INT_NOTEQUAL", |dst, a, b| R2ILOp::IntNotEqual { dst, a, b })
-            }
+            OpCode::Int(IntOp::NotEqual) => binary("INT_NOTEQUAL", |dst, a, b| {
+                R2ILOp::IntNotEqual { dst, a, b }
+            }),
             OpCode::Int(IntOp::LessThan(IntSign::Unsigned)) => {
                 binary("INT_LESS", |dst, a, b| R2ILOp::IntLess { dst, a, b })
             }
@@ -436,13 +438,20 @@ impl Disassembler {
                 binary("INT_SLESS", |dst, a, b| R2ILOp::IntSLess { dst, a, b })
             }
 
-
             OpCode::Int(IntOp::LessThanOrEqual(IntSign::Unsigned)) => {
-                binary("INT_LESSEQUAL", |dst, a, b| R2ILOp::IntLessEqual { dst, a, b })
+                binary("INT_LESSEQUAL", |dst, a, b| R2ILOp::IntLessEqual {
+                    dst,
+                    a,
+                    b,
+                })
             }
 
             OpCode::Int(IntOp::LessThanOrEqual(IntSign::Signed)) => {
-                binary("INT_SLESSEQUAL", |dst, a, b| R2ILOp::IntSLessEqual { dst, a, b })
+                binary("INT_SLESSEQUAL", |dst, a, b| R2ILOp::IntSLessEqual {
+                    dst,
+                    a,
+                    b,
+                })
             }
 
             // Extension operations
@@ -472,9 +481,7 @@ impl Disassembler {
                 binary("BOOL_AND", |dst, a, b| R2ILOp::BoolAnd { dst, a, b })
             }
 
-            OpCode::Bool(BoolOp::Or) => {
-                binary("BOOL_OR", |dst, a, b| R2ILOp::BoolOr { dst, a, b })
-            }
+            OpCode::Bool(BoolOp::Or) => binary("BOOL_OR", |dst, a, b| R2ILOp::BoolOr { dst, a, b }),
 
             OpCode::Bool(BoolOp::Xor) => {
                 binary("BOOL_XOR", |dst, a, b| R2ILOp::BoolXor { dst, a, b })
@@ -530,17 +537,17 @@ impl Disassembler {
                 binary("FLOAT_EQUAL", |dst, a, b| R2ILOp::FloatEqual { dst, a, b })
             }
 
-            OpCode::Float(FloatOp::NotEqual) => {
-                binary("FLOAT_NOTEQUAL", |dst, a, b| R2ILOp::FloatNotEqual { dst, a, b })
-            }
+            OpCode::Float(FloatOp::NotEqual) => binary("FLOAT_NOTEQUAL", |dst, a, b| {
+                R2ILOp::FloatNotEqual { dst, a, b }
+            }),
 
             OpCode::Float(FloatOp::LessThan) => {
                 binary("FLOAT_LESS", |dst, a, b| R2ILOp::FloatLess { dst, a, b })
             }
 
-            OpCode::Float(FloatOp::LessThanOrEqual) => {
-                binary("FLOAT_LESSEQUAL", |dst, a, b| R2ILOp::FloatLessEqual { dst, a, b })
-            }
+            OpCode::Float(FloatOp::LessThanOrEqual) => binary("FLOAT_LESSEQUAL", |dst, a, b| {
+                R2ILOp::FloatLessEqual { dst, a, b }
+            }),
 
             OpCode::Float(FloatOp::IsNaN) => {
                 unary("FLOAT_NAN", |dst, src| R2ILOp::FloatNaN { dst, src })
@@ -554,7 +561,9 @@ impl Disassembler {
                 unary("FLOAT_FLOAT", |dst, src| R2ILOp::FloatFloat { dst, src })
             }
 
-            OpCode::Float(FloatOp::Truncate) => unary("TRUNC", |dst, src| R2ILOp::Trunc { dst, src }),
+            OpCode::Float(FloatOp::Truncate) => {
+                unary("TRUNC", |dst, src| R2ILOp::Trunc { dst, src })
+            }
 
             OpCode::Float(FloatOp::Ceiling) => {
                 unary("FLOAT_CEIL", |dst, src| R2ILOp::FloatCeil { dst, src })
@@ -632,8 +641,6 @@ impl Disassembler {
             }
         }
     }
-
-
 }
 
 /// Simple byte loader for instruction bytes.
@@ -675,8 +682,6 @@ impl<'a> InstructionLoader for ByteLoader<'a> {
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

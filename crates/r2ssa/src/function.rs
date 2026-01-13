@@ -330,7 +330,13 @@ impl SSAFunction {
 
     /// Compute a backward slice starting from a phi node.
     pub fn backward_slice_from_phi(&self, block_addr: u64, phi_idx: usize) -> BackwardSlice {
-        backward_slice_from_op(self, SliceOpRef::Phi { block_addr, phi_idx })
+        backward_slice_from_op(
+            self,
+            SliceOpRef::Phi {
+                block_addr,
+                phi_idx,
+            },
+        )
     }
 
     /// Print the function in a human-readable format.

@@ -316,8 +316,6 @@ impl PcodeTranslator {
         }
     }
 
-
-
     /// Translate a single P-code operation to r2il.
     pub fn translate(&self, raw: &RawPcodeOp) -> Result<R2ILOp> {
         let opcode = PcodeOp::from_u32(raw.opcode).ok_or(PcodeError::UnknownOpcode(raw.opcode))?;
@@ -329,13 +327,9 @@ impl PcodeTranslator {
                 Ok(R2ILOp::Copy { dst, src })
             }
 
-            PcodeOp::Load => {
-                translate::translate_load(&self.wrap(raw)).map_err(translate_err)
-            }
+            PcodeOp::Load => translate::translate_load(&self.wrap(raw)).map_err(translate_err),
 
-            PcodeOp::Store => {
-                translate::translate_store(&self.wrap(raw)).map_err(translate_err)
-            }
+            PcodeOp::Store => translate::translate_store(&self.wrap(raw)).map_err(translate_err),
 
             PcodeOp::Branch => {
                 let target = self.require_input(raw, 0, "BRANCH")?;
@@ -588,13 +582,9 @@ impl PcodeTranslator {
                 Ok(R2ILOp::CpuId { dst })
             }
 
-            PcodeOp::PtrAdd => {
-                translate::translate_ptradd(&self.wrap(raw)).map_err(translate_err)
-            }
+            PcodeOp::PtrAdd => translate::translate_ptradd(&self.wrap(raw)).map_err(translate_err),
 
-            PcodeOp::PtrSub => {
-                translate::translate_ptrsub(&self.wrap(raw)).map_err(translate_err)
-            }
+            PcodeOp::PtrSub => translate::translate_ptrsub(&self.wrap(raw)).map_err(translate_err),
 
             PcodeOp::SegmentOp => {
                 let dst = self.require_output(raw, "SEGMENTOP")?;

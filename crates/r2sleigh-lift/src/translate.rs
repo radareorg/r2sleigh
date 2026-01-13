@@ -54,9 +54,7 @@ pub type Result<T> = std::result::Result<T, TranslateError>;
 
 /// Helper to require an output varnode.
 pub fn require_output<S: PcodeSource>(source: &S, name: &'static str) -> Result<Varnode> {
-    source
-        .output()
-        .ok_or(TranslateError::MissingOutput(name))
+    source.output().ok_or(TranslateError::MissingOutput(name))
 }
 
 /// Helper to require an input varnode at the given index.
@@ -71,11 +69,7 @@ pub fn require_input<S: PcodeSource>(
 }
 
 /// Helper for unary operations (one input, one output).
-pub fn translate_unary<S: PcodeSource, F>(
-    source: &S,
-    name: &'static str,
-    f: F,
-) -> Result<R2ILOp>
+pub fn translate_unary<S: PcodeSource, F>(source: &S, name: &'static str, f: F) -> Result<R2ILOp>
 where
     F: FnOnce(Varnode, Varnode) -> R2ILOp,
 {
@@ -85,11 +79,7 @@ where
 }
 
 /// Helper for binary operations (two inputs, one output).
-pub fn translate_binary<S: PcodeSource, F>(
-    source: &S,
-    name: &'static str,
-    f: F,
-) -> Result<R2ILOp>
+pub fn translate_binary<S: PcodeSource, F>(source: &S, name: &'static str, f: F) -> Result<R2ILOp>
 where
     F: FnOnce(Varnode, Varnode, Varnode) -> R2ILOp,
 {
@@ -129,8 +119,8 @@ pub enum CommonOp {
     IntCarry = 21,
     IntSCarry = 22,
     IntSBorrow = 23,
-    Int2Comp = 24,      // Two's complement (unary minus)
-    IntNegate = 25,     // Bitwise NOT (confusing Ghidra naming)
+    Int2Comp = 24,  // Two's complement (unary minus)
+    IntNegate = 25, // Bitwise NOT (confusing Ghidra naming)
     IntXor = 26,
     IntAnd = 27,
     IntOr = 28,
@@ -314,8 +304,7 @@ mod tests {
             inputs: vec![Varnode::register(8, 8), Varnode::constant(1, 8)],
         };
 
-        let result =
-            translate_binary(&source, "TEST", |dst, a, b| R2ILOp::IntAdd { dst, a, b });
+        let result = translate_binary(&source, "TEST", |dst, a, b| R2ILOp::IntAdd { dst, a, b });
         assert!(result.is_ok());
     }
 
@@ -331,10 +320,7 @@ mod tests {
 
         let result = translate_cbranch(&source).unwrap();
         match result {
-            R2ILOp::CBranch {
-                target: t,
-                cond: c,
-            } => {
+            R2ILOp::CBranch { target: t, cond: c } => {
                 assert_eq!(t.offset, 0x1000);
                 assert!(c.is_register());
             }

@@ -86,9 +86,7 @@ impl SliceOpRef {
     /// Get the block address for this reference.
     pub fn block_addr(&self) -> u64 {
         match self {
-            SliceOpRef::Phi { block_addr, .. } | SliceOpRef::Op { block_addr, .. } => {
-                *block_addr
-            }
+            SliceOpRef::Phi { block_addr, .. } | SliceOpRef::Op { block_addr, .. } => *block_addr,
         }
     }
 }
@@ -247,7 +245,9 @@ fn collect_store_infos(func: &SSAFunction) -> Vec<StoreInfo> {
 
 fn const_value(var: &SSAVar) -> Option<u64> {
     let val_str = var.name.strip_prefix("const:")?;
-    let val = if let Some(hex) = val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X"))
+    let val = if let Some(hex) = val_str
+        .strip_prefix("0x")
+        .or_else(|| val_str.strip_prefix("0X"))
     {
         u64::from_str_radix(hex, 16).ok()?
     } else {
@@ -306,7 +306,10 @@ fn walk_backward(
 
         match def_loc {
             DefLocation::Phi(phi_idx) => {
-                if slice.add_op(SliceOpRef::Phi { block_addr, phi_idx }) {
+                if slice.add_op(SliceOpRef::Phi {
+                    block_addr,
+                    phi_idx,
+                }) {
                     if let Some(block) = func.get_block(block_addr) {
                         if let Some(phi) = block.phis.get(phi_idx) {
                             for (_, src) in &phi.sources {
@@ -324,13 +327,7 @@ fn walk_backward(
                                 worklist.push_back(src.clone());
                             }
                             if let SSAOp::Load { space, addr, .. } = op {
-                                add_aliasing_stores(
-                                    slice,
-                                    worklist,
-                                    stores,
-                                    space.as_str(),
-                                    addr,
-                                );
+                                add_aliasing_stores(slice, worklist, stores, space.as_str(), addr);
                             }
                         }
                     }
@@ -361,10 +358,16 @@ pub fn backward_slice_from_op(func: &SSAFunction, sink: SliceOpRef) -> BackwardS
     let mut visited_vars = HashSet::new();
 
     match sink {
-        SliceOpRef::Phi { block_addr, phi_idx } => {
+        SliceOpRef::Phi {
+            block_addr,
+            phi_idx,
+        } => {
             if let Some(block) = func.get_block(block_addr) {
                 if let Some(phi) = block.phis.get(phi_idx) {
-                    slice.add_op(SliceOpRef::Phi { block_addr, phi_idx });
+                    slice.add_op(SliceOpRef::Phi {
+                        block_addr,
+                        phi_idx,
+                    });
                     for (_, src) in &phi.sources {
                         worklist.push_back(src.clone());
                     }
@@ -378,10 +381,14 @@ pub fn backward_slice_from_op(func: &SSAFunction, sink: SliceOpRef) -> BackwardS
                     for src in op.sources() {
                         worklist.push_back(src.clone());
                     }
-                    if let SSAOp::Load { space, addr, .. }
-                    | SSAOp::Store { space, addr, .. } = op
-                    {
-                        add_aliasing_stores(&mut slice, &mut worklist, &stores, space.as_str(), addr);
+                    if let SSAOp::Load { space, addr, .. } | SSAOp::Store { space, addr, .. } = op {
+                        add_aliasing_stores(
+                            &mut slice,
+                            &mut worklist,
+                            &stores,
+                            space.as_str(),
+                            addr,
+                        );
                     }
                 }
             }
