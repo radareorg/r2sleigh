@@ -1,0 +1,2 @@
+[alias]
+install-plugin = "run -p r2sleigh-plugin --bin r2sleigh-plugin-install"

@@ -68,6 +68,10 @@ make RUST_TARGET=debug
 ### Plugin Installation
 
 ```bash
+# From the repo root
+cargo install-plugin
+
+# Or directly
 cd r2plugin
 make install
 ```
