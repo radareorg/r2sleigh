@@ -176,12 +176,18 @@ impl<'ctx> SymState<'ctx> {
 
     /// Read from memory.
     pub fn mem_read(&self, addr: &SymValue<'ctx>, size: u32) -> SymValue<'ctx> {
-        self.memory.read(addr, size)
+        self.memory.read_with_constraints(addr, size, &self.constraints)
     }
 
     /// Write to memory.
     pub fn mem_write(&mut self, addr: &SymValue<'ctx>, value: &SymValue<'ctx>, size: u32) {
-        self.memory.write(addr, value, size);
+        self.memory
+            .write_with_constraints(addr, value, size, &self.constraints);
+    }
+
+    /// Set the maximum number of symbolic address targets to enumerate.
+    pub fn set_max_symbolic_targets(&mut self, max: usize) {
+        self.memory.set_max_symbolic_targets(max);
     }
 
     /// Add a path constraint.
