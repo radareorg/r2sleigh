@@ -60,10 +60,11 @@ extern char *r2dec_function(const R2ILContext *ctx, const R2ILBlock **blocks, si
 /* CFG */
 extern char *r2cfg_function_ascii(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2cfg_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
-
+extern char *r2il_get_reg_profile(const R2ILContext *ctx);
 /* Per-architecture context (lazy init) */
 static R2ILContext *sleigh_ctx = NULL;
 static char *sleigh_arch = NULL;
+static char *sleigh_arch_override = NULL;
 
 /* Minimum bytes to pass to libsla (it reads ahead for variable-length instructions) */
 #define SLEIGH_MIN_BYTES 16
@@ -140,10 +141,16 @@ static R2ILContext *get_context(RAnal *anal) {
 
 	/* Determine sleigh arch string */
 	const char *sleigh_arch_str;
-	if (!strcmp (arch, "x86")) {
+	if (sleigh_arch_override) {
+		sleigh_arch_str = sleigh_arch_override;
+	} else if (!strcmp (arch, "x86")) {
 		sleigh_arch_str = (bits == 64) ? "x86-64" : "x86";
 	} else if (!strcmp (arch, "arm")) {
 		sleigh_arch_str = "arm";
+	} else if (!strcmp (arch, "mips")) {
+        /* Simple heuristic for MIPS (assuming default is 32be/le) */
+        /* Note: This is partial, better use manual override for complex variants */
+		sleigh_arch_str = "mips"; /* Placeholder - mapped often to general mips */
 	} else {
 		return NULL; /* unsupported arch */
 	}
@@ -162,9 +169,18 @@ static R2ILContext *get_context(RAnal *anal) {
 	sleigh_arch = NULL;
 
 	/* Initialize new context */
+	/* Initialize new context */
 	sleigh_ctx = r2il_arch_init (sleigh_arch_str);
 	if (sleigh_ctx && r2il_is_loaded (sleigh_ctx)) {
 		sleigh_arch = strdup (sleigh_arch_str);
+
+		/* Set register profile from Sleigh definitions */
+		char *profile = r2il_get_reg_profile (sleigh_ctx);
+		if (profile) {
+			r_anal_set_reg_profile (anal, profile);
+			r2il_string_free (profile);
+		}
+
 		return sleigh_ctx;
 	}
 
@@ -258,52 +274,88 @@ static bool sleigh_fini(RAnal *anal) {
 }
 
 static bool sleigh_cmd(RAnal *anal, const char *cmd) {
-	if (!r_str_startswith (cmd, "sleigh")) {
+	if (!r_str_startswith (cmd, "sla")) {
 		return false;
 	}
 
 	RCore *core = anal->coreb.core;
 	RCons *cons = core ? core->cons : NULL;
 
-	if (cmd[6] == '?') {
+	if (cmd[3] == '?') {
 		if (cons) {
-			r_cons_println (cons, "| a:sleigh        - Show r2sleigh status");
-			r_cons_println (cons, "| a:sleigh.info   - Show current architecture info");
-			r_cons_println (cons, "| a:sleigh.json   - Dump r2il ops as JSON for current instruction");
-			r_cons_println (cons, "| a:sleigh.regs   - Show registers read/written by instruction");
-			r_cons_println (cons, "| a:sleigh.mem    - Show memory accesses by instruction");
-			r_cons_println (cons, "| a:sleigh.vars   - Show all varnodes used by instruction");
-			r_cons_println (cons, "| a:sleigh.ssa    - Show SSA form of instruction");
-			r_cons_println (cons, "| a:sleigh.defuse - Show def-use analysis of instruction");
-			r_cons_println (cons, "| a:sleigh.ssa.func - Show function SSA with phi nodes");
-			r_cons_println (cons, "| a:sleigh.defuse.func - Show function-wide def-use analysis");
-			r_cons_println (cons, "| a:sleigh.dom    - Show dominator tree for current function");
-			r_cons_println (cons, "| a:sleigh.sym    - Symbolic execution summary for current function");
-			r_cons_println (cons, "| a:sleigh.sym.paths - Explore paths in current function");
-			r_cons_println (cons, "| a:sleigh.taint  - Taint analysis for current function");
-			r_cons_println (cons, "| a:sleigh.dec    - Decompile current function to C");
-			r_cons_println (cons, "| a:sleigh.cfg    - Show ASCII CFG for current function");
-			r_cons_println (cons, "| a:sleigh.cfg.json - Show CFG as JSON for current function");
+			r_cons_println (cons, "| a:sla        - Show r2sleigh status");
+			r_cons_println (cons, "| a:sla.info   - Show current architecture info");
+			r_cons_println (cons, "| a:sla.arch [name] - Get/Set Sleigh architecture manually");
+			r_cons_println (cons, "| a:sla.json   - Dump r2il ops as JSON for current instruction");
+			r_cons_println (cons, "| a:sla.regs   - Show registers read/written by instruction");
+			r_cons_println (cons, "| a:sla.mem    - Show memory accesses by instruction");
+			r_cons_println (cons, "| a:sla.vars   - Show all varnodes used by instruction");
+			r_cons_println (cons, "| a:sla.ssa    - Show SSA form of instruction");
+			r_cons_println (cons, "| a:sla.defuse - Show def-use analysis of instruction");
+			r_cons_println (cons, "| a:sla.ssa.func - Show function SSA with phi nodes");
+			r_cons_println (cons, "| a:sla.defuse.func - Show function-wide def-use analysis");
+			r_cons_println (cons, "| a:sla.dom    - Show dominator tree for current function");
+			r_cons_println (cons, "| a:sla.sym    - Symbolic execution summary for current function");
+			r_cons_println (cons, "| a:sla.sym.paths - Explore paths in current function");
+			r_cons_println (cons, "| a:sla.taint  - Taint analysis for current function");
+			r_cons_println (cons, "| a:sla.dec    - Decompile current function to C");
+			r_cons_println (cons, "| a:sla.cfg    - Show ASCII CFG for current function");
+			r_cons_println (cons, "| a:sla.cfg.json - Show CFG as JSON for current function");
 		}
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh") || !strcmp (cmd, "sleigh.info")) {
+	if (!strncmp (cmd, "sla.arch", 8)) {
+		const char *arg = cmd + 8;
+		if (*arg == ' ') {
+			arg++; // skip space
+			while (*arg == ' ') arg++;
+			if (*arg) {
+				/* Set override */
+				free (sleigh_arch_override);
+				sleigh_arch_override = strdup (arg);
+				/* Force context reload on next use */
+				if (sleigh_ctx) {
+					r2il_free (sleigh_ctx);
+					sleigh_ctx = NULL;
+				}
+				free (sleigh_arch);
+				sleigh_arch = NULL;
+				if (cons) {
+					r_cons_printf (cons, "r2sleigh: architecture set to '%s' (reload deferred)\n", sleigh_arch_override);
+				}
+			}
+		} else {
+			/* Get current */
+			R2ILContext *ctx = get_context (anal);
+			const char *name = ctx ? r2il_arch_name (ctx) : NULL;
+			if (cons) {
+				if (name) {
+					r_cons_printf (cons, "%s\n", name);
+				} else {
+					r_cons_println (cons, "none");
+				}
+			}
+		}
+		return true;
+	}
+
+	if (!strcmp (cmd, "sla") || !strcmp (cmd, "sla.info")) {
 		R2ILContext *ctx = get_context (anal);
 		if (ctx) {
 			const char *name = r2il_arch_name (ctx);
 			if (cons) {
-				r_cons_printf (cons, "r2sleigh: loaded architecture '%s'\n", name ? name : "unknown");
+				r_cons_printf (cons, "sla: loaded architecture '%s'\n", name ? name : "unknown");
 			}
 		} else {
 			if (cons) {
-				r_cons_println (cons, "r2sleigh: no architecture loaded (unsupported or init failed)");
+				r_cons_println (cons, "sla: no architecture loaded (unsupported or init failed)");
 			}
 		}
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.json")) {
+	if (!strcmp (cmd, "sla.json")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -345,7 +397,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.regs")) {
+	if (!strcmp (cmd, "sla.regs")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -380,7 +432,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.mem")) {
+	if (!strcmp (cmd, "sla.mem")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -410,7 +462,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.vars")) {
+	if (!strcmp (cmd, "sla.vars")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -440,7 +492,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.ssa")) {
+	if (!strcmp (cmd, "sla.ssa")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -470,7 +522,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.defuse")) {
+	if (!strcmp (cmd, "sla.defuse")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -502,7 +554,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 	/* ========== Function-level SSA commands ========== */
 
-	if (!strcmp (cmd, "sleigh.ssa.func")) {
+	if (!strcmp (cmd, "sla.ssa.func")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -535,7 +587,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.defuse.func")) {
+	if (!strcmp (cmd, "sla.defuse.func")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -568,7 +620,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.dom")) {
+	if (!strcmp (cmd, "sla.dom")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -603,7 +655,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 	/* ========== Function-level commands ========== */
 
-	if (!strcmp (cmd, "sleigh.sym") || !strcmp (cmd, "sleigh.sym.paths")) {
+	if (!strcmp (cmd, "sla.sym") || !strcmp (cmd, "sla.sym.paths")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -626,7 +678,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		/* Call symbolic execution */
 		char *result;
-		if (!strcmp (cmd, "sleigh.sym.paths")) {
+		if (!strcmp (cmd, "sla.sym.paths")) {
 			result = r2sym_paths (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
 		} else {
 			result = r2sym_function (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
@@ -641,7 +693,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.taint")) {
+	if (!strcmp (cmd, "sla.taint")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -673,7 +725,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.dec")) {
+	if (!strcmp (cmd, "sla.dec")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -706,7 +758,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	if (!strcmp (cmd, "sleigh.cfg") || !strcmp (cmd, "sleigh.cfg.json")) {
+	if (!strcmp (cmd, "sla.cfg") || !strcmp (cmd, "sla.cfg.json")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
@@ -729,7 +781,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		/* Generate CFG */
 		char *result;
-		if (!strcmp (cmd, "sleigh.cfg.json")) {
+		if (!strcmp (cmd, "sla.cfg.json")) {
 			result = r2cfg_function_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
 		} else {
 			result = r2cfg_function_ascii (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
@@ -744,13 +796,13 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		return true;
 	}
 
-	R_LOG_ERROR ("Unknown subcommand. See 'a:sleigh?' for help");
+	R_LOG_ERROR ("Unknown subcommand. See 'a:sla?' for help");
 	return true;
 }
 
 RAnalPlugin r_anal_plugin_sleigh = {
 	.meta = {
-		.name = "sleigh",
+		.name = "sla",
 		.desc = "Sleigh-based analysis via r2sleigh (P-code to ESIL)",
 		.license = "LGPL3",
 		.author = "r2sleigh project",

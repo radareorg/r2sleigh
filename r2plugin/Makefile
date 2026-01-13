@@ -29,7 +29,7 @@ R2_PLUGIN_DIR := $(shell r2 -H R2_USER_PLUGINS 2>/dev/null || echo "$(HOME)/.loc
 # Compiler settings
 CC ?= gcc
 CFLAGS = -Wall -Wextra -fPIC -shared $(R2_CFLAGS)
-LDFLAGS = $(R2_LDFLAGS) -L$(RUST_BUILD_DIR) -lr2sleigh_plugin $(LDFLAGS_OS)
+LDFLAGS = $(R2_LDFLAGS) -L$(RUST_BUILD_DIR) -lr2sleigh_plugin $(LDFLAGS_OS) -lstdc++
 
 # Output
 PLUGIN_SO = $(PLUGIN_NAME).$(PLUGIN_EXT)

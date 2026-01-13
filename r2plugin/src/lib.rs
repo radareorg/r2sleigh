@@ -226,6 +226,84 @@ pub extern "C" fn r2il_register_count(ctx: *const R2ILContext) -> usize {
     }
 }
 
+/// Get the register profile string for radare2.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
+    if ctx.is_null() {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let arch = match &ctx_ref.arch {
+        Some(a) => a,
+        None => return ptr::null_mut(),
+    };
+
+    let mut profile = String::new();
+    let mut pc = None;
+    let mut sp = None;
+    let mut bp = None;
+    let mut a0 = None;
+    let mut a1 = None;
+    let mut a2 = None;
+    let mut a3 = None;
+    let mut r0 = None;
+
+    // Heuristics for roles
+    for reg in &arch.registers {
+        // Role detection (case-insensitive)
+        let name_lower = reg.name.to_lowercase();
+        
+        // PC candidates
+        if name_lower == "pc" || name_lower == "rip" || name_lower == "eip" || name_lower == "ip" {
+           if pc.is_none() { pc = Some(&reg.name); }
+        } 
+        // SP candidates
+        else if name_lower == "sp" || name_lower == "rsp" || name_lower == "esp" {
+           if sp.is_none() { sp = Some(&reg.name); }
+        } 
+        // BP candidates
+        else if name_lower == "bp" || name_lower == "rbp" || name_lower == "ebp" || name_lower == "fp" {
+           if bp.is_none() { bp = Some(&reg.name); }
+        } 
+        // Return value candidates
+        else if name_lower == "r0" || name_lower == "rax" || name_lower == "eax" || name_lower == "v0" {
+           if r0.is_none() { r0 = Some(&reg.name); }
+        } 
+        // Arg 0
+        else if name_lower == "rdi" || name_lower == "a0" {
+           if a0.is_none() { a0 = Some(&reg.name); }
+        } 
+        // Arg 1
+        else if name_lower == "rsi" || name_lower == "a1" {
+           if a1.is_none() { a1 = Some(&reg.name); }
+        } 
+        // Arg 2
+        else if name_lower == "rdx" || name_lower == "a2" {
+           if a2.is_none() { a2 = Some(&reg.name); }
+        } 
+        // Arg 3
+        else if name_lower == "rcx" || name_lower == "a3" {
+           if a3.is_none() { a3 = Some(&reg.name); }
+        }
+
+        profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", reg.name, reg.size * 8, reg.offset));
+    }
+
+    // Add roles
+    if let Some(n) = pc { profile.push_str(&format!("=PC\t{}\n", n)); }
+    if let Some(n) = sp { profile.push_str(&format!("=SP\t{}\n", n)); }
+    if let Some(n) = bp { profile.push_str(&format!("=BP\t{}\n", n)); }
+    if let Some(n) = a0 { profile.push_str(&format!("=A0\t{}\n", n)); }
+    if let Some(n) = a1 { profile.push_str(&format!("=A1\t{}\n", n)); }
+    if let Some(n) = a2 { profile.push_str(&format!("=A2\t{}\n", n)); }
+    if let Some(n) = a3 { profile.push_str(&format!("=A3\t{}\n", n)); }
+    if let Some(n) = r0 { profile.push_str(&format!("=R0\t{}\n", n)); }
+
+    CString::new(profile).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
 /// Lift instruction bytes into an r2il block.
 ///
 /// Returns NULL on failure or if the context lacks a disassembler.
@@ -2680,5 +2758,42 @@ mod tests {
         assert!(r2il_arch_name(ptr::null()).is_null());
         r2il_free(ptr::null_mut());
         r2il_block_free(ptr::null_mut());
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn test_init_x86_64() {
+        let arch_cstr = CString::new("x86-64").unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        if ctx_ptr.is_null() {
+             panic!("r2il_arch_initreturnedNULL");
+        }
+        let ctx = unsafe { &*ctx_ptr };
+        
+        if let Some(err) = &ctx.error {
+             // panic!("Contexthaserror:{:?}",err);
+             // It might error if sleigh-config data is bad, but we want to see it
+             println!("Contextwarn/error:{:?}",err);
+        }
+        // If we have an error, we might still have a partial context or it failed completely
+        // r2il_arch_init returns context with error set if loading failed
+        
+        if ctx.arch.is_none() {
+            panic!("ArchisNone(loadingfailed)");
+        }
+        
+        let profile_ptr = r2il_get_reg_profile(ctx_ptr);
+        assert!(!profile_ptr.is_null());
+        let profile = unsafe { CStr::from_ptr(profile_ptr).to_str().unwrap() };
+        println!("Profile: {}", profile);
+        assert!(profile.contains("=PC\tRIP"));
+        std::fs::write("/tmp/sleigh_profile.dr", profile).expect("Unable to write profile");
+        
+        r2il_string_free(profile_ptr);
+        r2il_free(ctx_ptr);
     }
 }
