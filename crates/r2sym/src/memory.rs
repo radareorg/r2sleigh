@@ -4,6 +4,7 @@
 //! concrete and symbolic addresses and values.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use z3::ast::{Bool, BV};
 use z3::{Context, SatResult, Solver};
@@ -57,6 +58,32 @@ impl<'ctx> SymMemory<'ctx> {
     /// Set the maximum number of symbolic targets to enumerate.
     pub fn set_max_symbolic_targets(&mut self, max: usize) {
         self.max_symbolic_targets = max;
+    }
+
+    pub(crate) fn merge_addrs(&self) -> Vec<u64> {
+        let mut addrs = HashSet::new();
+        addrs.extend(self.concrete.keys().copied());
+        for (addr, _value, size) in &self.symbolic_writes {
+            if let Some(base) = addr.as_concrete() {
+                for offset in 0..*size {
+                    addrs.insert(base.wrapping_add(offset as u64));
+                }
+            }
+        }
+        addrs.into_iter().collect()
+    }
+
+    pub(crate) fn symbolic_writes(&self) -> &[(SymValue<'ctx>, SymValue<'ctx>, u32)] {
+        &self.symbolic_writes
+    }
+
+    pub(crate) fn push_symbolic_write(
+        &mut self,
+        addr: SymValue<'ctx>,
+        value: SymValue<'ctx>,
+        size: u32,
+    ) {
+        self.symbolic_writes.push((addr, value, size));
     }
 
     /// Read a value from memory.

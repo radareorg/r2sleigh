@@ -12,6 +12,7 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Opaque context handle for C API.
@@ -1955,6 +1956,12 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
 
 use z3::{Config, Context};
 
+static MERGE_STATES: AtomicBool = AtomicBool::new(false);
+
+fn merge_states_enabled() -> bool {
+    MERGE_STATES.load(Ordering::Relaxed)
+}
+
 /// Opaque symbolic state handle for C API.
 /// Each context owns its own Z3 context for thread safety.
 pub struct R2SymContext {
@@ -2032,6 +2039,22 @@ pub extern "C" fn r2sym_available() -> i32 {
     1
 }
 
+/// Get whether state merging is enabled for symbolic execution.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_merge_is_enabled() -> i32 {
+    if merge_states_enabled() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Enable or disable state merging for symbolic execution.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_merge_set_enabled(enabled: i32) {
+    MERGE_STATES.store(enabled != 0, Ordering::Relaxed);
+}
+
 /// Symbolic execution summary for JSON output.
 #[derive(Serialize)]
 struct SymExecSummary {
@@ -2090,6 +2113,7 @@ pub extern "C" fn r2sym_function(
     let config = r2sym::ExploreConfig {
         max_states: 100,
         max_depth: 50,
+        merge_states: merge_states_enabled(),
         timeout: Some(std::time::Duration::from_secs(5)),
         ..Default::default()
     };
@@ -2218,6 +2242,7 @@ pub extern "C" fn r2sym_paths(
     let config = r2sym::ExploreConfig {
         max_states: 100,
         max_depth: 50,
+        merge_states: merge_states_enabled(),
         timeout: Some(std::time::Duration::from_secs(5)),
         ..Default::default()
     };

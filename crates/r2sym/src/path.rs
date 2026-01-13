@@ -270,6 +270,11 @@ impl<'ctx> PathExplorer<'ctx> {
         worklist.push_back(initial_state);
 
         while let Some(mut state) = self.next_state(&mut worklist) {
+            if self.config.merge_states {
+                if let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
+                    state = state.merge_with(&other);
+                }
+            }
             // Check timeout
             if let Some(timeout) = self.config.timeout {
                 if start_time.elapsed() > timeout {
@@ -399,6 +404,11 @@ impl<'ctx> PathExplorer<'ctx> {
         worklist.push_back(initial_state);
 
         while let Some(mut state) = self.next_state(&mut worklist) {
+            if self.config.merge_states {
+                if let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
+                    state = state.merge_with(&other);
+                }
+            }
             // Check timeout
             if let Some(timeout) = self.config.timeout {
                 if start_time.elapsed() > timeout {
@@ -471,6 +481,11 @@ impl<'ctx> PathExplorer<'ctx> {
         worklist.push_back(initial_state);
 
         while let Some(mut state) = self.next_state(&mut worklist) {
+            if self.config.merge_states {
+                if let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
+                    state = state.merge_with(&other);
+                }
+            }
             // Check timeout
             if let Some(timeout) = self.config.timeout {
                 if start_time.elapsed() > timeout {
@@ -536,6 +551,19 @@ impl<'ctx> PathExplorer<'ctx> {
 
         None
     }
+}
+
+fn take_merge_candidate<'ctx>(
+    worklist: &mut VecDeque<SymState<'ctx>>,
+    pc: u64,
+) -> Option<SymState<'ctx>> {
+    let len = worklist.len();
+    for idx in 0..len {
+        if worklist[idx].pc == pc {
+            return worklist.remove(idx);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

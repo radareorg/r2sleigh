@@ -53,6 +53,8 @@ extern char *r2taint_sources_sinks_json(const char *json);
 /* Symbolic execution */
 extern char *r2sym_function(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long entry_addr);
 extern char *r2sym_paths(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long entry_addr);
+extern int r2sym_merge_is_enabled(void);
+extern void r2sym_merge_set_enabled(int enabled);
 
 /* Decompiler */
 extern char *r2dec_function(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, const char *func_name);
@@ -297,6 +299,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.dom    - Show dominator tree for current function");
 			r_cons_println (cons, "| a:sla.sym    - Symbolic execution summary for current function");
 			r_cons_println (cons, "| a:sla.sym.paths - Explore paths in current function");
+			r_cons_println (cons, "| a:sla.sym.merge [on|off] - Toggle symbolic state merging");
 			r_cons_println (cons, "| a:sla.taint  - Taint analysis for current function");
 			r_cons_println (cons, "| a:sla.dec    - Decompile current function to C");
 			r_cons_println (cons, "| a:sla.cfg    - Show ASCII CFG for current function");
@@ -654,6 +657,35 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 	}
 
 	/* ========== Function-level commands ========== */
+
+	if (!strncmp (cmd, "sla.sym.merge", 13)) {
+		const char *arg = cmd + 13;
+		if (*arg == ' ') {
+			arg++;
+			while (*arg == ' ') {
+				arg++;
+			}
+		}
+
+		if (*arg) {
+			if (!strcmp (arg, "on") || !strcmp (arg, "1") || !strcmp (arg, "true")) {
+				r2sym_merge_set_enabled (1);
+			} else if (!strcmp (arg, "off") || !strcmp (arg, "0") || !strcmp (arg, "false")) {
+				r2sym_merge_set_enabled (0);
+			} else if (cons) {
+				r_cons_println (cons, "Usage: a:sla.sym.merge [on|off]");
+				return true;
+			}
+		} else {
+			int enabled = r2sym_merge_is_enabled ();
+			r2sym_merge_set_enabled (!enabled);
+		}
+
+		if (cons) {
+			r_cons_printf (cons, "sym merge: %s\n", r2sym_merge_is_enabled () ? "on" : "off");
+		}
+		return true;
+	}
 
 	if (!strcmp (cmd, "sla.sym") || !strcmp (cmd, "sla.sym.paths")) {
 		R2ILContext *ctx = get_context (anal);

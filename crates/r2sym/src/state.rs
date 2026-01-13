@@ -3,7 +3,7 @@
 //! This module provides the `SymState` type which represents the state
 //! of the program during symbolic execution.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use z3::ast::{Bool, BV};
 use z3::Context;
@@ -188,6 +188,98 @@ impl<'ctx> SymState<'ctx> {
     /// Set the maximum number of symbolic address targets to enumerate.
     pub fn set_max_symbolic_targets(&mut self, max: usize) {
         self.memory.set_max_symbolic_targets(max);
+    }
+
+    /// Compute the path condition (AND of all constraints).
+    pub fn path_condition(&self) -> Bool {
+        and_all(self.ctx, &self.constraints)
+    }
+
+    /// Merge this state with another state at the same program counter.
+    pub fn merge_with(&self, other: &SymState<'ctx>) -> Self {
+        let cond_self = self.path_condition();
+        let cond_other = other.path_condition();
+        let mut merged = self.fork();
+
+        merged.pc = self.pc;
+        merged.prev_pc = if self.prev_pc == other.prev_pc {
+            self.prev_pc
+        } else {
+            None
+        };
+        merged.active = self.active && other.active;
+        merged.exit_status = None;
+        merged.depth = self.depth.max(other.depth);
+        merged.constraints = vec![cond_self | cond_other.clone()];
+
+        let mut keys = HashSet::new();
+        keys.extend(self.registers.keys().cloned());
+        keys.extend(other.registers.keys().cloned());
+
+        let mut registers = HashMap::with_capacity(keys.len());
+        for key in keys {
+            let val_self = self
+                .registers
+                .get(&key)
+                .cloned()
+                .or_else(|| other.registers.get(&key).map(|v| SymValue::unknown(v.bits())))
+                .unwrap_or_else(|| SymValue::unknown(1));
+            let val_other = other
+                .registers
+                .get(&key)
+                .cloned()
+                .or_else(|| Some(SymValue::unknown(val_self.bits())))
+                .unwrap();
+
+            let merged_val = merge_values(self.ctx, &cond_other, &val_self, &val_other);
+            registers.insert(key, merged_val);
+        }
+        merged.registers = registers;
+
+        let mut memory = self.memory.fork();
+        let mut addrs = HashSet::new();
+        addrs.extend(self.memory.merge_addrs());
+        addrs.extend(other.memory.merge_addrs());
+        for addr in addrs {
+            let addr_val = SymValue::concrete(addr, 64);
+            let val_self = self
+                .memory
+                .read_with_constraints(&addr_val, 1, &self.constraints);
+            let val_other = other
+                .memory
+                .read_with_constraints(&addr_val, 1, &other.constraints);
+            let merged_val = merge_values(self.ctx, &cond_other, &val_self, &val_other);
+            memory.write(&addr_val, &merged_val, 1);
+        }
+
+        for (addr, value, size) in other.memory.symbolic_writes() {
+            if addr.as_concrete().is_none() {
+                memory.push_symbolic_write(addr.clone(), value.clone(), *size);
+            }
+        }
+
+        merged.memory = memory;
+
+        merged.symbolic_inputs = self.symbolic_inputs.clone();
+        for (name, value) in &other.symbolic_inputs {
+            merged
+                .symbolic_inputs
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+
+        merged.symbolic_memory = self.symbolic_memory.clone();
+        for region in &other.symbolic_memory {
+            let exists = merged
+                .symbolic_memory
+                .iter()
+                .any(|r| r.name == region.name && r.addr == region.addr && r.size == region.size);
+            if !exists {
+                merged.symbolic_memory.push(region.clone());
+            }
+        }
+
+        merged
     }
 
     /// Add a path constraint.
@@ -475,6 +567,31 @@ fn or_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {
     acc
 }
 
+fn merge_values<'ctx>(
+    ctx: &'ctx Context,
+    cond: &Bool,
+    base: &SymValue<'ctx>,
+    incoming: &SymValue<'ctx>,
+) -> SymValue<'ctx> {
+    let bits = base.bits().max(incoming.bits());
+    let taint = base.get_taint() | incoming.get_taint();
+    let base_bv = widen_value(ctx, base, bits);
+    let incoming_bv = widen_value(ctx, incoming, bits);
+    SymValue::symbolic_tainted(cond.ite(&incoming_bv, &base_bv), bits, taint)
+}
+
+fn widen_value<'ctx>(ctx: &'ctx Context, value: &SymValue<'ctx>, bits: u32) -> BV {
+    let bv = value.to_bv(ctx);
+    let value_bits = value.bits();
+    if value_bits == bits {
+        bv
+    } else if value_bits < bits {
+        bv.zero_ext(bits - value_bits)
+    } else {
+        bv.extract(bits - 1, 0)
+    }
+}
+
 impl<'ctx> std::fmt::Debug for SymState<'ctx> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SymState")
@@ -493,6 +610,8 @@ impl<'ctx> std::fmt::Debug for SymState<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use z3::ast::BV;
+    use z3::{SatResult, Solver};
 
     #[test]
     fn test_state_creation() {
@@ -580,5 +699,49 @@ mod tests {
         state.constrain_bytes(&sym, "[A-Z]");
 
         assert_eq!(state.num_constraints(), 2);
+    }
+
+    #[test]
+    fn test_merge_registers_with_constraints() {
+        let ctx = Context::thread_local();
+
+        let mut state_a = SymState::new(&ctx, 0x1000);
+        let x_a = SymValue::new_symbolic(&ctx, "x", 32);
+        state_a.set_register("x", x_a.clone());
+        state_a.add_constraint(x_a.to_bv(&ctx).eq(&BV::from_u64(0, 32)));
+        state_a.set_register("rax", SymValue::concrete(1, 64));
+
+        let mut state_b = SymState::new(&ctx, 0x1000);
+        let x_b = SymValue::new_symbolic(&ctx, "x", 32);
+        state_b.set_register("x", x_b.clone());
+        state_b.add_constraint(x_b.to_bv(&ctx).eq(&BV::from_u64(1, 32)));
+        state_b.set_register("rax", SymValue::concrete(2, 64));
+
+        let merged = state_a.merge_with(&state_b);
+        let merged_rax = merged.get_register("rax");
+
+        let solver = Solver::new();
+        solver.assert(&merged.path_condition());
+        solver.assert(&x_b.to_bv(&ctx).eq(&BV::from_u64(0, 32)));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+        let val = model
+            .eval(&merged_rax.to_bv(&ctx), true)
+            .unwrap()
+            .as_u64()
+            .unwrap();
+        assert_eq!(val, 1);
+
+        let solver = Solver::new();
+        solver.assert(&merged.path_condition());
+        solver.assert(&x_b.to_bv(&ctx).eq(&BV::from_u64(1, 32)));
+        assert_eq!(solver.check(), SatResult::Sat);
+        let model = solver.get_model().unwrap();
+        let val = model
+            .eval(&merged_rax.to_bv(&ctx), true)
+            .unwrap()
+            .as_u64()
+            .unwrap();
+        assert_eq!(val, 2);
     }
 }
