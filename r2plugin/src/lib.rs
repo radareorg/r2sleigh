@@ -1616,6 +1616,49 @@ struct SSAFunctionJson {
     blocks: Vec<SSABlockJson>,
 }
 
+fn build_ssa_function_json(ssa_func: &r2ssa::SSAFunction) -> SSAFunctionJson {
+    let mut json_blocks = Vec::new();
+    for &addr in ssa_func.block_addrs() {
+        if let Some(block) = ssa_func.get_block(addr) {
+            let phis: Vec<PhiNodeJson> = block
+                .phis
+                .iter()
+                .map(|phi| PhiNodeJson {
+                    dst: phi.dst.display_name(),
+                    sources: phi
+                        .sources
+                        .iter()
+                        .map(|(pred, var)| (format!("0x{:x}", pred), var.display_name()))
+                        .collect(),
+                })
+                .collect();
+
+            let ops: Vec<SSAOpInfo> = block.ops.iter().map(ssa_op_to_info).collect();
+
+            json_blocks.push(SSABlockJson {
+                addr,
+                addr_hex: format!("0x{:x}", addr),
+                size: block.size,
+                phis,
+                ops,
+            });
+        }
+    }
+
+    SSAFunctionJson {
+        name: ssa_func.name.clone(),
+        entry: ssa_func.entry,
+        entry_hex: format!("0x{:x}", ssa_func.entry),
+        num_blocks: ssa_func.num_blocks(),
+        blocks: json_blocks,
+    }
+}
+
+fn ssa_function_json_string(ssa_func: &r2ssa::SSAFunction) -> Option<String> {
+    let json = build_ssa_function_json(ssa_func);
+    serde_json::to_string_pretty(&json).ok()
+}
+
 /// Get function-level SSA as JSON (includes phi nodes).
 /// Caller must free the returned string with r2il_string_free().
 #[unsafe(no_mangle)]
@@ -1648,42 +1691,84 @@ pub extern "C" fn r2ssa_function_json(
         None => return ptr::null_mut(),
     };
 
-    // Build JSON representation
-    let mut json_blocks = Vec::new();
-    for &addr in ssa_func.block_addrs() {
-        if let Some(block) = ssa_func.get_block(addr) {
-            // Convert phi nodes
-            let phis: Vec<PhiNodeJson> = block.phis.iter().map(|phi| {
-                PhiNodeJson {
-                    dst: phi.dst.display_name(),
-                    sources: phi.sources.iter().map(|(pred, var)| {
-                        (format!("0x{:x}", pred), var.display_name())
-                    }).collect(),
-                }
-            }).collect();
+    let Some(json) = ssa_function_json_string(&ssa_func) else {
+        return ptr::null_mut();
+    };
 
-            // Convert ops
-            let ops: Vec<SSAOpInfo> = block.ops.iter().map(ssa_op_to_info).collect();
+    CString::new(json).map_or(ptr::null_mut(), |c| c.into_raw())
+}
 
-            json_blocks.push(SSABlockJson {
-                addr,
-                addr_hex: format!("0x{:x}", addr),
-                size: block.size,
-                phis,
-                ops,
-            });
+#[derive(Serialize)]
+struct SSAOptStatsJson {
+    iterations: usize,
+    constants_propagated: usize,
+    ops_simplified: usize,
+    copies_propagated: usize,
+    phis_simplified: usize,
+    cse_replacements: usize,
+    dce_removed_ops: usize,
+    dce_removed_phis: usize,
+}
+
+#[derive(Serialize)]
+struct SSAFunctionOptJson {
+    optimized: bool,
+    stats: SSAOptStatsJson,
+    function: SSAFunctionJson,
+}
+
+/// Get optimized function-level SSA as JSON (includes phi nodes).
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2ssa_function_opt_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
         }
     }
 
-    let json = SSAFunctionJson {
-        name: ssa_func.name.clone(),
-        entry: ssa_func.entry,
-        entry_hex: format!("0x{:x}", ssa_func.entry),
-        num_blocks: ssa_func.num_blocks(),
-        blocks: json_blocks,
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    let mut ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(
+        &r2il_blocks,
+        unsafe { (*ctx).arch.as_ref() },
+    ) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
     };
 
-    match serde_json::to_string_pretty(&json) {
+    let stats = ssa_func.optimize(&r2ssa::OptimizationConfig::default());
+    let function = build_ssa_function_json(&ssa_func);
+
+    let report = SSAFunctionOptJson {
+        optimized: true,
+        stats: SSAOptStatsJson {
+            iterations: stats.iterations,
+            constants_propagated: stats.constants_propagated,
+            ops_simplified: stats.ops_simplified,
+            copies_propagated: stats.copies_propagated,
+            phis_simplified: stats.phis_simplified,
+            cse_replacements: stats.cse_replacements,
+            dce_removed_ops: stats.dce_removed_ops,
+            dce_removed_phis: stats.dce_removed_phis,
+        },
+        function,
+    };
+
+    match serde_json::to_string_pretty(&report) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
     }

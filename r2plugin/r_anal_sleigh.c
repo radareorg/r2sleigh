@@ -46,6 +46,7 @@ extern char *r2il_block_defuse_json(const R2ILContext *ctx, const R2ILBlock *blo
 
 /* SSA analysis (function-level) */
 extern char *r2ssa_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+extern char *r2ssa_function_opt_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2ssa_defuse_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2ssa_domtree_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2ssa_backward_slice_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, const char *var_name);
@@ -299,6 +300,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.ssa    - Show SSA form of instruction");
 			r_cons_println (cons, "| a:sla.defuse - Show def-use analysis of instruction");
 			r_cons_println (cons, "| a:sla.ssa.func - Show function SSA with phi nodes");
+			r_cons_println (cons, "| a:sla.ssa.func.opt - Show optimized function SSA");
 			r_cons_println (cons, "| a:sla.defuse.func - Show function-wide def-use analysis");
 			r_cons_println (cons, "| a:sla.dom    - Show dominator tree for current function");
 			r_cons_println (cons, "| a:sla.slice <var> - Backward slice from variable (e.g. rax_3)");
@@ -585,6 +587,36 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		/* Get function SSA */
 		char *result = r2ssa_function_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sla.ssa.func.opt")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		char *result = r2ssa_function_opt_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
 
 		if (cons && result) {
 			r_cons_printf (cons, "%s\n", result);

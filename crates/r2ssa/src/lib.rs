@@ -23,6 +23,7 @@ pub mod domtree;
 pub mod function;
 mod naming;
 pub mod op;
+pub mod optimize;
 pub mod phi;
 pub mod rename;
 pub mod taint;
@@ -36,5 +37,6 @@ pub use defuse::{
 };
 pub use function::{PhiNode, SSABlock as FunctionSSABlock, SSAFunction};
 pub use op::SSAOp;
+pub use optimize::{optimize_function, OptimizationConfig, OptimizationStats};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use var::SSAVar;

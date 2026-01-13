@@ -142,6 +142,31 @@ mod function_ssa {
 }
 
 // ============================================================================
+// 3.1 Optimized SSA
+// ============================================================================
+
+mod ssa_opt {
+    use super::*;
+
+    const CHECK_SECRET_FUNC: &str = "dbg.check_secret";
+
+    #[test]
+    fn ssa_func_opt_includes_stats() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), CHECK_SECRET_FUNC, "a:sla.ssa.func.opt");
+        result.assert_ok();
+        assert!(
+            result.contains_any(&["\"optimized\"", "optimized"]),
+            "Optimized SSA should include optimized flag"
+        );
+        assert!(
+            result.contains_any(&["\"stats\"", "stats"]),
+            "Optimized SSA should include stats"
+        );
+    }
+}
+
+// ============================================================================
 // 4. Control Flow Graph
 // ============================================================================
 

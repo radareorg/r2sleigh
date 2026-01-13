@@ -165,6 +165,11 @@ impl SSAFunction {
         self.blocks.get(&addr)
     }
 
+    /// Get a mutable block by address.
+    pub fn get_block_mut(&mut self, addr: u64) -> Option<&mut SSABlock> {
+        self.blocks.get_mut(&addr)
+    }
+
     /// Get all blocks in reverse postorder.
     pub fn blocks(&self) -> impl Iterator<Item = &SSABlock> {
         self.block_order
@@ -337,6 +342,14 @@ impl SSAFunction {
                 phi_idx,
             },
         )
+    }
+
+    /// Run SSA optimizations on this function.
+    pub fn optimize(
+        &mut self,
+        config: &crate::optimize::OptimizationConfig,
+    ) -> crate::optimize::OptimizationStats {
+        crate::optimize::optimize_function(self, config)
     }
 
     /// Print the function in a human-readable format.
