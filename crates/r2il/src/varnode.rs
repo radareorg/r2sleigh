@@ -105,6 +105,21 @@ impl Default for Varnode {
     }
 }
 
+impl std::fmt::Display for Varnode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.space {
+            crate::space::SpaceId::Const => {
+                // For constants, show the value directly
+                write!(f, "0x{:x}:{}", self.offset, self.size)
+            }
+            _ => {
+                // For other spaces, show space:offset[size]
+                write!(f, "{}:0x{:x}[{}]", self.space, self.offset, self.size)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

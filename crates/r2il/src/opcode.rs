@@ -19,7 +19,7 @@ use crate::varnode::Varnode;
 /// - Control flow (Branch, CBranch, Call, Return)
 /// - Floating point (FloatAdd, FloatSub, etc.)
 /// - Special operations (Piece, Subpiece, etc.)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum R2ILOp {
     // ========== Data Movement ==========
     /// Copy src to dst: dst = src
@@ -537,6 +537,423 @@ impl R2ILOp {
             | R2ILOp::Insert { dst, .. } => Some(dst),
             R2ILOp::CallOther { output, .. } => output.as_ref(),
             _ => None,
+        }
+    }
+
+    /// Returns the output varnode mutably if this operation has one.
+    pub fn output_mut(&mut self) -> Option<&mut Varnode> {
+        match self {
+            R2ILOp::Copy { dst, .. }
+            | R2ILOp::Load { dst, .. }
+            | R2ILOp::IntAdd { dst, .. }
+            | R2ILOp::IntSub { dst, .. }
+            | R2ILOp::IntMult { dst, .. }
+            | R2ILOp::IntDiv { dst, .. }
+            | R2ILOp::IntSDiv { dst, .. }
+            | R2ILOp::IntRem { dst, .. }
+            | R2ILOp::IntSRem { dst, .. }
+            | R2ILOp::IntNegate { dst, .. }
+            | R2ILOp::IntCarry { dst, .. }
+            | R2ILOp::IntSCarry { dst, .. }
+            | R2ILOp::IntSBorrow { dst, .. }
+            | R2ILOp::IntAnd { dst, .. }
+            | R2ILOp::IntOr { dst, .. }
+            | R2ILOp::IntXor { dst, .. }
+            | R2ILOp::IntNot { dst, .. }
+            | R2ILOp::IntLeft { dst, .. }
+            | R2ILOp::IntRight { dst, .. }
+            | R2ILOp::IntSRight { dst, .. }
+            | R2ILOp::IntEqual { dst, .. }
+            | R2ILOp::IntNotEqual { dst, .. }
+            | R2ILOp::IntLess { dst, .. }
+            | R2ILOp::IntSLess { dst, .. }
+            | R2ILOp::IntLessEqual { dst, .. }
+            | R2ILOp::IntSLessEqual { dst, .. }
+            | R2ILOp::IntZExt { dst, .. }
+            | R2ILOp::IntSExt { dst, .. }
+            | R2ILOp::BoolNot { dst, .. }
+            | R2ILOp::BoolAnd { dst, .. }
+            | R2ILOp::BoolOr { dst, .. }
+            | R2ILOp::BoolXor { dst, .. }
+            | R2ILOp::Piece { dst, .. }
+            | R2ILOp::Subpiece { dst, .. }
+            | R2ILOp::PopCount { dst, .. }
+            | R2ILOp::Lzcount { dst, .. }
+            | R2ILOp::FloatAdd { dst, .. }
+            | R2ILOp::FloatSub { dst, .. }
+            | R2ILOp::FloatMult { dst, .. }
+            | R2ILOp::FloatDiv { dst, .. }
+            | R2ILOp::FloatNeg { dst, .. }
+            | R2ILOp::FloatAbs { dst, .. }
+            | R2ILOp::FloatSqrt { dst, .. }
+            | R2ILOp::FloatCeil { dst, .. }
+            | R2ILOp::FloatFloor { dst, .. }
+            | R2ILOp::FloatRound { dst, .. }
+            | R2ILOp::FloatNaN { dst, .. }
+            | R2ILOp::FloatEqual { dst, .. }
+            | R2ILOp::FloatNotEqual { dst, .. }
+            | R2ILOp::FloatLess { dst, .. }
+            | R2ILOp::FloatLessEqual { dst, .. }
+            | R2ILOp::Int2Float { dst, .. }
+            | R2ILOp::Float2Int { dst, .. }
+            | R2ILOp::FloatFloat { dst, .. }
+            | R2ILOp::Trunc { dst, .. }
+            | R2ILOp::CpuId { dst }
+            | R2ILOp::Multiequal { dst, .. }
+            | R2ILOp::Indirect { dst, .. }
+            | R2ILOp::PtrAdd { dst, .. }
+            | R2ILOp::PtrSub { dst, .. }
+            | R2ILOp::SegmentOp { dst, .. }
+            | R2ILOp::New { dst, .. }
+            | R2ILOp::Cast { dst, .. }
+            | R2ILOp::Extract { dst, .. }
+            | R2ILOp::Insert { dst, .. } => Some(dst),
+            R2ILOp::CallOther { output, .. } => output.as_mut(),
+            _ => None,
+        }
+    }
+
+    /// Returns the input varnodes for this operation.
+    ///
+    /// This is the symmetric counterpart to `output()`, enabling consumers
+    /// to iterate over all inputs without pattern matching on every variant.
+    pub fn inputs(&self) -> Vec<&Varnode> {
+        match self {
+            // Data movement
+            R2ILOp::Copy { src, .. } => vec![src],
+            R2ILOp::Load { addr, .. } => vec![addr],
+            R2ILOp::Store { addr, val, .. } => vec![addr, val],
+
+            // Binary integer operations
+            R2ILOp::IntAdd { a, b, .. }
+            | R2ILOp::IntSub { a, b, .. }
+            | R2ILOp::IntMult { a, b, .. }
+            | R2ILOp::IntDiv { a, b, .. }
+            | R2ILOp::IntSDiv { a, b, .. }
+            | R2ILOp::IntRem { a, b, .. }
+            | R2ILOp::IntSRem { a, b, .. }
+            | R2ILOp::IntCarry { a, b, .. }
+            | R2ILOp::IntSCarry { a, b, .. }
+            | R2ILOp::IntSBorrow { a, b, .. }
+            | R2ILOp::IntAnd { a, b, .. }
+            | R2ILOp::IntOr { a, b, .. }
+            | R2ILOp::IntXor { a, b, .. }
+            | R2ILOp::IntLeft { a, b, .. }
+            | R2ILOp::IntRight { a, b, .. }
+            | R2ILOp::IntSRight { a, b, .. }
+            | R2ILOp::IntEqual { a, b, .. }
+            | R2ILOp::IntNotEqual { a, b, .. }
+            | R2ILOp::IntLess { a, b, .. }
+            | R2ILOp::IntSLess { a, b, .. }
+            | R2ILOp::IntLessEqual { a, b, .. }
+            | R2ILOp::IntSLessEqual { a, b, .. } => vec![a, b],
+
+            // Unary integer operations
+            R2ILOp::IntNegate { src, .. }
+            | R2ILOp::IntNot { src, .. }
+            | R2ILOp::IntZExt { src, .. }
+            | R2ILOp::IntSExt { src, .. } => vec![src],
+
+            // Boolean operations
+            R2ILOp::BoolNot { src, .. } => vec![src],
+            R2ILOp::BoolAnd { a, b, .. }
+            | R2ILOp::BoolOr { a, b, .. }
+            | R2ILOp::BoolXor { a, b, .. } => vec![a, b],
+
+            // Bit manipulation
+            R2ILOp::Piece { hi, lo, .. } => vec![hi, lo],
+            R2ILOp::Subpiece { src, .. } => vec![src],
+            R2ILOp::PopCount { src, .. } | R2ILOp::Lzcount { src, .. } => vec![src],
+
+            // Control flow
+            R2ILOp::Branch { target } => vec![target],
+            R2ILOp::CBranch { target, cond } => vec![target, cond],
+            R2ILOp::BranchInd { target } => vec![target],
+            R2ILOp::Call { target } => vec![target],
+            R2ILOp::CallInd { target } => vec![target],
+            R2ILOp::Return { target } => vec![target],
+
+            // Binary float operations
+            R2ILOp::FloatAdd { a, b, .. }
+            | R2ILOp::FloatSub { a, b, .. }
+            | R2ILOp::FloatMult { a, b, .. }
+            | R2ILOp::FloatDiv { a, b, .. }
+            | R2ILOp::FloatEqual { a, b, .. }
+            | R2ILOp::FloatNotEqual { a, b, .. }
+            | R2ILOp::FloatLess { a, b, .. }
+            | R2ILOp::FloatLessEqual { a, b, .. } => vec![a, b],
+
+            // Unary float operations
+            R2ILOp::FloatNeg { src, .. }
+            | R2ILOp::FloatAbs { src, .. }
+            | R2ILOp::FloatSqrt { src, .. }
+            | R2ILOp::FloatCeil { src, .. }
+            | R2ILOp::FloatFloor { src, .. }
+            | R2ILOp::FloatRound { src, .. }
+            | R2ILOp::FloatNaN { src, .. }
+            | R2ILOp::Int2Float { src, .. }
+            | R2ILOp::Float2Int { src, .. }
+            | R2ILOp::FloatFloat { src, .. }
+            | R2ILOp::Trunc { src, .. } => vec![src],
+
+            // Special operations
+            R2ILOp::CallOther { inputs, .. } => inputs.iter().collect(),
+            R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint => vec![],
+            R2ILOp::CpuId { .. } => vec![],
+            R2ILOp::Multiequal { inputs, .. } => inputs.iter().collect(),
+            R2ILOp::Indirect { src, indirect, .. } => vec![src, indirect],
+            R2ILOp::PtrAdd { base, index, .. } | R2ILOp::PtrSub { base, index, .. } => {
+                vec![base, index]
+            }
+            R2ILOp::SegmentOp { segment, offset, .. } => vec![segment, offset],
+            R2ILOp::New { src, .. } | R2ILOp::Cast { src, .. } => vec![src],
+            R2ILOp::Extract { src, position, .. } => vec![src, position],
+            R2ILOp::Insert { src, value, position, .. } => vec![src, value, position],
+        }
+    }
+
+    /// Returns mutable references to the input varnodes for this operation.
+    ///
+    /// This enables transformation passes to modify operands in-place.
+    pub fn inputs_mut(&mut self) -> Vec<&mut Varnode> {
+        match self {
+            // Data movement
+            R2ILOp::Copy { src, .. } => vec![src],
+            R2ILOp::Load { addr, .. } => vec![addr],
+            R2ILOp::Store { addr, val, .. } => vec![addr, val],
+
+            // Binary integer operations
+            R2ILOp::IntAdd { a, b, .. }
+            | R2ILOp::IntSub { a, b, .. }
+            | R2ILOp::IntMult { a, b, .. }
+            | R2ILOp::IntDiv { a, b, .. }
+            | R2ILOp::IntSDiv { a, b, .. }
+            | R2ILOp::IntRem { a, b, .. }
+            | R2ILOp::IntSRem { a, b, .. }
+            | R2ILOp::IntCarry { a, b, .. }
+            | R2ILOp::IntSCarry { a, b, .. }
+            | R2ILOp::IntSBorrow { a, b, .. }
+            | R2ILOp::IntAnd { a, b, .. }
+            | R2ILOp::IntOr { a, b, .. }
+            | R2ILOp::IntXor { a, b, .. }
+            | R2ILOp::IntLeft { a, b, .. }
+            | R2ILOp::IntRight { a, b, .. }
+            | R2ILOp::IntSRight { a, b, .. }
+            | R2ILOp::IntEqual { a, b, .. }
+            | R2ILOp::IntNotEqual { a, b, .. }
+            | R2ILOp::IntLess { a, b, .. }
+            | R2ILOp::IntSLess { a, b, .. }
+            | R2ILOp::IntLessEqual { a, b, .. }
+            | R2ILOp::IntSLessEqual { a, b, .. } => vec![a, b],
+
+            // Unary integer operations
+            R2ILOp::IntNegate { src, .. }
+            | R2ILOp::IntNot { src, .. }
+            | R2ILOp::IntZExt { src, .. }
+            | R2ILOp::IntSExt { src, .. } => vec![src],
+
+            // Boolean operations
+            R2ILOp::BoolNot { src, .. } => vec![src],
+            R2ILOp::BoolAnd { a, b, .. }
+            | R2ILOp::BoolOr { a, b, .. }
+            | R2ILOp::BoolXor { a, b, .. } => vec![a, b],
+
+            // Bit manipulation
+            R2ILOp::Piece { hi, lo, .. } => vec![hi, lo],
+            R2ILOp::Subpiece { src, .. } => vec![src],
+            R2ILOp::PopCount { src, .. } | R2ILOp::Lzcount { src, .. } => vec![src],
+
+            // Control flow
+            R2ILOp::Branch { target } => vec![target],
+            R2ILOp::CBranch { target, cond } => vec![target, cond],
+            R2ILOp::BranchInd { target } => vec![target],
+            R2ILOp::Call { target } => vec![target],
+            R2ILOp::CallInd { target } => vec![target],
+            R2ILOp::Return { target } => vec![target],
+
+            // Binary float operations
+            R2ILOp::FloatAdd { a, b, .. }
+            | R2ILOp::FloatSub { a, b, .. }
+            | R2ILOp::FloatMult { a, b, .. }
+            | R2ILOp::FloatDiv { a, b, .. }
+            | R2ILOp::FloatEqual { a, b, .. }
+            | R2ILOp::FloatNotEqual { a, b, .. }
+            | R2ILOp::FloatLess { a, b, .. }
+            | R2ILOp::FloatLessEqual { a, b, .. } => vec![a, b],
+
+            // Unary float operations
+            R2ILOp::FloatNeg { src, .. }
+            | R2ILOp::FloatAbs { src, .. }
+            | R2ILOp::FloatSqrt { src, .. }
+            | R2ILOp::FloatCeil { src, .. }
+            | R2ILOp::FloatFloor { src, .. }
+            | R2ILOp::FloatRound { src, .. }
+            | R2ILOp::FloatNaN { src, .. }
+            | R2ILOp::Int2Float { src, .. }
+            | R2ILOp::Float2Int { src, .. }
+            | R2ILOp::FloatFloat { src, .. }
+            | R2ILOp::Trunc { src, .. } => vec![src],
+
+            // Special operations
+            R2ILOp::CallOther { inputs, .. } => inputs.iter_mut().collect(),
+            R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint => vec![],
+            R2ILOp::CpuId { .. } => vec![],
+            R2ILOp::Multiequal { inputs, .. } => inputs.iter_mut().collect(),
+            R2ILOp::Indirect { src, indirect, .. } => vec![src, indirect],
+            R2ILOp::PtrAdd { base, index, .. } | R2ILOp::PtrSub { base, index, .. } => {
+                vec![base, index]
+            }
+            R2ILOp::SegmentOp { segment, offset, .. } => vec![segment, offset],
+            R2ILOp::New { src, .. } | R2ILOp::Cast { src, .. } => vec![src],
+            R2ILOp::Extract { src, position, .. } => vec![src, position],
+            R2ILOp::Insert { src, value, position, .. } => vec![src, value, position],
+        }
+    }
+}
+
+impl std::fmt::Display for R2ILOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // Data movement
+            R2ILOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
+            R2ILOp::Load { dst, space, addr } => {
+                write!(f, "{} = LOAD [{}]{}", dst, space, addr)
+            }
+            R2ILOp::Store { space, addr, val } => {
+                write!(f, "STORE [{}]{} = {}", space, addr, val)
+            }
+
+            // Integer arithmetic
+            R2ILOp::IntAdd { dst, a, b } => write!(f, "{} = {} + {}", dst, a, b),
+            R2ILOp::IntSub { dst, a, b } => write!(f, "{} = {} - {}", dst, a, b),
+            R2ILOp::IntMult { dst, a, b } => write!(f, "{} = {} * {}", dst, a, b),
+            R2ILOp::IntDiv { dst, a, b } => write!(f, "{} = {} / {}", dst, a, b),
+            R2ILOp::IntSDiv { dst, a, b } => write!(f, "{} = {} s/ {}", dst, a, b),
+            R2ILOp::IntRem { dst, a, b } => write!(f, "{} = {} % {}", dst, a, b),
+            R2ILOp::IntSRem { dst, a, b } => write!(f, "{} = {} s% {}", dst, a, b),
+            R2ILOp::IntNegate { dst, src } => write!(f, "{} = -{}", dst, src),
+            R2ILOp::IntCarry { dst, a, b } => write!(f, "{} = CARRY({}, {})", dst, a, b),
+            R2ILOp::IntSCarry { dst, a, b } => write!(f, "{} = SCARRY({}, {})", dst, a, b),
+            R2ILOp::IntSBorrow { dst, a, b } => write!(f, "{} = SBORROW({}, {})", dst, a, b),
+
+            // Logical operations
+            R2ILOp::IntAnd { dst, a, b } => write!(f, "{} = {} & {}", dst, a, b),
+            R2ILOp::IntOr { dst, a, b } => write!(f, "{} = {} | {}", dst, a, b),
+            R2ILOp::IntXor { dst, a, b } => write!(f, "{} = {} ^ {}", dst, a, b),
+            R2ILOp::IntNot { dst, src } => write!(f, "{} = ~{}", dst, src),
+
+            // Shift operations
+            R2ILOp::IntLeft { dst, a, b } => write!(f, "{} = {} << {}", dst, a, b),
+            R2ILOp::IntRight { dst, a, b } => write!(f, "{} = {} >> {}", dst, a, b),
+            R2ILOp::IntSRight { dst, a, b } => write!(f, "{} = {} s>> {}", dst, a, b),
+
+            // Comparison operations
+            R2ILOp::IntEqual { dst, a, b } => write!(f, "{} = {} == {}", dst, a, b),
+            R2ILOp::IntNotEqual { dst, a, b } => write!(f, "{} = {} != {}", dst, a, b),
+            R2ILOp::IntLess { dst, a, b } => write!(f, "{} = {} < {}", dst, a, b),
+            R2ILOp::IntSLess { dst, a, b } => write!(f, "{} = {} s< {}", dst, a, b),
+            R2ILOp::IntLessEqual { dst, a, b } => write!(f, "{} = {} <= {}", dst, a, b),
+            R2ILOp::IntSLessEqual { dst, a, b } => write!(f, "{} = {} s<= {}", dst, a, b),
+
+            // Extension operations
+            R2ILOp::IntZExt { dst, src } => write!(f, "{} = ZEXT({})", dst, src),
+            R2ILOp::IntSExt { dst, src } => write!(f, "{} = SEXT({})", dst, src),
+
+            // Boolean operations
+            R2ILOp::BoolNot { dst, src } => write!(f, "{} = !{}", dst, src),
+            R2ILOp::BoolAnd { dst, a, b } => write!(f, "{} = {} && {}", dst, a, b),
+            R2ILOp::BoolOr { dst, a, b } => write!(f, "{} = {} || {}", dst, a, b),
+            R2ILOp::BoolXor { dst, a, b } => write!(f, "{} = {} ^^ {}", dst, a, b),
+
+            // Bit manipulation
+            R2ILOp::Piece { dst, hi, lo } => write!(f, "{} = PIECE({}, {})", dst, hi, lo),
+            R2ILOp::Subpiece { dst, src, offset } => {
+                write!(f, "{} = SUBPIECE({}, {})", dst, src, offset)
+            }
+            R2ILOp::PopCount { dst, src } => write!(f, "{} = POPCOUNT({})", dst, src),
+            R2ILOp::Lzcount { dst, src } => write!(f, "{} = LZCOUNT({})", dst, src),
+
+            // Control flow
+            R2ILOp::Branch { target } => write!(f, "BRANCH {}", target),
+            R2ILOp::CBranch { target, cond } => write!(f, "CBRANCH {} if {}", target, cond),
+            R2ILOp::BranchInd { target } => write!(f, "BRANCHIND {}", target),
+            R2ILOp::Call { target } => write!(f, "CALL {}", target),
+            R2ILOp::CallInd { target } => write!(f, "CALLIND {}", target),
+            R2ILOp::Return { target } => write!(f, "RETURN {}", target),
+
+            // Floating point operations
+            R2ILOp::FloatAdd { dst, a, b } => write!(f, "{} = {} f+ {}", dst, a, b),
+            R2ILOp::FloatSub { dst, a, b } => write!(f, "{} = {} f- {}", dst, a, b),
+            R2ILOp::FloatMult { dst, a, b } => write!(f, "{} = {} f* {}", dst, a, b),
+            R2ILOp::FloatDiv { dst, a, b } => write!(f, "{} = {} f/ {}", dst, a, b),
+            R2ILOp::FloatNeg { dst, src } => write!(f, "{} = f-{}", dst, src),
+            R2ILOp::FloatAbs { dst, src } => write!(f, "{} = FABS({})", dst, src),
+            R2ILOp::FloatSqrt { dst, src } => write!(f, "{} = FSQRT({})", dst, src),
+            R2ILOp::FloatCeil { dst, src } => write!(f, "{} = FCEIL({})", dst, src),
+            R2ILOp::FloatFloor { dst, src } => write!(f, "{} = FFLOOR({})", dst, src),
+            R2ILOp::FloatRound { dst, src } => write!(f, "{} = FROUND({})", dst, src),
+            R2ILOp::FloatNaN { dst, src } => write!(f, "{} = FNAN({})", dst, src),
+            R2ILOp::FloatEqual { dst, a, b } => write!(f, "{} = {} f== {}", dst, a, b),
+            R2ILOp::FloatNotEqual { dst, a, b } => write!(f, "{} = {} f!= {}", dst, a, b),
+            R2ILOp::FloatLess { dst, a, b } => write!(f, "{} = {} f< {}", dst, a, b),
+            R2ILOp::FloatLessEqual { dst, a, b } => write!(f, "{} = {} f<= {}", dst, a, b),
+            R2ILOp::Int2Float { dst, src } => write!(f, "{} = INT2FLOAT({})", dst, src),
+            R2ILOp::Float2Int { dst, src } => write!(f, "{} = FLOAT2INT({})", dst, src),
+            R2ILOp::FloatFloat { dst, src } => write!(f, "{} = FLOAT2FLOAT({})", dst, src),
+            R2ILOp::Trunc { dst, src } => write!(f, "{} = TRUNC({})", dst, src),
+
+            // Special operations
+            R2ILOp::CallOther { output, userop, inputs } => {
+                if let Some(out) = output {
+                    write!(f, "{} = ", out)?;
+                }
+                write!(f, "CALLOTHER({})", userop)?;
+                if !inputs.is_empty() {
+                    write!(f, " [")?;
+                    for (i, inp) in inputs.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", inp)?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
+            R2ILOp::Nop => write!(f, "NOP"),
+            R2ILOp::Unimplemented => write!(f, "UNIMPLEMENTED"),
+            R2ILOp::CpuId { dst } => write!(f, "{} = CPUID", dst),
+            R2ILOp::Breakpoint => write!(f, "BREAKPOINT"),
+            R2ILOp::Multiequal { dst, inputs } => {
+                write!(f, "{} = PHI(", dst)?;
+                for (i, inp) in inputs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", inp)?;
+                }
+                write!(f, ")")
+            }
+            R2ILOp::Indirect { dst, src, indirect } => {
+                write!(f, "{} = INDIRECT({}, {})", dst, src, indirect)
+            }
+            R2ILOp::PtrAdd { dst, base, index, element_size } => {
+                write!(f, "{} = PTRADD({}, {}, {})", dst, base, index, element_size)
+            }
+            R2ILOp::PtrSub { dst, base, index, element_size } => {
+                write!(f, "{} = PTRSUB({}, {}, {})", dst, base, index, element_size)
+            }
+            R2ILOp::SegmentOp { dst, segment, offset } => {
+                write!(f, "{} = SEGMENT({}, {})", dst, segment, offset)
+            }
+            R2ILOp::New { dst, src } => write!(f, "{} = NEW({})", dst, src),
+            R2ILOp::Cast { dst, src } => write!(f, "{} = CAST({})", dst, src),
+            R2ILOp::Extract { dst, src, position } => {
+                write!(f, "{} = EXTRACT({}, {})", dst, src, position)
+            }
+            R2ILOp::Insert { dst, src, value, position } => {
+                write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position)
+            }
         }
     }
 }

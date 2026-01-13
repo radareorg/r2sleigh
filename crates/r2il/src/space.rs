@@ -47,6 +47,18 @@ impl Default for SpaceId {
     }
 }
 
+impl std::fmt::Display for SpaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpaceId::Ram => write!(f, "ram"),
+            SpaceId::Register => write!(f, "reg"),
+            SpaceId::Unique => write!(f, "uniq"),
+            SpaceId::Const => write!(f, "const"),
+            SpaceId::Custom(id) => write!(f, "space{}", id),
+        }
+    }
+}
+
 /// Full address space definition with metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressSpace {
