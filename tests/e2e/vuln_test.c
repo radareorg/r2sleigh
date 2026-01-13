@@ -1,5 +1,19 @@
-// Vulnerability test cases for r2sleigh symbolic execution
+// Vulnerability test cases for r2sleigh integration tests
 // Compile with: gcc -O0 -g -fno-stack-protector -no-pie -o vuln_test vuln_test.c
+//
+// This binary is used by tests/e2e/integration_tests.rs to test all plugin features.
+// When adding a new feature that needs a specific binary pattern:
+// 1. Add a test function here that exercises the feature
+// 2. Add it to the main() switch statement
+// 3. Add an integration test in tests/e2e/integration_tests.rs
+//
+// Current test functions:
+// - check_secret: Simple condition (symbolic execution, path exploration)
+// - unlock: Multi-condition path explosion
+// - vuln_memcpy: Buffer overflow (taint analysis)
+// - solve_equation: Arithmetic constraint solving
+// - bitwise_check: Bitwise operations
+// - (others available for future test cases)
 
 #include <stdio.h>
 #include <stdlib.h>
