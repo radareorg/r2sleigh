@@ -113,6 +113,8 @@ pub struct SolvedPath {
     pub inputs: std::collections::HashMap<String, u64>,
     /// Concrete register values at path end.
     pub registers: std::collections::HashMap<String, u64>,
+    /// Concrete memory bytes for tracked symbolic regions.
+    pub memory: std::collections::HashMap<String, Vec<u8>>,
     /// Final program counter.
     pub final_pc: u64,
     /// Path constraints that were satisfied.
@@ -189,6 +191,15 @@ impl<'ctx> PathExplorer<'ctx> {
         &self.solver
     }
 
+    /// Register a call hook for a concrete target address.
+    pub fn register_call_hook<F>(&mut self, addr: u64, hook: F)
+    where
+        F: Fn(&mut SymState<'ctx>) -> crate::executor::CallHookResult + 'ctx,
+    {
+        self.executor
+            .register_call_hook(addr, move |state| Ok(hook(state)));
+    }
+
     /// Solve a path's constraints and extract concrete values.
     ///
     /// Returns None if the path is infeasible.
@@ -213,12 +224,29 @@ impl<'ctx> PathExplorer<'ctx> {
             }
         }
 
-        // Try to identify symbolic inputs (variables starting with "sym_")
+        // Include explicitly tracked symbolic inputs.
+        for (name, value) in path.state.symbolic_inputs() {
+            if let Some(concrete) = model.eval(value) {
+                solved.inputs.entry(name.clone()).or_insert(concrete);
+            }
+        }
+
+        // Try to identify symbolic inputs (variables starting with "sym_").
         for (name, value) in path.state.registers() {
+            if solved.inputs.contains_key(name) {
+                continue;
+            }
             if name.starts_with("sym_") || value.is_symbolic() {
                 if let Some(concrete) = model.eval(value) {
                     solved.inputs.insert(name.clone(), concrete);
                 }
+            }
+        }
+
+        // Extract tracked symbolic memory buffers.
+        for region in path.state.symbolic_memory() {
+            if let Some(bytes) = model.eval_bytes(&region.value, region.size as usize) {
+                solved.memory.insert(region.name.clone(), bytes);
             }
         }
 
@@ -572,6 +600,7 @@ mod tests {
         let solved = SolvedPath::default();
         assert!(solved.inputs.is_empty());
         assert!(solved.registers.is_empty());
+        assert!(solved.memory.is_empty());
         assert_eq!(solved.final_pc, 0);
         assert_eq!(solved.num_constraints, 0);
     }

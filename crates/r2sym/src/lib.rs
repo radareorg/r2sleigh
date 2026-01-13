@@ -15,17 +15,21 @@
 //! ## Example
 //!
 //! ```ignore
-//! use r2sym::{SymEngine, SymState};
+//! use r2sym::{ExploreConfig, PathExplorer, SymState};
 //! use r2ssa::SSAFunction;
 //!
 //! let func = SSAFunction::from_blocks(&blocks).unwrap();
-//! let mut engine = SymEngine::new();
-//! engine.make_symbolic("rdi", 64);
+//! let cfg = z3::Config::new();
+//! let ctx = z3::Context::new(&cfg);
 //!
-//! let results = engine.explore(&func);
+//! let mut state = SymState::new(&ctx, func.entry);
+//! state.make_symbolic("rdi", 64);
+//!
+//! let mut explorer = PathExplorer::with_config(&ctx, ExploreConfig::default());
+//! let results = explorer.explore(&func, state);
 //! for path in results {
-//!     if let Some(model) = path.solve() {
-//!         println!("Found inputs: {:?}", model);
+//!     if let Some(model) = explorer.solve_path(&path) {
+//!         println!("Found inputs: {:?}", model.inputs);
 //!     }
 //! }
 //! ```
@@ -33,15 +37,17 @@
 pub mod executor;
 pub mod memory;
 pub mod path;
+pub mod r2api;
 pub mod solver;
 pub mod state;
 pub mod value;
 
-pub use executor::SymExecutor;
+pub use executor::{CallHookResult, SymExecutor};
 pub use memory::SymMemory;
 pub use path::{ExploreConfig, PathExplorer, PathResult, SolvedPath};
+pub use r2api::{R2Api, R2Error};
 pub use solver::{SatResult, SymModel, SymSolver};
-pub use state::SymState;
+pub use state::{SymState, SymbolicMemoryRegion};
 pub use value::SymValue;
 
 /// Error types for symbolic execution.

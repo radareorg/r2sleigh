@@ -11,6 +11,8 @@ use z3::ast::{Ast, BV};
 use z3::Context;
 
 /// A symbolic value that can be concrete, symbolic, or unknown.
+///
+/// Each value carries an optional taint mask for tracking data flow.
 #[derive(Clone)]
 pub enum SymValue<'ctx> {
     /// A concrete (known) value.
@@ -19,6 +21,8 @@ pub enum SymValue<'ctx> {
         value: u64,
         /// Size in bits.
         bits: u32,
+        /// Taint mask (bitfield for multiple taint sources).
+        taint: u64,
     },
     /// A symbolic value represented as a Z3 bitvector.
     Symbolic {
@@ -26,39 +30,119 @@ pub enum SymValue<'ctx> {
         ast: BV<'ctx>,
         /// Size in bits.
         bits: u32,
+        /// Taint mask (bitfield for multiple taint sources).
+        taint: u64,
     },
     /// An unknown/uninitialized value.
     Unknown {
         /// Size in bits.
         bits: u32,
+        /// Taint mask (bitfield for multiple taint sources).
+        taint: u64,
     },
 }
 
 impl<'ctx> SymValue<'ctx> {
-    /// Create a concrete value.
+    /// Create a concrete value (untainted).
     pub fn concrete(value: u64, bits: u32) -> Self {
-        Self::Concrete { value, bits }
+        Self::Concrete {
+            value,
+            bits,
+            taint: 0,
+        }
     }
 
-    /// Create a symbolic value from a Z3 bitvector.
+    /// Create a concrete value with taint.
+    pub fn concrete_tainted(value: u64, bits: u32, taint: u64) -> Self {
+        Self::Concrete { value, bits, taint }
+    }
+
+    /// Create a symbolic value from a Z3 bitvector (untainted).
     pub fn symbolic(ast: BV<'ctx>, bits: u32) -> Self {
-        Self::Symbolic { ast, bits }
+        Self::Symbolic {
+            ast,
+            bits,
+            taint: 0,
+        }
     }
 
-    /// Create an unknown value.
+    /// Create a symbolic value with taint.
+    pub fn symbolic_tainted(ast: BV<'ctx>, bits: u32, taint: u64) -> Self {
+        Self::Symbolic { ast, bits, taint }
+    }
+
+    /// Create an unknown value (untainted).
     pub fn unknown(bits: u32) -> Self {
-        Self::Unknown { bits }
+        Self::Unknown { bits, taint: 0 }
     }
 
-    /// Create a new symbolic variable.
+    /// Create an unknown value with taint.
+    pub fn unknown_tainted(bits: u32, taint: u64) -> Self {
+        Self::Unknown { bits, taint }
+    }
+
+    /// Get the taint mask of this value.
+    pub fn get_taint(&self) -> u64 {
+        match self {
+            Self::Concrete { taint, .. } => *taint,
+            Self::Symbolic { taint, .. } => *taint,
+            Self::Unknown { taint, .. } => *taint,
+        }
+    }
+
+    /// Create a copy of this value with additional taint.
+    pub fn with_taint(&self, new_taint: u64) -> Self {
+        match self {
+            Self::Concrete { value, bits, taint } => Self::Concrete {
+                value: *value,
+                bits: *bits,
+                taint: *taint | new_taint,
+            },
+            Self::Symbolic { ast, bits, taint } => Self::Symbolic {
+                ast: ast.clone(),
+                bits: *bits,
+                taint: *taint | new_taint,
+            },
+            Self::Unknown { bits, taint } => Self::Unknown {
+                bits: *bits,
+                taint: *taint | new_taint,
+            },
+        }
+    }
+
+    /// Check if this value is tainted.
+    pub fn is_tainted(&self) -> bool {
+        self.get_taint() != 0
+    }
+
+    /// Check if this value has a specific taint.
+    pub fn has_taint(&self, taint_bit: u64) -> bool {
+        self.get_taint() & taint_bit != 0
+    }
+
+    /// Create a new symbolic variable (untainted).
     pub fn new_symbolic(ctx: &'ctx Context, name: &str, bits: u32) -> Self {
         let ast = BV::new_const(ctx, name, bits);
-        Self::Symbolic { ast, bits }
+        Self::Symbolic {
+            ast,
+            bits,
+            taint: 0,
+        }
+    }
+
+    /// Create a new symbolic variable with taint.
+    pub fn new_symbolic_tainted(ctx: &'ctx Context, name: &str, bits: u32, taint: u64) -> Self {
+        let ast = BV::new_const(ctx, name, bits);
+        Self::Symbolic { ast, bits, taint }
     }
 
     /// Create a concrete value from a Z3 context.
     pub fn from_u64(_ctx: &'ctx Context, value: u64, bits: u32) -> Self {
-        Self::Concrete { value, bits }
+        Self::Concrete {
+            value,
+            bits,
+            taint: 0,
+        }
     }
 
     /// Get the bit width of this value.
@@ -66,7 +150,7 @@ impl<'ctx> SymValue<'ctx> {
         match self {
             Self::Concrete { bits, .. } => *bits,
             Self::Symbolic { bits, .. } => *bits,
-            Self::Unknown { bits } => *bits,
+            Self::Unknown { bits, .. } => *bits,
         }
     }
 
@@ -144,9 +228,9 @@ impl<'ctx> SymValue<'ctx> {
     /// Convert to a Z3 bitvector (concretizing if needed).
     pub fn to_bv(&self, ctx: &'ctx Context) -> BV<'ctx> {
         match self {
-            Self::Concrete { value, bits } => BV::from_u64(ctx, *value, *bits),
+            Self::Concrete { value, bits, .. } => BV::from_u64(ctx, *value, *bits),
             Self::Symbolic { ast, .. } => ast.clone(),
-            Self::Unknown { bits } => {
+            Self::Unknown { bits, .. } => {
                 // Create a fresh symbolic variable for unknown values
                 BV::fresh_const(ctx, "unknown", *bits)
             }
@@ -159,19 +243,25 @@ impl<'ctx> SymValue<'ctx> {
             return self.clone();
         }
         let extend_by = new_bits - self.bits();
+        let taint = self.get_taint();
         match self {
             Self::Concrete { value, .. } => Self::Concrete {
                 value: *value,
                 bits: new_bits,
+                taint,
             },
             Self::Symbolic { ast, .. } => {
                 let new_ast = ast.zero_ext(extend_by);
                 Self::Symbolic {
                     ast: new_ast,
                     bits: new_bits,
+                    taint,
                 }
             }
-            Self::Unknown { .. } => Self::Unknown { bits: new_bits },
+            Self::Unknown { .. } => Self::Unknown {
+                bits: new_bits,
+                taint,
+            },
         }
     }
 
@@ -181,8 +271,9 @@ impl<'ctx> SymValue<'ctx> {
             return self.clone();
         }
         let extend_by = new_bits - self.bits();
+        let taint = self.get_taint();
         match self {
-            Self::Concrete { value, bits } => {
+            Self::Concrete { value, bits, .. } => {
                 // Sign extend the concrete value
                 let sign_bit = (*value >> (*bits - 1)) & 1;
                 let new_value = if sign_bit == 1 {
@@ -194,6 +285,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Concrete {
                     value: new_value,
                     bits: new_bits,
+                    taint,
                 }
             }
             Self::Symbolic { ast, .. } => {
@@ -201,15 +293,20 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: new_ast,
                     bits: new_bits,
+                    taint,
                 }
             }
-            Self::Unknown { .. } => Self::Unknown { bits: new_bits },
+            Self::Unknown { .. } => Self::Unknown {
+                bits: new_bits,
+                taint,
+            },
         }
     }
 
     /// Extract bits [high:low] from this value.
     pub fn extract(&self, _ctx: &'ctx Context, high: u32, low: u32) -> Self {
         let new_bits = high - low + 1;
+        let taint = self.get_taint();
         match self {
             Self::Concrete { value, .. } => {
                 let mask = (1u64 << new_bits) - 1;
@@ -217,6 +314,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Concrete {
                     value: new_value,
                     bits: new_bits,
+                    taint,
                 }
             }
             Self::Symbolic { ast, .. } => {
@@ -224,27 +322,34 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: new_ast,
                     bits: new_bits,
+                    taint,
                 }
             }
-            Self::Unknown { .. } => Self::Unknown { bits: new_bits },
+            Self::Unknown { .. } => Self::Unknown {
+                bits: new_bits,
+                taint,
+            },
         }
     }
 
     /// Concatenate two values (self is high bits, other is low bits).
     pub fn concat(&self, ctx: &'ctx Context, other: &Self) -> Self {
         let new_bits = self.bits() + other.bits();
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
             (
-                Self::Concrete { value: hi, bits: _ },
+                Self::Concrete { value: hi, .. },
                 Self::Concrete {
                     value: lo,
                     bits: lo_bits,
+                    ..
                 },
             ) => {
                 let new_value = (*hi << *lo_bits) | *lo;
                 Self::Concrete {
                     value: new_value,
                     bits: new_bits,
+                    taint,
                 }
             }
             _ => {
@@ -254,6 +359,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: new_ast,
                     bits: new_bits,
+                    taint,
                 }
             }
         }
@@ -261,10 +367,18 @@ impl<'ctx> SymValue<'ctx> {
 
     // ==================== Arithmetic Operations ====================
 
-    /// Add two values.
+    /// Add two values (taint is propagated via OR).
     pub fn add(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+            (
+                Self::Concrete { value: a, bits, .. },
+                Self::Concrete {
+                    value: b,
+                    bits: b_bits,
+                    ..
+                },
+            ) => {
                 let result_bits = (*bits).max(*b_bits);
                 let mask = if result_bits >= 64 {
                     u64::MAX
@@ -274,6 +388,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Concrete {
                     value: a.wrapping_add(*b) & mask,
                     bits: result_bits,
+                    taint,
                 }
             }
             _ => {
@@ -281,6 +396,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: a_bv.bvadd(&b_bv),
                     bits: result_bits,
+                    taint,
                 }
             }
         }
@@ -288,8 +404,16 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Subtract two values.
     pub fn sub(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+            (
+                Self::Concrete { value: a, bits, .. },
+                Self::Concrete {
+                    value: b,
+                    bits: b_bits,
+                    ..
+                },
+            ) => {
                 let result_bits = (*bits).max(*b_bits);
                 let mask = if result_bits >= 64 {
                     u64::MAX
@@ -299,6 +423,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Concrete {
                     value: a.wrapping_sub(*b) & mask,
                     bits: result_bits,
+                    taint,
                 }
             }
             _ => {
@@ -306,6 +431,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: a_bv.bvsub(&b_bv),
                     bits: result_bits,
+                    taint,
                 }
             }
         }
@@ -313,8 +439,16 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Multiply two values.
     pub fn mul(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+            (
+                Self::Concrete { value: a, bits, .. },
+                Self::Concrete {
+                    value: b,
+                    bits: b_bits,
+                    ..
+                },
+            ) => {
                 let result_bits = (*bits).max(*b_bits);
                 let mask = if result_bits >= 64 {
                     u64::MAX
@@ -324,6 +458,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Concrete {
                     value: a.wrapping_mul(*b) & mask,
                     bits: result_bits,
+                    taint,
                 }
             }
             _ => {
@@ -331,6 +466,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: a_bv.bvmul(&b_bv),
                     bits: result_bits,
+                    taint,
                 }
             }
         }
@@ -338,15 +474,27 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Unsigned division.
     pub fn udiv(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+            (
+                Self::Concrete { value: a, bits, .. },
+                Self::Concrete {
+                    value: b,
+                    bits: b_bits,
+                    ..
+                },
+            ) => {
                 let result_bits = (*bits).max(*b_bits);
                 if *b == 0 {
-                    Self::Unknown { bits: result_bits }
+                    Self::Unknown {
+                        bits: result_bits,
+                        taint,
+                    }
                 } else {
                     Self::Concrete {
                         value: *a / *b,
                         bits: result_bits,
+                        taint,
                     }
                 }
             }
@@ -355,6 +503,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: a_bv.bvudiv(&b_bv),
                     bits: result_bits,
+                    taint,
                 }
             }
         }
@@ -362,24 +511,38 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Signed division.
     pub fn sdiv(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
         Self::Symbolic {
             ast: a_bv.bvsdiv(&b_bv),
             bits: result_bits,
+            taint,
         }
     }
 
     /// Unsigned remainder.
     pub fn urem(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+            (
+                Self::Concrete { value: a, bits, .. },
+                Self::Concrete {
+                    value: b,
+                    bits: b_bits,
+                    ..
+                },
+            ) => {
                 let result_bits = (*bits).max(*b_bits);
                 if *b == 0 {
-                    Self::Unknown { bits: result_bits }
+                    Self::Unknown {
+                        bits: result_bits,
+                        taint,
+                    }
                 } else {
                     Self::Concrete {
                         value: *a % *b,
                         bits: result_bits,
+                        taint,
                     }
                 }
             }
@@ -388,6 +551,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: a_bv.bvurem(&b_bv),
                     bits: result_bits,
+                    taint,
                 }
             }
         }
@@ -395,17 +559,20 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Signed remainder.
     pub fn srem(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
         Self::Symbolic {
             ast: a_bv.bvsrem(&b_bv),
             bits: result_bits,
+            taint,
         }
     }
 
     /// Two's complement negation.
     pub fn neg(&self, ctx: &'ctx Context) -> Self {
+        let taint = self.get_taint();
         match self {
-            Self::Concrete { value, bits } => {
+            Self::Concrete { value, bits, .. } => {
                 let mask = if *bits >= 64 {
                     u64::MAX
                 } else {
@@ -414,6 +581,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Concrete {
                     value: (!*value).wrapping_add(1) & mask,
                     bits: *bits,
+                    taint,
                 }
             }
             _ => {
@@ -421,6 +589,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: bv.bvneg(),
                     bits: self.bits(),
+                    taint,
                 }
             }
         }
@@ -430,18 +599,26 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Bitwise AND.
     pub fn and(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+            (
+                Self::Concrete { value: a, bits, .. },
                 Self::Concrete {
-                    value: *a & *b,
-                    bits: (*bits).max(*b_bits),
-                }
-            }
+                    value: b,
+                    bits: b_bits,
+                    ..
+                },
+            ) => Self::Concrete {
+                value: *a & *b,
+                bits: (*bits).max(*b_bits),
+                taint,
+            },
             _ => {
                 let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvand(&b_bv),
                     bits: result_bits,
+                    taint,
                 }
             }
         }
@@ -449,18 +626,26 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Bitwise OR.
     pub fn or(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+            (
+                Self::Concrete { value: a, bits, .. },
                 Self::Concrete {
-                    value: *a | *b,
-                    bits: (*bits).max(*b_bits),
-                }
-            }
+                    value: b,
+                    bits: b_bits,
+                    ..
+                },
+            ) => Self::Concrete {
+                value: *a | *b,
+                bits: (*bits).max(*b_bits),
+                taint,
+            },
             _ => {
                 let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvor(&b_bv),
                     bits: result_bits,
+                    taint,
                 }
             }
         }
@@ -468,18 +653,26 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Bitwise XOR.
     pub fn xor(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
-            (Self::Concrete { value: a, bits }, Self::Concrete { value: b, bits: b_bits }) => {
+            (
+                Self::Concrete { value: a, bits, .. },
                 Self::Concrete {
-                    value: *a ^ *b,
-                    bits: (*bits).max(*b_bits),
-                }
-            }
+                    value: b,
+                    bits: b_bits,
+                    ..
+                },
+            ) => Self::Concrete {
+                value: *a ^ *b,
+                bits: (*bits).max(*b_bits),
+                taint,
+            },
             _ => {
                 let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
                 Self::Symbolic {
                     ast: a_bv.bvxor(&b_bv),
                     bits: result_bits,
+                    taint,
                 }
             }
         }
@@ -487,8 +680,9 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Bitwise NOT.
     pub fn not(&self, ctx: &'ctx Context) -> Self {
+        let taint = self.get_taint();
         match self {
-            Self::Concrete { value, bits } => {
+            Self::Concrete { value, bits, .. } => {
                 let mask = if *bits >= 64 {
                     u64::MAX
                 } else {
@@ -497,6 +691,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Concrete {
                     value: !*value & mask,
                     bits: *bits,
+                    taint,
                 }
             }
             _ => {
@@ -504,6 +699,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: bv.bvnot(),
                     bits: self.bits(),
+                    taint,
                 }
             }
         }
@@ -513,8 +709,9 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Logical left shift.
     pub fn shl(&self, ctx: &'ctx Context, amount: &Self) -> Self {
+        let taint = self.get_taint() | amount.get_taint();
         match (self, amount) {
-            (Self::Concrete { value, bits }, Self::Concrete { value: amt, .. }) => {
+            (Self::Concrete { value, bits, .. }, Self::Concrete { value: amt, .. }) => {
                 let mask = if *bits >= 64 {
                     u64::MAX
                 } else {
@@ -523,6 +720,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Concrete {
                     value: (*value << (*amt as u32)) & mask,
                     bits: *bits,
+                    taint,
                 }
             }
             _ => {
@@ -531,6 +729,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: a_bv.bvshl(&b_bv),
                     bits: self.bits(),
+                    taint,
                 }
             }
         }
@@ -538,17 +737,22 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Logical right shift.
     pub fn lshr(&self, ctx: &'ctx Context, amount: &Self) -> Self {
+        let taint = self.get_taint() | amount.get_taint();
         match (self, amount) {
-            (Self::Concrete { value, bits }, Self::Concrete { value: amt, .. }) => Self::Concrete {
-                value: *value >> (*amt as u32),
-                bits: *bits,
-            },
+            (Self::Concrete { value, bits, .. }, Self::Concrete { value: amt, .. }) => {
+                Self::Concrete {
+                    value: *value >> (*amt as u32),
+                    bits: *bits,
+                    taint,
+                }
+            }
             _ => {
                 let a_bv = self.to_bv(ctx);
                 let b_bv = self.normalize_shift_amount(ctx, amount);
                 Self::Symbolic {
                     ast: a_bv.bvlshr(&b_bv),
                     bits: self.bits(),
+                    taint,
                 }
             }
         }
@@ -556,11 +760,13 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Arithmetic right shift.
     pub fn ashr(&self, ctx: &'ctx Context, amount: &Self) -> Self {
+        let taint = self.get_taint() | amount.get_taint();
         let a_bv = self.to_bv(ctx);
         let b_bv = self.normalize_shift_amount(ctx, amount);
         Self::Symbolic {
             ast: a_bv.bvashr(&b_bv),
             bits: self.bits(),
+            taint,
         }
     }
 
@@ -568,10 +774,12 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Equality comparison (returns 1-bit result).
     pub fn eq(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
             (Self::Concrete { value: a, .. }, Self::Concrete { value: b, .. }) => Self::Concrete {
                 value: if *a == *b { 1 } else { 0 },
                 bits: 1,
+                taint,
             },
             _ => {
                 let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
@@ -581,6 +789,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: cond.ite(&one, &zero),
                     bits: 1,
+                    taint,
                 }
             }
         }
@@ -588,10 +797,12 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Unsigned less than comparison.
     pub fn ult(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
             (Self::Concrete { value: a, .. }, Self::Concrete { value: b, .. }) => Self::Concrete {
                 value: if *a < *b { 1 } else { 0 },
                 bits: 1,
+                taint,
             },
             _ => {
                 let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
@@ -601,6 +812,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: cond.ite(&one, &zero),
                     bits: 1,
+                    taint,
                 }
             }
         }
@@ -608,10 +820,12 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Unsigned less than or equal comparison.
     pub fn ule(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         match (self, other) {
             (Self::Concrete { value: a, .. }, Self::Concrete { value: b, .. }) => Self::Concrete {
                 value: if *a <= *b { 1 } else { 0 },
                 bits: 1,
+                taint,
             },
             _ => {
                 let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
@@ -621,6 +835,7 @@ impl<'ctx> SymValue<'ctx> {
                 Self::Symbolic {
                     ast: cond.ite(&one, &zero),
                     bits: 1,
+                    taint,
                 }
             }
         }
@@ -628,6 +843,7 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Signed less than comparison.
     pub fn slt(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
         let cond = a_bv.bvslt(&b_bv);
         let one = BV::from_u64(ctx, 1, 1);
@@ -635,11 +851,13 @@ impl<'ctx> SymValue<'ctx> {
         Self::Symbolic {
             ast: cond.ite(&one, &zero),
             bits: 1,
+            taint,
         }
     }
 
     /// Signed less than or equal comparison.
     pub fn sle(&self, ctx: &'ctx Context, other: &Self) -> Self {
+        let taint = self.get_taint() | other.get_taint();
         let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
         let cond = a_bv.bvsle(&b_bv);
         let one = BV::from_u64(ctx, 1, 1);
@@ -647,6 +865,7 @@ impl<'ctx> SymValue<'ctx> {
         Self::Symbolic {
             ast: cond.ite(&one, &zero),
             bits: 1,
+            taint,
         }
     }
 
@@ -670,19 +889,45 @@ impl<'ctx> SymValue<'ctx> {
 impl<'ctx> fmt::Debug for SymValue<'ctx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Concrete { value, bits } => write!(f, "Concrete(0x{:x}, {})", value, bits),
-            Self::Symbolic { bits, .. } => write!(f, "Symbolic({})", bits),
-            Self::Unknown { bits } => write!(f, "Unknown({})", bits),
+            Self::Concrete { value, bits, taint } => {
+                if *taint != 0 {
+                    write!(f, "Concrete(0x{:x}, {}, T:0x{:x})", value, bits, taint)
+                } else {
+                    write!(f, "Concrete(0x{:x}, {})", value, bits)
+                }
+            }
+            Self::Symbolic { bits, taint, .. } => {
+                if *taint != 0 {
+                    write!(f, "Symbolic({}, T:0x{:x})", bits, taint)
+                } else {
+                    write!(f, "Symbolic({})", bits)
+                }
+            }
+            Self::Unknown { bits, taint } => {
+                if *taint != 0 {
+                    write!(f, "Unknown({}, T:0x{:x})", bits, taint)
+                } else {
+                    write!(f, "Unknown({})", bits)
+                }
+            }
         }
     }
 }
 
 impl<'ctx> fmt::Display for SymValue<'ctx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let taint = self.get_taint();
+        let taint_suffix = if taint != 0 {
+            format!(" T:0x{:x}", taint)
+        } else {
+            String::new()
+        };
         match self {
-            Self::Concrete { value, bits } => write!(f, "0x{:x}:{}", value, bits),
-            Self::Symbolic { bits, .. } => write!(f, "<sym:{}>", bits),
-            Self::Unknown { bits } => write!(f, "<unk:{}>", bits),
+            Self::Concrete { value, bits, .. } => {
+                write!(f, "0x{:x}:{}{}", value, bits, taint_suffix)
+            }
+            Self::Symbolic { bits, .. } => write!(f, "<sym:{}>{}", bits, taint_suffix),
+            Self::Unknown { bits, .. } => write!(f, "<unk:{}>{}", bits, taint_suffix),
         }
     }
 }
@@ -899,5 +1144,59 @@ mod bitwidth_tests {
         let xor_result = sym8.xor(&ctx, &sym32);
         assert!(xor_result.is_symbolic());
         assert_eq!(xor_result.bits(), 32);
+    }
+
+    #[test]
+    fn test_taint_propagation() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        // Create tainted and untainted values
+        const TAINT_USER_INPUT: u64 = 0x1;
+        const TAINT_NETWORK: u64 = 0x2;
+
+        let tainted = SymValue::concrete_tainted(42, 32, TAINT_USER_INPUT);
+        let untainted = SymValue::concrete(10, 32);
+
+        // Taint should propagate through operations
+        let sum = tainted.add(&ctx, &untainted);
+        assert!(sum.is_tainted());
+        assert!(sum.has_taint(TAINT_USER_INPUT));
+        assert!(!sum.has_taint(TAINT_NETWORK));
+
+        // Multiple taints should merge via OR
+        let network_tainted = SymValue::concrete_tainted(5, 32, TAINT_NETWORK);
+        let combined = tainted.add(&ctx, &network_tainted);
+        assert!(combined.has_taint(TAINT_USER_INPUT));
+        assert!(combined.has_taint(TAINT_NETWORK));
+        assert_eq!(combined.get_taint(), TAINT_USER_INPUT | TAINT_NETWORK);
+
+        // Untainted operations stay untainted
+        let clean = untainted.add(&ctx, &SymValue::concrete(1, 32));
+        assert!(!clean.is_tainted());
+    }
+
+    #[test]
+    fn test_taint_with_symbolic_values() {
+        let cfg = Config::new();
+        let ctx = Context::new(&cfg);
+
+        const TAINT_STDIN: u64 = 0x4;
+
+        // Create a tainted symbolic value (e.g., user input)
+        let sym_input = SymValue::new_symbolic_tainted(&ctx, "stdin", 64, TAINT_STDIN);
+        assert!(sym_input.is_tainted());
+        assert!(sym_input.has_taint(TAINT_STDIN));
+
+        // Operations with tainted symbolic values propagate taint
+        let constant = SymValue::concrete(0x100, 64);
+        let result = sym_input.add(&ctx, &constant);
+        assert!(result.is_tainted());
+        assert!(result.has_taint(TAINT_STDIN));
+
+        // Shift by tainted amount propagates taint
+        let shift_amt = SymValue::concrete_tainted(4, 32, TAINT_STDIN);
+        let shifted = constant.shl(&ctx, &shift_amt);
+        assert!(shifted.is_tainted());
     }
 }

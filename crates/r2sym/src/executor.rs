@@ -3,6 +3,8 @@
 //! This module implements the core symbolic execution logic,
 //! stepping through SSA operations and updating state.
 
+use std::collections::HashMap;
+
 use r2ssa::{FunctionSSABlock, SSAOp, SSAVar};
 use z3::ast::{Ast, BV};
 use z3::Context;
@@ -11,16 +13,43 @@ use crate::state::{ExitStatus, SymState};
 use crate::value::SymValue;
 use crate::SymResult;
 
+/// Result of a call hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallHookResult {
+    /// Continue execution (fallthrough).
+    Fallthrough,
+    /// Jump to a new program counter.
+    Jump(u64),
+    /// Terminate the state.
+    Terminate(ExitStatus),
+}
+
+/// A call hook for intercepting direct calls.
+pub type CallHook<'ctx> = Box<dyn Fn(&mut SymState<'ctx>) -> SymResult<CallHookResult> + 'ctx>;
+
 /// Symbolic executor for SSA functions.
 pub struct SymExecutor<'ctx> {
     /// The Z3 context.
     ctx: &'ctx Context,
+    /// Registered call hooks (address -> handler).
+    call_hooks: HashMap<u64, CallHook<'ctx>>,
 }
 
 impl<'ctx> SymExecutor<'ctx> {
     /// Create a new symbolic executor.
     pub fn new(ctx: &'ctx Context) -> Self {
-        Self { ctx }
+        Self {
+            ctx,
+            call_hooks: HashMap::new(),
+        }
+    }
+
+    /// Register a call hook for a target address.
+    pub fn register_call_hook<F>(&mut self, addr: u64, hook: F)
+    where
+        F: Fn(&mut SymState<'ctx>) -> SymResult<CallHookResult> + 'ctx,
+    {
+        self.call_hooks.insert(addr, Box::new(hook));
     }
 
     /// Execute a single SSA operation on the given state.
@@ -443,10 +472,15 @@ impl<'ctx> SymExecutor<'ctx> {
             }
 
             Call { target } => {
-                // For now, just update PC (simplified - no call stack)
                 let target_val = self.read_var(state, target);
                 if let Some(addr) = target_val.as_concrete() {
-                    state.pc = addr;
+                    if let Some(hook) = self.call_hooks.get(&addr) {
+                        match hook(state)? {
+                            CallHookResult::Fallthrough => {}
+                            CallHookResult::Jump(new_pc) => state.pc = new_pc,
+                            CallHookResult::Terminate(status) => state.terminate(status),
+                        }
+                    }
                 }
                 Ok(vec![])
             }
@@ -454,7 +488,15 @@ impl<'ctx> SymExecutor<'ctx> {
             CallInd { target } => {
                 let target_val = self.read_var(state, target);
                 if let Some(addr) = target_val.as_concrete() {
-                    state.pc = addr;
+                    if let Some(hook) = self.call_hooks.get(&addr) {
+                        match hook(state)? {
+                            CallHookResult::Fallthrough => {}
+                            CallHookResult::Jump(new_pc) => state.pc = new_pc,
+                            CallHookResult::Terminate(status) => state.terminate(status),
+                        }
+                    } else {
+                        // Fallthrough for direct known calls inside a function.
+                    }
                 } else {
                     state.terminate(ExitStatus::Error("Symbolic indirect call".to_string()));
                 }
@@ -639,7 +681,7 @@ impl<'ctx> SymExecutor<'ctx> {
             SymValue::concrete(0, var.size * 8)
         } else {
             let key = var.display_name();
-            state.get_register(&key)
+            state.get_register_sized(&key, var.size * 8)
         }
     }
 

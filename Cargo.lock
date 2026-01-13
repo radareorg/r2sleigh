@@ -467,6 +467,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "r2pipe"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63443078dfdb83f59820ed161863e38df38e8c6a2c3b85733ebac1bb65b4af2b"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "r2sleigh-cli"
 version = "0.1.0"
 dependencies = [
@@ -520,8 +533,10 @@ name = "r2sym"
 version = "0.1.0"
 dependencies = [
  "r2il",
+ "r2pipe",
  "r2ssa",
  "serde",
+ "serde_json",
  "sleigh-config",
  "thiserror 1.0.69",
  "z3",

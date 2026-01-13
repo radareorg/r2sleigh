@@ -182,9 +182,15 @@ impl<'ctx> SymSolver<'ctx> {
         let (a_bv, b_bv) = if a.bits() == b.bits() {
             (a.to_bv(self.ctx), b.to_bv(self.ctx))
         } else if a.bits() > b.bits() {
-            (a.to_bv(self.ctx), b.to_bv(self.ctx).zero_ext(a.bits() - b.bits()))
+            (
+                a.to_bv(self.ctx),
+                b.to_bv(self.ctx).zero_ext(a.bits() - b.bits()),
+            )
         } else {
-            (a.to_bv(self.ctx).zero_ext(b.bits() - a.bits()), b.to_bv(self.ctx))
+            (
+                a.to_bv(self.ctx).zero_ext(b.bits() - a.bits()),
+                b.to_bv(self.ctx),
+            )
         };
         let eq = a_bv._eq(&b_bv);
 
@@ -335,6 +341,40 @@ impl<'ctx> SymModel<'ctx> {
     pub fn eval(&self, value: &SymValue<'ctx>) -> Option<u64> {
         let bv = value.to_bv(self.ctx);
         self.eval_bv(&bv)
+    }
+
+    /// Evaluate a symbolic value as a little-endian byte array.
+    pub fn eval_bytes(&self, value: &SymValue<'ctx>, size: usize) -> Option<Vec<u8>> {
+        if size == 0 {
+            return Some(Vec::new());
+        }
+
+        let max_bytes = (value.bits() / 8) as usize;
+        if max_bytes == 0 {
+            return None;
+        }
+        let size = std::cmp::min(size, max_bytes);
+
+        let bv = value.to_bv(self.ctx);
+        let mut bytes = Vec::with_capacity(size);
+        for i in 0..size {
+            let low = (i as u32) * 8;
+            let high = low + 7;
+            let byte_bv = bv.extract(high, low);
+            let byte = self.model.eval(&byte_bv, true)?.as_u64()? as u8;
+            bytes.push(byte);
+        }
+        Some(bytes)
+    }
+
+    /// Evaluate a symbolic value as a UTF-8 string (stops at NUL or max bytes).
+    pub fn eval_string(&self, value: &SymValue<'ctx>, max_len: usize) -> Option<String> {
+        let bytes = self.eval_bytes(value, max_len)?;
+        let mut trimmed = bytes;
+        if let Some(pos) = trimmed.iter().position(|b| *b == 0) {
+            trimmed.truncate(pos);
+        }
+        String::from_utf8(trimmed).ok()
     }
 
     /// Get all concrete values from the model.
