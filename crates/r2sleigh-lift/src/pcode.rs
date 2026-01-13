@@ -5,6 +5,8 @@
 use r2il::{R2ILOp, SpaceId, Varnode};
 use thiserror::Error;
 
+use crate::translate::{self, PcodeSource};
+
 /// Errors that can occur during P-code translation.
 #[derive(Debug, Error)]
 pub enum PcodeError {
@@ -231,6 +233,46 @@ pub struct RawPcodeOp {
     pub inputs: Vec<RawVarnode>,
 }
 
+/// Wrapper for RawPcodeOp that implements PcodeSource.
+///
+/// This allows using the shared translation functions from the translate module.
+struct RawPcodeSourceWrapper<'a> {
+    raw: &'a RawPcodeOp,
+    translator: &'a PcodeTranslator,
+}
+
+impl<'a> PcodeSource for RawPcodeSourceWrapper<'a> {
+    fn output(&self) -> Option<Varnode> {
+        self.raw
+            .output
+            .as_ref()
+            .and_then(|v| self.translator.convert_varnode(v).ok())
+    }
+
+    fn input(&self, idx: usize) -> Option<Varnode> {
+        self.raw
+            .inputs
+            .get(idx)
+            .and_then(|v| self.translator.convert_varnode(v).ok())
+    }
+
+    fn input_raw_offset(&self, idx: usize) -> Option<u64> {
+        self.raw.inputs.get(idx).map(|v| v.offset)
+    }
+
+    fn input_count(&self) -> usize {
+        self.raw.inputs.len()
+    }
+
+    fn space_from_index(&self, idx: u64) -> SpaceId {
+        self.translator
+            .space_map
+            .get(idx as usize)
+            .copied()
+            .unwrap_or(SpaceId::Custom(idx as u32))
+    }
+}
+
 /// Translator from P-code to r2il.
 pub struct PcodeTranslator {
     /// Mapping from Sleigh space indices to r2il SpaceId
@@ -266,15 +308,15 @@ impl PcodeTranslator {
         Ok(Varnode::new(space, raw.offset, raw.size))
     }
 
-    /// Get the space ID from a space index varnode.
-    fn get_space_from_const(&self, vn: &RawVarnode) -> Result<SpaceId> {
-        // The space ID is stored as a constant
-        let idx = vn.offset as usize;
-        self.space_map
-            .get(idx)
-            .copied()
-            .ok_or(PcodeError::InvalidSpace(vn.offset))
+    /// Wrap a RawPcodeOp for use with shared translate functions.
+    fn wrap<'a>(&'a self, raw: &'a RawPcodeOp) -> RawPcodeSourceWrapper<'a> {
+        RawPcodeSourceWrapper {
+            raw,
+            translator: self,
+        }
     }
+
+
 
     /// Translate a single P-code operation to r2il.
     pub fn translate(&self, raw: &RawPcodeOp) -> Result<R2ILOp> {
@@ -288,19 +330,11 @@ impl PcodeTranslator {
             }
 
             PcodeOp::Load => {
-                let dst = self.require_output(raw, "LOAD")?;
-                let space_vn = self.require_raw_input(raw, 0, "LOAD")?;
-                let addr = self.require_input(raw, 1, "LOAD")?;
-                let space = self.get_space_from_const(space_vn)?;
-                Ok(R2ILOp::Load { dst, space, addr })
+                translate::translate_load(&self.wrap(raw)).map_err(translate_err)
             }
 
             PcodeOp::Store => {
-                let space_vn = self.require_raw_input(raw, 0, "STORE")?;
-                let addr = self.require_input(raw, 1, "STORE")?;
-                let val = self.require_input(raw, 2, "STORE")?;
-                let space = self.get_space_from_const(space_vn)?;
-                Ok(R2ILOp::Store { space, addr, val })
+                translate::translate_store(&self.wrap(raw)).map_err(translate_err)
             }
 
             PcodeOp::Branch => {
@@ -309,9 +343,8 @@ impl PcodeTranslator {
             }
 
             PcodeOp::CBranch => {
-                let target = self.require_input(raw, 0, "CBRANCH")?;
-                let cond = self.require_input(raw, 1, "CBRANCH")?;
-                Ok(R2ILOp::CBranch { target, cond })
+                // Use shared translate function for correct operand order
+                translate::translate_cbranch(&self.wrap(raw)).map_err(translate_err)
             }
 
             PcodeOp::BranchInd => {
@@ -521,11 +554,7 @@ impl PcodeTranslator {
                 self.binary_op(raw, "PIECE", |dst, hi, lo| R2ILOp::Piece { dst, hi, lo })
             }
             PcodeOp::Subpiece => {
-                let dst = self.require_output(raw, "SUBPIECE")?;
-                let src = self.require_input(raw, 0, "SUBPIECE")?;
-                let offset_vn = self.require_raw_input(raw, 1, "SUBPIECE")?;
-                let offset = offset_vn.offset as u32;
-                Ok(R2ILOp::Subpiece { dst, src, offset })
+                translate::translate_subpiece(&self.wrap(raw)).map_err(translate_err)
             }
             PcodeOp::PopCount => {
                 self.unary_op(raw, "POPCOUNT", |dst, src| R2ILOp::PopCount { dst, src })
@@ -560,31 +589,11 @@ impl PcodeTranslator {
             }
 
             PcodeOp::PtrAdd => {
-                let dst = self.require_output(raw, "PTRADD")?;
-                let base = self.require_input(raw, 0, "PTRADD")?;
-                let index = self.require_input(raw, 1, "PTRADD")?;
-                let size_vn = self.require_raw_input(raw, 2, "PTRADD")?;
-                let element_size = size_vn.offset as u32;
-                Ok(R2ILOp::PtrAdd {
-                    dst,
-                    base,
-                    index,
-                    element_size,
-                })
+                translate::translate_ptradd(&self.wrap(raw)).map_err(translate_err)
             }
 
             PcodeOp::PtrSub => {
-                let dst = self.require_output(raw, "PTRSUB")?;
-                let base = self.require_input(raw, 0, "PTRSUB")?;
-                let index = self.require_input(raw, 1, "PTRSUB")?;
-                let size_vn = self.require_raw_input(raw, 2, "PTRSUB")?;
-                let element_size = size_vn.offset as u32;
-                Ok(R2ILOp::PtrSub {
-                    dst,
-                    base,
-                    index,
-                    element_size,
-                })
+                translate::translate_ptrsub(&self.wrap(raw)).map_err(translate_err)
             }
 
             PcodeOp::SegmentOp => {
@@ -625,9 +634,7 @@ impl PcodeTranslator {
     where
         F: FnOnce(Varnode, Varnode) -> R2ILOp,
     {
-        let dst = self.require_output(raw, name)?;
-        let src = self.require_input(raw, 0, name)?;
-        Ok(f(dst, src))
+        translate::translate_unary(&self.wrap(raw), name, f).map_err(translate_err)
     }
 
     /// Helper for binary operations.
@@ -635,10 +642,7 @@ impl PcodeTranslator {
     where
         F: FnOnce(Varnode, Varnode, Varnode) -> R2ILOp,
     {
-        let dst = self.require_output(raw, name)?;
-        let a = self.require_input(raw, 0, name)?;
-        let b = self.require_input(raw, 1, name)?;
-        Ok(f(dst, a, b))
+        translate::translate_binary(&self.wrap(raw), name, f).map_err(translate_err)
     }
 
     /// Require an output varnode.
@@ -673,6 +677,19 @@ impl PcodeTranslator {
             expected: idx + 1,
             got: raw.inputs.len(),
         })
+    }
+}
+
+/// Helper to convert translation errors.
+fn translate_err(e: translate::TranslateError) -> PcodeError {
+    match e {
+        translate::TranslateError::MissingOutput(op) => PcodeError::MissingOutput(op),
+        translate::TranslateError::MissingInput(op, expected) => PcodeError::InvalidOperandCount {
+            op,
+            expected: expected + 1,
+            got: 0, // We don't have the actual count easily available here
+        },
+        translate::TranslateError::InvalidSpace(idx) => PcodeError::InvalidSpace(idx),
     }
 }
 

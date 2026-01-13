@@ -341,4 +341,34 @@ mod tests {
             _ => panic!("Expected CBranch"),
         }
     }
+
+    #[test]
+    fn test_translate_ptradd() {
+        // PTRADD(base, index, element_size)
+        // r2il: base + (index * element_size)
+        let base = Varnode::register(0, 8);
+        let index = Varnode::register(8, 8);
+        let element_size = Varnode::constant(4, 8); // 4-byte elements
+
+        let source = MockPcodeSource {
+            output: Some(Varnode::register(16, 8)),
+            inputs: vec![base, index, element_size],
+        };
+
+        let result = translate_ptradd(&source).unwrap();
+        match result {
+            R2ILOp::PtrAdd {
+                dst,
+                base: b,
+                index: i,
+                element_size: sz,
+            } => {
+                assert_eq!(dst.offset, 16);
+                assert_eq!(b.offset, 0);
+                assert_eq!(i.offset, 8);
+                assert_eq!(sz, 4);
+            }
+            _ => panic!("Expected PtrAdd"),
+        }
+    }
 }
