@@ -10,6 +10,7 @@ use r2il::{ArchSpec, R2ILBlock};
 use serde::{Deserialize, Serialize};
 
 use crate::cfg::{CFGEdge, CFG};
+use crate::defuse::{backward_slice_from_op, backward_slice_from_var, BackwardSlice, SliceOpRef};
 use crate::domtree::DomTree;
 use crate::naming::build_register_name_map;
 use crate::op::SSAOp;
@@ -315,6 +316,21 @@ impl SSAFunction {
         }
 
         uses
+    }
+
+    /// Compute a backward slice for a sink variable.
+    pub fn backward_slice(&self, sink: &SSAVar) -> BackwardSlice {
+        backward_slice_from_var(self, sink)
+    }
+
+    /// Compute a backward slice starting from an SSA operation.
+    pub fn backward_slice_from_op(&self, block_addr: u64, op_idx: usize) -> BackwardSlice {
+        backward_slice_from_op(self, SliceOpRef::Op { block_addr, op_idx })
+    }
+
+    /// Compute a backward slice starting from a phi node.
+    pub fn backward_slice_from_phi(&self, block_addr: u64, phi_idx: usize) -> BackwardSlice {
+        backward_slice_from_op(self, SliceOpRef::Phi { block_addr, phi_idx })
     }
 
     /// Print the function in a human-readable format.

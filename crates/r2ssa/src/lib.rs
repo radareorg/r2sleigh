@@ -30,7 +30,10 @@ pub mod var;
 
 pub use block::SSABlock;
 pub use cfg::{BasicBlock, BlockTerminator, CFG, CFGEdge};
-pub use defuse::{def_use, DefUseInfo};
+pub use defuse::{
+    backward_slice_from_op, backward_slice_from_var, BackwardSlice, DefUseInfo, SliceOpRef,
+    def_use,
+};
 pub use function::{PhiNode, SSABlock as FunctionSSABlock, SSAFunction};
 pub use op::SSAOp;
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};

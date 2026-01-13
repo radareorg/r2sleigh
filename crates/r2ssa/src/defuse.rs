@@ -1,9 +1,10 @@
 //! Def-use chain analysis for SSA blocks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::function::{DefLocation, SSAFunction};
 use crate::op::SSAOp;
 use crate::var::SSAVar;
 use crate::SSABlock;
@@ -69,6 +70,51 @@ impl DefUseInfo {
     /// Get all output variable names.
     pub fn output_vars(&self) -> impl Iterator<Item = &str> {
         self.outputs.iter().map(|s| s.as_str())
+    }
+}
+
+/// Reference to an SSA operation or phi node in a function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SliceOpRef {
+    /// Phi node at the given index in the block.
+    Phi { block_addr: u64, phi_idx: usize },
+    /// Operation at the given index in the block.
+    Op { block_addr: u64, op_idx: usize },
+}
+
+impl SliceOpRef {
+    /// Get the block address for this reference.
+    pub fn block_addr(&self) -> u64 {
+        match self {
+            SliceOpRef::Phi { block_addr, .. } | SliceOpRef::Op { block_addr, .. } => {
+                *block_addr
+            }
+        }
+    }
+}
+
+/// Result of a backward slice: SSA operations and blocks that affect a sink.
+#[derive(Debug, Clone, Default)]
+pub struct BackwardSlice {
+    /// Operations (including phi nodes) in the slice.
+    pub ops: HashSet<SliceOpRef>,
+    /// Blocks that contain slice operations.
+    pub blocks: HashSet<u64>,
+}
+
+impl BackwardSlice {
+    /// Insert an operation into the slice and track its block.
+    pub fn add_op(&mut self, op: SliceOpRef) -> bool {
+        let inserted = self.ops.insert(op);
+        if inserted {
+            self.blocks.insert(op.block_addr());
+        }
+        inserted
+    }
+
+    /// Check if the slice is empty.
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
     }
 }
 
@@ -170,12 +216,207 @@ pub fn find_constants(block: &SSABlock) -> HashMap<String, u64> {
     constants
 }
 
+#[derive(Debug, Clone)]
+struct StoreInfo {
+    block_addr: u64,
+    op_idx: usize,
+    space: String,
+    addr: SSAVar,
+    val: SSAVar,
+}
+
+fn collect_store_infos(func: &SSAFunction) -> Vec<StoreInfo> {
+    let mut stores = Vec::new();
+
+    for block in func.blocks() {
+        for (op_idx, op) in block.ops.iter().enumerate() {
+            if let SSAOp::Store { space, addr, val } = op {
+                stores.push(StoreInfo {
+                    block_addr: block.addr,
+                    op_idx,
+                    space: space.clone(),
+                    addr: addr.clone(),
+                    val: val.clone(),
+                });
+            }
+        }
+    }
+
+    stores
+}
+
+fn const_value(var: &SSAVar) -> Option<u64> {
+    let val_str = var.name.strip_prefix("const:")?;
+    let val = if let Some(hex) = val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16).ok()?
+    } else {
+        val_str.parse::<u64>().ok()?
+    };
+    Some(val)
+}
+
+fn addresses_may_alias(a: &SSAVar, b: &SSAVar) -> bool {
+    match (const_value(a), const_value(b)) {
+        (Some(a_val), Some(b_val)) => a_val == b_val,
+        _ => true,
+    }
+}
+
+fn add_aliasing_stores(
+    slice: &mut BackwardSlice,
+    worklist: &mut VecDeque<SSAVar>,
+    stores: &[StoreInfo],
+    sink_space: &str,
+    sink_addr: &SSAVar,
+) {
+    for store in stores {
+        if store.space != sink_space {
+            continue;
+        }
+        if !addresses_may_alias(&store.addr, sink_addr) {
+            continue;
+        }
+        if slice.add_op(SliceOpRef::Op {
+            block_addr: store.block_addr,
+            op_idx: store.op_idx,
+        }) {
+            worklist.push_back(store.addr.clone());
+            worklist.push_back(store.val.clone());
+        }
+    }
+}
+
+fn walk_backward(
+    func: &SSAFunction,
+    stores: &[StoreInfo],
+    slice: &mut BackwardSlice,
+    worklist: &mut VecDeque<SSAVar>,
+    visited_vars: &mut HashSet<String>,
+) {
+    while let Some(var) = worklist.pop_front() {
+        let key = var.display_name();
+        if !visited_vars.insert(key) {
+            continue;
+        }
+
+        let Some((block_addr, def_loc)) = func.find_def(&var) else {
+            continue;
+        };
+
+        match def_loc {
+            DefLocation::Phi(phi_idx) => {
+                if slice.add_op(SliceOpRef::Phi { block_addr, phi_idx }) {
+                    if let Some(block) = func.get_block(block_addr) {
+                        if let Some(phi) = block.phis.get(phi_idx) {
+                            for (_, src) in &phi.sources {
+                                worklist.push_back(src.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            DefLocation::Op(op_idx) => {
+                if slice.add_op(SliceOpRef::Op { block_addr, op_idx }) {
+                    if let Some(block) = func.get_block(block_addr) {
+                        if let Some(op) = block.ops.get(op_idx) {
+                            for src in op.sources() {
+                                worklist.push_back(src.clone());
+                            }
+                            if let SSAOp::Load { space, addr, .. } = op {
+                                add_aliasing_stores(
+                                    slice,
+                                    worklist,
+                                    stores,
+                                    space.as_str(),
+                                    addr,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Compute a backward slice starting from a sink variable.
+pub fn backward_slice_from_var(func: &SSAFunction, sink: &SSAVar) -> BackwardSlice {
+    let stores = collect_store_infos(func);
+    let mut slice = BackwardSlice::default();
+    let mut worklist = VecDeque::new();
+    let mut visited_vars = HashSet::new();
+
+    worklist.push_back(sink.clone());
+    walk_backward(func, &stores, &mut slice, &mut worklist, &mut visited_vars);
+
+    slice
+}
+
+/// Compute a backward slice starting from a specific SSA operation.
+pub fn backward_slice_from_op(func: &SSAFunction, sink: SliceOpRef) -> BackwardSlice {
+    let stores = collect_store_infos(func);
+    let mut slice = BackwardSlice::default();
+    let mut worklist = VecDeque::new();
+    let mut visited_vars = HashSet::new();
+
+    match sink {
+        SliceOpRef::Phi { block_addr, phi_idx } => {
+            if let Some(block) = func.get_block(block_addr) {
+                if let Some(phi) = block.phis.get(phi_idx) {
+                    slice.add_op(SliceOpRef::Phi { block_addr, phi_idx });
+                    for (_, src) in &phi.sources {
+                        worklist.push_back(src.clone());
+                    }
+                }
+            }
+        }
+        SliceOpRef::Op { block_addr, op_idx } => {
+            if let Some(block) = func.get_block(block_addr) {
+                if let Some(op) = block.ops.get(op_idx) {
+                    slice.add_op(SliceOpRef::Op { block_addr, op_idx });
+                    for src in op.sources() {
+                        worklist.push_back(src.clone());
+                    }
+                    if let SSAOp::Load { space, addr, .. }
+                    | SSAOp::Store { space, addr, .. } = op
+                    {
+                        add_aliasing_stores(&mut slice, &mut worklist, &stores, space.as_str(), addr);
+                    }
+                }
+            }
+        }
+    }
+
+    walk_backward(func, &stores, &mut slice, &mut worklist, &mut visited_vars);
+
+    slice
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SSAFunction;
+    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 
     fn make_var(name: &str, version: u32, size: u32) -> SSAVar {
         SSAVar::new(name, version, size)
+    }
+
+    fn make_const_vn(val: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Const,
+            offset: val,
+            size,
+        }
+    }
+
+    fn make_reg_vn(offset: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Register,
+            offset,
+            size,
+        }
     }
 
     #[test]
@@ -290,5 +531,80 @@ mod tests {
 
         let constants = find_constants(&block);
         assert_eq!(constants.get("RAX_1"), Some(&0x42));
+    }
+
+    #[test]
+    fn test_backward_slice_var_chain() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::Copy {
+                    dst: make_reg_vn(0, 8),
+                    src: make_const_vn(1, 8),
+                }],
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::IntAdd {
+                    dst: make_reg_vn(8, 8),
+                    a: make_reg_vn(0, 8),
+                    b: make_const_vn(2, 8),
+                }],
+            },
+        ];
+
+        let func = SSAFunction::from_blocks(&blocks).unwrap();
+        let block = func.get_block(0x1004).unwrap();
+        let dst = block.ops[0].dst().unwrap().clone();
+
+        let slice = backward_slice_from_var(&func, &dst);
+        assert!(slice.ops.contains(&SliceOpRef::Op {
+            block_addr: 0x1004,
+            op_idx: 0
+        }));
+        assert!(slice.ops.contains(&SliceOpRef::Op {
+            block_addr: 0x1000,
+            op_idx: 0
+        }));
+    }
+
+    #[test]
+    fn test_backward_slice_memory_alias() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x2000,
+                size: 4,
+                ops: vec![R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: make_const_vn(0x1000, 8),
+                    val: make_reg_vn(0, 8),
+                }],
+            },
+            R2ILBlock {
+                addr: 0x2004,
+                size: 4,
+                ops: vec![R2ILOp::Load {
+                    dst: make_reg_vn(8, 8),
+                    space: SpaceId::Ram,
+                    addr: make_const_vn(0x1000, 8),
+                }],
+            },
+        ];
+
+        let func = SSAFunction::from_blocks(&blocks).unwrap();
+        let block = func.get_block(0x2004).unwrap();
+        let dst = block.ops[0].dst().unwrap().clone();
+
+        let slice = backward_slice_from_var(&func, &dst);
+        assert!(slice.ops.contains(&SliceOpRef::Op {
+            block_addr: 0x2004,
+            op_idx: 0
+        }));
+        assert!(slice.ops.contains(&SliceOpRef::Op {
+            block_addr: 0x2000,
+            op_idx: 0
+        }));
     }
 }
