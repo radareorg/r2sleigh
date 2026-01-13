@@ -165,36 +165,37 @@ impl VariableRecovery {
     /// Generate a parameter name.
     fn gen_param_name(&mut self, var: &SSAVar) -> String {
         // Use register name if it's a common parameter register
-        if var.name.contains("rdi") || var.name.contains("edi") {
+        let name = var.name.to_lowercase();
+        if name.contains("rdi") || name.contains("edi") {
             return "arg1".to_string();
         }
-        if var.name.contains("rsi") || var.name.contains("esi") {
+        if name.contains("rsi") || name.contains("esi") {
             return "arg2".to_string();
         }
-        if var.name.contains("rdx") || var.name.contains("edx") {
+        if name.contains("rdx") || name.contains("edx") {
             return "arg3".to_string();
         }
-        if var.name.contains("rcx") || var.name.contains("ecx") {
+        if name.contains("rcx") || name.contains("ecx") {
             return "arg4".to_string();
         }
-        if var.name.contains("r8") {
+        if name.contains("r8") {
             return "arg5".to_string();
         }
-        if var.name.contains("r9") {
+        if name.contains("r9") {
             return "arg6".to_string();
         }
 
         // ARM calling convention
-        if var.name.contains("r0") || var.name.contains("x0") {
+        if name.contains("r0") || name.contains("x0") {
             return "arg1".to_string();
         }
-        if var.name.contains("r1") || var.name.contains("x1") {
+        if name.contains("r1") || name.contains("x1") {
             return "arg2".to_string();
         }
-        if var.name.contains("r2") || var.name.contains("x2") {
+        if name.contains("r2") || name.contains("x2") {
             return "arg3".to_string();
         }
-        if var.name.contains("r3") || var.name.contains("x3") {
+        if name.contains("r3") || name.contains("x3") {
             return "arg4".to_string();
         }
 

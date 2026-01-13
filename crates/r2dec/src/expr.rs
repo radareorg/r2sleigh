@@ -32,7 +32,12 @@ impl ExpressionBuilder {
         // Clean up the name
         let base = if var.name.starts_with("reg:") {
             // Extract register name or use offset
-            format!("r{}", var.name.trim_start_matches("reg:"))
+            let reg = var.name.trim_start_matches("reg:");
+            if is_hex_name(reg) {
+                format!("r{}", reg)
+            } else {
+                reg.to_string()
+            }
         } else if var.name.starts_with("unique:") || var.name.starts_with("tmp:") {
             format!("t{}", var.version)
         } else {
@@ -409,6 +414,10 @@ impl ExpressionBuilder {
             _ => expr,
         }
     }
+}
+
+fn is_hex_name(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
