@@ -305,7 +305,7 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
     CString::new(profile).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
-/// Lift instruction bytes into an r2il block.
+/// Lift a single instruction into an r2il block.
 ///
 /// Returns NULL on failure or if the context lacks a disassembler.
 #[unsafe(no_mangle)]
@@ -327,6 +327,47 @@ pub extern "C" fn r2il_lift(
 
     let slice = unsafe { slice::from_raw_parts(bytes, len) };
     match disasm.lift(slice, addr) {
+        Ok(block) => Box::into_raw(Box::new(block)),
+        Err(e) => {
+            ctx_ref.error = CString::new(e.to_string()).ok();
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Lift an entire basic block (multiple instructions) into an r2il block.
+///
+/// # Arguments
+///
+/// * `ctx` - The r2il context
+/// * `bytes` - Instruction bytes for the block
+/// * `len` - Length of the byte buffer
+/// * `addr` - Starting address of the block
+/// * `block_size` - Size of the basic block in bytes (from radare2)
+///
+/// Returns NULL on failure or if the context lacks a disassembler.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_lift_block(
+    ctx: *mut R2ILContext,
+    bytes: *const u8,
+    len: usize,
+    addr: u64,
+    block_size: u32,
+) -> *mut R2ILBlock {
+    if ctx.is_null() || bytes.is_null() || len == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &mut *ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let slice = unsafe { slice::from_raw_parts(bytes, len) };
+    let size = (block_size as usize).min(len);
+
+    match disasm.lift_block(slice, addr, size) {
         Ok(block) => Box::into_raw(Box::new(block)),
         Err(e) => {
             ctx_ref.error = CString::new(e.to_string()).ok();
@@ -1962,6 +2003,82 @@ fn merge_states_enabled() -> bool {
     MERGE_STATES.load(Ordering::Relaxed)
 }
 
+fn seed_symbolic_state<'ctx>(
+    state: &mut r2sym::SymState<'ctx>,
+    func: &r2ssa::SSAFunction,
+    arch: Option<&ArchSpec>,
+) {
+    let Some(arch) = arch else {
+        return;
+    };
+
+    let arch_name = arch.name.to_ascii_lowercase();
+    let (arg_regs, stack_regs, stack_value) = if arch_name == "x86-64"
+        || arch_name == "x86_64"
+        || (arch_name == "x86" && arch.addr_size == 8)
+    {
+        (
+            [
+                "RDI", "RSI", "RDX", "RCX", "R8", "R9", "EDI", "ESI", "EDX", "ECX", "R8D", "R9D",
+            ]
+            .as_slice(),
+            ["RSP", "RBP"].as_slice(),
+            0x7fff_ffff_0000u64,
+        )
+    } else if arch_name == "x86" {
+        (
+            ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI"].as_slice(),
+            ["ESP", "EBP"].as_slice(),
+            0x7fff_0000u64,
+        )
+    } else {
+        return;
+    };
+
+    let mut seen = HashSet::new();
+    let mut maybe_seed = |var: &r2ssa::SSAVar| {
+        if !var.is_register() || var.version != 0 {
+            return;
+        }
+
+        let base_name = var.name.strip_prefix("reg:").unwrap_or(&var.name);
+        let base = base_name.to_ascii_uppercase();
+        let reg_name = var.display_name();
+        if !seen.insert(reg_name.clone()) {
+            return;
+        }
+
+        let bits = var.size * 8;
+        if stack_regs.contains(&base.as_str()) {
+            state.set_concrete(&reg_name, stack_value, bits);
+            return;
+        }
+
+        if arg_regs.contains(&base.as_str()) {
+            let sym_name = base_name.to_ascii_lowercase();
+            state.make_symbolic_named(&reg_name, &sym_name, bits);
+        }
+    };
+
+    for block in func.blocks() {
+        for phi in &block.phis {
+            maybe_seed(&phi.dst);
+            for (_, src) in &phi.sources {
+                maybe_seed(src);
+            }
+        }
+
+        for op in &block.ops {
+            if let Some(dst) = op.dst() {
+                maybe_seed(dst);
+            }
+            for src in op.sources() {
+                maybe_seed(src);
+            }
+        }
+    }
+}
+
 /// Opaque symbolic state handle for C API.
 /// Each context owns its own Z3 context for thread safety.
 pub struct R2SymContext {
@@ -2106,23 +2223,36 @@ pub extern "C" fn r2sym_function(
     };
 
     // Create Z3 context and run symbolic execution
-    let _z3_config = Config::new();
+    // Note: z3 0.19 uses thread-local context
     let z3_ctx = Context::thread_local();
 
-    let initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
-    let config = r2sym::ExploreConfig {
-        max_states: 100,
-        max_depth: 50,
-        merge_states: merge_states_enabled(),
-        timeout: Some(std::time::Duration::from_secs(5)),
-        ..Default::default()
+    // Wrap exploration in catch_unwind to handle z3 context issues gracefully
+    let explore_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
+        seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
+        let config = r2sym::ExploreConfig {
+            max_states: 100,
+            max_depth: 200,
+            merge_states: merge_states_enabled(),
+            timeout: Some(std::time::Duration::from_secs(5)),
+            ..Default::default()
+        };
+
+        let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
+        let results = explorer.explore(&ssa_func, initial_state);
+        let stats = explorer.stats().clone();
+        (results, stats)
+    }));
+
+    let (results, stats) = match explore_result {
+        Ok(r) => r,
+        Err(_) => {
+            let error_msg = r#"{"error": "symbolic execution failed (z3 context error)"}"#;
+            return CString::new(error_msg).map_or(ptr::null_mut(), |c| c.into_raw());
+        }
     };
 
-    let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
-    let results = explorer.explore(&ssa_func, initial_state);
-
     // Build summary
-    let stats = explorer.stats();
     let feasible_count = results.iter().filter(|r| r.feasible).count();
 
     let summary = SymExecSummary {
@@ -2235,20 +2365,33 @@ pub extern "C" fn r2sym_paths(
     };
 
     // Create Z3 context and run symbolic execution
-    let _z3_config = Config::new();
+    // Note: z3 0.19 uses thread-local context
     let z3_ctx = Context::thread_local();
 
-    let initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
-    let config = r2sym::ExploreConfig {
-        max_states: 100,
-        max_depth: 50,
-        merge_states: merge_states_enabled(),
-        timeout: Some(std::time::Duration::from_secs(5)),
-        ..Default::default()
-    };
+    // Wrap exploration in catch_unwind to handle z3 context issues gracefully
+    let explore_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
+        seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
+        let config = r2sym::ExploreConfig {
+            max_states: 100,
+            max_depth: 200,
+            merge_states: merge_states_enabled(),
+            timeout: Some(std::time::Duration::from_secs(5)),
+            ..Default::default()
+        };
 
-    let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
-    let results = explorer.explore(&ssa_func, initial_state);
+        let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
+        let results = explorer.explore(&ssa_func, initial_state);
+        (results, explorer)
+    }));
+
+    let (results, mut explorer) = match explore_result {
+        Ok(r) => r,
+        Err(_) => {
+            let error_msg = r#"[{"error": "symbolic execution failed (z3 context error)"}]"#;
+            return CString::new(error_msg).map_or(ptr::null_mut(), |c| c.into_raw());
+        }
+    };
 
     // Build path info with solutions
     let paths: Vec<PathInfo> = results

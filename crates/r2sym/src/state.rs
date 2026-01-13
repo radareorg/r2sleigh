@@ -389,8 +389,8 @@ impl<'ctx> SymState<'ctx> {
         let total_bytes = (value.bits() / 8) as usize;
         if total_bytes < needle_bytes.len() {
             if must_contain {
-                let false_bool = Bool::from_bool(false);
-                self.add_constraint(false_bool);
+                // Create a false constraint using the helper
+                self.add_constraint(bool_false());
             }
             return;
         }
@@ -551,13 +551,26 @@ fn parse_byte_ranges(pattern: &str) -> Vec<(u8, u8)> {
     ranges
 }
 
+fn bool_true() -> Bool {
+    // Create true using z3 0.19 API (uses thread-local context)
+    let one = BV::from_u64(1, 8);
+    one._eq(&one)
+}
+
+fn bool_false() -> Bool {
+    // Create false using z3 0.19 API (uses thread-local context)
+    let zero = BV::from_u64(0, 8);
+    let one = BV::from_u64(1, 8);
+    zero._eq(&one)
+}
+
 fn and_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {
     if values.is_empty() {
-        return Bool::from_bool(true);
+        return bool_true();
     }
-    let mut iter = values.iter();
-    let mut acc = iter.next().unwrap().clone();
-    for val in iter {
+    // Chain with bitwise AND
+    let mut acc = values[0].clone();
+    for val in &values[1..] {
         acc = acc & val;
     }
     acc
@@ -565,11 +578,11 @@ fn and_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {
 
 fn or_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {
     if values.is_empty() {
-        return Bool::from_bool(false);
+        return bool_false();
     }
-    let mut iter = values.iter();
-    let mut acc = iter.next().unwrap().clone();
-    for val in iter {
+    // Chain with bitwise OR
+    let mut acc = values[0].clone();
+    for val in &values[1..] {
         acc = acc | val;
     }
     acc

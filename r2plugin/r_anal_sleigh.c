@@ -17,6 +17,7 @@ extern const char *r2il_error(const R2ILContext *ctx);
 
 /* Lifting */
 extern R2ILBlock *r2il_lift(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr);
+extern R2ILBlock *r2il_lift_block(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr, unsigned int block_size);
 extern void r2il_block_free(R2ILBlock *block);
 
 /* Block inspection */
@@ -115,20 +116,22 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 
 	r_list_foreach (fcn->bbs, iter, bb) {
 		ut8 buf[SLEIGH_BLOCK_MAX_BYTES];
-		size_t to_read = R_MIN (bb->size, sizeof (buf));
+		size_t bb_size = R_MIN (bb->size, sizeof (buf));
+		size_t to_read = bb_size;
 
 		if (!anal->iob.read_at (anal->iob.io, bb->addr, buf, to_read)) {
 			R_LOG_ERROR ("r2sleigh: failed to read block at 0x%"PFMT64x, bb->addr);
 			continue;
 		}
 
-		/* Ensure minimum bytes for libsla */
+		/* Ensure minimum bytes for libsla (it reads ahead for variable-length instructions) */
 		if (to_read < SLEIGH_MIN_BYTES) {
 			memset (buf + to_read, 0, SLEIGH_MIN_BYTES - to_read);
 			to_read = SLEIGH_MIN_BYTES;
 		}
 
-		R2ILBlock *block = r2il_lift (ctx, buf, to_read, bb->addr);
+		/* Lift entire basic block (multiple instructions) */
+		R2ILBlock *block = r2il_lift_block (ctx, buf, to_read, bb->addr, (unsigned int)bb_size);
 		if (block) {
 			block_array_push (out, block);
 		}

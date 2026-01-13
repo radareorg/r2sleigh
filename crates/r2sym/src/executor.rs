@@ -691,6 +691,13 @@ impl<'ctx> SymExecutor<'ctx> {
                 }
             }
             SymValue::concrete(0, var.size * 8)
+        } else if let Some(hex) = var.name.strip_prefix("ram:") {
+            // Treat RAM addresses as concrete branch targets.
+            if let Ok(value) = u64::from_str_radix(hex, 16) {
+                SymValue::concrete(value, var.size * 8)
+            } else {
+                SymValue::concrete(0, var.size * 8)
+            }
         } else {
             let key = var.display_name();
             state.get_register_sized(&key, var.size * 8)

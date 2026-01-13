@@ -183,15 +183,18 @@ impl<'ctx> SymMemory<'ctx> {
         // Check symbolic writes for this address (most recent first).
         for (write_addr, write_val, write_size) in self.symbolic_writes.iter().rev() {
             if let Some(wa) = write_addr.as_concrete() {
-                if wa <= concrete_addr && wa + (*write_size as u64) >= concrete_addr + (size as u64)
-                {
-                    let offset = concrete_addr - wa;
-                    if offset == 0 && *write_size == size {
-                        return write_val.clone();
+                let write_end = wa.checked_add(*write_size as u64);
+                let read_end = concrete_addr.checked_add(size as u64);
+                if let (Some(write_end), Some(read_end)) = (write_end, read_end) {
+                    if wa <= concrete_addr && write_end >= read_end {
+                        let offset = concrete_addr - wa;
+                        if offset == 0 && *write_size == size {
+                            return write_val.clone();
+                        }
+                        let low_bit = (offset * 8) as u32;
+                        let high_bit = low_bit + (size * 8) - 1;
+                        return write_val.extract(self.ctx, high_bit, low_bit);
                     }
-                    let low_bit = (offset * 8) as u32;
-                    let high_bit = low_bit + (size * 8) - 1;
-                    return write_val.extract(self.ctx, high_bit, low_bit);
                 }
             }
         }
@@ -238,6 +241,9 @@ impl<'ctx> SymMemory<'ctx> {
         size: u32,
         constraints: &[Bool],
     ) {
+        let bits = size * 8;
+        let value = adjust_bits(self.ctx, value, bits);
+
         if let Some(concrete_addr) = addr.as_concrete() {
             if let Some(concrete_value) = value.as_concrete() {
                 for i in 0..size {
@@ -259,9 +265,9 @@ impl<'ctx> SymMemory<'ctx> {
         }
 
         let addr_bv = addr.to_bv(self.ctx);
-        let bits = size * 8;
         for target in targets {
             let existing = self.read_concrete(target, size);
+            let existing = adjust_bits(self.ctx, &existing, bits);
             let cond = addr_bv.eq(&BV::from_u64(target, addr.bits()));
             let taint = existing.get_taint() | value.get_taint() | addr.get_taint();
             let merged = SymValue::symbolic_tainted(
@@ -334,6 +340,17 @@ impl<'ctx> SymMemory<'ctx> {
     pub fn clear(&mut self) {
         self.concrete.clear();
         self.symbolic_writes.clear();
+    }
+}
+
+fn adjust_bits<'ctx>(ctx: &'ctx Context, value: &SymValue<'ctx>, bits: u32) -> SymValue<'ctx> {
+    if value.bits() == bits {
+        return value.clone();
+    }
+    if value.bits() < bits {
+        value.zero_extend(ctx, bits)
+    } else {
+        value.extract(ctx, bits - 1, 0)
     }
 }
 

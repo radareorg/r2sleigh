@@ -183,6 +183,9 @@ impl Disassembler {
     /// # Returns
     ///
     /// An `R2ILBlock` containing the translated operations, or an error.
+    ///
+    /// Note: This lifts a **single instruction**. Use `lift_block` to lift
+    /// multiple instructions within a basic block.
     pub fn lift(&self, bytes: &[u8], addr: u64) -> Result<R2ILBlock> {
         let code_space = self.sleigh.default_code_space();
         let address = Address::new(code_space, addr);
@@ -203,6 +206,70 @@ impl Disassembler {
 
         // Translate P-code to r2il
         self.translate_pcode(pcode, addr)
+    }
+
+    /// Minimum bytes required by libsla for disassembly.
+    const MIN_BYTES: usize = 16;
+
+    /// Lift an entire basic block (multiple instructions) to r2il.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Instruction bytes for the entire block (should be at least 16 bytes for libsla)
+    /// * `addr` - Starting address of the block
+    /// * `block_size` - Size of the block in bytes
+    ///
+    /// # Returns
+    ///
+    /// An `R2ILBlock` containing operations from all instructions in the block.
+    pub fn lift_block(&self, bytes: &[u8], addr: u64, block_size: usize) -> Result<R2ILBlock> {
+        let mut combined_block = R2ILBlock::new(addr, block_size as u32);
+        let mut offset = 0usize;
+
+        while offset < block_size {
+            let remaining = &bytes[offset..];
+            if remaining.is_empty() {
+                break;
+            }
+
+            let instr_addr = addr + offset as u64;
+
+            // libsla requires at least 16 bytes; pad if necessary
+            let lift_bytes: Vec<u8> = if remaining.len() < Self::MIN_BYTES {
+                let mut padded = remaining.to_vec();
+                padded.resize(Self::MIN_BYTES, 0);
+                padded
+            } else {
+                remaining.to_vec()
+            };
+
+            // Lift single instruction
+            match self.lift(&lift_bytes, instr_addr) {
+                Ok(instr_block) => {
+                    let instr_size = instr_block.size as usize;
+                    if instr_size == 0 {
+                        // Prevent infinite loop on zero-size instruction
+                        break;
+                    }
+
+                    // Append all ops from this instruction
+                    for op in instr_block.ops {
+                        combined_block.push(op);
+                    }
+
+                    offset += instr_size;
+                }
+                Err(_) => {
+                    // Stop on disassembly error (e.g., invalid instruction)
+                    break;
+                }
+            }
+        }
+
+        // Update the block size to reflect actual bytes consumed
+        combined_block.size = offset as u32;
+
+        Ok(combined_block)
     }
 
     /// Disassemble and get native assembly mnemonic.
