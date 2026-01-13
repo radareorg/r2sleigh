@@ -1,191 +1,370 @@
-# r2sleigh Roadmap (Concise)
+# r2sleigh Roadmap
 
-> Goal: bring Sleigh-powered, typed lifting to radare2 with backward-compatible ESIL and a path to richer analysis.
+> Goal: bring Sleigh-powered, typed lifting to radare2 with backward-compatible ESIL and advanced analysis capabilities.
 
 ## Snapshot (Jan 2025)
 
-- Core crates compile and lift via libsla; x86/x86-64/ARM available through `sleigh-config`.
-- CLI emits JSON/ESIL; P-code → r2il translation tested.
-- **radare2 plugin complete**: FFI exports, C wrapper, Makefile, full command set.
-- **SSA foundation complete**: `r2ssa` crate with versioned variables, def-use chains.
-- Plugin tested: disassembly, ESIL, typed analysis, SSA commands all working.
+**135 tests passing** across 7 crates:
+- `r2il` (26 tests) - Core IL types
+- `r2sleigh-lift` (4 tests) - P-code translation
+- `r2sleigh-cli` (9 tests) - CLI tool
+- `r2ssa` (42 tests) - SSA transformation
+- `r2sym` (51 tests) - Symbolic execution + taint analysis
+- `r2dec` (3 tests) - Decompiler scaffolding
+- `r2plugin` - radare2 integration
 
-## Phase Overview
-
-- Phase 1: Foundation — **done** (types, translator, CLI, ESIL).
-- Phase 2: radare2 integration — **done** (FFI + plugin + commands + typed analysis).
-- Phase 2.5: SSA foundation — **done** (SSA types, conversion, def-use, plugin commands).
-- Phase 3: Advanced analysis — **next** (inter-block SSA, symbolic, memory model).
-- Phase 4: Native decompiler — **long-term** (AST, structuring, codegen).
+**17 plugin commands working** in radare2.
 
 ---
 
-## Architecture Summary
+## Phase Status
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| 1. Foundation | ✅ Complete | r2il types, P-code translator, ESIL output, CLI |
+| 2. radare2 Plugin | ✅ Complete | FFI, C wrapper, RAnalPlugin, 8 instruction commands |
+| 2.5. SSA | ✅ Complete | SSAVar, CFG, domtree, phi nodes, def-use analysis |
+| 3. Symbolic Execution | ✅ Complete | Z3 solver, path exploration, taint analysis |
+| 4. Decompiler | ⚠️ Scaffolding | AST types exist, codegen outputs raw SSA |
+| 5. Advanced Analysis | 🔜 Planned | Slicing, vuln detection, concolic, crypto detection |
+
+---
+
+## Architecture
 
 ```
-.sla → libsla (P-code) → r2sleigh-lift (r2il) → ESIL | future SSA/symbolic/decomp
+.sla → libsla (P-code) → r2sleigh-lift (r2il) → r2ssa (SSA) → r2sym (symbolic) | r2dec (decomp)
+                                              ↓
+                                           ESIL (legacy)
 ```
 
-Crates:
-- `crates/r2il`: core types (`Varnode`, `SpaceId`, `R2ILOp`, `ArchSpec`, serialization).
-- `crates/r2sleigh-lift`: P-code translation + disasm wrapper + ESIL formatting.
-- `crates/r2sleigh-cli`: CLI (compile/disasm/info).
-- `crates/r2ssa`: SSA transformation (`SSAVar`, `SSAOp`, `SSABlock`, def-use analysis).
-- `r2plugin`: Rust cdylib + C wrapper for radare2 (`RAnalPlugin`).
+### Crates
+
+| Crate | Purpose | Tests |
+|-------|---------|-------|
+| `r2il` | Core types: `Varnode`, `SpaceId`, `R2ILOp`, `R2ILBlock` | 26 |
+| `r2sleigh-lift` | P-code → r2il translation, ESIL formatting | 4 |
+| `r2sleigh-cli` | CLI: compile, disasm, info commands | 9 |
+| `r2ssa` | SSA: `SSAVar`, `SSAOp`, `SSABlock`, CFG, domtree, phi | 42 |
+| `r2sym` | Symbolic: `SymValue`, `SymState`, solver, paths, **taint** | 51 |
+| `r2dec` | Decompiler: AST, expr, codegen (scaffolding) | 3 |
+| `r2plugin` | Rust cdylib + C wrapper for radare2 | - |
 
 ---
 
-## Phase 1 (Complete)
+## Plugin Commands (17 total)
 
-- r2il opcodes (60+), spaces, varnodes, serialization with version/magic.
-- P-code translator + libsla disassembler wrapper.
-- ESIL output path in CLI.
-- x86/x86-64 and ARM feature-gated via `sleigh-config`.
-- Tests: serializer round-trip, translator sanity (Copy/Add), CLI smoke commands.
+### Instruction-level (8)
+| Command | Description |
+|---------|-------------|
+| `a:sleigh` | Plugin status |
+| `a:sleigh.info` | Architecture info |
+| `a:sleigh.json` | R2IL ops as JSON |
+| `a:sleigh.regs` | Registers read/written |
+| `a:sleigh.mem` | Memory accesses |
+| `a:sleigh.vars` | All varnodes |
+| `a:sleigh.ssa` | SSA form (single instruction) |
+| `a:sleigh.defuse` | Def-use analysis |
 
----
+### Function-level (9)
+| Command | Description |
+|---------|-------------|
+| `a:sleigh.ssa.func` | Function SSA with phi nodes |
+| `a:sleigh.defuse.func` | Function-wide def-use |
+| `a:sleigh.dom` | Dominator tree (JSON) |
+| `a:sleigh.cfg` | ASCII CFG |
+| `a:sleigh.cfg.json` | CFG as JSON |
+| `a:sleigh.sym` | Symbolic execution summary |
+| `a:sleigh.sym.paths` | Path exploration with solutions |
+| `a:sleigh.taint` | Taint analysis (sources → sinks) |
+| `a:sleigh.dec` | Decompile to C (basic) |
 
-## Phase 2: radare2 Integration (Complete)
-
-### Deliverables (Done)
-
-- **FFI surface** (Rust cdylib `r2plugin/src/lib.rs`):
-  - `r2il_arch_init(arch)` — load arch spec from sleigh-config ✓
-  - `r2il_lift(ctx, bytes, len, addr)` — lift to `R2ILBlock` ✓
-  - `r2il_block_free`, `r2il_block_op_count`, `r2il_block_op_json` ✓
-  - `r2il_block_size`, `r2il_block_addr` ✓
-  - `r2il_block_type`, `r2il_block_jump`, `r2il_block_fail` ✓
-  - `r2il_block_to_esil(ctx, block)` — ESIL string ✓
-  - `r2il_block_mnemonic(ctx, bytes, len, addr)` — disassembly ✓
-  - `r2il_string_free` ✓
-
-- **C wrapper** (`r2plugin/r_anal_sleigh.c`):
-  - `RAnalPlugin` with `sleigh_op()` callback ✓
-  - Maps `R2ILBlock` → `RAnalOp` (type, size, jump/fail, ESIL) ✓
-  - Handles 16-byte minimum padding for libsla ✓
-  - Lazy architecture initialization with caching ✓
-
-- **Build integration** (`r2plugin/Makefile`):
-  - Builds Rust cdylib + C wrapper → `anal_sleigh.so` ✓
-  - `make install` / `make uninstall` targets ✓
-  - Feature flags for x86/arm/all-archs ✓
-
-- **User commands**:
-  - `a:sleigh` — status ✓
-  - `a:sleigh.info` — architecture info ✓
-  - `a:sleigh.json` — r2il ops as JSON ✓
-  - `a:sleigh.regs` — registers read/written ✓
-  - `a:sleigh.mem` — memory accesses ✓
-  - `a:sleigh.vars` — all varnodes ✓
-  - `a:sleigh.ssa` — SSA form ✓
-  - `a:sleigh.defuse` — def-use analysis ✓
-
-- **Documentation**:
-  - README with plugin installation and usage ✓
-
-### Verified Working
-
-```bash
-$ r2 -qc 'e anal.arch=sleigh; pd 3' /tmp/test.bin
-            0x00000000      55             push rbp
-            0x00000001      4889e5         mov rbp, rsp
-            0x00000004      c3             ret
-
-$ r2 -qc 'e anal.arch=sleigh; e asm.esil=true; pd 3' /tmp/test.bin
-            0x00000000      55             rbp,8,rsp,-,=[8],8,rsp,-=
-            0x00000001      4889e5         rsp,rbp,=
-            0x00000004      c3             rsp,[8],rip,=,8,rsp,+=
-```
+### Planned Commands
+| Command | Description | Priority |
+|---------|-------------|----------|
+| `a:sleigh.slice` | Backward slicing ("what affects X?") | High |
+| `a:sleigh.vuln` | Vulnerability pattern detection | High |
+| `a:sleigh.crypto` | Crypto algorithm detection | Medium |
+| `a:sleigh.constraint` | Export path constraints (SMT-LIB2) | Medium |
+| `a:sleigh.callgraph` | Inter-procedural data flow | Medium |
+| `a:sleigh.regions` | Memory region tracking | Medium |
+| `a:sleigh.diff` | Semantic diff of two functions | Low |
 
 ---
 
-## Phase 2.5: SSA Foundation (Complete)
+## What's Done
 
-Goal: single-block SSA transformation with analysis primitives.
+### Phase 1: Foundation ✅
+- 60+ R2IL opcodes matching P-code semantics
+- Varnode, SpaceId, ArchSpec types with serialization
+- P-code → r2il translator using libsla
+- ESIL output for backward compatibility
+- CLI with compile/disasm/info commands
+- x86/x86-64/ARM support via sleigh-config
 
-### Deliverables (Done)
+### Phase 2: radare2 Plugin ✅
+- FFI surface: `r2il_arch_init`, `r2il_lift`, `r2il_block_*`
+- C wrapper: `RAnalPlugin` with `sleigh_op()` callback
+- Makefile with `install`/`uninstall` targets
+- 8 instruction-level commands
+- Lazy architecture loading with caching
 
-- **`r2ssa` crate** (`crates/r2ssa/`):
-  - `SSAVar`: versioned variable with name, version, size ✓
-  - `SSAOp`: all R2ILOp variants with SSAVar + Phi node ✓
-  - `SSABlock`: container for SSA operations ✓
-  - `to_ssa()`: convert R2ILBlock to SSABlock ✓
-  - `SSAContext`: version tracking during conversion ✓
+### Phase 2.5: SSA Foundation ✅
+- `SSAVar`: versioned variables (name_version)
+- `SSAOp`: all R2IL ops with SSA vars + Phi variant
+- `SSABlock` and `SSAContext` for conversion
+- `to_ssa()`: R2ILBlock → SSABlock
+- Def-use analysis: inputs, outputs, live ranges
+- Dead code detection, constant finding
+- **CFG construction**: `BasicBlock`, edges, traversal
+- **Dominator tree**: idom, children, dominance frontier
+- **Phi node placement**: based on dominance frontiers
+- **SSA renaming**: variable versioning algorithm
+- **Function-level SSA**: `SSAFunction` with multiple blocks
 
-- **Def-use analysis** (`defuse.rs`):
-  - `DefUseInfo`: inputs, outputs, live variables ✓
-  - `def_use()`: compute def-use chains ✓
-  - `dead_ops()`: identify dead code ✓
-  - `find_constants()`: constant propagation info ✓
+### Phase 3: Symbolic Execution ✅
+- `SymValue`: concrete, symbolic, unknown values
+- **Taint tracking**: per-value taint masks, OR propagation
+- `SymState`: registers, memory, constraints
+- `SymMemory`: concrete/symbolic memory model
+- `SymExecutor`: R2IL op interpreter
+- `SymSolver`: Z3 integration for constraint solving
+- `PathExplorer`: explore paths, collect results
+- **Bitwidth normalization**: handle mixed-width operations
+- **Path solving**: extract concrete solutions from Z3 models
+- `SolvedPath`: inputs, registers, final_pc, constraints
+- **Taint command**: `a:sleigh.taint` with configurable sources/sinks
 
-- **Plugin integration**:
-  - `r2il_block_to_ssa_json()` FFI function ✓
-  - `r2il_block_defuse_json()` FFI function ✓
-  - `a:sleigh.ssa` command ✓
-  - `a:sleigh.defuse` command ✓
-
-- **Tests**: 18 tests (12 unit + 6 integration) ✓
+### Phase 4: Decompiler (Scaffolding)
+- AST node types defined
+- Expression builder exists
+- Codegen outputs raw SSA (not structured C)
+- Type inference scaffolding
+- Variable recovery scaffolding
+- Region analysis (if/while/for detection)
 
 ---
 
-## Phase 3: Advanced Analysis (Next)
+## What's Left
 
-Goal: inter-block analysis and symbolic execution.
+### Tier 1: High Priority (Next Up)
 
-- Inter-block SSA: CFG construction, phi nodes at block boundaries.
-- Dataflow: reaching defs, liveness analysis, taint scaffolding.
-- Memory model: regions + permission checks; hook loads/stores.
-- Symbolic execution: expression domain + optional solver bridge; branch forking.
-- IR hygiene: normalize flag semantics, consistent bit-width ops.
+| # | Feature | Command | Description | Effort |
+|---|---------|---------|-------------|--------|
+| 1 | ~~Taint command~~ | ~~`a:sleigh.taint`~~ | ✅ Exposed with JSON output | Done |
+| 2 | **Backward Slicing** | `a:sleigh.slice` | "What code affects variable X at address Y?" | Low |
+| 3 | **Vulnerability Patterns** | `a:sleigh.vuln` | Detect common vuln patterns (overflow, format string, UAF) | Medium |
+| 4 | **Better register naming** | - | Map `reg:10_1` → `ESP_1` in all output | Low |
+| 5 | **Memory in solutions** | - | Include memory values in symbolic path output | Low |
 
-Prereqs: stable r2il schema, consistent varnode naming, cross-arch register metadata.
+### Tier 2: Security Research Features
+
+| # | Feature | Command | Description | Effort |
+|---|---------|---------|-------------|--------|
+| 6 | **Concolic Execution** | `a:sleigh.concolic` | Concrete + symbolic hybrid (guided by ESIL traces) | Medium |
+| 7 | **Guided Vuln Discovery** | `a:sleigh.findpath` | "Find input reaching dangerous function with tainted arg" | Medium |
+| 8 | **Path Predicate Export** | `a:sleigh.constraint` | Export constraints as SMT-LIB2 for external solvers | Low |
+| 9 | **Crypto Detection** | `a:sleigh.crypto` | Detect crypto by IL patterns (S-box, constants, XOR chains) | Medium |
+| 10 | **Memory Region Tracking** | `a:sleigh.regions` | Track heap/stack/global regions with bounds | Medium |
+
+### Tier 3: Inter-procedural Analysis
+
+| # | Feature | Command | Description | Effort |
+|---|---------|---------|-------------|--------|
+| 11 | **Call Graph with Data Flow** | `a:sleigh.callgraph` | Track data flow across function boundaries | High |
+| 12 | **Inter-proc Taint** | `a:sleigh.taint.global` | Taint analysis spanning multiple functions | High |
+| 13 | **Function Summaries** | - | Cache symbolic summaries for called functions | High |
+
+### Tier 4: Decompiler Improvements
+
+| # | Feature | Description | Effort |
+|---|---------|-------------|--------|
+| 14 | **Control flow structuring** | if/while/for/switch recovery (region-based) | Medium |
+| 15 | **Expression folding** | Combine SSA ops into readable C expressions | Medium |
+| 16 | **Type inference** | Propagate types through dataflow | Medium |
+| 17 | **String recovery** | Detect and inline string literals | Low |
+| 18 | **Proper CFG from r2** | Use radare2's function/block boundaries | Low |
+
+### Tier 5: Advanced/Research Features
+
+| # | Feature | Command | Description | Effort |
+|---|---------|---------|-------------|--------|
+| 19 | **Semantic Diff** | `a:sleigh.diff` | Compare two functions for semantic differences | High |
+| 20 | **Incremental Analysis** | - | Update SSA/taint as user annotates types | High |
+| 21 | **Pattern Matching DSL** | `a:sleigh.match` | User-defined IL patterns for custom detection | Medium |
+| 22 | **Multi-architecture testing** | - | Verify ARM, MIPS, PPC, etc. | Medium |
 
 ---
 
-## Phase 4: Native Decompiler (Long-term)
+## Feature Details
 
-Goal: structure SSA to AST and emit C-like code without external tools.
+### Backward Slicing (`a:sleigh.slice`)
+**What:** Answer "What code affects variable X at point Y?"
+**Use case:** "What determines the size argument to memcpy?"
+**Implementation:** Traverse def-use chains backwards from target variable.
+**Output:** List of SSA operations and their addresses.
 
-- Control-flow structuring (dom tree, loops, switches).
-- Type recovery (propagation + call signatures + struct inference).
-- Pattern library for idioms (memcpy, strlen, prolog/epilog).
-- Pretty-printer configurable for styles.
+### Vulnerability Pattern Detection (`a:sleigh.vuln`)
+**What:** Detect common vulnerability patterns at IL level:
+- Integer overflow before allocation (`malloc(a * b)` without check)
+- Tainted data in dangerous function args (`memcpy(dst, src, tainted_size)`)
+- Format string vulnerabilities (`printf(user_input)`)
+- Double-free patterns (heuristic)
+- Use-after-free patterns (heuristic)
 
-Prereqs: mature SSA + dataflow + type info; extensive tests per-arch.
+**Use case:** Automated vulnerability scanning
+**Implementation:** Combine taint analysis + pattern matching on SSA
+
+### Concolic Execution (`a:sleigh.concolic`)
+**What:** Use concrete execution traces to guide symbolic exploration
+**Use case:** Avoid path explosion by following real execution paths
+**Implementation:** 
+1. Record path from r2's ESIL emulator
+2. Use r2sym to explore branches off recorded path
+3. Solve for alternate inputs at each branch
+
+### Crypto Detection (`a:sleigh.crypto`)
+**What:** Detect cryptographic algorithms by IL patterns:
+- S-box lookups (256-byte table indexed by byte)
+- Characteristic constants (SHA magic, AES rcon)
+- XOR/shift patterns (TEA, RC4)
+- Modular arithmetic patterns (RSA, DH)
+
+**Use case:** Malware analysis, license checking analysis
+
+### Guided Vulnerability Discovery (`a:sleigh.findpath`)
+**What:** Combine taint + symbolic to find exploitable paths
+**Workflow:**
+1. Mark function inputs as tainted (sources)
+2. Define sinks (memcpy size, system arg, indirect call target)
+3. Symbolic execution finds paths from source to sink
+4. Output concrete inputs that trigger vulnerability
+
+---
+
+## What r2sleigh Does That Others Don't
+
+### vs radare2
+
+| Feature | radare2 | r2sleigh |
+|---------|---------|----------|
+| SSA form exposed | ❌ | ✅ |
+| Function SSA with phi | ❌ | ✅ |
+| Def-use chains | ❌ | ✅ |
+| Dominator tree | ❌ | ✅ |
+| Symbolic execution | ❌ | ✅ |
+| Taint analysis | ❌ | ✅ |
+| Path exploration | ❌ | ✅ |
+| Z3 constraint solving | ❌ | ✅ |
+| CFG as JSON | ⚠️ basic | ✅ |
+| Backward slicing | ❌ | 🔜 |
+| Vuln pattern detection | ❌ | 🔜 |
+
+### vs angr
+
+| Aspect | angr | r2sleigh |
+|--------|------|----------|
+| Integrated with r2 | ❌ | ✅ |
+| CLI-first workflow | ⚠️ | ✅ |
+| Uses Sleigh specs | ❌ (VEX) | ✅ |
+| JSON output for tooling | ⚠️ | ✅ |
+| Lightweight (no Python overhead) | ❌ | ✅ |
+| Scriptable with r2pipe | ❌ | ✅ |
+
+### vs Ghidra
+
+| Aspect | Ghidra | r2sleigh |
+|--------|--------|----------|
+| SSA exposed to user | ❌ | ✅ |
+| Symbolic execution | ❌ | ✅ |
+| Taint analysis | ❌ | ✅ |
+| CLI operation | ⚠️ headless | ✅ native |
+| Lightweight (no JVM) | ❌ | ✅ |
+| Uses Sleigh specs | ✅ | ✅ |
+
+### Unique Value Proposition
+> **angr's analysis power + radare2's workflow + Ghidra's Sleigh accuracy**
 
 ---
 
 ## Technical Notes
 
-- `.r2il` today: `bincode` serialization with magic/version and `HashMap` for registers; not a stable C ABI. Either freeze a deterministic binary layout or add a JSON/CBOR export for C consumers.
-- libsla quirk: x86-64 needs 16 bytes minimum; plugin pads input automatically.
-- Spaces: `SpaceId` maps `Const`, `Register`, `Ram`, `Unique`, `Custom(n)`; loads/stores carry a space constant operand.
-- ESIL syntax: ASCII minus (`-`), signed shift `>>>`, sign-extend `val,bits,~~`, boolean vs bitwise correctness.
+- **libsla quirk**: x86-64 needs 16 bytes minimum; plugin pads automatically
+- **Taint**: 64-bit mask per value, OR'd through operations
+- **Symbolic values**: concrete (u64), symbolic (Z3 BV), or unknown
+- **Bitwidth**: `normalize_widths()` zero-extends smaller operand
+- **Path limits**: default max_depth=100, max_states=1000
+- **Memory model**: Flat symbolic memory with concrete fallback
 
 ---
 
-## Testing Strategy
+## Implementation Notes
 
-- Rust: `cargo test --all-features`; add translator/ESIL golden tests per opcode.
-- Plugin: radare2 oneliners for load/lift/ESIL; compare against native plugins where applicable.
-- Integration: sample bytes for x86-64 and ARM (padded) through CLI and plugin; ensure consistent sizes and branch targets.
-- Fuzzing (optional): feed random bytes through `lift` to guard translator panics.
+### For Backward Slicing
+```rust
+// Already have def-use chains in r2ssa
+// Need: fn slice_backward(func: &SSAFunction, target: &SSAVar) -> Vec<(u64, SSAOp)>
+// Traverse: for each source of target, add to slice, recurse
+```
 
----
+### For Vulnerability Patterns
+```rust
+// Pattern: tainted value flows to dangerous sink
+struct VulnPattern {
+    name: &'static str,
+    sink_ops: Vec<&'static str>,  // "Call", "Store", etc.
+    sink_targets: Vec<&'static str>,  // "memcpy", "system", etc.
+    check: fn(&TaintResult, &SSAOp) -> bool,
+}
+```
 
-## Risks / Mitigations
-
-- **Format churn**: lock a stable `.r2il` spec before publishing plugin; add version gating.
-- **ESIL mismatch**: cross-check with radare2 native outputs; add regression tests.
-- **Performance**: cache lifts; avoid repeated libsla init; limit allocations in FFI paths.
-- **Maintenance**: upstream sleigh-config changes; keep feature flags aligned between CLI/plugin.
+### For Concolic Execution
+```rust
+// Hook into r2's ESIL trace
+// Record: Vec<(addr, branch_taken: bool)>
+// At each branch, fork symbolic state for unexplored direction
+```
 
 ---
 
 ## References
 
 - Agent guidelines: `Agent.md`
-- radare2 coding notes: `../radare2/AGENTS.md`
 - ESIL reference: https://book.rada.re/disassembling/esil.html
 - Sleigh docs: https://ghidra.re/courses/languages/html/sleigh.html
 - P-code reference: https://ghidra.re/courses/languages/html/pcoderef.html
+- angr docs: https://docs.angr.io/
+- S2E docs: https://s2e.systems/docs/
+
+---
+
+## Legacy Phase Tracking
+
+Phase 1: Foundation (what we have now)
+  ✅ r2il types in Rust
+  ✅ P-code → r2il translation
+  ✅ r2il → ESIL for backward compat
+  ✅ C-ABI plugin for radare2
+
+Phase 2: Core Integration
+  ✅ RAnalPlugin integration
+  ⬜ Add libr/il/ to radare2 core (upstream)
+  ⬜ RAnal uses r2il directly (not just ESIL)
+  ⬜ Type-aware analysis passes
+
+Phase 3: Advanced Features
+  ✅ SSA transformation
+  ✅ Symbolic execution engine
+  ⬜ Memory region modeling
+  ⬜ Inter-procedural analysis
+
+Phase 4: Decompiler
+  ⚠️ r2il → pseudo-C (scaffolding)
+  ⬜ Type inference from r2il
+  ⬜ Control flow structuring
+
+Phase 5: Security Research
+  ⬜ Backward slicing
+  ⬜ Vulnerability pattern detection
+  ⬜ Concolic execution
+  ⬜ Crypto detection
