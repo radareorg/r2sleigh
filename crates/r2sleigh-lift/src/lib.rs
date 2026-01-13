@@ -28,6 +28,7 @@ pub mod disasm;
 pub mod esil;
 pub mod pcode;
 pub mod sleigh;
+pub mod translate;
 
 use thiserror::Error;
 

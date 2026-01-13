@@ -397,8 +397,13 @@ impl PcodeTranslator {
             PcodeOp::IntSBorrow => self.binary_op(raw, "INT_SBORROW", |dst, a, b| {
                 R2ILOp::IntSBorrow { dst, a, b }
             }),
-            PcodeOp::Int2Comp | PcodeOp::IntNegate => {
-                self.unary_op(raw, "INT_NEGATE", |dst, src| R2ILOp::IntNegate { dst, src })
+            // Int2Comp (opcode 24) = two's complement negation
+            PcodeOp::Int2Comp => {
+                self.unary_op(raw, "INT_2COMP", |dst, src| R2ILOp::IntNegate { dst, src })
+            }
+            // IntNegate (opcode 25) = bitwise NOT (confusing Ghidra naming)
+            PcodeOp::IntNegate => {
+                self.unary_op(raw, "INT_NEGATE", |dst, src| R2ILOp::IntNot { dst, src })
             }
             PcodeOp::IntMult => {
                 self.binary_op(raw, "INT_MULT", |dst, a, b| R2ILOp::IntMult { dst, a, b })

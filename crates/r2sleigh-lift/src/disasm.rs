@@ -252,15 +252,16 @@ impl Disassembler {
             }
 
             OpCode::BranchConditional => {
-                let cond = inputs
+                // P-code spec: CBRANCH(dest, cond) - destination first, condition second
+                let target = inputs
                     .first()
                     .cloned()
                     .ok_or_else(|| missing_input("CBRANCH", 0))?;
-                let target = inputs
+                let cond = inputs
                     .get(1)
                     .cloned()
                     .ok_or_else(|| missing_input("CBRANCH", 1))?;
-                Some(R2ILOp::CBranch { cond, target })
+                Some(R2ILOp::CBranch { target, cond })
             }
 
             OpCode::BranchIndirect => {
@@ -971,14 +972,20 @@ impl Disassembler {
     }
 
     /// Extract a space ID from a constant varnode (used in LOAD/STORE).
+    ///
+    /// The constant varnode's offset contains the space index as defined by the Sleigh spec.
+    /// We look up the actual space from the sleigh instance rather than hardcoding indices.
     fn space_from_constant(&self, vn: &Varnode) -> SpaceId {
         // In P-code, LOAD/STORE use a constant varnode with the space index as the offset
-        // We map it to our space types
-        match vn.offset {
-            0 => SpaceId::Ram,
-            1 => SpaceId::Register,
-            2 => SpaceId::Unique,
-            n => SpaceId::Custom(n as u32),
+        // Look up the actual space from the sleigh instance
+        let spaces = self.sleigh.address_spaces();
+        let idx = vn.offset as usize;
+
+        if let Some(space) = spaces.get(idx) {
+            self.translate_space(space)
+        } else {
+            // Fallback for unknown space indices
+            SpaceId::Custom(vn.offset as u32)
         }
     }
 }
