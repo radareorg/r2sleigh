@@ -508,6 +508,111 @@ impl SSAOp {
     }
 }
 
+impl std::fmt::Display for SSAOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SSAOp::Phi { dst, sources } => {
+                write!(f, "{} = PHI(", dst)?;
+                for (i, src) in sources.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", src)?;
+                }
+                write!(f, ")")
+            }
+            SSAOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
+            SSAOp::Load { dst, space, addr } => write!(f, "{} = LOAD [{}]{}", dst, space, addr),
+            SSAOp::Store { space, addr, val } => write!(f, "STORE [{}]{} = {}", space, addr, val),
+            SSAOp::IntAdd { dst, a, b } => write!(f, "{} = {} + {}", dst, a, b),
+            SSAOp::IntSub { dst, a, b } => write!(f, "{} = {} - {}", dst, a, b),
+            SSAOp::IntMult { dst, a, b } => write!(f, "{} = {} * {}", dst, a, b),
+            SSAOp::IntDiv { dst, a, b } => write!(f, "{} = {} / {}", dst, a, b),
+            SSAOp::IntSDiv { dst, a, b } => write!(f, "{} = {} s/ {}", dst, a, b),
+            SSAOp::IntRem { dst, a, b } => write!(f, "{} = {} % {}", dst, a, b),
+            SSAOp::IntSRem { dst, a, b } => write!(f, "{} = {} s% {}", dst, a, b),
+            SSAOp::IntNegate { dst, src } => write!(f, "{} = -{}", dst, src),
+            SSAOp::IntCarry { dst, a, b } => write!(f, "{} = CARRY({}, {})", dst, a, b),
+            SSAOp::IntSCarry { dst, a, b } => write!(f, "{} = SCARRY({}, {})", dst, a, b),
+            SSAOp::IntSBorrow { dst, a, b } => write!(f, "{} = SBORROW({}, {})", dst, a, b),
+            SSAOp::IntAnd { dst, a, b } => write!(f, "{} = {} & {}", dst, a, b),
+            SSAOp::IntOr { dst, a, b } => write!(f, "{} = {} | {}", dst, a, b),
+            SSAOp::IntXor { dst, a, b } => write!(f, "{} = {} ^ {}", dst, a, b),
+            SSAOp::IntNot { dst, src } => write!(f, "{} = ~{}", dst, src),
+            SSAOp::IntLeft { dst, a, b } => write!(f, "{} = {} << {}", dst, a, b),
+            SSAOp::IntRight { dst, a, b } => write!(f, "{} = {} >> {}", dst, a, b),
+            SSAOp::IntSRight { dst, a, b } => write!(f, "{} = {} s>> {}", dst, a, b),
+            SSAOp::IntEqual { dst, a, b } => write!(f, "{} = {} == {}", dst, a, b),
+            SSAOp::IntNotEqual { dst, a, b } => write!(f, "{} = {} != {}", dst, a, b),
+            SSAOp::IntLess { dst, a, b } => write!(f, "{} = {} < {}", dst, a, b),
+            SSAOp::IntSLess { dst, a, b } => write!(f, "{} = {} s< {}", dst, a, b),
+            SSAOp::IntLessEqual { dst, a, b } => write!(f, "{} = {} <= {}", dst, a, b),
+            SSAOp::IntSLessEqual { dst, a, b } => write!(f, "{} = {} s<= {}", dst, a, b),
+            SSAOp::IntZExt { dst, src } => write!(f, "{} = ZEXT({})", dst, src),
+            SSAOp::IntSExt { dst, src } => write!(f, "{} = SEXT({})", dst, src),
+            SSAOp::BoolNot { dst, src } => write!(f, "{} = !{}", dst, src),
+            SSAOp::BoolAnd { dst, a, b } => write!(f, "{} = {} && {}", dst, a, b),
+            SSAOp::BoolOr { dst, a, b } => write!(f, "{} = {} || {}", dst, a, b),
+            SSAOp::BoolXor { dst, a, b } => write!(f, "{} = {} ^^ {}", dst, a, b),
+            SSAOp::Piece { dst, hi, lo } => write!(f, "{} = PIECE({}, {})", dst, hi, lo),
+            SSAOp::Subpiece { dst, src, offset } => write!(f, "{} = SUBPIECE({}, {})", dst, src, offset),
+            SSAOp::PopCount { dst, src } => write!(f, "{} = POPCOUNT({})", dst, src),
+            SSAOp::Lzcount { dst, src } => write!(f, "{} = LZCOUNT({})", dst, src),
+            SSAOp::Branch { target } => write!(f, "BRANCH {}", target),
+            SSAOp::CBranch { target, cond } => write!(f, "CBRANCH {} if {}", target, cond),
+            SSAOp::BranchInd { target } => write!(f, "BRANCHIND {}", target),
+            SSAOp::Call { target } => write!(f, "CALL {}", target),
+            SSAOp::CallInd { target } => write!(f, "CALLIND {}", target),
+            SSAOp::Return { target } => write!(f, "RETURN {}", target),
+            SSAOp::FloatAdd { dst, a, b } => write!(f, "{} = {} f+ {}", dst, a, b),
+            SSAOp::FloatSub { dst, a, b } => write!(f, "{} = {} f- {}", dst, a, b),
+            SSAOp::FloatMult { dst, a, b } => write!(f, "{} = {} f* {}", dst, a, b),
+            SSAOp::FloatDiv { dst, a, b } => write!(f, "{} = {} f/ {}", dst, a, b),
+            SSAOp::FloatNeg { dst, src } => write!(f, "{} = f-{}", dst, src),
+            SSAOp::FloatAbs { dst, src } => write!(f, "{} = FABS({})", dst, src),
+            SSAOp::FloatSqrt { dst, src } => write!(f, "{} = FSQRT({})", dst, src),
+            SSAOp::FloatCeil { dst, src } => write!(f, "{} = FCEIL({})", dst, src),
+            SSAOp::FloatFloor { dst, src } => write!(f, "{} = FFLOOR({})", dst, src),
+            SSAOp::FloatRound { dst, src } => write!(f, "{} = FROUND({})", dst, src),
+            SSAOp::FloatNaN { dst, src } => write!(f, "{} = FNAN({})", dst, src),
+            SSAOp::FloatEqual { dst, a, b } => write!(f, "{} = {} f== {}", dst, a, b),
+            SSAOp::FloatNotEqual { dst, a, b } => write!(f, "{} = {} f!= {}", dst, a, b),
+            SSAOp::FloatLess { dst, a, b } => write!(f, "{} = {} f< {}", dst, a, b),
+            SSAOp::FloatLessEqual { dst, a, b } => write!(f, "{} = {} f<= {}", dst, a, b),
+            SSAOp::Int2Float { dst, src } => write!(f, "{} = INT2FLOAT({})", dst, src),
+            SSAOp::Float2Int { dst, src } => write!(f, "{} = FLOAT2INT({})", dst, src),
+            SSAOp::FloatFloat { dst, src } => write!(f, "{} = FLOAT2FLOAT({})", dst, src),
+            SSAOp::Trunc { dst, src } => write!(f, "{} = TRUNC({})", dst, src),
+            SSAOp::CallOther { output, userop, inputs } => {
+                if let Some(out) = output {
+                    write!(f, "{} = ", out)?;
+                }
+                write!(f, "CALLOTHER({})", userop)?;
+                if !inputs.is_empty() {
+                    write!(f, " [")?;
+                    for (i, inp) in inputs.iter().enumerate() {
+                        if i > 0 { write!(f, ", ")?; }
+                        write!(f, "{}", inp)?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            },
+            SSAOp::Nop => write!(f, "NOP"),
+            SSAOp::Unimplemented => write!(f, "UNIMPLEMENTED"),
+            SSAOp::CpuId { dst } => write!(f, "{} = CPUID", dst),
+            SSAOp::Breakpoint => write!(f, "BREAKPOINT"),
+            SSAOp::PtrAdd { dst, base, index, element_size } => write!(f, "{} = PTRADD({}, {}, {})", dst, base, index, element_size),
+            SSAOp::PtrSub { dst, base, index, element_size } => write!(f, "{} = PTRSUB({}, {}, {})", dst, base, index, element_size),
+            SSAOp::SegmentOp { dst, segment, offset } => write!(f, "{} = SEGMENT({}, {})", dst, segment, offset),
+            SSAOp::New { dst, src } => write!(f, "{} = NEW({})", dst, src),
+            SSAOp::Cast { dst, src } => write!(f, "{} = CAST({})", dst, src),
+            SSAOp::Extract { dst, src, position } => write!(f, "{} = EXTRACT({}, {})", dst, src, position),
+            SSAOp::Insert { dst, src, value, position } => write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,5 +663,43 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert_eq!(sources[0], &s1);
         assert_eq!(sources[1], &s2);
+    }
+
+    #[test]
+    fn test_display() {
+        let op = SSAOp::Copy {
+            dst: SSAVar::new("RAX", 1, 8),
+            src: SSAVar::new("RAX", 0, 8),
+        };
+        assert_eq!(format!("{}", op), "RAX_1 = COPY RAX_0");
+    }
+
+    #[test]
+    fn test_display_phi() {
+        let op = SSAOp::Phi {
+            dst: SSAVar::new("RAX", 2, 8),
+            sources: vec![
+                SSAVar::new("RAX", 0, 8),
+                SSAVar::new("RAX", 1, 8),
+            ],
+        };
+        assert_eq!(format!("{}", op), "RAX_2 = PHI(RAX_0, RAX_1)");
+    }
+
+    #[test]
+    fn test_display_load_store() {
+        let load = SSAOp::Load {
+            dst: SSAVar::new("RAX", 1, 8),
+            space: "ram".to_string(),
+            addr: SSAVar::new("RSP", 0, 8),
+        };
+        assert_eq!(format!("{}", load), "RAX_1 = LOAD [ram]RSP_0");
+
+        let store = SSAOp::Store {
+            space: "ram".to_string(),
+            addr: SSAVar::new("RSP", 0, 8),
+            val: SSAVar::new("RAX", 1, 8),
+        };
+        assert_eq!(format!("{}", store), "STORE [ram]RSP_0 = RAX_1");
     }
 }
