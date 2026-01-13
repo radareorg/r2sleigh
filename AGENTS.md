@@ -18,7 +18,9 @@ crates/
 ├── r2il/           # Core IL types (Varnode, R2ILOp, ArchSpec)
 ├── r2sleigh-lift/  # P-code → r2il translation
 ├── r2sleigh-cli/   # CLI tool (compile, disasm, info)
-└── r2ssa/          # SSA transformation and analysis
+├── r2ssa/          # SSA transformation and analysis
+├── r2sym/          # Symbolic execution + taint analysis
+└── r2dec/          # Decompiler (scaffolding)
 r2plugin/           # C-ABI for radare2 integration
 ```
 
@@ -61,6 +63,43 @@ cargo test --all-features
 ```
 
 **IMPORTANT**: Disassembly requires 16+ bytes of input (pad with zeros).
+
+## Local Plugin Setup (radare2 in sibling dir)
+
+- Build + install: `make -C r2plugin RUST_FEATURES=x86 install`
+- Verify load: `r2 -qc 'L' /bin/ls` (check for sleigh in the plugin list)
+- Plugin dir comes from `r2 -H R2_USER_PLUGINS` (see `r2plugin/Makefile`)
+- `pkg-config r_anal` is used for headers/libs; set `PKG_CONFIG_PATH` if needed
+
+### Using Plugin Automatically with `aaa`
+
+**Important**: The plugin implements the `op` callback, which radare2 calls automatically during analysis. However, radare2 selects analysis plugins based on architecture matching, not via a config variable.
+
+The plugin will be used automatically when:
+1. **Architecture matches**: The plugin supports `x86`, `arm`, and `mips` architectures
+2. **Plugin is loaded**: Ensure it's installed in `~/.local/share/radare2/plugins/`
+3. **Architecture is set correctly**: radare2 auto-detects from the binary, or set explicitly:
+
+```bash
+# The plugin works automatically if architecture matches
+r2 -qc 'e bin.relocs.apply=true; aaa' /bin/ls
+
+# Verify plugin is working:
+r2 -qc 'e bin.relocs.apply=true; aaa; s entry0+4; a:sla.info' /bin/ls
+
+# If architecture doesn't match, set it explicitly:
+r2 -qc 'e anal.arch=x86; e anal.bits=64; aaa' /bin/ls
+```
+
+The plugin auto-detects architecture from `anal.arch` and `anal.bits`:
+- `anal.arch=x86` + `anal.bits=64` → uses `x86-64`
+- `anal.arch=x86` + `anal.bits=32` → uses `x86`
+- `anal.arch=arm` → uses `arm`
+- `anal.arch=mips` → uses `mips`
+
+You can override with: `a:sla.arch x86-64`
+
+**Note**: The plugin's `op` callback is called automatically by radare2 during analysis (`aaa`, `aa`, etc.) when the architecture matches. There's no need to "select" it explicitly - it works transparently.
 
 ## Code Style
 
@@ -220,6 +259,15 @@ r2 -qc 's entry0+4; a:sleigh.defuse' /bin/ls
 | `r2ssa/op.rs` | ~600 | SSA operations |
 | `r2ssa/block.rs` | ~500 | SSA conversion |
 | `r2ssa/defuse.rs` | ~200 | Def-use analysis |
+| `r2sym/executor.rs` | ~400 | R2IL interpreter for symbolic execution |
+| `r2sym/state.rs` | ~300 | Symbolic state (regs, mem, constraints) |
+| `r2sym/solver.rs` | ~200 | Z3 integration and model extraction |
+| `r2sym/path.rs` | ~200 | Path exploration and results |
+| `r2dec/structure.rs` | ~250 | Control-flow structuring |
+| `r2dec/expr.rs` | ~300 | Expression builder |
+| `r2dec/codegen.rs` | ~200 | C code generation |
+| `r2dec/types.rs` | ~200 | Type scaffolding |
+| `r2dec/variable.rs` | ~200 | Variable recovery scaffolding |
 | `r2plugin/lib.rs` | ~1200 | C-ABI exports for radare2 |
 | `r2plugin/r_anal_sleigh.c` | ~400 | radare2 RAnalPlugin wrapper |
 | `tests/e2e/integration_tests.rs` | ~500 | Integration tests (REQUIRED for new features) |
@@ -291,6 +339,9 @@ int test_new_feature(int x) {
 2. **Unicode minus**: Use ASCII `-` (0x2D), not `−` (U+2212) in ESIL.
 3. **Feature flags**: `sleigh-config` features must match CLI features.
 4. **Rust 2024**: `#[no_mangle]` → `#[unsafe(no_mangle)]`
+5. **Width mismatches**: normalize widths and use explicit sign/zero-extend ops.
+6. **Const vs Unique**: Const is literal, Unique is temp SSA space (not memory).
+7. **Register aliasing**: overlapping regs need a deterministic policy in output.
 
 ## Dependencies
 

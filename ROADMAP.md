@@ -13,7 +13,7 @@
 - `r2dec` (3 tests) - Decompiler scaffolding
 - `r2plugin` - radare2 integration
 
-**17 plugin commands working** in radare2.
+**18 plugin commands working** in radare2.
 
 ---
 
@@ -52,7 +52,7 @@
 
 ---
 
-## Plugin Commands (17 total)
+## Plugin Commands (18 total)
 
 ### Instruction-level (8)
 | Command | Description |
@@ -66,10 +66,11 @@
 | `a:sleigh.ssa` | SSA form (single instruction) |
 | `a:sleigh.defuse` | Def-use analysis |
 
-### Function-level (9)
+### Function-level (10)
 | Command | Description |
 |---------|-------------|
 | `a:sleigh.ssa.func` | Function SSA with phi nodes |
+| `a:sleigh.ssa.func.opt` | Optimized function SSA |
 | `a:sleigh.defuse.func` | Function-wide def-use |
 | `a:sleigh.dom` | Dominator tree (JSON) |
 | `a:sleigh.cfg` | ASCII CFG |
@@ -121,6 +122,7 @@
 - **Phi node placement**: based on dominance frontiers
 - **SSA renaming**: variable versioning algorithm
 - **Function-level SSA**: `SSAFunction` with multiple blocks
+- **SSA optimization pipeline**: const-prop, inst-combine, copy-prop, local CSE, DCE
 
 ### Phase 3: Symbolic Execution ✅
 - `SymValue`: concrete, symbolic, unknown values
@@ -146,6 +148,11 @@
 ---
 
 ## What's Left
+
+### Tracking TODOs
+
+- [ ] Add name-resolved register aliases to `a:sla.json` output (raw R2IL JSON still uses offsets)
+- [ ] Verify register alias policy applies across all serialized outputs (R2IL JSON, plugin, CLI, ESIL)
 
 ### Tier 1: High Priority (Next Up)
 
@@ -194,6 +201,56 @@
 | 21 | **Pattern Matching DSL** | `a:sleigh.match` | User-defined IL patterns for custom detection | Medium |
 | 22 | **Multi-architecture testing** | - | Verify ARM, MIPS, PPC, etc. | Medium |
 
+### Long-Run Foundations (New)
+
+| # | Feature | Description | Effort |
+|---|---------|-------------|--------|
+| 23 | **✅ SSA optimization pipeline** | DCE, copy-prop, local CSE, const-prop, inst-combine before decomp/analysis | Medium |
+| 24 | **IL validation + structured export** | R2IL/SSA validator + JSON tree export with stable schema | Medium |
+| 25 | **Memory/value-set analysis** | Alias-aware value sets and region modeling to improve taint/slicing/decomp | High |
+| 26 | **Decompiler recovery pipeline** | Full control-flow structuring + type recovery + variable recovery integration | High |
+| 27 | **ESIL-trace-guided analysis hooks** | Use ESIL traces for concolic guidance, watchpoints, path pruning | Medium |
+| 28 | **Architecture expansion + lift tests** | Add Sleigh targets (RISC-V/MIPS/PPC/AVR/etc) with per-arch fixtures | Medium |
+| 29 | **Register naming + alias policy** | Normalize reg names to profiles; resolve aliases/overlaps deterministically | Low |
+| 30 | **Control-flow structuring parity** | Region/SESE + "No More Gotos" style recovery for irreducibles | High |
+| 31 | **R2IL VM + event tracing** | Executable R2IL with trace/events for validation and guided analysis | High |
+| 32 | **ABI/calling-convention modeling** | Signature recovery + argument/return tracking for inter-proc analysis | Medium |
+
+### ROI/Benefit Priority Table
+
+| Rank | Feature | User Usefulness | Effort |
+|------|---------|-----------------|--------|
+| 1 | Register naming + alias policy | High | Low |
+| 2 | ✅ SSA optimization pipeline | High | Medium |
+| 3 | Backward slicing | High | Low |
+| 4 | IL validation + structured export | High | Medium |
+| 5 | Memory in solutions | Medium | Low |
+| 6 | Proper CFG from r2 | Medium | Low |
+| 7 | Vulnerability patterns | High | Medium |
+| 8 | Path predicate export | Medium | Low |
+| 9 | Memory/value-set analysis | High | High |
+| 10 | Memory region tracking | Medium | Medium |
+| 11 | Control-flow structuring parity | High | High |
+| 12 | Control flow structuring | High | Medium |
+| 13 | Expression folding | Medium | Medium |
+| 14 | Type inference | High | Medium |
+| 15 | String recovery | Medium | Low |
+| 16 | Decompiler recovery pipeline | High | High |
+| 17 | ESIL-trace-guided analysis hooks | Medium | Medium |
+| 18 | Concolic execution | Medium | High |
+| 19 | Guided vuln discovery (findpath) | High | High |
+| 20 | ABI/calling-convention modeling | Medium | Medium |
+| 21 | Call graph with data flow | Medium | High |
+| 22 | Function summaries | Medium | High |
+| 23 | Inter-proc taint | Medium | High |
+| 24 | R2IL VM + event tracing | Medium | High |
+| 25 | Architecture expansion + lift tests | Medium | Medium |
+| 26 | Multi-architecture testing | Medium | Medium |
+| 27 | Pattern matching DSL | Medium | Medium |
+| 28 | Crypto detection | Medium | Medium |
+| 29 | Semantic diff | Low | High |
+| 30 | Incremental analysis | Medium | High |
+
 ---
 
 ## Feature Details
@@ -239,6 +296,33 @@
 2. Define sinks (memcpy size, system arg, indirect call target)
 3. Symbolic execution finds paths from source to sink
 4. Output concrete inputs that trigger vulnerability
+
+### Path Predicate Export (`a:sleigh.constraint`)
+**What:** Export the mathematical constraints of a path to standard SMT-LIB2 format.
+**Use case:** Offload extremely complex constraints to specialized solvers (like integer programming solvers) or high-performance clusters to break obscure obfuscations.
+**Implementation:** Serialize the internal Z3 `Solver` state to an SMT-LIB2 string.
+
+### Inter-procedural Analysis (`a:sleigh.callgraph`)
+**What:** Track data flow and taint propagation across function boundaries (e.g., `main` → `parser` → `validate`).
+**Use case:** Detect bugs where tainted input passed to a parent function causes a crash deep in a helper function.
+**Implementation:** 
+1. Analyze leaf functions to generate "summaries" (input/output relationships).
+2. Propagate symbolic states through `Call` ops instead of treating them as black boxes.
+
+### Guided Fuzzing / DSE
+**What:** Dynamic Symbolic Execution to assist fuzzers.
+**Use case:** Help fuzzers (like AFL++) pass "magic byte" checks that random mutation cannot solve.
+**Implementation:**
+1. Listen to fuzzer coverage events.
+2. On stuck branches: solve for the exact input required to flip the condition.
+3. Feed the solved input back to the fuzzer queue.
+
+### Taint-Guided Symbolic Execution
+**What:** Optimization that limits symbolic execution scope.
+**Use case:** Avoid state explosion in large binaries.
+**Implementation:** 
+1. Before forking state at a branch, check the taint mask of the condition.
+2. If the condition is NOT tainted (not influenced by user input), execute it concretely and do not fork.
 
 ---
 
