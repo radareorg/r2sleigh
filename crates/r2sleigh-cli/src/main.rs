@@ -370,7 +370,7 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
             ).map_err(|e| e.to_string())
         }
         _ => {
-            let mut supported = vec![];
+            let mut supported: Vec<&str> = vec![];
             #[cfg(feature = "x86")]
             supported.extend(["x86-64", "x86"]);
             #[cfg(feature = "arm")]
