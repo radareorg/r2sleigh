@@ -48,6 +48,7 @@ extern char *r2il_block_defuse_json(const R2ILContext *ctx, const R2ILBlock *blo
 extern char *r2ssa_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2ssa_defuse_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2ssa_domtree_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+extern char *r2ssa_backward_slice_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, const char *var_name);
 extern char *r2taint_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2taint_sources_sinks_json(const char *json);
 
@@ -300,6 +301,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.ssa.func - Show function SSA with phi nodes");
 			r_cons_println (cons, "| a:sla.defuse.func - Show function-wide def-use analysis");
 			r_cons_println (cons, "| a:sla.dom    - Show dominator tree for current function");
+			r_cons_println (cons, "| a:sla.slice <var> - Backward slice from variable (e.g. rax_3)");
 			r_cons_println (cons, "| a:sla.sym    - Symbolic execution summary for current function");
 			r_cons_println (cons, "| a:sla.sym.paths - Explore paths in current function");
 			r_cons_println (cons, "| a:sla.sym.merge [on|off] - Toggle symbolic state merging");
@@ -649,6 +651,56 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		/* Get dominator tree */
 		char *result = r2ssa_domtree_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
+		return true;
+	}
+
+	if (!strncmp (cmd, "sla.slice", 9)) {
+		const char *arg = cmd + 9;
+		if (*arg == ' ') {
+			arg++;
+			while (*arg == ' ') {
+				arg++;
+			}
+		}
+
+		if (!*arg) {
+			if (cons) {
+				r_cons_println (cons, "Usage: a:sla.slice <var_name>");
+				r_cons_println (cons, "Example: a:sla.slice rax_3");
+				r_cons_println (cons, "         a:sla.slice zf_1");
+			}
+			return true;
+		}
+
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		/* Get current function */
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		/* Lift all blocks */
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		/* Get backward slice */
+		char *result = r2ssa_backward_slice_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, arg);
 
 		if (cons && result) {
 			r_cons_printf (cons, "%s\n", result);

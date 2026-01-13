@@ -1920,6 +1920,152 @@ pub extern "C" fn r2ssa_domtree_json(
     }
 }
 
+/// Backward slice info for JSON output.
+#[derive(Serialize)]
+struct BackwardSliceJson {
+    sink_var: String,
+    ops: Vec<SliceOpJson>,
+    blocks: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SliceOpJson {
+    #[serde(rename = "type")]
+    op_type: String,
+    block: String,
+    index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    op_str: Option<String>,
+}
+
+/// Compute backward slice from a variable name at a given block.
+/// var_name should be in format "name_version" (e.g. "rax_3").
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2ssa_backward_slice_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    var_name: *const c_char,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 || var_name.is_null() {
+        return ptr::null_mut();
+    }
+
+    let var_name_str = match unsafe { CStr::from_ptr(var_name) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return ptr::null_mut(),
+    };
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
+    };
+
+    // Find the actual SSAVar with matching display_name (which handles reg: prefix and case)
+    let target_display_name = var_name_str.to_string();
+    let sink_var = {
+        let mut found: Option<r2ssa::SSAVar> = None;
+        'outer: for &addr in ssa_func.block_addrs() {
+            if let Some(block) = ssa_func.get_block(addr) {
+                // Check phi destinations
+                for phi in &block.phis {
+                    if phi.dst.display_name() == target_display_name {
+                        found = Some(phi.dst.clone());
+                        break 'outer;
+                    }
+                }
+                // Check op destinations
+                for op in &block.ops {
+                    if let Some(dst) = op.dst() {
+                        if dst.display_name() == target_display_name {
+                            found = Some(dst.clone());
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        match found {
+            Some(v) => v,
+            None => {
+                // Variable not found - return error JSON
+                let error_json = format!(
+                    r#"{{"error": "Variable '{}' not found"}}"#,
+                    var_name_str
+                );
+                return CString::new(error_json).map_or(ptr::null_mut(), |c| c.into_raw());
+            }
+        }
+    };
+
+    // Compute backward slice
+    let slice = r2ssa::backward_slice_from_var(&ssa_func, &sink_var);
+
+    // Convert to JSON
+    let mut ops_json = Vec::new();
+    for op_ref in &slice.ops {
+        match op_ref {
+            r2ssa::SliceOpRef::Phi { block_addr, phi_idx } => {
+                let mut op_str = None;
+                if let Some(block) = ssa_func.get_block(*block_addr) {
+                    if let Some(phi) = block.phis.get(*phi_idx) {
+                        op_str = Some(format!("{} = phi(...)", phi.dst.display_name()));
+                    }
+                }
+                ops_json.push(SliceOpJson {
+                    op_type: "phi".to_string(),
+                    block: format!("0x{:x}", block_addr),
+                    index: *phi_idx,
+                    op_str,
+                });
+            }
+            r2ssa::SliceOpRef::Op { block_addr, op_idx } => {
+                let mut op_str = None;
+                if let Some(block) = ssa_func.get_block(*block_addr) {
+                    if let Some(op) = block.ops.get(*op_idx) {
+                        op_str = Some(format!("{:?}", op));
+                    }
+                }
+                ops_json.push(SliceOpJson {
+                    op_type: "op".to_string(),
+                    block: format!("0x{:x}", block_addr),
+                    index: *op_idx,
+                    op_str,
+                });
+            }
+        }
+    }
+
+    let blocks_hex: Vec<String> = slice.blocks.iter().map(|b| format!("0x{:x}", b)).collect();
+
+    let json = BackwardSliceJson {
+        sink_var: var_name_str.to_string(),
+        ops: ops_json,
+        blocks: blocks_hex,
+    };
+
+    match serde_json::to_string_pretty(&json) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 // ============================================================================
 // Architecture Helpers
 // ============================================================================
