@@ -7,7 +7,8 @@ use libsla::{
     Address, AddressSpace, AddressSpaceType, BoolOp, FloatOp, GhidraSleigh, InstructionLoader,
     IntOp, IntSign, OpCode, PcodeDisassembly, PcodeInstruction, PseudoOp, Sleigh, VarnodeData,
 };
-use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+use r2il::{select_register_name, R2ILBlock, R2ILOp, SpaceId, Varnode};
+use std::collections::HashMap;
 
 use crate::translate::{self, PcodeSource};
 use crate::{LiftError, Result};
@@ -18,6 +19,8 @@ pub struct Disassembler {
     sleigh: GhidraSleigh,
     /// Architecture name
     arch_name: String,
+    /// Canonical register names by (offset, size)
+    reg_name_map: HashMap<(u64, u32), String>,
 }
 
 /// Wrapper for libsla PcodeInstruction that implements PcodeSource.
@@ -73,6 +76,24 @@ fn translate_err(e: translate::TranslateError) -> LiftError {
     }
 }
 
+fn build_register_name_map(sleigh: &GhidraSleigh) -> HashMap<(u64, u32), String> {
+    let mut candidates: HashMap<(u64, u32), Vec<String>> = HashMap::new();
+
+    for (varnode, name) in sleigh.register_name_map() {
+        let key = (varnode.address.offset, varnode.size as u32);
+        candidates.entry(key).or_default().push(name);
+    }
+
+    let mut map = HashMap::new();
+    for (key, names) in candidates {
+        if let Some(name) = select_register_name(names.iter().map(String::as_str)) {
+            map.insert(key, name);
+        }
+    }
+
+    map
+}
+
 impl Disassembler {
     /// Create a new disassembler from a precompiled .sla file and processor specification.
     ///
@@ -101,9 +122,12 @@ impl Disassembler {
             .build(sla_bytes)
             .map_err(|e| LiftError::Parse(format!("Failed to load .sla: {}", e)))?;
 
+        let reg_name_map = build_register_name_map(&sleigh);
+
         Ok(Self {
             sleigh,
             arch_name: arch_name.to_string(),
+            reg_name_map,
         })
     }
 
@@ -144,6 +168,10 @@ impl Disassembler {
     pub fn register_name(&self, vn: &Varnode) -> Option<String> {
         if vn.space != SpaceId::Register {
             return None;
+        }
+
+        if let Some(name) = self.reg_name_map.get(&(vn.offset, vn.size)) {
+            return Some(name.clone());
         }
 
         // Get the register address space

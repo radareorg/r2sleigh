@@ -111,7 +111,16 @@ pub fn to_ssa(block: &R2ILBlock, disasm: &Disassembler) -> SSABlock {
 
 /// Convert a varnode to an SSA variable name.
 fn varnode_to_name(vn: &Varnode, disasm: &Disassembler) -> String {
-    disasm.format_varnode(vn).to_lowercase()
+    match vn.space {
+        SpaceId::Register => disasm
+            .register_name(vn)
+            .map(|name| format!("reg:{}", name.to_lowercase()))
+            .unwrap_or_else(|| format!("reg:{:x}", vn.offset)),
+        SpaceId::Unique => format!("tmp:{:x}", vn.offset),
+        SpaceId::Const => format!("const:{:x}", vn.offset),
+        SpaceId::Ram => format!("ram:{:x}", vn.offset),
+        SpaceId::Custom(id) => format!("space{}:{:x}", id, vn.offset),
+    }
 }
 
 /// Convert a varnode to an SSA variable for reading (uses current version).

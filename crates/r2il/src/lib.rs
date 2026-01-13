@@ -27,12 +27,14 @@
 //! ```
 
 pub mod opcode;
+pub mod regname;
 pub mod serialize;
 pub mod space;
 pub mod varnode;
 
 // Re-export main types at crate root
 pub use opcode::{R2ILBlock, R2ILOp};
+pub use regname::select_register_name;
 pub use serialize::{ArchSpec, RegisterDef};
 pub use space::{AddressSpace, SpaceId};
 pub use varnode::Varnode;

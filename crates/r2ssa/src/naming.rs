@@ -1,15 +1,23 @@
 use std::collections::HashMap;
 
-use r2il::{ArchSpec, SpaceId, Varnode};
+use r2il::{select_register_name, ArchSpec, SpaceId, Varnode};
 
 pub type RegisterNameMap = HashMap<(u64, u32), String>;
 
 pub fn build_register_name_map(arch: &ArchSpec) -> RegisterNameMap {
-    let mut map = HashMap::new();
+    let mut candidates: HashMap<(u64, u32), Vec<String>> = HashMap::new();
     for reg in &arch.registers {
         let key = (reg.offset, reg.size);
-        map.entry(key).or_insert_with(|| reg.name.to_lowercase());
+        candidates.entry(key).or_default().push(reg.name.clone());
     }
+
+    let mut map = HashMap::new();
+    for (key, names) in candidates {
+        if let Some(name) = select_register_name(names.iter().map(String::as_str)) {
+            map.insert(key, name.to_lowercase());
+        }
+    }
+
     map
 }
 

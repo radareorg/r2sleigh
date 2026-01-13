@@ -89,6 +89,17 @@ mod instruction_analysis {
             "Memory analysis should show addr/size/write"
         );
     }
+
+    #[test]
+    fn instruction_ssa_uses_named_registers() {
+        setup();
+        let result = r2_at_addr(vuln_test_binary(), CMP_INSTRUCTION_ADDR, "a:sla.ssa");
+        result.assert_ok();
+        assert!(
+            result.contains_any(&["RBP_", "RSP_"]),
+            "SSA output should use named registers"
+        );
+    }
 }
 
 // ============================================================================
