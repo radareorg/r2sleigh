@@ -7,7 +7,8 @@
 
 use std::fmt;
 
-use z3::ast::{Ast, BV};
+use std::marker::PhantomData;
+use z3::ast::BV;
 use z3::Context;
 
 /// A symbolic value that can be concrete, symbolic, or unknown.
@@ -27,11 +28,13 @@ pub enum SymValue<'ctx> {
     /// A symbolic value represented as a Z3 bitvector.
     Symbolic {
         /// The Z3 bitvector AST.
-        ast: BV<'ctx>,
+        ast: BV,
         /// Size in bits.
         bits: u32,
         /// Taint mask (bitfield for multiple taint sources).
         taint: u64,
+        /// Marker for lifetime
+        _marker: PhantomData<&'ctx ()>,
     },
     /// An unknown/uninitialized value.
     Unknown {
@@ -58,17 +61,23 @@ impl<'ctx> SymValue<'ctx> {
     }
 
     /// Create a symbolic value from a Z3 bitvector (untainted).
-    pub fn symbolic(ast: BV<'ctx>, bits: u32) -> Self {
+    pub fn symbolic(ast: BV, bits: u32) -> Self {
         Self::Symbolic {
             ast,
             bits,
             taint: 0,
+            _marker: PhantomData,
         }
     }
 
     /// Create a symbolic value with taint.
-    pub fn symbolic_tainted(ast: BV<'ctx>, bits: u32, taint: u64) -> Self {
-        Self::Symbolic { ast, bits, taint }
+    pub fn symbolic_tainted(ast: BV, bits: u32, taint: u64) -> Self {
+        Self::Symbolic {
+            ast,
+            bits,
+            taint,
+            _marker: PhantomData,
+        }
     }
 
     /// Create an unknown value (untainted).
@@ -98,10 +107,13 @@ impl<'ctx> SymValue<'ctx> {
                 bits: *bits,
                 taint: *taint | new_taint,
             },
-            Self::Symbolic { ast, bits, taint } => Self::Symbolic {
+            Self::Symbolic {
+                ast, bits, taint, ..
+            } => Self::Symbolic {
                 ast: ast.clone(),
                 bits: *bits,
                 taint: *taint | new_taint,
+                _marker: PhantomData,
             },
             Self::Unknown { bits, taint } => Self::Unknown {
                 bits: *bits,
@@ -121,19 +133,25 @@ impl<'ctx> SymValue<'ctx> {
     }
 
     /// Create a new symbolic variable (untainted).
-    pub fn new_symbolic(ctx: &'ctx Context, name: &str, bits: u32) -> Self {
-        let ast = BV::new_const(ctx, name, bits);
+    pub fn new_symbolic(_ctx: &'ctx Context, name: &str, bits: u32) -> Self {
+        let ast = BV::new_const(name, bits);
         Self::Symbolic {
             ast,
             bits,
             taint: 0,
+            _marker: PhantomData,
         }
     }
 
     /// Create a new symbolic variable with taint.
-    pub fn new_symbolic_tainted(ctx: &'ctx Context, name: &str, bits: u32, taint: u64) -> Self {
-        let ast = BV::new_const(ctx, name, bits);
-        Self::Symbolic { ast, bits, taint }
+    pub fn new_symbolic_tainted(_ctx: &'ctx Context, name: &str, bits: u32, taint: u64) -> Self {
+        let ast = BV::new_const(name, bits);
+        Self::Symbolic {
+            ast,
+            bits,
+            taint,
+            _marker: PhantomData,
+        }
     }
 
     /// Create a concrete value from a Z3 context.
@@ -157,11 +175,7 @@ impl<'ctx> SymValue<'ctx> {
     /// Normalize two values to the same bit width for binary operations.
     /// Returns (self_normalized, other_normalized, result_bits).
     /// Uses zero-extension to match the larger width.
-    fn normalize_widths<'a>(
-        &'a self,
-        ctx: &'ctx Context,
-        other: &'a Self,
-    ) -> (BV<'ctx>, BV<'ctx>, u32) {
+    fn normalize_widths<'a>(&'a self, ctx: &'ctx Context, other: &'a Self) -> (BV, BV, u32) {
         let self_bits = self.bits();
         let other_bits = other.bits();
 
@@ -180,7 +194,7 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Normalize shift amount to match value width.
     /// Shift amounts are often smaller (e.g., 8-bit) than the value being shifted.
-    fn normalize_shift_amount(&self, ctx: &'ctx Context, amount: &Self) -> BV<'ctx> {
+    fn normalize_shift_amount(&self, ctx: &'ctx Context, amount: &Self) -> BV {
         let value_bits = self.bits();
         let amount_bits = amount.bits();
 
@@ -218,7 +232,7 @@ impl<'ctx> SymValue<'ctx> {
     }
 
     /// Get the Z3 AST if this is symbolic.
-    pub fn as_ast(&self) -> Option<&BV<'ctx>> {
+    pub fn as_ast(&self) -> Option<&BV> {
         match self {
             Self::Symbolic { ast, .. } => Some(ast),
             _ => None,
@@ -226,13 +240,13 @@ impl<'ctx> SymValue<'ctx> {
     }
 
     /// Convert to a Z3 bitvector (concretizing if needed).
-    pub fn to_bv(&self, ctx: &'ctx Context) -> BV<'ctx> {
+    pub fn to_bv(&self, _ctx: &'ctx Context) -> BV {
         match self {
-            Self::Concrete { value, bits, .. } => BV::from_u64(ctx, *value, *bits),
+            Self::Concrete { value, bits, .. } => BV::from_i64(*value as i64, *bits),
             Self::Symbolic { ast, .. } => ast.clone(),
             Self::Unknown { bits, .. } => {
                 // Create a fresh symbolic variable for unknown values
-                BV::fresh_const(ctx, "unknown", *bits)
+                BV::fresh_const("unknown", *bits)
             }
         }
     }
@@ -250,12 +264,18 @@ impl<'ctx> SymValue<'ctx> {
                 bits: new_bits,
                 taint,
             },
-            Self::Symbolic { ast, .. } => {
+            Self::Symbolic {
+                ast,
+                bits: _,
+                taint,
+                ..
+            } => {
                 let new_ast = ast.zero_ext(extend_by);
                 Self::Symbolic {
                     ast: new_ast,
                     bits: new_bits,
-                    taint,
+                    taint: *taint,
+                    _marker: PhantomData,
                 }
             }
             Self::Unknown { .. } => Self::Unknown {
@@ -294,6 +314,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: new_ast,
                     bits: new_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
             Self::Unknown { .. } => Self::Unknown {
@@ -323,6 +344,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: new_ast,
                     bits: new_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
             Self::Unknown { .. } => Self::Unknown {
@@ -360,6 +382,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: new_ast,
                     bits: new_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -397,6 +420,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvadd(&b_bv),
                     bits: result_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -432,6 +456,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvsub(&b_bv),
                     bits: result_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -467,6 +492,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvmul(&b_bv),
                     bits: result_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -504,6 +530,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvudiv(&b_bv),
                     bits: result_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -517,6 +544,7 @@ impl<'ctx> SymValue<'ctx> {
             ast: a_bv.bvsdiv(&b_bv),
             bits: result_bits,
             taint,
+            _marker: PhantomData,
         }
     }
 
@@ -552,6 +580,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvurem(&b_bv),
                     bits: result_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -565,6 +594,7 @@ impl<'ctx> SymValue<'ctx> {
             ast: a_bv.bvsrem(&b_bv),
             bits: result_bits,
             taint,
+            _marker: PhantomData,
         }
     }
 
@@ -590,6 +620,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: bv.bvneg(),
                     bits: self.bits(),
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -619,6 +650,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvand(&b_bv),
                     bits: result_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -646,6 +678,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvor(&b_bv),
                     bits: result_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -673,6 +706,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvxor(&b_bv),
                     bits: result_bits,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -700,6 +734,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: bv.bvnot(),
                     bits: self.bits(),
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -730,6 +765,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvshl(&b_bv),
                     bits: self.bits(),
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -753,6 +789,7 @@ impl<'ctx> SymValue<'ctx> {
                     ast: a_bv.bvlshr(&b_bv),
                     bits: self.bits(),
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -767,6 +804,7 @@ impl<'ctx> SymValue<'ctx> {
             ast: a_bv.bvashr(&b_bv),
             bits: self.bits(),
             taint,
+            _marker: PhantomData,
         }
     }
 
@@ -783,13 +821,14 @@ impl<'ctx> SymValue<'ctx> {
             },
             _ => {
                 let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
-                let cond = a_bv._eq(&b_bv);
-                let one = BV::from_u64(ctx, 1, 1);
-                let zero = BV::from_u64(ctx, 0, 1);
+                let cond = a_bv.eq(&b_bv);
+                let one = BV::from_i64(1, 1);
+                let zero = BV::from_i64(0, 1);
                 Self::Symbolic {
                     ast: cond.ite(&one, &zero),
                     bits: 1,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -807,12 +846,13 @@ impl<'ctx> SymValue<'ctx> {
             _ => {
                 let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
                 let cond = a_bv.bvult(&b_bv);
-                let one = BV::from_u64(ctx, 1, 1);
-                let zero = BV::from_u64(ctx, 0, 1);
+                let one = BV::from_i64(1, 1);
+                let zero = BV::from_i64(0, 1);
                 Self::Symbolic {
                     ast: cond.ite(&one, &zero),
                     bits: 1,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -830,12 +870,13 @@ impl<'ctx> SymValue<'ctx> {
             _ => {
                 let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
                 let cond = a_bv.bvule(&b_bv);
-                let one = BV::from_u64(ctx, 1, 1);
-                let zero = BV::from_u64(ctx, 0, 1);
+                let one = BV::from_i64(1, 1);
+                let zero = BV::from_i64(0, 1);
                 Self::Symbolic {
                     ast: cond.ite(&one, &zero),
                     bits: 1,
                     taint,
+                    _marker: PhantomData,
                 }
             }
         }
@@ -846,12 +887,13 @@ impl<'ctx> SymValue<'ctx> {
         let taint = self.get_taint() | other.get_taint();
         let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
         let cond = a_bv.bvslt(&b_bv);
-        let one = BV::from_u64(ctx, 1, 1);
-        let zero = BV::from_u64(ctx, 0, 1);
+        let one = BV::from_i64(1, 1);
+        let zero = BV::from_i64(0, 1);
         Self::Symbolic {
             ast: cond.ite(&one, &zero),
             bits: 1,
             taint,
+            _marker: PhantomData,
         }
     }
 
@@ -860,12 +902,13 @@ impl<'ctx> SymValue<'ctx> {
         let taint = self.get_taint() | other.get_taint();
         let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
         let cond = a_bv.bvsle(&b_bv);
-        let one = BV::from_u64(ctx, 1, 1);
-        let zero = BV::from_u64(ctx, 0, 1);
+        let one = BV::from_i64(1, 1);
+        let zero = BV::from_i64(0, 1);
         Self::Symbolic {
             ast: cond.ite(&one, &zero),
             bits: 1,
             taint,
+            _marker: PhantomData,
         }
     }
 

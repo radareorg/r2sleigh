@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use r2ssa::{FunctionSSABlock, SSAOp, SSAVar};
-use z3::ast::{Ast, BV};
+use z3::ast::BV;
 use z3::Context;
 
 use crate::state::{ExitStatus, SymState};
@@ -176,11 +176,11 @@ impl<'ctx> SymExecutor<'ctx> {
                 let a_sign = a_bv.extract(bits - 1, bits - 1);
                 let b_sign = b_bv.extract(bits - 1, bits - 1);
                 let sum_sign = sum_bv.extract(bits - 1, bits - 1);
-                let same_signs = a_sign._eq(&b_sign);
-                let diff_result = a_sign._eq(&sum_sign).not();
+                let same_signs = a_sign.eq(&b_sign);
+                let diff_result = a_sign.eq(&sum_sign).not();
                 let overflow = same_signs & diff_result;
-                let one = BV::from_u64(self.ctx, 1, 1);
-                let zero = BV::from_u64(self.ctx, 0, 1);
+                let one = BV::from_i64(1, 1);
+                let zero = BV::from_i64(0, 1);
                 let result = SymValue::symbolic(overflow.ite(&one, &zero), 1);
                 self.write_var(state, dst, result);
                 Ok(vec![])
@@ -197,11 +197,11 @@ impl<'ctx> SymExecutor<'ctx> {
                 let a_sign = a_bv.extract(bits - 1, bits - 1);
                 let b_sign = b_bv.extract(bits - 1, bits - 1);
                 let diff_sign = diff_bv.extract(bits - 1, bits - 1);
-                let diff_signs = a_sign._eq(&b_sign).not();
-                let diff_result = a_sign._eq(&diff_sign).not();
+                let diff_signs = a_sign.eq(&b_sign).not();
+                let diff_result = a_sign.eq(&diff_sign).not();
                 let borrow = diff_signs & diff_result;
-                let one = BV::from_u64(self.ctx, 1, 1);
-                let zero = BV::from_u64(self.ctx, 0, 1);
+                let one = BV::from_i64(1, 1);
+                let zero = BV::from_i64(0, 1);
                 let result = SymValue::symbolic(borrow.ite(&one, &zero), 1);
                 self.write_var(state, dst, result);
                 Ok(vec![])
@@ -282,9 +282,9 @@ impl<'ctx> SymExecutor<'ctx> {
                     Some(v) => SymValue::concrete(if v == 0 { 1 } else { 0 }, 1),
                     None => {
                         let bv = eq.to_bv(self.ctx);
-                        let zero = BV::from_u64(self.ctx, 0, 1);
-                        let one = BV::from_u64(self.ctx, 1, 1);
-                        let is_zero = bv._eq(&zero);
+                        let zero = BV::from_i64(0, 1);
+                        let one = BV::from_i64(1, 1);
+                        let is_zero = bv.eq(&zero);
                         SymValue::symbolic(is_zero.ite(&one, &zero), 1)
                     }
                 };

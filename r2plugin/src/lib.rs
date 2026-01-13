@@ -1243,9 +1243,7 @@ pub extern "C" fn r2taint_function_json(
         return ptr::null_mut();
     }
     let ctx = unsafe { &*ctx };
-    let ctx = unsafe { &*ctx };
-    let ctx = unsafe { &*ctx };
-    let ctx = unsafe { &*ctx };
+
 
     // Collect R2IL blocks
     let mut r2il_blocks = Vec::new();
@@ -1883,7 +1881,7 @@ use z3::{Config, Context};
 /// Each context owns its own Z3 context for thread safety.
 pub struct R2SymContext {
     _config: Config,
-    _context: Context,
+    // _context: Context, // Removed in z3 0.19
     entry_pc: u64,
     error: Option<CString>,
 }
@@ -1908,11 +1906,10 @@ pub extern "C" fn r2sym_fini() {
 #[unsafe(no_mangle)]
 pub extern "C" fn r2sym_state_new(entry_pc: u64) -> *mut R2SymContext {
     let config = Config::new();
-    let context = Context::new(&config);
+    // Context is thread-local in 0.19
 
     Box::into_raw(Box::new(R2SymContext {
         _config: config,
-        _context: context,
         entry_pc,
         error: None,
     }))
@@ -2008,8 +2005,8 @@ pub extern "C" fn r2sym_function(
     };
 
     // Create Z3 context and run symbolic execution
-    let z3_config = Config::new();
-    let z3_ctx = Context::new(&z3_config);
+    let _z3_config = Config::new();
+    let z3_ctx = Context::thread_local();
 
     let initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
     let config = r2sym::ExploreConfig {
@@ -2136,8 +2133,8 @@ pub extern "C" fn r2sym_paths(
     };
 
     // Create Z3 context and run symbolic execution
-    let z3_config = Config::new();
-    let z3_ctx = Context::new(&z3_config);
+    let _z3_config = Config::new();
+    let z3_ctx = Context::thread_local();
 
     let initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
     let config = r2sym::ExploreConfig {

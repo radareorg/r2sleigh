@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use z3::ast::{Ast, Bool, BV};
+use z3::ast::{Bool, BV};
 use z3::Context;
 
 use crate::memory::SymMemory;
@@ -35,7 +35,7 @@ pub struct SymState<'ctx> {
     /// Memory state.
     pub memory: SymMemory<'ctx>,
     /// Path constraints (conditions that must be true for this path).
-    constraints: Vec<Bool<'ctx>>,
+    constraints: Vec<Bool>,
     /// Current program counter.
     pub pc: u64,
     /// Whether this state is still active (not terminated).
@@ -171,29 +171,29 @@ impl<'ctx> SymState<'ctx> {
     }
 
     /// Add a path constraint.
-    pub fn add_constraint(&mut self, constraint: Bool<'ctx>) {
+    pub fn add_constraint(&mut self, constraint: Bool) {
         self.constraints.push(constraint);
     }
 
     /// Constrain a value to equal a concrete constant.
     pub fn constrain_eq(&mut self, value: &SymValue<'ctx>, rhs: u64) {
         let bv = value.to_bv(self.ctx);
-        let rhs_bv = BV::from_u64(self.ctx, rhs, value.bits());
-        self.add_constraint(bv._eq(&rhs_bv));
+        let rhs_bv = BV::from_u64(rhs, value.bits());
+        self.add_constraint(bv.eq(&rhs_bv));
     }
 
     /// Constrain a value to not equal a concrete constant.
     pub fn constrain_ne(&mut self, value: &SymValue<'ctx>, rhs: u64) {
         let bv = value.to_bv(self.ctx);
-        let rhs_bv = BV::from_u64(self.ctx, rhs, value.bits());
-        self.add_constraint(bv._eq(&rhs_bv).not());
+        let rhs_bv = BV::from_u64(rhs, value.bits());
+        self.add_constraint(bv.eq(&rhs_bv).not());
     }
 
     /// Constrain a value to be within an unsigned range [min, max].
     pub fn constrain_range(&mut self, value: &SymValue<'ctx>, min: u64, max: u64) {
         let bv = value.to_bv(self.ctx);
-        let min_bv = BV::from_u64(self.ctx, min, value.bits());
-        let max_bv = BV::from_u64(self.ctx, max, value.bits());
+        let min_bv = BV::from_u64(min, value.bits());
+        let max_bv = BV::from_u64(max, value.bits());
         let ge = bv.bvuge(&min_bv);
         let le = bv.bvule(&max_bv);
         self.add_constraint(ge & le);
@@ -217,8 +217,8 @@ impl<'ctx> SymState<'ctx> {
             let limit = std::cmp::min(bytes, pat_bytes.len());
             for i in 0..limit {
                 let byte_bv = bv.extract((i as u32 + 1) * 8 - 1, (i as u32) * 8);
-                let expected = BV::from_u64(self.ctx, pat_bytes[i] as u64, 8);
-                self.add_constraint(byte_bv._eq(&expected));
+                let expected = BV::from_u64(pat_bytes[i] as u64, 8);
+                self.add_constraint(byte_bv.eq(&expected));
             }
             return;
         }
@@ -233,10 +233,10 @@ impl<'ctx> SymState<'ctx> {
             let byte_bv = bv.extract((i as u32 + 1) * 8 - 1, (i as u32) * 8);
             let mut ors = Vec::with_capacity(ranges.len());
             for (lo, hi) in &ranges {
-                let lo_bv = BV::from_u64(self.ctx, *lo as u64, 8);
-                let hi_bv = BV::from_u64(self.ctx, *hi as u64, 8);
+                let lo_bv = BV::from_u64(*lo as u64, 8);
+                let hi_bv = BV::from_u64(*hi as u64, 8);
                 if lo == hi {
-                    ors.push(byte_bv._eq(&lo_bv));
+                    ors.push(byte_bv.eq(&lo_bv));
                 } else {
                     ors.push(byte_bv.bvuge(&lo_bv) & byte_bv.bvule(&hi_bv));
                 }
@@ -269,7 +269,7 @@ impl<'ctx> SymState<'ctx> {
         let total_bytes = (value.bits() / 8) as usize;
         if total_bytes < needle_bytes.len() {
             if must_contain {
-                let false_bool = Bool::from_bool(self.ctx, false);
+                let false_bool = Bool::from_bool(false);
                 self.add_constraint(false_bool);
             }
             return;
@@ -283,8 +283,8 @@ impl<'ctx> SymState<'ctx> {
                 let low = ((offset + i) as u32) * 8;
                 let high = low + 7;
                 let byte_bv = bv.extract(high, low);
-                let expected = BV::from_u64(self.ctx, *byte as u64, 8);
-                ands.push(byte_bv._eq(&expected));
+                let expected = BV::from_u64(*byte as u64, 8);
+                ands.push(byte_bv.eq(&expected));
             }
             matches.push(and_all(self.ctx, &ands));
         }
@@ -300,21 +300,21 @@ impl<'ctx> SymState<'ctx> {
     /// Add a constraint that a value is true (non-zero).
     pub fn add_true_constraint(&mut self, value: &SymValue<'ctx>) {
         let bv = value.to_bv(self.ctx);
-        let zero = BV::from_u64(self.ctx, 0, value.bits());
-        let cond = bv._eq(&zero).not();
+        let zero = BV::from_u64(0, value.bits());
+        let cond = bv.eq(&zero).not();
         self.constraints.push(cond);
     }
 
     /// Add a constraint that a value is false (zero).
     pub fn add_false_constraint(&mut self, value: &SymValue<'ctx>) {
         let bv = value.to_bv(self.ctx);
-        let zero = BV::from_u64(self.ctx, 0, value.bits());
-        let cond = bv._eq(&zero);
+        let zero = BV::from_u64(0, value.bits());
+        let cond = bv.eq(&zero);
         self.constraints.push(cond);
     }
 
     /// Get all path constraints.
-    pub fn constraints(&self) -> &[Bool<'ctx>] {
+    pub fn constraints(&self) -> &[Bool] {
         &self.constraints
     }
 
@@ -356,7 +356,7 @@ impl<'ctx> SymState<'ctx> {
     }
 
     /// Create a forked state with an additional constraint.
-    pub fn fork_with_constraint(&self, constraint: Bool<'ctx>) -> Self {
+    pub fn fork_with_constraint(&self, constraint: Bool) -> Self {
         let mut forked = self.fork();
         forked.add_constraint(constraint);
         forked
@@ -430,9 +430,9 @@ fn parse_byte_ranges(pattern: &str) -> Vec<(u8, u8)> {
     ranges
 }
 
-fn and_all<'ctx>(ctx: &'ctx Context, values: &[Bool<'ctx>]) -> Bool<'ctx> {
+fn and_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {
     if values.is_empty() {
-        return Bool::from_bool(ctx, true);
+        return Bool::from_bool(true);
     }
     let mut iter = values.iter();
     let mut acc = iter.next().unwrap().clone();
@@ -442,9 +442,9 @@ fn and_all<'ctx>(ctx: &'ctx Context, values: &[Bool<'ctx>]) -> Bool<'ctx> {
     acc
 }
 
-fn or_all<'ctx>(ctx: &'ctx Context, values: &[Bool<'ctx>]) -> Bool<'ctx> {
+fn or_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {
     if values.is_empty() {
-        return Bool::from_bool(ctx, false);
+        return Bool::from_bool(false);
     }
     let mut iter = values.iter();
     let mut acc = iter.next().unwrap().clone();

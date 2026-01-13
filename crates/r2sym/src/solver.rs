@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use z3::ast::{Ast, Bool, BV};
+use z3::ast::{Bool, BV};
 use z3::{Context, Model, Params, Solver};
 
 use crate::state::SymState;
@@ -38,7 +38,7 @@ pub struct SymSolver<'ctx> {
     /// The Z3 context.
     ctx: &'ctx Context,
     /// The underlying Z3 solver.
-    solver: Solver<'ctx>,
+    solver: Solver,
     /// Timeout in milliseconds (0 = no timeout).
     _timeout_ms: u32,
 }
@@ -46,7 +46,7 @@ pub struct SymSolver<'ctx> {
 impl<'ctx> SymSolver<'ctx> {
     /// Create a new solver.
     pub fn new(ctx: &'ctx Context) -> Self {
-        let solver = Solver::new(ctx);
+        let solver = Solver::new();
         Self {
             ctx,
             solver,
@@ -56,11 +56,11 @@ impl<'ctx> SymSolver<'ctx> {
 
     /// Create a solver with a timeout.
     pub fn with_timeout(ctx: &'ctx Context, timeout: Duration) -> Self {
-        let solver = Solver::new(ctx);
+        let solver = Solver::new();
         let timeout_ms = timeout.as_millis() as u32;
 
         // Set timeout parameter
-        let mut params = Params::new(ctx);
+        let mut params = Params::new();
         params.set_u32("timeout", timeout_ms);
         solver.set_params(&params);
 
@@ -77,12 +77,12 @@ impl<'ctx> SymSolver<'ctx> {
     }
 
     /// Add a constraint to the solver.
-    pub fn assert(&self, constraint: &Bool<'ctx>) {
+    pub fn assert(&self, constraint: &Bool) {
         self.solver.assert(constraint);
     }
 
     /// Add multiple constraints.
-    pub fn assert_all(&self, constraints: &[Bool<'ctx>]) {
+    pub fn assert_all(&self, constraints: &[Bool]) {
         for c in constraints {
             self.solver.assert(c);
         }
@@ -94,12 +94,12 @@ impl<'ctx> SymSolver<'ctx> {
     }
 
     /// Check with additional assumptions (without modifying the solver state).
-    pub fn check_assumptions(&self, assumptions: &[Bool<'ctx>]) -> SatResult {
+    pub fn check_assumptions(&self, assumptions: &[Bool]) -> SatResult {
         self.solver.check_assumptions(assumptions).into()
     }
 
     /// Get the model if the constraints are satisfiable.
-    pub fn get_model(&self) -> Option<Model<'ctx>> {
+    pub fn get_model(&self) -> Option<Model> {
         self.solver.get_model()
     }
 
@@ -128,7 +128,7 @@ impl<'ctx> SymSolver<'ctx> {
     }
 
     /// Get a concrete model for a state's constraints.
-    pub fn solve(&self, state: &SymState<'ctx>) -> Option<SymModel<'ctx>> {
+    pub fn solve(&self, state: &SymState<'ctx>) -> Option<SymModel<'_>> {
         self.push();
         self.assert_all(state.constraints());
 
@@ -155,7 +155,7 @@ impl<'ctx> SymSolver<'ctx> {
         &self,
         state: &SymState<'ctx>,
         target: &SymValue<'ctx>,
-        constraint: &Bool<'ctx>,
+        constraint: &Bool,
     ) -> Option<u64> {
         self.push();
         self.assert_all(state.constraints());
@@ -192,7 +192,7 @@ impl<'ctx> SymSolver<'ctx> {
                 b.to_bv(self.ctx),
             )
         };
-        let eq = a_bv._eq(&b_bv);
+        let eq = a_bv.eq(&b_bv);
 
         self.push();
         self.assert_all(state.constraints());
@@ -206,8 +206,8 @@ impl<'ctx> SymSolver<'ctx> {
     /// Check if a value can be zero.
     pub fn can_be_zero(&self, state: &SymState<'ctx>, value: &SymValue<'ctx>) -> bool {
         let bv = value.to_bv(self.ctx);
-        let zero = BV::from_u64(self.ctx, 0, value.bits());
-        let eq = bv._eq(&zero);
+        let zero = BV::from_i64(0, value.bits());
+        let eq = bv.eq(&zero);
 
         self.push();
         self.assert_all(state.constraints());
@@ -221,8 +221,8 @@ impl<'ctx> SymSolver<'ctx> {
     /// Check if a value must be zero (cannot be non-zero).
     pub fn must_be_zero(&self, state: &SymState<'ctx>, value: &SymValue<'ctx>) -> bool {
         let bv = value.to_bv(self.ctx);
-        let zero = BV::from_u64(self.ctx, 0, value.bits());
-        let neq = bv._eq(&zero).not();
+        let zero = BV::from_i64(0, value.bits());
+        let neq = bv.eq(&zero).not();
 
         self.push();
         self.assert_all(state.constraints());
@@ -253,7 +253,7 @@ impl<'ctx> SymSolver<'ctx> {
 
         while lo <= hi {
             let mid = lo + (hi - lo) / 2;
-            let mid_bv = BV::from_u64(self.ctx, mid, bits);
+            let mid_bv = BV::from_i64(mid as i64, bits);
             let constraint = bv.bvule(&mid_bv);
 
             self.push();
@@ -295,7 +295,7 @@ impl<'ctx> SymSolver<'ctx> {
 
         while lo <= hi {
             let mid = lo + (hi - lo) / 2;
-            let mid_bv = BV::from_u64(self.ctx, mid, bits);
+            let mid_bv = BV::from_i64(mid as i64, bits);
             let constraint = bv.bvuge(&mid_bv);
 
             self.push();
@@ -323,17 +323,17 @@ impl<'ctx> SymSolver<'ctx> {
 /// A model (concrete assignment) from the solver.
 pub struct SymModel<'ctx> {
     ctx: &'ctx Context,
-    model: Model<'ctx>,
+    model: Model,
 }
 
 impl<'ctx> SymModel<'ctx> {
     /// Create a new model wrapper.
-    pub fn new(ctx: &'ctx Context, model: Model<'ctx>) -> Self {
+    pub fn new(ctx: &'ctx Context, model: Model) -> Self {
         Self { ctx, model }
     }
 
     /// Evaluate a bitvector in this model.
-    pub fn eval_bv(&self, bv: &BV<'ctx>) -> Option<u64> {
+    pub fn eval_bv(&self, bv: &BV) -> Option<u64> {
         self.model.eval(bv, true)?.as_u64()
     }
 
@@ -409,8 +409,8 @@ mod tests {
         let solver = SymSolver::new(&ctx);
 
         // x > 5
-        let x = BV::new_const(&ctx, "x", 32);
-        let five = BV::from_u64(&ctx, 5, 32);
+        let x = BV::new_const("x", 32);
+        let five = BV::from_i64(5, 32);
         let constraint = x.bvugt(&five);
 
         solver.assert(&constraint);
@@ -428,9 +428,9 @@ mod tests {
         let solver = SymSolver::new(&ctx);
 
         // x > 5 AND x < 3 (impossible)
-        let x = BV::new_const(&ctx, "x", 32);
-        let five = BV::from_u64(&ctx, 5, 32);
-        let three = BV::from_u64(&ctx, 3, 32);
+        let x = BV::new_const("x", 32);
+        let five = BV::from_i64(5, 32);
+        let three = BV::from_i64(3, 32);
 
         solver.assert(&x.bvugt(&five));
         solver.assert(&x.bvult(&three));

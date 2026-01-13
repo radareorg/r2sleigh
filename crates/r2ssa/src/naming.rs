@@ -8,8 +8,7 @@ pub fn build_register_name_map(arch: &ArchSpec) -> RegisterNameMap {
     let mut map = HashMap::new();
     for reg in &arch.registers {
         let key = (reg.offset, reg.size);
-        map.entry(key)
-            .or_insert_with(|| reg.name.to_lowercase());
+        map.entry(key).or_insert_with(|| reg.name.to_lowercase());
     }
     map
 }
@@ -99,4 +98,3 @@ mod tests {
         assert_eq!(varnode_to_name(&ram_vn, None), "ram:400000");
     }
 }
-

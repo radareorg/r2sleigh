@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::cfg::{CFGEdge, CFG};
 use crate::domtree::DomTree;
-use crate::op::SSAOp;
 use crate::naming::build_register_name_map;
+use crate::op::SSAOp;
 use crate::phi::{collect_defs_from_cfg_with_names, PhiPlacement};
 use crate::rename::rename_function_with_names;
 use crate::var::SSAVar;
@@ -94,7 +94,8 @@ impl SSAFunction {
         let phi_placement = PhiPlacement::compute(&cfg, &domtree, &defs, &var_sizes);
 
         // Rename variables
-        let renamed = rename_function_with_names(&cfg, &domtree, &phi_placement, &var_sizes, reg_names_ref);
+        let renamed =
+            rename_function_with_names(&cfg, &domtree, &phi_placement, &var_sizes, reg_names_ref);
 
         // Build SSA blocks
         let mut ssa_blocks = HashMap::new();
