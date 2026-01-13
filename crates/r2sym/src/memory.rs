@@ -100,7 +100,8 @@ impl<'ctx> SymMemory<'ctx> {
         } else {
             // Symbolic address - need to model with Z3
             // For now, return a fresh symbolic value
-            SymValue::new_symbolic(self.ctx, "mem_sym", size * 8)
+            let ast = z3::ast::BV::fresh_const("mem_sym", size * 8);
+            SymValue::symbolic(ast, size * 8)
         }
     }
 
@@ -197,12 +198,10 @@ impl<'ctx> std::fmt::Debug for SymMemory<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use z3::Config;
 
     #[test]
     fn test_concrete_read_write() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
         let mut mem = SymMemory::new(&ctx);
 
         let addr = SymValue::concrete(0x1000, 64);
@@ -216,8 +215,7 @@ mod tests {
 
     #[test]
     fn test_byte_access() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
         let mut mem = SymMemory::new(&ctx);
 
         mem.write_bytes(0x1000, &[0x11, 0x22, 0x33, 0x44]);
@@ -232,8 +230,7 @@ mod tests {
 
     #[test]
     fn test_uninitialized_read() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
         let mem = SymMemory::new(&ctx);
 
         let addr = SymValue::concrete(0x2000, 64);
@@ -244,8 +241,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_default() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
         let mem = SymMemory::new_symbolic(&ctx);
 
         let addr = SymValue::concrete(0x2000, 64);

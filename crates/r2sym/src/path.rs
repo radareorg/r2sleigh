@@ -6,7 +6,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use r2ssa::SSAFunction;
+use r2ssa::{BlockTerminator, SSAFunction};
 use z3::Context;
 
 use crate::executor::SymExecutor;
@@ -312,7 +312,8 @@ impl<'ctx> PathExplorer<'ctx> {
             match self.executor.execute_block(&mut state, block) {
                 Ok(forked_states) => {
                     // Add forked states to worklist
-                    for forked in forked_states {
+                    for mut forked in forked_states {
+                        forked.set_prev_pc(Some(block_addr));
                         worklist.push_back(forked);
                     }
 
@@ -329,10 +330,12 @@ impl<'ctx> PathExplorer<'ctx> {
                     } else {
                         // Continue exploring this path
                         // Update PC to next block if not changed by control flow
-                        let succs = func.successors(block_addr);
-                        if state.pc == block_addr && !succs.is_empty() {
-                            state.pc = succs[0];
+                        if state.pc == block_addr {
+                            if let Some(next) = self.fallthrough_target(func, block_addr) {
+                                state.pc = next;
+                            }
                         }
+                        state.set_prev_pc(Some(block_addr));
                         worklist.push_back(state);
                     }
                 }
@@ -350,6 +353,18 @@ impl<'ctx> PathExplorer<'ctx> {
 
         self.stats.total_time = start_time.elapsed();
         results
+    }
+
+    fn fallthrough_target(&self, func: &SSAFunction, block_addr: u64) -> Option<u64> {
+        let block = func.cfg().get_block(block_addr)?;
+        match block.terminator {
+            BlockTerminator::Fallthrough { next } => Some(next),
+            BlockTerminator::ConditionalBranch { false_target, .. } => Some(false_target),
+            BlockTerminator::Call { fallthrough, .. } => fallthrough,
+            BlockTerminator::IndirectCall { fallthrough } => fallthrough,
+            BlockTerminator::Branch { target } => Some(target),
+            _ => None,
+        }
     }
 
     /// Get the next state from the worklist based on strategy.
@@ -423,15 +438,18 @@ impl<'ctx> PathExplorer<'ctx> {
             };
 
             if let Ok(forked_states) = self.executor.execute_block(&mut state, block) {
-                for forked in forked_states {
+                for mut forked in forked_states {
+                    forked.set_prev_pc(Some(block_addr));
                     worklist.push_back(forked);
                 }
 
                 if !state.is_terminated() {
-                    let succs = func.successors(block_addr);
-                    if state.pc == block_addr && !succs.is_empty() {
-                        state.pc = succs[0];
+                    if state.pc == block_addr {
+                        if let Some(next) = self.fallthrough_target(func, block_addr) {
+                            state.pc = next;
+                        }
                     }
+                    state.set_prev_pc(Some(block_addr));
                     worklist.push_back(state);
                 }
             }
@@ -497,17 +515,20 @@ impl<'ctx> PathExplorer<'ctx> {
             };
 
             if let Ok(forked_states) = self.executor.execute_block(&mut state, block) {
-                for forked in forked_states {
+                for mut forked in forked_states {
+                    forked.set_prev_pc(Some(block_addr));
                     if !avoid_set.contains(&forked.pc) {
                         worklist.push_back(forked);
                     }
                 }
 
                 if !state.is_terminated() && !avoid_set.contains(&state.pc) {
-                    let succs = func.successors(block_addr);
-                    if state.pc == block_addr && !succs.is_empty() {
-                        state.pc = succs[0];
+                    if state.pc == block_addr {
+                        if let Some(next) = self.fallthrough_target(func, block_addr) {
+                            state.pc = next;
+                        }
                     }
+                    state.set_prev_pc(Some(block_addr));
                     worklist.push_back(state);
                 }
             }
@@ -521,7 +542,6 @@ impl<'ctx> PathExplorer<'ctx> {
 mod tests {
     use super::*;
     use crate::SymValue;
-    use z3::Config;
 
     #[test]
     fn test_explore_config_default() {
@@ -533,8 +553,7 @@ mod tests {
 
     #[test]
     fn test_path_explorer_creation() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let explorer = PathExplorer::new(&ctx);
         assert_eq!(explorer.stats().states_explored, 0);
@@ -549,8 +568,7 @@ mod tests {
 
     #[test]
     fn test_path_result_methods() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
         state.set_register("rax", SymValue::concrete(42, 64));
@@ -567,8 +585,7 @@ mod tests {
 
     #[test]
     fn test_solve_path_with_constraints() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
         state.make_symbolic("sym_input", 64);

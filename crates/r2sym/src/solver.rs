@@ -253,7 +253,7 @@ impl<'ctx> SymSolver<'ctx> {
 
         while lo <= hi {
             let mid = lo + (hi - lo) / 2;
-            let mid_bv = BV::from_i64(mid as i64, bits);
+            let mid_bv = BV::from_u64(mid, bits);
             let constraint = bv.bvule(&mid_bv);
 
             self.push();
@@ -295,7 +295,7 @@ impl<'ctx> SymSolver<'ctx> {
 
         while lo <= hi {
             let mid = lo + (hi - lo) / 2;
-            let mid_bv = BV::from_i64(mid as i64, bits);
+            let mid_bv = BV::from_u64(mid, bits);
             let constraint = bv.bvuge(&mid_bv);
 
             self.push();
@@ -400,12 +400,10 @@ impl<'ctx> std::fmt::Debug for SymModel<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use z3::Config;
 
     #[test]
     fn test_simple_sat() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
         let solver = SymSolver::new(&ctx);
 
         // x > 5
@@ -423,8 +421,7 @@ mod tests {
 
     #[test]
     fn test_unsat() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
         let solver = SymSolver::new(&ctx);
 
         // x > 5 AND x < 3 (impossible)
@@ -440,8 +437,7 @@ mod tests {
 
     #[test]
     fn test_state_sat() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
         state.make_symbolic("x", 32);
@@ -457,8 +453,7 @@ mod tests {
 
     #[test]
     fn test_solve() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
         state.make_symbolic("x", 32);

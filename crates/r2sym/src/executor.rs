@@ -410,7 +410,19 @@ impl<'ctx> SymExecutor<'ctx> {
                 // Leading zero count
                 let val = self.read_var(state, src);
                 if let Some(v) = val.as_concrete() {
-                    let count = v.leading_zeros() as u64;
+                    let bits = val.bits();
+                    let count = if bits >= 64 {
+                        v.leading_zeros() as u64
+                    } else {
+                        let mask = (1u64 << bits) - 1;
+                        let masked = v & mask;
+                        if masked == 0 {
+                            bits as u64
+                        } else {
+                            let used = 64 - masked.leading_zeros();
+                            (bits - used) as u64
+                        }
+                    };
                     self.write_var(state, dst, SymValue::concrete(count, dst.size * 8));
                 } else {
                     let result = SymValue::new_symbolic(self.ctx, "lzcount", dst.size * 8);
@@ -698,12 +710,16 @@ impl<'ctx> SymExecutor<'ctx> {
         block: &FunctionSSABlock,
     ) -> SymResult<Vec<SymState<'ctx>>> {
         let mut forked_states = Vec::new();
+        let incoming = state.prev_pc();
 
         // Execute phi nodes first
         for phi in &block.phis {
             // In single-path execution, we need to know which predecessor we came from
-            // For now, just use the first source
-            if let Some((_, src)) = phi.sources.first() {
+            let src = incoming
+                .and_then(|prev| phi.sources.iter().find(|(pred, _)| *pred == prev))
+                .map(|(_, src)| src)
+                .or_else(|| phi.sources.first().map(|(_, src)| src));
+            if let Some(src) = src {
                 let val = self.read_var(state, src);
                 let key = phi.dst.display_name();
                 state.set_register(&key, val);
@@ -728,12 +744,10 @@ impl<'ctx> SymExecutor<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use z3::Config;
 
     #[test]
     fn test_copy_op() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let executor = SymExecutor::new(&ctx);
         let mut state = SymState::new(&ctx, 0x1000);
@@ -754,8 +768,7 @@ mod tests {
 
     #[test]
     fn test_add_op() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let executor = SymExecutor::new(&ctx);
         let mut state = SymState::new(&ctx, 0x1000);
@@ -777,8 +790,7 @@ mod tests {
 
     #[test]
     fn test_cbranch_concrete() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let executor = SymExecutor::new(&ctx);
         let mut state = SymState::new(&ctx, 0x1000);
@@ -798,8 +810,7 @@ mod tests {
 
     #[test]
     fn test_cbranch_symbolic() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let executor = SymExecutor::new(&ctx);
         let mut state = SymState::new(&ctx, 0x1000);

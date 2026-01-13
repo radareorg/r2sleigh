@@ -19,8 +19,7 @@
 //! use r2ssa::SSAFunction;
 //!
 //! let func = SSAFunction::from_blocks(&blocks).unwrap();
-//! let cfg = z3::Config::new();
-//! let ctx = z3::Context::new(&cfg);
+//! let ctx = z3::Context::thread_local();
 //!
 //! let mut state = SymState::new(&ctx, func.entry);
 //! state.make_symbolic("rdi", 64);

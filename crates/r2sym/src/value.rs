@@ -192,6 +192,26 @@ impl<'ctx> SymValue<'ctx> {
         }
     }
 
+    /// Normalize two values to the same bit width for signed operations.
+    /// Returns (self_normalized, other_normalized, result_bits).
+    /// Uses sign-extension to match the larger width.
+    fn normalize_widths_signed<'a>(&'a self, ctx: &'ctx Context, other: &'a Self) -> (BV, BV, u32) {
+        let self_bits = self.bits();
+        let other_bits = other.bits();
+
+        if self_bits == other_bits {
+            (self.to_bv(ctx), other.to_bv(ctx), self_bits)
+        } else if self_bits > other_bits {
+            let self_bv = self.to_bv(ctx);
+            let other_bv = other.to_bv(ctx).sign_ext(self_bits - other_bits);
+            (self_bv, other_bv, self_bits)
+        } else {
+            let self_bv = self.to_bv(ctx).sign_ext(other_bits - self_bits);
+            let other_bv = other.to_bv(ctx);
+            (self_bv, other_bv, other_bits)
+        }
+    }
+
     /// Normalize shift amount to match value width.
     /// Shift amounts are often smaller (e.g., 8-bit) than the value being shifted.
     fn normalize_shift_amount(&self, ctx: &'ctx Context, amount: &Self) -> BV {
@@ -242,7 +262,7 @@ impl<'ctx> SymValue<'ctx> {
     /// Convert to a Z3 bitvector (concretizing if needed).
     pub fn to_bv(&self, _ctx: &'ctx Context) -> BV {
         match self {
-            Self::Concrete { value, bits, .. } => BV::from_i64(*value as i64, *bits),
+            Self::Concrete { value, bits, .. } => BV::from_u64(*value, *bits),
             Self::Symbolic { ast, .. } => ast.clone(),
             Self::Unknown { bits, .. } => {
                 // Create a fresh symbolic variable for unknown values
@@ -294,14 +314,27 @@ impl<'ctx> SymValue<'ctx> {
         let taint = self.get_taint();
         match self {
             Self::Concrete { value, bits, .. } => {
-                // Sign extend the concrete value
-                let sign_bit = (*value >> (*bits - 1)) & 1;
-                let new_value = if sign_bit == 1 {
-                    let mask = !((1u64 << *bits) - 1);
-                    *value | mask
+                let src_bits = *bits;
+                let mut new_value = *value;
+                let low_mask = if src_bits >= 64 {
+                    u64::MAX
                 } else {
-                    *value
+                    (1u64 << src_bits) - 1
                 };
+                new_value &= low_mask;
+                if src_bits > 0 && ((new_value >> (src_bits - 1)) & 1) == 1 {
+                    let extend_mask = if new_bits >= 64 {
+                        if src_bits >= 64 {
+                            0
+                        } else {
+                            !low_mask
+                        }
+                    } else {
+                        let new_mask = (1u64 << new_bits) - 1;
+                        new_mask & !low_mask
+                    };
+                    new_value |= extend_mask;
+                }
                 Self::Concrete {
                     value: new_value,
                     bits: new_bits,
@@ -330,7 +363,15 @@ impl<'ctx> SymValue<'ctx> {
         let taint = self.get_taint();
         match self {
             Self::Concrete { value, .. } => {
-                let mask = (1u64 << new_bits) - 1;
+                if new_bits > 64 || high >= 64 {
+                    let new_ast = self.to_bv(_ctx).extract(high, low);
+                    return Self::symbolic_tainted(new_ast, new_bits, taint);
+                }
+                let mask = if new_bits >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << new_bits) - 1
+                };
                 let new_value = (*value >> low) & mask;
                 Self::Concrete {
                     value: new_value,
@@ -367,23 +408,25 @@ impl<'ctx> SymValue<'ctx> {
                     ..
                 },
             ) => {
-                let new_value = (*hi << *lo_bits) | *lo;
-                Self::Concrete {
-                    value: new_value,
-                    bits: new_bits,
-                    taint,
+                if new_bits <= 64 {
+                    let new_value = (*hi << *lo_bits) | *lo;
+                    Self::Concrete {
+                        value: new_value,
+                        bits: new_bits,
+                        taint,
+                    }
+                } else {
+                    let hi_bv = self.to_bv(ctx);
+                    let lo_bv = other.to_bv(ctx);
+                    let new_ast = hi_bv.concat(&lo_bv);
+                    Self::symbolic_tainted(new_ast, new_bits, taint)
                 }
             }
             _ => {
                 let hi_bv = self.to_bv(ctx);
                 let lo_bv = other.to_bv(ctx);
                 let new_ast = hi_bv.concat(&lo_bv);
-                Self::Symbolic {
-                    ast: new_ast,
-                    bits: new_bits,
-                    taint,
-                    _marker: PhantomData,
-                }
+                Self::symbolic_tainted(new_ast, new_bits, taint)
             }
         }
     }
@@ -539,7 +582,7 @@ impl<'ctx> SymValue<'ctx> {
     /// Signed division.
     pub fn sdiv(&self, ctx: &'ctx Context, other: &Self) -> Self {
         let taint = self.get_taint() | other.get_taint();
-        let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
+        let (a_bv, b_bv, result_bits) = self.normalize_widths_signed(ctx, other);
         Self::Symbolic {
             ast: a_bv.bvsdiv(&b_bv),
             bits: result_bits,
@@ -589,7 +632,7 @@ impl<'ctx> SymValue<'ctx> {
     /// Signed remainder.
     pub fn srem(&self, ctx: &'ctx Context, other: &Self) -> Self {
         let taint = self.get_taint() | other.get_taint();
-        let (a_bv, b_bv, result_bits) = self.normalize_widths(ctx, other);
+        let (a_bv, b_bv, result_bits) = self.normalize_widths_signed(ctx, other);
         Self::Symbolic {
             ast: a_bv.bvsrem(&b_bv),
             bits: result_bits,
@@ -885,7 +928,7 @@ impl<'ctx> SymValue<'ctx> {
     /// Signed less than comparison.
     pub fn slt(&self, ctx: &'ctx Context, other: &Self) -> Self {
         let taint = self.get_taint() | other.get_taint();
-        let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
+        let (a_bv, b_bv, _) = self.normalize_widths_signed(ctx, other);
         let cond = a_bv.bvslt(&b_bv);
         let one = BV::from_i64(1, 1);
         let zero = BV::from_i64(0, 1);
@@ -900,7 +943,7 @@ impl<'ctx> SymValue<'ctx> {
     /// Signed less than or equal comparison.
     pub fn sle(&self, ctx: &'ctx Context, other: &Self) -> Self {
         let taint = self.get_taint() | other.get_taint();
-        let (a_bv, b_bv, _) = self.normalize_widths(ctx, other);
+        let (a_bv, b_bv, _) = self.normalize_widths_signed(ctx, other);
         let cond = a_bv.bvsle(&b_bv);
         let one = BV::from_i64(1, 1);
         let zero = BV::from_i64(0, 1);
@@ -978,12 +1021,10 @@ impl<'ctx> fmt::Display for SymValue<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use z3::Config;
 
     #[test]
     fn test_concrete_ops() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let a = SymValue::concrete(10, 32);
         let b = SymValue::concrete(3, 32);
@@ -1006,8 +1047,7 @@ mod tests {
 
     #[test]
     fn test_bitwise_ops() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let a = SymValue::concrete(0b1100, 8);
         let b = SymValue::concrete(0b1010, 8);
@@ -1020,8 +1060,7 @@ mod tests {
 
     #[test]
     fn test_shift_ops() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let a = SymValue::concrete(0b1100, 8);
         let amt = SymValue::concrete(2, 8);
@@ -1032,8 +1071,7 @@ mod tests {
 
     #[test]
     fn test_comparison_ops() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let a = SymValue::concrete(10, 32);
         let b = SymValue::concrete(20, 32);
@@ -1046,8 +1084,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_creation() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let sym = SymValue::new_symbolic(&ctx, "x", 64);
         assert!(sym.is_symbolic());
@@ -1056,8 +1093,7 @@ mod tests {
 
     #[test]
     fn test_extension() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let a = SymValue::concrete(0xFF, 8);
 
@@ -1068,13 +1104,12 @@ mod tests {
         let sext = a.sign_extend(&ctx, 16);
         assert_eq!(sext.bits(), 16);
         // 0xFF sign-extended = 0xFFFF
-        assert_eq!(sext.as_concrete(), Some(0xFFFFFFFFFFFFFFFF)); // Due to our sign extension logic
+        assert_eq!(sext.as_concrete(), Some(0xFFFF));
     }
 
     #[test]
     fn test_extract() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let a = SymValue::concrete(0xABCD, 16);
         let low = a.extract(&ctx, 7, 0);
@@ -1089,12 +1124,10 @@ mod tests {
 #[cfg(test)]
 mod bitwidth_tests {
     use super::*;
-    use z3::Config;
 
     #[test]
     fn test_add_different_bitwidths_concrete() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         // Create values of different widths
         let val8 = SymValue::concrete(5, 8);
@@ -1108,8 +1141,7 @@ mod bitwidth_tests {
 
     #[test]
     fn test_shl_different_bitwidths_concrete() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         // Create values of different widths - this is common in real code
         // where shift amount might be 8-bit but value is 64-bit
@@ -1124,8 +1156,7 @@ mod bitwidth_tests {
 
     #[test]
     fn test_symbolic_different_bitwidths() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         // Create symbolic values of different widths
         let sym8 = SymValue::new_symbolic(&ctx, "x", 8);
@@ -1139,8 +1170,7 @@ mod bitwidth_tests {
 
     #[test]
     fn test_symbolic_shift_different_bitwidths() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         // Symbolic value with smaller shift amount
         let sym64 = SymValue::new_symbolic(&ctx, "val", 64);
@@ -1154,8 +1184,7 @@ mod bitwidth_tests {
 
     #[test]
     fn test_comparison_different_bitwidths() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         // Create symbolic values of different widths
         let sym8 = SymValue::new_symbolic(&ctx, "x", 8);
@@ -1169,8 +1198,7 @@ mod bitwidth_tests {
 
     #[test]
     fn test_bitwise_different_bitwidths() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let sym8 = SymValue::new_symbolic(&ctx, "x", 8);
         let sym32 = SymValue::new_symbolic(&ctx, "y", 32);
@@ -1191,8 +1219,7 @@ mod bitwidth_tests {
 
     #[test]
     fn test_taint_propagation() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         // Create tainted and untainted values
         const TAINT_USER_INPUT: u64 = 0x1;
@@ -1221,8 +1248,7 @@ mod bitwidth_tests {
 
     #[test]
     fn test_taint_with_symbolic_values() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         const TAINT_STDIN: u64 = 0x4;
 

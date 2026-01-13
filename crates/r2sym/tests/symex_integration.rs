@@ -7,7 +7,7 @@ use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 use r2ssa::SSAFunction;
 use r2sym::path::ExploreStrategy;
 use r2sym::{ExploreConfig, PathExplorer, SymState, SymValue};
-use z3::{Config, Context};
+use z3::Context;
 
 // Helper functions for creating varnodes
 fn make_reg(offset: u64, size: u32) -> Varnode {
@@ -30,7 +30,6 @@ fn make_const(val: u64, size: u32) -> Varnode {
 const RAX: u64 = 0;
 const RBX: u64 = 8;
 const RCX: u64 = 16;
-const RDX: u64 = 24;
 const RDI: u64 = 56;
 
 #[test]
@@ -58,8 +57,7 @@ fn test_symbolic_execution_linear_block() {
 
     let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
 
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let state = SymState::new(&ctx, 0x1000);
     let mut explorer = PathExplorer::new(&ctx);
@@ -99,8 +97,7 @@ fn test_symbolic_execution_with_symbolic_input() {
 
     let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
 
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let mut state = SymState::new(&ctx, 0x1000);
     // Make RAX symbolic
@@ -168,8 +165,7 @@ fn test_symbolic_execution_conditional_branch() {
 
     let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
 
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let mut state = SymState::new(&ctx, 0x1000);
     // Make RDI symbolic (simulating user input)
@@ -205,8 +201,7 @@ fn test_symbolic_execution_conditional_branch() {
 #[test]
 fn test_symbolic_arithmetic_operations() {
     // Test all arithmetic operations with symbolic values
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let _state = SymState::new(&ctx, 0x1000);
 
@@ -248,8 +243,7 @@ fn test_symbolic_arithmetic_operations() {
 
 #[test]
 fn test_symbolic_bitwise_operations() {
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     // Test concrete bitwise
     let a = SymValue::concrete(0b1100, 8);
@@ -275,8 +269,7 @@ fn test_symbolic_bitwise_operations() {
 
 #[test]
 fn test_symbolic_comparisons() {
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let a = SymValue::concrete(10, 32);
     let b = SymValue::concrete(20, 32);
@@ -297,8 +290,7 @@ fn test_symbolic_comparisons() {
 
 #[test]
 fn test_symbolic_memory_operations() {
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let mut state = SymState::new(&ctx, 0x1000);
 
@@ -323,8 +315,7 @@ fn test_symbolic_memory_operations() {
 
 #[test]
 fn test_state_forking() {
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let mut state = SymState::new(&ctx, 0x1000);
     state.set_concrete("rax", 42, 64);
@@ -350,8 +341,7 @@ fn test_state_forking() {
 fn test_constraint_solving() {
     use r2sym::SymSolver;
 
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let mut state = SymState::new(&ctx, 0x1000);
     state.make_symbolic("x", 32);
@@ -381,8 +371,7 @@ fn test_constraint_solving() {
 fn test_unsatisfiable_constraints() {
     use r2sym::SymSolver;
 
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let mut state = SymState::new(&ctx, 0x1000);
     state.make_symbolic("x", 32);
@@ -423,8 +412,7 @@ fn test_explore_config() {
 fn test_path_result_properties() {
     use r2sym::PathResult;
 
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let mut state = SymState::new(&ctx, 0x1000);
     state.set_register("rax", SymValue::concrete(42, 64));
@@ -442,8 +430,7 @@ fn test_path_result_properties() {
 #[test]
 fn test_different_bitwidth_operations() {
     // Test that operations with different bit widths work correctly
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     // 8-bit and 64-bit values
     let val8 = SymValue::concrete(5, 8);

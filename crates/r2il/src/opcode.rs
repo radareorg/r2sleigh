@@ -705,10 +705,17 @@ impl R2ILOp {
             R2ILOp::PtrAdd { base, index, .. } | R2ILOp::PtrSub { base, index, .. } => {
                 vec![base, index]
             }
-            R2ILOp::SegmentOp { segment, offset, .. } => vec![segment, offset],
+            R2ILOp::SegmentOp {
+                segment, offset, ..
+            } => vec![segment, offset],
             R2ILOp::New { src, .. } | R2ILOp::Cast { src, .. } => vec![src],
             R2ILOp::Extract { src, position, .. } => vec![src, position],
-            R2ILOp::Insert { src, value, position, .. } => vec![src, value, position],
+            R2ILOp::Insert {
+                src,
+                value,
+                position,
+                ..
+            } => vec![src, value, position],
         }
     }
 
@@ -803,10 +810,17 @@ impl R2ILOp {
             R2ILOp::PtrAdd { base, index, .. } | R2ILOp::PtrSub { base, index, .. } => {
                 vec![base, index]
             }
-            R2ILOp::SegmentOp { segment, offset, .. } => vec![segment, offset],
+            R2ILOp::SegmentOp {
+                segment, offset, ..
+            } => vec![segment, offset],
             R2ILOp::New { src, .. } | R2ILOp::Cast { src, .. } => vec![src],
             R2ILOp::Extract { src, position, .. } => vec![src, position],
-            R2ILOp::Insert { src, value, position, .. } => vec![src, value, position],
+            R2ILOp::Insert {
+                src,
+                value,
+                position,
+                ..
+            } => vec![src, value, position],
         }
     }
 }
@@ -903,7 +917,11 @@ impl std::fmt::Display for R2ILOp {
             R2ILOp::Trunc { dst, src } => write!(f, "{} = TRUNC({})", dst, src),
 
             // Special operations
-            R2ILOp::CallOther { output, userop, inputs } => {
+            R2ILOp::CallOther {
+                output,
+                userop,
+                inputs,
+            } => {
                 if let Some(out) = output {
                     write!(f, "{} = ", out)?;
                 }
@@ -937,13 +955,27 @@ impl std::fmt::Display for R2ILOp {
             R2ILOp::Indirect { dst, src, indirect } => {
                 write!(f, "{} = INDIRECT({}, {})", dst, src, indirect)
             }
-            R2ILOp::PtrAdd { dst, base, index, element_size } => {
+            R2ILOp::PtrAdd {
+                dst,
+                base,
+                index,
+                element_size,
+            } => {
                 write!(f, "{} = PTRADD({}, {}, {})", dst, base, index, element_size)
             }
-            R2ILOp::PtrSub { dst, base, index, element_size } => {
+            R2ILOp::PtrSub {
+                dst,
+                base,
+                index,
+                element_size,
+            } => {
                 write!(f, "{} = PTRSUB({}, {}, {})", dst, base, index, element_size)
             }
-            R2ILOp::SegmentOp { dst, segment, offset } => {
+            R2ILOp::SegmentOp {
+                dst,
+                segment,
+                offset,
+            } => {
                 write!(f, "{} = SEGMENT({}, {})", dst, segment, offset)
             }
             R2ILOp::New { dst, src } => write!(f, "{} = NEW({})", dst, src),
@@ -951,7 +983,12 @@ impl std::fmt::Display for R2ILOp {
             R2ILOp::Extract { dst, src, position } => {
                 write!(f, "{} = EXTRACT({}, {})", dst, src, position)
             }
-            R2ILOp::Insert { dst, src, value, position } => {
+            R2ILOp::Insert {
+                dst,
+                src,
+                value,
+                position,
+            } => {
                 write!(f, "{} = INSERT({}, {}, {})", dst, src, value, position)
             }
         }

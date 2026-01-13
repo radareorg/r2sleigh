@@ -38,6 +38,8 @@ pub struct SymState<'ctx> {
     constraints: Vec<Bool>,
     /// Current program counter.
     pub pc: u64,
+    /// Previous program counter (block predecessor).
+    prev_pc: Option<u64>,
     /// Whether this state is still active (not terminated).
     pub active: bool,
     /// Exit status (if terminated).
@@ -74,6 +76,7 @@ impl<'ctx> SymState<'ctx> {
             memory: SymMemory::new(ctx),
             constraints: Vec::new(),
             pc: entry_pc,
+            prev_pc: None,
             active: true,
             exit_status: None,
             depth: 0,
@@ -90,6 +93,7 @@ impl<'ctx> SymState<'ctx> {
             memory: SymMemory::new_symbolic(ctx),
             constraints: Vec::new(),
             pc: entry_pc,
+            prev_pc: None,
             active: true,
             exit_status: None,
             depth: 0,
@@ -143,6 +147,16 @@ impl<'ctx> SymState<'ctx> {
     /// Get all register names.
     pub fn register_names(&self) -> impl Iterator<Item = &String> {
         self.registers.keys()
+    }
+
+    /// Get the previous program counter.
+    pub(crate) fn prev_pc(&self) -> Option<u64> {
+        self.prev_pc
+    }
+
+    /// Set the previous program counter.
+    pub(crate) fn set_prev_pc(&mut self, prev_pc: Option<u64>) {
+        self.prev_pc = prev_pc;
     }
 
     /// Get all registers.
@@ -347,6 +361,7 @@ impl<'ctx> SymState<'ctx> {
             memory: self.memory.fork(),
             constraints: self.constraints.clone(),
             pc: self.pc,
+            prev_pc: self.prev_pc,
             active: self.active,
             exit_status: self.exit_status.clone(),
             depth: self.depth,
@@ -458,6 +473,7 @@ impl<'ctx> std::fmt::Debug for SymState<'ctx> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SymState")
             .field("pc", &format!("0x{:x}", self.pc))
+            .field("prev_pc", &self.prev_pc.map(|pc| format!("0x{:x}", pc)))
             .field("registers", &self.registers.len())
             .field("constraints", &self.constraints.len())
             .field("depth", &self.depth)
@@ -471,12 +487,10 @@ impl<'ctx> std::fmt::Debug for SymState<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use z3::Config;
 
     #[test]
     fn test_state_creation() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let state = SymState::new(&ctx, 0x1000);
         assert_eq!(state.pc, 0x1000);
@@ -486,8 +500,7 @@ mod tests {
 
     #[test]
     fn test_register_access() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
 
@@ -502,8 +515,7 @@ mod tests {
 
     #[test]
     fn test_memory_access() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
 
@@ -517,8 +529,7 @@ mod tests {
 
     #[test]
     fn test_fork() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
         state.set_concrete("rax", 42, 64);
@@ -531,8 +542,7 @@ mod tests {
 
     #[test]
     fn test_constraints() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
         state.make_symbolic("rax", 64);
@@ -545,8 +555,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_memory_tracking() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
         let sym = state.make_symbolic_memory(0x3000, 4, "input_buf");
@@ -558,8 +567,7 @@ mod tests {
 
     #[test]
     fn test_constrain_bytes_pattern() {
-        let cfg = Config::new();
-        let ctx = Context::new(&cfg);
+        let ctx = Context::thread_local();
 
         let mut state = SymState::new(&ctx, 0x1000);
         let sym = state.new_symbolic_input("sym", 16);

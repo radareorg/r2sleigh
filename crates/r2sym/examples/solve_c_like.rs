@@ -1,7 +1,7 @@
 use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 use r2ssa::SSAFunction;
 use r2sym::{ExploreConfig, PathExplorer, SymState};
-use z3::{Config, Context};
+use z3::Context;
 
 const ENTRY: u64 = 0x1000;
 const FAIL: u64 = 0x1004;
@@ -21,8 +21,7 @@ fn main() {
     let blocks = build_blocks();
     let func = SSAFunction::from_blocks(&blocks).expect("SSA build failed");
 
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
+    let ctx = Context::thread_local();
 
     let mut state = SymState::new(&ctx, ENTRY);
     state.make_symbolic_memory(INPUT_ADDR, 4, "input");
