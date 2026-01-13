@@ -328,13 +328,7 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                         );
                     }
                     UseLocation::Op { op_idx, .. } => {
-                        self.propagate_to_op(
-                            block_addr,
-                            op_idx,
-                            &new_labels,
-                            var_taints,
-                            worklist,
-                        );
+                        self.propagate_to_op(block_addr, op_idx, &new_labels, var_taints, worklist);
                     }
                 }
             }
@@ -389,8 +383,7 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                         .collect();
 
                     // Try custom propagation rule first
-                    let new_taint = if let Some(custom) =
-                        self.policy.propagate(op, &source_taints)
+                    let new_taint = if let Some(custom) = self.policy.propagate(op, &source_taints)
                     {
                         custom
                     } else {
@@ -490,7 +483,9 @@ mod tests {
 
     #[test]
     fn test_default_policy_source_specific() {
-        let policy = DefaultTaintPolicy::new().with_source("RDI").with_source("RSI");
+        let policy = DefaultTaintPolicy::new()
+            .with_source("RDI")
+            .with_source("RSI");
 
         // RDI v0 is a source
         let rdi = make_var("RDI", 0);

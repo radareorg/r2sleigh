@@ -47,6 +47,8 @@ extern char *r2il_block_defuse_json(const R2ILContext *ctx, const R2ILBlock *blo
 extern char *r2ssa_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2ssa_defuse_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2ssa_domtree_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+extern char *r2taint_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+extern char *r2taint_sources_sinks_json(const char *json);
 
 /* Symbolic execution */
 extern char *r2sym_function(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long entry_addr);
@@ -278,6 +280,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sleigh.dom    - Show dominator tree for current function");
 			r_cons_println (cons, "| a:sleigh.sym    - Symbolic execution summary for current function");
 			r_cons_println (cons, "| a:sleigh.sym.paths - Explore paths in current function");
+			r_cons_println (cons, "| a:sleigh.taint  - Taint analysis for current function");
 			r_cons_println (cons, "| a:sleigh.dec    - Decompile current function to C");
 			r_cons_println (cons, "| a:sleigh.cfg    - Show ASCII CFG for current function");
 			r_cons_println (cons, "| a:sleigh.cfg.json - Show CFG as JSON for current function");
@@ -628,6 +631,38 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		} else {
 			result = r2sym_function (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
 		}
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+
+		r2il_string_free (result);
+		block_array_free (&blocks);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sleigh.taint")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return true;
+		}
+
+		/* Get current function */
+		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return true;
+		}
+
+		/* Lift all blocks */
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return true;
+		}
+
+		char *result = r2taint_function_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
 
 		if (cons && result) {
 			r_cons_printf (cons, "%s\n", result);
