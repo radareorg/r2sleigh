@@ -114,7 +114,11 @@ impl VarKey {
 
 impl Ord for VarKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.name.as_str(), self.version, self.size).cmp(&(other.name.as_str(), other.version, other.size))
+        (self.name.as_str(), self.version, self.size).cmp(&(
+            other.name.as_str(),
+            other.version,
+            other.size,
+        ))
     }
 }
 
@@ -129,7 +133,10 @@ fn const_value(var: &SSAVar) -> Option<u64> {
         return None;
     }
     let val_str = var.name.strip_prefix("const:")?;
-    if let Some(hex) = val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X")) {
+    if let Some(hex) = val_str
+        .strip_prefix("0x")
+        .or_else(|| val_str.strip_prefix("0X"))
+    {
         return u64::from_str_radix(hex, 16).ok();
     }
     if let Ok(val) = u64::from_str_radix(val_str, 16) {
@@ -214,9 +221,8 @@ fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
     let mask = mask_for_bits(bits);
 
     let unary = |src: &SSAVar| const_for_var(src, consts);
-    let binary = |a: &SSAVar, b: &SSAVar| {
-        Some((const_for_var(a, consts)?, const_for_var(b, consts)?))
-    };
+    let binary =
+        |a: &SSAVar, b: &SSAVar| Some((const_for_var(a, consts)?, const_for_var(b, consts)?));
 
     let val = match op {
         Copy { src, .. } => unary(src)?,
@@ -594,7 +600,10 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
         | IntSLess { a, b, .. }
         | IntSLessEqual { a, b, .. } => {
             if a == b {
-                let val = matches!(op, IntEqual { .. } | IntLessEqual { .. } | IntSLessEqual { .. }) as u64;
+                let val = matches!(
+                    op,
+                    IntEqual { .. } | IntLessEqual { .. } | IntSLessEqual { .. }
+                ) as u64;
                 return Some(make_const(val));
             }
             match (const_of(a), const_of(b)) {
@@ -1000,10 +1009,7 @@ fn common_subexpr_elim(func: &mut SSAFunction, stats: &mut OptimizationStats) ->
 
             if let Some(existing) = available.get(&key).cloned() {
                 if existing.size == dst.size {
-                    *op = SSAOp::Copy {
-                        dst,
-                        src: existing,
-                    };
+                    *op = SSAOp::Copy { dst, src: existing };
                     stats.cse_replacements += 1;
                     changed = true;
                 }
@@ -1025,7 +1031,10 @@ fn op_has_side_effects(op: &SSAOp, preserve_memory_reads: bool) -> bool {
     }
     matches!(
         op,
-        SSAOp::CallOther { .. } | SSAOp::Breakpoint | SSAOp::Unimplemented | SSAOp::CpuId { .. }
+        SSAOp::CallOther { .. }
+            | SSAOp::Breakpoint
+            | SSAOp::Unimplemented
+            | SSAOp::CpuId { .. }
             | SSAOp::New { .. }
     )
 }
@@ -1289,7 +1298,9 @@ where
             dst: dst.clone(),
             src: map(src),
         },
-        Branch { target } => Branch { target: map(target) },
+        Branch { target } => Branch {
+            target: map(target),
+        },
         CBranch { target, cond } => CBranch {
             target: map(target),
             cond: map(cond),
@@ -1297,7 +1308,9 @@ where
         BranchInd { target } => BranchInd {
             target: map(target),
         },
-        Call { target } => Call { target: map(target) },
+        Call { target } => Call {
+            target: map(target),
+        },
         CallInd { target } => CallInd {
             target: map(target),
         },
@@ -1437,11 +1450,7 @@ where
             dst: dst.clone(),
             src: map(src),
         },
-        Extract {
-            dst,
-            src,
-            position,
-        } => Extract {
+        Extract { dst, src, position } => Extract {
             dst: dst.clone(),
             src: map(src),
             position: map(position),
