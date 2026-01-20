@@ -15,6 +15,7 @@ r2sleigh-lift = { path = "../r2sleigh-lift" }
 clap.workspace = true
 thiserror.workspace = true
 hex = "0.4"
+serde_json = "1"
 
 [features]
 default = []

@@ -1049,6 +1049,7 @@ dependencies = [
  "hex",
  "r2il",
  "r2sleigh-lift",
+ "serde_json",
  "sleigh-config",
  "thiserror 1.0.69",
 ]

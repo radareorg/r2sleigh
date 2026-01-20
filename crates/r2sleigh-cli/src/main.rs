@@ -281,6 +281,46 @@ fn cmd_version() -> Result<(), String> {
 }
 
 #[cfg(feature = "sleigh-config")]
+fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler) {
+    use serde_json::Value;
+
+    match value {
+        Value::Object(map) => {
+            let is_varnode = map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
+            if is_varnode {
+                let space = map.get("space").and_then(Value::as_str);
+                if let Some(space_str) = space {
+                    if space_str.eq_ignore_ascii_case("register") {
+                        let offset = map.get("offset").and_then(Value::as_u64);
+                        let size = map.get("size").and_then(Value::as_u64);
+                        if let (Some(offset), Some(size)) = (offset, size) {
+                            let vn = r2il::Varnode {
+                                space: r2il::SpaceId::Register,
+                                offset,
+                                size: size as u32,
+                            };
+                            if let Some(name) = disasm.register_name(&vn) {
+                                map.insert("name".to_string(), Value::String(name));
+                            }
+                        }
+                    }
+                }
+            }
+
+            for value in map.values_mut() {
+                annotate_register_names(value, disasm);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                annotate_register_names(item, disasm);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(feature = "sleigh-config")]
 fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Result<(), String> {
     // Parse the address
     let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
@@ -309,18 +349,23 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
 
     match format {
         "json" => {
-            // Simple JSON output
-            println!("{{");
-            println!("  \"addr\": \"0x{:x}\",", block.addr);
-            println!("  \"size\": {},", size);
-            println!("  \"mnemonic\": \"{}\",", mnemonic);
-            println!("  \"ops\": [");
-            for (i, op) in block.ops.iter().enumerate() {
-                let comma = if i < block.ops.len() - 1 { "," } else { "" };
-                println!("    \"{}\"{}", format_op(&disasm, op), comma);
+            let mut ops = Vec::new();
+            for op in &block.ops {
+                let mut value = serde_json::to_value(op)
+                    .map_err(|e| format!("Failed to serialize op: {}", e))?;
+                annotate_register_names(&mut value, &disasm);
+                ops.push(value);
             }
-            println!("  ]");
-            println!("}}");
+
+            let json = serde_json::json!({
+                "addr": format!("0x{:x}", block.addr),
+                "size": size,
+                "mnemonic": mnemonic,
+                "ops": ops,
+            });
+            let output = serde_json::to_string_pretty(&json)
+                .map_err(|e| format!("Failed to render JSON: {}", e))?;
+            println!("{}", output);
         }
         "esil" => {
             // Convert to ESIL-like format (simplified)
@@ -383,5 +428,54 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
                 Err(format!("Unknown architecture '{}'. Supported: {}", arch, supported.join(", ")))
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "sleigh-config", feature = "x86"))]
+mod tests {
+    use super::*;
+
+    fn contains_named_register(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                let is_varnode =
+                    map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
+                if is_varnode {
+                    let space = map.get("space").and_then(serde_json::Value::as_str);
+                    if let Some(space_str) = space {
+                        if space_str.eq_ignore_ascii_case("register") {
+                            if let Some(name) = map.get("name").and_then(serde_json::Value::as_str) {
+                                if !name.is_empty() {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                map.values().any(contains_named_register)
+            }
+            serde_json::Value::Array(items) => items.iter().any(contains_named_register),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn disasm_json_includes_named_registers() {
+        let disasm = get_disassembler("x86-64").expect("disassembler");
+        let bytes = hex::decode("4889e500000000000000000000000000").expect("bytes");
+        let block = disasm.lift(&bytes, 0x1000).expect("lift");
+
+        let mut found = false;
+        for op in &block.ops {
+            let mut value = serde_json::to_value(op).expect("op json");
+            annotate_register_names(&mut value, &disasm);
+            if contains_named_register(&value) {
+                found = true;
+                break;
+            }
+        }
+
+        assert!(found, "CLI JSON should include named register varnodes");
     }
 }

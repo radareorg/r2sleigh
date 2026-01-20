@@ -104,6 +104,8 @@ r2sleigh disasm --arch x86-64 --bytes "4889e5"
 r2sleigh disasm --arch x86-64 --bytes "4889e5" --format json
 r2sleigh disasm --arch x86-64 --bytes "4889e5" --format esil
 
+# JSON output uses structured ops with register varnode names (field: "name")
+
 # Show architecture info
 r2sleigh info x86-64.r2il
 ```
