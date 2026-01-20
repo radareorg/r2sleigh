@@ -104,7 +104,19 @@ r2sleigh disasm --arch x86-64 --bytes "4889e5"
 r2sleigh disasm --arch x86-64 --bytes "4889e5" --format json
 r2sleigh disasm --arch x86-64 --bytes "4889e5" --format esil
 
-# JSON output uses structured ops with register varnode names (field: "name")
+JSON output uses structured ops with register varnode names (field: `name`).
+
+Example JSON (truncated):
+```json
+{
+  "addr": "0x1000",
+  "size": 3,
+  "mnemonic": "mov rbp, rsp",
+  "ops": [
+    { "Copy": { "dst": { "space": "register", "offset": 32, "size": 8, "name": "RBP" }, "src": { "space": "register", "offset": 24, "size": 8, "name": "RSP" } } }
+  ]
+}
+```
 
 # Show architecture info
 r2sleigh info x86-64.r2il

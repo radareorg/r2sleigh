@@ -321,6 +321,29 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
 }
 
 #[cfg(feature = "sleigh-config")]
+fn build_disasm_json(
+    disasm: &Disassembler,
+    block: &r2il::R2ILBlock,
+    mnemonic: &str,
+    size: usize,
+) -> Result<serde_json::Value, String> {
+    let mut ops = Vec::new();
+    for op in &block.ops {
+        let mut value =
+            serde_json::to_value(op).map_err(|e| format!("Failed to serialize op: {}", e))?;
+        annotate_register_names(&mut value, disasm);
+        ops.push(value);
+    }
+
+    Ok(serde_json::json!({
+        "addr": format!("0x{:x}", block.addr),
+        "size": size,
+        "mnemonic": mnemonic,
+        "ops": ops,
+    }))
+}
+
+#[cfg(feature = "sleigh-config")]
 fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Result<(), String> {
     // Parse the address
     let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
@@ -349,20 +372,7 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
 
     match format {
         "json" => {
-            let mut ops = Vec::new();
-            for op in &block.ops {
-                let mut value = serde_json::to_value(op)
-                    .map_err(|e| format!("Failed to serialize op: {}", e))?;
-                annotate_register_names(&mut value, &disasm);
-                ops.push(value);
-            }
-
-            let json = serde_json::json!({
-                "addr": format!("0x{:x}", block.addr),
-                "size": size,
-                "mnemonic": mnemonic,
-                "ops": ops,
-            });
+            let json = build_disasm_json(&disasm, &block, &mnemonic, size)?;
             let output = serde_json::to_string_pretty(&json)
                 .map_err(|e| format!("Failed to render JSON: {}", e))?;
             println!("{}", output);
@@ -465,17 +475,14 @@ mod tests {
         let disasm = get_disassembler("x86-64").expect("disassembler");
         let bytes = hex::decode("4889e500000000000000000000000000").expect("bytes");
         let block = disasm.lift(&bytes, 0x1000).expect("lift");
-
-        let mut found = false;
-        for op in &block.ops {
-            let mut value = serde_json::to_value(op).expect("op json");
-            annotate_register_names(&mut value, &disasm);
-            if contains_named_register(&value) {
-                found = true;
-                break;
-            }
-        }
-
-        assert!(found, "CLI JSON should include named register varnodes");
+        let (mnemonic, size) = disasm.disasm_native(&bytes, 0x1000).expect("disasm");
+        let json = build_disasm_json(&disasm, &block, &mnemonic, size).expect("json");
+        let ops = json.get("ops").and_then(serde_json::Value::as_array).expect("ops array");
+        assert!(!ops.is_empty(), "CLI JSON should include ops");
+        assert!(ops[0].is_object(), "CLI JSON ops should be objects");
+        assert!(
+            contains_named_register(&json),
+            "CLI JSON should include named register varnodes"
+        );
     }
 }
