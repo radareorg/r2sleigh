@@ -21,6 +21,8 @@ pub struct Disassembler {
     arch_name: String,
     /// Canonical register names by (offset, size)
     reg_name_map: HashMap<(u64, u32), String>,
+    /// User-defined operations by index
+    userop_map: HashMap<u32, String>,
 }
 
 /// Wrapper for libsla PcodeInstruction that implements PcodeSource.
@@ -128,12 +130,23 @@ impl Disassembler {
             sleigh,
             arch_name: arch_name.to_string(),
             reg_name_map,
+            userop_map: HashMap::new(),
         })
     }
 
     /// Get the architecture name.
     pub fn arch_name(&self) -> &str {
         &self.arch_name
+    }
+
+    /// Set user-defined operation names for CallOther resolution.
+    pub fn set_userop_map(&mut self, map: HashMap<u32, String>) {
+        self.userop_map = map;
+    }
+
+    /// Get the user-defined operation name for a CallOther index.
+    pub fn userop_name(&self, index: u32) -> Option<&str> {
+        self.userop_map.get(&index).map(String::as_str)
     }
 
     /// Get the default code address space.

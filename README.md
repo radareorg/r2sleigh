@@ -188,6 +188,14 @@ P-code (1 ops):
   0: Copy { dst: RBP, src: RSP }
 ```
 
+```
+$ r2sleigh disasm --arch x86-64 --bytes "31c00fa2c3ffffffffffffffffffffffff" --format esil
+# 0x1000: XOR EAX,EAX (size=2)
+eax,eax,^,eax,=
+# 0x1002: CPUID (size=2)
+eax,CALLOTHER(44:cpuid),tmp:0x40800,=
+```
+
 ### radare2 Plugin
 
 ```

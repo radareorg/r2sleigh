@@ -29,14 +29,16 @@ pub mod esil;
 pub mod pcode;
 pub mod sleigh;
 pub mod translate;
+pub mod userops;
 
 use thiserror::Error;
 
 pub use context::LiftContext;
 pub use disasm::Disassembler;
-pub use esil::{format_op, op_to_esil};
+pub use esil::{format_op, op_to_esil, op_to_esil_named};
 pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
 pub use sleigh::{build_arch_spec, extract_arch_spec, get_sleigh_info, SleighInfo};
+pub use userops::userop_map_for_arch;
 use r2il::ArchSpec;
 
 /// Errors that can occur during lifting.

@@ -120,8 +120,9 @@ mod instruction_analysis {
     use super::*;
 
     /// Test addresses in vuln_test binary (check_secret function)
-    const CMP_INSTRUCTION_ADDR: u64 = 0x401221;
-    const MOV_INSTRUCTION_ADDR: u64 = 0x40121e;
+    const CMP_INSTRUCTION_ADDR: u64 = 0x401241;
+    const MOV_INSTRUCTION_ADDR: u64 = 0x40123e;
+    const CPUID_INSTRUCTION_ADDR: u64 = 0x4014d9;
 
     #[rstest]
     #[case("a:sla.json")]
@@ -196,6 +197,30 @@ mod instruction_analysis {
             result.contains_any(&["RBP_", "RSP_"]),
             "SSA output should use named registers"
         );
+    }
+
+    #[test]
+    fn callother_includes_userop_name() {
+        setup();
+        let result = r2_at_addr(vuln_test_binary(), CPUID_INSTRUCTION_ADDR, "a:sla.json");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sla.json");
+        let ops = expect_array(&json, "a:sla.json");
+
+        let mut found = false;
+        for op in ops {
+            if let Some(callother) = op.get("CallOther").and_then(Value::as_object) {
+                let name = callother.get("userop_name").and_then(Value::as_str);
+                if let Some(name) = name {
+                    if !name.is_empty() {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(found, "CallOther ops should include userop_name");
     }
 }
 
@@ -695,4 +720,5 @@ mod ffi {
             r2il_free(ctx);
         }
     }
+
 }

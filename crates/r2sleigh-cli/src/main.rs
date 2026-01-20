@@ -12,7 +12,7 @@ use r2sleigh_lift::{create_arm_spec, create_x86_64_spec, Lifter};
 use std::path::PathBuf;
 
 #[cfg(feature = "sleigh-config")]
-use r2sleigh_lift::{format_op, op_to_esil, Disassembler};
+use r2sleigh_lift::{format_op, op_to_esil_named, userop_map_for_arch, Disassembler};
 
 /// r2sleigh - Sleigh to r2il compiler for radare2
 #[derive(Parser)]
@@ -321,6 +321,37 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
 }
 
 #[cfg(feature = "sleigh-config")]
+fn annotate_userop_names(value: &mut serde_json::Value, disasm: &Disassembler) {
+    use serde_json::Value;
+
+    match value {
+        Value::Object(map) => {
+            if let Some(callother) = map.get_mut("CallOther") {
+                if let Value::Object(call_map) = callother {
+                    let userop = call_map.get("userop").and_then(Value::as_u64);
+                    if let Some(userop) = userop {
+                        if let Some(name) = disasm.userop_name(userop as u32) {
+                            call_map
+                                .insert("userop_name".to_string(), Value::String(name.to_string()));
+                        }
+                    }
+                }
+            }
+
+            for value in map.values_mut() {
+                annotate_userop_names(value, disasm);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                annotate_userop_names(item, disasm);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(feature = "sleigh-config")]
 fn build_disasm_json(
     disasm: &Disassembler,
     block: &r2il::R2ILBlock,
@@ -332,6 +363,7 @@ fn build_disasm_json(
         let mut value =
             serde_json::to_value(op).map_err(|e| format!("Failed to serialize op: {}", e))?;
         annotate_register_names(&mut value, disasm);
+        annotate_userop_names(&mut value, disasm);
         ops.push(value);
     }
 
@@ -341,6 +373,52 @@ fn build_disasm_json(
         "mnemonic": mnemonic,
         "ops": ops,
     }))
+}
+
+#[cfg(feature = "sleigh-config")]
+fn render_esil_lines(disasm: &Disassembler, bytes: &[u8], addr: u64) -> Result<Vec<String>, String> {
+    const MIN_BYTES: usize = 16;
+    let mut lines = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        if remaining.is_empty() {
+            break;
+        }
+
+        let instr_addr = addr + offset as u64;
+        let mut lift_bytes = remaining.to_vec();
+        if lift_bytes.len() < MIN_BYTES {
+            lift_bytes.resize(MIN_BYTES, 0);
+        }
+
+        let (mnemonic, _) = match disasm.disasm_native(&lift_bytes, instr_addr) {
+            Ok(result) => result,
+            Err(_) => break,
+        };
+        let block = match disasm.lift(&lift_bytes, instr_addr) {
+            Ok(result) => result,
+            Err(_) => break,
+        };
+
+        let instr_size = block.size as usize;
+        if instr_size == 0 {
+            break;
+        }
+
+        lines.push(format!(
+            "# 0x{:x}: {} (size={})",
+            instr_addr, mnemonic, instr_size
+        ));
+        for op in &block.ops {
+            lines.push(op_to_esil_named(disasm, op));
+        }
+
+        offset += instr_size;
+    }
+
+    Ok(lines)
 }
 
 #[cfg(feature = "sleigh-config")]
@@ -378,10 +456,9 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
             println!("{}", output);
         }
         "esil" => {
-            // Convert to ESIL-like format (simplified)
-            println!("# 0x{:x}: {} (size={})", addr, mnemonic, size);
-            for op in &block.ops {
-                println!("{}", op_to_esil(&disasm, op));
+            let lines = render_esil_lines(&disasm, &bytes, addr)?;
+            for line in lines {
+                println!("{}", line);
             }
         }
         _ => {
@@ -402,28 +479,37 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
     match arch.to_lowercase().as_str() {
         #[cfg(feature = "x86")]
         "x86-64" | "x86_64" | "x64" | "amd64" => {
-            Disassembler::from_sla(
+            let mut disasm = Disassembler::from_sla(
                 sleigh_config::processor_x86::SLA_X86_64,
                 sleigh_config::processor_x86::PSPEC_X86_64,
                 "x86-64"
-            ).map_err(|e| e.to_string())
+            )
+            .map_err(|e| e.to_string())?;
+            disasm.set_userop_map(userop_map_for_arch("x86-64"));
+            Ok(disasm)
         }
         #[cfg(feature = "x86")]
         "x86" | "x86-32" | "i386" | "i686" => {
-            Disassembler::from_sla(
+            let mut disasm = Disassembler::from_sla(
                 sleigh_config::processor_x86::SLA_X86,
                 sleigh_config::processor_x86::PSPEC_X86,
                 "x86"
-            ).map_err(|e| e.to_string())
+            )
+            .map_err(|e| e.to_string())?;
+            disasm.set_userop_map(userop_map_for_arch("x86"));
+            Ok(disasm)
         }
         #[cfg(feature = "arm")]
         "arm" | "arm32" | "arm-le" => {
-            Disassembler::from_sla(
+            let mut disasm = Disassembler::from_sla(
                 sleigh_config::processor_arm::SLA_ARM8_LE,
                 // sleigh-config 1.x does not ship an ARM8 pspec; use a Cortex pspec instead.
                 sleigh_config::processor_arm::PSPEC_ARMCORTEX,
                 "ARM"
-            ).map_err(|e| e.to_string())
+            )
+            .map_err(|e| e.to_string())?;
+            disasm.set_userop_map(userop_map_for_arch("arm"));
+            Ok(disasm)
         }
         _ => {
             let mut supported: Vec<&str> = vec![];
@@ -483,6 +569,17 @@ mod tests {
         assert!(
             contains_named_register(&json),
             "CLI JSON should include named register varnodes"
+        );
+    }
+
+    #[test]
+    fn disasm_esil_includes_userop_name_across_instructions() {
+        let disasm = get_disassembler("x86-64").expect("disassembler");
+        let bytes = hex::decode("31c00fa2c3ffffffffffffffffffffffff").expect("bytes");
+        let lines = render_esil_lines(&disasm, &bytes, 0x1000).expect("render esil");
+        assert!(
+            lines.iter().any(|line| line.contains("CALLOTHER(") && line.contains("cpuid")),
+            "ESIL should include named CallOther ops across multiple instructions"
         );
     }
 }

@@ -134,6 +134,19 @@ int safe_array_access(int *arr, int idx, int len) {
     return -1;
 }
 
+// Test 13: CPUID instruction (tests CallOther/userop naming)
+__attribute__((naked)) void test_cpuid(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile(
+        "xor %eax, %eax\n\t"
+        "cpuid\n\t"
+        "ret\n\t"
+    );
+#else
+    __asm__ volatile("ret");
+#endif
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -224,6 +237,10 @@ int main(int argc, char *argv[]) {
             }
             break;
         }
+        case 13:
+            test_cpuid();
+            printf("test_cpuid() = ok\n");
+            break;
         default:
             printf("Unknown test: %d\n", test);
             return 1;

@@ -190,10 +190,14 @@ pub fn format_op(disasm: &Disassembler, op: &R2ILOp) -> String {
                 .map(|o| vn(o))
                 .unwrap_or_else(|| "none".to_string());
             let in_str: Vec<String> = inputs.iter().map(|v| vn(v)).collect();
+            let userop_str = match disasm.userop_name(*userop) {
+                Some(name) => format!("{} ({})", userop, name),
+                None => userop.to_string(),
+            };
             format!(
                 "CallOther {{ output: {}, userop: {}, inputs: [{}] }}",
                 out_str,
-                userop,
+                userop_str,
                 in_str.join(", ")
             )
         }
@@ -511,12 +515,7 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
             userop,
             inputs,
         } => {
-            let args: Vec<String> = inputs.iter().map(|v| vn(v)).collect();
-            let args_str = args.join(",");
-            match output {
-                Some(dst) => format!("{},CALLOTHER({}),{},=", args_str, userop, vn(dst)),
-                None => format!("{},CALLOTHER({})", args_str, userop),
-            }
+            format_callother_esil(disasm, output, *userop, inputs, false)
         }
 
         Nop => String::new(),
@@ -593,5 +592,43 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
                 vn(dst)
             )
         }
+    }
+}
+
+/// Convert an R2ILOp into an ESIL string with userop names (best-effort).
+pub fn op_to_esil_named(disasm: &Disassembler, op: &R2ILOp) -> String {
+    match op {
+        R2ILOp::CallOther {
+            output,
+            userop,
+            inputs,
+        } => format_callother_esil(disasm, output, *userop, inputs, true),
+        _ => op_to_esil(disasm, op),
+    }
+}
+
+fn callother_userop_label(disasm: &Disassembler, userop: u32, include_name: bool) -> String {
+    if include_name {
+        if let Some(name) = disasm.userop_name(userop) {
+            return format!("{}:{}", userop, name);
+        }
+    }
+    userop.to_string()
+}
+
+fn format_callother_esil(
+    disasm: &Disassembler,
+    output: &Option<r2il::Varnode>,
+    userop: u32,
+    inputs: &[r2il::Varnode],
+    include_name: bool,
+) -> String {
+    let vn = |v: &r2il::Varnode| disasm.format_varnode(v).to_lowercase();
+    let args: Vec<String> = inputs.iter().map(|v| vn(v)).collect();
+    let args_str = args.join(",");
+    let userop_str = callother_userop_label(disasm, userop, include_name);
+    match output {
+        Some(dst) => format!("{},CALLOTHER({}),{},=", args_str, userop_str, vn(dst)),
+        None => format!("{},CALLOTHER({})", args_str, userop_str),
     }
 }

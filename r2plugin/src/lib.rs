@@ -5,8 +5,9 @@
 //! bytes into r2il blocks with ESIL rendering.
 
 use r2il::{serialize, ArchSpec, R2ILBlock, R2ILOp};
+use r2il::serialize::UserOpDef;
 use r2ssa::TaintPolicy;
-use r2sleigh_lift::{build_arch_spec, op_to_esil, Disassembler};
+use r2sleigh_lift::{build_arch_spec, op_to_esil, userop_map_for_arch, Disassembler};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
@@ -450,9 +451,40 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
     }
 }
 
+fn annotate_userop_names(value: &mut serde_json::Value, disasm: &Disassembler) {
+    use serde_json::Value;
+
+    match value {
+        Value::Object(map) => {
+            if let Some(callother) = map.get_mut("CallOther") {
+                if let Value::Object(call_map) = callother {
+                    let userop = call_map.get("userop").and_then(Value::as_u64);
+                    if let Some(userop) = userop {
+                        if let Some(name) = disasm.userop_name(userop as u32) {
+                            call_map
+                                .insert("userop_name".to_string(), Value::String(name.to_string()));
+                        }
+                    }
+                }
+            }
+
+            for value in map.values_mut() {
+                annotate_userop_names(value, disasm);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                annotate_userop_names(item, disasm);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn op_json_with_registers(op: &R2ILOp, disasm: &Disassembler) -> Option<String> {
     let mut value = serde_json::to_value(op).ok()?;
     annotate_register_names(&mut value, disasm);
+    annotate_userop_names(&mut value, disasm);
     serde_json::to_string(&value).ok()
 }
 
@@ -2245,6 +2277,7 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
                 "x86-64",
             )
             .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "x86-64");
             Ok((spec, dis))
         }
         #[cfg(feature = "x86")]
@@ -2261,6 +2294,7 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
                 "x86",
             )
             .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "x86");
             Ok((spec, dis))
         }
         #[cfg(feature = "arm")]
@@ -2279,6 +2313,7 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
                 "ARM",
             )
             .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "arm");
             Ok((spec, dis))
         }
         _ => {
@@ -2295,6 +2330,22 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
             }
         }
     }
+}
+
+fn apply_userop_map(mut spec: ArchSpec, mut disasm: Disassembler, arch: &str) -> (ArchSpec, Disassembler) {
+    let userop_map = userop_map_for_arch(arch);
+    disasm.set_userop_map(userop_map.clone());
+
+    if !userop_map.is_empty() {
+        let mut defs: Vec<UserOpDef> = userop_map
+            .into_iter()
+            .map(|(index, name)| UserOpDef { index, name })
+            .collect();
+        defs.sort_by_key(|def| def.index);
+        spec.userops = defs;
+    }
+
+    (spec, disasm)
 }
 
 // ============================================================================
