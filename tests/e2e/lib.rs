@@ -77,16 +77,22 @@ pub fn r2_cmd(binary: &str, cmd: &str) -> R2Result {
 
 /// Run radare2 with custom timeout
 pub fn r2_cmd_timeout(binary: &str, cmd: &str, timeout: Duration) -> R2Result {
-    let output = Command::new("timeout")
-        .args([
-            &format!("{}s", timeout.as_secs()),
-            "r2",
-            "-q",
-            "-e", "bin.relocs.apply=true",
-            "-c", cmd,
-            binary,
-        ])
-        .output();
+    let mut command = Command::new("timeout");
+    command.args([
+        &format!("{}s", timeout.as_secs()),
+        "r2",
+        "-q",
+        "-e", "bin.relocs.apply=true",
+        "-c", cmd,
+        binary,
+    ]);
+
+    if let Ok(home) = std::env::var("HOME") {
+        let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
+        command.env("R2_USER_PLUGINS", plugin_dir);
+    }
+
+    let output = command.output();
 
     parse_output(output)
 }

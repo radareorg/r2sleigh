@@ -514,9 +514,7 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
             output,
             userop,
             inputs,
-        } => {
-            format_callother_esil(disasm, output, *userop, inputs, false)
-        }
+        } => format_callother_esil(disasm, output, *userop, inputs, false),
 
         Nop => String::new(),
         Unimplemented => "UNIMPL".to_string(),

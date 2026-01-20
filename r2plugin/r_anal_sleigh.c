@@ -3,6 +3,8 @@
 #include <r_anal.h>
 #include <r_core.h>
 #include <r_lib.h>
+#include <r_util/r_json.h>
+#include <string.h>
 
 /* FFI declarations for r2sleigh Rust library */
 typedef struct R2ILContext R2ILContext;
@@ -105,6 +107,155 @@ static void block_array_free(BlockArray *arr) {
 	arr->blocks = NULL;
 	arr->count = 0;
 	arr->capacity = 0;
+}
+
+static bool ssa_var_to_reg_name(const char *ssa_name, char *out, size_t out_size) {
+	if (!ssa_name || !out || out_size == 0) {
+		return false;
+	}
+
+	const char *suffix = strrchr (ssa_name, '_');
+	size_t len = suffix ? (size_t)(suffix - ssa_name) : strlen (ssa_name);
+	if (len == 0 || len >= out_size) {
+		return false;
+	}
+
+	char base[128];
+	if (len >= sizeof (base)) {
+		return false;
+	}
+	memcpy (base, ssa_name, len);
+	base[len] = '\0';
+
+	if (r_str_startswith (base, "const:") ||
+		r_str_startswith (base, "tmp:") ||
+		r_str_startswith (base, "ram:") ||
+		r_str_startswith (base, "space")) {
+		return false;
+	}
+
+	const char *name = base;
+	if (r_str_startswith (base, "reg:")) {
+		name = base + 4;
+	}
+
+	r_str_ncpy (out, name, out_size);
+	return out[0] != '\0';
+}
+
+static bool vec_has_reg(const RVecRArchValue *vec, const char *reg_name) {
+	size_t len;
+	size_t i;
+
+	if (!vec || !reg_name) {
+		return false;
+	}
+
+	len = RVecRArchValue_length (vec);
+	for (i = 0; i < len; i++) {
+		RArchValue *value = RVecRArchValue_at (vec, i);
+		if (value && value->reg && !strcmp (value->reg, reg_name)) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void add_ssa_reg_values(RAnal *anal, const RJson *array, RVecRArchValue *vec, int access) {
+	size_t i;
+
+	if (!anal || !array || array->type != R_JSON_ARRAY || !vec) {
+		return;
+	}
+
+	for (i = 0; i < array->children.count; i++) {
+		const RJson *item = r_json_item (array, i);
+		if (!item || item->type != R_JSON_STRING || !item->str_value) {
+			continue;
+		}
+
+		char regbuf[64];
+		if (!ssa_var_to_reg_name (item->str_value, regbuf, sizeof (regbuf))) {
+			continue;
+		}
+
+		RRegItem *reg = r_reg_get (anal->reg, regbuf, -1);
+		if (!reg) {
+			char alt[64];
+			r_str_ncpy (alt, regbuf, sizeof (alt));
+			r_str_case (alt, false);
+			reg = r_reg_get (anal->reg, alt, -1);
+		}
+		if (!reg) {
+			char alt[64];
+			r_str_ncpy (alt, regbuf, sizeof (alt));
+			r_str_case (alt, true);
+			reg = r_reg_get (anal->reg, alt, -1);
+		}
+		if (!reg || !reg->name || vec_has_reg (vec, reg->name)) {
+			continue;
+		}
+
+		RArchValue value = {0};
+		value.type = R_ANAL_VAL_REG;
+		value.reg = reg->name;
+		value.access = access;
+		RVecRArchValue_push_back (vec, &value);
+	}
+}
+
+static void fill_op_values_from_defuse(RAnal *anal, RAnalOp *op, R2ILContext *ctx, const R2ILBlock *block) {
+	if (!anal || !op || !ctx || !block) {
+		return;
+	}
+
+	char *defuse_json = r2il_block_defuse_json (ctx, block);
+	if (!defuse_json) {
+		return;
+	}
+
+	RJson *root = r_json_parse (defuse_json);
+	if (!root || root->type != R_JSON_OBJECT) {
+		r_json_free (root);
+		r2il_string_free (defuse_json);
+		return;
+	}
+
+	const RJson *inputs = r_json_get (root, "inputs");
+	const RJson *outputs = r_json_get (root, "outputs");
+
+	RVecRArchValue_clear (&op->srcs);
+	RVecRArchValue_clear (&op->dsts);
+	add_ssa_reg_values (anal, inputs, &op->srcs, R_PERM_R);
+	add_ssa_reg_values (anal, outputs, &op->dsts, R_PERM_W);
+
+	r_json_free (root);
+	r2il_string_free (defuse_json);
+}
+
+static void print_reg_values_json(RCons *cons, const RVecRArchValue *vec) {
+	size_t len;
+	size_t i;
+	bool first = true;
+
+	if (!cons || !vec) {
+		return;
+	}
+
+	len = RVecRArchValue_length (vec);
+	for (i = 0; i < len; i++) {
+		const RArchValue *value = RVecRArchValue_at (vec, i);
+		if (!value || value->type != R_ANAL_VAL_REG || !value->reg) {
+			continue;
+		}
+
+		if (!first) {
+			r_cons_print (cons, ",");
+		}
+		r_cons_printf (cons, "\"%s\"", value->reg);
+		first = false;
+	}
 }
 
 /* Lift all basic blocks of a function */
@@ -260,6 +411,10 @@ static int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int l
 		}
 	}
 
+	if (mask & R_ARCH_OP_MASK_VAL) {
+		fill_op_values_from_defuse (anal, op, ctx, block);
+	}
+
 	r2il_block_free (block);
 	return op->size;
 }
@@ -295,6 +450,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.arch [name] - Get/Set Sleigh architecture manually");
 			r_cons_println (cons, "| a:sla.json   - Dump r2il ops as JSON for current instruction");
 			r_cons_println (cons, "| a:sla.regs   - Show registers read/written by instruction");
+			r_cons_println (cons, "| a:sla.opvals - Show analysis srcs/dsts for current instruction");
 			r_cons_println (cons, "| a:sla.mem    - Show memory accesses by instruction");
 			r_cons_println (cons, "| a:sla.vars   - Show all varnodes used by instruction");
 			r_cons_println (cons, "| a:sla.ssa    - Show SSA form of instruction");
@@ -439,6 +595,34 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		r2il_string_free (read_json);
 		r2il_string_free (write_json);
 		r2il_block_free (block);
+		return true;
+	}
+
+	if (!strcmp (cmd, "sla.opvals")) {
+		ut64 addr = core->addr;
+		ut8 buf[SLEIGH_MIN_BYTES];
+		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
+			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
+			return true;
+		}
+
+		RAnalOp op;
+		r_anal_op_init (&op);
+		int op_size = sleigh_op (anal, &op, addr, buf, sizeof (buf), R_ARCH_OP_MASK_VAL);
+		if (op_size <= 0) {
+			r_anal_op_fini (&op);
+			return true;
+		}
+
+		if (cons) {
+			r_cons_print (cons, "{\"srcs\":[");
+			print_reg_values_json (cons, &op.srcs);
+			r_cons_print (cons, "],\"dsts\":[");
+			print_reg_values_json (cons, &op.dsts);
+			r_cons_println (cons, "]}");
+		}
+
+		r_anal_op_fini (&op);
 		return true;
 	}
 

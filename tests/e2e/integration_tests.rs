@@ -189,6 +189,32 @@ mod instruction_analysis {
     }
 
     #[test]
+    fn analysis_opvals_include_ssa_regs() {
+        setup();
+        let result = r2_at_addr(vuln_test_binary(), CMP_INSTRUCTION_ADDR, "a:sla.opvals");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sla.opvals");
+        let obj = expect_object(&json, "a:sla.opvals");
+        let srcs = obj
+            .get("srcs")
+            .and_then(Value::as_array)
+            .expect("a:sla.opvals srcs array");
+        let dsts = obj
+            .get("dsts")
+            .and_then(Value::as_array)
+            .expect("a:sla.opvals dsts array");
+
+        assert!(
+            srcs.iter().any(|v| v.as_str() == Some("RBP")),
+            "srcs should include RBP"
+        );
+        assert!(
+            dsts.iter().any(|v| v.as_str() == Some("ZF")),
+            "dsts should include ZF"
+        );
+    }
+
+    #[test]
     fn instruction_ssa_uses_named_registers() {
         setup();
         let result = r2_at_addr(vuln_test_binary(), CMP_INSTRUCTION_ADDR, "a:sla.ssa");
