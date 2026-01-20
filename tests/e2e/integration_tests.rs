@@ -5,6 +5,7 @@
 
 use e2e::{r2_at_addr, r2_at_func, require_binary, vuln_test_binary};
 use rstest::rstest;
+use serde_json::Value;
 
 // ============================================================================
 // Test fixtures
@@ -12,6 +13,53 @@ use rstest::rstest;
 
 fn setup() {
     require_binary(vuln_test_binary());
+}
+
+fn parse_json(result: &e2e::R2Result, label: &str) -> Value {
+    result.parse_json::<Value>().unwrap_or_else(|e| {
+        panic!(
+            "{} should be valid JSON: {} -- output: {}",
+            label, e, result.stdout
+        )
+    })
+}
+
+fn expect_array<'a>(value: &'a Value, label: &str) -> &'a Vec<Value> {
+    match value {
+        Value::Array(arr) => arr,
+        _ => panic!("{} should be a JSON array", label),
+    }
+}
+
+fn expect_object<'a>(value: &'a Value, label: &str) -> &'a serde_json::Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        _ => panic!("{} should be a JSON object", label),
+    }
+}
+
+fn contains_named_register(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let is_varnode = map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
+            if is_varnode {
+                let space = map.get("space").and_then(Value::as_str);
+                if let Some(space_str) = space {
+                    if space_str.eq_ignore_ascii_case("register") {
+                        if let Some(name) = map.get("name").and_then(Value::as_str) {
+                            if !name.is_empty() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            map.values().any(contains_named_register)
+        }
+        Value::Array(arr) => arr.iter().any(contains_named_register),
+        _ => false,
+    }
 }
 
 // ============================================================================
@@ -47,6 +95,21 @@ mod plugin_status {
             "Should show x86-64 arch"
         );
     }
+
+    #[test]
+    fn plugin_arch_override_roundtrip() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "main",
+            "a:sla.arch x86-64; a:sla.arch",
+        );
+        result.assert_ok();
+        assert!(
+            result.contains_any(&["x86-64", "x86_64"]),
+            "Should report overridden arch"
+        );
+    }
 }
 
 // ============================================================================
@@ -61,22 +124,53 @@ mod instruction_analysis {
     const MOV_INSTRUCTION_ADDR: u64 = 0x40121e;
 
     #[rstest]
-    #[case("a:sla.json", &["IntSub", "IntEqual", "Load"])]
-    #[case("a:sla.regs", &["read", "write", "RBP"])]
-    #[case("a:sla.vars", &["name", "space", "offset"])]
-    #[case("a:sla.ssa", &["SSA", "dst", "src"])]
-    #[case("a:sla.defuse", &["inputs", "outputs"])]
-    fn instruction_commands_at_cmp(#[case] cmd: &str, #[case] expected: &[&str]) {
+    #[case("a:sla.json")]
+    #[case("a:sla.regs")]
+    #[case("a:sla.vars")]
+    #[case("a:sla.ssa")]
+    #[case("a:sla.defuse")]
+    fn instruction_commands_at_cmp(#[case] cmd: &str) {
         setup();
         let result = r2_at_addr(vuln_test_binary(), CMP_INSTRUCTION_ADDR, cmd);
         result.assert_ok();
-        assert!(
-            result.contains_any(expected),
-            "{} should contain one of {:?}, got: {}",
-            cmd,
-            expected,
-            result.stdout
-        );
+        let json = parse_json(&result, cmd);
+        match cmd {
+            "a:sla.json" => {
+                let ops = expect_array(&json, cmd);
+                assert!(!ops.is_empty(), "a:sla.json should return ops");
+                assert!(
+                    contains_named_register(&json),
+                    "a:sla.json should include named register varnodes"
+                );
+            }
+            "a:sla.regs" => {
+                let obj = expect_object(&json, cmd);
+                assert!(obj.get("read").map_or(false, |v| v.is_array()));
+                assert!(obj.get("write").map_or(false, |v| v.is_array()));
+            }
+            "a:sla.vars" => {
+                let vars = expect_array(&json, cmd);
+                assert!(!vars.is_empty(), "a:sla.vars should return entries");
+                let first = expect_object(&vars[0], "a:sla.vars entry");
+                assert!(first.contains_key("name"));
+                assert!(first.contains_key("space"));
+                assert!(first.contains_key("offset"));
+                assert!(first.contains_key("size"));
+            }
+            "a:sla.ssa" => {
+                let ops = expect_array(&json, cmd);
+                assert!(!ops.is_empty(), "a:sla.ssa should return ops");
+                let first = expect_object(&ops[0], "a:sla.ssa entry");
+                assert!(first.contains_key("op"));
+            }
+            "a:sla.defuse" => {
+                let obj = expect_object(&json, cmd);
+                assert!(obj.contains_key("inputs"));
+                assert!(obj.contains_key("outputs"));
+                assert!(obj.contains_key("live"));
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -84,10 +178,13 @@ mod instruction_analysis {
         setup();
         let result = r2_at_addr(vuln_test_binary(), MOV_INSTRUCTION_ADDR, "a:sla.mem");
         result.assert_ok();
-        assert!(
-            result.contains_any(&["addr", "size", "write"]),
-            "Memory analysis should show addr/size/write"
-        );
+        let json = parse_json(&result, "a:sla.mem");
+        let accesses = expect_array(&json, "a:sla.mem");
+        assert!(!accesses.is_empty(), "a:sla.mem should return accesses");
+        let first = expect_object(&accesses[0], "a:sla.mem entry");
+        assert!(first.contains_key("addr"));
+        assert!(first.contains_key("size"));
+        assert!(first.contains_key("write"));
     }
 
     #[test]
@@ -112,20 +209,28 @@ mod function_ssa {
     const CHECK_SECRET_FUNC: &str = "dbg.check_secret";
 
     #[rstest]
-    #[case("a:sla.ssa.func", "blocks")]
-    #[case("a:sla.ssa.func", "ops")]
-    #[case("a:sla.defuse.func", "def")]
-    fn ssa_func_commands(#[case] cmd: &str, #[case] expected: &str) {
+    #[case("a:sla.ssa.func")]
+    #[case("a:sla.defuse.func")]
+    fn ssa_func_commands(#[case] cmd: &str) {
         setup();
         let result = r2_at_func(vuln_test_binary(), CHECK_SECRET_FUNC, cmd);
         result.assert_ok();
-        assert!(
-            result.contains(expected),
-            "{} should contain '{}', got: {}",
-            cmd,
-            expected,
-            result.stdout
-        );
+        let json = parse_json(&result, cmd);
+        match cmd {
+            "a:sla.ssa.func" => {
+                let obj = expect_object(&json, cmd);
+                assert!(obj.get("blocks").map_or(false, |v| v.is_array()));
+                assert!(obj.contains_key("entry_hex"));
+            }
+            "a:sla.defuse.func" => {
+                let obj = expect_object(&json, cmd);
+                assert!(obj.contains_key("definitions"));
+                assert!(obj.contains_key("uses"));
+                assert!(obj.contains_key("live_in"));
+                assert!(obj.contains_key("live_out"));
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -133,11 +238,19 @@ mod function_ssa {
         setup();
         let result = r2_at_func(vuln_test_binary(), CHECK_SECRET_FUNC, "a:sla.ssa.func");
         result.assert_ok();
-        // May contain "phis" or "phi" depending on output format
-        assert!(
-            result.contains_any(&["phis", "phi"]),
-            "SSA should show phi nodes"
-        );
+        let json = parse_json(&result, "a:sla.ssa.func");
+        let obj = expect_object(&json, "a:sla.ssa.func");
+        let blocks = obj
+            .get("blocks")
+            .and_then(|v| v.as_array())
+            .expect("a:sla.ssa.func should include blocks");
+        let has_phi = blocks.iter().any(|block| {
+            block
+                .get("phis")
+                .and_then(|v| v.as_array())
+                .map_or(false, |phis| !phis.is_empty())
+        });
+        assert!(has_phi, "SSA should show phi nodes");
     }
 }
 
@@ -155,14 +268,11 @@ mod ssa_opt {
         setup();
         let result = r2_at_func(vuln_test_binary(), CHECK_SECRET_FUNC, "a:sla.ssa.func.opt");
         result.assert_ok();
-        assert!(
-            result.contains_any(&["\"optimized\"", "optimized"]),
-            "Optimized SSA should include optimized flag"
-        );
-        assert!(
-            result.contains_any(&["\"stats\"", "stats"]),
-            "Optimized SSA should include stats"
-        );
+        let json = parse_json(&result, "a:sla.ssa.func.opt");
+        let obj = expect_object(&json, "a:sla.ssa.func.opt");
+        assert!(obj.contains_key("optimized"));
+        assert!(obj.contains_key("stats"));
+        assert!(obj.contains_key("function"));
     }
 }
 
@@ -186,16 +296,15 @@ mod cfg {
     #[rstest]
     #[case("blocks")]
     #[case("edges")]
-    #[case("successors")]
+    #[case("entry")]
+    #[case("num_blocks")]
     fn cfg_json_structure(#[case] field: &str) {
         setup();
         let result = r2_at_func(vuln_test_binary(), CHECK_SECRET_FUNC, "a:sla.cfg.json");
         result.assert_ok();
-        assert!(
-            result.contains(field),
-            "CFG JSON should contain '{}' field",
-            field
-        );
+        let json = parse_json(&result, "a:sla.cfg.json");
+        let obj = expect_object(&json, "a:sla.cfg.json");
+        assert!(obj.contains_key(field));
     }
 
     #[test]
@@ -203,10 +312,32 @@ mod cfg {
         setup();
         let result = r2_at_func(vuln_test_binary(), CHECK_SECRET_FUNC, "a:sla.dom");
         result.assert_ok();
-        assert!(
-            result.contains_any(&["dominator", "0x40"]),
-            "Dominator tree should show structure"
-        );
+        let json = parse_json(&result, "a:sla.dom");
+        let obj = expect_object(&json, "a:sla.dom");
+        assert!(obj.contains_key("idom"));
+        assert!(obj.contains_key("children"));
+        assert!(obj.contains_key("dominance_frontier"));
+        assert!(obj.contains_key("depth"));
+    }
+
+    #[test]
+    fn cfg_json_blocks_have_successors() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), CHECK_SECRET_FUNC, "a:sla.cfg.json");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sla.cfg.json");
+        let obj = expect_object(&json, "a:sla.cfg.json");
+        let blocks = obj
+            .get("blocks")
+            .and_then(|v| v.as_array())
+            .expect("a:sla.cfg.json should include blocks");
+        let has_successors = blocks.iter().any(|block| {
+            block
+                .get("successors")
+                .and_then(|v| v.as_array())
+                .is_some()
+        });
+        assert!(has_successors, "CFG blocks should include successors");
     }
 }
 
@@ -220,18 +351,16 @@ mod slicing {
     const CHECK_SECRET_FUNC: &str = "dbg.check_secret";
 
     #[rstest]
-    #[case("a:sla.slice ZF_1", "sink_var")]
-    #[case("a:sla.slice ZF_1", "ops")]
-    #[case("a:sla.slice ZF_1", "blocks")]
-    fn slice_output(#[case] cmd: &str, #[case] expected: &str) {
+    #[case("a:sla.slice ZF_1")]
+    fn slice_output(#[case] cmd: &str) {
         setup();
         let result = r2_at_func(vuln_test_binary(), CHECK_SECRET_FUNC, cmd);
         result.assert_ok();
-        assert!(
-            result.contains(expected),
-            "Slice should contain '{}'",
-            expected
-        );
+        let json = parse_json(&result, cmd);
+        let obj = expect_object(&json, cmd);
+        assert!(obj.contains_key("sink_var"));
+        assert!(obj.contains_key("ops"));
+        assert!(obj.contains_key("blocks"));
     }
 
     #[test]
@@ -251,10 +380,9 @@ mod slicing {
             "a:sla.slice NONEXISTENT_999",
         );
         result.assert_ok();
-        assert!(
-            result.contains("not found"),
-            "Should report var not found"
-        );
+        let json = parse_json(&result, "a:sla.slice");
+        let obj = expect_object(&json, "a:sla.slice error");
+        assert!(obj.contains_key("error"));
     }
 }
 
@@ -272,6 +400,12 @@ mod taint {
         setup();
         let result = r2_at_func(vuln_test_binary(), func, "a:sla.taint");
         result.assert_ok();
+        let json = parse_json(&result, "a:sla.taint");
+        let obj = expect_object(&json, "a:sla.taint");
+        assert!(obj.contains_key("sources"));
+        assert!(obj.contains_key("sinks"));
+        assert!(obj.contains_key("sink_hits"));
+        assert!(obj.contains_key("tainted_vars"));
         assert!(
             result.contains_any(expected),
             "Taint should contain one of {:?}",
@@ -295,10 +429,9 @@ mod symbolic {
         setup();
         let result = r2_at_func(vuln_test_binary(), func, "a:sla.sym");
         result.assert_ok();
-        assert!(
-            result.contains("paths_explored"),
-            "Should report paths explored"
-        );
+        let json = parse_json(&result, "a:sla.sym");
+        let obj = expect_object(&json, "a:sla.sym");
+        assert!(obj.contains_key("paths_explored"));
     }
 
     #[rstest]
@@ -308,7 +441,9 @@ mod symbolic {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.sym");
         result.assert_ok();
-        assert!(result.contains(stat), "Should report {}", stat);
+        let json = parse_json(&result, "a:sla.sym");
+        let obj = expect_object(&json, "a:sla.sym");
+        assert!(obj.contains_key(stat), "Should report {}", stat);
     }
 }
 
@@ -328,11 +463,11 @@ mod paths {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.sym.paths");
         result.assert_ok();
-        assert!(
-            result.contains(field),
-            "Paths output should contain '{}'",
-            field
-        );
+        let json = parse_json(&result, "a:sla.sym.paths");
+        let paths = expect_array(&json, "a:sla.sym.paths");
+        assert!(!paths.is_empty(), "a:sla.sym.paths should return paths");
+        let first = expect_object(&paths[0], "a:sla.sym.paths entry");
+        assert!(first.contains_key(field));
     }
 
     #[test]

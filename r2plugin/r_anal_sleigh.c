@@ -31,7 +31,7 @@ extern unsigned long long r2il_block_fail(const R2ILBlock *block);
 /* ESIL/mnemonic */
 extern char *r2il_block_to_esil(const R2ILContext *ctx, const R2ILBlock *block);
 extern char *r2il_block_mnemonic(const R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr);
-extern char *r2il_block_op_json(const R2ILBlock *block, size_t index);
+extern char *r2il_block_op_json_named(const R2ILContext *ctx, const R2ILBlock *block, size_t index);
 extern void r2il_string_free(char *s);
 
 /* Typed analysis */
@@ -393,7 +393,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		}
 		size_t i;
 		for (i = 0; i < count; i++) {
-			char *json = r2il_block_op_json (block, i);
+			char *json = r2il_block_op_json_named (ctx, block, i);
 			if (json && cons) {
 				r_cons_printf (cons, "  %s%s\n", json, (i + 1 < count) ? "," : "");
 				r2il_string_free (json);

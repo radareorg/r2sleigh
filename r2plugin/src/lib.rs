@@ -411,6 +411,51 @@ pub extern "C" fn r2il_block_to_esil(ctx: *const R2ILContext, block: *const R2IL
     CString::new(parts.join(";")).map_or(ptr::null_mut(), |s| s.into_raw())
 }
 
+fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler) {
+    use serde_json::Value;
+
+    match value {
+        Value::Object(map) => {
+            let is_varnode = map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
+            if is_varnode {
+                let space = map.get("space").and_then(Value::as_str);
+                if let Some(space_str) = space {
+                    if space_str.eq_ignore_ascii_case("register") {
+                        let offset = map.get("offset").and_then(Value::as_u64);
+                        let size = map.get("size").and_then(Value::as_u64);
+                        if let (Some(offset), Some(size)) = (offset, size) {
+                            let vn = r2il::Varnode {
+                                space: r2il::SpaceId::Register,
+                                offset,
+                                size: size as u32,
+                            };
+                            if let Some(name) = disasm.register_name(&vn) {
+                                map.insert("name".to_string(), Value::String(name));
+                            }
+                        }
+                    }
+                }
+            }
+
+            for value in map.values_mut() {
+                annotate_register_names(value, disasm);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                annotate_register_names(item, disasm);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn op_json_with_registers(op: &R2ILOp, disasm: &Disassembler) -> Option<String> {
+    let mut value = serde_json::to_value(op).ok()?;
+    annotate_register_names(&mut value, disasm);
+    serde_json::to_string(&value).ok()
+}
+
 /// Get a JSON representation of an operation in a block.
 #[unsafe(no_mangle)]
 pub extern "C" fn r2il_block_op_json(block: *const R2ILBlock, index: usize) -> *mut c_char {
@@ -426,6 +471,34 @@ pub extern "C" fn r2il_block_op_json(block: *const R2ILBlock, index: usize) -> *
     match serde_json::to_string(&blk.ops[index]) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Get a JSON representation of an operation with register names resolved.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_op_json_named(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+    index: usize,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let blk = unsafe { &*block };
+    if index >= blk.ops.len() {
+        return ptr::null_mut();
+    }
+
+    match op_json_with_registers(&blk.ops[index], disasm) {
+        Some(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        None => ptr::null_mut(),
     }
 }
 
