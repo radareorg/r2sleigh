@@ -6,6 +6,9 @@
 #include <r_util/r_json.h>
 #include <string.h>
 
+/* Vector type for RAnalRef (needed for get_data_refs callback) */
+R_VEC_TYPE (RVecAnalRef, RAnalRef);
+
 /* FFI declarations for r2sleigh Rust library */
 typedef struct R2ILContext R2ILContext;
 typedef struct R2ILBlock R2ILBlock;
@@ -68,6 +71,11 @@ extern char *r2dec_function(const R2ILContext *ctx, const R2ILBlock **blocks, si
 extern char *r2cfg_function_ascii(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2cfg_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2il_get_reg_profile(const R2ILContext *ctx);
+
+/* radare2 Deep Integration */
+extern int r2sleigh_analyze_fcn(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
+extern char *r2sleigh_recover_vars(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
+extern char *r2sleigh_get_data_refs(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
 /* Per-architecture context (lazy init) */
 static R2ILContext *sleigh_ctx = NULL;
 static char *sleigh_arch = NULL;
@@ -1385,6 +1393,270 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 	return strdup("");
 }
 
+/* ============================================================================
+ * radare2 Deep Integration Callbacks
+ * These are called automatically by radare2 during analysis (aaa, afv, ax)
+ * ============================================================================ */
+
+/* Called after function analysis completes */
+static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
+	if (!fcn || !anal) {
+		return false;
+	}
+
+	R2ILContext *ctx = get_context (anal);
+	if (!ctx) {
+		return false;
+	}
+
+	BlockArray blocks;
+	if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+		return false;
+	}
+
+	int result = r2sleigh_analyze_fcn (ctx,
+		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+
+	block_array_free (&blocks);
+	return result == 1;
+}
+
+/* Helper to free RAnalVarProt */
+static void var_prot_free(void *ptr) {
+	if (!ptr) {
+		return;
+	}
+	RAnalVarProt *prot = (RAnalVarProt *)ptr;
+	free (prot->name);
+	free (prot->type);
+	free (prot);
+}
+
+/* Called during variable recovery (afva) */
+static RList *sleigh_recover_vars(RAnal *anal, RAnalFunction *fcn) {
+	if (!fcn || !anal) {
+		return NULL;
+	}
+
+	R2ILContext *ctx = get_context (anal);
+	if (!ctx) {
+		return NULL;
+	}
+
+	BlockArray blocks;
+	if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+		return NULL;
+	}
+
+	char *json = r2sleigh_recover_vars (ctx,
+		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+
+	block_array_free (&blocks);
+
+	if (!json || !*json) {
+		r2il_string_free (json);
+		return NULL;
+	}
+
+	/* Parse JSON and create RList of RAnalVarProt */
+	RList *vars = r_list_newf ((RListFree)var_prot_free);
+	if (!vars) {
+		r2il_string_free (json);
+		return NULL;
+	}
+
+	RJson *root = r_json_parse (json);
+	if (!root || root->type != R_JSON_ARRAY) {
+		r2il_string_free (json);
+		r_list_free (vars);
+		return NULL;
+	}
+
+	const RJson *item;
+	for (item = root->children.first; item; item = item->next) {
+		if (item->type != R_JSON_OBJECT) {
+			continue;
+		}
+
+		const RJson *j_name = r_json_get (item, "name");
+		const RJson *j_kind = r_json_get (item, "kind");
+		const RJson *j_delta = r_json_get (item, "delta");
+		const RJson *j_type = r_json_get (item, "type");
+		const RJson *j_isarg = r_json_get (item, "isarg");
+		const RJson *j_reg = r_json_get (item, "reg");
+
+		if (!j_name || !j_kind || !j_delta || !j_type) {
+			continue;
+		}
+
+		RAnalVarProt *prot = R_NEW0 (RAnalVarProt);
+		if (!prot) {
+			continue;
+		}
+
+		prot->name = strdup (j_name->str_value ? j_name->str_value : "");
+		prot->type = strdup (j_type->str_value ? j_type->str_value : "int64_t");
+		prot->delta = (st64)j_delta->num.s_value;
+		prot->isarg = j_isarg && j_isarg->type == R_JSON_BOOLEAN && j_isarg->num.u_value;
+
+		/* Parse kind: "r" = register, "s" = stack, "b" = bp-relative */
+		if (j_kind->str_value) {
+			switch (j_kind->str_value[0]) {
+			case 'r':
+				/* Register-based argument: use r_reg_get to find index */
+				if (j_reg && j_reg->str_value && anal->reg) {
+					/* Try uppercase version (Sleigh uses uppercase reg names) */
+					char *upper_reg = strdup (j_reg->str_value);
+					if (upper_reg) {
+						for (char *p = upper_reg; *p; p++) {
+							*p = toupper ((unsigned char)*p);
+						}
+					}
+					RRegItem *ri = upper_reg
+						? r_reg_get (anal->reg, upper_reg, R_REG_TYPE_GPR)
+						: NULL;
+					if (!ri) {
+						/* Try original case as fallback */
+						ri = r_reg_get (anal->reg, j_reg->str_value, R_REG_TYPE_GPR);
+					}
+					free (upper_reg);
+					if (ri) {
+						prot->kind = R_ANAL_VAR_KIND_REG;
+						prot->delta = ri->index;
+					} else {
+						/* Reg lookup failed, skip this arg */
+						free (prot->name);
+						free (prot->type);
+						free (prot);
+						continue;
+					}
+				} else {
+					/* No reg name provided, skip */
+					free (prot->name);
+					free (prot->type);
+					free (prot);
+					continue;
+				}
+				break;
+			case 's':
+				prot->kind = R_ANAL_VAR_KIND_SPV;
+				break;
+			case 'b':
+				prot->kind = R_ANAL_VAR_KIND_BPV;
+				break;
+			default:
+				prot->kind = R_ANAL_VAR_KIND_SPV;
+			}
+		}
+
+		r_list_append (vars, prot);
+	}
+
+	r_json_free (root);
+	r2il_string_free (json);
+
+	if (r_list_empty (vars)) {
+		r_list_free (vars);
+		return NULL;
+	}
+
+	return vars;
+}
+
+/* Called during reference analysis (aar) */
+static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
+	if (!fcn || !anal) {
+		return NULL;
+	}
+
+	R2ILContext *ctx = get_context (anal);
+	if (!ctx) {
+		return NULL;
+	}
+
+	BlockArray blocks;
+	if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+		return NULL;
+	}
+
+	char *json = r2sleigh_get_data_refs (ctx,
+		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+
+	block_array_free (&blocks);
+
+	if (!json || !*json) {
+		r2il_string_free (json);
+		return NULL;
+	}
+
+	/* Parse JSON and create RVecAnalRef */
+	RVecAnalRef *refs = RVecAnalRef_new ();
+	if (!refs) {
+		r2il_string_free (json);
+		return NULL;
+	}
+
+	RJson *root = r_json_parse (json);
+	if (!root || root->type != R_JSON_ARRAY) {
+		r2il_string_free (json);
+		RVecAnalRef_free (refs);
+		return NULL;
+	}
+
+	const RJson *item;
+	for (item = root->children.first; item; item = item->next) {
+		if (item->type != R_JSON_OBJECT) {
+			continue;
+		}
+
+		const RJson *j_from = r_json_get (item, "from");
+		const RJson *j_to = r_json_get (item, "to");
+		const RJson *j_type = r_json_get (item, "type");
+
+		if (!j_from || !j_to) {
+			continue;
+		}
+
+		RAnalRef ref = {
+			.at = (ut64)j_from->num.u_value,
+			.addr = (ut64)j_to->num.u_value,
+			.type = R_ANAL_REF_TYPE_DATA  /* default to data ref */
+		};
+
+		/* Parse type if present */
+		if (j_type && j_type->str_value) {
+			switch (j_type->str_value[0]) {
+			case 'c':
+			case 'C':
+				ref.type = R_ANAL_REF_TYPE_CALL;
+				break;
+			case 'j':
+			case 'J':
+				ref.type = R_ANAL_REF_TYPE_JUMP;
+				break;
+			case 's':
+			case 'S':
+				ref.type = R_ANAL_REF_TYPE_STRN;
+				break;
+			default:
+				ref.type = R_ANAL_REF_TYPE_DATA;
+			}
+		}
+
+		RVecAnalRef_push_back (refs, &ref);
+	}
+
+	r_json_free (root);
+	r2il_string_free (json);
+
+	if (RVecAnalRef_empty (refs)) {
+		RVecAnalRef_free (refs);
+		return NULL;
+	}
+
+	return refs;
+}
+
 RAnalPlugin r_anal_plugin_sleigh = {
 	.meta = {
 		.name = "sla",
@@ -1396,6 +1668,10 @@ RAnalPlugin r_anal_plugin_sleigh = {
 	.fini = sleigh_fini,
 	.op = sleigh_op,
 	.cmd = sleigh_cmd,
+	/* Deep integration callbacks */
+	.analyze_fcn = sleigh_analyze_fcn,
+	.recover_vars = sleigh_recover_vars,
+	.get_data_refs = sleigh_get_data_refs,
 };
 
 #ifndef R2_PLUGIN_INCORE

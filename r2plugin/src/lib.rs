@@ -763,7 +763,7 @@ use r2il::Varnode;
 /// Helper: extract all register varnodes that are read by an operation.
 fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
     let mut regs = Vec::new();
-    
+
     match op {
         // Data movement - src is read
         R2ILOp::Copy { src, .. } => {
@@ -776,7 +776,7 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
             if addr.is_register() { regs.push(addr); }
             if val.is_register() { regs.push(val); }
         }
-        
+
         // Binary ops - a and b are read
         R2ILOp::IntAdd { a, b, .. } |
         R2ILOp::IntSub { a, b, .. } |
@@ -815,7 +815,7 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
             if a.is_register() { regs.push(a); }
             if b.is_register() { regs.push(b); }
         }
-        
+
         // Unary ops - src is read
         R2ILOp::IntNegate { src, .. } |
         R2ILOp::IntNot { src, .. } |
@@ -837,7 +837,7 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
         R2ILOp::FloatRound { src, .. } => {
             if src.is_register() { regs.push(src); }
         }
-        
+
         // Control flow - target/cond are read
         R2ILOp::Branch { target } |
         R2ILOp::BranchInd { target } |
@@ -850,74 +850,74 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
             if cond.is_register() { regs.push(cond); }
             if target.is_register() { regs.push(target); }
         }
-        
+
         // CallOther - inputs are read
         R2ILOp::CallOther { inputs, .. } => {
             for inp in inputs {
                 if inp.is_register() { regs.push(inp); }
             }
         }
-        
+
         // Float2Int - src is read
         R2ILOp::Float2Int { src, .. } |
         R2ILOp::New { src, .. } |
         R2ILOp::Cast { src, .. } => {
             if src.is_register() { regs.push(src); }
         }
-        
+
         // Extract - src and position are read
         R2ILOp::Extract { src, position, .. } => {
             if src.is_register() { regs.push(src); }
             if position.is_register() { regs.push(position); }
         }
-        
+
         // Insert - src, value, position are read
         R2ILOp::Insert { src, value, position, .. } => {
             if src.is_register() { regs.push(src); }
             if value.is_register() { regs.push(value); }
             if position.is_register() { regs.push(position); }
         }
-        
+
         // SegmentOp - segment and offset are read
         R2ILOp::SegmentOp { segment, offset, .. } => {
             if segment.is_register() { regs.push(segment); }
             if offset.is_register() { regs.push(offset); }
         }
-        
+
         // PtrAdd/PtrSub - base and index are read
         R2ILOp::PtrAdd { base, index, .. } |
         R2ILOp::PtrSub { base, index, .. } => {
             if base.is_register() { regs.push(base); }
             if index.is_register() { regs.push(index); }
         }
-        
+
         // Multiequal - inputs are read
         R2ILOp::Multiequal { inputs, .. } => {
             for inp in inputs {
                 if inp.is_register() { regs.push(inp); }
             }
         }
-        
+
         // Indirect - src and indirect are read
         R2ILOp::Indirect { src, indirect, .. } => {
             if src.is_register() { regs.push(src); }
             if indirect.is_register() { regs.push(indirect); }
         }
-        
+
         // Ops with no register reads
         R2ILOp::Nop |
         R2ILOp::Unimplemented |
         R2ILOp::Breakpoint |
         R2ILOp::CpuId { .. } => {}
     }
-    
+
     regs
 }
 
 /// Helper: extract all register varnodes that are written by an operation.
 fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
     let mut regs = Vec::new();
-    
+
     match op {
         // All ops with dst field write to dst
         R2ILOp::Copy { dst, .. } |
@@ -976,10 +976,10 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
         R2ILOp::FloatRound { dst, .. } => {
             if dst.is_register() { regs.push(dst); }
         }
-        
+
         // Store doesn't have a register dst
         R2ILOp::Store { .. } => {}
-        
+
         // Control flow ops don't write registers directly
         R2ILOp::Branch { .. } |
         R2ILOp::BranchInd { .. } |
@@ -987,14 +987,14 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
         R2ILOp::Call { .. } |
         R2ILOp::CallInd { .. } |
         R2ILOp::Return { .. } => {}
-        
+
         // CallOther may have output
         R2ILOp::CallOther { output, .. } => {
             if let Some(out) = output {
                 if out.is_register() { regs.push(out); }
             }
         }
-        
+
         // Ops with dst field that write
         R2ILOp::Float2Int { dst, .. } |
         R2ILOp::CpuId { dst, .. } |
@@ -1009,13 +1009,13 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
         R2ILOp::PtrSub { dst, .. } => {
             if dst.is_register() { regs.push(dst); }
         }
-        
+
         // Ops with no register writes
         R2ILOp::Nop |
         R2ILOp::Unimplemented |
         R2ILOp::Breakpoint => {}
     }
-    
+
     regs
 }
 
@@ -1038,7 +1038,7 @@ pub extern "C" fn r2il_block_regs_read(
 
     let blk = unsafe { &*block };
     let mut regs = BTreeSet::new();
-    
+
     for op in &blk.ops {
         for reg in op_regs_read(op) {
             if let Some(name) = disasm.register_name(reg) {
@@ -1398,7 +1398,7 @@ pub extern "C" fn r2il_block_regs_write(
 
     let blk = unsafe { &*block };
     let mut regs = BTreeSet::new();
-    
+
     for op in &blk.ops {
         for reg in op_regs_write(op) {
             if let Some(name) = disasm.register_name(reg) {
@@ -1423,11 +1423,11 @@ struct VarnodeInfo {
 /// Helper: collect all varnodes from an operation.
 fn op_all_varnodes(op: &R2ILOp) -> Vec<&Varnode> {
     let mut vns = Vec::new();
-    
+
     // Combine read and write varnodes
     vns.extend(op_regs_read(op));
     vns.extend(op_regs_write(op));
-    
+
     // Also get non-register varnodes
     match op {
         R2ILOp::Copy { dst, src } => {
@@ -1454,7 +1454,7 @@ fn op_all_varnodes(op: &R2ILOp) -> Vec<&Varnode> {
         }
         _ => {} // Other ops handled by op_regs_read/write
     }
-    
+
     vns
 }
 
@@ -3439,6 +3439,408 @@ pub extern "C" fn r2dec_block_ast_json(
     }
 }
 
+// ============================================================================
+// radare2 Deep Integration FFI - Variable Recovery and Data Refs
+// ============================================================================
+
+/// Analyze a function and build SSA representation.
+/// This is called after radare2 completes basic function analysis.
+/// Returns 1 on success, 0 on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sleigh_analyze_fcn(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    _fcn_addr: u64,
+) -> i32 {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return 0;
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return 0,
+    };
+
+    // Convert R2ILBlocks to SSA
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if blk_ptr.is_null() {
+            continue;
+        }
+        let blk = unsafe { &*blk_ptr };
+        r2il_blocks.push(blk.clone());
+    }
+
+    // Build SSA for all blocks - this validates we can process the function
+    let mut _ssa_blocks = Vec::new();
+    for blk in &r2il_blocks {
+        let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+        _ssa_blocks.push(ssa_block);
+    }
+
+    1 // Success
+}
+
+/// Recover variables from SSA analysis.
+/// Returns a JSON array of variable prototypes:
+/// [{"name": "arg0", "kind": "r", "delta": 0, "type": "int64_t", "isarg": true, "reg": "rdi"}, ...]
+/// Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sleigh_recover_vars(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    _fcn_addr: u64,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    // Convert R2ILBlocks to SSA
+    let mut ssa_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if blk_ptr.is_null() {
+            continue;
+        }
+        let blk = unsafe { &*blk_ptr };
+        let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+        ssa_blocks.push(ssa_block);
+    }
+
+    if ssa_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Recover variables from SSA analysis
+    let vars = recover_vars_from_ssa(&ssa_blocks);
+
+    // Serialize to JSON
+    match serde_json::to_string(&vars) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Get data flow references from def-use analysis.
+/// Returns a JSON array of references:
+/// [{"from": 4096, "to": 8192, "type": "d"}, ...]
+/// Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sleigh_get_data_refs(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    _fcn_addr: u64,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    // Convert R2ILBlocks to SSA
+    let mut ssa_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if blk_ptr.is_null() {
+            continue;
+        }
+        let blk = unsafe { &*blk_ptr };
+        let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+        ssa_blocks.push(ssa_block);
+    }
+
+    if ssa_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Get data refs from def-use analysis
+    let refs = get_data_refs_from_ssa(&ssa_blocks);
+
+    // Serialize to JSON
+    match serde_json::to_string(&refs) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Variable prototype for radare2 integration
+#[derive(serde::Serialize)]
+struct VarProt {
+    name: String,
+    kind: String,  // "r" for register, "s" for stack, "b" for bp-relative
+    delta: i64,
+    #[serde(rename = "type")]
+    var_type: String,
+    isarg: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reg: Option<String>,
+}
+
+/// Data reference for radare2 integration
+#[derive(serde::Serialize)]
+struct DataRef {
+    from: u64,
+    to: u64,
+    #[serde(rename = "type")]
+    ref_type: String,
+}
+
+/// Recover variables from SSA blocks
+///
+/// Strategy:
+/// 1. Detect register arguments (RDI_0, RSI_0, etc. = version 0 inputs)
+/// 2. Detect stack variables by finding IntAdd/IntSub patterns:
+///    - IntAdd { dst: temp, a: RBP, b: const(-offset) } → [RBP-offset] = local var
+///    - IntAdd { dst: temp, a: RSP, b: const(+offset) } → [RSP+offset] = local var
+///    - Positive RBP offsets or return address area = arguments
+fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut vars = Vec::new();
+    let mut seen_offsets: HashSet<i64> = HashSet::new();
+    let mut seen_arg_regs: HashSet<String> = HashSet::new();
+
+    // x86-64 calling convention argument registers (including 32-bit aliases)
+    // Format: (canonical_name, [lowercase_aliases])
+    let arg_regs: &[(&str, &[&str])] = &[
+        ("rdi", &["rdi", "edi", "di", "dil"]),
+        ("rsi", &["rsi", "esi", "si", "sil"]),
+        ("rdx", &["rdx", "edx", "dx", "dl", "dh"]),
+        ("rcx", &["rcx", "ecx", "cx", "cl", "ch"]),
+        ("r8", &["r8", "r8d", "r8w", "r8b"]),
+        ("r9", &["r9", "r9d", "r9w", "r9b"]),
+    ];
+
+    // Track temp variables that are stack addresses: temp_name -> (base_reg, offset)
+    let mut stack_addr_temps: HashMap<String, (String, i64)> = HashMap::new();
+
+    for block in ssa_blocks {
+        for op in &block.ops {
+            // Pattern 1: Detect IntAdd/IntSub with RBP/RSP and constant
+            // This creates a stack address in a temp variable
+            match op {
+                r2ssa::SSAOp::IntAdd { dst, a, b } | r2ssa::SSAOp::IntSub { dst, a, b } => {
+                    let a_name = a.name.to_lowercase();
+                    let b_name = b.name.to_lowercase();
+
+                    // Check if 'a' is RBP or RSP and 'b' is a constant
+                    let is_a_base = a_name == "rbp" || a_name == "rsp";
+                    let is_b_const = b_name.starts_with("const:");
+
+                    if is_a_base && is_b_const {
+                        if let Some(raw_offset) = parse_const_value(&b.name) {
+                            // For IntAdd with large values, treat as two's complement negative
+                            // e.g., 0xffffffffffffffb8 = -0x48
+                            let offset = if matches!(op, r2ssa::SSAOp::IntSub { .. }) {
+                                -(raw_offset as i64)
+                            } else {
+                                // IntAdd: if value > 0x7FFF... it's a negative in two's complement
+                                raw_offset as i64  // Rust handles this correctly
+                            };
+
+                            // Store this temp as a known stack address
+                            let dst_key = format!("{}_{}", dst.name.to_lowercase(), dst.version);
+                            stack_addr_temps.insert(dst_key, (a_name.clone(), offset));
+                        }
+                    }
+                    // Also check if 'b' is the base register (commutative for add)
+                    else if (b_name == "rbp" || b_name == "rsp") && a_name.starts_with("const:") {
+                        if let Some(raw_offset) = parse_const_value(&a.name) {
+                            let offset = raw_offset as i64;
+                            let dst_key = format!("{}_{}", dst.name.to_lowercase(), dst.version);
+                            stack_addr_temps.insert(dst_key, (b_name.clone(), offset));
+                        }
+                    }
+                }
+
+                // Pattern 2: Detect Store/Load with a known stack address temp
+                r2ssa::SSAOp::Store { addr, val, .. } => {
+                    let addr_key = format!("{}_{}", addr.name.to_lowercase(), addr.version);
+                    if let Some((base_reg, offset)) = stack_addr_temps.get(&addr_key) {
+                        add_stack_var(&mut vars, &mut seen_offsets, base_reg, *offset, val.size);
+                    }
+                }
+                r2ssa::SSAOp::Load { dst, addr, .. } => {
+                    let addr_key = format!("{}_{}", addr.name.to_lowercase(), addr.version);
+                    if let Some((base_reg, offset)) = stack_addr_temps.get(&addr_key) {
+                        add_stack_var(&mut vars, &mut seen_offsets, base_reg, *offset, dst.size);
+                    }
+                }
+
+                _ => {}
+            }
+
+            // Pattern 3: Detect register arguments (version 0 = uninitialized input)
+            for src in op.sources() {
+                let base_name = src.name.to_lowercase();
+                if src.version == 0 {
+                    // Check if this register matches any argument register (including aliases)
+                    for (i, (canonical, aliases)) in arg_regs.iter().enumerate() {
+                        if aliases.contains(&base_name.as_str()) && !seen_arg_regs.contains(*canonical) {
+                            seen_arg_regs.insert(canonical.to_string());
+                            vars.push(VarProt {
+                                name: format!("arg{}", i),
+                                kind: "r".to_string(),
+                                delta: 0,
+                                var_type: size_to_type(src.size),
+                                isarg: true,
+                                reg: Some(canonical.to_string()),
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort variables by offset for consistent output
+    vars.sort_by_key(|v| v.delta);
+    vars
+}
+
+/// Add a stack variable if not already seen
+fn add_stack_var(
+    vars: &mut Vec<VarProt>,
+    seen_offsets: &mut HashSet<i64>,
+    base_reg: &str,
+    offset: i64,
+    size: u32,
+) {
+    if seen_offsets.contains(&offset) {
+        return;
+    }
+    seen_offsets.insert(offset);
+
+    // Determine if this is an argument or local variable
+    // For RBP-relative: negative offset = local, positive = saved regs/return/args
+    // For RSP-relative: depends on stack frame layout
+    let is_rbp = base_reg == "rbp";
+    let is_arg = if is_rbp {
+        offset > 0  // Above RBP = return addr, saved RBP, then args
+    } else {
+        false  // RSP-relative accesses are typically locals
+    };
+
+    let var_name = if is_arg && offset > 8 {
+        // Skip return address (offset 8) and saved RBP (offset 0)
+        format!("arg_{:x}h", offset.unsigned_abs())
+    } else if offset < 0 {
+        format!("var_{:x}h", offset.unsigned_abs())
+    } else {
+        format!("var_{:x}h", offset.unsigned_abs())
+    };
+
+    let kind = if is_rbp { "b" } else { "s" };  // bp-relative or sp-relative
+
+    vars.push(VarProt {
+        name: var_name,
+        kind: kind.to_string(),
+        delta: offset,
+        var_type: size_to_type(size),
+        isarg: is_arg && offset > 8,
+        reg: None,
+    });
+}
+
+/// Parse a constant value from SSA variable name
+/// Handles formats like:
+/// - "const:0x48"
+/// - "const:18446744073709551544"
+/// - "const:ffffffffffffffb8_0" (SSA versioned constant with hex)
+fn parse_const_value(name: &str) -> Option<u64> {
+    let val_str = name.strip_prefix("const:")
+        .or_else(|| name.strip_prefix("CONST:"))?;
+
+    // Remove SSA version suffix if present (e.g., "ffffffffffffffb8_0" -> "ffffffffffffffb8")
+    let val_str = val_str.split('_').next().unwrap_or(val_str);
+
+    if let Some(hex) = val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        // Try parsing as decimal first
+        if let Ok(v) = val_str.parse::<u64>() {
+            return Some(v);
+        }
+        // Try parsing as hex without 0x prefix (common for constants like "ffffffffffffffb8")
+        u64::from_str_radix(val_str, 16).ok()
+    }
+}
+
+/// Convert size in bytes to C type string
+fn size_to_type(size: u32) -> String {
+    match size {
+        1 => "int8_t".to_string(),
+        2 => "int16_t".to_string(),
+        4 => "int32_t".to_string(),
+        8 => "int64_t".to_string(),
+        _ => format!("byte[{}]", size),
+    }
+}
+
+/// Get data references from SSA def-use chains
+fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
+    use std::collections::HashMap;
+
+    let mut refs = Vec::new();
+    let mut definitions: HashMap<String, u64> = HashMap::new();
+
+    // First pass: collect all definitions
+    for block in ssa_blocks {
+        for op in &block.ops {
+            if let Some(dst) = op.dst() {
+                let var_key = format!("{}_{}", dst.name, dst.version);
+                definitions.insert(var_key, block.addr);
+            }
+        }
+    }
+
+    // Second pass: for each use, create a ref from definition to use
+    for block in ssa_blocks {
+        for op in &block.ops {
+            for src in op.sources() {
+                // Skip version 0 (external/uninitialized)
+                if src.version == 0 {
+                    continue;
+                }
+
+                let var_key = format!("{}_{}", src.name, src.version);
+                if let Some(&def_addr) = definitions.get(&var_key) {
+                    // Only add ref if definition is at a different address
+                    if def_addr != block.addr {
+                        refs.push(DataRef {
+                            from: def_addr,
+                            to: block.addr,
+                            ref_type: "d".to_string(), // data ref
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate refs
+    refs.sort_by_key(|r| (r.from, r.to));
+    refs.dedup_by(|a, b| a.from == b.from && a.to == b.to);
+
+    refs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3511,7 +3913,7 @@ mod integration_tests {
              panic!("r2il_arch_initreturnedNULL");
         }
         let ctx = unsafe { &*ctx_ptr };
-        
+
         if let Some(err) = &ctx.error {
              // panic!("Contexthaserror:{:?}",err);
              // It might error if sleigh-config data is bad, but we want to see it
@@ -3519,18 +3921,18 @@ mod integration_tests {
         }
         // If we have an error, we might still have a partial context or it failed completely
         // r2il_arch_init returns context with error set if loading failed
-        
+
         if ctx.arch.is_none() {
             panic!("ArchisNone(loadingfailed)");
         }
-        
+
         let profile_ptr = r2il_get_reg_profile(ctx_ptr);
         assert!(!profile_ptr.is_null());
         let profile = unsafe { CStr::from_ptr(profile_ptr).to_str().unwrap() };
         println!("Profile: {}", profile);
         assert!(profile.contains("=PC\tRIP"));
         std::fs::write("/tmp/sleigh_profile.dr", profile).expect("Unable to write profile");
-        
+
         r2il_string_free(profile_ptr);
         r2il_free(ctx_ptr);
     }
