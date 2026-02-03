@@ -254,54 +254,74 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
 
     // Heuristics for roles
     for reg in &arch.registers {
-        // Role detection (case-insensitive)
         let name_lower = reg.name.to_lowercase();
-        
-        // PC candidates
+
         if name_lower == "pc" || name_lower == "rip" || name_lower == "eip" || name_lower == "ip" {
-           if pc.is_none() { pc = Some(&reg.name); }
-        } 
-        // SP candidates
-        else if name_lower == "sp" || name_lower == "rsp" || name_lower == "esp" {
-           if sp.is_none() { sp = Some(&reg.name); }
-        } 
-        // BP candidates
-        else if name_lower == "bp" || name_lower == "rbp" || name_lower == "ebp" || name_lower == "fp" {
-           if bp.is_none() { bp = Some(&reg.name); }
-        } 
-        // Return value candidates
-        else if name_lower == "r0" || name_lower == "rax" || name_lower == "eax" || name_lower == "v0" {
-           if r0.is_none() { r0 = Some(&reg.name); }
-        } 
-        // Arg 0
-        else if name_lower == "rdi" || name_lower == "a0" {
-           if a0.is_none() { a0 = Some(&reg.name); }
-        } 
-        // Arg 1
-        else if name_lower == "rsi" || name_lower == "a1" {
-           if a1.is_none() { a1 = Some(&reg.name); }
-        } 
-        // Arg 2
-        else if name_lower == "rdx" || name_lower == "a2" {
-           if a2.is_none() { a2 = Some(&reg.name); }
-        } 
-        // Arg 3
-        else if name_lower == "rcx" || name_lower == "a3" {
-           if a3.is_none() { a3 = Some(&reg.name); }
+            if pc.is_none() {
+                pc = Some(&reg.name);
+            }
+        } else if name_lower == "sp" || name_lower == "rsp" || name_lower == "esp" {
+            if sp.is_none() {
+                sp = Some(&reg.name);
+            }
+        } else if name_lower == "bp" || name_lower == "rbp" || name_lower == "ebp" || name_lower == "fp" {
+            if bp.is_none() {
+                bp = Some(&reg.name);
+            }
+        } else if name_lower == "r0" || name_lower == "rax" || name_lower == "eax" || name_lower == "v0" {
+            if r0.is_none() {
+                r0 = Some(&reg.name);
+            }
+        } else if name_lower == "rdi" || name_lower == "a0" {
+            if a0.is_none() {
+                a0 = Some(&reg.name);
+            }
+        } else if name_lower == "rsi" || name_lower == "a1" {
+            if a1.is_none() {
+                a1 = Some(&reg.name);
+            }
+        } else if name_lower == "rdx" || name_lower == "a2" {
+            if a2.is_none() {
+                a2 = Some(&reg.name);
+            }
+        } else if name_lower == "rcx" || name_lower == "a3" {
+            if a3.is_none() {
+                a3 = Some(&reg.name);
+            }
         }
 
-        profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", reg.name, reg.size * 8, reg.offset));
+        profile.push_str(&format!(
+            "gpr\t{}\t.{}\t{}\t0\n",
+            reg.name,
+            reg.size * 8,
+            reg.offset
+        ));
     }
 
-    // Add roles
-    if let Some(n) = pc { profile.push_str(&format!("=PC\t{}\n", n)); }
-    if let Some(n) = sp { profile.push_str(&format!("=SP\t{}\n", n)); }
-    if let Some(n) = bp { profile.push_str(&format!("=BP\t{}\n", n)); }
-    if let Some(n) = a0 { profile.push_str(&format!("=A0\t{}\n", n)); }
-    if let Some(n) = a1 { profile.push_str(&format!("=A1\t{}\n", n)); }
-    if let Some(n) = a2 { profile.push_str(&format!("=A2\t{}\n", n)); }
-    if let Some(n) = a3 { profile.push_str(&format!("=A3\t{}\n", n)); }
-    if let Some(n) = r0 { profile.push_str(&format!("=R0\t{}\n", n)); }
+    if let Some(n) = pc {
+        profile.push_str(&format!("=PC\t{}\n", n));
+    }
+    if let Some(n) = sp {
+        profile.push_str(&format!("=SP\t{}\n", n));
+    }
+    if let Some(n) = bp {
+        profile.push_str(&format!("=BP\t{}\n", n));
+    }
+    if let Some(n) = a0 {
+        profile.push_str(&format!("=A0\t{}\n", n));
+    }
+    if let Some(n) = a1 {
+        profile.push_str(&format!("=A1\t{}\n", n));
+    }
+    if let Some(n) = a2 {
+        profile.push_str(&format!("=A2\t{}\n", n));
+    }
+    if let Some(n) = a3 {
+        profile.push_str(&format!("=A3\t{}\n", n));
+    }
+    if let Some(n) = r0 {
+        profile.push_str(&format!("=R0\t{}\n", n));
+    }
 
     CString::new(profile).map_or(ptr::null_mut(), |c| c.into_raw())
 }
@@ -737,7 +757,7 @@ pub extern "C" fn r2il_string_free(s: *mut c_char) {
 
 // ========== Typed Analysis FFI ==========
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use r2il::Varnode;
 
 /// Helper: extract all register varnodes that are read by an operation.
@@ -1009,34 +1029,355 @@ pub extern "C" fn r2il_block_regs_read(
     if ctx.is_null() || block.is_null() {
         return ptr::null_mut();
     }
-    
+
     let ctx_ref = unsafe { &*ctx };
     let disasm = match &ctx_ref.disasm {
         Some(d) => d,
         None => return ptr::null_mut(),
     };
-    
+
     let blk = unsafe { &*block };
-    let mut seen: HashSet<(u64, u32)> = HashSet::new();
-    let mut names: Vec<String> = Vec::new();
+    let mut regs = BTreeSet::new();
     
     for op in &blk.ops {
-        for vn in op_regs_read(op) {
-            let key = (vn.offset, vn.size);
-            if !seen.contains(&key) {
-                seen.insert(key);
-                let name = disasm.register_name(vn)
-                    .unwrap_or_else(|| format!("reg:0x{:x}:{}", vn.offset, vn.size));
-                names.push(name);
+        for reg in op_regs_read(op) {
+            if let Some(name) = disasm.register_name(reg) {
+                regs.insert(name);
             }
         }
     }
-    
-    match serde_json::to_string(&names) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
+
+    let json_array = serde_json::to_string(&regs.into_iter().collect::<Vec<_>>()).unwrap_or_default();
+    CString::new(json_array).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+/// Get memory accesses by the block as JSON array.
+/// Each entry includes legacy fields (`addr`, `size`, `write`) and richer metadata.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_mem_access(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let blk = unsafe { &*block };
+    let defs = build_stack_defs(&blk.ops);
+    let mut accesses = Vec::new();
+
+    for op in &blk.ops {
+        match op {
+            R2ILOp::Load { dst, space: _, addr } => {
+                let mut access = serde_json::json!({
+                    "type": "load",
+                    "size": dst.size,
+                    "write": false,
+                    "addr": disasm.format_varnode(addr),
+                });
+
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+
+                if let Some((base, offset)) = resolve_stack_addr(addr, disasm, &defs, &blk.ops) {
+                    access["stack"] = serde_json::Value::Bool(true);
+                    access["stack_offset"] = serde_json::Value::Number(offset.into());
+                    access["stack_base"] = serde_json::Value::String(base);
+                }
+
+                accesses.push(access);
+            }
+            R2ILOp::Store { space: _, addr, val } => {
+                let mut access = serde_json::json!({
+                    "type": "store",
+                    "size": val.size,
+                    "write": true,
+                    "addr": disasm.format_varnode(addr),
+                });
+
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(val, disasm) {
+                    access["value"] = value;
+                }
+
+                if let Some((base, offset)) = resolve_stack_addr(addr, disasm, &defs, &blk.ops) {
+                    access["stack"] = serde_json::Value::Bool(true);
+                    access["stack_offset"] = serde_json::Value::Number(offset.into());
+                    access["stack_base"] = serde_json::Value::String(base);
+                }
+
+                accesses.push(access);
+            }
+            _ => {}
+        }
+    }
+
+    let json = serde_json::to_string(&accesses).unwrap_or_default();
+    CString::new(json).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+/// Get all varnodes used by the block as JSON.
+/// Includes registers, memory locations, constants, and temporaries.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_varnodes(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let blk = unsafe { &*block };
+    let mut seen: HashSet<(u8, u64, u32)> = HashSet::new();
+    let mut varnodes: Vec<VarnodeInfo> = Vec::new();
+
+    for op in &blk.ops {
+        for vn in op_all_varnodes(op) {
+            let space_id = match vn.space {
+                r2il::SpaceId::Const => 0,
+                r2il::SpaceId::Register => 1,
+                r2il::SpaceId::Ram => 2,
+                r2il::SpaceId::Unique => 3,
+                r2il::SpaceId::Custom(n) => 4 + (n as u8),
+            };
+            let key = (space_id, vn.offset, vn.size);
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.insert(key);
+
+            let (name, space_str) = match vn.space {
+                r2il::SpaceId::Const => (format!("0x{:x}", vn.offset), space_label(vn.space)),
+                r2il::SpaceId::Register => {
+                    let name = disasm
+                        .register_name(vn)
+                        .unwrap_or_else(|| format!("reg:0x{:x}", vn.offset));
+                    (name, space_label(vn.space))
+                }
+                r2il::SpaceId::Ram => (format!("[0x{:x}]", vn.offset), space_label(vn.space)),
+                r2il::SpaceId::Unique => (format!("tmp:0x{:x}", vn.offset), space_label(vn.space)),
+                r2il::SpaceId::Custom(n) => (
+                    format!("space{}:0x{:x}", n, vn.offset),
+                    space_label(vn.space),
+                ),
+            };
+
+            varnodes.push(VarnodeInfo {
+                name,
+                space: space_str,
+                offset: vn.offset,
+                size: vn.size,
+            });
+        }
+    }
+
+    let json = serde_json::to_string(&varnodes).unwrap_or_default();
+    CString::new(json).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+fn space_label(space: r2il::SpaceId) -> String {
+    match space {
+        r2il::SpaceId::Const => "const".to_string(),
+        r2il::SpaceId::Register => "register".to_string(),
+        r2il::SpaceId::Ram => "ram".to_string(),
+        r2il::SpaceId::Unique => "unique".to_string(),
+        r2il::SpaceId::Custom(id) => format!("custom:{}", id),
     }
 }
+
+/// Helper: convert a varnode to JSON with register names resolved.
+fn varnode_to_json(vn: &Varnode, disasm: &Disassembler) -> Option<serde_json::Value> {
+    let mut json = serde_json::json!({
+        "space": space_label(vn.space),
+        "offset": vn.offset,
+        "size": vn.size,
+    });
+
+    if vn.is_register() {
+        if let Some(name) = disasm.register_name(vn) {
+            json["name"] = serde_json::Value::String(name);
+        }
+    }
+
+    Some(json)
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct VarnodeKey {
+    space: r2il::SpaceId,
+    offset: u64,
+    size: u32,
+}
+
+fn varnode_key(vn: &Varnode) -> VarnodeKey {
+    VarnodeKey {
+        space: vn.space,
+        offset: vn.offset,
+        size: vn.size,
+    }
+}
+
+fn const_value(vn: &Varnode) -> Option<i64> {
+    if vn.space.is_const() {
+        Some(vn.offset as i64)
+    } else {
+        None
+    }
+}
+
+fn is_stack_reg_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("sp") || lower.contains("bp") || lower.contains("fp")
+}
+
+fn stack_reg_name(vn: &Varnode, disasm: &Disassembler) -> Option<String> {
+    if !vn.is_register() {
+        return None;
+    }
+    let name = disasm.register_name(vn)?;
+    if is_stack_reg_name(&name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn build_stack_defs(ops: &[R2ILOp]) -> HashMap<VarnodeKey, usize> {
+    let mut defs = HashMap::new();
+    for (idx, op) in ops.iter().enumerate() {
+        let dst = match op {
+            R2ILOp::Copy { dst, .. }
+            | R2ILOp::IntAdd { dst, .. }
+            | R2ILOp::IntSub { dst, .. }
+            | R2ILOp::PtrAdd { dst, .. }
+            | R2ILOp::PtrSub { dst, .. } => Some(dst),
+            _ => None,
+        };
+        if let Some(dst) = dst {
+            defs.insert(varnode_key(dst), idx);
+        }
+    }
+    defs
+}
+
+fn resolve_stack_addr(
+    vn: &Varnode,
+    disasm: &Disassembler,
+    defs: &HashMap<VarnodeKey, usize>,
+    ops: &[R2ILOp],
+) -> Option<(String, i64)> {
+    let mut visited = HashSet::new();
+    resolve_stack_addr_inner(vn, disasm, defs, ops, &mut visited, 0)
+}
+
+fn resolve_stack_addr_inner(
+    vn: &Varnode,
+    disasm: &Disassembler,
+    defs: &HashMap<VarnodeKey, usize>,
+    ops: &[R2ILOp],
+    visited: &mut HashSet<VarnodeKey>,
+    depth: usize,
+) -> Option<(String, i64)> {
+    if depth > 8 {
+        return None;
+    }
+    if let Some(name) = stack_reg_name(vn, disasm) {
+        return Some((name, 0));
+    }
+    if !vn.space.is_unique() {
+        return None;
+    }
+
+    let key = varnode_key(vn);
+    if !visited.insert(key) {
+        return None;
+    }
+    let idx = defs.get(&key)?;
+    let op = &ops[*idx];
+
+    match op {
+        R2ILOp::Copy { src, .. } => {
+            resolve_stack_addr_inner(src, disasm, defs, ops, visited, depth + 1)
+        }
+        R2ILOp::IntAdd { a, b, .. } => {
+            if let Some((base, off)) =
+                resolve_stack_addr_inner(a, disasm, defs, ops, visited, depth + 1)
+            {
+                if let Some(c) = const_value(b) {
+                    return Some((base, off + c));
+                }
+            }
+            if let Some((base, off)) =
+                resolve_stack_addr_inner(b, disasm, defs, ops, visited, depth + 1)
+            {
+                if let Some(c) = const_value(a) {
+                    return Some((base, off + c));
+                }
+            }
+            None
+        }
+        R2ILOp::IntSub { a, b, .. } => {
+            if let Some((base, off)) =
+                resolve_stack_addr_inner(a, disasm, defs, ops, visited, depth + 1)
+            {
+                if let Some(c) = const_value(b) {
+                    return Some((base, off - c));
+                }
+            }
+            None
+        }
+        R2ILOp::PtrAdd {
+            base,
+            index,
+            element_size,
+            ..
+        } => {
+            if let Some((base_name, off)) =
+                resolve_stack_addr_inner(base, disasm, defs, ops, visited, depth + 1)
+            {
+                if let Some(c) = const_value(index) {
+                    return Some((base_name, off + c * (*element_size as i64)));
+                }
+            }
+            None
+        }
+        R2ILOp::PtrSub {
+            base,
+            index,
+            element_size,
+            ..
+        } => {
+            if let Some((base_name, off)) =
+                resolve_stack_addr_inner(base, disasm, defs, ops, visited, depth + 1)
+            {
+                if let Some(c) = const_value(index) {
+                    return Some((base_name, off - c * (*element_size as i64)));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+use serde::{Deserialize, Serialize};
 
 /// Get registers written by the block as JSON array of names.
 /// Caller must free the returned string with r2il_string_free().
@@ -1048,91 +1389,26 @@ pub extern "C" fn r2il_block_regs_write(
     if ctx.is_null() || block.is_null() {
         return ptr::null_mut();
     }
-    
+
     let ctx_ref = unsafe { &*ctx };
     let disasm = match &ctx_ref.disasm {
         Some(d) => d,
         None => return ptr::null_mut(),
     };
-    
+
     let blk = unsafe { &*block };
-    let mut seen: HashSet<(u64, u32)> = HashSet::new();
-    let mut names: Vec<String> = Vec::new();
+    let mut regs = BTreeSet::new();
     
     for op in &blk.ops {
-        for vn in op_regs_write(op) {
-            let key = (vn.offset, vn.size);
-            if !seen.contains(&key) {
-                seen.insert(key);
-                let name = disasm.register_name(vn)
-                    .unwrap_or_else(|| format!("reg:0x{:x}:{}", vn.offset, vn.size));
-                names.push(name);
+        for reg in op_regs_write(op) {
+            if let Some(name) = disasm.register_name(reg) {
+                regs.insert(name);
             }
         }
     }
-    
-    match serde_json::to_string(&names) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
-    }
-}
 
-use serde::{Deserialize, Serialize};
-
-/// Memory access info for JSON output.
-#[derive(Serialize)]
-struct MemAccess {
-    addr: String,
-    size: u32,
-    write: bool,
-}
-
-/// Get memory accesses (loads/stores) as JSON array.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_mem_access(
-    ctx: *const R2ILContext,
-    block: *const R2ILBlock,
-) -> *mut c_char {
-    if ctx.is_null() || block.is_null() {
-        return ptr::null_mut();
-    }
-    
-    let ctx_ref = unsafe { &*ctx };
-    let disasm = match &ctx_ref.disasm {
-        Some(d) => d,
-        None => return ptr::null_mut(),
-    };
-    
-    let blk = unsafe { &*block };
-    let mut accesses: Vec<MemAccess> = Vec::new();
-    
-    for op in &blk.ops {
-        match op {
-            R2ILOp::Load { dst, addr, .. } => {
-                let addr_str = disasm.format_varnode(addr);
-                accesses.push(MemAccess {
-                    addr: addr_str,
-                    size: dst.size,
-                    write: false,
-                });
-            }
-            R2ILOp::Store { addr, val, .. } => {
-                let addr_str = disasm.format_varnode(addr);
-                accesses.push(MemAccess {
-                    addr: addr_str,
-                    size: val.size,
-                    write: true,
-                });
-            }
-            _ => {}
-        }
-    }
-    
-    match serde_json::to_string(&accesses) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
-    }
+    let json_array = serde_json::to_string(&regs.into_iter().collect::<Vec<_>>()).unwrap_or_default();
+    CString::new(json_array).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
 /// Varnode info for JSON output.
@@ -1180,69 +1456,6 @@ fn op_all_varnodes(op: &R2ILOp) -> Vec<&Varnode> {
     }
     
     vns
-}
-
-/// Get all varnodes used in the block as JSON array.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_varnodes(
-    ctx: *const R2ILContext,
-    block: *const R2ILBlock,
-) -> *mut c_char {
-    if ctx.is_null() || block.is_null() {
-        return ptr::null_mut();
-    }
-    
-    let ctx_ref = unsafe { &*ctx };
-    let disasm = match &ctx_ref.disasm {
-        Some(d) => d,
-        None => return ptr::null_mut(),
-    };
-    
-    let blk = unsafe { &*block };
-    let mut seen: HashSet<(u8, u64, u32)> = HashSet::new(); // (space_id, offset, size)
-    let mut varnodes: Vec<VarnodeInfo> = Vec::new();
-    
-    for op in &blk.ops {
-        for vn in op_all_varnodes(op) {
-            let space_id = match vn.space {
-                r2il::SpaceId::Const => 0,
-                r2il::SpaceId::Register => 1,
-                r2il::SpaceId::Ram => 2,
-                r2il::SpaceId::Unique => 3,
-                r2il::SpaceId::Custom(n) => 4 + (n as u8),
-            };
-            let key = (space_id, vn.offset, vn.size);
-            
-            if !seen.contains(&key) {
-                seen.insert(key);
-                
-                let (name, space_str) = match vn.space {
-                    r2il::SpaceId::Const => (format!("0x{:x}", vn.offset), "const".to_string()),
-                    r2il::SpaceId::Register => {
-                        let name = disasm.register_name(vn)
-                            .unwrap_or_else(|| format!("reg:0x{:x}", vn.offset));
-                        (name, "register".to_string())
-                    }
-                    r2il::SpaceId::Ram => (format!("[0x{:x}]", vn.offset), "ram".to_string()),
-                    r2il::SpaceId::Unique => (format!("tmp:0x{:x}", vn.offset), "unique".to_string()),
-                    r2il::SpaceId::Custom(n) => (format!("space{}:0x{:x}", n, vn.offset), format!("custom:{}", n)),
-                };
-                
-                varnodes.push(VarnodeInfo {
-                    name,
-                    space: space_str,
-                    offset: vn.offset,
-                    size: vn.size,
-                });
-            }
-        }
-    }
-    
-    match serde_json::to_string(&varnodes) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
-    }
 }
 
 // ============================================================================

@@ -21,12 +21,17 @@ pub fn build_register_name_map(arch: &ArchSpec) -> RegisterNameMap {
     map
 }
 
+/// Convert a varnode to a variable name.
+///
+/// For registers:
+/// - If a name is found in the map, use the name directly (e.g., "rax")
+/// - If no name is found, use "reg:offset" fallback (e.g., "reg:10")
 pub fn varnode_to_name(vn: &Varnode, reg_names: Option<&RegisterNameMap>) -> String {
     match vn.space {
         SpaceId::Register => {
             if let Some(map) = reg_names {
                 if let Some(name) = map.get(&(vn.offset, vn.size)) {
-                    return format!("reg:{}", name);
+                    return name.clone();
                 }
             }
             format!("reg:{:x}", vn.offset)
@@ -55,7 +60,7 @@ mod tests {
 
     #[test]
     fn test_varnode_to_name_with_map() {
-        // Register with name map uses named register
+        // Register with name map uses named register (no prefix)
         let mut map = RegisterNameMap::new();
         map.insert((0x10, 8), "rax".to_string());
 
@@ -64,7 +69,7 @@ mod tests {
             offset: 0x10,
             size: 8,
         };
-        assert_eq!(varnode_to_name(&vn, Some(&map)), "reg:rax");
+        assert_eq!(varnode_to_name(&vn, Some(&map)), "rax");
     }
 
     #[test]

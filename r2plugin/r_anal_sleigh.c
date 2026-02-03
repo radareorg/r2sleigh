@@ -205,33 +205,278 @@ static void add_ssa_reg_values(RAnal *anal, const RJson *array, RVecRArchValue *
 	}
 }
 
-static void fill_op_values_from_defuse(RAnal *anal, RAnalOp *op, R2ILContext *ctx, const R2ILBlock *block) {
+static void add_memory_archvalue(RAnal *anal, const RJson *mem_access, RVecRArchValue *vec, int access) {
+	if (!anal || !mem_access || mem_access->type != R_JSON_OBJECT || !vec) {
+		return;
+	}
+
+	const RJson *type = r_json_get (mem_access, "type");
+	const RJson *size = r_json_get (mem_access, "size");
+	const RJson *addr = r_json_get (mem_access, "addr_detail");
+	if (!addr || addr->type != R_JSON_OBJECT) {
+		const RJson *addr_alt = r_json_get (mem_access, "addr");
+		if (addr_alt && addr_alt->type == R_JSON_OBJECT) {
+			addr = addr_alt;
+		}
+	}
+
+	if (!type || !type->str_value || !size) {
+		return;
+	}
+
+	RArchValue value = {0};
+	value.type = R_ANAL_VAL_MEM;
+	value.access = access;
+
+	// Set memory size and reference
+	value.memref = (size->type == R_JSON_INTEGER) ? size->num.u_value : 1;
+
+	// Parse address information
+	if (addr && addr->type == R_JSON_OBJECT) {
+		const RJson *addr_space = r_json_get (addr, "space");
+		const RJson *addr_offset = r_json_get (addr, "offset");
+		const RJson *addr_name = r_json_get (addr, "name");
+
+		if (addr_space && addr_space->str_value &&
+			r_str_casecmp (addr_space->str_value, "register") == 0 &&
+			addr_name && addr_name->str_value) {
+			// Register-based memory access
+			RRegItem *reg = r_reg_get (anal->reg, addr_name->str_value, -1);
+			if (!reg) {
+				char alt[64];
+				r_str_ncpy (alt, addr_name->str_value, sizeof (alt));
+				r_str_case (alt, false);
+				reg = r_reg_get (anal->reg, alt, -1);
+			}
+			if (!reg) {
+				char alt[64];
+				r_str_ncpy (alt, addr_name->str_value, sizeof (alt));
+				r_str_case (alt, true);
+				reg = r_reg_get (anal->reg, alt, -1);
+			}
+			if (reg && reg->name) {
+				value.reg = reg->name;
+			}
+			value.base = 0; // Will be calculated by radare2 from register
+			value.delta = (addr_offset && addr_offset->type == R_JSON_INTEGER) ? addr_offset->num.s_value : 0;
+		} else if (addr_offset && addr_offset->type == R_JSON_INTEGER) {
+			// Absolute memory access
+			value.reg = NULL;
+			value.base = addr_offset->num.u_value;
+			value.delta = 0;
+		}
+	}
+
+	if (!value.reg) {
+		const RJson *stack_base = r_json_get (mem_access, "stack_base");
+		const RJson *stack_offset = r_json_get (mem_access, "stack_offset");
+		if (stack_base && stack_base->str_value) {
+			RRegItem *reg = r_reg_get (anal->reg, stack_base->str_value, -1);
+			if (!reg) {
+				char alt[64];
+				r_str_ncpy (alt, stack_base->str_value, sizeof (alt));
+				r_str_case (alt, false);
+				reg = r_reg_get (anal->reg, alt, -1);
+			}
+			if (!reg) {
+				char alt[64];
+				r_str_ncpy (alt, stack_base->str_value, sizeof (alt));
+				r_str_case (alt, true);
+				reg = r_reg_get (anal->reg, alt, -1);
+			}
+			if (reg && reg->name) {
+				value.reg = reg->name;
+				value.base = 0;
+				value.delta = (stack_offset && stack_offset->type == R_JSON_INTEGER)
+					? stack_offset->num.s_value
+					: 0;
+			}
+		}
+	}
+
+	RVecRArchValue_push_back (vec, &value);
+}
+
+static void add_immediate_archvalue(const RJson *varnode, RVecRArchValue *vec, int access) {
+	if (!varnode || varnode->type != R_JSON_OBJECT || !vec) {
+		return;
+	}
+
+	const RJson *space = r_json_get (varnode, "space");
+	const RJson *offset = r_json_get (varnode, "offset");
+
+	if (!space || !space->str_value || !offset) {
+		return;
+	}
+
+	// Only create immediate values for constant space
+	if (r_str_casecmp (space->str_value, "const") != 0) {
+		return;
+	}
+
+	RArchValue value = {0};
+	value.type = R_ANAL_VAL_IMM;
+	value.access = access;
+	value.imm = (offset->type == R_JSON_INTEGER) ? offset->num.s_value : 0;
+
+	RVecRArchValue_push_back (vec, &value);
+}
+
+static void fill_op_values_enhanced(RAnal *anal, RAnalOp *op, R2ILContext *ctx, const R2ILBlock *block) {
 	if (!anal || !op || !ctx || !block) {
 		return;
 	}
 
-	char *defuse_json = r2il_block_defuse_json (ctx, block);
-	if (!defuse_json) {
-		return;
+	// Get memory accesses
+	char *mem_json = r2il_block_mem_access (ctx, block);
+	if (mem_json) {
+		RJson *mem_root = r_json_parse (mem_json);
+		if (mem_root && mem_root->type == R_JSON_ARRAY) {
+			size_t i;
+			for (i = 0; i < mem_root->children.count; i++) {
+				const RJson *mem_access = r_json_item (mem_root, i);
+				if (mem_access) {
+					const RJson *type = r_json_get (mem_access, "type");
+					if (type && type->str_value) {
+						int access = R_PERM_R;
+						bool is_store = !strcmp (type->str_value, "store");
+						if (is_store) {
+							access = R_PERM_W;
+						}
+						add_memory_archvalue (anal, mem_access, is_store ? &op->dsts : &op->srcs, access);
+					}
+				}
+			}
+		}
+		r_json_free (mem_root);
+		r2il_string_free (mem_json);
 	}
 
-	RJson *root = r_json_parse (defuse_json);
-	if (!root || root->type != R_JSON_OBJECT) {
+	// Get all varnodes to find immediate values
+	char *vars_json = r2il_block_varnodes (ctx, block);
+	if (vars_json) {
+		RJson *vars_root = r_json_parse (vars_json);
+		if (vars_root && vars_root->type == R_JSON_ARRAY) {
+			size_t i;
+			for (i = 0; i < vars_root->children.count; i++) {
+				const RJson *varnode = r_json_item (vars_root, i);
+				if (varnode) {
+					add_immediate_archvalue (varnode, &op->srcs, R_PERM_R);
+				}
+			}
+		}
+		r_json_free (vars_root);
+		r2il_string_free (vars_json);
+	}
+
+	// Still add SSA register values for def-use analysis
+	char *defuse_json = r2il_block_defuse_json (ctx, block);
+	if (defuse_json) {
+		RJson *root = r_json_parse (defuse_json);
+		if (root && root->type == R_JSON_OBJECT) {
+			const RJson *inputs = r_json_get (root, "inputs");
+			const RJson *outputs = r_json_get (root, "outputs");
+			add_ssa_reg_values (anal, inputs, &op->srcs, R_PERM_R);
+			add_ssa_reg_values (anal, outputs, &op->dsts, R_PERM_W);
+		}
 		r_json_free (root);
 		r2il_string_free (defuse_json);
+	}
+}
+
+static void analyze_stack_operation(R2ILContext *ctx, const R2ILBlock *block, RAnalOp *op) {
+	if (!ctx || !block || !op) {
 		return;
 	}
 
-	const RJson *inputs = r_json_get (root, "inputs");
-	const RJson *outputs = r_json_get (root, "outputs");
+	// Get memory accesses to identify stack operations
+	char *mem_json = r2il_block_mem_access (ctx, block);
+	if (!mem_json) {
+		return;
+	}
 
-	RVecRArchValue_clear (&op->srcs);
-	RVecRArchValue_clear (&op->dsts);
-	add_ssa_reg_values (anal, inputs, &op->srcs, R_PERM_R);
-	add_ssa_reg_values (anal, outputs, &op->dsts, R_PERM_W);
+	RJson *mem_root = r_json_parse (mem_json);
+	if (!mem_root || mem_root->type != R_JSON_ARRAY) {
+		r_json_free (mem_root);
+		r2il_string_free (mem_json);
+		return;
+	}
 
-	r_json_free (root);
-	r2il_string_free (defuse_json);
+	// Look for stack operations
+	size_t i;
+	for (i = 0; i < mem_root->children.count; i++) {
+		const RJson *mem_access = r_json_item (mem_root, i);
+		if (!mem_access) continue;
+
+		const RJson *stack = r_json_get (mem_access, "stack");
+		const RJson *stack_offset = r_json_get (mem_access, "stack_offset");
+		const RJson *type = r_json_get (mem_access, "type");
+
+		if (stack && stack->type == R_JSON_BOOLEAN && stack->num.u_value) {
+			// This is a stack operation
+			if (type && type->str_value) {
+				if (strcmp (type->str_value, "store") == 0) {
+					op->stackop = R_ANAL_STACK_SET;
+				} else if (strcmp (type->str_value, "load") == 0) {
+					op->stackop = R_ANAL_STACK_GET;
+				}
+			}
+
+			// Set stack pointer offset
+			if (stack_offset && stack_offset->type == R_JSON_INTEGER) {
+				op->stackptr = stack_offset->num.s_value;
+			}
+
+			break; // Only handle first stack operation for now
+		}
+	}
+
+	r_json_free (mem_root);
+	r2il_string_free (mem_json);
+}
+
+static void set_operation_direction(R2ILContext *ctx, const R2ILBlock *block, RAnalOp *op) {
+	if (!ctx || !block || !op) {
+		return;
+	}
+
+	// Get memory accesses to determine direction
+	char *mem_json = r2il_block_mem_access (ctx, block);
+	if (!mem_json) {
+		return;
+	}
+
+	RJson *mem_root = r_json_parse (mem_json);
+	if (!mem_root || mem_root->type != R_JSON_ARRAY) {
+		r_json_free (mem_root);
+		r2il_string_free (mem_json);
+		return;
+	}
+
+	op->direction = 0; // Default: no specific direction
+
+	size_t i;
+	for (i = 0; i < mem_root->children.count; i++) {
+		const RJson *mem_access = r_json_item (mem_root, i);
+		if (!mem_access) continue;
+
+		const RJson *type = r_json_get (mem_access, "type");
+		if (type && type->str_value) {
+			if (strcmp (type->str_value, "store") == 0) {
+				op->direction |= R_ANAL_OP_DIR_WRITE;
+			} else if (strcmp (type->str_value, "load") == 0) {
+				op->direction |= R_ANAL_OP_DIR_READ;
+			}
+		}
+	}
+
+	// If no memory operations, default to read
+	if (op->direction == 0) {
+		op->direction = R_ANAL_OP_DIR_READ;
+	}
+
+	r_json_free (mem_root);
+	r2il_string_free (mem_json);
 }
 
 static void print_reg_values_json(RCons *cons, const RVecRArchValue *vec) {
@@ -293,7 +538,7 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 	return out->count > 0;
 }
 
-static R2ILContext *get_context(RAnal *anal) {
+R2ILContext *get_context(RAnal *anal) {
 	const char *arch = anal->config->arch;
 	int bits = anal->config->bits;
 
@@ -327,33 +572,35 @@ static R2ILContext *get_context(RAnal *anal) {
 	sleigh_arch = NULL;
 
 	/* Initialize new context */
-	/* Initialize new context */
 	sleigh_ctx = r2il_arch_init (sleigh_arch_str);
-	if (sleigh_ctx && r2il_is_loaded (sleigh_ctx)) {
-		sleigh_arch = strdup (sleigh_arch_str);
-
-		/* Set register profile from Sleigh definitions */
-		char *profile = r2il_get_reg_profile (sleigh_ctx);
-		if (profile) {
-			r_anal_set_reg_profile (anal, profile);
-			r2il_string_free (profile);
-		}
-
-		return sleigh_ctx;
+	if (!sleigh_ctx) {
+		R_LOG_ERROR ("r2sleigh: failed to initialize context for %s", sleigh_arch_str);
+		return NULL;
 	}
 
-	if (sleigh_ctx) {
+	if (!r2il_is_loaded (sleigh_ctx)) {
 		const char *err = r2il_error (sleigh_ctx);
 		if (err) {
 			R_LOG_ERROR ("r2sleigh: %s", err);
 		}
 		r2il_free (sleigh_ctx);
 		sleigh_ctx = NULL;
+		return NULL;
 	}
-	return NULL;
+
+	sleigh_arch = strdup (sleigh_arch_str);
+
+	/* Set register profile from Sleigh definitions */
+	char *profile = r2il_get_reg_profile (sleigh_ctx);
+	if (profile) {
+		r_anal_set_reg_profile (anal, profile);
+		r2il_string_free (profile);
+	}
+
+	return sleigh_ctx;
 }
 
-static int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int len, RAnalOpMask mask) {
+int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int len, RAnalOpMask mask) {
 	R_RETURN_VAL_IF_FAIL (anal && op && data, -1);
 
 	R2ILContext *ctx = get_context (anal);
@@ -412,7 +659,18 @@ static int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int l
 	}
 
 	if (mask & R_ARCH_OP_MASK_VAL) {
-		fill_op_values_from_defuse (anal, op, ctx, block);
+		// Clear existing values first
+		RVecRArchValue_clear (&op->srcs);
+		RVecRArchValue_clear (&op->dsts);
+
+		// Use enhanced value filling with memory/immediate support
+		fill_op_values_enhanced (anal, op, ctx, block);
+
+		// Add stack operation metadata
+		analyze_stack_operation (ctx, block, op);
+
+		// Set operation direction
+		set_operation_direction (ctx, block, op);
 	}
 
 	r2il_block_free (block);
@@ -435,9 +693,9 @@ static bool sleigh_fini(RAnal *anal) {
 	return true;
 }
 
-static bool sleigh_cmd(RAnal *anal, const char *cmd) {
+static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 	if (!r_str_startswith (cmd, "sla")) {
-		return false;
+		return NULL;
 	}
 
 	RCore *core = anal->coreb.core;
@@ -468,7 +726,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.cfg    - Show ASCII CFG for current function");
 			r_cons_println (cons, "| a:sla.cfg.json - Show CFG as JSON for current function");
 		}
-		return true;
+		return strdup("");
 	}
 
 	if (!strncmp (cmd, "sla.arch", 8)) {
@@ -503,7 +761,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 				}
 			}
 		}
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla") || !strcmp (cmd, "sla.info")) {
@@ -518,14 +776,14 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 				r_cons_println (cons, "sla: no architecture loaded (unsupported or init failed)");
 			}
 		}
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.json")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current seek */
@@ -534,13 +792,13 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		ut8 buf[SLEIGH_MIN_BYTES];
 		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
 			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return true;
+			return strdup("");
 		}
 
 		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
 		if (!block) {
 			R_LOG_ERROR ("r2sleigh: lift failed");
-			return true;
+			return strdup("");
 		}
 
 		size_t count = r2il_block_op_count (block);
@@ -560,27 +818,27 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		}
 
 		r2il_block_free (block);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.regs")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		ut64 addr = core->addr;
 		ut8 buf[SLEIGH_MIN_BYTES];
 		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
 			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return true;
+			return strdup("");
 		}
 
 		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
 		if (!block) {
 			R_LOG_ERROR ("r2sleigh: lift failed");
-			return true;
+			return strdup("");
 		}
 
 		char *read_json = r2il_block_regs_read (ctx, block);
@@ -595,55 +853,79 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		r2il_string_free (read_json);
 		r2il_string_free (write_json);
 		r2il_block_free (block);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.opvals")) {
+		R2ILContext *ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return strdup("");
+		}
+
 		ut64 addr = core->addr;
 		ut8 buf[SLEIGH_MIN_BYTES];
 		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
 			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return true;
+			return strdup("");
 		}
 
-		RAnalOp op;
-		r_anal_op_init (&op);
-		int op_size = sleigh_op (anal, &op, addr, buf, sizeof (buf), R_ARCH_OP_MASK_VAL);
-		if (op_size <= 0) {
-			r_anal_op_fini (&op);
-			return true;
+		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
+		if (!block) {
+			R_LOG_ERROR ("r2sleigh: lift failed");
+			return strdup("");
+		}
+
+		RVecRArchValue srcs;
+		RVecRArchValue dsts;
+		RVecRArchValue_init (&srcs);
+		RVecRArchValue_init (&dsts);
+
+		char *defuse_json = r2il_block_defuse_json (ctx, block);
+		if (defuse_json) {
+			RJson *root = r_json_parse (defuse_json);
+			if (root && root->type == R_JSON_OBJECT) {
+				const RJson *inputs = r_json_get (root, "inputs");
+				const RJson *outputs = r_json_get (root, "outputs");
+				add_ssa_reg_values (anal, inputs, &srcs, R_PERM_R);
+				add_ssa_reg_values (anal, outputs, &dsts, R_PERM_W);
+			}
+			r_json_free (root);
+			r2il_string_free (defuse_json);
 		}
 
 		if (cons) {
 			r_cons_print (cons, "{\"srcs\":[");
-			print_reg_values_json (cons, &op.srcs);
+			print_reg_values_json (cons, &srcs);
 			r_cons_print (cons, "],\"dsts\":[");
-			print_reg_values_json (cons, &op.dsts);
+			print_reg_values_json (cons, &dsts);
 			r_cons_println (cons, "]}");
 		}
 
-		r_anal_op_fini (&op);
-		return true;
+		RVecRArchValue_fini (&srcs);
+		RVecRArchValue_fini (&dsts);
+		r2il_block_free (block);
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.mem")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		ut64 addr = core->addr;
 		ut8 buf[SLEIGH_MIN_BYTES];
 		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
 			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return true;
+			return strdup("");
 		}
 
 		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
 		if (!block) {
 			R_LOG_ERROR ("r2sleigh: lift failed");
-			return true;
+			return strdup("");
 		}
 
 		char *mem_json = r2il_block_mem_access (ctx, block);
@@ -653,27 +935,27 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (mem_json);
 		r2il_block_free (block);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.vars")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		ut64 addr = core->addr;
 		ut8 buf[SLEIGH_MIN_BYTES];
 		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
 			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return true;
+			return strdup("");
 		}
 
 		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
 		if (!block) {
 			R_LOG_ERROR ("r2sleigh: lift failed");
-			return true;
+			return strdup("");
 		}
 
 		char *vars_json = r2il_block_varnodes (ctx, block);
@@ -683,27 +965,27 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (vars_json);
 		r2il_block_free (block);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.ssa")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		ut64 addr = core->addr;
 		ut8 buf[SLEIGH_MIN_BYTES];
 		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
 			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return true;
+			return strdup("");
 		}
 
 		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
 		if (!block) {
 			R_LOG_ERROR ("r2sleigh: lift failed");
-			return true;
+			return strdup("");
 		}
 
 		char *ssa_json = r2il_block_to_ssa_json (ctx, block);
@@ -713,27 +995,27 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (ssa_json);
 		r2il_block_free (block);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.defuse")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		ut64 addr = core->addr;
 		ut8 buf[SLEIGH_MIN_BYTES];
 		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
 			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return true;
+			return strdup("");
 		}
 
 		R2ILBlock *block = r2il_lift (ctx, buf, sizeof (buf), addr);
 		if (!block) {
 			R_LOG_ERROR ("r2sleigh: lift failed");
-			return true;
+			return strdup("");
 		}
 
 		char *defuse_json = r2il_block_defuse_json (ctx, block);
@@ -743,7 +1025,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (defuse_json);
 		r2il_block_free (block);
-		return true;
+		return strdup("");
 	}
 
 	/* ========== Function-level SSA commands ========== */
@@ -752,21 +1034,21 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current function */
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		/* Lift all blocks */
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		/* Get function SSA */
@@ -778,26 +1060,26 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.ssa.func.opt")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		char *result = r2ssa_function_opt_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
@@ -808,28 +1090,28 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.defuse.func")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current function */
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		/* Lift all blocks */
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		/* Get function def-use analysis */
@@ -841,28 +1123,28 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.dom")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current function */
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		/* Lift all blocks */
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		/* Get dominator tree */
@@ -874,7 +1156,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	if (!strncmp (cmd, "sla.slice", 9)) {
@@ -892,27 +1174,27 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 				r_cons_println (cons, "Example: a:sla.slice rax_3");
 				r_cons_println (cons, "         a:sla.slice zf_1");
 			}
-			return true;
+			return strdup("");
 		}
 
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current function */
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		/* Lift all blocks */
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		/* Get backward slice */
@@ -924,7 +1206,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	/* ========== Function-level commands ========== */
@@ -945,7 +1227,7 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 				r2sym_merge_set_enabled (0);
 			} else if (cons) {
 				r_cons_println (cons, "Usage: a:sla.sym.merge [on|off]");
-				return true;
+				return strdup("");
 			}
 		} else {
 			int enabled = r2sym_merge_is_enabled ();
@@ -955,28 +1237,28 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 		if (cons) {
 			r_cons_printf (cons, "sym merge: %s\n", r2sym_merge_is_enabled () ? "on" : "off");
 		}
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.sym") || !strcmp (cmd, "sla.sym.paths")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current function */
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		/* Lift all blocks */
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		/* Call symbolic execution */
@@ -993,28 +1275,28 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.taint")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current function */
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		/* Lift all blocks */
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		char *result = r2taint_function_json (ctx, (const R2ILBlock **)blocks.blocks, blocks.count);
@@ -1025,28 +1307,28 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.dec")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current function */
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		/* Lift all blocks */
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		/* Decompile */
@@ -1058,28 +1340,28 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	if (!strcmp (cmd, "sla.cfg") || !strcmp (cmd, "sla.cfg.json")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
-			return true;
+			return strdup("");
 		}
 
 		/* Get current function */
 		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
 		if (!fcn) {
 			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return true;
+			return strdup("");
 		}
 
 		/* Lift all blocks */
 		BlockArray blocks;
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
-			return true;
+			return strdup("");
 		}
 
 		/* Generate CFG */
@@ -1096,11 +1378,11 @@ static bool sleigh_cmd(RAnal *anal, const char *cmd) {
 
 		r2il_string_free (result);
 		block_array_free (&blocks);
-		return true;
+		return strdup("");
 	}
 
 	R_LOG_ERROR ("Unknown subcommand. See 'a:sla?' for help");
-	return true;
+	return strdup("");
 }
 
 RAnalPlugin r_anal_plugin_sleigh = {

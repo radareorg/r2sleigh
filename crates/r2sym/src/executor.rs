@@ -759,8 +759,8 @@ mod tests {
         let executor = SymExecutor::new(&ctx);
         let mut state = SymState::new(&ctx, 0x1000);
 
-        // Set up source variable
-        state.set_register("src_0", SymValue::concrete(42, 64));
+        // Set up source variable (uppercase because display_name() uppercases named registers)
+        state.set_register("SRC_0", SymValue::concrete(42, 64));
 
         let op = SSAOp::Copy {
             dst: SSAVar::new("dst", 1, 8),
@@ -769,7 +769,7 @@ mod tests {
 
         let _ = executor.step(&mut state, &op);
 
-        let dst_val = state.get_register("dst_1");
+        let dst_val = state.get_register("DST_1");
         assert_eq!(dst_val.as_concrete(), Some(42));
     }
 
@@ -780,8 +780,8 @@ mod tests {
         let executor = SymExecutor::new(&ctx);
         let mut state = SymState::new(&ctx, 0x1000);
 
-        state.set_register("a_0", SymValue::concrete(10, 64));
-        state.set_register("b_0", SymValue::concrete(20, 64));
+        state.set_register("A_0", SymValue::concrete(10, 64));
+        state.set_register("B_0", SymValue::concrete(20, 64));
 
         let op = SSAOp::IntAdd {
             dst: SSAVar::new("result", 1, 8),
@@ -791,7 +791,7 @@ mod tests {
 
         let _ = executor.step(&mut state, &op);
 
-        let result = state.get_register("result_1");
+        let result = state.get_register("RESULT_1");
         assert_eq!(result.as_concrete(), Some(30));
     }
 
@@ -802,8 +802,8 @@ mod tests {
         let executor = SymExecutor::new(&ctx);
         let mut state = SymState::new(&ctx, 0x1000);
 
-        // Condition is true (non-zero)
-        state.set_register("cond_0", SymValue::concrete(1, 1));
+        // Condition is true (non-zero, uppercase for display_name compatibility)
+        state.set_register("COND_0", SymValue::concrete(1, 1));
 
         let op = SSAOp::CBranch {
             target: SSAVar::constant(0x2000, 8),
@@ -822,8 +822,8 @@ mod tests {
         let executor = SymExecutor::new(&ctx);
         let mut state = SymState::new(&ctx, 0x1000);
 
-        // Symbolic condition
-        state.make_symbolic("cond", 1);
+        // Symbolic condition (uppercase for display_name compatibility)
+        state.make_symbolic("COND", 1);
 
         let op = SSAOp::CBranch {
             target: SSAVar::constant(0x2000, 8),

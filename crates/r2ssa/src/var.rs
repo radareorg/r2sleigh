@@ -46,14 +46,23 @@ impl SSAVar {
     }
 
     /// Get a display name like "RAX_0" or "RAX_1".
+    ///
+    /// For named registers (without prefix), outputs "RAX_0".
+    /// For unknown registers (with "reg:" prefix), outputs "reg:10_0".
+    /// For constants, outputs "const:42_0".
+    /// For temporaries, outputs "tmp:1000_0".
     pub fn display_name(&self) -> String {
-        if let Some(reg_name) = self.name.strip_prefix("reg:") {
-            if is_hex_name(reg_name) {
-                return format!("reg:{}_{}", reg_name, self.version);
-            }
-            return format!("{}_{}", reg_name.to_uppercase(), self.version);
+        // Handle special prefixes (hex fallbacks and other spaces)
+        if self.name.starts_with("reg:")
+            || self.name.starts_with("tmp:")
+            || self.name.starts_with("const:")
+            || self.name.starts_with("ram:")
+            || self.name.starts_with("space")
+        {
+            return format!("{}_{}", self.name, self.version);
         }
-        format!("{}_{}", self.name, self.version)
+        // Named register - uppercase it
+        format!("{}_{}", self.name.to_uppercase(), self.version)
     }
 
     /// Check if this is a constant (name starts with "const:").
@@ -76,10 +85,6 @@ impl std::fmt::Display for SSAVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.display_name())
     }
-}
-
-fn is_hex_name(value: &str) -> bool {
-    !value.is_empty() && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]

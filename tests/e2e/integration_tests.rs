@@ -186,6 +186,24 @@ mod instruction_analysis {
         assert!(first.contains_key("addr"));
         assert!(first.contains_key("size"));
         assert!(first.contains_key("write"));
+        assert!(
+            accesses.iter().any(|entry| {
+                entry
+                    .as_object()
+                    .and_then(|obj| obj.get("stack").and_then(Value::as_bool))
+                    == Some(true)
+            }),
+            "a:sla.mem should mark stack accesses"
+        );
+        assert!(
+            accesses.iter().any(|entry| {
+                entry.as_object().map_or(false, |obj| {
+                    obj.get("stack").and_then(Value::as_bool) == Some(true)
+                        && obj.get("stack_offset").map_or(false, |v| v.is_number())
+                })
+            }),
+            "a:sla.mem stack entries should include stack_offset"
+        );
     }
 
     #[test]
