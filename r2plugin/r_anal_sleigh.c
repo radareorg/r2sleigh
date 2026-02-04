@@ -66,6 +66,9 @@ extern void r2sym_merge_set_enabled(int enabled);
 
 /* Decompiler */
 extern char *r2dec_function(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, const char *func_name);
+extern char *r2dec_function_with_context(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
+                                          const char *func_name, const char *func_names_json,
+                                          const char *strings_json, const char *symbols_json);
 
 /* CFG */
 extern char *r2cfg_function_ascii(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
@@ -1339,14 +1342,109 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			return strdup("");
 		}
 
-		/* Decompile */
-		char *result = r2dec_function (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->name);
+		/* Gather function names from r2 */
+		char *func_names_json = NULL;
+		char *strings_json = NULL;
+		char *symbols_json = NULL;
+
+		/* Get function list as JSON and convert to our format */
+		/* aflj returns [{addr:0x401000,name:"main"}, ...] */
+		char *aflj = r_core_cmd_str (core, "aflj");
+		if (aflj && aflj[0] == '[') {
+			/* Convert to {addr: name} format */
+			PJ *pj = pj_new ();
+			pj_o (pj);
+			/* Parse the array manually */
+			RJson *root = r_json_parse (aflj);
+			if (root && root->type == R_JSON_ARRAY) {
+				RJson *elem;
+				for (elem = root->children.first; elem; elem = elem->next) {
+					if (elem->type == R_JSON_OBJECT) {
+						const RJson *addr = r_json_get (elem, "addr");
+						const RJson *name = r_json_get (elem, "name");
+						if (addr && name && addr->type == R_JSON_INTEGER && name->type == R_JSON_STRING) {
+							char addr_str[32];
+							snprintf (addr_str, sizeof(addr_str), "0x%llx", (unsigned long long)addr->num.u_value);
+							pj_ks (pj, addr_str, name->str_value);
+						}
+					}
+				}
+				r_json_free (root);
+			}
+			pj_end (pj);
+			func_names_json = pj_drain (pj);
+		}
+		free (aflj);
+
+		/* Get strings: izj returns [{vaddr:0x402000,string:"Hello"}, ...] */
+		char *izj = r_core_cmd_str (core, "izj");
+		if (izj && izj[0] == '[') {
+			PJ *pj = pj_new ();
+			pj_o (pj);
+			RJson *root = r_json_parse (izj);
+			if (root && root->type == R_JSON_ARRAY) {
+				RJson *elem;
+				for (elem = root->children.first; elem; elem = elem->next) {
+					if (elem->type == R_JSON_OBJECT) {
+						const RJson *vaddr = r_json_get (elem, "vaddr");
+						const RJson *str = r_json_get (elem, "string");
+						if (vaddr && str && vaddr->type == R_JSON_INTEGER && str->type == R_JSON_STRING) {
+							char addr_str[32];
+							snprintf (addr_str, sizeof(addr_str), "0x%llx", (unsigned long long)vaddr->num.u_value);
+							pj_ks (pj, addr_str, str->str_value);
+						}
+					}
+				}
+				r_json_free (root);
+			}
+			pj_end (pj);
+			strings_json = pj_drain (pj);
+		}
+		free (izj);
+
+		/* Get global symbols/flags: fj returns [{name:"sym.foo",offset:0x401000}, ...] */
+		char *fj = r_core_cmd_str (core, "fj");
+		if (fj && fj[0] == '[') {
+			PJ *pj = pj_new ();
+			pj_o (pj);
+			RJson *root = r_json_parse (fj);
+			if (root && root->type == R_JSON_ARRAY) {
+				RJson *elem;
+				for (elem = root->children.first; elem; elem = elem->next) {
+					if (elem->type == R_JSON_OBJECT) {
+						const RJson *offset = r_json_get (elem, "offset");
+						const RJson *name = r_json_get (elem, "name");
+						if (offset && name && offset->type == R_JSON_INTEGER && name->type == R_JSON_STRING) {
+							/* Skip functions (already in func_names) and strings */
+							const char *n = name->str_value;
+							if (n && strncmp(n, "sym.", 4) != 0 && strncmp(n, "str.", 4) != 0
+							    && strncmp(n, "section.", 8) != 0 && strncmp(n, "reloc.", 6) != 0) {
+								char addr_str[32];
+								snprintf (addr_str, sizeof(addr_str), "0x%llx", (unsigned long long)offset->num.u_value);
+								pj_ks (pj, addr_str, n);
+							}
+						}
+					}
+				}
+				r_json_free (root);
+			}
+			pj_end (pj);
+			symbols_json = pj_drain (pj);
+		}
+		free (fj);
+
+		/* Decompile with context */
+		char *result = r2dec_function_with_context (ctx, (const R2ILBlock **)blocks.blocks, blocks.count,
+		                                             fcn->name, func_names_json, strings_json, symbols_json);
 
 		if (cons && result) {
 			r_cons_printf (cons, "%s\n", result);
 		}
 
 		r2il_string_free (result);
+		free (func_names_json);
+		free (strings_json);
+		free (symbols_json);
 		block_array_free (&blocks);
 		return strdup("");
 	}

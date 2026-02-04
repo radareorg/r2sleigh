@@ -360,7 +360,13 @@ impl CodeGenerator {
                 }
             }
             CExpr::UIntLit(val) => {
-                if *val > 0xffff {
+                // Check if this looks like a negative offset (high bit set, close to max)
+                // This handles 64-bit negative values like 0xffffffffffffffb8 (-72)
+                if *val > 0xffffffffffff0000 {
+                    // Convert to negative: two's complement
+                    let neg = (!*val).wrapping_add(1);
+                    self.output.push_str(&format!("-0x{:x}", neg));
+                } else if *val > 0xffff {
                     self.output.push_str(&format!("0x{:x}U", val));
                 } else {
                     self.output.push_str(&format!("{}U", val));

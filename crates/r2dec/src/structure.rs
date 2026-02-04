@@ -9,6 +9,7 @@ use r2ssa::SSAFunction;
 
 use crate::ast::{CExpr, CStmt};
 use crate::expr::ExpressionBuilder;
+use crate::fold::FoldingContext;
 use crate::region::{Region, RegionAnalyzer};
 
 /// Control flow structurer.
@@ -17,6 +18,8 @@ use crate::region::{Region, RegionAnalyzer};
 pub struct ControlFlowStructurer<'a> {
     func: &'a SSAFunction,
     expr_builder: ExpressionBuilder,
+    /// Folding context for expression optimization.
+    fold_ctx: Option<FoldingContext>,
     /// Labels for blocks that need gotos.
     labels: HashMap<u64, String>,
     /// Counter for generating unique labels.
@@ -24,13 +27,51 @@ pub struct ControlFlowStructurer<'a> {
 }
 
 impl<'a> ControlFlowStructurer<'a> {
-    /// Create a new structurer.
-    pub fn new(func: &'a SSAFunction) -> Self {
+    /// Create a new structurer with the specified pointer size.
+    pub fn new(func: &'a SSAFunction, ptr_size: u32) -> Self {
+        // Pre-analyze all blocks for expression folding
+        let mut fold_ctx = FoldingContext::new(ptr_size);
+        let blocks: Vec<_> = func.blocks().cloned().collect();
+        fold_ctx.analyze_blocks(&blocks);
+
         Self {
             func,
-            expr_builder: ExpressionBuilder::new(64), // TODO: get from config
+            expr_builder: ExpressionBuilder::new(ptr_size),
+            fold_ctx: Some(fold_ctx),
             labels: HashMap::new(),
             label_counter: 0,
+        }
+    }
+
+    /// Create a structurer without expression folding (for comparison).
+    pub fn new_unfolded(func: &'a SSAFunction, ptr_size: u32) -> Self {
+        Self {
+            func,
+            expr_builder: ExpressionBuilder::new(ptr_size),
+            fold_ctx: None,
+            labels: HashMap::new(),
+            label_counter: 0,
+        }
+    }
+
+    /// Set function names for call target resolution.
+    pub fn set_function_names(&mut self, names: HashMap<u64, String>) {
+        if let Some(ref mut ctx) = self.fold_ctx {
+            ctx.set_function_names(names);
+        }
+    }
+
+    /// Set string literals for constant address resolution.
+    pub fn set_strings(&mut self, strings: HashMap<u64, String>) {
+        if let Some(ref mut ctx) = self.fold_ctx {
+            ctx.set_strings(strings);
+        }
+    }
+
+    /// Set symbol names for global variable resolution.
+    pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
+        if let Some(ref mut ctx) = self.fold_ctx {
+            ctx.set_symbols(symbols);
         }
     }
 
@@ -103,9 +144,15 @@ impl<'a> ControlFlowStructurer<'a> {
         }
 
         // Convert operations to statements
-        for op in &block.ops {
-            if let Some(stmt) = self.expr_builder.op_to_stmt(op) {
-                stmts.push(stmt);
+        if let Some(ref fold_ctx) = self.fold_ctx {
+            // Use folding context for optimized output
+            stmts.extend(fold_ctx.fold_block(block));
+        } else {
+            // Fall back to basic expression builder
+            for op in &block.ops {
+                if let Some(stmt) = self.expr_builder.op_to_stmt(op) {
+                    stmts.push(stmt);
+                }
             }
         }
 
@@ -127,7 +174,11 @@ impl<'a> ControlFlowStructurer<'a> {
 
         // Look for a conditional branch in the block
         for op in &block.ops {
-            if let Some(cond) = self.expr_builder.extract_condition(op) {
+            if let Some(ref fold_ctx) = self.fold_ctx {
+                if let Some(cond) = fold_ctx.extract_condition(op) {
+                    return cond;
+                }
+            } else if let Some(cond) = self.expr_builder.extract_condition(op) {
                 return cond;
             }
         }

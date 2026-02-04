@@ -31,6 +31,7 @@
 pub mod ast;
 pub mod codegen;
 pub mod expr;
+pub mod fold;
 pub mod region;
 pub mod structure;
 pub mod types;
@@ -39,6 +40,7 @@ pub mod variable;
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::{generate, CodeGenConfig, CodeGenerator};
 pub use expr::ExpressionBuilder;
+pub use fold::{fold_block, fold_blocks, FoldingContext};
 pub use region::{Region, RegionAnalyzer};
 pub use structure::ControlFlowStructurer;
 pub use types::TypeInference;
@@ -107,15 +109,51 @@ impl DecompilerConfig {
     }
 }
 
+/// External information for decompilation (function names, strings, symbols).
+#[derive(Debug, Clone, Default)]
+pub struct DecompilerContext {
+    /// Function address to name mapping.
+    pub function_names: std::collections::HashMap<u64, String>,
+    /// String literal addresses.
+    pub strings: std::collections::HashMap<u64, String>,
+    /// Symbol/global variable names.
+    pub symbols: std::collections::HashMap<u64, String>,
+}
+
 /// The main decompiler.
 pub struct Decompiler {
     config: DecompilerConfig,
+    context: DecompilerContext,
 }
 
 impl Decompiler {
     /// Create a new decompiler with the given configuration.
     pub fn new(config: DecompilerConfig) -> Self {
-        Self { config }
+        Self { 
+            config,
+            context: DecompilerContext::default(),
+        }
+    }
+
+    /// Set external context (function names, strings, symbols).
+    pub fn with_context(mut self, context: DecompilerContext) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Set function names for call target resolution.
+    pub fn set_function_names(&mut self, names: std::collections::HashMap<u64, String>) {
+        self.context.function_names = names;
+    }
+
+    /// Set string literals for address resolution.
+    pub fn set_strings(&mut self, strings: std::collections::HashMap<u64, String>) {
+        self.context.strings = strings;
+    }
+
+    /// Set symbol names for global variable resolution.
+    pub fn set_symbols(&mut self, symbols: std::collections::HashMap<u64, String>) {
+        self.context.symbols = symbols;
     }
 
     /// Decompile an SSA function to C code.
@@ -140,7 +178,19 @@ impl Decompiler {
         type_inference.infer_function(func);
 
         // Structure control flow
-        let mut structurer = ControlFlowStructurer::new(func);
+        let mut structurer = ControlFlowStructurer::new(func, self.config.ptr_size);
+        
+        // Pass external context to structurer
+        if !self.context.function_names.is_empty() {
+            structurer.set_function_names(self.context.function_names.clone());
+        }
+        if !self.context.strings.is_empty() {
+            structurer.set_strings(self.context.strings.clone());
+        }
+        if !self.context.symbols.is_empty() {
+            structurer.set_symbols(self.context.symbols.clone());
+        }
+        
         let body_stmt = structurer.structure();
 
         // Build the C function

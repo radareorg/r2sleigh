@@ -3348,9 +3348,161 @@ pub extern "C" fn r2dec_function(
         None => return ptr::null_mut(),
     };
 
-    // Create decompiler with default config
-    let config = r2dec::DecompilerConfig::default();
+    // Create decompiler with architecture-aware config
+    let config = if let Some(arch) = &ctx_ref.arch {
+        let ptr_bits = arch.addr_size * 8; // addr_size is in bytes
+        match (arch.name.as_str(), ptr_bits) {
+            ("x86", 32) | ("x86-32", _) => r2dec::DecompilerConfig::x86(),
+            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => r2dec::DecompilerConfig::x86_64(),
+            ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
+            ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
+            _ => {
+                // Use default but set ptr_size based on addr_size
+                let mut cfg = r2dec::DecompilerConfig::default();
+                cfg.ptr_size = ptr_bits;
+                cfg
+            }
+        }
+    } else {
+        r2dec::DecompilerConfig::default()
+    };
     let decompiler = r2dec::Decompiler::new(config);
+
+    // Decompile to C code
+    let output = decompiler.decompile(&ssa_func);
+
+    CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+/// Decompile a function with external context (function names, strings, symbols).
+/// Returns C code as a string. Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2dec_function_with_context(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    func_name: *const c_char,
+    func_names_json: *const c_char,
+    strings_json: *const c_char,
+    symbols_json: *const c_char,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let _disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return ptr::null_mut(),
+    };
+
+    let func_name_str = if func_name.is_null() {
+        "func".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(func_name)
+                .to_str()
+                .unwrap_or("func")
+                .to_string()
+        }
+    };
+
+    // Collect R2IL blocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    // Build SSA function
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+        Some(f) => f.with_name(&func_name_str),
+        None => return ptr::null_mut(),
+    };
+
+    // Create decompiler with architecture-aware config
+    let config = if let Some(arch) = &ctx_ref.arch {
+        let ptr_bits = arch.addr_size * 8;
+        match (arch.name.as_str(), ptr_bits) {
+            ("x86", 32) | ("x86-32", _) => r2dec::DecompilerConfig::x86(),
+            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => r2dec::DecompilerConfig::x86_64(),
+            ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
+            ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
+            _ => {
+                let mut cfg = r2dec::DecompilerConfig::default();
+                cfg.ptr_size = ptr_bits;
+                cfg
+            }
+        }
+    } else {
+        r2dec::DecompilerConfig::default()
+    };
+    
+    let mut decompiler = r2dec::Decompiler::new(config);
+
+    // Parse function names JSON: {"0x401000": "main", "0x401100": "printf", ...}
+    if !func_names_json.is_null() {
+        let json_str = unsafe { CStr::from_ptr(func_names_json).to_str().unwrap_or("{}") };
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(json_str) {
+            let func_map: std::collections::HashMap<u64, String> = map
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    let addr = if k.starts_with("0x") || k.starts_with("0X") {
+                        u64::from_str_radix(&k[2..], 16).ok()
+                    } else {
+                        k.parse().ok()
+                    };
+                    addr.map(|a| (a, v))
+                })
+                .collect();
+            decompiler.set_function_names(func_map);
+        }
+    }
+
+    // Parse strings JSON
+    if !strings_json.is_null() {
+        let json_str = unsafe { CStr::from_ptr(strings_json).to_str().unwrap_or("{}") };
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(json_str) {
+            let str_map: std::collections::HashMap<u64, String> = map
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    let addr = if k.starts_with("0x") || k.starts_with("0X") {
+                        u64::from_str_radix(&k[2..], 16).ok()
+                    } else {
+                        k.parse().ok()
+                    };
+                    addr.map(|a| (a, v))
+                })
+                .collect();
+            decompiler.set_strings(str_map);
+        }
+    }
+
+    // Parse symbols JSON
+    if !symbols_json.is_null() {
+        let json_str = unsafe { CStr::from_ptr(symbols_json).to_str().unwrap_or("{}") };
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(json_str) {
+            let sym_map: std::collections::HashMap<u64, String> = map
+                .into_iter()
+                .filter_map(|(k, v)| {
+                    let addr = if k.starts_with("0x") || k.starts_with("0X") {
+                        u64::from_str_radix(&k[2..], 16).ok()
+                    } else {
+                        k.parse().ok()
+                    };
+                    addr.map(|a| (a, v))
+                })
+                .collect();
+            decompiler.set_symbols(sym_map);
+        }
+    }
 
     // Decompile to C code
     let output = decompiler.decompile(&ssa_func);
@@ -3380,8 +3532,13 @@ pub extern "C" fn r2dec_block(
     // Convert to SSA
     let ssa_block = r2ssa::block::to_ssa(blk, disasm);
 
+    // Get pointer size from architecture
+    let ptr_size = ctx_ref.arch.as_ref()
+        .map(|a| a.addr_size * 8)
+        .unwrap_or(64);
+
     // Build statements from SSA ops
-    let expr_builder = r2dec::ExpressionBuilder::new(64); // Assume 64-bit
+    let expr_builder = r2dec::ExpressionBuilder::new(ptr_size);
     let mut stmts = Vec::new();
 
     for op in &ssa_block.ops {

@@ -30,23 +30,140 @@ pub struct FunctionType {
 impl TypeInference {
     /// Create a new type inference context.
     pub fn new(ptr_size: u32) -> Self {
-        Self {
+        let mut ti = Self {
             var_types: HashMap::new(),
             func_types: HashMap::new(),
             _ptr_size: ptr_size,
-        }
+        };
+        // Add known libc function signatures
+        ti.add_known_functions();
+        ti
+    }
+
+    /// Add known C library function signatures.
+    fn add_known_functions(&mut self) {
+        // memcpy(void* dst, const void* src, size_t n)
+        self.func_types.insert(
+            "memcpy".to_string(),
+            FunctionType {
+                return_type: CType::void_ptr(),
+                params: vec![CType::void_ptr(), CType::void_ptr(), CType::UInt(64)],
+                variadic: false,
+            },
+        );
+        self.func_types.insert(
+            "sym.imp.memcpy".to_string(),
+            FunctionType {
+                return_type: CType::void_ptr(),
+                params: vec![CType::void_ptr(), CType::void_ptr(), CType::UInt(64)],
+                variadic: false,
+            },
+        );
+
+        // printf(const char* fmt, ...)
+        self.func_types.insert(
+            "printf".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: true,
+            },
+        );
+        self.func_types.insert(
+            "sym.imp.printf".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: true,
+            },
+        );
+
+        // strcmp(const char* s1, const char* s2)
+        self.func_types.insert(
+            "strcmp".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8)), CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        );
+        self.func_types.insert(
+            "sym.imp.strcmp".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8)), CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        );
+
+        // strlen(const char* s)
+        self.func_types.insert(
+            "strlen".to_string(),
+            FunctionType {
+                return_type: CType::UInt(64),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        );
+        self.func_types.insert(
+            "sym.imp.strlen".to_string(),
+            FunctionType {
+                return_type: CType::UInt(64),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        );
+
+        // malloc(size_t size)
+        self.func_types.insert(
+            "malloc".to_string(),
+            FunctionType {
+                return_type: CType::void_ptr(),
+                params: vec![CType::UInt(64)],
+                variadic: false,
+            },
+        );
+        self.func_types.insert(
+            "sym.imp.malloc".to_string(),
+            FunctionType {
+                return_type: CType::void_ptr(),
+                params: vec![CType::UInt(64)],
+                variadic: false,
+            },
+        );
+
+        // free(void* ptr)
+        self.func_types.insert(
+            "free".to_string(),
+            FunctionType {
+                return_type: CType::Void,
+                params: vec![CType::void_ptr()],
+                variadic: false,
+            },
+        );
+        self.func_types.insert(
+            "sym.imp.free".to_string(),
+            FunctionType {
+                return_type: CType::Void,
+                params: vec![CType::void_ptr()],
+                variadic: false,
+            },
+        );
     }
 
     /// Infer types for all variables in a function.
     pub fn infer_function(&mut self, func: &SSAFunction) {
-        // First pass: collect explicit type information
+        // First pass: collect explicit type information from operations
         for block in func.blocks() {
             for op in &block.ops {
                 self.infer_from_op(op);
             }
         }
 
-        // Second pass: propagate types through uses
+        // Second pass: detect pointer arithmetic patterns
+        self.detect_pointer_patterns(func);
+
+        // Third pass: propagate types through uses
         let mut changed = true;
         let mut iterations = 0;
         while changed && iterations < 10 {
@@ -291,18 +408,103 @@ impl TypeInference {
     pub fn detect_pointer_patterns(&mut self, func: &SSAFunction) {
         for block in func.blocks() {
             for op in &block.ops {
-                if let SSAOp::IntAdd { dst, a, b } = op {
-                    let ty_a = self.get_type(a);
-                    let ty_b = self.get_type(b);
+                match op {
+                    // Pointer arithmetic: ptr + offset
+                    SSAOp::IntAdd { dst, a, b } => {
+                        let ty_a = self.get_type(a);
+                        let ty_b = self.get_type(b);
 
-                    if matches!(ty_a, CType::Pointer(_)) {
-                        self.set_type(dst, ty_a);
-                    } else if matches!(ty_b, CType::Pointer(_)) {
-                        self.set_type(dst, ty_b);
+                        if matches!(ty_a, CType::Pointer(_)) {
+                            self.set_type(dst, ty_a);
+                        } else if matches!(ty_b, CType::Pointer(_)) {
+                            self.set_type(dst, ty_b);
+                        }
+                    }
+                    // Pointer arithmetic: ptr - offset
+                    SSAOp::IntSub { dst, a, b } => {
+                        let ty_a = self.get_type(a);
+                        let ty_b = self.get_type(b);
+
+                        // ptr - int = ptr
+                        if matches!(ty_a, CType::Pointer(_)) && !matches!(ty_b, CType::Pointer(_)) {
+                            self.set_type(dst, ty_a);
+                        }
+                        // ptr - ptr = size_t (not a pointer)
+                    }
+                    // Copy propagates pointer type
+                    SSAOp::Copy { dst, src } => {
+                        let ty_src = self.get_type(src);
+                        if matches!(ty_src, CType::Pointer(_)) {
+                            self.set_type(dst, ty_src);
+                        }
+                    }
+                    // Load/Store addresses are always pointers
+                    SSAOp::Load { addr, .. } | SSAOp::Store { addr, .. } => {
+                        // Mark the address as a pointer if not already
+                        let ty = self.get_type(addr);
+                        if !matches!(ty, CType::Pointer(_)) {
+                            self.set_type(addr, CType::void_ptr());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Detect if a variable is used as a string (passed to string functions).
+    pub fn detect_string_usage(
+        &mut self,
+        func: &SSAFunction,
+        function_names: &HashMap<u64, String>,
+    ) {
+        for block in func.blocks() {
+            for op in &block.ops {
+                if let SSAOp::Call { target } = op {
+                    // Try to get the function name from the call target
+                    if target.is_const() {
+                        if let Some(addr) = parse_const_addr(&target.name) {
+                            if let Some(name) = function_names.get(&addr) {
+                                // Check if this is a string function
+                                if let Some(func_type) = self.func_types.get(name) {
+                                    // Mark parameters as the appropriate types
+                                    // This is a simplified version - full implementation would
+                                    // track which registers hold the arguments
+                                    if name.contains("printf")
+                                        || name.contains("strlen")
+                                        || name.contains("strcmp")
+                                    {
+                                        // First param is a char*
+                                        // We'd need call analysis to properly track this
+                                    }
+                                    let _ = func_type; // Silence unused warning for now
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// Parse a constant address from an SSA variable name.
+fn parse_const_addr(name: &str) -> Option<u64> {
+    if let Some(val_str) = name.strip_prefix("const:") {
+        let val_str = val_str.split('_').next().unwrap_or(val_str);
+        if let Some(hex) = val_str
+            .strip_prefix("0x")
+            .or_else(|| val_str.strip_prefix("0X"))
+        {
+            return u64::from_str_radix(hex, 16).ok();
+        }
+        // Try as plain hex
+        u64::from_str_radix(val_str, 16).ok()
+    } else if let Some(val_str) = name.strip_prefix("ram:") {
+        let val_str = val_str.split('_').next().unwrap_or(val_str);
+        u64::from_str_radix(val_str, 16).ok()
+    } else {
+        None
     }
 }
 
