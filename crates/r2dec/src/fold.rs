@@ -29,6 +29,11 @@ use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 // Type alias for clarity
 type SSABlock = FunctionSSABlock;
 
+/// Threshold for detecting 64-bit negative values stored as unsigned.
+/// Values above this are likely negative offsets (within ~65536 of u64::MAX).
+/// This handles cases like stack offsets: 0xffffffffffffffb8 represents -72.
+const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
+
 /// Tracks use counts and definitions for expression folding.
 #[derive(Debug)]
 pub struct FoldingContext {
@@ -40,7 +45,8 @@ pub struct FoldingContext {
     pinned: HashSet<String>,
     /// Variables that are used in control flow conditions.
     condition_vars: HashSet<String>,
-    /// Pointer size in bits.
+    /// Pointer size in bits (reserved for architecture-aware type sizing).
+    #[allow(dead_code)]
     ptr_size: u32,
     /// Function address to name mapping for resolving call targets.
     function_names: HashMap<u64, String>,
@@ -55,7 +61,8 @@ pub struct FoldingContext {
     fp_name: String,
     /// Stack variable names by offset.
     stack_vars: HashMap<i64, String>,
-    /// Counter for unique stack variable names.
+    /// Counter for unique stack variable names (reserved for stack var naming).
+    #[allow(dead_code)]
     stack_var_counter: usize,
 }
 
@@ -72,6 +79,11 @@ impl FoldingContext {
             strings: HashMap::new(),
             symbols: HashMap::new(),
             hide_stack_frame: true, // Default to hiding stack frame
+            // NOTE: Stack register names are currently x86-only.
+            // For ARM/MIPS support, these would need to be configurable:
+            // - ARM: sp, fp (or r13, r11)
+            // - MIPS: $sp, $fp ($29, $30)
+            // Use set_stack_regs() to override for other architectures.
             sp_name: if ptr_size == 64 {
                 "rsp".to_string()
             } else {
@@ -246,7 +258,7 @@ impl FoldingContext {
             CExpr::IntLit(v) => Some(*v),
             CExpr::UIntLit(v) => {
                 // Handle negative offsets stored as unsigned
-                if *v > 0xffffffffffff0000 {
+                if *v > LIKELY_NEGATIVE_THRESHOLD {
                     let neg = (!*v).wrapping_add(1);
                     Some(-(neg as i64))
                 } else {
@@ -262,7 +274,7 @@ impl FoldingContext {
         if var.is_const() {
             if let Some(val) = parse_const_value(&var.name) {
                 // Handle negative offsets stored as unsigned
-                if val > 0xffffffffffff0000 {
+                if val > LIKELY_NEGATIVE_THRESHOLD {
                     let neg = (!val).wrapping_add(1);
                     return Some(-(neg as i64));
                 }
@@ -608,12 +620,14 @@ impl FoldingContext {
                 };
                 CExpr::call(func_expr, vec![])
             }
-            // For other ops, just return a variable reference
+            // For other ops, generate a placeholder indicating unhandled operation.
+            // This helps identify operations that need explicit handling.
             _ => {
                 if let Some(dst) = op.dst() {
                     CExpr::Var(self.var_name(dst))
                 } else {
-                    CExpr::IntLit(0)
+                    // No destination - return a comment-like placeholder
+                    CExpr::Var("__unhandled_op__".to_string())
                 }
             }
         }

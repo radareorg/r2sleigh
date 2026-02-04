@@ -474,6 +474,11 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
 
         BranchInd { target } => format!("{},pc,=", vn(target)),
 
+        // NOTE: ESIL for Call/Return is x86-64 specific:
+        // - Uses 'rsp' as stack pointer (ARM uses 'sp', MIPS uses '$sp')
+        // - Uses 8-byte pointer size (32-bit would use 4)
+        // For other architectures, this needs architecture-aware generation
+        // that takes stack pointer name and pointer size as parameters.
         Call { target } => {
             // Call: push return address, jump to target
             format!("pc,8,rsp,-=,rsp,=[8],{},pc,=", vn(target))

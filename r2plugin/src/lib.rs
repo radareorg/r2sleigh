@@ -1277,6 +1277,13 @@ fn build_stack_defs(ops: &[R2ILOp]) -> HashMap<VarnodeKey, usize> {
     defs
 }
 
+/// Maximum depth for stack address resolution recursion.
+/// This limit of 8 prevents infinite recursion in cyclic definitions while being
+/// deep enough for typical stack address calculations like:
+///   rbp -> temp1 (copy) -> temp2 (add offset) -> temp3 (sub) -> final address
+/// In practice, most stack accesses resolve within 2-4 levels.
+const STACK_RESOLVE_MAX_DEPTH: usize = 8;
+
 fn resolve_stack_addr(
     vn: &Varnode,
     disasm: &Disassembler,
@@ -1295,7 +1302,7 @@ fn resolve_stack_addr_inner(
     visited: &mut HashSet<VarnodeKey>,
     depth: usize,
 ) -> Option<(String, i64)> {
-    if depth > 8 {
+    if depth > STACK_RESOLVE_MAX_DEPTH {
         return None;
     }
     if let Some(name) = stack_reg_name(vn, disasm) {

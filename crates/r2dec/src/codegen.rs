@@ -4,6 +4,11 @@
 
 use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType};
 
+/// Threshold for detecting 64-bit negative values stored as unsigned.
+/// Values above this are likely negative offsets (within ~65536 of u64::MAX).
+/// This handles cases like stack offsets: 0xffffffffffffffb8 represents -72.
+const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
+
 /// Code generator configuration.
 #[derive(Debug, Clone)]
 pub struct CodeGenConfig {
@@ -361,8 +366,7 @@ impl CodeGenerator {
             }
             CExpr::UIntLit(val) => {
                 // Check if this looks like a negative offset (high bit set, close to max)
-                // This handles 64-bit negative values like 0xffffffffffffffb8 (-72)
-                if *val > 0xffffffffffff0000 {
+                if *val > LIKELY_NEGATIVE_THRESHOLD {
                     // Convert to negative: two's complement
                     let neg = (!*val).wrapping_add(1);
                     self.output.push_str(&format!("-0x{:x}", neg));

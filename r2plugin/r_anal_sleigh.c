@@ -79,7 +79,12 @@ extern char *r2il_get_reg_profile(const R2ILContext *ctx);
 extern int r2sleigh_analyze_fcn(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
 extern char *r2sleigh_recover_vars(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
 extern char *r2sleigh_get_data_refs(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
-/* Per-architecture context (lazy init) */
+/* Per-architecture context (lazy init)
+ *
+ * WARNING: These globals are NOT thread-safe. This plugin assumes
+ * single-threaded radare2 usage. If radare2 becomes multi-threaded,
+ * this code must be updated with proper synchronization (e.g., mutex).
+ */
 static R2ILContext *sleigh_ctx = NULL;
 static char *sleigh_arch = NULL;
 static char *sleigh_arch_override = NULL;

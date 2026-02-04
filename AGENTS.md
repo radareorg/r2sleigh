@@ -47,7 +47,12 @@ r2plugin/           # C-ABI for radare2 integration
 | `SSAVar` | `r2ssa/var.rs` | Versioned variable (name_version) |
 | `SSAOp` | `r2ssa/op.rs` | SSA operation with versioned vars |
 | `SSABlock` | `r2ssa/block.rs` | SSA form of an instruction |
+| `FunctionSSABlock` | `r2ssa/function.rs` | SSA block with phi nodes (used by r2dec) |
+| `SSAFunction` | `r2ssa/function.rs` | Complete function in SSA form |
 | `DefUseInfo` | `r2ssa/defuse.rs` | Def-use chain analysis results |
+| `CExpr` | `r2dec/ast.rs` | C expression AST |
+| `CStmt` | `r2dec/ast.rs` | C statement AST |
+| `FoldingContext` | `r2dec/fold.rs` | Expression folding/dead code elimination |
 
 ## Build Commands
 
@@ -263,11 +268,14 @@ r2 -qc 's entry0+4; a:sleigh.defuse' /bin/ls
 | `r2sym/state.rs` | ~300 | Symbolic state (regs, mem, constraints) |
 | `r2sym/solver.rs` | ~200 | Z3 integration and model extraction |
 | `r2sym/path.rs` | ~200 | Path exploration and results |
-| `r2dec/structure.rs` | ~250 | Control-flow structuring |
-| `r2dec/expr.rs` | ~300 | Expression builder |
-| `r2dec/codegen.rs` | ~200 | C code generation |
-| `r2dec/types.rs` | ~200 | Type scaffolding |
-| `r2dec/variable.rs` | ~200 | Variable recovery scaffolding |
+| `r2dec/structure.rs` | ~275 | Control-flow structuring |
+| `r2dec/fold.rs` | ~500 | Expression folding and dead code elimination |
+| `r2dec/expr.rs` | ~500 | Expression builder (legacy, use fold.rs) |
+| `r2dec/codegen.rs` | ~680 | C code generation |
+| `r2dec/ast.rs` | ~690 | C AST types (CExpr, CStmt, CType) |
+| `r2dec/region.rs` | ~200 | Region analysis for control flow |
+| `r2dec/types.rs` | ~200 | Type inference |
+| `r2dec/variable.rs` | ~200 | Variable recovery |
 | `r2plugin/lib.rs` | ~1200 | C-ABI exports for radare2 |
 | `r2plugin/r_anal_sleigh.c` | ~400 | radare2 RAnalPlugin wrapper |
 | `tests/e2e/integration_tests.rs` | ~500 | Integration tests (REQUIRED for new features) |
@@ -359,14 +367,170 @@ int test_new_feature(int x) {
 
 | Command | Output | Purpose |
 |---------|--------|---------|
-| `a:sleigh` | text | Status |
-| `a:sleigh.info` | text | Architecture info |
-| `a:sleigh.json` | JSON | Raw r2il ops |
-| `a:sleigh.regs` | JSON | Registers read/written |
-| `a:sleigh.mem` | JSON | Memory accesses |
-| `a:sleigh.vars` | JSON | All varnodes |
-| `a:sleigh.ssa` | JSON | SSA form |
-| `a:sleigh.defuse` | JSON | Def-use analysis |
+| `a:sla` | text | Status and help |
+| `a:sla.info` | text | Architecture info |
+| `a:sla.arch [name]` | text | Get/set architecture override |
+| `a:sla.json` | JSON | Raw r2il ops for current instruction |
+| `a:sla.regs` | JSON | Registers read/written |
+| `a:sla.mem` | JSON | Memory accesses |
+| `a:sla.vars` | JSON | All varnodes |
+| `a:sla.ssa` | JSON | SSA form for current function |
+| `a:sla.defuse` | JSON | Def-use analysis |
+| `a:sla.taint` | JSON | Taint analysis |
+| `a:sla.slice [var]` | JSON | Backward slice from variable |
+| `a:sla.dec` | text | Decompile function to C |
+| `a:sla.cfg` | JSON | Control flow graph |
+| `a:sla.sym.paths` | JSON | Symbolic execution paths |
+| `a:sla.sym.solve` | JSON | Solve for target address |
+
+**Note**: Commands use `a:sla` prefix (short for `a:sleigh`). Both work.
+
+## r2dec Decompiler Architecture
+
+The decompiler (`r2dec`) converts SSA form to readable C code.
+
+### Decompilation Pipeline
+
+```
+SSAFunction → RegionAnalyzer → ControlFlowStructurer → FoldingContext → CodeGenerator → C code
+     ↓              ↓                    ↓                   ↓               ↓
+  SSA ops     Region tree         CStmt/CExpr        Optimized AST     String output
+```
+
+### Key Types in r2dec
+
+| Type | Location | Purpose |
+|------|----------|---------|
+| `CExpr` | `r2dec/ast.rs` | C expression AST (Binary, Unary, Var, Call, etc.) |
+| `CStmt` | `r2dec/ast.rs` | C statement AST (If, While, Return, Block, etc.) |
+| `CType` | `r2dec/ast.rs` | C type representation (Int, Ptr, Struct, etc.) |
+| `CFunction` | `r2dec/ast.rs` | Complete function with params, locals, body |
+| `FoldingContext` | `r2dec/fold.rs` | Expression folding and dead code elimination |
+| `Region` | `r2dec/region.rs` | Control flow region (Block, IfThenElse, While, etc.) |
+| `CodeGenerator` | `r2dec/codegen.rs` | Converts AST to C string with pretty printing |
+
+### Two SSABlock Types (Important!)
+
+There are **two different `SSABlock` types** in r2ssa:
+
+| Type | Location | Purpose |
+|------|----------|---------|
+| `SSABlock` | `r2ssa/block.rs` | Single instruction block (addr, size, ops) |
+| `FunctionSSABlock` | `r2ssa/function.rs` | Function block with phi nodes (addr, size, ops, phis) |
+
+**r2dec uses `FunctionSSABlock`** (re-exported as `r2ssa::FunctionSSABlock`).
+
+When writing tests for r2dec:
+```rust
+// DON'T use SSABlock::new() - it doesn't exist for FunctionSSABlock
+// DO create blocks directly:
+let block = FunctionSSABlock {
+    addr: 0x1000,
+    size: 4,
+    ops: vec![...],
+    phis: Vec::new(),
+};
+```
+
+### Expression Folding (fold.rs)
+
+The `FoldingContext` performs three key optimizations:
+
+1. **Use-counting**: Tracks how many times each SSA variable is used
+2. **Single-use inlining**: Variables used only once get inlined at use site
+3. **Dead code elimination**: Unused CPU flags (CF, ZF, SF, etc.) are removed
+
+**CPU flags that are auto-eliminated when unused**:
+- `cf`, `pf`, `af`, `zf`, `sf`, `of`, `df`, `tf`
+- Also versioned variants: `cf_1`, `zf_2`, etc.
+
+**Constant handling**: `const:xxx` → actual numeric values
+- `const:0x42` → `0x42`
+- `const:fffffffc` → `0xfffffffcU`
+
+### Adding Decompiler Support for New SSA Operations
+
+1. Add case to `FoldingContext::op_to_expr()` in `r2dec/fold.rs`
+2. Add case to `FoldingContext::op_to_stmt()` in `r2dec/fold.rs`
+3. Test with `r2 -qc 'aaa; s func; a:sla.dec' /path/to/binary`
+
+Example for a new binary op:
+```rust
+// In op_to_expr():
+SSAOp::IntFoo { a, b, .. } => self.binary_expr(BinaryOp::Foo, a, b),
+
+// In op_to_stmt():
+SSAOp::IntFoo { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Foo),
+```
+
+### Control Flow Structuring
+
+The `ControlFlowStructurer` converts region trees to C statements:
+
+| Region Type | C Output |
+|-------------|----------|
+| `Region::Block` | Statement sequence |
+| `Region::IfThenElse` | `if (cond) { ... } else { ... }` |
+| `Region::WhileLoop` | `while (cond) { ... }` |
+| `Region::DoWhileLoop` | `do { ... } while (cond);` |
+| `Region::Irreducible` | Labels + gotos |
+
+### Debugging Decompiler Output
+
+```bash
+# View decompiled C code
+r2 -qc 'aaa; s main; a:sla.dec' /path/to/binary
+
+# View SSA form (input to decompiler)
+r2 -qc 'aaa; s main; a:sla.ssa' /path/to/binary
+
+# View raw IL (before SSA)
+r2 -qc 'aaa; s main; a:sla.json' /path/to/binary
+```
+
+## Deep radare2 Integration
+
+The plugin provides callbacks that radare2 calls automatically during analysis.
+
+### Plugin Callbacks (in r_anal_sleigh.c)
+
+| Callback | When Called | Purpose |
+|----------|-------------|---------|
+| `sleigh_op` | `aaa`/analysis | Lift instructions to ESIL |
+| `sleigh_recover_vars` | `afva` | Provide SSA-derived variables |
+| `sleigh_analyze_fcn` | After `af` | Per-function SSA/analysis |
+| `sleigh_get_data_refs` | After `aar` | Provide def-use xrefs |
+| `sleigh_post_analysis` | End of `aaaa` | Cross-function analysis |
+
+### Variable Recovery (recover_vars)
+
+The plugin provides stack variables and register arguments to radare2's `afv` system.
+
+**Stack variable detection** (in `lib.rs`):
+1. Track `IntAdd`/`IntSub` with RBP/RSP as base
+2. Store address temps in `stack_addr_temps` map
+3. When `Store`/`Load` uses a tracked temp, emit stack variable
+
+**Register argument detection**:
+- Check sources with version 0 against arg register list
+- x86-64 arg regs: `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9` (+ 32-bit aliases)
+- Set `RAnalVarProt.kind = R_ANAL_VAR_KIND_REG` and `delta = reg_index`
+
+**Important**: `RAnalVarProt.delta` means different things:
+- For `R_ANAL_VAR_KIND_REG`: register index from `r_reg_get()`
+- For `R_ANAL_VAR_KIND_SPV`/`BPV`: stack offset
+
+### Register Name Lookup
+
+When mapping register names to indices:
+```c
+// In r_anal_sleigh.c
+// radare2's anal->reg uses UPPERCASE names (e.g., "RDI" not "rdi")
+char *upper_reg = strdup(reg_name);
+for (char *p = upper_reg; *p; p++) *p = toupper(*p);
+RRegItem *ri = r_reg_get(anal->reg, upper_reg, R_REG_TYPE_GPR);
+prot->delta = ri->index;  // Use index, not offset
+```
 
 ## Links
 

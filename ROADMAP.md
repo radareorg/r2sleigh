@@ -2,15 +2,15 @@
 
 > Goal: bring Sleigh-powered, typed lifting to radare2 with backward-compatible ESIL and advanced analysis capabilities.
 
-## Snapshot (Jan 2025)
+## Snapshot (Feb 2025)
 
-**135 tests passing** across 7 crates:
+**164 tests passing** across 7 crates:
 - `r2il` (26 tests) - Core IL types
 - `r2sleigh-lift` (4 tests) - P-code translation
 - `r2sleigh-cli` (9 tests) - CLI tool
 - `r2ssa` (42 tests) - SSA transformation
 - `r2sym` (51 tests) - Symbolic execution + taint analysis
-- `r2dec` (3 tests) - Decompiler scaffolding
+- `r2dec` (32 tests) - Decompiler with expression folding
 - `r2plugin` - radare2 integration
 
 **18 plugin commands working** in radare2.
@@ -25,7 +25,7 @@
 | 2. radare2 Plugin | ✅ Complete | FFI, C wrapper, RAnalPlugin, 8 instruction commands |
 | 2.5. SSA | ✅ Complete | SSAVar, CFG, domtree, phi nodes, def-use analysis |
 | 3. Symbolic Execution | ✅ Complete | Z3 solver, path exploration, taint analysis |
-| 4. Decompiler | ⚠️ Scaffolding | AST types exist, codegen outputs raw SSA |
+| 4. Decompiler | 🔨 In Progress | Expression folding done, control flow structuring basic |
 | 5. Advanced Analysis | 🔜 Planned | Slicing, vuln detection, concolic, crypto detection |
 
 ---
@@ -47,7 +47,7 @@
 | `r2sleigh-cli` | CLI: compile, disasm, info commands | 9 |
 | `r2ssa` | SSA: `SSAVar`, `SSAOp`, `SSABlock`, CFG, domtree, phi | 42 |
 | `r2sym` | Symbolic: `SymValue`, `SymState`, solver, paths, **taint** | 51 |
-| `r2dec` | Decompiler: AST, expr, codegen (scaffolding) | 3 |
+| `r2dec` | Decompiler: AST, expr folding, control flow, codegen | 32 |
 | `r2plugin` | Rust cdylib + C wrapper for radare2 | - |
 
 ---
@@ -136,14 +136,40 @@
 - **Path solving**: extract concrete solutions from Z3 models
 - `SolvedPath`: inputs, registers, final_pc, constraints
 - **Taint command**: `a:sleigh.taint` with configurable sources/sinks
+- **Backward Slicing**: `a:sla.slice` with JSON output (ops, blocks, phi nodes)
 
-### Phase 4: Decompiler (Scaffolding)
-- AST node types defined
-- Expression builder exists
-- Codegen outputs raw SSA (not structured C)
-- Type inference scaffolding
-- Variable recovery scaffolding
-- Region analysis (if/while/for detection)
+### Phase 3.5: Deep radare2 Integration ✅
+- **New r2 callbacks**: `analyze_fcn`, `recover_vars`, `get_data_refs`, `post_analysis`
+- **Plugin-provided variables**: SSA-based variable recovery feeds into `afv`
+- **Plugin-provided refs**: Def-use xrefs integrated with `ax`
+- **Seamless analysis**: Plugin hooks called automatically during `aaa`/`aaaa`
+
+### Phase 4: Decompiler (In Progress)
+
+#### 4.1 Expression Folding ✅
+- **Use counting**: Track how many times each SSA variable is used
+- **Single-use inlining**: Variables used once are inlined at use site
+- **Dead code elimination**: Unused CPU flags (CF, ZF, SF, etc.) removed
+- **Constant handling**: `const:xxx` → numeric literals (e.g., `0xfffffffffffffff0U`)
+- **Condition pinning**: Branch conditions kept as named variables for readability
+
+#### 4.2 Control Flow Structuring (Basic) ✅
+- Region analysis: if/while/do-while detection
+- Back edge detection for loops
+- Merge point identification for diamonds
+- Irreducible regions fall back to gotos
+
+#### 4.3 Code Generation ✅
+- Full C AST types (statements, expressions, types)
+- Pretty-printing with proper operator precedence
+- Configurable indent and C99 types
+
+#### 4.4 Scaffolding (Needs Work)
+- Type inference (size-based only, no pointer tracking)
+- Variable recovery (basic stack/param detection)
+- No for-loop or switch detection
+- No string literal recovery
+- No function signature integration
 
 ---
 
@@ -153,15 +179,19 @@
 
 - [ ] Add name-resolved register aliases to `a:sla.json` output (raw R2IL JSON still uses offsets)
 - [ ] Verify register alias policy applies across all serialized outputs (R2IL JSON, plugin, CLI, ESIL)
+- [ ] Surface CALLOTHER/userop names in JSON/ESIL output (map `userop` index → name)
+- [ ] Preserve analysis/pseudo P-code ops behind a debug flag (or emit marker ops)
+- [ ] Capture Sleigh custom address-space metadata (name/word-size/semantics) instead of flattening to `Custom`
+- [ ] Feed SSA/def-use info into radare2 analysis metadata (refs, vars, xrefs) instead of JSON-only
 
 ### Tier 1: High Priority (Next Up)
 
 | # | Feature | Command | Description | Effort |
 |---|---------|---------|-------------|--------|
 | 1 | ~~Taint command~~ | ~~`a:sleigh.taint`~~ | ✅ Exposed with JSON output | Done |
-| 2 | **Backward Slicing** | `a:sleigh.slice` | "What code affects variable X at address Y?" | Low |
+| 2 | ~~Backward Slicing~~ | ~~`a:sla.slice`~~ | ✅ "What code affects variable X?" with JSON output | Done |
 | 3 | **Vulnerability Patterns** | `a:sleigh.vuln` | Detect common vuln patterns (overflow, format string, UAF) | Medium |
-| 4 | **Better register naming** | - | Map `reg:10_1` → `ESP_1` in all output | Low |
+| 4 | ~~Better register naming~~ | - | ✅ Map `reg:10_1` → `ESP_1` in all output | Done |
 | 5 | **Memory in solutions** | - | Include memory values in symbolic path output | Low |
 
 ### Tier 2: Security Research Features
@@ -182,15 +212,55 @@
 | 12 | **Inter-proc Taint** | `a:sleigh.taint.global` | Taint analysis spanning multiple functions | High |
 | 13 | **Function Summaries** | - | Cache symbolic summaries for called functions | High |
 
-### Tier 4: Decompiler Improvements
+### Tier 4: Decompiler Improvements (r2dec Roadmap)
 
-| # | Feature | Description | Effort |
-|---|---------|-------------|--------|
-| 14 | **Control flow structuring** | if/while/for/switch recovery (region-based) | Medium |
-| 15 | **Expression folding** | Combine SSA ops into readable C expressions | Medium |
-| 16 | **Type inference** | Propagate types through dataflow | Medium |
-| 17 | **String recovery** | Detect and inline string literals | Low |
-| 18 | **Proper CFG from r2** | Use radare2's function/block boundaries | Low |
+#### Phase 4.1: Expression Folding ✅ DONE
+| # | Feature | Status | Description |
+|---|---------|--------|-------------|
+| 14 | Single-use inlining | ✅ Done | Inline variables used only once |
+| 15 | Dead flag elimination | ✅ Done | Remove unused CPU flags (CF, ZF, SF, OF, etc.) |
+| 16 | Constant folding | ✅ Done | Convert `const:xxx` to numeric literals |
+| 17 | Condition pinning | ✅ Done | Keep branch conditions as named vars |
+
+#### Phase 4.2: Quick Wins (Low Effort, High Impact)
+| # | Feature | Status | Description | Effort |
+|---|---------|--------|-------------|--------|
+| 18 | **ptr_size from config** | 🔜 Next | Pass DecompilerConfig.ptr_size to FoldingContext | 5 min |
+| 19 | **Function signatures from r2** | 🔜 | Read `afs`/`afi` for param/return types | Low |
+| 20 | **String literal recovery** | 🔜 | Check if addr points to .rodata → inline | Low |
+| 21 | **Function call names** | 🔜 | Replace `call(0x401234)` with `printf(...)` | Low |
+| 22 | **Global variable names** | 🔜 | Use r2 flags for global addresses | Low |
+
+#### Phase 4.3: Type Inference (Medium Effort, High Impact)
+| # | Feature | Status | Description | Effort |
+|---|---------|--------|-------------|--------|
+| 23 | **Pointer type propagation** | 🔜 | Track pointer types through Load/Store | Medium |
+| 24 | **Signed vs unsigned** | 🔜 | Use IntSLess/IntSDiv to infer signedness | Low |
+| 25 | **Array access patterns** | 🔜 | Detect `base + i*size` → `arr[i]` | Medium |
+
+#### Phase 4.4: Variable Recovery (Medium Effort, High Impact)
+| # | Feature | Status | Description | Effort |
+|---|---------|--------|-------------|--------|
+| 26 | **r2 variable integration** | 🔜 | Read `afvj` for user-defined var names | Low |
+| 27 | **Phi node elimination** | 🔜 | Convert φ(x₁,x₂) to proper assignments | Medium |
+| 28 | **Register coalescing** | 🔜 | Merge RAX_1, RAX_2 into single variable | Medium |
+| 29 | **Meaningful names** | 🔜 | Usage patterns (loop counter → `i`) | Medium |
+
+#### Phase 4.5: Control Flow Polish (Medium Effort)
+| # | Feature | Status | Description | Effort |
+|---|---------|--------|-------------|--------|
+| 30 | **For-loop detection** | 🔜 | Detect `init; while(cond) { body; update }` | Medium |
+| 31 | **Switch detection** | 🔜 | Cascaded if-else on same var → switch | Medium |
+| 32 | **Short-circuit && / \|\|** | 🔜 | `if(a) if(b)` → `if(a && b)` | Low |
+| 33 | **Condition inversion** | 🔜 | Prefer `if(!x) return` over `if(x){...}` | Low |
+
+#### Phase 4.6: Advanced (High Effort, Future)
+| # | Feature | Status | Description | Effort |
+|---|---------|--------|-------------|--------|
+| 34 | **Struct field recovery** | 🔜 | `*(ptr+offset)` → `ptr->field` | High |
+| 35 | **"No More Gotos"** | 🔜 | Handle irreducible CFGs cleanly | High |
+| 36 | **Loop unrolling detection** | 🔜 | Collapse unrolled loops | High |
+| 37 | **Inline small functions** | 🔜 | Inline trivial helpers | Medium |
 
 ### Tier 5: Advanced/Research Features
 
@@ -218,6 +288,24 @@
 
 ### ROI/Benefit Priority Table
 
+#### r2dec Decompiler (Prioritized)
+| Rank | Feature | User Usefulness | Effort | Status |
+|------|---------|-----------------|--------|--------|
+| 1 | ✅ Expression folding | High | Medium | Done |
+| 2 | ✅ Dead flag elimination | High | Low | Done |
+| 3 | ✅ Constant folding | High | Low | Done |
+| 4 | ptr_size from config | High | 5 min | Next |
+| 5 | Function signatures from r2 | High | Low | Next |
+| 6 | String literal recovery | High | Low | Next |
+| 7 | Function call names | High | Low | Next |
+| 8 | Type inference (pointers) | High | Medium | Planned |
+| 9 | r2 variable integration | High | Low | Planned |
+| 10 | For-loop detection | Medium | Medium | Planned |
+| 11 | Switch detection | Medium | Medium | Planned |
+| 12 | Phi node elimination | Medium | Medium | Planned |
+| 13 | Struct field recovery | High | High | Future |
+
+#### Other Features
 | Rank | Feature | User Usefulness | Effort |
 |------|---------|-----------------|--------|
 | 1 | Register naming + alias policy | High | Low |
@@ -225,31 +313,25 @@
 | 3 | Backward slicing | High | Low |
 | 4 | IL validation + structured export | High | Medium |
 | 5 | Memory in solutions | Medium | Low |
-| 6 | Proper CFG from r2 | Medium | Low |
-| 7 | Vulnerability patterns | High | Medium |
-| 8 | Path predicate export | Medium | Low |
-| 9 | Memory/value-set analysis | High | High |
-| 10 | Memory region tracking | Medium | Medium |
-| 11 | Control-flow structuring parity | High | High |
-| 12 | Control flow structuring | High | Medium |
-| 13 | Expression folding | Medium | Medium |
-| 14 | Type inference | High | Medium |
-| 15 | String recovery | Medium | Low |
-| 16 | Decompiler recovery pipeline | High | High |
-| 17 | ESIL-trace-guided analysis hooks | Medium | Medium |
-| 18 | Concolic execution | Medium | High |
-| 19 | Guided vuln discovery (findpath) | High | High |
-| 20 | ABI/calling-convention modeling | Medium | Medium |
-| 21 | Call graph with data flow | Medium | High |
-| 22 | Function summaries | Medium | High |
-| 23 | Inter-proc taint | Medium | High |
-| 24 | R2IL VM + event tracing | Medium | High |
-| 25 | Architecture expansion + lift tests | Medium | Medium |
-| 26 | Multi-architecture testing | Medium | Medium |
-| 27 | Pattern matching DSL | Medium | Medium |
-| 28 | Crypto detection | Medium | Medium |
-| 29 | Semantic diff | Low | High |
-| 30 | Incremental analysis | Medium | High |
+| 6 | Vulnerability patterns | High | Medium |
+| 7 | Path predicate export | Medium | Low |
+| 8 | Memory/value-set analysis | High | High |
+| 9 | Memory region tracking | Medium | Medium |
+| 10 | Control-flow structuring parity | High | High |
+| 11 | ESIL-trace-guided analysis hooks | Medium | Medium |
+| 12 | Concolic execution | Medium | High |
+| 13 | Guided vuln discovery (findpath) | High | High |
+| 14 | ABI/calling-convention modeling | Medium | Medium |
+| 15 | Call graph with data flow | Medium | High |
+| 16 | Function summaries | Medium | High |
+| 17 | Inter-proc taint | Medium | High |
+| 18 | R2IL VM + event tracing | Medium | High |
+| 19 | Architecture expansion + lift tests | Medium | Medium |
+| 20 | Multi-architecture testing | Medium | Medium |
+| 21 | Pattern matching DSL | Medium | Medium |
+| 22 | Crypto detection | Medium | Medium |
+| 23 | Semantic diff | Low | High |
+| 24 | Incremental analysis | Medium | High |
 
 ---
 
@@ -384,6 +466,71 @@
 
 ## Implementation Notes
 
+### r2dec Decompiler Implementation Guide
+
+#### Quick Wins (do these first)
+
+**1. Fix ptr_size (5 min)**
+```rust
+// In structure.rs, change:
+let mut fold_ctx = FoldingContext::new(64); // TODO: get from config
+// To:
+let mut fold_ctx = FoldingContext::new(self.config.ptr_size);
+```
+
+**2. String literal recovery**
+```rust
+// In plugin, read string at address:
+// r2pipe: pszj @ addr → returns string if valid
+fn try_string_at(core: &RCore, addr: u64) -> Option<String> {
+    // Check if addr is in .rodata/.data section
+    // Check if it's a valid null-terminated string
+    // Return quoted string literal
+}
+```
+
+**3. Function signatures from r2**
+```rust
+// Use r2 command: afij @ func_addr
+// Returns JSON with: name, args, ret type
+// Map to CFunction params and ret_type
+```
+
+**4. Function call names**
+```rust
+// For Call { target }, if target is constant:
+// Look up: fd @ target_addr → function name
+// Or use: aflj to get function list
+```
+
+#### Type Inference Improvements
+
+**Pointer detection heuristic:**
+```rust
+// If variable is used in Load/Store address position → it's a pointer
+// If variable = result of malloc-like call → pointer
+// If variable used in IntAdd with constant → likely pointer arithmetic
+```
+
+**Signedness inference:**
+```rust
+// IntSLess, IntSDiv, IntSRem, IntSRight → signed operands
+// IntLess, IntDiv, IntRem, IntRight → unsigned
+// Propagate through assignments
+```
+
+#### For-loop detection pattern
+
+```rust
+// Detect: init; while(cond) { body; update }
+// Where update is: i = i + 1 (or similar)
+fn detect_for_loop(header: &SSABlock, body: &[SSABlock]) -> Option<ForLoop> {
+    // 1. Find loop-carried variable (defined in body, used in header condition)
+    // 2. Check if update is simple increment/decrement
+    // 3. Find initialization before loop entry
+}
+```
+
 ### For Backward Slicing
 ```rust
 // Already have def-use chains in r2ssa
@@ -424,7 +571,7 @@ struct VulnPattern {
 
 ## Legacy Phase Tracking
 
-Phase 1: Foundation (what we have now)
+Phase 1: Foundation
   ✅ r2il types in Rust
   ✅ P-code → r2il translation
   ✅ r2il → ESIL for backward compat
@@ -442,13 +589,20 @@ Phase 3: Advanced Features
   ⬜ Memory region modeling
   ⬜ Inter-procedural analysis
 
-Phase 4: Decompiler
-  ⚠️ r2il → pseudo-C (scaffolding)
-  ⬜ Type inference from r2il
-  ⬜ Control flow structuring
+Phase 4: Decompiler (r2dec)
+  ✅ C AST types and codegen
+  ✅ Expression folding (single-use inlining, dead flag elimination)
+  ✅ Control flow structuring (if/while/do-while)
+  ✅ Region analysis (back edges, merge points)
+  🔨 Type inference (size-based, needs pointer tracking)
+  🔨 Variable recovery (basic, needs r2 integration)
+  ⬜ For-loop/switch detection
+  ⬜ String literal recovery
+  ⬜ Function signature integration
 
 Phase 5: Security Research
-  ⬜ Backward slicing
+  ✅ Backward slicing (a:sla.slice)
+  ✅ Taint analysis (a:sla.taint)
   ⬜ Vulnerability pattern detection
   ⬜ Concolic execution
   ⬜ Crypto detection

@@ -42,7 +42,8 @@ pub struct VariableRecovery {
     sp_name: String,
     /// Frame pointer register name.
     fp_name: String,
-    /// Pointer size in bits.
+    /// Pointer size in bits (reserved for architecture-aware type sizing).
+    #[allow(dead_code)]
     ptr_size: u32,
     /// Loop variable counter (i, j, k, ...).
     loop_var_idx: usize,

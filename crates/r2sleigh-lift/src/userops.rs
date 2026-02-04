@@ -155,14 +155,22 @@ fn build_userop_map(arch: &str) -> HashMap<u32, String> {
 pub fn userop_map_for_arch(arch: &str) -> HashMap<u32, String> {
     let key = arch.to_ascii_lowercase();
     let cache = USEROP_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut guard) = cache.lock() {
+
+    // Check cache first (quick path with short lock hold)
+    if let Ok(guard) = cache.lock() {
         if let Some(found) = guard.get(&key) {
             return found.clone();
         }
-        let map = build_userop_map(&key);
-        guard.insert(key, map.clone());
-        map
-    } else {
-        build_userop_map(&key)
     }
+
+    // Build outside lock - this may do file I/O which can be slow.
+    // We don't want to block other threads waiting for the cache.
+    let map = build_userop_map(&key);
+
+    // Insert into cache (another thread may have raced us, that's OK)
+    if let Ok(mut guard) = cache.lock() {
+        guard.entry(key).or_insert_with(|| map.clone());
+    }
+
+    map
 }

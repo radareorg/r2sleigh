@@ -211,61 +211,31 @@ impl<'a> ControlFlowStructurer<'a> {
         CStmt::Block(stmts)
     }
 
-    /// Generate a unique label.
-    #[allow(dead_code)]
-    fn gen_label(&mut self) -> String {
-        let label = format!("L{}", self.label_counter);
-        self.label_counter += 1;
-        label
-    }
-
-    /// Add a goto for a block.
-    #[allow(dead_code)]
-    fn goto_block(&mut self, addr: u64) -> CStmt {
-        let label = self.labels.entry(addr).or_insert_with(|| {
-            let l = format!("L{}", self.label_counter);
-            self.label_counter += 1;
-            l
-        });
-        CStmt::Goto(label.clone())
-    }
+    // TODO: gen_label() and goto_block() are reserved for future use when
+    // implementing more complex control flow restructuring (e.g., irreducible
+    // regions that require goto-based fallback). Currently, structure_irreducible()
+    // handles labels directly. These helpers may be useful for:
+    // - Break/continue in nested loops
+    // - Early returns from deeply nested code
+    // - Complex switch fallthrough patterns
 }
 
-/// Try to detect for-loop patterns.
-///
-/// A for loop has:
-/// - An initialization before the loop
-/// - A condition at the loop header
-/// - An increment at the end of the loop body
-#[allow(dead_code)]
-pub fn detect_for_loop(
-    func: &SSAFunction,
-    header: u64,
-    _body: &[u64],
-) -> Option<(CStmt, CExpr, CExpr)> {
-    let _header_block = func.get_block(header)?;
+// TODO: detect_for_loop() - Planned feature to detect for-loop patterns.
+// A for loop has:
+// - An initialization before the loop
+// - A condition at the loop header
+// - An increment at the end of the loop body
+// Implementation requires:
+// 1. Identify counter variable initialized before header
+// 2. Match counter comparison in header condition
+// 3. Find counter increment at end of loop body
+// 4. Transform WhileLoop region into ForLoop with init/update expressions
 
-    // Look for common patterns:
-    // 1. Counter variable initialized before header
-    // 2. Counter compared in header
-    // 3. Counter incremented in body
-
-    // This is a simplified heuristic - real detection needs more analysis
-    None
-}
-
-/// Simplify nested if-else chains into switch statements.
-#[allow(dead_code)]
-pub fn detect_switch(region: &Region) -> Option<(CExpr, Vec<(u64, Region)>)> {
-    match region {
-        Region::IfThenElse { .. } => {
-            // Check if this is part of a switch chain
-            // Would need to analyze the condition expressions
-            None
-        }
-        _ => None,
-    }
-}
+// TODO: detect_switch() - Planned feature to simplify nested if-else chains.
+// Would analyze condition expressions to detect:
+// - Same variable compared against multiple constants
+// - Exclusive conditions (no overlap)
+// - Convert to switch statement for cleaner output
 
 #[cfg(test)]
 mod tests {
