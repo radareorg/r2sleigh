@@ -348,6 +348,74 @@ impl FoldingContext {
                     }
                 }
             }
+
+            // Track SF origins: SF = (sub_result < 0) - sign of the subtraction result
+            // SF is set when the result is negative (high bit set)
+            if let SSAOp::IntSLess { dst, a, b } = op {
+                let dst_name = dst.name.to_lowercase();
+                if dst_name.contains("sf") {
+                    // SF = (sub_result < 0)
+                    if b.is_const() && parse_const_value(&b.name) == Some(0) {
+                        let a_key = a.display_name();
+                        if let Some((orig_a, orig_b)) = self.sub_results.get(&a_key).cloned() {
+                            self.flag_origins
+                                .insert(dst.display_name(), (orig_a, orig_b));
+                        }
+                    }
+                }
+            }
+
+            // Track OF origins: OF = IntSBorrow(a, b) - signed overflow from subtraction
+            if let SSAOp::IntSBorrow { dst, a, b } = op {
+                let dst_name = dst.name.to_lowercase();
+                if dst_name.contains("of") {
+                    // Trace operands like we do for IntSub
+                    let a_name = self.trace_ssa_var_to_source(a);
+                    let b_name = if b.is_const() {
+                        if let Some(val) = parse_const_value(&b.name) {
+                            if val > 255 && val % 10 != 0 {
+                                format!("0x{:x}", val)
+                            } else if val > 0xffff {
+                                format!("0x{:x}", val)
+                            } else {
+                                format!("{}", val)
+                            }
+                        } else {
+                            self.var_name(b)
+                        }
+                    } else {
+                        self.trace_ssa_var_to_source(b)
+                    };
+                    self.flag_origins
+                        .insert(dst.display_name(), (a_name, b_name));
+                }
+            }
+
+            // Track CF origins: CF = IntLess(a, b) - unsigned carry/borrow from subtraction
+            if let SSAOp::IntLess { dst, a, b } = op {
+                let dst_name = dst.name.to_lowercase();
+                if dst_name.contains("cf") {
+                    // Trace operands
+                    let a_name = self.trace_ssa_var_to_source(a);
+                    let b_name = if b.is_const() {
+                        if let Some(val) = parse_const_value(&b.name) {
+                            if val > 255 && val % 10 != 0 {
+                                format!("0x{:x}", val)
+                            } else if val > 0xffff {
+                                format!("0x{:x}", val)
+                            } else {
+                                format!("{}", val)
+                            }
+                        } else {
+                            self.var_name(b)
+                        }
+                    } else {
+                        self.trace_ssa_var_to_source(b)
+                    };
+                    self.flag_origins
+                        .insert(dst.display_name(), (a_name, b_name));
+                }
+            }
         }
     }
 
@@ -386,19 +454,23 @@ impl FoldingContext {
     }
 
     /// Normalize a stack address for matching Store→Load pairs.
-    /// Addresses like tmp:4700_1 and tmp:4700_2 at the same offset should match.
+    /// Different SSA versions of the same temp can compute different addresses
+    /// (e.g., tmp:4700_1 = rbp-100, tmp:4700_2 = rbp-112).
+    /// We need to look at the definition to get the actual offset.
     fn normalize_stack_address(&self, addr: &SSAVar) -> String {
-        // The address variable name contains the unique address (e.g., "tmp:4700")
-        // Different versions (tmp:4700_1, tmp:4700_2) compute the same address
-        // So we just use the base name without version
         let addr_key = addr.display_name();
 
-        // Strip version number to get canonical address
-        // "tmp:4700_1" -> "tmp:4700"
-        if let Some((base, _)) = addr_key.rsplit_once('_') {
-            return base.to_string();
+        // Check if we have a definition for this address variable
+        if let Some(expr) = self.definitions.get(&addr_key) {
+            // Try to extract the offset from the definition
+            if let Some(offset) = self.extract_offset_from_expr(expr) {
+                // Use the offset as the canonical key
+                return format!("stack:{}", offset);
+            }
         }
 
+        // Fallback: use the full address key (including version) since
+        // different versions can compute different addresses
         addr_key
     }
 
@@ -1192,9 +1264,173 @@ impl FoldingContext {
     }
 
     /// Try to reconstruct a high-level comparison from x86 flag patterns.
-    /// Handles patterns like: BoolNot(ZF) -> a != b, ZF -> a == b
+    /// Handles patterns like:
+    /// - BoolNot(ZF) -> a != b
+    /// - ZF -> a == b  
+    /// - !ZF && (OF == SF) -> a > b (signed, JG)
+    /// - OF == SF -> a >= b (signed, JGE)
+    /// - OF != SF -> a < b (signed, JL)
+    /// - ZF || (OF != SF) -> a <= b (signed, JLE)
+    /// - !CF && !ZF -> a > b (unsigned, JA)
+    /// - !CF -> a >= b (unsigned, JAE)
+    /// - CF -> a < b (unsigned, JB)
+    /// - CF || ZF -> a <= b (unsigned, JBE)
     fn try_reconstruct_condition(&self, expr: &CExpr) -> Option<CExpr> {
         match expr {
+            // Pattern: Binary AND - check for signed greater than: !ZF && (OF == SF)
+            CExpr::Binary {
+                op: BinaryOp::And,
+                left,
+                right,
+            } => {
+                // Try !ZF && (OF == SF) -> a > b (signed)
+                if let (Some(zf_name), true) = (self.extract_not_zf(left), self.is_of_eq_sf(right))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
+                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+                // Try reversed: (OF == SF) && !ZF
+                if let (Some(zf_name), true) = (self.extract_not_zf(right), self.is_of_eq_sf(left))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
+                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+
+                // Try !CF && !ZF -> a > b (unsigned, JA)
+                if let (Some(cf_name), Some(zf_name)) =
+                    (self.extract_not_cf(left), self.extract_not_zf(right))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&cf_name) {
+                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                    if let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
+                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+                // Try reversed
+                if let (Some(cf_name), Some(zf_name)) =
+                    (self.extract_not_cf(right), self.extract_not_zf(left))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&cf_name) {
+                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                    if let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
+                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+
+                None
+            }
+
+            // Pattern: Binary OR - check for unsigned less-equal: CF || ZF
+            CExpr::Binary {
+                op: BinaryOp::Or,
+                left,
+                right,
+            } => {
+                // Try CF || ZF -> a <= b (unsigned, JBE)
+                if let (Some(cf_name), Some(zf_name)) =
+                    (self.extract_cf(left), self.extract_zf(right))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&cf_name) {
+                        return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                    if let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
+                        return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+                // Try reversed
+                if let (Some(cf_name), Some(zf_name)) =
+                    (self.extract_cf(right), self.extract_zf(left))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&cf_name) {
+                        return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                    if let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
+                        return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+
+                // Try ZF || (OF != SF) -> a <= b (signed, JLE)
+                if let (Some(zf_name), true) = (self.extract_zf(left), self.is_of_ne_sf(right)) {
+                    if let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
+                        return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+                // Try reversed
+                if let (Some(zf_name), true) = (self.extract_zf(right), self.is_of_ne_sf(left)) {
+                    if let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
+                        return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+
+                None
+            }
+
+            // Pattern: Binary Eq - check for OF == SF (signed >=)
+            CExpr::Binary {
+                op: BinaryOp::Eq,
+                left,
+                right,
+            } => {
+                // OF == SF -> a >= b (signed, JGE)
+                if let (Some(of_name), Some(sf_name)) =
+                    (self.extract_of(left), self.extract_sf(right))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&of_name) {
+                        return Some(CExpr::binary(BinaryOp::Ge, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                    if let Some((a, b)) = self.lookup_flag_origin(&sf_name) {
+                        return Some(CExpr::binary(BinaryOp::Ge, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+                // Try reversed
+                if let (Some(of_name), Some(sf_name)) =
+                    (self.extract_of(right), self.extract_sf(left))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&of_name) {
+                        return Some(CExpr::binary(BinaryOp::Ge, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                    if let Some((a, b)) = self.lookup_flag_origin(&sf_name) {
+                        return Some(CExpr::binary(BinaryOp::Ge, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+                None
+            }
+
+            // Pattern: Binary Ne - check for OF != SF (signed <)
+            CExpr::Binary {
+                op: BinaryOp::Ne,
+                left,
+                right,
+            } => {
+                // OF != SF -> a < b (signed, JL)
+                if let (Some(of_name), Some(sf_name)) =
+                    (self.extract_of(left), self.extract_sf(right))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&of_name) {
+                        return Some(CExpr::binary(BinaryOp::Lt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                    if let Some((a, b)) = self.lookup_flag_origin(&sf_name) {
+                        return Some(CExpr::binary(BinaryOp::Lt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+                // Try reversed
+                if let (Some(of_name), Some(sf_name)) =
+                    (self.extract_of(right), self.extract_sf(left))
+                {
+                    if let Some((a, b)) = self.lookup_flag_origin(&of_name) {
+                        return Some(CExpr::binary(BinaryOp::Lt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                    if let Some((a, b)) = self.lookup_flag_origin(&sf_name) {
+                        return Some(CExpr::binary(BinaryOp::Lt, CExpr::Var(a), CExpr::Var(b)));
+                    }
+                }
+                None
+            }
+
             // Pattern: !ZF (BoolNot of ZF) means "not equal"
             CExpr::Unary {
                 op: UnaryOp::Not,
@@ -1212,13 +1448,49 @@ impl FoldingContext {
                             ));
                         }
                     }
+                    // !CF means a >= b (unsigned, JAE)
+                    if flag_lower.contains("cf") {
+                        if let Some((left, right)) = self.lookup_flag_origin(flag_name) {
+                            return Some(CExpr::binary(
+                                BinaryOp::Ge,
+                                CExpr::Var(left),
+                                CExpr::Var(right),
+                            ));
+                        }
+                    }
                 }
+
+                // Try !(CF || ZF) -> a > b (unsigned, JA) - negation of JBE
+                if let CExpr::Binary {
+                    op: BinaryOp::Or,
+                    left: or_left,
+                    right: or_right,
+                } = operand.as_ref()
+                {
+                    if let (Some(cf_name), Some(_zf_name)) =
+                        (self.extract_cf(or_left), self.extract_zf(or_right))
+                    {
+                        if let Some((a, b)) = self.lookup_flag_origin(&cf_name) {
+                            return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                        }
+                    }
+                    // Try reversed
+                    if let (Some(cf_name), Some(_zf_name)) =
+                        (self.extract_cf(or_right), self.extract_zf(or_left))
+                    {
+                        if let Some((a, b)) = self.lookup_flag_origin(&cf_name) {
+                            return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                        }
+                    }
+                }
+
                 // Try to recurse into the operand
                 if let Some(inner) = self.try_reconstruct_condition(operand) {
                     return Some(CExpr::unary(UnaryOp::Not, inner));
                 }
                 None
             }
+
             // Pattern: ZF directly means "equal"
             CExpr::Var(flag_name) => {
                 let flag_lower = flag_name.to_lowercase();
@@ -1231,12 +1503,129 @@ impl FoldingContext {
                         ));
                     }
                 }
+                // CF directly means a < b (unsigned, JB)
+                if flag_lower.contains("cf") {
+                    if let Some((left, right)) = self.lookup_flag_origin(flag_name) {
+                        return Some(CExpr::binary(
+                            BinaryOp::Lt,
+                            CExpr::Var(left),
+                            CExpr::Var(right),
+                        ));
+                    }
+                }
                 None
             }
-            // Pattern: SF (sign flag) could be a < 0 comparison
-            // TODO: Handle more flag patterns (SF, CF, OF)
+
             _ => None,
         }
+    }
+
+    // ========== Helper functions for flag pattern detection ==========
+
+    /// Extract ZF variable name from an expression (if it's a ZF flag reference).
+    fn extract_zf(&self, expr: &CExpr) -> Option<String> {
+        if let CExpr::Var(name) = expr {
+            if name.to_lowercase().contains("zf") {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    /// Extract CF variable name from an expression (if it's a CF flag reference).
+    fn extract_cf(&self, expr: &CExpr) -> Option<String> {
+        if let CExpr::Var(name) = expr {
+            if name.to_lowercase().contains("cf") {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    /// Extract SF variable name from an expression (if it's a SF flag reference).
+    fn extract_sf(&self, expr: &CExpr) -> Option<String> {
+        if let CExpr::Var(name) = expr {
+            if name.to_lowercase().contains("sf") {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    /// Extract OF variable name from an expression (if it's an OF flag reference).
+    fn extract_of(&self, expr: &CExpr) -> Option<String> {
+        if let CExpr::Var(name) = expr {
+            if name.to_lowercase().contains("of") {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
+    /// Extract ZF variable name from a !ZF expression.
+    fn extract_not_zf(&self, expr: &CExpr) -> Option<String> {
+        if let CExpr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = expr
+        {
+            return self.extract_zf(operand);
+        }
+        None
+    }
+
+    /// Extract CF variable name from a !CF expression.
+    fn extract_not_cf(&self, expr: &CExpr) -> Option<String> {
+        if let CExpr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = expr
+        {
+            return self.extract_cf(operand);
+        }
+        None
+    }
+
+    /// Check if expression is OF == SF.
+    fn is_of_eq_sf(&self, expr: &CExpr) -> bool {
+        if let CExpr::Binary {
+            op: BinaryOp::Eq,
+            left,
+            right,
+        } = expr
+        {
+            let has_of_sf =
+                self.extract_of(left).is_some() && self.extract_sf(right).is_some();
+            let has_sf_of =
+                self.extract_sf(left).is_some() && self.extract_of(right).is_some();
+            return has_of_sf || has_sf_of;
+        }
+        false
+    }
+
+    /// Check if expression is OF != SF.
+    fn is_of_ne_sf(&self, expr: &CExpr) -> bool {
+        if let CExpr::Binary {
+            op: BinaryOp::Ne,
+            left,
+            right,
+        } = expr
+        {
+            let has_of_sf =
+                self.extract_of(left).is_some() && self.extract_sf(right).is_some();
+            let has_sf_of =
+                self.extract_sf(left).is_some() && self.extract_of(right).is_some();
+            return has_of_sf || has_sf_of;
+        }
+        // Also check for !(OF == SF)
+        if let CExpr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = expr
+        {
+            return self.is_of_eq_sf(operand);
+        }
+        false
     }
 
     /// Extract switch expression from an operation (for switch statement detection).
