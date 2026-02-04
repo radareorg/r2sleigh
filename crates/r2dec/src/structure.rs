@@ -36,6 +36,9 @@ impl<'a> ControlFlowStructurer<'a> {
         let blocks: Vec<_> = func.blocks().cloned().collect();
         fold_ctx.analyze_blocks(&blocks);
 
+        // Analyze function structure for return detection
+        fold_ctx.analyze_function_structure(func);
+
         // Create region analyzer for break/continue detection
         let region_analyzer = RegionAnalyzer::new(func);
 
@@ -203,7 +206,9 @@ impl<'a> ControlFlowStructurer<'a> {
         }
 
         // Convert operations to statements
-        if let Some(ref fold_ctx) = self.fold_ctx {
+        if let Some(ref mut fold_ctx) = self.fold_ctx {
+            // Set current block address for return detection
+            fold_ctx.set_current_block(addr);
             // Use folding context for optimized output
             stmts.extend(fold_ctx.fold_block(block));
         } else {

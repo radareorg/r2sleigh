@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use r2ssa::{FunctionSSABlock, SSAOp, SSAVar};
+use r2ssa::{FunctionSSABlock, SSAFunction, SSAOp, SSAVar};
 
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 
@@ -75,6 +75,14 @@ pub struct FoldingContext {
     /// Maps memory addresses (display_name of address var) to stored values (display_name).
     /// Used to trace through Store→Load pairs.
     memory_stores: HashMap<String, String>,
+    /// Return register name ("rax" for 64-bit, "eax" for 32-bit).
+    ret_reg_name: String,
+    /// The function's exit block address (block containing SSAOp::Return).
+    exit_block: Option<u64>,
+    /// Blocks that branch directly to the exit block (these are "return" points).
+    return_blocks: HashSet<u64>,
+    /// Current block address being processed (for return detection).
+    current_block_addr: Option<u64>,
 }
 
 impl FoldingContext {
@@ -111,6 +119,14 @@ impl FoldingContext {
             sub_results: HashMap::new(),
             copy_sources: HashMap::new(),
             memory_stores: HashMap::new(),
+            ret_reg_name: if ptr_size == 64 {
+                "rax".to_string()
+            } else {
+                "eax".to_string()
+            },
+            exit_block: None,
+            return_blocks: HashSet::new(),
+            current_block_addr: None,
         }
     }
 
@@ -138,6 +154,85 @@ impl FoldingContext {
     /// Set the symbol/global variable names mapping.
     pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
         self.symbols = symbols;
+    }
+
+    /// Analyze function structure to detect return patterns.
+    /// This finds the exit block and blocks that branch to it.
+    pub fn analyze_function_structure(&mut self, func: &SSAFunction) {
+        // Find exit block (the block containing SSAOp::Return)
+        for block in func.blocks() {
+            for op in &block.ops {
+                if matches!(op, SSAOp::Return { .. }) {
+                    self.exit_block = Some(block.addr);
+                    break;
+                }
+            }
+            if self.exit_block.is_some() {
+                break;
+            }
+        }
+
+        // Find blocks that branch directly to the exit block
+        if let Some(exit_addr) = self.exit_block {
+            for block in func.blocks() {
+                // Skip the exit block itself
+                if block.addr == exit_addr {
+                    continue;
+                }
+
+                for op in &block.ops {
+                    if let SSAOp::Branch { target } = op {
+                        // Extract address from the target variable (e.g., "ram:401256_0")
+                        if let Some(addr) = self.extract_branch_target_address(target) {
+                            if addr == exit_addr {
+                                self.return_blocks.insert(block.addr);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also mark blocks that fall through to exit (no explicit branch at end)
+            // These are typically the else branch in if-return patterns
+            // Check if this block is a predecessor of exit block by looking at phi nodes
+            if let Some(exit_blk) = func.get_block(exit_addr) {
+                for phi in &exit_blk.phis {
+                    for (src_addr, _) in &phi.sources {
+                        // src_addr is already u64
+                        if *src_addr != exit_addr {
+                            self.return_blocks.insert(*src_addr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Extract address from a branch target variable.
+    fn extract_branch_target_address(&self, target: &SSAVar) -> Option<u64> {
+        // Target is usually "ram:401256_0" format
+        let name = &target.name;
+        if let Some(rest) = name.strip_prefix("ram:") {
+            // Parse hex address
+            u64::from_str_radix(rest, 16).ok()
+        } else if let Some(rest) = name.strip_prefix("const:") {
+            u64::from_str_radix(rest, 16).ok()
+        } else {
+            None
+        }
+    }
+
+    /// Set the current block address being processed.
+    pub fn set_current_block(&mut self, addr: u64) {
+        self.current_block_addr = Some(addr);
+    }
+
+    /// Check if the current block is a return block.
+    fn is_current_return_block(&self) -> bool {
+        if let Some(addr) = self.current_block_addr {
+            return self.return_blocks.contains(&addr);
+        }
+        false
     }
 
     /// Look up a function name by address.
@@ -931,6 +1026,14 @@ impl FoldingContext {
     fn op_to_stmt(&self, op: &SSAOp) -> Option<CStmt> {
         match op {
             SSAOp::Copy { dst, src } => {
+                let dst_name = dst.name.to_lowercase();
+                // Check if this is a return value assignment in a return block
+                if (dst_name == self.ret_reg_name || dst_name == "rax" || dst_name == "eax")
+                    && self.is_current_return_block()
+                {
+                    // Emit return statement instead of assignment
+                    return Some(CStmt::Return(Some(self.get_expr(src))));
+                }
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs = self.get_expr(src);
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
