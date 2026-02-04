@@ -995,6 +995,30 @@ impl std::fmt::Display for R2ILOp {
     }
 }
 
+/// Information about a switch case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchCase {
+    /// The case value.
+    pub value: u64,
+    /// The target address for this case.
+    pub target: u64,
+}
+
+/// Information about a switch statement (jump table).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SwitchInfo {
+    /// Address of the switch instruction.
+    pub switch_addr: u64,
+    /// Minimum case value.
+    pub min_val: u64,
+    /// Maximum case value.
+    pub max_val: u64,
+    /// Default case target (if any).
+    pub default_target: Option<u64>,
+    /// All switch cases.
+    pub cases: Vec<SwitchCase>,
+}
+
 /// A sequence of r2il operations for a single instruction.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct R2ILBlock {
@@ -1004,6 +1028,9 @@ pub struct R2ILBlock {
     pub size: u32,
     /// The operations for this instruction
     pub ops: Vec<R2ILOp>,
+    /// Switch table information (if this block contains a switch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_info: Option<SwitchInfo>,
 }
 
 impl R2ILBlock {
@@ -1013,11 +1040,17 @@ impl R2ILBlock {
             addr,
             size,
             ops: Vec::new(),
+            switch_info: None,
         }
     }
 
     /// Add an operation to this block.
     pub fn push(&mut self, op: R2ILOp) {
         self.ops.push(op);
+    }
+
+    /// Set the switch info for this block.
+    pub fn set_switch_info(&mut self, info: SwitchInfo) {
+        self.switch_info = Some(info);
     }
 }

@@ -24,6 +24,9 @@ extern const char *r2il_error(const R2ILContext *ctx);
 extern R2ILBlock *r2il_lift(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr);
 extern R2ILBlock *r2il_lift_block(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr, unsigned int block_size);
 extern void r2il_block_free(R2ILBlock *block);
+extern void r2il_block_set_switch_info(R2ILBlock *block, unsigned long long switch_addr,
+    unsigned long long min_val, unsigned long long max_val, unsigned long long default_target,
+    const unsigned long long *case_values, const unsigned long long *case_targets, size_t num_cases);
 
 /* Block inspection */
 extern size_t r2il_block_op_count(const R2ILBlock *block);
@@ -547,6 +550,32 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 		/* Lift entire basic block (multiple instructions) */
 		R2ILBlock *block = r2il_lift_block (ctx, buf, to_read, bb->addr, (unsigned int)bb_size);
 		if (block) {
+			/* Check if this block has switch info from radare2's analysis */
+			if (bb->switch_op && bb->switch_op->cases) {
+				size_t num_cases = r_list_length (bb->switch_op->cases);
+				if (num_cases > 0) {
+					unsigned long long *case_values = malloc (num_cases * sizeof (unsigned long long));
+					unsigned long long *case_targets = malloc (num_cases * sizeof (unsigned long long));
+					if (case_values && case_targets) {
+						RListIter *case_iter;
+						RAnalCaseOp *case_op;
+						size_t i = 0;
+						r_list_foreach (bb->switch_op->cases, case_iter, case_op) {
+							case_values[i] = case_op->value;
+							case_targets[i] = case_op->jump;
+							i++;
+						}
+						r2il_block_set_switch_info (block,
+							bb->switch_op->addr,
+							bb->switch_op->min_val,
+							bb->switch_op->max_val,
+							bb->switch_op->def_val,
+							case_values, case_targets, num_cases);
+					}
+					free (case_values);
+					free (case_targets);
+				}
+			}
 			block_array_push (out, block);
 		}
 	}

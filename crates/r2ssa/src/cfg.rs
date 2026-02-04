@@ -34,6 +34,13 @@ pub enum BlockTerminator {
     ConditionalBranch { true_target: u64, false_target: u64 },
     /// Indirect branch (target unknown at compile time).
     IndirectBranch,
+    /// Switch statement with multiple targets.
+    Switch {
+        /// Case targets: (case_value, target_address).
+        cases: Vec<(u64, u64)>,
+        /// Default case target (if any).
+        default: Option<u64>,
+    },
     /// Call to a function (may have fallthrough).
     Call {
         target: u64,
@@ -60,7 +67,22 @@ impl BasicBlock {
 
     /// Create a basic block from an r2il block.
     pub fn from_r2il(block: &R2ILBlock) -> Self {
-        let terminator = Self::analyze_terminator(&block.ops, block.addr + block.size as u64);
+        // Check if this block has switch info
+        let terminator = if let Some(ref switch_info) = block.switch_info {
+            // Use switch terminator with cases from switch_info
+            let cases: Vec<(u64, u64)> = switch_info
+                .cases
+                .iter()
+                .map(|c| (c.value, c.target))
+                .collect();
+            BlockTerminator::Switch {
+                cases,
+                default: switch_info.default_target,
+            }
+        } else {
+            Self::analyze_terminator(&block.ops, block.addr + block.size as u64)
+        };
+
         Self {
             addr: block.addr,
             size: block.size,
@@ -145,6 +167,16 @@ impl BasicBlock {
                 true_target,
                 false_target,
             } => vec![*true_target, *false_target],
+            BlockTerminator::Switch { cases, default } => {
+                let mut targets: Vec<u64> = cases.iter().map(|(_, target)| *target).collect();
+                if let Some(def) = default {
+                    targets.push(*def);
+                }
+                // Deduplicate targets
+                targets.sort();
+                targets.dedup();
+                targets
+            }
             BlockTerminator::Call { fallthrough, .. } => fallthrough.iter().copied().collect(),
             BlockTerminator::IndirectCall { fallthrough } => fallthrough.iter().copied().collect(),
             BlockTerminator::IndirectBranch | BlockTerminator::Return | BlockTerminator::None => {
@@ -160,6 +192,7 @@ impl BasicBlock {
             BlockTerminator::Branch { .. }
                 | BlockTerminator::ConditionalBranch { .. }
                 | BlockTerminator::IndirectBranch
+                | BlockTerminator::Switch { .. }
         )
     }
 
@@ -269,6 +302,20 @@ impl CFG {
                 if let Some(ft) = fallthrough {
                     if let Some(&ft_idx) = self.addr_to_node.get(&ft) {
                         self.graph.add_edge(node_idx, ft_idx, CFGEdge::Normal);
+                    }
+                }
+            }
+            BlockTerminator::Switch { ref cases, default } => {
+                // Add edges for each switch case
+                for (_, target) in cases {
+                    if let Some(&target_idx) = self.addr_to_node.get(target) {
+                        self.graph.add_edge(node_idx, target_idx, CFGEdge::Normal);
+                    }
+                }
+                // Add edge for default case
+                if let Some(def) = default {
+                    if let Some(&def_idx) = self.addr_to_node.get(&def) {
+                        self.graph.add_edge(node_idx, def_idx, CFGEdge::Normal);
                     }
                 }
             }

@@ -463,27 +463,48 @@ impl<'a> RegionAnalyzer<'a> {
         // Find the common merge point for all targets
         let merge = self.find_switch_merge(targets);
 
+        // Try to get real switch info from the CFG
+        let switch_info = self.func.switch_info(entry);
+
         // Build case regions for each target
         let mut cases = Vec::new();
-        let mut default_idx = None;
+        let mut default_target = None;
 
-        for (idx, &target) in targets.iter().enumerate() {
-            if Some(target) == merge {
-                // This target goes directly to merge - likely default/fallthrough
-                default_idx = Some(idx);
-                continue;
+        if let Some((switch_cases, def)) = switch_info {
+            // Use real case values from switch info
+            default_target = def;
+
+            // Group cases by target and deduplicate
+            let mut target_to_values: HashMap<u64, Vec<u64>> = HashMap::new();
+            for (value, target) in &switch_cases {
+                target_to_values.entry(*target).or_default().push(*value);
             }
 
-            // For now, we don't have case values - just use index as placeholder
-            // A more sophisticated implementation would trace back to find the
-            // comparison values from the switch expression
-            let case_value = Some(idx as u64);
-            let case_region = Box::new(self.analyze_region(target));
-            cases.push((case_value, case_region));
+            for (&target, values) in &target_to_values {
+                if Some(target) == merge || Some(target) == default_target {
+                    continue;
+                }
+                // Use the first value for this target
+                let case_value = values.first().copied();
+                let case_region = Box::new(self.analyze_region(target));
+                cases.push((case_value, case_region));
+            }
+        } else {
+            // Fallback: use indices as placeholder values
+            for (idx, &target) in targets.iter().enumerate() {
+                if Some(target) == merge {
+                    default_target = Some(target);
+                    continue;
+                }
+
+                let case_value = Some(idx as u64);
+                let case_region = Box::new(self.analyze_region(target));
+                cases.push((case_value, case_region));
+            }
         }
 
         // Build default region if we have one
-        let default = default_idx.map(|idx| Box::new(self.analyze_region(targets[idx])));
+        let default = default_target.map(|addr| Box::new(self.analyze_region(addr)));
 
         Some(Region::Switch {
             switch_block: entry,

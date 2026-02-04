@@ -207,6 +207,17 @@ impl SSAFunction {
         self.cfg.successors(addr)
     }
 
+    /// Get switch info for a block, if it's a switch terminator.
+    /// Returns Some((cases, default)) where cases is Vec<(value, target)>.
+    pub fn switch_info(&self, addr: u64) -> Option<(Vec<(u64, u64)>, Option<u64>)> {
+        let block = self.cfg.get_block(addr)?;
+        if let crate::cfg::BlockTerminator::Switch { cases, default } = &block.terminator {
+            Some((cases.clone(), *default))
+        } else {
+            None
+        }
+    }
+
     /// Check if block A dominates block B.
     pub fn dominates(&self, a: u64, b: u64) -> bool {
         self.domtree.dominates(a, b)

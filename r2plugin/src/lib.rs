@@ -405,6 +405,58 @@ pub extern "C" fn r2il_block_free(block: *mut R2ILBlock) {
     }
 }
 
+/// Set switch table information for a block.
+/// This should be called after lifting if the block contains a switch statement.
+/// 
+/// # Arguments
+/// * `block` - The block to set switch info on
+/// * `switch_addr` - Address of the switch instruction
+/// * `min_val` - Minimum case value
+/// * `max_val` - Maximum case value  
+/// * `default_target` - Default case target address (0 if none)
+/// * `case_values` - Array of case values
+/// * `case_targets` - Array of case target addresses
+/// * `num_cases` - Number of cases
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_set_switch_info(
+    block: *mut R2ILBlock,
+    switch_addr: u64,
+    min_val: u64,
+    max_val: u64,
+    default_target: u64,
+    case_values: *const u64,
+    case_targets: *const u64,
+    num_cases: usize,
+) {
+    if block.is_null() || case_values.is_null() || case_targets.is_null() {
+        return;
+    }
+
+    let block = unsafe { &mut *block };
+    
+    // Build cases from arrays
+    let mut cases = Vec::with_capacity(num_cases);
+    for i in 0..num_cases {
+        let value = unsafe { *case_values.add(i) };
+        let target = unsafe { *case_targets.add(i) };
+        cases.push(r2il::SwitchCase { value, target });
+    }
+
+    // Deduplicate cases (same target may appear multiple times)
+    cases.sort_by_key(|c| (c.value, c.target));
+    cases.dedup();
+
+    let switch_info = r2il::SwitchInfo {
+        switch_addr,
+        min_val,
+        max_val,
+        default_target: if default_target != 0 { Some(default_target) } else { None },
+        cases,
+    };
+
+    block.set_switch_info(switch_info);
+}
+
 /// Get the number of operations in a block.
 #[unsafe(no_mangle)]
 pub extern "C" fn r2il_block_op_count(block: *const R2ILBlock) -> usize {
@@ -3112,6 +3164,7 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
                 r2ssa::cfg::BlockTerminator::Call { target, .. } => format!("call 0x{:x}", target),
                 r2ssa::cfg::BlockTerminator::IndirectBranch => "jmp [reg]".to_string(),
                 r2ssa::cfg::BlockTerminator::IndirectCall { .. } => "call [reg]".to_string(),
+                r2ssa::cfg::BlockTerminator::Switch { cases, .. } => format!("switch ({} cases)", cases.len()),
                 r2ssa::cfg::BlockTerminator::None => "???".to_string(),
             };
             let _ = writeln!(output, "│ {:<47} │", term_str);
@@ -3263,6 +3316,7 @@ pub extern "C" fn r2cfg_function_json(
                 r2ssa::cfg::BlockTerminator::Call { .. } => "call",
                 r2ssa::cfg::BlockTerminator::IndirectBranch => "indirect_branch",
                 r2ssa::cfg::BlockTerminator::IndirectCall { .. } => "indirect_call",
+                r2ssa::cfg::BlockTerminator::Switch { .. } => "switch",
                 r2ssa::cfg::BlockTerminator::None => "none",
             };
 
