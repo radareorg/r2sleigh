@@ -64,6 +64,17 @@ pub struct FoldingContext {
     /// Counter for unique stack variable names (reserved for stack var naming).
     #[allow(dead_code)]
     stack_var_counter: usize,
+    /// Maps flag variable names (like ZF) to original comparison operands.
+    /// Used to reconstruct high-level comparisons from x86 cmp/test patterns.
+    flag_origins: HashMap<String, (String, String)>,
+    /// Maps subtraction result names to their operands (for CMP reconstruction).
+    sub_results: HashMap<String, (String, String)>,
+    /// Maps SSA variable keys to their copy sources (for tracing through copies).
+    /// Key is display_name, value is display_name of source.
+    copy_sources: HashMap<String, String>,
+    /// Maps memory addresses (display_name of address var) to stored values (display_name).
+    /// Used to trace through Store→Load pairs.
+    memory_stores: HashMap<String, String>,
 }
 
 impl FoldingContext {
@@ -96,6 +107,10 @@ impl FoldingContext {
             },
             stack_vars: HashMap::new(),
             stack_var_counter: 0,
+            flag_origins: HashMap::new(),
+            sub_results: HashMap::new(),
+            copy_sources: HashMap::new(),
+            memory_stores: HashMap::new(),
         }
     }
 
@@ -155,14 +170,257 @@ impl FoldingContext {
             }
         }
 
-        // Second pass: build definitions
+        // Second pass: build definitions and track copies/stores/loads
         for op in &block.ops {
+            // Track Copy operations for tracing through to original sources
+            if let SSAOp::Copy { dst, src } = op {
+                self.copy_sources
+                    .insert(dst.display_name(), src.display_name());
+            }
+
+            // Track Store operations: memory[addr] = val
+            if let SSAOp::Store { addr, val, .. } = op {
+                // Normalize the address to a canonical form for matching
+                let addr_key = self.normalize_stack_address(addr);
+                self.memory_stores.insert(addr_key, val.display_name());
+            }
+
+            // Track Load operations: dst = memory[addr]
+            // If we previously stored to this address, link to the stored value
+            if let SSAOp::Load { dst, addr, .. } = op {
+                let addr_key = self.normalize_stack_address(addr);
+                if let Some(stored_val) = self.memory_stores.get(&addr_key).cloned() {
+                    // Link load result to the stored value
+                    self.copy_sources.insert(dst.display_name(), stored_val);
+                } else {
+                    // Fallback: mark as memory load
+                    self.copy_sources
+                        .insert(dst.display_name(), format!("*{}", addr.display_name()));
+                }
+            }
+
             if let Some(dst) = op.dst() {
                 let key = dst.display_name();
                 let expr = self.op_to_expr(op);
                 self.definitions.insert(key, expr);
             }
         }
+
+        // Third pass: track comparison patterns (after definitions are built)
+        // This allows us to trace through temporaries for comparison reconstruction
+        for op in &block.ops {
+            // Track IntSub results for CMP reconstruction
+            // x86 CMP instruction is encoded as SUB that only sets flags
+            if let SSAOp::IntSub { dst, a, b } = op {
+                let dst_key = dst.display_name();
+                // Trace through copies to find the original source variable
+                let a_name = self.trace_ssa_var_to_source(a);
+                let b_name = if b.is_const() {
+                    // Format constant nicely
+                    if let Some(val) = parse_const_value(&b.name) {
+                        // Use hex for values that look like they were written as hex
+                        // (> 255 and not a round decimal number)
+                        if val > 255 && val % 10 != 0 {
+                            format!("0x{:x}", val)
+                        } else if val > 0xffff {
+                            format!("0x{:x}", val)
+                        } else {
+                            format!("{}", val)
+                        }
+                    } else {
+                        self.var_name(b)
+                    }
+                } else {
+                    self.trace_ssa_var_to_source(b)
+                };
+                self.sub_results.insert(dst_key, (a_name, b_name));
+            }
+
+            // Track ZF origins: ZF = (sub_result == 0) means the original comparison
+            // When ZF=1, it means a == b (from the subtraction a - b)
+            if let SSAOp::IntEqual { dst, a, b } = op {
+                let dst_name = dst.name.to_lowercase();
+                // Check if this sets ZF and compares to zero
+                if dst_name.contains("zf") {
+                    if b.is_const() && parse_const_value(&b.name) == Some(0) {
+                        // This is ZF = (sub_result == 0)
+                        let a_key = a.display_name();
+                        if let Some((orig_a, orig_b)) = self.sub_results.get(&a_key).cloned() {
+                            // ZF=1 when orig_a == orig_b
+                            self.flag_origins
+                                .insert(dst.display_name(), (orig_a, orig_b));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Trace an SSA variable back to its original source by following Copy operations.
+    /// This is used for comparison reconstruction to find the actual argument name.
+    fn trace_ssa_var_to_source(&self, var: &SSAVar) -> String {
+        let mut current_key = var.display_name();
+        let mut visited = HashSet::new();
+
+        // Trace through up to 20 copies to find the source
+        for _ in 0..20 {
+            if visited.contains(&current_key) {
+                break; // Cycle detected
+            }
+            visited.insert(current_key.clone());
+
+            // Use copy_sources map to trace through copies
+            if let Some(src_key) = self.copy_sources.get(&current_key) {
+                // Check if this is a memory dereference marker
+                if src_key.starts_with("*") {
+                    // This was loaded from memory - can't trace further easily
+                    // But check if the value stored there came from a register
+                    // For now, just return a placeholder
+                    return format!("var_{}", current_key.split('_').last().unwrap_or("0"));
+                }
+                current_key = src_key.clone();
+                continue;
+            }
+
+            // No more copies - check what we have
+            break;
+        }
+
+        // Format the final result nicely
+        self.format_traced_name(&current_key)
+    }
+
+    /// Normalize a stack address for matching Store→Load pairs.
+    /// Addresses like tmp:4700_1 and tmp:4700_2 at the same offset should match.
+    fn normalize_stack_address(&self, addr: &SSAVar) -> String {
+        // The address variable name contains the unique address (e.g., "tmp:4700")
+        // Different versions (tmp:4700_1, tmp:4700_2) compute the same address
+        // So we just use the base name without version
+        let addr_key = addr.display_name();
+
+        // Strip version number to get canonical address
+        // "tmp:4700_1" -> "tmp:4700"
+        if let Some((base, _)) = addr_key.rsplit_once('_') {
+            return base.to_string();
+        }
+
+        addr_key
+    }
+
+    /// Format a traced SSA variable name for display.
+    fn format_traced_name(&self, key: &str) -> String {
+        // Check if it's a named register (not tmp: or const:)
+        if !key.starts_with("tmp:") && !key.starts_with("const:") && !key.starts_with("ram:") {
+            // It's a register name like "EDI_0" or "RAX_1"
+            // Split into base and version
+            if let Some((base, version)) = key.rsplit_once('_') {
+                if version == "0" {
+                    // Version 0 = function input/parameter
+                    return base.to_lowercase();
+                }
+                // Other versions - show the name with version
+                return format!("{}_{}", base.to_lowercase(), version);
+            }
+            return key.to_lowercase();
+        }
+
+        // For temporaries, generate a simple name
+        if key.starts_with("tmp:") {
+            // Extract version for unique naming
+            if let Some(version) = key.rsplit_once('_').map(|(_, v)| v) {
+                return format!("t{}", version);
+            }
+        }
+
+        key.to_string()
+    }
+
+    /// Convert an expression to a simple name string (for comparison reconstruction).
+    fn expr_to_simple_name(&self, expr: &CExpr) -> String {
+        match expr {
+            CExpr::Var(name) => {
+                // Try to trace through to get the actual source
+                self.trace_to_source(name)
+            }
+            CExpr::IntLit(val) => {
+                if *val < 0 {
+                    format!("{}", val)
+                } else if *val > 0xffff {
+                    format!("0x{:x}", val)
+                } else {
+                    format!("{}", val)
+                }
+            }
+            CExpr::UIntLit(val) => {
+                if *val > 0xffff {
+                    format!("0x{:x}", val)
+                } else {
+                    format!("{}", val)
+                }
+            }
+            // For complex expressions, just use a placeholder
+            _ => format!("{:?}", expr),
+        }
+    }
+
+    /// Trace through copies to find the original source variable.
+    /// This is used for comparison reconstruction to get the actual argument name.
+    /// Unlike get_expr, this traces through ALL copies regardless of use count.
+    fn trace_to_source(&self, name: &str) -> String {
+        let mut current = name.to_string();
+        let mut visited = HashSet::new();
+
+        // Trace through up to 20 copies to find the source
+        for _ in 0..20 {
+            if visited.contains(&current) {
+                break; // Cycle detected
+            }
+            visited.insert(current.clone());
+
+            // Look up the definition
+            if let Some(expr) = self.definitions.get(&current) {
+                match expr {
+                    // If it's a simple variable reference, continue tracing
+                    CExpr::Var(next_name) => {
+                        // Check if this looks like a temp name (t1_1 style)
+                        // If so, we haven't traced far enough - try to find its definition
+                        if next_name.starts_with("t") && next_name.contains("_") {
+                            // This is a temp var that wasn't inlined due to use count
+                            // Try to find the original by looking for the tmp: definition
+                            // We need to find the display name for this temp
+                            // The temp name "t1_1" corresponds to "tmp:xxx_1"
+                            // We can't easily reverse this, so just return what we have
+                            current = next_name.clone();
+                            continue;
+                        }
+                        // It's a register name or similar - could be the source
+                        current = next_name.clone();
+                        continue;
+                    }
+                    // If it's a cast, trace through
+                    CExpr::Cast { expr: inner, .. } => {
+                        if let CExpr::Var(next_name) = inner.as_ref() {
+                            current = next_name.clone();
+                            continue;
+                        }
+                    }
+                    // For any other expression, we've found the definition
+                    _ => {}
+                }
+            }
+            break;
+        }
+
+        // Clean up the name - prefer readable format
+        // If it's a version 0 register, it's likely a function parameter
+        if current.ends_with("_0") && !current.starts_with("t") {
+            // This is a register at version 0 - likely a parameter
+            let base = current.strip_suffix("_0").unwrap_or(&current);
+            // Make it more readable (e.g., "edi_0" -> "edi")
+            return base.to_string();
+        }
+
+        current
     }
 
     /// Analyze multiple blocks (for function-level folding).
@@ -801,9 +1059,116 @@ impl FoldingContext {
     /// Extract a condition expression from a branch operation.
     pub fn extract_condition(&self, op: &SSAOp) -> Option<CExpr> {
         match op {
-            SSAOp::CBranch { cond, .. } => Some(self.get_expr(cond)),
+            SSAOp::CBranch { cond, .. } => Some(self.get_condition_expr(cond)),
             _ => None,
         }
+    }
+
+    /// Get the expression for a condition variable, always inlining its definition.
+    /// Unlike get_expr(), this bypasses the should_inline() check because we always
+    /// want to see the actual condition expression, not a temp variable name.
+    fn get_condition_expr(&self, var: &SSAVar) -> CExpr {
+        let key = var.display_name();
+
+        // Always inline constants
+        if var.is_const() {
+            return self.const_to_expr(var);
+        }
+
+        // Try to inline the condition's definition
+        if let Some(expr) = self.definitions.get(&key) {
+            // Try to reconstruct comparison from flag patterns
+            if let Some(reconstructed) = self.try_reconstruct_condition(expr) {
+                return reconstructed;
+            }
+            return expr.clone();
+        }
+
+        // Fallback to variable reference
+        CExpr::Var(self.var_name(var))
+    }
+
+    /// Try to reconstruct a high-level comparison from x86 flag patterns.
+    /// Handles patterns like: BoolNot(ZF) -> a != b, ZF -> a == b
+    fn try_reconstruct_condition(&self, expr: &CExpr) -> Option<CExpr> {
+        match expr {
+            // Pattern: !ZF (BoolNot of ZF) means "not equal"
+            CExpr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => {
+                if let CExpr::Var(flag_name) = operand.as_ref() {
+                    let flag_lower = flag_name.to_lowercase();
+                    if flag_lower.contains("zf") {
+                        // !ZF means a != b
+                        if let Some((left, right)) = self.lookup_flag_origin(flag_name) {
+                            return Some(CExpr::binary(
+                                BinaryOp::Ne,
+                                CExpr::Var(left),
+                                CExpr::Var(right),
+                            ));
+                        }
+                    }
+                }
+                // Try to recurse into the operand
+                if let Some(inner) = self.try_reconstruct_condition(operand) {
+                    return Some(CExpr::unary(UnaryOp::Not, inner));
+                }
+                None
+            }
+            // Pattern: ZF directly means "equal"
+            CExpr::Var(flag_name) => {
+                let flag_lower = flag_name.to_lowercase();
+                if flag_lower.contains("zf") {
+                    if let Some((left, right)) = self.lookup_flag_origin(flag_name) {
+                        return Some(CExpr::binary(
+                            BinaryOp::Eq,
+                            CExpr::Var(left),
+                            CExpr::Var(right),
+                        ));
+                    }
+                }
+                None
+            }
+            // Pattern: SF (sign flag) could be a < 0 comparison
+            // TODO: Handle more flag patterns (SF, CF, OF)
+            _ => None,
+        }
+    }
+
+    /// Extract switch expression from an operation (for switch statement detection).
+    pub fn extract_switch_expr(&self, op: &SSAOp) -> Option<CExpr> {
+        // Look for indirect branch (BranchInd) which typically holds the switch variable
+        if let SSAOp::BranchInd { target } = op {
+            return Some(self.get_expr(target));
+        }
+        None
+    }
+
+    /// Look up the original comparison operands for a flag variable.
+    fn lookup_flag_origin(&self, flag_name: &str) -> Option<(String, String)> {
+        let flag_lower = flag_name.to_lowercase();
+
+        // Try exact match first (case-insensitive)
+        for (key, origin) in &self.flag_origins {
+            if key.to_lowercase() == flag_lower {
+                return Some(origin.clone());
+            }
+        }
+
+        // Try matching by base name (without version suffix)
+        // e.g., "zf_1" should match "ZF_1", "zf" should match "zf_1"
+        for (key, origin) in &self.flag_origins {
+            let key_lower = key.to_lowercase();
+            // Check if they share the same base (e.g., "zf" part)
+            let flag_base = flag_lower.split('_').next().unwrap_or(&flag_lower);
+            let key_base = key_lower.split('_').next().unwrap_or(&key_lower);
+            if flag_base == key_base {
+                return Some(origin.clone());
+            }
+        }
+
+        None
     }
 }
 
@@ -852,9 +1217,22 @@ fn parse_const_value(name: &str) -> Option<u64> {
         .or_else(|| val_str.strip_prefix("0X"))
     {
         u64::from_str_radix(hex, 16).ok()
-    } else if val_str.chars().all(|c| c.is_ascii_hexdigit()) && val_str.len() > 4 {
-        // Likely a hex value without 0x prefix
-        u64::from_str_radix(val_str, 16).ok()
+    } else if val_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        // All hex digits - could be hex without 0x prefix
+        // Try hex first if it contains a-f, otherwise try decimal
+        if val_str.chars().any(|c| c.is_ascii_alphabetic()) {
+            // Contains letters, must be hex
+            u64::from_str_radix(val_str, 16).ok()
+        } else {
+            // All digits - could be decimal or hex
+            // If it's a long number (> 4 digits), treat as hex
+            if val_str.len() > 4 {
+                u64::from_str_radix(val_str, 16).ok()
+            } else {
+                // Short number - parse as decimal
+                val_str.parse().ok()
+            }
+        }
     } else {
         val_str.parse().ok()
     }
@@ -1042,5 +1420,60 @@ mod tests {
         // Should only have one statement (RAX_1 assignment)
         // ZF_1 should be eliminated as dead
         assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
+    fn test_comparison_reconstruction() {
+        // Test that CMP instruction pattern is reconstructed:
+        // IntSub tmp = a - 0xdead
+        // IntEqual ZF = tmp == 0
+        // BoolNot cond = !ZF
+        // CBranch cond  -> should become "if (a != 0xdead)"
+
+        let edi_0 = make_var("EDI", 0, 4);
+        let tmp_sub = make_var("tmp:1000", 1, 4);
+        let zf_1 = make_var("ZF", 1, 1);
+        let cond = make_var("tmp:2000", 1, 1);
+        let const_dead = make_var("const:dead", 0, 4);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let block = make_block(vec![
+            // tmp_sub = edi_0 - 0xdead (the CMP)
+            SSAOp::IntSub {
+                dst: tmp_sub.clone(),
+                a: edi_0.clone(),
+                b: const_dead.clone(),
+            },
+            // ZF = tmp_sub == 0
+            SSAOp::IntEqual {
+                dst: zf_1.clone(),
+                a: tmp_sub.clone(),
+                b: const_0.clone(),
+            },
+            // cond = !ZF
+            SSAOp::BoolNot {
+                dst: cond.clone(),
+                src: zf_1.clone(),
+            },
+            // CBranch cond
+            SSAOp::CBranch {
+                cond: cond.clone(),
+                target: make_var("const:1000", 0, 8),
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+
+        // Check that flag_origins was populated
+        assert!(
+            ctx.flag_origins.contains_key("ZF_1"),
+            "ZF_1 should be in flag_origins"
+        );
+
+        // Check the origin values
+        let (left, right) = ctx.flag_origins.get("ZF_1").unwrap();
+        assert_eq!(left, "edi", "Left operand should be edi");
+        assert_eq!(right, "0xdead", "Right operand should be 0xdead");
     }
 }

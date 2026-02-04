@@ -24,6 +24,8 @@ pub struct ControlFlowStructurer<'a> {
     labels: HashMap<u64, String>,
     /// Counter for generating unique labels.
     label_counter: usize,
+    /// Region analyzer for detecting breaks/continues.
+    region_analyzer: Option<RegionAnalyzer<'a>>,
 }
 
 impl<'a> ControlFlowStructurer<'a> {
@@ -34,12 +36,16 @@ impl<'a> ControlFlowStructurer<'a> {
         let blocks: Vec<_> = func.blocks().cloned().collect();
         fold_ctx.analyze_blocks(&blocks);
 
+        // Create region analyzer for break/continue detection
+        let region_analyzer = RegionAnalyzer::new(func);
+
         Self {
             func,
             expr_builder: ExpressionBuilder::new(ptr_size),
             fold_ctx: Some(fold_ctx),
             labels: HashMap::new(),
             label_counter: 0,
+            region_analyzer: Some(region_analyzer),
         }
     }
 
@@ -51,6 +57,7 @@ impl<'a> ControlFlowStructurer<'a> {
             fold_ctx: None,
             labels: HashMap::new(),
             label_counter: 0,
+            region_analyzer: None,
         }
     }
 
@@ -125,8 +132,60 @@ impl<'a> ControlFlowStructurer<'a> {
                     cond,
                 }
             }
+            Region::Switch {
+                switch_block,
+                cases,
+                default,
+                merge_block: _,
+            } => {
+                // Get the switch expression from the block
+                let switch_expr = self.get_switch_expression(*switch_block);
+
+                // Build switch cases
+                let mut switch_cases = Vec::new();
+                for (case_value, case_region) in cases {
+                    let value_expr = case_value
+                        .map(|v| CExpr::IntLit(v as i64))
+                        .unwrap_or(CExpr::IntLit(0));
+                    let case_stmt = self.structure_region(case_region);
+                    switch_cases.push(crate::ast::SwitchCase {
+                        value: value_expr,
+                        body: vec![case_stmt, CStmt::Break],
+                    });
+                }
+
+                // Build default case
+                let default_body = default.as_ref().map(|r| vec![self.structure_region(r)]);
+
+                CStmt::Switch {
+                    expr: switch_expr,
+                    cases: switch_cases,
+                    default: default_body,
+                }
+            }
             Region::Irreducible { entry, blocks } => self.structure_irreducible(*entry, blocks),
         }
+    }
+
+    /// Get the switch expression from a block.
+    fn get_switch_expression(&mut self, addr: u64) -> CExpr {
+        let block = match self.func.get_block(addr) {
+            Some(b) => b,
+            None => return CExpr::Var("switch_expr".to_string()),
+        };
+
+        // Look for an indirect branch which typically has the switch variable
+        // For now, return a generic switch variable
+        // A more sophisticated implementation would trace the indirect branch target
+        if let Some(ref fold_ctx) = self.fold_ctx {
+            for op in &block.ops {
+                if let Some(expr) = fold_ctx.extract_switch_expr(op) {
+                    return expr;
+                }
+            }
+        }
+
+        CExpr::Var("test".to_string())
     }
 
     /// Structure a single basic block.
@@ -153,6 +212,15 @@ impl<'a> ControlFlowStructurer<'a> {
                 if let Some(stmt) = self.expr_builder.op_to_stmt(op) {
                     stmts.push(stmt);
                 }
+            }
+        }
+
+        // Check for break/continue at block end
+        if let Some(ref analyzer) = self.region_analyzer {
+            if analyzer.is_loop_continue(addr) {
+                stmts.push(CStmt::Continue);
+            } else if analyzer.is_loop_break(addr) {
+                stmts.push(CStmt::Break);
             }
         }
 

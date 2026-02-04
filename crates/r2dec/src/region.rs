@@ -41,6 +41,17 @@ pub enum Region {
         /// The condition block.
         cond_block: u64,
     },
+    /// A switch statement.
+    Switch {
+        /// The block containing the switch expression.
+        switch_block: u64,
+        /// Case targets: (case_value, case_region).
+        cases: Vec<(Option<u64>, Box<Region>)>,
+        /// Default case region (if any).
+        default: Option<Box<Region>>,
+        /// The merge block after the switch (if any).
+        merge_block: Option<u64>,
+    },
     /// An irreducible region (contains gotos).
     Irreducible {
         /// Entry block.
@@ -59,6 +70,7 @@ impl Region {
             Self::IfThenElse { cond_block, .. } => *cond_block,
             Self::WhileLoop { header, .. } => *header,
             Self::DoWhileLoop { body, .. } => body.entry(),
+            Self::Switch { switch_block, .. } => *switch_block,
             Self::Irreducible { entry, .. } => *entry,
         }
     }
@@ -94,6 +106,24 @@ impl Region {
                 blocks.push(*cond_block);
                 blocks
             }
+            Self::Switch {
+                switch_block,
+                cases,
+                default,
+                merge_block,
+            } => {
+                let mut blocks = vec![*switch_block];
+                for (_, case_region) in cases {
+                    blocks.extend(case_region.blocks());
+                }
+                if let Some(def) = default {
+                    blocks.extend(def.blocks());
+                }
+                if let Some(merge) = merge_block {
+                    blocks.push(*merge);
+                }
+                blocks
+            }
             Self::Irreducible { blocks, .. } => blocks.clone(),
         }
     }
@@ -108,6 +138,10 @@ pub struct RegionAnalyzer<'a> {
     loops: HashMap<u64, HashSet<u64>>,
     /// Processed blocks.
     processed: HashSet<u64>,
+    /// Blocks that exit a loop (break targets): block_addr -> exit_target.
+    loop_exits: HashMap<u64, u64>,
+    /// Blocks that continue to loop header: block_addr -> header.
+    loop_continues: HashMap<u64, u64>,
 }
 
 impl<'a> RegionAnalyzer<'a> {
@@ -118,9 +152,12 @@ impl<'a> RegionAnalyzer<'a> {
             back_edges: HashMap::new(),
             loops: HashMap::new(),
             processed: HashSet::new(),
+            loop_exits: HashMap::new(),
+            loop_continues: HashMap::new(),
         };
         analyzer.find_back_edges();
         analyzer.find_loops();
+        analyzer.find_loop_exits();
         analyzer
     }
 
@@ -167,6 +204,39 @@ impl<'a> RegionAnalyzer<'a> {
 
             self.loops.insert(header, body);
         }
+    }
+
+    /// Find loop exit and continue edges.
+    fn find_loop_exits(&mut self) {
+        for (&header, body) in &self.loops {
+            for &block in body {
+                // Check successors of each block in the loop
+                for succ in self.func.successors(block) {
+                    if succ == header && block != header {
+                        // This is a continue (jump back to header, not from header itself)
+                        self.loop_continues.insert(block, header);
+                    } else if !body.contains(&succ) {
+                        // This is a break (exit from loop)
+                        self.loop_exits.insert(block, succ);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if a block contains a break (loop exit).
+    pub fn is_loop_break(&self, block: u64) -> bool {
+        self.loop_exits.contains_key(&block)
+    }
+
+    /// Check if a block contains a continue (jump to loop header).
+    pub fn is_loop_continue(&self, block: u64) -> bool {
+        self.loop_continues.contains_key(&block)
+    }
+
+    /// Get the loop exit target for a block.
+    pub fn get_loop_exit_target(&self, block: u64) -> Option<u64> {
+        self.loop_exits.get(&block).copied()
     }
 
     fn collect_loop_body(&self, block: u64, header: u64, body: &mut HashSet<u64>) {
@@ -231,7 +301,12 @@ impl<'a> RegionAnalyzer<'a> {
                 self.analyze_conditional(entry, succs[0], succs[1])
             }
             _ => {
-                // Multiple successors (switch) - treat as irreducible for now
+                // Multiple successors - likely a switch statement
+                // Try to detect switch pattern
+                if let Some(switch_region) = self.detect_switch(entry, &succs) {
+                    return switch_region;
+                }
+                // Fallback to irreducible
                 self.processed.insert(entry);
                 Region::Irreducible {
                     entry,
@@ -369,6 +444,83 @@ impl<'a> RegionAnalyzer<'a> {
     /// Get the loop body for a header.
     pub fn get_loop_body(&self, header: u64) -> Option<&HashSet<u64>> {
         self.loops.get(&header)
+    }
+
+    /// Detect a switch statement pattern.
+    /// Returns a Switch region if the entry block dispatches to multiple targets.
+    fn detect_switch(&mut self, entry: u64, targets: &[u64]) -> Option<Region> {
+        // A switch is detected when:
+        // 1. Multiple successors (already checked by caller)
+        // 2. Targets don't all merge back to the same point (that would be if-else chain)
+
+        if targets.len() < 3 {
+            // Too few targets for a meaningful switch
+            return None;
+        }
+
+        self.processed.insert(entry);
+
+        // Find the common merge point for all targets
+        let merge = self.find_switch_merge(targets);
+
+        // Build case regions for each target
+        let mut cases = Vec::new();
+        let mut default_idx = None;
+
+        for (idx, &target) in targets.iter().enumerate() {
+            if Some(target) == merge {
+                // This target goes directly to merge - likely default/fallthrough
+                default_idx = Some(idx);
+                continue;
+            }
+
+            // For now, we don't have case values - just use index as placeholder
+            // A more sophisticated implementation would trace back to find the
+            // comparison values from the switch expression
+            let case_value = Some(idx as u64);
+            let case_region = Box::new(self.analyze_region(target));
+            cases.push((case_value, case_region));
+        }
+
+        // Build default region if we have one
+        let default = default_idx.map(|idx| Box::new(self.analyze_region(targets[idx])));
+
+        Some(Region::Switch {
+            switch_block: entry,
+            cases,
+            default,
+            merge_block: merge,
+        })
+    }
+
+    /// Find the merge point for switch targets.
+    fn find_switch_merge(&self, targets: &[u64]) -> Option<u64> {
+        if targets.is_empty() {
+            return None;
+        }
+
+        // Collect reachable blocks from each target
+        let mut reachable_sets: Vec<HashSet<u64>> = Vec::new();
+        for &target in targets {
+            let mut reachable = HashSet::new();
+            self.collect_reachable(target, &mut reachable, 10);
+            reachable_sets.push(reachable);
+        }
+
+        // Find intersection of all reachable sets
+        if let Some(first) = reachable_sets.first() {
+            let common: HashSet<u64> = first
+                .iter()
+                .copied()
+                .filter(|b| reachable_sets.iter().all(|s| s.contains(b)))
+                .collect();
+
+            // Return the first common block (closest to targets)
+            // In a proper implementation, we'd want the immediate post-dominator
+            return common.into_iter().min();
+        }
+
+        None
     }
 }
 
