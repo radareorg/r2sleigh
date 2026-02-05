@@ -442,15 +442,15 @@ impl VariableRecovery {
         format!("{}{}", base, count)
     }
 
-    /// Get a type from a bit size.
+    /// Get a type from a byte size.
     fn type_from_size(&self, size: u32) -> CType {
         match size {
-            1 => CType::Bool,
-            8 => CType::Int(8),
-            16 => CType::Int(16),
-            32 => CType::Int(32),
-            64 => CType::Int(64),
-            _ => CType::Int(size),
+            0 => CType::Unknown,
+            1 => CType::Int(8),
+            2 => CType::Int(16),
+            4 => CType::Int(32),
+            8 => CType::Int(64),
+            _ => CType::Int(size.saturating_mul(8)),
         }
     }
 

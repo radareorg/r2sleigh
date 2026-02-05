@@ -385,12 +385,12 @@ impl TypeInference {
     /// Get a type from a size.
     pub fn type_from_size(&self, size: u32) -> CType {
         match size {
-            1 => CType::Bool,
-            8 => CType::Int(8),
-            16 => CType::Int(16),
-            32 => CType::Int(32),
-            64 => CType::Int(64),
-            _ => CType::Int(size),
+            0 => CType::Unknown,
+            1 => CType::Int(8),
+            2 => CType::Int(16),
+            4 => CType::Int(32),
+            8 => CType::Int(64),
+            _ => CType::Int(size.saturating_mul(8)),
         }
     }
 
@@ -516,10 +516,10 @@ mod tests {
     fn test_type_from_size() {
         let ti = TypeInference::new(64);
 
-        assert_eq!(ti.type_from_size(1), CType::Bool);
-        assert_eq!(ti.type_from_size(8), CType::Int(8));
-        assert_eq!(ti.type_from_size(32), CType::Int(32));
-        assert_eq!(ti.type_from_size(64), CType::Int(64));
+        assert_eq!(ti.type_from_size(1), CType::Int(8));
+        assert_eq!(ti.type_from_size(2), CType::Int(16));
+        assert_eq!(ti.type_from_size(4), CType::Int(32));
+        assert_eq!(ti.type_from_size(8), CType::Int(64));
     }
 
     #[test]

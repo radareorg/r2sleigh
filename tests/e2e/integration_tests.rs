@@ -120,9 +120,9 @@ mod instruction_analysis {
     use super::*;
 
     /// Test addresses in vuln_test binary (check_secret function)
-    const CMP_INSTRUCTION_ADDR: u64 = 0x401241;
-    const MOV_INSTRUCTION_ADDR: u64 = 0x40123e;
-    const CPUID_INSTRUCTION_ADDR: u64 = 0x4014d9;
+    const CMP_INSTRUCTION_ADDR: u64 = 0x401261;
+    const MOV_INSTRUCTION_ADDR: u64 = 0x40125e;
+    const CPUID_INSTRUCTION_ADDR: u64 = 0x4014f9;
 
     #[rstest]
     #[case("a:sla.json")]
@@ -694,6 +694,64 @@ mod decompilation {
         let result = r2_at_func(vuln_test_binary(), "dbg.solve_equation", "a:sla.dec");
         result.assert_ok();
         assert!(result.contains("{"), "Should have function braces");
+    }
+
+    #[test]
+    fn decompiles_ptradd_subscript() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_array_index", "a:sla.dec");
+        result.assert_ok();
+        assert!(result.contains("["), "Should use subscript for pointer add");
+    }
+
+    #[test]
+    fn decompiles_ptrsub_subscript() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_array_index_neg", "a:sla.dec");
+        result.assert_ok();
+        assert!(result.contains("["), "Should use subscript for pointer sub");
+    }
+
+    #[test]
+    fn decompiles_piece_pattern() {
+        setup();
+        let piece = r2_at_func(vuln_test_binary(), "dbg.test_piece", "a:sla.dec");
+        piece.assert_ok();
+        assert!(
+            piece.contains("<<"),
+            "Should show a shift for PIECE"
+        );
+        assert!(piece.contains("|"), "Should show bitwise OR for PIECE");
+    }
+
+    #[test]
+    fn decompiles_boolxor() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_boolxor", "a:sla.dec");
+        result.assert_ok();
+        assert!(result.contains("^"), "Should emit XOR for bool xor");
+    }
+
+    #[test]
+    fn decompiles_cast_u8() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_cast_u8", "a:sla.dec");
+        result.assert_ok();
+        assert!(
+            result.contains("(int64_t)"),
+            "Should show a cast in output"
+        );
+    }
+
+    #[test]
+    fn decompiles_callother() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_cpuid", "a:sla.dec");
+        result.assert_ok();
+        assert!(
+            result.contains("callother("),
+            "Should emit callother for user-defined op"
+        );
     }
 }
 

@@ -29,6 +29,14 @@ use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 // Type alias for clarity
 type SSABlock = FunctionSSABlock;
 
+#[derive(Debug, Clone)]
+struct PtrArith {
+    base: SSAVar,
+    index: SSAVar,
+    element_size: u32,
+    is_sub: bool,
+}
+
 /// Threshold for detecting 64-bit negative values stored as unsigned.
 /// Values above this are likely negative offsets (within ~65536 of u64::MAX).
 /// This handles cases like stack offsets: 0xffffffffffffffb8 represents -72.
@@ -75,6 +83,8 @@ pub struct FoldingContext {
     /// Maps memory addresses (display_name of address var) to stored values (display_name).
     /// Used to trace through Store→Load pairs.
     memory_stores: HashMap<String, String>,
+    /// Tracks pointer arithmetic results for subscript reconstruction.
+    ptr_arith: HashMap<String, PtrArith>,
     /// Return register name ("rax" for 64-bit, "eax" for 32-bit).
     ret_reg_name: String,
     /// The function's exit block address (block containing SSAOp::Return).
@@ -83,6 +93,8 @@ pub struct FoldingContext {
     return_blocks: HashSet<u64>,
     /// Current block address being processed (for return detection).
     current_block_addr: Option<u64>,
+    /// Optional userop name mappings for CallOther.
+    userop_names: HashMap<u32, String>,
 }
 
 impl FoldingContext {
@@ -119,6 +131,7 @@ impl FoldingContext {
             sub_results: HashMap::new(),
             copy_sources: HashMap::new(),
             memory_stores: HashMap::new(),
+            ptr_arith: HashMap::new(),
             ret_reg_name: if ptr_size == 64 {
                 "rax".to_string()
             } else {
@@ -127,6 +140,7 @@ impl FoldingContext {
             exit_block: None,
             return_blocks: HashSet::new(),
             current_block_addr: None,
+            userop_names: HashMap::new(),
         }
     }
 
@@ -154,6 +168,11 @@ impl FoldingContext {
     /// Set the symbol/global variable names mapping.
     pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
         self.symbols = symbols;
+    }
+
+    /// Set CallOther userop name mappings.
+    pub fn set_userop_names(&mut self, names: HashMap<u32, String>) {
+        self.userop_names = names;
     }
 
     /// Analyze function structure to detect return patterns.
@@ -250,6 +269,14 @@ impl FoldingContext {
         self.symbols.get(&addr)
     }
 
+    /// Look up a userop name for CallOther.
+    fn lookup_userop_name(&self, userop: u32) -> String {
+        self.userop_names
+            .get(&userop)
+            .cloned()
+            .unwrap_or_else(|| format!("userop_{}", userop))
+    }
+
     /// Analyze a block to collect use counts and definitions.
     pub fn analyze_block(&mut self, block: &SSABlock) {
         // First pass: count uses of each variable
@@ -292,6 +319,42 @@ impl FoldingContext {
                     self.copy_sources
                         .insert(dst.display_name(), format!("*{}", addr.display_name()));
                 }
+            }
+
+            if let SSAOp::PtrAdd {
+                dst,
+                base,
+                index,
+                element_size,
+            } = op
+            {
+                self.ptr_arith.insert(
+                    dst.display_name(),
+                    PtrArith {
+                        base: base.clone(),
+                        index: index.clone(),
+                        element_size: *element_size,
+                        is_sub: false,
+                    },
+                );
+            }
+
+            if let SSAOp::PtrSub {
+                dst,
+                base,
+                index,
+                element_size,
+            } = op
+            {
+                self.ptr_arith.insert(
+                    dst.display_name(),
+                    PtrArith {
+                        base: base.clone(),
+                        index: index.clone(),
+                        element_size: *element_size,
+                        is_sub: true,
+                    },
+                );
             }
 
             if let Some(dst) = op.dst() {
@@ -967,7 +1030,18 @@ impl FoldingContext {
     fn op_to_expr(&self, op: &SSAOp) -> CExpr {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
-            SSAOp::Load { addr, .. } => CExpr::Deref(Box::new(self.get_expr(addr))),
+            SSAOp::Load { addr, .. } => {
+                let addr_expr = self.get_expr(addr);
+                if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
+                    CExpr::Var(stack_var)
+                } else if let Some(ptr) = self.ptr_arith.get(&addr.display_name()) {
+                    self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+                } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
+                    sub
+                } else {
+                    CExpr::Deref(Box::new(addr_expr))
+                }
+            }
             SSAOp::IntAdd { a, b, .. } => self.binary_expr(BinaryOp::Add, a, b),
             SSAOp::IntSub { a, b, .. } => self.binary_expr(BinaryOp::Sub, a, b),
             SSAOp::IntMult { a, b, .. } => self.binary_expr(BinaryOp::Mul, a, b),
@@ -996,6 +1070,7 @@ impl FoldingContext {
             SSAOp::IntNot { src, .. } => CExpr::unary(UnaryOp::BitNot, self.get_expr(src)),
             SSAOp::BoolAnd { a, b, .. } => self.binary_expr(BinaryOp::And, a, b),
             SSAOp::BoolOr { a, b, .. } => self.binary_expr(BinaryOp::Or, a, b),
+            SSAOp::BoolXor { a, b, .. } => self.binary_expr(BinaryOp::BitXor, a, b),
             SSAOp::BoolNot { src, .. } => CExpr::unary(UnaryOp::Not, self.get_expr(src)),
             SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => {
                 let ty = type_from_size(dst.size);
@@ -1004,6 +1079,31 @@ impl FoldingContext {
             SSAOp::Trunc { dst, src } => {
                 let ty = type_from_size(dst.size);
                 CExpr::cast(ty, self.get_expr(src))
+            }
+            SSAOp::Piece { dst, hi, lo } => {
+                let shift_bits = lo.size.saturating_mul(8);
+                let dst_ty = uint_type_from_size(dst.size);
+                let hi_cast = CExpr::cast(dst_ty.clone(), self.get_expr(hi));
+                let lo_cast = CExpr::cast(dst_ty.clone(), self.get_expr(lo));
+                let shifted = if shift_bits == 0 {
+                    hi_cast
+                } else {
+                    CExpr::binary(BinaryOp::Shl, hi_cast, CExpr::IntLit(shift_bits as i64))
+                };
+                CExpr::binary(BinaryOp::BitOr, shifted, lo_cast)
+            }
+            SSAOp::Subpiece { dst, src, offset } => {
+                if *offset == 0 && dst.size == src.size {
+                    self.get_expr(src)
+                } else if *offset == 0 {
+                    CExpr::cast(uint_type_from_size(dst.size), self.get_expr(src))
+                } else {
+                    let shift_bits = offset.saturating_mul(8);
+                    let src_cast = CExpr::cast(uint_type_from_size(src.size), self.get_expr(src));
+                    let shifted =
+                        CExpr::binary(BinaryOp::Shr, src_cast, CExpr::IntLit(shift_bits as i64));
+                    CExpr::cast(uint_type_from_size(dst.size), shifted)
+                }
             }
             SSAOp::FloatAdd { a, b, .. } => self.binary_expr(BinaryOp::Add, a, b),
             SSAOp::FloatSub { a, b, .. } => self.binary_expr(BinaryOp::Sub, a, b),
@@ -1019,6 +1119,10 @@ impl FoldingContext {
                 CExpr::cast(ty, self.get_expr(src))
             }
             SSAOp::Float2Int { dst, src } => {
+                let ty = type_from_size(dst.size);
+                CExpr::cast(ty, self.get_expr(src))
+            }
+            SSAOp::Cast { dst, src } => {
                 let ty = type_from_size(dst.size);
                 CExpr::cast(ty, self.get_expr(src))
             }
@@ -1045,6 +1149,34 @@ impl FoldingContext {
                 };
                 CExpr::call(func_expr, vec![])
             }
+            SSAOp::CallOther {
+                output: _,
+                userop,
+                inputs,
+            } => {
+                let mut args = Vec::with_capacity(inputs.len() + 1);
+                args.push(CExpr::StringLit(self.lookup_userop_name(*userop)));
+                for input in inputs {
+                    args.push(self.get_expr(input));
+                }
+                CExpr::call(CExpr::Var("callother".to_string()), args)
+            }
+            SSAOp::CpuId { .. } => {
+                let args = vec![CExpr::StringLit("cpuid".to_string())];
+                CExpr::call(CExpr::Var("callother".to_string()), args)
+            }
+            SSAOp::PtrAdd {
+                base,
+                index,
+                element_size,
+                ..
+            } => self.ptr_arith_expr(base, index, *element_size, false),
+            SSAOp::PtrSub {
+                base,
+                index,
+                element_size,
+                ..
+            } => self.ptr_arith_expr(base, index, *element_size, true),
             // For other ops, generate a placeholder indicating unhandled operation.
             // This helps identify operations that need explicit handling.
             _ => {
@@ -1061,6 +1193,195 @@ impl FoldingContext {
     /// Create a binary expression.
     fn binary_expr(&self, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> CExpr {
         CExpr::binary(op, self.get_expr(a), self.get_expr(b))
+    }
+
+    fn ptr_arith_expr(
+        &self,
+        base: &SSAVar,
+        index: &SSAVar,
+        element_size: u32,
+        is_sub: bool,
+    ) -> CExpr {
+        let base_expr = self.get_expr(base);
+        let index_expr = self.get_expr(index);
+        let scaled = if element_size <= 1 {
+            index_expr
+        } else {
+            CExpr::binary(
+                BinaryOp::Mul,
+                index_expr,
+                CExpr::IntLit(element_size as i64),
+            )
+        };
+        let op = if is_sub { BinaryOp::Sub } else { BinaryOp::Add };
+        CExpr::binary(op, base_expr, scaled)
+    }
+
+    fn ptr_subscript_expr(
+        &self,
+        base: &SSAVar,
+        index: &SSAVar,
+        element_size: u32,
+        is_sub: bool,
+    ) -> CExpr {
+        let elem_ty = uint_type_from_size(element_size);
+        let base_expr = CExpr::cast(CType::ptr(elem_ty), self.get_expr(base));
+        let index_expr = if is_sub {
+            CExpr::unary(UnaryOp::Neg, self.get_expr(index))
+        } else {
+            self.get_expr(index)
+        };
+        CExpr::Subscript {
+            base: Box::new(base_expr),
+            index: Box::new(index_expr),
+        }
+    }
+
+    fn try_subscript_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
+        let expr = self
+            .definitions
+            .get(&addr.display_name())
+            .cloned()
+            .unwrap_or_else(|| addr_expr.clone());
+
+        let (base_expr, index_expr, elem_size, is_sub) = self.extract_base_index_scale(&expr)?;
+
+        if elem_size == 0 {
+            return None;
+        }
+
+        let elem_ty = uint_type_from_size(elem_size);
+        let base_cast = CExpr::cast(CType::ptr(elem_ty), base_expr);
+        let index_final = if is_sub {
+            CExpr::unary(UnaryOp::Neg, index_expr)
+        } else {
+            index_expr
+        };
+
+        Some(CExpr::Subscript {
+            base: Box::new(base_cast),
+            index: Box::new(index_final),
+        })
+    }
+
+    fn extract_base_index_scale(&self, expr: &CExpr) -> Option<(CExpr, CExpr, u32, bool)> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => self
+                .extract_base_index_from_add(left, right)
+                .map(|(b, i, s)| (b, i, s, false)),
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => self
+                .extract_base_index_from_add(left, right)
+                .map(|(b, i, s)| (b, i, s, true)),
+            CExpr::Var(name) => {
+                if let Some(def) = self.definitions.get(name) {
+                    self.extract_base_index_scale(def)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn extract_base_index_from_add(
+        &self,
+        left: &CExpr,
+        right: &CExpr,
+    ) -> Option<(CExpr, CExpr, u32)> {
+        if let Some((index, scale)) = self.extract_mul_const(right, 0) {
+            return self
+                .scale_to_elem_size(scale)
+                .map(|s| (left.clone(), index, s));
+        }
+        if let Some((index, scale)) = self.extract_mul_const(left, 0) {
+            return self
+                .scale_to_elem_size(scale)
+                .map(|s| (right.clone(), index, s));
+        }
+        // Fallback: base + index (scale = 1)
+        let right_resolved = self.resolve_once(right).unwrap_or_else(|| right.clone());
+        if matches!(
+            right_resolved,
+            CExpr::Var(_) | CExpr::Cast { .. } | CExpr::Binary { .. }
+        ) {
+            return Some((left.clone(), right_resolved, 1));
+        }
+        None
+    }
+
+    fn resolve_once(&self, expr: &CExpr) -> Option<CExpr> {
+        if let CExpr::Var(name) = expr {
+            self.lookup_definition(name)
+        } else {
+            None
+        }
+    }
+
+    fn extract_mul_const(&self, expr: &CExpr, depth: u32) -> Option<(CExpr, i64)> {
+        if depth > 2 {
+            return None;
+        }
+
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Mul,
+                left,
+                right,
+            } => {
+                if let Some(c) = self.literal_to_i64(right) {
+                    return Some((left.as_ref().clone(), c));
+                }
+                if let Some(c) = self.literal_to_i64(left) {
+                    return Some((right.as_ref().clone(), c));
+                }
+                None
+            }
+            CExpr::Cast { expr: inner, .. } => self.extract_mul_const(inner, depth + 1),
+            CExpr::Var(name) => {
+                if let Some(def) = self.lookup_definition(name) {
+                    return self.extract_mul_const(&def, depth + 1);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn literal_to_i64(&self, expr: &CExpr) -> Option<i64> {
+        match expr {
+            CExpr::IntLit(v) => Some(*v),
+            CExpr::UIntLit(v) => i64::try_from(*v).ok(),
+            _ => None,
+        }
+    }
+
+    fn lookup_definition(&self, name: &str) -> Option<CExpr> {
+        if let Some(expr) = self.definitions.get(name) {
+            return Some(expr.clone());
+        }
+        if let Some((base, version)) = name.rsplit_once('_') {
+            let upper = format!("{}_{}", base.to_uppercase(), version);
+            if let Some(expr) = self.definitions.get(&upper) {
+                return Some(expr.clone());
+            }
+        }
+        None
+    }
+
+    fn scale_to_elem_size(&self, scale: i64) -> Option<u32> {
+        let abs = scale.checked_abs()? as u64;
+        if abs == 0 {
+            return None;
+        }
+        u32::try_from(abs).ok()
     }
 
     /// Convert a block to folded C statements.
@@ -1114,8 +1435,13 @@ impl FoldingContext {
                 let lhs = CExpr::Var(self.var_name(dst));
                 // Try to use stack variable name if this is a stack access
                 let addr_expr = self.get_expr(addr);
+                let addr_key = addr.display_name();
                 let rhs = if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                     CExpr::Var(stack_var)
+                } else if let Some(ptr) = self.ptr_arith.get(&addr_key) {
+                    self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+                } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
+                    sub
                 } else {
                     CExpr::Deref(Box::new(addr_expr))
                 };
@@ -1124,8 +1450,13 @@ impl FoldingContext {
             SSAOp::Store { addr, val, .. } => {
                 // Try to use stack variable name if this is a stack access
                 let addr_expr = self.get_expr(addr);
+                let addr_key = addr.display_name();
                 let lhs = if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                     CExpr::Var(stack_var)
+                } else if let Some(ptr) = self.ptr_arith.get(&addr_key) {
+                    self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+                } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
+                    sub
                 } else {
                     CExpr::Deref(Box::new(addr_expr))
                 };
@@ -1168,6 +1499,7 @@ impl FoldingContext {
             }
             SSAOp::BoolAnd { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::And),
             SSAOp::BoolOr { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Or),
+            SSAOp::BoolXor { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::BitXor),
             SSAOp::BoolNot { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs = CExpr::unary(UnaryOp::Not, self.get_expr(src));
@@ -1183,6 +1515,35 @@ impl FoldingContext {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let ty = type_from_size(dst.size);
                 let rhs = CExpr::cast(ty, self.get_expr(src));
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::Piece { dst, hi, lo } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let shift_bits = lo.size.saturating_mul(8);
+                let dst_ty = uint_type_from_size(dst.size);
+                let hi_cast = CExpr::cast(dst_ty.clone(), self.get_expr(hi));
+                let lo_cast = CExpr::cast(dst_ty.clone(), self.get_expr(lo));
+                let shifted = if shift_bits == 0 {
+                    hi_cast
+                } else {
+                    CExpr::binary(BinaryOp::Shl, hi_cast, CExpr::IntLit(shift_bits as i64))
+                };
+                let rhs = CExpr::binary(BinaryOp::BitOr, shifted, lo_cast);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::Subpiece { dst, src, offset } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = if *offset == 0 && dst.size == src.size {
+                    self.get_expr(src)
+                } else if *offset == 0 {
+                    CExpr::cast(uint_type_from_size(dst.size), self.get_expr(src))
+                } else {
+                    let shift_bits = offset.saturating_mul(8);
+                    let src_cast = CExpr::cast(uint_type_from_size(src.size), self.get_expr(src));
+                    let shifted =
+                        CExpr::binary(BinaryOp::Shr, src_cast, CExpr::IntLit(shift_bits as i64));
+                    CExpr::cast(uint_type_from_size(dst.size), shifted)
+                };
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::Call { target } => {
@@ -1208,6 +1569,57 @@ impl FoldingContext {
                 };
                 let call = CExpr::call(func_expr, vec![]);
                 Some(CStmt::Expr(call))
+            }
+            SSAOp::CallOther {
+                output,
+                userop,
+                inputs,
+            } => {
+                let mut args = Vec::with_capacity(inputs.len() + 1);
+                args.push(CExpr::StringLit(self.lookup_userop_name(*userop)));
+                for input in inputs {
+                    args.push(self.get_expr(input));
+                }
+                let call = CExpr::call(CExpr::Var("callother".to_string()), args);
+                if let Some(dst) = output {
+                    let lhs = CExpr::Var(self.var_name(dst));
+                    Some(CStmt::Expr(CExpr::assign(lhs, call)))
+                } else {
+                    Some(CStmt::Expr(call))
+                }
+            }
+            SSAOp::CpuId { dst } => {
+                let call = CExpr::call(
+                    CExpr::Var("callother".to_string()),
+                    vec![CExpr::StringLit("cpuid".to_string())],
+                );
+                let lhs = CExpr::Var(self.var_name(dst));
+                Some(CStmt::Expr(CExpr::assign(lhs, call)))
+            }
+            SSAOp::PtrAdd {
+                dst,
+                base,
+                index,
+                element_size,
+            } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = self.ptr_arith_expr(base, index, *element_size, false);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::PtrSub {
+                dst,
+                base,
+                index,
+                element_size,
+            } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = self.ptr_arith_expr(base, index, *element_size, true);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::Cast { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::cast(type_from_size(dst.size), self.get_expr(src));
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::Return { target } => Some(CStmt::Return(Some(self.get_expr(target)))),
             SSAOp::Branch { .. } | SSAOp::CBranch { .. } => {
@@ -1594,10 +2006,8 @@ impl FoldingContext {
             right,
         } = expr
         {
-            let has_of_sf =
-                self.extract_of(left).is_some() && self.extract_sf(right).is_some();
-            let has_sf_of =
-                self.extract_sf(left).is_some() && self.extract_of(right).is_some();
+            let has_of_sf = self.extract_of(left).is_some() && self.extract_sf(right).is_some();
+            let has_sf_of = self.extract_sf(left).is_some() && self.extract_of(right).is_some();
             return has_of_sf || has_sf_of;
         }
         false
@@ -1611,10 +2021,8 @@ impl FoldingContext {
             right,
         } = expr
         {
-            let has_of_sf =
-                self.extract_of(left).is_some() && self.extract_sf(right).is_some();
-            let has_sf_of =
-                self.extract_sf(left).is_some() && self.extract_of(right).is_some();
+            let has_of_sf = self.extract_of(left).is_some() && self.extract_sf(right).is_some();
+            let has_sf_of = self.extract_sf(left).is_some() && self.extract_of(right).is_some();
             return has_of_sf || has_sf_of;
         }
         // Also check for !(OF == SF)
@@ -1760,14 +2168,25 @@ fn is_hex_name(value: &str) -> bool {
 }
 
 /// Get a C type from a bit size.
-fn type_from_size(bits: u32) -> CType {
-    match bits {
-        1 => CType::Bool,
-        8 => CType::Int(8),
-        16 => CType::Int(16),
-        32 => CType::Int(32),
-        64 => CType::Int(64),
-        _ => CType::Int(bits),
+fn type_from_size(size: u32) -> CType {
+    match size {
+        0 => CType::Unknown,
+        1 => CType::Int(8),
+        2 => CType::Int(16),
+        4 => CType::Int(32),
+        8 => CType::Int(64),
+        _ => CType::Int(size.saturating_mul(8)),
+    }
+}
+
+fn uint_type_from_size(size: u32) -> CType {
+    match size {
+        0 => CType::Unknown,
+        1 => CType::UInt(8),
+        2 => CType::UInt(16),
+        4 => CType::UInt(32),
+        8 => CType::UInt(64),
+        _ => CType::UInt(size.saturating_mul(8)),
     }
 }
 

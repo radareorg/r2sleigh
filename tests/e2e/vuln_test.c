@@ -17,6 +17,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
 // Test 1: Simple password check (symbolic should find 0xDEAD)
@@ -147,6 +148,36 @@ __attribute__((naked)) void test_cpuid(void) {
 #endif
 }
 
+// Test 14: Subpiece/cast from 64-bit to 32-bit
+uint32_t test_subpiece(uint64_t x) {
+    return (uint32_t)x;
+}
+
+// Test 15: Piece (concatenate hi/lo)
+uint64_t test_piece(uint32_t hi, uint32_t lo) {
+    return ((uint64_t)hi << 32) | lo;
+}
+
+// Test 16: Boolean XOR
+int test_boolxor(int a, int b) {
+    return (a > 0) ^ (b > 0);
+}
+
+// Test 17: Pointer add (array indexing)
+int test_array_index(int *arr, int idx) {
+    return arr[idx];
+}
+
+// Test 18: Pointer sub (negative index)
+int test_array_index_neg(int *arr, int idx) {
+    return arr[-idx];
+}
+
+// Test 19: Explicit cast to uint8_t
+uint8_t test_cast_u8(int x) {
+    return (uint8_t)x;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -240,6 +271,61 @@ int main(int argc, char *argv[]) {
         case 13:
             test_cpuid();
             printf("test_cpuid() = ok\n");
+            break;
+        case 14:
+            if (argc > 2) {
+                uint64_t x = strtoull(argv[2], NULL, 0);
+                printf(
+                    "test_subpiece(0x%llx) = 0x%x\n",
+                    (unsigned long long)x,
+                    test_subpiece(x)
+                );
+            }
+            break;
+        case 15:
+            if (argc > 3) {
+                uint32_t hi = strtoul(argv[2], NULL, 0);
+                uint32_t lo = strtoul(argv[3], NULL, 0);
+                printf(
+                    "test_piece(0x%x, 0x%x) = 0x%llx\n",
+                    hi,
+                    lo,
+                    (unsigned long long)test_piece(hi, lo)
+                );
+            }
+            break;
+        case 16:
+            if (argc > 3) {
+                int a = atoi(argv[2]);
+                int b = atoi(argv[3]);
+                printf("test_boolxor(%d, %d) = %d\n", a, b, test_boolxor(a, b));
+            }
+            break;
+        case 17: {
+            int arr[] = {10, 20, 30, 40, 50};
+            if (argc > 2) {
+                int idx = atoi(argv[2]);
+                printf("test_array_index(arr, %d) = %d\n", idx, test_array_index(arr, idx));
+            }
+            break;
+        }
+        case 18: {
+            int arr[] = {10, 20, 30, 40, 50};
+            if (argc > 2) {
+                int idx = atoi(argv[2]);
+                printf(
+                    "test_array_index_neg(arr, %d) = %d\n",
+                    idx,
+                    test_array_index_neg(arr, idx)
+                );
+            }
+            break;
+        }
+        case 19:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf("test_cast_u8(%d) = %u\n", x, test_cast_u8(x));
+            }
             break;
         default:
             printf("Unknown test: %d\n", test);
