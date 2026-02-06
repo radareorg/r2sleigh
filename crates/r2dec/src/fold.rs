@@ -95,6 +95,14 @@ pub struct FoldingContext {
     current_block_addr: Option<u64>,
     /// Optional userop name mappings for CallOther.
     userop_names: HashMap<u32, String>,
+    /// Ordered argument registers for the calling convention (e.g., SysV x86-64).
+    arg_regs: Vec<String>,
+    /// Caller-saved registers that can be eliminated when unused.
+    caller_saved_regs: HashSet<String>,
+    /// Collected call arguments: maps (block_addr, op_index) -> ordered arg expressions.
+    call_args: HashMap<(u64, usize), Vec<CExpr>>,
+    /// SSA variable names whose definitions are consumed by call argument collection.
+    consumed_by_call: HashSet<String>,
 }
 
 impl FoldingContext {
@@ -141,6 +149,34 @@ impl FoldingContext {
             return_blocks: HashSet::new(),
             current_block_addr: None,
             userop_names: HashMap::new(),
+            arg_regs: if ptr_size == 64 {
+                vec![
+                    "rdi".to_string(),
+                    "rsi".to_string(),
+                    "rdx".to_string(),
+                    "rcx".to_string(),
+                    "r8".to_string(),
+                    "r9".to_string(),
+                ]
+            } else {
+                // cdecl / x86-32: arguments are on the stack, no register args
+                vec![]
+            },
+            caller_saved_regs: {
+                let mut s = HashSet::new();
+                if ptr_size == 64 {
+                    for r in &["rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11"] {
+                        s.insert(r.to_string());
+                    }
+                } else {
+                    for r in &["eax", "ecx", "edx"] {
+                        s.insert(r.to_string());
+                    }
+                }
+                s
+            },
+            call_args: HashMap::new(),
+            consumed_by_call: HashSet::new(),
         }
     }
 
@@ -163,6 +199,58 @@ impl FoldingContext {
     /// Set the string literals mapping.
     pub fn set_strings(&mut self, strings: HashMap<u64, String>) {
         self.strings = strings;
+    }
+
+    /// Set calling convention argument registers (ordered).
+    pub fn set_arg_regs(&mut self, regs: Vec<String>) {
+        self.arg_regs = regs;
+    }
+
+    /// Collect the set of variable names that survive folding (not inlined, not dead,
+    /// not consumed by call args). Used to filter local variable declarations.
+    pub fn emitted_var_names(&self, blocks: &[SSABlock]) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for block in blocks {
+            for (op_idx, op) in block.ops.iter().enumerate() {
+                if self.is_stack_frame_op(op) {
+                    continue;
+                }
+                if let Some(dst) = op.dst() {
+                    if self.is_dead(dst) {
+                        continue;
+                    }
+                    let key = dst.display_name();
+                    if self.should_inline(&key) {
+                        continue;
+                    }
+                    if self.consumed_by_call.contains(&key) {
+                        continue;
+                    }
+                }
+                // For Call/CallInd, check if op_to_stmt_with_args would emit it
+                let is_call = matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. });
+                if is_call {
+                    // Calls don't produce named variables, skip
+                    continue;
+                }
+                // This op would be emitted - collect any variable name it defines
+                if let Some(dst) = op.dst() {
+                    let var_name = self.var_name(dst);
+                    names.insert(var_name);
+                }
+                // Also collect variable names used in the right-hand side
+                // (These appear as Var references in the output)
+                for src in op.sources() {
+                    if src.is_const() || src.name.starts_with("ram:") {
+                        continue;
+                    }
+                    let _ = op_idx; // suppress unused warning
+                    let var_name = self.var_name(src);
+                    names.insert(var_name);
+                }
+            }
+        }
+        names
     }
 
     /// Set the symbol/global variable names mapping.
@@ -565,94 +653,6 @@ impl FoldingContext {
         key.to_string()
     }
 
-    /// Convert an expression to a simple name string (for comparison reconstruction).
-    fn expr_to_simple_name(&self, expr: &CExpr) -> String {
-        match expr {
-            CExpr::Var(name) => {
-                // Try to trace through to get the actual source
-                self.trace_to_source(name)
-            }
-            CExpr::IntLit(val) => {
-                if *val < 0 {
-                    format!("{}", val)
-                } else if *val > 0xffff {
-                    format!("0x{:x}", val)
-                } else {
-                    format!("{}", val)
-                }
-            }
-            CExpr::UIntLit(val) => {
-                if *val > 0xffff {
-                    format!("0x{:x}", val)
-                } else {
-                    format!("{}", val)
-                }
-            }
-            // For complex expressions, just use a placeholder
-            _ => format!("{:?}", expr),
-        }
-    }
-
-    /// Trace through copies to find the original source variable.
-    /// This is used for comparison reconstruction to get the actual argument name.
-    /// Unlike get_expr, this traces through ALL copies regardless of use count.
-    fn trace_to_source(&self, name: &str) -> String {
-        let mut current = name.to_string();
-        let mut visited = HashSet::new();
-
-        // Trace through up to 20 copies to find the source
-        for _ in 0..20 {
-            if visited.contains(&current) {
-                break; // Cycle detected
-            }
-            visited.insert(current.clone());
-
-            // Look up the definition
-            if let Some(expr) = self.definitions.get(&current) {
-                match expr {
-                    // If it's a simple variable reference, continue tracing
-                    CExpr::Var(next_name) => {
-                        // Check if this looks like a temp name (t1_1 style)
-                        // If so, we haven't traced far enough - try to find its definition
-                        if next_name.starts_with("t") && next_name.contains("_") {
-                            // This is a temp var that wasn't inlined due to use count
-                            // Try to find the original by looking for the tmp: definition
-                            // We need to find the display name for this temp
-                            // The temp name "t1_1" corresponds to "tmp:xxx_1"
-                            // We can't easily reverse this, so just return what we have
-                            current = next_name.clone();
-                            continue;
-                        }
-                        // It's a register name or similar - could be the source
-                        current = next_name.clone();
-                        continue;
-                    }
-                    // If it's a cast, trace through
-                    CExpr::Cast { expr: inner, .. } => {
-                        if let CExpr::Var(next_name) = inner.as_ref() {
-                            current = next_name.clone();
-                            continue;
-                        }
-                    }
-                    // For any other expression, we've found the definition
-                    _ => {}
-                }
-            }
-            break;
-        }
-
-        // Clean up the name - prefer readable format
-        // If it's a version 0 register, it's likely a function parameter
-        if current.ends_with("_0") && !current.starts_with("t") {
-            // This is a register at version 0 - likely a parameter
-            let base = current.strip_suffix("_0").unwrap_or(&current);
-            // Make it more readable (e.g., "edi_0" -> "edi")
-            return base.to_string();
-        }
-
-        current
-    }
-
     /// Analyze multiple blocks (for function-level folding).
     pub fn analyze_blocks(&mut self, blocks: &[SSABlock]) {
         for block in blocks {
@@ -660,6 +660,83 @@ impl FoldingContext {
         }
         // Analyze stack variable patterns
         self.analyze_stack_vars(blocks);
+        // Collect call arguments from pre-call register writes
+        self.analyze_call_args(blocks);
+    }
+
+    /// Analyze blocks to collect call arguments from register writes preceding calls.
+    ///
+    /// For each Call/CallInd, scan backwards to find Copy ops that write to
+    /// calling-convention argument registers (RDI, RSI, RDX, RCX, R8, R9).
+    /// Also handles IntZExt targeting those registers (common for 32-bit args).
+    fn analyze_call_args(&mut self, blocks: &[SSABlock]) {
+        if self.arg_regs.is_empty() {
+            return;
+        }
+
+        for block in blocks {
+            let ops = &block.ops;
+            for (call_idx, op) in ops.iter().enumerate() {
+                let is_call = matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. });
+                if !is_call {
+                    continue;
+                }
+
+                // Scan backwards from this call to collect arg register writes
+                let mut found_regs: HashMap<String, (CExpr, String)> = HashMap::new();
+                let mut i = call_idx;
+                while i > 0 {
+                    i -= 1;
+                    let prev_op = &ops[i];
+
+                    // Stop at another call (barrier)
+                    if matches!(prev_op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+                        break;
+                    }
+
+                    // Check Copy and IntZExt ops that write to arg registers
+                    let (dst_var, src_var) = match prev_op {
+                        SSAOp::Copy { dst, src } => (dst, Some(src)),
+                        SSAOp::IntZExt { dst, src } => (dst, Some(src)),
+                        SSAOp::IntSExt { dst, src } => (dst, Some(src)),
+                        _ => continue,
+                    };
+
+                    let dst_base = dst_var.name.to_lowercase();
+                    // Check if this writes to an arg register
+                    if let Some(_pos) = self.arg_regs.iter().position(|r| *r == dst_base) {
+                        if !found_regs.contains_key(&dst_base) {
+                            if let Some(src) = src_var {
+                                let expr = self.get_expr(src);
+                                let dst_key = dst_var.display_name();
+                                found_regs.insert(dst_base.clone(), (expr, dst_key));
+                            }
+                        }
+                    }
+                }
+
+                // Build ordered argument list based on calling convention order
+                let mut args = Vec::new();
+                let mut consumed_keys = Vec::new();
+                for reg in &self.arg_regs {
+                    if let Some((expr, dst_key)) = found_regs.remove(reg) {
+                        args.push(expr);
+                        consumed_keys.push(dst_key);
+                    } else {
+                        // Gap in arguments - stop collecting
+                        // (e.g., if RDI and RDX are set but not RSI, only take RDI)
+                        break;
+                    }
+                }
+
+                if !args.is_empty() {
+                    self.call_args.insert((block.addr, call_idx), args);
+                    for key in consumed_keys {
+                        self.consumed_by_call.insert(key);
+                    }
+                }
+            }
+        }
     }
 
     /// Analyze stack variable access patterns and assign names.
@@ -803,14 +880,8 @@ impl FoldingContext {
 
     /// Check if a variable should be inlined.
     fn should_inline(&self, var_name: &str) -> bool {
-        // Don't inline if:
-        // 1. It has multiple uses
-        // 2. It's explicitly pinned
-        // 3. It's a register output (we want to see what gets written to regs)
-        // 4. It's used in a condition
-
+        // Don't inline if it has multiple uses
         let use_count = self.use_counts.get(var_name).copied().unwrap_or(0);
-
         if use_count != 1 {
             return false;
         }
@@ -828,15 +899,31 @@ impl FoldingContext {
             return true;
         }
 
-        // Don't inline named registers by default - user wants to see them
-        // But do inline temp versions (t1_1, etc.)
-        if var_name.contains("_") {
-            let base = var_name.split('_').next().unwrap_or(var_name);
-            // Inline if it's a temp-like name
-            base.starts_with("t") && base.len() <= 3
-        } else {
-            false
+        // Inline single-use register copies:
+        // If a named register variable is used exactly once and has a simple
+        // definition (Copy from const/string/var), inline it at the use site.
+        // This eliminates `rdi_2 = "hello"; foo(rdi_2)` -> `foo("hello")`.
+        if let Some((base, _version)) = var_name.rsplit_once('_') {
+            let base_lower = base.to_lowercase();
+            // Don't inline return register assignments in return blocks
+            if base_lower == self.ret_reg_name && self.is_current_return_block() {
+                return false;
+            }
+            // Don't inline stack/frame pointer versions - they're structural
+            if base_lower == self.sp_name || base_lower == self.fp_name {
+                return false;
+            }
+            // Inline calling-convention argument registers (consumed by call args)
+            if self.caller_saved_regs.contains(&base_lower) {
+                return true;
+            }
+            // Inline any single-use register with a simple definition
+            if self.definitions.contains_key(var_name) {
+                return true;
+            }
         }
+
+        false
     }
 
     /// Check if a variable is dead (never used).
@@ -848,19 +935,39 @@ impl FoldingContext {
             return false;
         }
 
-        // Don't mark as dead if it's a named register (could be output)
-        let is_named_reg = !var.name.starts_with("tmp:")
-            && !var.name.starts_with("const:")
-            && !var.name.starts_with("reg:");
-
-        // Keep named register outputs, kill flags and temps
-        if is_named_reg {
-            // But do mark CPU flags as dead
-            let lower = var.name.to_lowercase();
-            is_cpu_flag(&lower)
-        } else {
-            true
+        // Temporaries and reg: prefixed vars are always dead if unused
+        if var.name.starts_with("tmp:")
+            || var.name.starts_with("const:")
+            || var.name.starts_with("reg:")
+        {
+            return true;
         }
+
+        // CPU flags are always dead if unused
+        let lower = var.name.to_lowercase();
+        if is_cpu_flag(&lower) {
+            return true;
+        }
+
+        // Caller-saved / calling-convention registers are dead if unused
+        // (their values don't survive across calls anyway)
+        if self.caller_saved_regs.contains(&lower) {
+            return true;
+        }
+
+        // Variables consumed by call argument collection are dead
+        if self.consumed_by_call.contains(&key) {
+            return true;
+        }
+
+        // Stack/frame pointer intermediate versions are dead if unused
+        if lower == self.sp_name || lower == self.fp_name {
+            return true;
+        }
+
+        // Keep other named registers alive (e.g., callee-saved like rbx, r12-r15)
+        // as they might be meaningful outputs
+        false
     }
 
     /// Check if an operation is part of stack frame setup/teardown (prologue/epilogue).
@@ -962,6 +1069,21 @@ impl FoldingContext {
             return self.const_to_expr(var);
         }
 
+        // Resolve ram:address references to known names
+        if var.name.starts_with("ram:") {
+            if let Some(addr) = extract_call_address(&var.name) {
+                if let Some(name) = self.lookup_function(addr) {
+                    return CExpr::Var(name.clone());
+                }
+                if let Some(s) = self.lookup_string(addr) {
+                    return CExpr::StringLit(s.clone());
+                }
+                if let Some(s) = self.lookup_symbol(addr) {
+                    return CExpr::Var(s.clone());
+                }
+            }
+        }
+
         // Try to inline if appropriate
         if self.should_inline(&key) {
             if let Some(expr) = self.definitions.get(&key) {
@@ -1008,6 +1130,11 @@ impl FoldingContext {
     /// Convert a constant variable to a C expression.
     fn const_to_expr(&self, var: &SSAVar) -> CExpr {
         let val = parse_const_value(&var.name).unwrap_or(0);
+
+        // Check if this is a function address (e.g., for lea rdi, [main])
+        if let Some(name) = self.lookup_function(val) {
+            return CExpr::Var(name.clone());
+        }
 
         // Check if this is a string address
         if let Some(s) = self.lookup_string(val) {
@@ -1127,27 +1254,12 @@ impl FoldingContext {
                 CExpr::cast(ty, self.get_expr(src))
             }
             SSAOp::Call { target } => {
-                // Try to resolve function name from address
-                let func_expr = if let Some(addr) = extract_call_address(&target.name) {
-                    if let Some(name) = self.lookup_function(addr) {
-                        CExpr::Var(name.clone())
-                    } else {
-                        self.get_expr(target)
-                    }
-                } else if target.is_const() {
-                    if let Some(addr) = parse_const_value(&target.name) {
-                        if let Some(name) = self.lookup_function(addr) {
-                            CExpr::Var(name.clone())
-                        } else {
-                            self.get_expr(target)
-                        }
-                    } else {
-                        self.get_expr(target)
-                    }
-                } else {
-                    self.get_expr(target)
-                };
+                let func_expr = self.resolve_call_target(target);
                 CExpr::call(func_expr, vec![])
+            }
+            SSAOp::CallInd { target } => {
+                let target_expr = self.get_expr(target);
+                CExpr::call(CExpr::Deref(Box::new(target_expr)), vec![])
             }
             SSAOp::CallOther {
                 output: _,
@@ -1388,7 +1500,7 @@ impl FoldingContext {
     pub fn fold_block(&self, block: &SSABlock) -> Vec<CStmt> {
         let mut stmts = Vec::new();
 
-        for op in &block.ops {
+        for (op_idx, op) in block.ops.iter().enumerate() {
             // Skip stack frame setup/teardown if enabled
             if self.is_stack_frame_op(op) {
                 continue;
@@ -1405,14 +1517,63 @@ impl FoldingContext {
                 if self.should_inline(&key) {
                     continue;
                 }
+
+                // Skip if this op's destination was consumed by call argument collection
+                if self.consumed_by_call.contains(&key) {
+                    continue;
+                }
             }
 
-            if let Some(stmt) = self.op_to_stmt(op) {
+            if let Some(stmt) = self.op_to_stmt_with_args(op, block.addr, op_idx) {
                 stmts.push(stmt);
             }
         }
 
         stmts
+    }
+
+    /// Convert an SSA operation to a C statement, with call argument context.
+    fn op_to_stmt_with_args(&self, op: &SSAOp, block_addr: u64, op_idx: usize) -> Option<CStmt> {
+        match op {
+            SSAOp::Call { target } => {
+                let func_expr = self.resolve_call_target(target);
+                let args = self
+                    .call_args
+                    .get(&(block_addr, op_idx))
+                    .cloned()
+                    .unwrap_or_default();
+                let call = CExpr::call(func_expr, args);
+                Some(CStmt::Expr(call))
+            }
+            SSAOp::CallInd { target } => {
+                let target_expr = self.get_expr(target);
+                let func_expr = CExpr::Deref(Box::new(target_expr));
+                let args = self
+                    .call_args
+                    .get(&(block_addr, op_idx))
+                    .cloned()
+                    .unwrap_or_default();
+                let call = CExpr::call(func_expr, args);
+                Some(CStmt::Expr(call))
+            }
+            _ => self.op_to_stmt(op),
+        }
+    }
+
+    /// Resolve a call target to a function name expression.
+    fn resolve_call_target(&self, target: &SSAVar) -> CExpr {
+        if let Some(addr) = extract_call_address(&target.name) {
+            if let Some(name) = self.lookup_function(addr) {
+                return CExpr::Var(name.clone());
+            }
+        } else if target.is_const() {
+            if let Some(addr) = parse_const_value(&target.name) {
+                if let Some(name) = self.lookup_function(addr) {
+                    return CExpr::Var(name.clone());
+                }
+            }
+        }
+        self.get_expr(target)
     }
 
     /// Convert an SSA operation to a C statement.
@@ -1547,26 +1708,16 @@ impl FoldingContext {
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::Call { target } => {
-                // Try to resolve function name from address
-                let func_expr = if let Some(addr) = extract_call_address(&target.name) {
-                    if let Some(name) = self.lookup_function(addr) {
-                        CExpr::Var(name.clone())
-                    } else {
-                        self.get_expr(target)
-                    }
-                } else if target.is_const() {
-                    if let Some(addr) = parse_const_value(&target.name) {
-                        if let Some(name) = self.lookup_function(addr) {
-                            CExpr::Var(name.clone())
-                        } else {
-                            self.get_expr(target)
-                        }
-                    } else {
-                        self.get_expr(target)
-                    }
-                } else {
-                    self.get_expr(target)
-                };
+                // Note: Call arguments are handled by op_to_stmt_with_args().
+                // This fallback emits the call without args when called directly.
+                let func_expr = self.resolve_call_target(target);
+                let call = CExpr::call(func_expr, vec![]);
+                Some(CStmt::Expr(call))
+            }
+            SSAOp::CallInd { target } => {
+                // Note: Call arguments are handled by op_to_stmt_with_args().
+                let target_expr = self.get_expr(target);
+                let func_expr = CExpr::Deref(Box::new(target_expr));
                 let call = CExpr::call(func_expr, vec![]);
                 Some(CStmt::Expr(call))
             }
@@ -2328,9 +2479,10 @@ mod tests {
 
         let stmts = fold_block(&block);
 
-        // Should only have one statement (RAX_1 assignment)
-        // ZF_1 should be eliminated as dead
-        assert_eq!(stmts.len(), 1);
+        // RAX_1 is used only once (in the dead ZF_1 expression), so with stronger
+        // inlining it gets inlined into the dead expression, which is then eliminated.
+        // Both statements should be eliminated.
+        assert_eq!(stmts.len(), 0);
     }
 
     #[test]

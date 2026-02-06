@@ -3702,6 +3702,135 @@ pub extern "C" fn r2sleigh_analyze_fcn(
     1 // Success
 }
 
+/// Annotation entry for analyze_fcn writeback.
+#[derive(serde::Serialize)]
+struct FcnAnnotation {
+    addr: u64,
+    comment: String,
+}
+
+/// Analyze a function and return per-block annotations as JSON.
+/// Returns a JSON array of {addr, comment} pairs summarizing SSA def-use info.
+/// Uses function-level SSA with phi nodes for meaningful annotations.
+/// Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sleigh_analyze_fcn_annotations(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    _fcn_addr: u64,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+
+    // Collect R2ILBlocks
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if blk_ptr.is_null() {
+            continue;
+        }
+        let blk = unsafe { &*blk_ptr };
+        r2il_blocks.push(blk.clone());
+    }
+
+    // Build function-level SSA with phi nodes
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+        Some(f) => f,
+        None => return ptr::null_mut(),
+    };
+
+    fn is_real_reg(name: &str) -> bool {
+        !name.starts_with("tmp:") && !name.starts_with("const:")
+            && !name.starts_with("ram:")
+            && !name.contains("CF_") && !name.contains("ZF_")
+            && !name.contains("SF_") && !name.contains("PF_")
+            && !name.contains("OF_") && !name.contains("AF_")
+            && !name.contains("DF_") && !name.contains("TF_")
+    }
+
+    let mut annotations = Vec::new();
+
+    for block in ssa_func.blocks() {
+        let mut parts = Vec::new();
+
+        // Phi nodes show where values merge from different paths
+        if !block.phis.is_empty() {
+            let phi_vars: Vec<&str> = block.phis.iter()
+                .map(|p| p.dst.name.as_str())
+                .filter(|n| is_real_reg(n))
+                .collect();
+            if !phi_vars.is_empty() {
+                let mut sorted = phi_vars;
+                sorted.sort();
+                sorted.dedup();
+                if sorted.len() > 4 {
+                    sorted.truncate(4);
+                    sorted.push("...");
+                }
+                parts.push(format!("merges {}", sorted.join(",")));
+            }
+        }
+
+        // Collect register reads (version 0 = function input)
+        let mut func_inputs = Vec::new();
+        for op in &block.ops {
+            for src in op.sources() {
+                if src.version == 0 && is_real_reg(&src.name) {
+                    func_inputs.push(src.name.as_str());
+                }
+            }
+        }
+        func_inputs.sort();
+        func_inputs.dedup();
+        if !func_inputs.is_empty() {
+            if func_inputs.len() > 5 {
+                func_inputs.truncate(5);
+                func_inputs.push("...");
+            }
+            parts.push(format!("uses {}", func_inputs.join(",")));
+        }
+
+        // Collect register definitions
+        let mut defs = Vec::new();
+        for op in &block.ops {
+            if let Some(dst) = op.dst() {
+                if is_real_reg(&dst.name) {
+                    defs.push(dst.name.as_str());
+                }
+            }
+        }
+        defs.sort();
+        defs.dedup();
+        if !defs.is_empty() {
+            if defs.len() > 5 {
+                defs.truncate(5);
+                defs.push("...");
+            }
+            parts.push(format!("defines {}", defs.join(",")));
+        }
+
+        if !parts.is_empty() {
+            annotations.push(FcnAnnotation {
+                addr: block.addr,
+                comment: format!("sla: {}", parts.join("; ")),
+            });
+        }
+    }
+
+    if annotations.is_empty() {
+        return ptr::null_mut();
+    }
+
+    match serde_json::to_string(&annotations) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 /// Recover variables from SSA analysis.
 /// Returns a JSON array of variable prototypes:
 /// [{"name": "arg0", "kind": "r", "delta": 0, "type": "int64_t", "isarg": true, "reg": "rdi"}, ...]

@@ -289,6 +289,7 @@ mod tests {
                     target: make_const(0x1008, 8),
                     cond: make_const(1, 1),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -302,6 +303,7 @@ mod tests {
                         target: make_const(0x100c, 8),
                     },
                 ],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -310,6 +312,7 @@ mod tests {
                     dst: make_reg(0, 8), // Write to reg:0
                     src: make_const(2, 8),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -317,6 +320,7 @@ mod tests {
                 ops: vec![R2ILOp::Return {
                     target: make_ram(0, 8),
                 }],
+                switch_info: None,
             },
         ];
 
@@ -345,6 +349,7 @@ mod tests {
                     dst: make_reg(0, 8),
                     src: make_const(1, 8),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -352,6 +357,7 @@ mod tests {
                 ops: vec![R2ILOp::Return {
                     target: make_ram(0, 8),
                 }],
+                switch_info: None,
             },
         ];
 
@@ -381,6 +387,7 @@ mod tests {
                         src: make_const(2, 8),
                     },
                 ],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -389,6 +396,7 @@ mod tests {
                     dst: make_reg(0, 8),
                     src: make_const(3, 8),
                 }],
+                switch_info: None,
             },
         ];
 

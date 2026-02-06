@@ -191,6 +191,9 @@ impl Decompiler {
             structurer.set_symbols(self.context.symbols.clone());
         }
         
+        // Get set of variables that survive folding before structuring
+        let emitted_vars = structurer.emitted_var_names();
+
         let body_stmt = structurer.structure();
 
         // Build the C function
@@ -198,20 +201,22 @@ impl Decompiler {
             format!("sub_{:x}", func.entry)
         });
 
-        // Collect parameters
+        // Collect parameters -- keep only those whose names appear in emitted output
         let params: Vec<ast::CParam> = var_recovery
             .parameters()
             .iter()
+            .filter(|v| emitted_vars.contains(&v.name))
             .map(|v| ast::CParam {
                 ty: type_inference.get_type(&v.ssa_var),
                 name: v.name.clone(),
             })
             .collect();
 
-        // Collect locals
+        // Collect locals -- keep only those whose names appear in emitted output
         let locals: Vec<ast::CLocal> = var_recovery
             .locals()
             .iter()
+            .filter(|v| emitted_vars.contains(&v.name))
             .map(|v| ast::CLocal {
                 ty: type_inference.get_type(&v.ssa_var),
                 name: v.name.clone(),

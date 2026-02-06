@@ -550,6 +550,7 @@ mod tests {
                     dst: make_reg_vn(0, 8),
                     src: make_const_vn(1, 8),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -559,6 +560,7 @@ mod tests {
                     a: make_reg_vn(0, 8),
                     b: make_const_vn(2, 8),
                 }],
+                switch_info: None,
             },
         ];
 
@@ -588,6 +590,7 @@ mod tests {
                     addr: make_const_vn(0x1000, 8),
                     val: make_reg_vn(0, 8),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x2004,
@@ -597,6 +600,7 @@ mod tests {
                     space: SpaceId::Ram,
                     addr: make_const_vn(0x1000, 8),
                 }],
+                switch_info: None,
             },
         ];
 

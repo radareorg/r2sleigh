@@ -3,7 +3,7 @@
 //! This module converts unstructured control flow (gotos, CFG edges) into
 //! structured high-level constructs (if-then-else, while, for, etc.).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAFunction;
 
@@ -82,6 +82,16 @@ impl<'a> ControlFlowStructurer<'a> {
     pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
         if let Some(ref mut ctx) = self.fold_ctx {
             ctx.set_symbols(symbols);
+        }
+    }
+
+    /// Get the set of variable names that survive folding (for filtering declarations).
+    pub fn emitted_var_names(&self) -> HashSet<String> {
+        if let Some(ref ctx) = self.fold_ctx {
+            let blocks: Vec<_> = self.func.blocks().cloned().collect();
+            ctx.emitted_var_names(&blocks)
+        } else {
+            HashSet::new()
         }
     }
 

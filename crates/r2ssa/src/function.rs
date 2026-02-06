@@ -516,6 +516,7 @@ mod tests {
                         src: make_const(2, 8),
                     },
                 ],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -523,6 +524,7 @@ mod tests {
                 ops: vec![R2ILOp::Return {
                     target: make_ram(0, 8),
                 }],
+                switch_info: None,
             },
         ];
 
@@ -546,6 +548,7 @@ mod tests {
                     target: make_const(0x1008, 8),
                     cond: make_const(1, 1),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -559,6 +562,7 @@ mod tests {
                         target: make_const(0x100c, 8),
                     },
                 ],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -567,6 +571,7 @@ mod tests {
                     dst: make_reg(0, 8),
                     src: make_const(2, 8),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -574,6 +579,7 @@ mod tests {
                 ops: vec![R2ILOp::Return {
                     target: make_ram(0, 8),
                 }],
+                switch_info: None,
             },
         ];
 
@@ -600,6 +606,7 @@ mod tests {
                     dst: make_reg(0, 8),
                     src: make_const(1, 8),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -609,6 +616,7 @@ mod tests {
                     a: make_reg(0, 8),
                     b: make_const(1, 8),
                 }],
+                switch_info: None,
             },
         ];
 
@@ -637,6 +645,7 @@ mod tests {
                     dst: make_reg(0, 8),
                     src: make_const(42, 8),
                 }],
+                switch_info: None,
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -644,6 +653,7 @@ mod tests {
                 ops: vec![R2ILOp::Return {
                     target: make_ram(0, 8),
                 }],
+                switch_info: None,
             },
         ];
 

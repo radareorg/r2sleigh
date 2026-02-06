@@ -6,9 +6,6 @@
 #include <r_util/r_json.h>
 #include <string.h>
 
-/* Vector type for RAnalRef (needed for get_data_refs callback) */
-R_VEC_TYPE (RVecAnalRef, RAnalRef);
-
 /* FFI declarations for r2sleigh Rust library */
 typedef struct R2ILContext R2ILContext;
 typedef struct R2ILBlock R2ILBlock;
@@ -80,6 +77,7 @@ extern char *r2il_get_reg_profile(const R2ILContext *ctx);
 
 /* radare2 Deep Integration */
 extern int r2sleigh_analyze_fcn(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
+extern char *r2sleigh_analyze_fcn_annotations(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
 extern char *r2sleigh_recover_vars(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
 extern char *r2sleigh_get_data_refs(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
 /* Per-architecture context (lazy init)
@@ -1437,7 +1435,8 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		free (izj);
 
 		/* Get global symbols/flags: fj returns [{name:"sym.foo",offset:0x401000}, ...] */
-		char *fj = r_core_cmd_str (core, "fj");
+		/* Use 'fs *;fj' to get flags from all flagspaces (including relocs) */
+		char *fj = r_core_cmd_str (core, "fs *;fj");
 		if (fj && fj[0] == '[') {
 			PJ *pj = pj_new ();
 			pj_o (pj);
@@ -1446,15 +1445,15 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 				RJson *elem;
 				for (elem = root->children.first; elem; elem = elem->next) {
 					if (elem->type == R_JSON_OBJECT) {
-						const RJson *offset = r_json_get (elem, "offset");
+						const RJson *offset = r_json_get (elem, "addr");
 						const RJson *name = r_json_get (elem, "name");
 						if (offset && name && offset->type == R_JSON_INTEGER && name->type == R_JSON_STRING) {
-							/* Skip functions (already in func_names) and strings */
+							/* Skip functions (already in func_names) and strings and sections */
 							const char *n = name->str_value;
-							if (n && strncmp(n, "sym.", 4) != 0 && strncmp(n, "str.", 4) != 0
-							    && strncmp(n, "section.", 8) != 0 && strncmp(n, "reloc.", 6) != 0) {
+							if (n && strncmp (n, "sym.", 4) != 0 && strncmp (n, "str.", 4) != 0
+							    && strncmp (n, "section.", 8) != 0) {
 								char addr_str[32];
-								snprintf (addr_str, sizeof(addr_str), "0x%llx", (unsigned long long)offset->num.u_value);
+								snprintf (addr_str, sizeof (addr_str), "0x%llx", (unsigned long long)offset->num.u_value);
 								pj_ks (pj, addr_str, n);
 							}
 						}
@@ -1548,6 +1547,29 @@ static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
 
 	int result = r2sleigh_analyze_fcn (ctx,
 		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+
+	/* Write SSA annotations as comments */
+	char *json = r2sleigh_analyze_fcn_annotations (ctx,
+		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+	if (json && *json) {
+		RJson *root = r_json_parse (json);
+		if (root && root->type == R_JSON_ARRAY) {
+			const RJson *item;
+			for (item = root->children.first; item; item = item->next) {
+				if (item->type != R_JSON_OBJECT) {
+					continue;
+				}
+				const RJson *j_addr = r_json_get (item, "addr");
+				const RJson *j_comment = r_json_get (item, "comment");
+				if (j_addr && j_comment && j_comment->str_value) {
+					r_meta_set_string (anal, R_META_TYPE_COMMENT,
+						(ut64)j_addr->num.u_value, j_comment->str_value);
+				}
+			}
+			r_json_free (root);
+		}
+		r2il_string_free (json);
+	}
 
 	block_array_free (&blocks);
 	return result == 1;
@@ -1789,6 +1811,99 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 	return refs;
 }
 
+/* Eligibility/priority callback: score > 0 = eligible with priority, < 0 = ineligible */
+static int sleigh_eligible(RAnal *anal) {
+	R2ILContext *ctx = get_context (anal);
+	return ctx ? 10 : -1;
+}
+
+/* Called at end of aaaa for global post-analysis passes */
+static bool sleigh_post_analysis(RAnal *anal) {
+	R2ILContext *ctx = get_context (anal);
+	if (!ctx) {
+		return false;
+	}
+
+	int num_fcns = r_list_length (anal->fcns);
+	if (num_fcns == 0) {
+		return true;
+	}
+
+	R_LOG_INFO ("r2sleigh: post-analysis xref pass over %d functions", num_fcns);
+
+	int xrefs_added = 0;
+	RListIter *iter;
+	RAnalFunction *fcn;
+	r_list_foreach (anal->fcns, iter, fcn) {
+		BlockArray blocks;
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			continue;
+		}
+
+		char *json = r2sleigh_get_data_refs (ctx,
+			(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+		block_array_free (&blocks);
+
+		if (!json || !*json) {
+			r2il_string_free (json);
+			continue;
+		}
+
+		RJson *root = r_json_parse (json);
+		if (!root || root->type != R_JSON_ARRAY) {
+			r_json_free (root);
+			r2il_string_free (json);
+			continue;
+		}
+
+		const RJson *item;
+		for (item = root->children.first; item; item = item->next) {
+			if (item->type != R_JSON_OBJECT) {
+				continue;
+			}
+			const RJson *j_from = r_json_get (item, "from");
+			const RJson *j_to = r_json_get (item, "to");
+			const RJson *j_type = r_json_get (item, "type");
+			if (!j_from || !j_to) {
+				continue;
+			}
+
+			ut64 from = (ut64)j_from->num.u_value;
+			ut64 to = (ut64)j_to->num.u_value;
+			RAnalRefType type = R_ANAL_REF_TYPE_DATA;
+
+			if (j_type && j_type->str_value) {
+				switch (j_type->str_value[0]) {
+				case 'c':
+				case 'C':
+					type = R_ANAL_REF_TYPE_CALL;
+					break;
+				case 'j':
+				case 'J':
+					type = R_ANAL_REF_TYPE_JUMP;
+					break;
+				case 's':
+				case 'S':
+					type = R_ANAL_REF_TYPE_STRN;
+					break;
+				default:
+					type = R_ANAL_REF_TYPE_DATA;
+				}
+			}
+
+			if (r_anal_xrefs_set (anal, from, to, type)) {
+				xrefs_added++;
+			}
+		}
+
+		r_json_free (root);
+		r2il_string_free (json);
+	}
+
+	R_LOG_INFO ("r2sleigh: post-analysis added %d xrefs", xrefs_added);
+	return true;
+}
+
 RAnalPlugin r_anal_plugin_sleigh = {
 	.meta = {
 		.name = "sla",
@@ -1798,12 +1913,14 @@ RAnalPlugin r_anal_plugin_sleigh = {
 	},
 	.init = sleigh_init,
 	.fini = sleigh_fini,
+	.eligible = sleigh_eligible,
 	.op = sleigh_op,
 	.cmd = sleigh_cmd,
 	/* Deep integration callbacks */
 	.analyze_fcn = sleigh_analyze_fcn,
 	.recover_vars = sleigh_recover_vars,
 	.get_data_refs = sleigh_get_data_refs,
+	.post_analysis = sleigh_post_analysis,
 };
 
 #ifndef R2_PLUGIN_INCORE

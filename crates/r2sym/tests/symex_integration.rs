@@ -53,6 +53,7 @@ fn test_symbolic_execution_linear_block() {
                 b: make_const(5, 8),
             },
         ],
+        switch_info: None,
     }];
 
     let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
@@ -93,6 +94,7 @@ fn test_symbolic_execution_with_symbolic_input() {
                 b: make_const(10, 8),
             },
         ],
+        switch_info: None,
     }];
 
     let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
@@ -138,6 +140,7 @@ fn test_symbolic_execution_conditional_branch() {
                     cond: make_reg(RCX, 1),
                 },
             ],
+            switch_info: None,
         },
         R2ILBlock {
             addr: 0x1004,
@@ -149,6 +152,7 @@ fn test_symbolic_execution_conditional_branch() {
                     src: make_const(0, 8),
                 },
             ],
+            switch_info: None,
         },
         R2ILBlock {
             addr: 0x1010,
@@ -160,6 +164,7 @@ fn test_symbolic_execution_conditional_branch() {
                     src: make_const(1, 8),
                 },
             ],
+            switch_info: None,
         },
     ];
 
