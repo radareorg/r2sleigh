@@ -311,43 +311,82 @@ impl VariableRecovery {
         }
     }
 
-    /// Find function parameters.
+    /// Find function parameters using calling-convention-aware detection.
+    ///
+    /// Scans the *entire function* for version-0 uses of calling convention
+    /// argument registers (RDI, RSI, RDX, RCX, R8, R9 for SysV x86-64).
+    /// Parameters are ordered by their CC position and stop at the first
+    /// unused arg register (no gaps allowed).
     fn find_parameters(&mut self, func: &SSAFunction) {
-        let entry = match func.entry_block() {
-            Some(b) => b,
-            None => return,
+        // Ordered CC arg registers for the current architecture
+        let cc_arg_regs: Vec<&str> = if self.ptr_size == 64 {
+            vec!["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+        } else {
+            // x86-32: args on stack, no register params
+            vec![]
         };
 
-        let mut defined = std::collections::HashSet::new();
+        if cc_arg_regs.is_empty() {
+            return;
+        }
 
-        for op in &entry.ops {
-            // Check uses first
-            for src in op.sources() {
-                if !defined.contains(src) && !self.vars.contains_key(src) {
-                    let name = self.gen_param_name(&src);
-                    let ty = self.type_from_size(src.size);
-                    self.vars.insert(
-                        src.clone(),
-                        VarInfo {
-                            ssa_var: src.clone(),
-                            name,
-                            ty,
-                            is_param: true,
-                            is_local: false,
-                            stack_offset: None,
-                        },
-                    );
+        // Scan entire function for version-0 uses of CC arg registers
+        let mut seen_v0: HashMap<String, SSAVar> = HashMap::new();
+
+        for block in func.blocks() {
+            for op in &block.ops {
+                for src in op.sources() {
+                    if src.version == 0 {
+                        let name_lower = src.name.to_lowercase();
+                        for &cc_reg in &cc_arg_regs {
+                            if name_lower.contains(cc_reg) {
+                                seen_v0.entry(cc_reg.to_string()).or_insert_with(|| src.clone());
+                            }
+                        }
+                    }
                 }
             }
+            // Also check phi sources
+            for phi in &block.phis {
+                for (_, src) in &phi.sources {
+                    if src.version == 0 {
+                        let name_lower = src.name.to_lowercase();
+                        for &cc_reg in &cc_arg_regs {
+                            if name_lower.contains(cc_reg) {
+                                seen_v0.entry(cc_reg.to_string()).or_insert_with(|| src.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
-            // Then definitions
-            if let Some(dst) = op.dst() {
-                defined.insert(dst.clone());
+        // Emit parameters in CC order, stopping at the first gap
+        for (idx, &cc_reg) in cc_arg_regs.iter().enumerate() {
+            if let Some(var) = seen_v0.get(cc_reg) {
+                let name = format!("arg{}", idx + 1);
+                let name = self.make_unique_param_name(name);
+                let ty = self.type_from_size(var.size);
+                self.vars.insert(
+                    var.clone(),
+                    VarInfo {
+                        ssa_var: var.clone(),
+                        name,
+                        ty,
+                        is_param: true,
+                        is_local: false,
+                        stack_offset: None,
+                    },
+                );
+            } else {
+                // No gap: stop at first unused arg register
+                break;
             }
         }
     }
 
-    /// Generate a parameter name.
+    /// Generate a parameter name from register conventions.
+    #[allow(dead_code)] // Used in tests
     fn gen_param_name(&mut self, var: &SSAVar) -> String {
         // Use register name if it's a common parameter register
         let name = var.name.to_lowercase();

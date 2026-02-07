@@ -47,6 +47,10 @@ const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
 pub struct FoldingContext {
     /// Maps SSA variable name to its defining expression.
     definitions: HashMap<String, CExpr>,
+    /// Reverse map: formatted display name -> SSA definition CExpr.
+    /// Populated after analyze_blocks to allow condition reconstruction
+    /// to look up definitions by their rendered C variable names.
+    formatted_defs: HashMap<String, CExpr>,
     /// Maps SSA variable name to its use count.
     use_counts: HashMap<String, usize>,
     /// Variables that should not be inlined (e.g., multiple uses, side effects).
@@ -103,6 +107,8 @@ pub struct FoldingContext {
     call_args: HashMap<(u64, usize), Vec<CExpr>>,
     /// SSA variable names whose definitions are consumed by call argument collection.
     consumed_by_call: HashSet<String>,
+    /// Out-of-SSA variable aliases: maps SSA display_name -> merged C name.
+    var_aliases: HashMap<String, String>,
 }
 
 impl FoldingContext {
@@ -177,6 +183,8 @@ impl FoldingContext {
             },
             call_args: HashMap::new(),
             consumed_by_call: HashSet::new(),
+            var_aliases: HashMap::new(),
+            formatted_defs: HashMap::new(),
         }
     }
 
@@ -627,6 +635,11 @@ impl FoldingContext {
 
     /// Format a traced SSA variable name for display.
     fn format_traced_name(&self, key: &str) -> String {
+        // Check coalesced alias first
+        if let Some(alias) = self.var_aliases.get(key) {
+            return alias.clone();
+        }
+
         // Check if it's a named register (not tmp: or const:)
         if !key.starts_with("tmp:") && !key.starts_with("const:") && !key.starts_with("ram:") {
             // It's a register name like "EDI_0" or "RAX_1"
@@ -642,11 +655,18 @@ impl FoldingContext {
             return key.to_lowercase();
         }
 
-        // For temporaries, generate a simple name
+        // For temporaries, generate a name matching var_name() output:
+        // var_name: base="t{version}", then if version > 0: "{base}_{version}"
         if key.starts_with("tmp:") {
-            // Extract version for unique naming
-            if let Some(version) = key.rsplit_once('_').map(|(_, v)| v) {
-                return format!("t{}", version);
+            if let Some(version_str) = key.rsplit_once('_').map(|(_, v)| v) {
+                if let Ok(ver) = version_str.parse::<u32>() {
+                    return if ver > 0 {
+                        format!("t{}_{}", ver, ver)
+                    } else {
+                        "t0".to_string()
+                    };
+                }
+                return format!("t{}", version_str);
             }
         }
 
@@ -662,6 +682,219 @@ impl FoldingContext {
         self.analyze_stack_vars(blocks);
         // Collect call arguments from pre-call register writes
         self.analyze_call_args(blocks);
+        // Coalesce SSA versions into single variable names
+        self.coalesce_variables(blocks);
+        // Build reverse map: formatted name -> definition
+        // This allows condition reconstruction to look up definitions by rendered names
+        self.build_formatted_defs();
+    }
+
+    /// Build the reverse definitions map (formatted name -> CExpr).
+    /// Must be called after coalesce_variables() since it depends on var_aliases.
+    fn build_formatted_defs(&mut self) {
+        self.formatted_defs.clear();
+        for (ssa_key, expr) in &self.definitions {
+            let formatted = self.format_traced_name(ssa_key);
+            self.formatted_defs.insert(formatted, expr.clone());
+        }
+    }
+
+    /// Coalesce SSA variable versions into single names where possible.
+    ///
+    /// Uses a union-find structure over phi node edges to group SSA versions
+    /// that represent the same logical variable. Within each group, if no two
+    /// versions appear in the same block, they all share the base register name.
+    fn coalesce_variables(&mut self, blocks: &[SSABlock]) {
+        // Step 1: Collect all named register SSA vars and build base-register map
+        let mut reg_versions: HashMap<String, Vec<(String, u32)>> = HashMap::new();
+
+        for block in blocks {
+            for op in &block.ops {
+                if let Some(dst) = op.dst() {
+                    if dst.name.starts_with("tmp:") || dst.name.starts_with("const:")
+                        || dst.name.starts_with("ram:") || dst.name.starts_with("reg:")
+                    {
+                        continue;
+                    }
+                    let base = dst.name.to_lowercase();
+                    reg_versions.entry(base).or_default()
+                        .push((dst.display_name(), dst.version));
+                }
+                for src in op.sources() {
+                    if src.name.starts_with("tmp:") || src.name.starts_with("const:")
+                        || src.name.starts_with("ram:") || src.name.starts_with("reg:")
+                    {
+                        continue;
+                    }
+                    let base = src.name.to_lowercase();
+                    reg_versions.entry(base).or_default()
+                        .push((src.display_name(), src.version));
+                }
+            }
+            for phi in &block.phis {
+                if !phi.dst.name.starts_with("tmp:") && !phi.dst.name.starts_with("const:")
+                    && !phi.dst.name.starts_with("ram:") && !phi.dst.name.starts_with("reg:")
+                {
+                    let base = phi.dst.name.to_lowercase();
+                    reg_versions.entry(base).or_default()
+                        .push((phi.dst.display_name(), phi.dst.version));
+                }
+                for (_, src) in &phi.sources {
+                    if !src.name.starts_with("tmp:") && !src.name.starts_with("const:")
+                        && !src.name.starts_with("ram:") && !src.name.starts_with("reg:")
+                    {
+                        let base = src.name.to_lowercase();
+                        reg_versions.entry(base).or_default()
+                            .push((src.display_name(), src.version));
+                    }
+                }
+            }
+        }
+
+        // Step 2: Build union-find and merge phi-connected versions
+        let mut uf_parent: HashMap<String, String> = HashMap::new();
+
+        // Initialize each SSA name as its own parent
+        for versions in reg_versions.values() {
+            for (name, _) in versions {
+                uf_parent.entry(name.clone()).or_insert_with(|| name.clone());
+            }
+        }
+
+        // Union phi-connected versions
+        for block in blocks {
+            for phi in &block.phis {
+                if phi.dst.name.starts_with("tmp:") || phi.dst.name.starts_with("const:")
+                    || phi.dst.name.starts_with("ram:") || phi.dst.name.starts_with("reg:")
+                {
+                    continue;
+                }
+                let dst_key = phi.dst.display_name();
+                for (_, src) in &phi.sources {
+                    let src_key = src.display_name();
+                    // Union dst and src
+                    let root_a = uf_find(&mut uf_parent, &dst_key);
+                    let root_b = uf_find(&mut uf_parent, &src_key);
+                    if root_a != root_b {
+                        uf_parent.insert(root_a, root_b);
+                    }
+                }
+            }
+        }
+
+        // Step 3: Build block -> set of SSA names
+        let mut block_vars: HashMap<u64, HashSet<String>> = HashMap::new();
+        for block in blocks {
+            let vars = block_vars.entry(block.addr).or_default();
+            for op in &block.ops {
+                if let Some(dst) = op.dst() {
+                    vars.insert(dst.display_name());
+                }
+                for src in op.sources() {
+                    vars.insert(src.display_name());
+                }
+            }
+            for phi in &block.phis {
+                vars.insert(phi.dst.display_name());
+                for (_, src) in &phi.sources {
+                    vars.insert(src.display_name());
+                }
+            }
+        }
+
+        // Step 4: For each base register, group by union-find root and assign names
+        for (base, versions) in &reg_versions {
+            if *base == self.sp_name || *base == self.fp_name {
+                continue;
+            }
+            // Deduplicate
+            let mut unique: Vec<(String, u32)> = versions.clone();
+            unique.sort_by_key(|(_, v)| *v);
+            unique.dedup_by_key(|(k, _)| k.clone());
+            if unique.len() <= 1 {
+                continue;
+            }
+
+            // Group by union-find root
+            let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+            for (ssa_name, _) in &unique {
+                let root = uf_find(&mut uf_parent, ssa_name);
+                groups.entry(root).or_default().push(ssa_name.clone());
+            }
+
+            // For each group, check if members conflict (appear in the same block)
+            let mut group_idx = 0usize;
+            for (_root, members) in &groups {
+                let has_conflict = block_vars.values().any(|vars| {
+                    let mut count = 0;
+                    for m in members {
+                        if vars.contains(m) {
+                            count += 1;
+                        }
+                    }
+                    count > 1
+                });
+
+                if !has_conflict {
+                    // All members share the base name
+                    let alias = if group_idx == 0 {
+                        base.clone()
+                    } else {
+                        format!("{}_{}", base, group_idx + 1)
+                    };
+                    for m in members {
+                        self.var_aliases.insert(m.clone(), alias.clone());
+                    }
+                    group_idx += 1;
+                } else {
+                    // Members conflict -- assign base name to the group representative
+                    // and leave others with their versioned names
+                    let alias = if group_idx == 0 {
+                        base.clone()
+                    } else {
+                        format!("{}_{}", base, group_idx + 1)
+                    };
+                    // Only alias version 0 if present
+                    for m in members {
+                        // Check if this is version 0
+                        if let Some((_, v)) = unique.iter().find(|(n, _)| n == m) {
+                            if *v == 0 {
+                                self.var_aliases.insert(m.clone(), alias.clone());
+                            }
+                        }
+                    }
+                    group_idx += 1;
+                }
+            }
+
+            // If there are ungrouped singletons, also try to alias them
+            // (versions not in any phi chain but still non-conflicting)
+            let grouped: HashSet<&str> = groups.values()
+                .flat_map(|v| v.iter().map(|s| s.as_str()))
+                .collect();
+            let ungrouped: Vec<&(String, u32)> = unique.iter()
+                .filter(|(n, _)| !grouped.contains(n.as_str()) && !self.var_aliases.contains_key(n))
+                .collect();
+            if !ungrouped.is_empty() {
+                // Check if all ungrouped can share a name
+                let ug_names: Vec<&str> = ungrouped.iter().map(|(n, _)| n.as_str()).collect();
+                let has_conflict = block_vars.values().any(|vars| {
+                    let mut count = 0;
+                    for n in &ug_names {
+                        if vars.contains(*n) {
+                            count += 1;
+                        }
+                    }
+                    count > 1
+                });
+                if !has_conflict {
+                    let alias = if group_idx == 0 { base.clone() } else { format!("{}_{}", base, group_idx + 1) };
+                    for (n, _) in &ungrouped {
+                        self.var_aliases.insert(n.clone(), alias.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// Analyze blocks to collect call arguments from register writes preceding calls.
@@ -733,6 +966,43 @@ impl FoldingContext {
                     self.call_args.insert((block.addr, call_idx), args);
                     for key in consumed_keys {
                         self.consumed_by_call.insert(key);
+                    }
+                }
+
+                // Also detect pre-call return address push pattern:
+                //   IntSub { dst: RSP_N, a: RSP_M, b: const:8 }
+                //   Store  { addr: RSP_N, val: const:RETADDR }
+                // Mark both as consumed.
+                let mut j = call_idx;
+                while j > 0 {
+                    j -= 1;
+                    let prev = &ops[j];
+                    // Stop at another call
+                    if matches!(prev, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+                        break;
+                    }
+                    // Look for Store of a constant to an RSP-derived address
+                    if let SSAOp::Store { addr, val, .. } = prev {
+                        let addr_lower = addr.name.to_lowercase();
+                        if addr_lower.contains(&self.sp_name) && val.is_const() {
+                            // This is likely push of return address
+                            let store_val_key = val.display_name();
+                            self.consumed_by_call.insert(store_val_key);
+                            let addr_key = addr.display_name();
+                            self.consumed_by_call.insert(addr_key);
+                            // Also find the preceding IntSub that adjusted RSP
+                            if j > 0 {
+                                let prev2 = &ops[j - 1];
+                                if let SSAOp::IntSub { dst, b, .. } = prev2 {
+                                    let dst_lower = dst.name.to_lowercase();
+                                    if dst_lower.contains(&self.sp_name) && b.is_const() {
+                                        let sub_key = dst.display_name();
+                                        self.consumed_by_call.insert(sub_key);
+                                    }
+                                }
+                            }
+                            break;
+                        }
                     }
                 }
             }
@@ -991,6 +1261,43 @@ impl FoldingContext {
                 if val_name.contains("rip") || val_name.contains("eip") {
                     return true;
                 }
+                // Store constant to RSP-derived address (pre-call return address push)
+                if val.is_const()
+                    && (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
+                {
+                    // Check if this constant was consumed by call-arg analysis
+                    let val_key = val.display_name();
+                    if self.consumed_by_call.contains(&val_key) {
+                        return true;
+                    }
+                }
+                // Store callee-saved register to stack (prologue push)
+                // The P-code often uses temps: Copy tmp:X = RBX; Store [RSP], tmp:X
+                // So we need to check both direct and indirect through temps.
+                if (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
+                    && !val.is_const()
+                {
+                    // Direct: val is a callee-saved register
+                    if val_name.contains("rbx") || val_name.contains("r12")
+                        || val_name.contains("r13") || val_name.contains("r14")
+                        || val_name.contains("r15")
+                    {
+                        return true;
+                    }
+                    // Indirect: val is a temp, trace it back via copy_sources
+                    if val.name.starts_with("tmp:") {
+                        let val_key = val.display_name();
+                        if let Some(src_key) = self.copy_sources.get(&val_key) {
+                            let src_lower = src_key.to_lowercase();
+                            if src_lower.contains("rbx") || src_lower.contains("r12")
+                                || src_lower.contains("r13") || src_lower.contains("r14")
+                                || src_lower.contains("r15") || src_lower.contains(&self.fp_name)
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
                 false
             }
             // mov rbp, rsp: Copy from sp to fp
@@ -1054,6 +1361,14 @@ impl FoldingContext {
                 if dst_name.contains("rip") || dst_name.contains("eip") {
                     return true;
                 }
+                // Load callee-saved register from stack (epilogue pop)
+                if (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
+                    && (dst_name.contains("rbx") || dst_name.contains("r12")
+                        || dst_name.contains("r13") || dst_name.contains("r14")
+                        || dst_name.contains("r15"))
+                {
+                    return true;
+                }
                 false
             }
             _ => false,
@@ -1107,6 +1422,12 @@ impl FoldingContext {
             }
         }
 
+        // Check if coalescing mapped this SSA name to a merged name
+        let display = var.display_name();
+        if let Some(alias) = self.var_aliases.get(&display) {
+            return alias.clone();
+        }
+
         let base = if var.name.starts_with("reg:") {
             let reg = var.name.trim_start_matches("reg:");
             if is_hex_name(reg) {
@@ -1131,19 +1452,22 @@ impl FoldingContext {
     fn const_to_expr(&self, var: &SSAVar) -> CExpr {
         let val = parse_const_value(&var.name).unwrap_or(0);
 
-        // Check if this is a function address (e.g., for lea rdi, [main])
-        if let Some(name) = self.lookup_function(val) {
-            return CExpr::Var(name.clone());
-        }
+        // Only resolve addresses that are plausibly code/data (not small literals)
+        if val > 0xff {
+            // Check if this is a function address (e.g., for lea rdi, [main])
+            if let Some(name) = self.lookup_function(val) {
+                return CExpr::Var(name.clone());
+            }
 
-        // Check if this is a string address
-        if let Some(s) = self.lookup_string(val) {
-            return CExpr::StringLit(s.clone());
-        }
+            // Check if this is a string address
+            if let Some(s) = self.lookup_string(val) {
+                return CExpr::StringLit(s.clone());
+            }
 
-        // Check if this is a symbol address
-        if let Some(s) = self.lookup_symbol(val) {
-            return CExpr::Var(s.clone());
+            // Check if this is a symbol address
+            if let Some(s) = self.lookup_symbol(val) {
+                return CExpr::Var(s.clone());
+            }
         }
 
         if val > 0x7fffffff {
@@ -1158,6 +1482,20 @@ impl FoldingContext {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
             SSAOp::Load { addr, .. } => {
+                // Try to resolve ram: address to a global symbol directly
+                if addr.name.starts_with("ram:") {
+                    if let Some(address) = extract_call_address(&addr.name) {
+                        if let Some(sym) = self.lookup_symbol(address) {
+                            return CExpr::Var(sym.clone());
+                        }
+                        if let Some(name) = self.lookup_function(address) {
+                            return CExpr::Var(name.clone());
+                        }
+                        if let Some(s) = self.lookup_string(address) {
+                            return CExpr::StringLit(s.clone());
+                        }
+                    }
+                }
                 let addr_expr = self.get_expr(addr);
                 if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                     CExpr::Var(stack_var)
@@ -1594,32 +1932,66 @@ impl FoldingContext {
             }
             SSAOp::Load { dst, addr, .. } => {
                 let lhs = CExpr::Var(self.var_name(dst));
-                // Try to use stack variable name if this is a stack access
-                let addr_expr = self.get_expr(addr);
-                let addr_key = addr.display_name();
-                let rhs = if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
-                    CExpr::Var(stack_var)
-                } else if let Some(ptr) = self.ptr_arith.get(&addr_key) {
-                    self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
-                } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
-                    sub
+                // Try to resolve ram: address to a global symbol name directly
+                let rhs = if addr.name.starts_with("ram:") {
+                    if let Some(address) = extract_call_address(&addr.name) {
+                        if let Some(sym) = self.lookup_symbol(address) {
+                            CExpr::Var(sym.clone())
+                        } else if let Some(name) = self.lookup_function(address) {
+                            CExpr::Var(name.clone())
+                        } else if let Some(s) = self.lookup_string(address) {
+                            CExpr::StringLit(s.clone())
+                        } else {
+                            let addr_expr = self.get_expr(addr);
+                            CExpr::Deref(Box::new(addr_expr))
+                        }
+                    } else {
+                        let addr_expr = self.get_expr(addr);
+                        CExpr::Deref(Box::new(addr_expr))
+                    }
                 } else {
-                    CExpr::Deref(Box::new(addr_expr))
+                    // Try to use stack variable name if this is a stack access
+                    let addr_expr = self.get_expr(addr);
+                    let addr_key = addr.display_name();
+                    if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
+                        CExpr::Var(stack_var)
+                    } else if let Some(ptr) = self.ptr_arith.get(&addr_key) {
+                        self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+                    } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
+                        sub
+                    } else {
+                        CExpr::Deref(Box::new(addr_expr))
+                    }
                 };
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::Store { addr, val, .. } => {
-                // Try to use stack variable name if this is a stack access
-                let addr_expr = self.get_expr(addr);
-                let addr_key = addr.display_name();
-                let lhs = if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
-                    CExpr::Var(stack_var)
-                } else if let Some(ptr) = self.ptr_arith.get(&addr_key) {
-                    self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
-                } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
-                    sub
+                // Try to resolve ram: address to a global symbol name directly
+                let lhs = if addr.name.starts_with("ram:") {
+                    if let Some(address) = extract_call_address(&addr.name) {
+                        if let Some(sym) = self.lookup_symbol(address) {
+                            CExpr::Var(sym.clone())
+                        } else {
+                            let addr_expr = self.get_expr(addr);
+                            CExpr::Deref(Box::new(addr_expr))
+                        }
+                    } else {
+                        let addr_expr = self.get_expr(addr);
+                        CExpr::Deref(Box::new(addr_expr))
+                    }
                 } else {
-                    CExpr::Deref(Box::new(addr_expr))
+                    // Try to use stack variable name if this is a stack access
+                    let addr_expr = self.get_expr(addr);
+                    let addr_key = addr.display_name();
+                    if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
+                        CExpr::Var(stack_var)
+                    } else if let Some(ptr) = self.ptr_arith.get(&addr_key) {
+                        self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+                    } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
+                        sub
+                    } else {
+                        CExpr::Deref(Box::new(addr_expr))
+                    }
                 };
                 let rhs = self.get_expr(val);
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
@@ -1813,6 +2185,19 @@ impl FoldingContext {
             return self.const_to_expr(var);
         }
 
+        // If the variable is a flag (ZF, CF, etc.), try direct flag reconstruction first
+        let var_lower = var.name.to_lowercase();
+        if var_lower.contains("zf") || var_lower.contains("cf")
+            || var_lower.contains("sf") || var_lower.contains("of")
+        {
+            let var_cname = self.var_name(var);
+            if let Some(reconstructed) =
+                self.try_reconstruct_condition(&CExpr::Var(var_cname))
+            {
+                return reconstructed;
+            }
+        }
+
         // Try to inline the condition's definition
         if let Some(expr) = self.definitions.get(&key) {
             // Try to reconstruct comparison from flag patterns
@@ -1933,6 +2318,7 @@ impl FoldingContext {
             }
 
             // Pattern: Binary Eq - check for OF == SF (signed >=)
+            // AND temp == 0 patterns (TEST/CMP reconstruction)
             CExpr::Binary {
                 op: BinaryOp::Eq,
                 left,
@@ -1960,10 +2346,19 @@ impl FoldingContext {
                         return Some(CExpr::binary(BinaryOp::Ge, CExpr::Var(a), CExpr::Var(b)));
                     }
                 }
+                // Fallback: temp == 0 where temp is from TEST/CMP
+                if let Some(result) = self.try_reconstruct_cmp_zero(left, right, BinaryOp::Eq) {
+                    return Some(result);
+                }
+                // Also try reversed (0 == temp)
+                if let Some(result) = self.try_reconstruct_cmp_zero(right, left, BinaryOp::Eq) {
+                    return Some(result);
+                }
                 None
             }
 
             // Pattern: Binary Ne - check for OF != SF (signed <)
+            // AND temp != 0 patterns (TEST/CMP reconstruction)
             CExpr::Binary {
                 op: BinaryOp::Ne,
                 left,
@@ -1990,6 +2385,13 @@ impl FoldingContext {
                     if let Some((a, b)) = self.lookup_flag_origin(&sf_name) {
                         return Some(CExpr::binary(BinaryOp::Lt, CExpr::Var(a), CExpr::Var(b)));
                     }
+                }
+                // Fallback: temp != 0 where temp is from TEST/CMP
+                if let Some(result) = self.try_reconstruct_cmp_zero(left, right, BinaryOp::Ne) {
+                    return Some(result);
+                }
+                if let Some(result) = self.try_reconstruct_cmp_zero(right, left, BinaryOp::Ne) {
+                    return Some(result);
                 }
                 None
             }
@@ -2047,9 +2449,66 @@ impl FoldingContext {
                     }
                 }
 
-                // Try to recurse into the operand
+                // Try to recurse into the operand and negate the result
                 if let Some(inner) = self.try_reconstruct_condition(operand) {
-                    return Some(CExpr::unary(UnaryOp::Not, inner));
+                    // Negate comparison operators directly instead of wrapping in !()
+                    return Some(match inner {
+                        CExpr::Binary {
+                            op: BinaryOp::Eq,
+                            left,
+                            right,
+                        } => CExpr::Binary {
+                            op: BinaryOp::Ne,
+                            left,
+                            right,
+                        },
+                        CExpr::Binary {
+                            op: BinaryOp::Ne,
+                            left,
+                            right,
+                        } => CExpr::Binary {
+                            op: BinaryOp::Eq,
+                            left,
+                            right,
+                        },
+                        CExpr::Binary {
+                            op: BinaryOp::Lt,
+                            left,
+                            right,
+                        } => CExpr::Binary {
+                            op: BinaryOp::Ge,
+                            left,
+                            right,
+                        },
+                        CExpr::Binary {
+                            op: BinaryOp::Ge,
+                            left,
+                            right,
+                        } => CExpr::Binary {
+                            op: BinaryOp::Lt,
+                            left,
+                            right,
+                        },
+                        CExpr::Binary {
+                            op: BinaryOp::Gt,
+                            left,
+                            right,
+                        } => CExpr::Binary {
+                            op: BinaryOp::Le,
+                            left,
+                            right,
+                        },
+                        CExpr::Binary {
+                            op: BinaryOp::Le,
+                            left,
+                            right,
+                        } => CExpr::Binary {
+                            op: BinaryOp::Gt,
+                            left,
+                            right,
+                        },
+                        other => CExpr::unary(UnaryOp::Not, other),
+                    });
                 }
                 None
             }
@@ -2079,6 +2538,70 @@ impl FoldingContext {
                 None
             }
 
+            _ => None,
+        }
+    }
+
+    /// Try to reconstruct a comparison from `temp == 0` or `temp != 0` patterns.
+    ///
+    /// For `TEST reg, reg; JZ/JNZ`:
+    ///   - `t1 = IntAnd(RBX, RBX)` -> `ZF = (t1 == 0)` -> CBranch(ZF)
+    ///   - When we see `Var(t1) == IntLit(0)`, trace t1's definition:
+    ///     - If `BitAnd(a, b)` where a == b (TEST): produce `a == 0` / `a != 0`
+    ///     - If `Sub(a, b)` (CMP): produce `a == b` / `a != b`
+    fn try_reconstruct_cmp_zero(
+        &self,
+        var_side: &CExpr,
+        zero_side: &CExpr,
+        cmp_op: BinaryOp,
+    ) -> Option<CExpr> {
+        // zero_side must be 0
+        let is_zero = match zero_side {
+            CExpr::IntLit(0) => true,
+            CExpr::Var(name) if name == "elf_header" || name == "0" => true,
+            _ => false,
+        };
+        if !is_zero {
+            return None;
+        }
+
+        // var_side must be a variable reference
+        let var_name = match var_side {
+            CExpr::Var(name) => name,
+            _ => return None,
+        };
+
+        // Look up the definition of this variable (try SSA key first, then formatted name)
+        let def = self.definitions.get(var_name)
+            .or_else(|| self.formatted_defs.get(var_name))?;
+
+        match def {
+            // TEST reg, reg pattern: IntAnd(a, b) where a == b
+            CExpr::Binary {
+                op: BinaryOp::BitAnd,
+                left,
+                right,
+            } => {
+                if left == right {
+                    // TEST reg, reg -> reg == 0 / reg != 0
+                    return Some(CExpr::binary(cmp_op, *left.clone(), CExpr::IntLit(0)));
+                }
+                // TEST a, b (different operands) -> (a & b) == 0 / != 0
+                Some(CExpr::binary(
+                    cmp_op,
+                    CExpr::binary(BinaryOp::BitAnd, *left.clone(), *right.clone()),
+                    CExpr::IntLit(0),
+                ))
+            }
+            // CMP a, b pattern: Sub(a, b) where the sub is a CMP (result only used for flags)
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => {
+                // CMP a, b; JE/JNE -> a == b / a != b
+                Some(CExpr::binary(cmp_op, *left.clone(), *right.clone()))
+            }
             _ => None,
         }
     }
@@ -2290,6 +2813,17 @@ fn parse_const_value(name: &str) -> Option<u64> {
 }
 
 /// Extract address from a call target name like "ram:401110_0" or "const:401110".
+/// Union-find: find the root representative with path compression.
+fn uf_find(parent: &mut HashMap<String, String>, x: &str) -> String {
+    let p = parent.get(x).cloned().unwrap_or_else(|| x.to_string());
+    if p == x {
+        return x.to_string();
+    }
+    let root = uf_find(parent, &p);
+    parent.insert(x.to_string(), root.clone());
+    root
+}
+
 fn extract_call_address(name: &str) -> Option<u64> {
     // Try ram:address_version format (e.g., "ram:401110_0")
     if let Some(rest) = name.strip_prefix("ram:") {

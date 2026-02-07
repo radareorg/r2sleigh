@@ -201,16 +201,17 @@ impl Decompiler {
             format!("sub_{:x}", func.entry)
         });
 
-        // Collect parameters -- keep only those whose names appear in emitted output
-        let params: Vec<ast::CParam> = var_recovery
+        // Collect parameters -- always include in signature even if inlined in body
+        let mut params: Vec<ast::CParam> = var_recovery
             .parameters()
             .iter()
-            .filter(|v| emitted_vars.contains(&v.name))
             .map(|v| ast::CParam {
                 ty: type_inference.get_type(&v.ssa_var),
                 name: v.name.clone(),
             })
             .collect();
+        // Sort by arg number for stable ordering (arg1, arg2, ...)
+        params.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Collect locals -- keep only those whose names appear in emitted output
         let locals: Vec<ast::CLocal> = var_recovery
