@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <locale.h>
 
 // Test 1: Simple password check (symbolic should find 0xDEAD)
 int check_secret(int x) {
@@ -178,6 +179,90 @@ uint8_t test_cast_u8(int x) {
     return (uint8_t)x;
 }
 
+// Test 20: Guarded loop + switch recovery
+int test_loop_switch(int x) {
+    int i = 0;
+    int sum = 0;
+
+    while (1) {
+        if (i >= x) {
+            break;
+        }
+
+        switch (i & 7) {
+            case 0:
+                sum += 1;
+                break;
+            case 1:
+                sum += 2;
+                break;
+            case 2:
+                sum += 3;
+                break;
+            case 3:
+                sum += 4;
+                break;
+            case 4:
+                sum += 5;
+                break;
+            case 5:
+                sum += 6;
+                break;
+            case 6:
+                sum += 7;
+                break;
+            case 7:
+                sum += 8;
+                break;
+            default:
+                sum += 9;
+                break;
+        }
+
+        i = i + 1;
+    }
+
+    return sum;
+}
+
+typedef struct {
+    int first;
+    int second;
+    int third;
+    int fourth;
+    int fifth;
+    int sixth;
+    int seventh;
+    int eighth;
+    int ninth;
+    int tenth;
+    int eleventh;
+    int twelfth;
+    int thirteenth;
+    int fourteenth;
+} DemoStruct;
+
+// Test 21: Struct-like fixed-offset access
+int test_struct_field(DemoStruct *obj, int v) {
+    obj->thirteenth = v;
+    return obj->thirteenth + obj->first;
+}
+
+// Test 22: API signature propagation (setlocale returns char*)
+int test_setlocale_wrapper(void) {
+    char *loc = setlocale(LC_ALL, "C");
+    if (!loc) {
+        return 0;
+    }
+    return (int)loc[0];
+}
+
+// Test 23: Multi-use simple temporary (x + 1 reused)
+int test_multi_use_temp(int x) {
+    int y = x + 1;
+    return y + y + y;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -325,6 +410,29 @@ int main(int argc, char *argv[]) {
             if (argc > 2) {
                 int x = atoi(argv[2]);
                 printf("test_cast_u8(%d) = %u\n", x, test_cast_u8(x));
+            }
+            break;
+        case 20:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf("test_loop_switch(%d) = %d\n", x, test_loop_switch(x));
+            }
+            break;
+        case 21: {
+            DemoStruct obj = {0};
+            if (argc > 2) {
+                int v = atoi(argv[2]);
+                printf("test_struct_field(&obj, %d) = %d\n", v, test_struct_field(&obj, v));
+            }
+            break;
+        }
+        case 22:
+            printf("test_setlocale_wrapper() = %d\n", test_setlocale_wrapper());
+            break;
+        case 23:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf("test_multi_use_temp(%d) = %d\n", x, test_multi_use_temp(x));
             }
             break;
         default:

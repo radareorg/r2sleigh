@@ -120,9 +120,9 @@ mod instruction_analysis {
     use super::*;
 
     /// Test addresses in vuln_test binary (check_secret function)
-    const CMP_INSTRUCTION_ADDR: u64 = 0x401261;
-    const MOV_INSTRUCTION_ADDR: u64 = 0x40125e;
-    const CPUID_INSTRUCTION_ADDR: u64 = 0x4014f9;
+    const CMP_INSTRUCTION_ADDR: u64 = 0x401281;
+    const MOV_INSTRUCTION_ADDR: u64 = 0x40127e;
+    const CPUID_INSTRUCTION_ADDR: u64 = 0x401519;
 
     #[rstest]
     #[case("a:sla.json")]
@@ -751,6 +751,49 @@ mod decompilation {
         assert!(
             result.contains("callother("),
             "Should emit callother for user-defined op"
+        );
+    }
+
+    #[test]
+    fn decompiles_loop_as_while_and_switch() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_loop_switch", "a:sla.dec");
+        result.assert_ok();
+        assert!(result.contains("while ("), "Should recover while loop");
+        assert!(result.contains("switch ("), "Should recover switch statement");
+    }
+
+    #[test]
+    fn decompiles_struct_member_access() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_field", "a:sla.dec");
+        result.assert_ok();
+        assert!(
+            result.contains("->field_"),
+            "Should recover pointer member access for fixed offsets"
+        );
+    }
+
+    #[test]
+    fn decompiles_setlocale_with_pointer_type() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_setlocale_wrapper", "a:sla.dec");
+        result.assert_ok();
+        assert!(result.contains("setlocale("), "Should resolve setlocale call name");
+        assert!(
+            result.contains("int8_t*"),
+            "Should infer pointer type from setlocale signature"
+        );
+    }
+
+    #[test]
+    fn decompiles_multi_use_simple_temp_inlined() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_multi_use_temp", "a:sla.dec");
+        result.assert_ok();
+        assert!(
+            !result.contains(" = arg1 + 1;"),
+            "Simple temporary used multiple times should be inlined"
         );
     }
 }

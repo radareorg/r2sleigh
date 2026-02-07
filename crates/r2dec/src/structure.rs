@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAFunction;
 
-use crate::ast::{CExpr, CStmt};
+use crate::ast::{CExpr, CStmt, CType};
 use crate::expr::ExpressionBuilder;
 use crate::fold::FoldingContext;
 use crate::region::{Region, RegionAnalyzer};
@@ -98,6 +98,13 @@ impl<'a> ControlFlowStructurer<'a> {
         }
     }
 
+    /// Set inferred variable type hints for expression recovery.
+    pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
+        if let Some(ref mut ctx) = self.fold_ctx {
+            ctx.set_type_hints(hints);
+        }
+    }
+
     /// Get the set of variable names that survive folding (for filtering declarations).
     pub fn emitted_var_names(&mut self) -> HashSet<String> {
         // Ensure analysis is finalized before computing emitted vars
@@ -148,8 +155,14 @@ impl<'a> ControlFlowStructurer<'a> {
                 let cond = self.get_branch_condition(*cond_block);
                 let then_stmt = self.structure_region(then_region);
                 let else_stmt = else_region.as_ref().map(|r| self.structure_region(r));
-
-                CStmt::if_stmt(cond, then_stmt, else_stmt)
+                let if_stmt = CStmt::if_stmt(cond, then_stmt, else_stmt);
+                let mut prefix = self.structure_block_prefix_stmts(*cond_block);
+                if prefix.is_empty() {
+                    if_stmt
+                } else {
+                    prefix.push(if_stmt);
+                    CStmt::Block(prefix)
+                }
             }
             Region::WhileLoop { header, body } => {
                 let cond = self.get_branch_condition(*header);
@@ -189,10 +202,18 @@ impl<'a> ControlFlowStructurer<'a> {
                 // Build default case
                 let default_body = default.as_ref().map(|r| vec![self.structure_region(r)]);
 
-                CStmt::Switch {
+                let switch_stmt = CStmt::Switch {
                     expr: switch_expr,
                     cases: switch_cases,
                     default: default_body,
+                };
+
+                let mut prefix = self.structure_block_prefix_stmts(*switch_block);
+                if prefix.is_empty() {
+                    switch_stmt
+                } else {
+                    prefix.push(switch_stmt);
+                    CStmt::Block(prefix)
                 }
             }
             Region::Irreducible { entry, blocks } => self.structure_irreducible(*entry, blocks),
@@ -336,6 +357,27 @@ impl<'a> ControlFlowStructurer<'a> {
         }
     }
 
+    /// Emit side-effecting statements for a block without labels or loop markers.
+    /// Used for condition/switch header blocks where statements must appear before
+    /// the structured control-flow construct.
+    fn structure_block_prefix_stmts(&mut self, addr: u64) -> Vec<CStmt> {
+        let block = match self.func.get_block(addr) {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+
+        if let Some(ref mut fold_ctx) = self.fold_ctx {
+            fold_ctx.set_current_block(addr);
+            fold_ctx.fold_block(block)
+        } else {
+            block
+                .ops
+                .iter()
+                .filter_map(|op| self.expr_builder.op_to_stmt(op))
+                .collect()
+        }
+    }
+
     /// Get the branch condition from a block.
     fn get_branch_condition(&mut self, addr: u64) -> CExpr {
         let block = match self.func.get_block(addr) {
@@ -407,7 +449,8 @@ impl<'a> ControlFlowStructurer<'a> {
     fn cleanup_recurse(stmt: CStmt) -> CStmt {
         match stmt {
             CStmt::Block(stmts) => {
-                let cleaned: Vec<CStmt> = stmts.into_iter()
+                let cleaned: Vec<CStmt> = stmts
+                    .into_iter()
                     .map(Self::cleanup_recurse)
                     .filter(|s| !matches!(s, CStmt::Empty))
                     .collect();
@@ -419,31 +462,63 @@ impl<'a> ControlFlowStructurer<'a> {
                     CStmt::Block(cleaned)
                 }
             }
-            CStmt::If { cond, then_body, else_body } => {
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 let then_body = Box::new(Self::cleanup_recurse(*then_body));
                 let else_body = else_body.map(|e| Box::new(Self::cleanup_recurse(*e)));
-                CStmt::If { cond, then_body, else_body }
+                CStmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                }
             }
             CStmt::While { cond, body } => {
                 let body = Self::strip_trailing_continue(Self::cleanup_recurse(*body));
-                CStmt::While { cond, body: Box::new(body) }
+                CStmt::While {
+                    cond,
+                    body: Box::new(body),
+                }
             }
             CStmt::DoWhile { body, cond } => {
                 let body = Self::strip_trailing_continue(Self::cleanup_recurse(*body));
                 // Fix C: do { if (c) break; rest } while(1) -> while(!c) { rest }
                 Self::try_convert_do_while_to_while(body, cond)
             }
-            CStmt::For { init, cond, update, body } => {
+            CStmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
                 let body = Self::strip_trailing_continue(Self::cleanup_recurse(*body));
-                CStmt::For { init, cond, update, body: Box::new(body) }
+                CStmt::For {
+                    init,
+                    cond,
+                    update,
+                    body: Box::new(body),
+                }
             }
-            CStmt::Switch { expr, cases, default } => {
-                let cases = cases.into_iter().map(|c| crate::ast::SwitchCase {
-                    value: c.value,
-                    body: c.body.into_iter().map(Self::cleanup_recurse).collect(),
-                }).collect();
+            CStmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                let cases = cases
+                    .into_iter()
+                    .map(|c| crate::ast::SwitchCase {
+                        value: c.value,
+                        body: c.body.into_iter().map(Self::cleanup_recurse).collect(),
+                    })
+                    .collect();
                 let default = default.map(|d| d.into_iter().map(Self::cleanup_recurse).collect());
-                CStmt::Switch { expr, cases, default }
+                CStmt::Switch {
+                    expr,
+                    cases,
+                    default,
+                }
             }
             other => other,
         }
@@ -452,9 +527,7 @@ impl<'a> ControlFlowStructurer<'a> {
     /// Flatten single-element blocks.
     fn flatten(stmt: CStmt) -> CStmt {
         match stmt {
-            CStmt::Block(mut stmts) if stmts.len() == 1 => {
-                Self::flatten(stmts.remove(0))
-            }
+            CStmt::Block(mut stmts) if stmts.len() == 1 => Self::flatten(stmts.remove(0)),
             CStmt::Block(stmts) if stmts.is_empty() => CStmt::Empty,
             other => other,
         }
@@ -492,7 +565,10 @@ impl<'a> ControlFlowStructurer<'a> {
             _ => false,
         };
         if !is_infinite {
-            return CStmt::DoWhile { body: Box::new(body), cond };
+            return CStmt::DoWhile {
+                body: Box::new(body),
+                cond,
+            };
         }
 
         // Extract the body statements
@@ -500,16 +576,27 @@ impl<'a> ControlFlowStructurer<'a> {
             CStmt::Block(stmts) => stmts.clone(),
             CStmt::If { .. } => vec![body.clone()],
             _ => {
-                return CStmt::DoWhile { body: Box::new(body), cond };
+                return CStmt::DoWhile {
+                    body: Box::new(body),
+                    cond,
+                };
             }
         };
 
         if stmts.is_empty() {
-            return CStmt::DoWhile { body: Box::new(body), cond };
+            return CStmt::DoWhile {
+                body: Box::new(body),
+                cond,
+            };
         }
 
         // Check if first statement is `if (c) { break; }` (no else)
-        if let CStmt::If { cond: break_cond, then_body, else_body: None } = &stmts[0] {
+        if let CStmt::If {
+            cond: break_cond,
+            then_body,
+            else_body: None,
+        } = &stmts[0]
+        {
             let is_break = matches!(then_body.as_ref(), CStmt::Break)
                 || matches!(then_body.as_ref(), CStmt::Block(v) if v.len() == 1 && matches!(v[0], CStmt::Break));
             if is_break {
@@ -531,7 +618,10 @@ impl<'a> ControlFlowStructurer<'a> {
             }
         }
 
-        CStmt::DoWhile { body: Box::new(body), cond }
+        CStmt::DoWhile {
+            body: Box::new(body),
+            cond,
+        }
     }
 }
 

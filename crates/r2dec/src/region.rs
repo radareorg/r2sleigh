@@ -267,6 +267,11 @@ impl<'a> RegionAnalyzer<'a> {
             return self.analyze_loop(entry, &body);
         }
 
+        // Prefer explicit switch metadata from CFG terminators.
+        if let Some((cases, default)) = self.func.switch_info(entry) {
+            return self.analyze_switch_with_cases(entry, &cases, default);
+        }
+
         // Get successors
         let succs = self.func.successors(entry);
 
@@ -281,8 +286,12 @@ impl<'a> RegionAnalyzer<'a> {
                 self.processed.insert(entry);
                 let next = succs[0];
                 let preds = self.func.predecessors(next);
+                let next_loop_body = self.loops.get(&next);
+                let is_loop_preheader = next_loop_body
+                    .map(|loop_body| !loop_body.contains(&entry))
+                    .unwrap_or(false);
 
-                if preds.len() == 1 && !self.loops.contains_key(&next) {
+                if (preds.len() == 1 && !self.loops.contains_key(&next)) || is_loop_preheader {
                     // Can extend sequence
                     let next_region = self.analyze_region(next);
                     match next_region {
@@ -392,11 +401,6 @@ impl<'a> RegionAnalyzer<'a> {
     fn analyze_loop(&mut self, header: u64, body: &HashSet<u64>) -> Region {
         self.processed.insert(header);
 
-        // Mark all body blocks as processed
-        for &block in body {
-            self.processed.insert(block);
-        }
-
         // Determine loop type (while vs do-while)
         let succs = self.func.successors(header);
         let is_while = succs.len() == 2 && succs.iter().any(|s| !body.contains(s));
@@ -404,10 +408,12 @@ impl<'a> RegionAnalyzer<'a> {
         if is_while {
             // While loop: header is the condition
             let body_entry = succs.iter().find(|s| body.contains(s)).copied();
+            let mut body_blocks = body.clone();
+            body_blocks.remove(&header);
             let body_region = if let Some(entry) = body_entry {
-                self.analyze_loop_body(entry, body)
+                self.analyze_loop_body(entry, &body_blocks)
             } else {
-                Region::Block(header)
+                Region::Sequence(Vec::new())
             };
 
             Region::WhileLoop {
@@ -415,6 +421,23 @@ impl<'a> RegionAnalyzer<'a> {
                 body: Box::new(body_region),
             }
         } else {
+            // Guarded infinite-loop pattern:
+            //   loop_head -> guard
+            //   guard: if (break_cond) break; ...
+            // Recover this as while(cond) from region analysis instead of cleanup.
+            if let Some((guard_block, body_entry)) = self.find_precheck_guard(header, body) {
+                let mut body_blocks = body.clone();
+                body_blocks.remove(&guard_block);
+                if header != guard_block && self.func.successors(header).len() == 1 {
+                    body_blocks.remove(&header);
+                }
+                let body_region = self.analyze_loop_body(body_entry, &body_blocks);
+                return Region::WhileLoop {
+                    header: guard_block,
+                    body: Box::new(body_region),
+                };
+            }
+
             // Do-while or infinite loop
             let body_region = self.analyze_loop_body(header, body);
             Region::DoWhileLoop {
@@ -424,16 +447,95 @@ impl<'a> RegionAnalyzer<'a> {
         }
     }
 
-    fn analyze_loop_body(&mut self, _entry: u64, body: &HashSet<u64>) -> Region {
-        // Simplified: just return the blocks as a sequence
-        let mut blocks: Vec<u64> = body.iter().copied().collect();
-        blocks.sort();
-
-        if blocks.len() == 1 {
-            Region::Block(blocks[0])
-        } else {
-            Region::Sequence(blocks.into_iter().map(Region::Block).collect())
+    fn analyze_loop_body(&mut self, entry: u64, body: &HashSet<u64>) -> Region {
+        if body.is_empty() {
+            return Region::Sequence(Vec::new());
         }
+
+        let mut blocks = Vec::new();
+        let mut seen = HashSet::new();
+        self.collect_loop_body_order(entry, body, &mut seen, &mut blocks);
+
+        for &b in body {
+            if !seen.contains(&b) {
+                blocks.push(b);
+            }
+        }
+
+        let mut regions = Vec::new();
+        for b in blocks {
+            if self.processed.contains(&b) {
+                continue;
+            }
+            regions.push(self.analyze_region(b));
+        }
+
+        if regions.is_empty() {
+            Region::Sequence(Vec::new())
+        } else if regions.len() == 1 {
+            regions.remove(0)
+        } else {
+            Region::Sequence(regions)
+        }
+    }
+
+    fn collect_loop_body_order(
+        &self,
+        block: u64,
+        body: &HashSet<u64>,
+        seen: &mut HashSet<u64>,
+        out: &mut Vec<u64>,
+    ) {
+        if !body.contains(&block) || !seen.insert(block) {
+            return;
+        }
+        out.push(block);
+        for succ in self.func.successors(block) {
+            if body.contains(&succ) {
+                self.collect_loop_body_order(succ, body, seen, out);
+            }
+        }
+    }
+
+    fn find_precheck_guard(&self, header: u64, body: &HashSet<u64>) -> Option<(u64, u64)> {
+        if self.func.successors(header).len() != 1 {
+            return None;
+        }
+
+        for &block in body {
+            if block == header {
+                continue;
+            }
+            let preds = self.func.predecessors(block);
+            if !preds.contains(&header) {
+                continue;
+            }
+
+            let succs = self.func.successors(block);
+            if succs.len() != 2 {
+                continue;
+            }
+
+            let mut inside = None;
+            let mut outside = false;
+            for succ in succs {
+                if body.contains(&succ) {
+                    inside = Some(succ);
+                } else {
+                    outside = true;
+                }
+            }
+
+            if outside {
+                if let Some(next_body) = inside {
+                    if next_body != header {
+                        return Some((block, next_body));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Check if a block is a loop header.
@@ -512,6 +614,50 @@ impl<'a> RegionAnalyzer<'a> {
             default,
             merge_block: merge,
         })
+    }
+
+    fn analyze_switch_with_cases(
+        &mut self,
+        entry: u64,
+        switch_cases: &[(u64, u64)],
+        default: Option<u64>,
+    ) -> Region {
+        self.processed.insert(entry);
+
+        let mut targets: Vec<u64> = switch_cases.iter().map(|(_, t)| *t).collect();
+        if let Some(def) = default {
+            targets.push(def);
+        }
+        targets.sort();
+        targets.dedup();
+
+        let merge = self.find_switch_merge(&targets);
+
+        let mut target_to_values: HashMap<u64, Vec<u64>> = HashMap::new();
+        for (value, target) in switch_cases {
+            target_to_values.entry(*target).or_default().push(*value);
+        }
+
+        let mut cases = Vec::new();
+        for (&target, values) in &target_to_values {
+            if Some(target) == merge || Some(target) == default {
+                continue;
+            }
+            let case_region = Box::new(self.analyze_region(target));
+            cases.push((values.first().copied(), case_region));
+        }
+        cases.sort_by_key(|(v, _)| v.unwrap_or(u64::MAX));
+
+        let default_region = default
+            .filter(|t| Some(*t) != merge)
+            .map(|addr| Box::new(self.analyze_region(addr)));
+
+        Region::Switch {
+            switch_block: entry,
+            cases,
+            default: default_region,
+            merge_block: merge,
+        }
     }
 
     /// Find the merge point for switch targets.

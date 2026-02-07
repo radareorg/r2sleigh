@@ -1448,9 +1448,9 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 						const RJson *offset = r_json_get (elem, "addr");
 						const RJson *name = r_json_get (elem, "name");
 						if (offset && name && offset->type == R_JSON_INTEGER && name->type == R_JSON_STRING) {
-							/* Skip functions (already in func_names) and strings and sections */
+							/* Skip strings (already in strings_json) and sections */
 							const char *n = name->str_value;
-							if (n && strncmp (n, "sym.", 4) != 0 && strncmp (n, "str.", 4) != 0
+							if (n && strncmp (n, "str.", 4) != 0
 							    && strncmp (n, "section.", 8) != 0) {
 								char addr_str[32];
 								snprintf (addr_str, sizeof (addr_str), "0x%llx", (unsigned long long)offset->num.u_value);

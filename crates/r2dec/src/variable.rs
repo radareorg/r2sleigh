@@ -340,7 +340,9 @@ impl VariableRecovery {
                         let name_lower = src.name.to_lowercase();
                         for &cc_reg in &cc_arg_regs {
                             if name_lower.contains(cc_reg) {
-                                seen_v0.entry(cc_reg.to_string()).or_insert_with(|| src.clone());
+                                seen_v0
+                                    .entry(cc_reg.to_string())
+                                    .or_insert_with(|| src.clone());
                             }
                         }
                     }
@@ -353,7 +355,9 @@ impl VariableRecovery {
                         let name_lower = src.name.to_lowercase();
                         for &cc_reg in &cc_arg_regs {
                             if name_lower.contains(cc_reg) {
-                                seen_v0.entry(cc_reg.to_string()).or_insert_with(|| src.clone());
+                                seen_v0
+                                    .entry(cc_reg.to_string())
+                                    .or_insert_with(|| src.clone());
                             }
                         }
                     }

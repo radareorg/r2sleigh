@@ -109,6 +109,10 @@ pub struct FoldingContext {
     consumed_by_call: HashSet<String>,
     /// Out-of-SSA variable aliases: maps SSA display_name -> merged C name.
     var_aliases: HashMap<String, String>,
+    /// Type hints keyed by rendered variable name (for member/subscript recovery).
+    type_hints: HashMap<String, CType>,
+    /// Values that are only used to feed flag-setting operations.
+    flag_only_values: HashSet<String>,
 }
 
 impl FoldingContext {
@@ -185,6 +189,8 @@ impl FoldingContext {
             consumed_by_call: HashSet::new(),
             var_aliases: HashMap::new(),
             formatted_defs: HashMap::new(),
+            type_hints: HashMap::new(),
+            flag_only_values: HashSet::new(),
         }
     }
 
@@ -269,6 +275,11 @@ impl FoldingContext {
     /// Set CallOther userop name mappings.
     pub fn set_userop_names(&mut self, names: HashMap<u32, String>) {
         self.userop_names = names;
+    }
+
+    /// Set inferred type hints keyed by rendered variable name.
+    pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
+        self.type_hints = hints;
     }
 
     /// Analyze function structure to detect return patterns.
@@ -463,6 +474,35 @@ impl FoldingContext {
         // Third pass: track comparison patterns (after definitions are built)
         // This allows us to trace through temporaries for comparison reconstruction
         for op in &block.ops {
+            // Track values that only exist to feed flag calculations.
+            if let Some(dst) = op.dst() {
+                let dst_lower = dst.name.to_lowercase();
+                if is_cpu_flag(&dst_lower) {
+                    for src in op.sources() {
+                        let src_key = src.display_name();
+                        if self.use_counts.get(&src_key).copied().unwrap_or(0) <= 1 {
+                            self.flag_only_values.insert(src_key);
+                        }
+                    }
+                }
+
+                // Propagate flag-only marking through trivial bool glue
+                // (e.g., cond = !ZF, cond = CF || ZF).
+                let dst_key = dst.display_name();
+                let dst_uses = self.use_counts.get(&dst_key).copied().unwrap_or(0);
+                if dst_uses <= 1 {
+                    let srcs = op.sources();
+                    if !srcs.is_empty()
+                        && srcs.iter().all(|src| {
+                            is_cpu_flag(&src.name.to_lowercase())
+                                || self.flag_only_values.contains(&src.display_name())
+                        })
+                    {
+                        self.flag_only_values.insert(dst_key);
+                    }
+                }
+            }
+
             // Track IntSub results for CMP reconstruction
             // x86 CMP instruction is encoded as SUB that only sets flags
             if let SSAOp::IntSub { dst, a, b } = op {
@@ -711,40 +751,56 @@ impl FoldingContext {
         for block in blocks {
             for op in &block.ops {
                 if let Some(dst) = op.dst() {
-                    if dst.name.starts_with("tmp:") || dst.name.starts_with("const:")
-                        || dst.name.starts_with("ram:") || dst.name.starts_with("reg:")
+                    if dst.name.starts_with("tmp:")
+                        || dst.name.starts_with("const:")
+                        || dst.name.starts_with("ram:")
+                        || dst.name.starts_with("reg:")
                     {
                         continue;
                     }
                     let base = dst.name.to_lowercase();
-                    reg_versions.entry(base).or_default()
+                    reg_versions
+                        .entry(base)
+                        .or_default()
                         .push((dst.display_name(), dst.version));
                 }
                 for src in op.sources() {
-                    if src.name.starts_with("tmp:") || src.name.starts_with("const:")
-                        || src.name.starts_with("ram:") || src.name.starts_with("reg:")
+                    if src.name.starts_with("tmp:")
+                        || src.name.starts_with("const:")
+                        || src.name.starts_with("ram:")
+                        || src.name.starts_with("reg:")
                     {
                         continue;
                     }
                     let base = src.name.to_lowercase();
-                    reg_versions.entry(base).or_default()
+                    reg_versions
+                        .entry(base)
+                        .or_default()
                         .push((src.display_name(), src.version));
                 }
             }
             for phi in &block.phis {
-                if !phi.dst.name.starts_with("tmp:") && !phi.dst.name.starts_with("const:")
-                    && !phi.dst.name.starts_with("ram:") && !phi.dst.name.starts_with("reg:")
+                if !phi.dst.name.starts_with("tmp:")
+                    && !phi.dst.name.starts_with("const:")
+                    && !phi.dst.name.starts_with("ram:")
+                    && !phi.dst.name.starts_with("reg:")
                 {
                     let base = phi.dst.name.to_lowercase();
-                    reg_versions.entry(base).or_default()
+                    reg_versions
+                        .entry(base)
+                        .or_default()
                         .push((phi.dst.display_name(), phi.dst.version));
                 }
                 for (_, src) in &phi.sources {
-                    if !src.name.starts_with("tmp:") && !src.name.starts_with("const:")
-                        && !src.name.starts_with("ram:") && !src.name.starts_with("reg:")
+                    if !src.name.starts_with("tmp:")
+                        && !src.name.starts_with("const:")
+                        && !src.name.starts_with("ram:")
+                        && !src.name.starts_with("reg:")
                     {
                         let base = src.name.to_lowercase();
-                        reg_versions.entry(base).or_default()
+                        reg_versions
+                            .entry(base)
+                            .or_default()
                             .push((src.display_name(), src.version));
                     }
                 }
@@ -757,15 +813,19 @@ impl FoldingContext {
         // Initialize each SSA name as its own parent
         for versions in reg_versions.values() {
             for (name, _) in versions {
-                uf_parent.entry(name.clone()).or_insert_with(|| name.clone());
+                uf_parent
+                    .entry(name.clone())
+                    .or_insert_with(|| name.clone());
             }
         }
 
         // Union phi-connected versions
         for block in blocks {
             for phi in &block.phis {
-                if phi.dst.name.starts_with("tmp:") || phi.dst.name.starts_with("const:")
-                    || phi.dst.name.starts_with("ram:") || phi.dst.name.starts_with("reg:")
+                if phi.dst.name.starts_with("tmp:")
+                    || phi.dst.name.starts_with("const:")
+                    || phi.dst.name.starts_with("ram:")
+                    || phi.dst.name.starts_with("reg:")
                 {
                     continue;
                 }
@@ -869,10 +929,12 @@ impl FoldingContext {
 
             // If there are ungrouped singletons, also try to alias them
             // (versions not in any phi chain but still non-conflicting)
-            let grouped: HashSet<&str> = groups.values()
+            let grouped: HashSet<&str> = groups
+                .values()
                 .flat_map(|v| v.iter().map(|s| s.as_str()))
                 .collect();
-            let ungrouped: Vec<&(String, u32)> = unique.iter()
+            let ungrouped: Vec<&(String, u32)> = unique
+                .iter()
                 .filter(|(n, _)| !grouped.contains(n.as_str()) && !self.var_aliases.contains_key(n))
                 .collect();
             if !ungrouped.is_empty() {
@@ -888,7 +950,11 @@ impl FoldingContext {
                     count > 1
                 });
                 if !has_conflict {
-                    let alias = if group_idx == 0 { base.clone() } else { format!("{}_{}", base, group_idx + 1) };
+                    let alias = if group_idx == 0 {
+                        base.clone()
+                    } else {
+                        format!("{}_{}", base, group_idx + 1)
+                    };
                     for (n, _) in &ungrouped {
                         self.var_aliases.insert(n.clone(), alias.clone());
                     }
@@ -927,11 +993,13 @@ impl FoldingContext {
                         break;
                     }
 
-                    // Check Copy and IntZExt ops that write to arg registers
-                    let (dst_var, src_var) = match prev_op {
-                        SSAOp::Copy { dst, src } => (dst, Some(src)),
-                        SSAOp::IntZExt { dst, src } => (dst, Some(src)),
-                        SSAOp::IntSExt { dst, src } => (dst, Some(src)),
+                    // Check register writes that feed call arguments.
+                    let (dst_var, src_expr) = match prev_op {
+                        SSAOp::Copy { dst, src } => (dst, Some(self.get_expr(src))),
+                        SSAOp::IntZExt { dst, src } => (dst, Some(self.get_expr(src))),
+                        SSAOp::IntSExt { dst, src } => (dst, Some(self.get_expr(src))),
+                        // Common zeroing idiom before calls: xor reg, reg
+                        SSAOp::IntXor { dst, a, b } if a == b => (dst, Some(CExpr::IntLit(0))),
                         _ => continue,
                     };
 
@@ -939,8 +1007,7 @@ impl FoldingContext {
                     // Check if this writes to an arg register
                     if let Some(_pos) = self.arg_regs.iter().position(|r| *r == dst_base) {
                         if !found_regs.contains_key(&dst_base) {
-                            if let Some(src) = src_var {
-                                let expr = self.get_expr(src);
+                            if let Some(expr) = src_expr {
                                 let dst_key = dst_var.display_name();
                                 found_regs.insert(dst_base.clone(), (expr, dst_key));
                             }
@@ -1150,9 +1217,8 @@ impl FoldingContext {
 
     /// Check if a variable should be inlined.
     fn should_inline(&self, var_name: &str) -> bool {
-        // Don't inline if it has multiple uses
         let use_count = self.use_counts.get(var_name).copied().unwrap_or(0);
-        if use_count != 1 {
+        if use_count == 0 || use_count > 3 {
             return false;
         }
 
@@ -1160,11 +1226,21 @@ impl FoldingContext {
             return false;
         }
 
-        if self.condition_vars.contains(var_name) {
+        if self.condition_vars.contains(var_name) && !self.is_condition_inline_candidate(var_name) {
             return false;
         }
 
-        // Always inline temporaries and constants
+        // Values that only feed flag computation should always disappear.
+        if self.flag_only_values.contains(var_name) {
+            return true;
+        }
+
+        // Multi-use inlining is only allowed for very small expressions.
+        if use_count > 1 && !self.is_simple_inline_candidate(var_name) {
+            return false;
+        }
+
+        // Always inline temporaries and constants.
         if var_name.starts_with("tmp:") || var_name.starts_with("const:") {
             return true;
         }
@@ -1187,8 +1263,9 @@ impl FoldingContext {
             if self.caller_saved_regs.contains(&base_lower) {
                 return true;
             }
-            // Inline any single-use register with a simple definition
-            if self.definitions.contains_key(var_name) {
+            // Inline any register with a definition when it is single-use
+            // or the definition is trivially small.
+            if use_count == 1 || self.is_simple_inline_candidate(var_name) {
                 return true;
             }
         }
@@ -1196,10 +1273,81 @@ impl FoldingContext {
         false
     }
 
+    fn is_condition_inline_candidate(&self, var_name: &str) -> bool {
+        if self.flag_only_values.contains(var_name) {
+            return true;
+        }
+
+        if is_cpu_flag(&var_name.to_lowercase()) {
+            return true;
+        }
+
+        self.is_simple_inline_candidate(var_name)
+    }
+
+    fn is_simple_inline_candidate(&self, var_name: &str) -> bool {
+        self.definitions
+            .get(var_name)
+            .map(|expr| self.is_simple_expr(expr, 0))
+            .unwrap_or(false)
+    }
+
+    fn is_simple_expr(&self, expr: &CExpr, depth: u32) -> bool {
+        if depth > 2 {
+            return false;
+        }
+
+        match expr {
+            CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(_)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_) => true,
+            CExpr::Var(name) => {
+                if is_cpu_flag(&name.to_lowercase()) {
+                    return true;
+                }
+                self.definitions
+                    .get(name)
+                    .map(|inner| self.is_simple_expr(inner, depth + 1))
+                    .unwrap_or(true)
+            }
+            CExpr::Cast { expr, .. } | CExpr::Paren(expr) => self.is_simple_expr(expr, depth + 1),
+            CExpr::Unary { operand, .. } => self.is_simple_expr(operand, depth + 1),
+            CExpr::Binary { op, left, right } => {
+                matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Eq
+                        | BinaryOp::Ne
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                        | BinaryOp::And
+                        | BinaryOp::Or
+                ) && self.is_simple_expr(left, depth + 1)
+                    && self.is_simple_expr(right, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
     /// Check if a variable is dead (never used).
     pub fn is_dead(&self, var: &SSAVar) -> bool {
         let key = var.display_name();
         let use_count = self.use_counts.get(&key).copied().unwrap_or(0);
+        let lower = var.name.to_lowercase();
+
+        // Flag registers are rendering artifacts; keep them out of emitted code.
+        if is_cpu_flag(&lower) {
+            return true;
+        }
+
+        // Helpers used only to feed flags are also dead in final output.
+        if self.flag_only_values.contains(&key) {
+            return true;
+        }
 
         if use_count > 0 {
             return false;
@@ -1210,12 +1358,6 @@ impl FoldingContext {
             || var.name.starts_with("const:")
             || var.name.starts_with("reg:")
         {
-            return true;
-        }
-
-        // CPU flags are always dead if unused
-        let lower = var.name.to_lowercase();
-        if is_cpu_flag(&lower) {
             return true;
         }
 
@@ -1235,9 +1377,28 @@ impl FoldingContext {
             return true;
         }
 
+        // Eliminate explicit zeroing idioms when the value is never used
+        // beyond setup/flag chains (e.g., eax = eax ^ eax).
+        if let Some(expr) = self.definitions.get(&key) {
+            if self.is_zeroing_expr(expr) {
+                return true;
+            }
+        }
+
         // Keep other named registers alive (e.g., callee-saved like rbx, r12-r15)
         // as they might be meaningful outputs
         false
+    }
+
+    fn is_zeroing_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::BitXor | BinaryOp::Sub,
+                left,
+                right,
+            } => left == right,
+            _ => false,
+        }
     }
 
     /// Check if an operation is part of stack frame setup/teardown (prologue/epilogue).
@@ -1278,8 +1439,10 @@ impl FoldingContext {
                     && !val.is_const()
                 {
                     // Direct: val is a callee-saved register
-                    if val_name.contains("rbx") || val_name.contains("r12")
-                        || val_name.contains("r13") || val_name.contains("r14")
+                    if val_name.contains("rbx")
+                        || val_name.contains("r12")
+                        || val_name.contains("r13")
+                        || val_name.contains("r14")
                         || val_name.contains("r15")
                     {
                         return true;
@@ -1289,9 +1452,12 @@ impl FoldingContext {
                         let val_key = val.display_name();
                         if let Some(src_key) = self.copy_sources.get(&val_key) {
                             let src_lower = src_key.to_lowercase();
-                            if src_lower.contains("rbx") || src_lower.contains("r12")
-                                || src_lower.contains("r13") || src_lower.contains("r14")
-                                || src_lower.contains("r15") || src_lower.contains(&self.fp_name)
+                            if src_lower.contains("rbx")
+                                || src_lower.contains("r12")
+                                || src_lower.contains("r13")
+                                || src_lower.contains("r14")
+                                || src_lower.contains("r15")
+                                || src_lower.contains(&self.fp_name)
                             {
                                 return true;
                             }
@@ -1363,8 +1529,10 @@ impl FoldingContext {
                 }
                 // Load callee-saved register from stack (epilogue pop)
                 if (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
-                    && (dst_name.contains("rbx") || dst_name.contains("r12")
-                        || dst_name.contains("r13") || dst_name.contains("r14")
+                    && (dst_name.contains("rbx")
+                        || dst_name.contains("r12")
+                        || dst_name.contains("r13")
+                        || dst_name.contains("r14")
                         || dst_name.contains("r15"))
                 {
                     return true;
@@ -1503,6 +1671,8 @@ impl FoldingContext {
                     self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                 } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                     sub
+                } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr) {
+                    member
                 } else {
                     CExpr::Deref(Box::new(addr_expr))
                 }
@@ -1714,6 +1884,122 @@ impl FoldingContext {
         })
     }
 
+    fn try_member_access_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
+        let expr = self
+            .definitions
+            .get(&addr.display_name())
+            .cloned()
+            .unwrap_or_else(|| addr_expr.clone());
+
+        let (base_expr, offset) = self.extract_base_const_offset(&expr)?;
+        if offset == 0 || self.is_stackish_expr(&base_expr) || !self.looks_like_pointer(&base_expr)
+        {
+            return None;
+        }
+
+        let member = if offset < 0 {
+            format!("field_neg_{:x}", (-offset) as u64)
+        } else {
+            format!("field_{:x}", offset as u64)
+        };
+
+        Some(CExpr::PtrMember {
+            base: Box::new(base_expr),
+            member,
+        })
+    }
+
+    fn extract_base_const_offset(&self, expr: &CExpr) -> Option<(CExpr, i64)> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => {
+                if let Some(off) = self.literal_to_i64(right) {
+                    return Some((left.as_ref().clone(), off));
+                }
+                if let Some(off) = self.literal_to_i64(left) {
+                    return Some((right.as_ref().clone(), off));
+                }
+                None
+            }
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => self
+                .literal_to_i64(right)
+                .map(|off| (left.as_ref().clone(), -off)),
+            CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
+                self.extract_base_const_offset(inner)
+            }
+            CExpr::Var(name) => self
+                .lookup_definition(name)
+                .and_then(|def| self.extract_base_const_offset(&def)),
+            _ => None,
+        }
+    }
+
+    fn looks_like_pointer(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Cast { ty, .. } => matches!(ty, CType::Pointer(_)),
+            CExpr::Deref(_) => true,
+            CExpr::Var(name) => {
+                if name.starts_with("arg") || name.contains("ptr") {
+                    return true;
+                }
+                if let Some(ty) = self.lookup_type_hint(name) {
+                    return matches!(ty, CType::Pointer(_) | CType::Struct(_));
+                }
+                false
+            }
+            CExpr::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                left,
+                right,
+            } => self.looks_like_pointer(left) || self.looks_like_pointer(right),
+            _ => false,
+        }
+    }
+
+    fn is_stackish_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let lower = name.to_lowercase();
+                lower.contains(&self.sp_name) || lower.contains(&self.fp_name)
+            }
+            CExpr::Binary { left, right, .. } => {
+                self.is_stackish_expr(left) || self.is_stackish_expr(right)
+            }
+            CExpr::Cast { expr, .. } | CExpr::Paren(expr) | CExpr::Unary { operand: expr, .. } => {
+                self.is_stackish_expr(expr)
+            }
+            // Dereferencing a stack slot often yields a pointer value stored on
+            // the stack (e.g., local pointer variable), so don't reject it.
+            CExpr::Deref(_) => false,
+            _ => false,
+        }
+    }
+
+    fn lookup_type_hint(&self, name: &str) -> Option<&CType> {
+        if let Some(ty) = self.type_hints.get(name) {
+            return Some(ty);
+        }
+        let lower = name.to_lowercase();
+        self.type_hints.get(&lower)
+    }
+
+    fn type_hint_for_var(&self, var: &SSAVar) -> Option<CType> {
+        let display = var.display_name();
+        if let Some(ty) = self.lookup_type_hint(&display) {
+            return Some(ty.clone());
+        }
+
+        let rendered = self.var_name(var);
+        self.lookup_type_hint(&rendered).cloned()
+    }
+
     fn extract_base_index_scale(&self, expr: &CExpr) -> Option<(CExpr, CExpr, u32, bool)> {
         match expr {
             CExpr::Binary {
@@ -1904,9 +2190,15 @@ impl FoldingContext {
             if let Some(name) = self.lookup_function(addr) {
                 return CExpr::Var(name.clone());
             }
+            if let Some(name) = self.lookup_symbol(addr) {
+                return CExpr::Var(name.clone());
+            }
         } else if target.is_const() {
             if let Some(addr) = parse_const_value(&target.name) {
                 if let Some(name) = self.lookup_function(addr) {
+                    return CExpr::Var(name.clone());
+                }
+                if let Some(name) = self.lookup_symbol(addr) {
                     return CExpr::Var(name.clone());
                 }
             }
@@ -1927,7 +2219,12 @@ impl FoldingContext {
                     return Some(CStmt::Return(Some(self.get_expr(src))));
                 }
                 let lhs = CExpr::Var(self.var_name(dst));
-                let rhs = self.get_expr(src);
+                let mut rhs = self.get_expr(src);
+                if let Some(dst_ty) = self.type_hint_for_var(dst) {
+                    if matches!(dst_ty, CType::Pointer(_)) && !self.looks_like_pointer(&rhs) {
+                        rhs = CExpr::cast(dst_ty, rhs);
+                    }
+                }
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::Load { dst, addr, .. } => {
@@ -1959,6 +2256,9 @@ impl FoldingContext {
                         self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                         sub
+                    } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr)
+                    {
+                        member
                     } else {
                         CExpr::Deref(Box::new(addr_expr))
                     }
@@ -1989,11 +2289,19 @@ impl FoldingContext {
                         self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                         sub
+                    } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr)
+                    {
+                        member
                     } else {
                         CExpr::Deref(Box::new(addr_expr))
                     }
                 };
-                let rhs = self.get_expr(val);
+                let mut rhs = self.get_expr(val);
+                if let Some(val_ty) = self.type_hint_for_var(val) {
+                    if matches!(val_ty, CType::Pointer(_)) && !self.looks_like_pointer(&rhs) {
+                        rhs = CExpr::cast(val_ty, rhs);
+                    }
+                }
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::IntAdd { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Add),
@@ -2187,13 +2495,13 @@ impl FoldingContext {
 
         // If the variable is a flag (ZF, CF, etc.), try direct flag reconstruction first
         let var_lower = var.name.to_lowercase();
-        if var_lower.contains("zf") || var_lower.contains("cf")
-            || var_lower.contains("sf") || var_lower.contains("of")
+        if var_lower.contains("zf")
+            || var_lower.contains("cf")
+            || var_lower.contains("sf")
+            || var_lower.contains("of")
         {
             let var_cname = self.var_name(var);
-            if let Some(reconstructed) =
-                self.try_reconstruct_condition(&CExpr::Var(var_cname))
-            {
+            if let Some(reconstructed) = self.try_reconstruct_condition(&CExpr::Var(var_cname)) {
                 return reconstructed;
             }
         }
@@ -2572,7 +2880,9 @@ impl FoldingContext {
         };
 
         // Look up the definition of this variable (try SSA key first, then formatted name)
-        let def = self.definitions.get(var_name)
+        let def = self
+            .definitions
+            .get(var_name)
             .or_else(|| self.formatted_defs.get(var_name))?;
 
         match def {
@@ -2986,6 +3296,38 @@ mod tests {
         ctx.analyze_block(&block);
 
         // t0 should be inlined (single use, temp)
+        assert!(ctx.should_inline(&t0.display_name()));
+    }
+
+    #[test]
+    fn test_multi_use_simple_temp_inlining() {
+        let rax_0 = make_var("RAX", 0, 8);
+        let t0 = make_var("tmp:200", 1, 8);
+        let t1 = make_var("tmp:201", 1, 8);
+        let t2 = make_var("tmp:202", 1, 8);
+
+        let block = make_block(vec![
+            SSAOp::IntAdd {
+                dst: t0.clone(),
+                a: rax_0,
+                b: make_var("const:1", 0, 8),
+            },
+            SSAOp::IntAdd {
+                dst: t1.clone(),
+                a: t0.clone(),
+                b: t0.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: t2,
+                a: t1,
+                b: t0.clone(),
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+
+        // t0 has 3 uses but remains simple enough to inline.
         assert!(ctx.should_inline(&t0.display_name()));
     }
 

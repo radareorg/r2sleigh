@@ -38,9 +38,9 @@ pub mod types;
 pub mod variable;
 
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
-pub use codegen::{generate, CodeGenConfig, CodeGenerator};
+pub use codegen::{CodeGenConfig, CodeGenerator, generate};
 pub use expr::ExpressionBuilder;
-pub use fold::{fold_block, fold_blocks, FoldingContext};
+pub use fold::{FoldingContext, fold_block, fold_blocks};
 pub use region::{Region, RegionAnalyzer};
 pub use structure::ControlFlowStructurer;
 pub use types::TypeInference;
@@ -129,7 +129,7 @@ pub struct Decompiler {
 impl Decompiler {
     /// Create a new decompiler with the given configuration.
     pub fn new(config: DecompilerConfig) -> Self {
-        Self { 
+        Self {
             config,
             context: DecompilerContext::default(),
         }
@@ -169,17 +169,24 @@ impl Decompiler {
     /// Build a C function from an SSA function.
     pub fn build_function(&self, func: &SSAFunction) -> CFunction {
         // Recover variables
-        let mut var_recovery =
-            VariableRecovery::new(&self.config.sp_name, &self.config.fp_name, self.config.ptr_size);
+        let mut var_recovery = VariableRecovery::new(
+            &self.config.sp_name,
+            &self.config.fp_name,
+            self.config.ptr_size,
+        );
         var_recovery.recover(func);
 
         // Infer types
         let mut type_inference = TypeInference::new(self.config.ptr_size);
+        if !self.context.function_names.is_empty() {
+            type_inference.set_function_names(self.context.function_names.clone());
+        }
         type_inference.infer_function(func);
+        let type_hints = type_inference.var_type_hints();
 
         // Structure control flow
         let mut structurer = ControlFlowStructurer::new(func, self.config.ptr_size);
-        
+
         // Pass external context to structurer
         if !self.context.function_names.is_empty() {
             structurer.set_function_names(self.context.function_names.clone());
@@ -190,16 +197,20 @@ impl Decompiler {
         if !self.context.symbols.is_empty() {
             structurer.set_symbols(self.context.symbols.clone());
         }
-        
+        if !type_hints.is_empty() {
+            structurer.set_type_hints(type_hints);
+        }
+
         // Get set of variables that survive folding before structuring
         let emitted_vars = structurer.emitted_var_names();
 
         let body_stmt = structurer.structure();
 
         // Build the C function
-        let func_name = func.name.clone().unwrap_or_else(|| {
-            format!("sub_{:x}", func.entry)
-        });
+        let func_name = func
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("sub_{:x}", func.entry));
 
         // Collect parameters -- always include in signature even if inlined in body
         let mut params: Vec<ast::CParam> = var_recovery

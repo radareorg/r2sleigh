@@ -15,8 +15,14 @@ pub struct TypeInference {
     var_types: HashMap<SSAVar, CType>,
     /// Known function signatures.
     func_types: HashMap<String, FunctionType>,
+    /// Function names by address (injected from external context).
+    function_names: HashMap<u64, String>,
     /// Pointer size in bits.
-    _ptr_size: u32,
+    ptr_size: u32,
+    /// Calling-convention argument registers for the active architecture.
+    arg_regs: Vec<String>,
+    /// Return-value registers for the active architecture.
+    ret_regs: Vec<String>,
 }
 
 /// Function type signature.
@@ -33,7 +39,25 @@ impl TypeInference {
         let mut ti = Self {
             var_types: HashMap::new(),
             func_types: HashMap::new(),
-            _ptr_size: ptr_size,
+            function_names: HashMap::new(),
+            ptr_size,
+            arg_regs: if ptr_size == 64 {
+                vec![
+                    "rdi".to_string(),
+                    "rsi".to_string(),
+                    "rdx".to_string(),
+                    "rcx".to_string(),
+                    "r8".to_string(),
+                    "r9".to_string(),
+                ]
+            } else {
+                vec![]
+            },
+            ret_regs: if ptr_size == 64 {
+                vec!["rax".to_string(), "eax".to_string()]
+            } else {
+                vec!["eax".to_string()]
+            },
         };
         // Add known libc function signatures
         ti.add_known_functions();
@@ -42,12 +66,14 @@ impl TypeInference {
 
     /// Add known C library function signatures.
     fn add_known_functions(&mut self) {
+        let size_t = CType::UInt(self.ptr_size);
+
         // memcpy(void* dst, const void* src, size_t n)
         self.func_types.insert(
             "memcpy".to_string(),
             FunctionType {
                 return_type: CType::void_ptr(),
-                params: vec![CType::void_ptr(), CType::void_ptr(), CType::UInt(64)],
+                params: vec![CType::void_ptr(), CType::void_ptr(), size_t.clone()],
                 variadic: false,
             },
         );
@@ -55,7 +81,7 @@ impl TypeInference {
             "sym.imp.memcpy".to_string(),
             FunctionType {
                 return_type: CType::void_ptr(),
-                params: vec![CType::void_ptr(), CType::void_ptr(), CType::UInt(64)],
+                params: vec![CType::void_ptr(), CType::void_ptr(), size_t.clone()],
                 variadic: false,
             },
         );
@@ -100,7 +126,7 @@ impl TypeInference {
         self.func_types.insert(
             "strlen".to_string(),
             FunctionType {
-                return_type: CType::UInt(64),
+                return_type: size_t.clone(),
                 params: vec![CType::ptr(CType::Int(8))],
                 variadic: false,
             },
@@ -108,7 +134,7 @@ impl TypeInference {
         self.func_types.insert(
             "sym.imp.strlen".to_string(),
             FunctionType {
-                return_type: CType::UInt(64),
+                return_type: size_t.clone(),
                 params: vec![CType::ptr(CType::Int(8))],
                 variadic: false,
             },
@@ -119,7 +145,7 @@ impl TypeInference {
             "malloc".to_string(),
             FunctionType {
                 return_type: CType::void_ptr(),
-                params: vec![CType::UInt(64)],
+                params: vec![size_t.clone()],
                 variadic: false,
             },
         );
@@ -127,7 +153,7 @@ impl TypeInference {
             "sym.imp.malloc".to_string(),
             FunctionType {
                 return_type: CType::void_ptr(),
-                params: vec![CType::UInt(64)],
+                params: vec![size_t],
                 variadic: false,
             },
         );
@@ -149,6 +175,24 @@ impl TypeInference {
                 variadic: false,
             },
         );
+
+        // setlocale(int category, const char* locale) -> char*
+        self.func_types.insert(
+            "setlocale".to_string(),
+            FunctionType {
+                return_type: CType::ptr(CType::Int(8)),
+                params: vec![CType::Int(32), CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        );
+        self.func_types.insert(
+            "sym.imp.setlocale".to_string(),
+            FunctionType {
+                return_type: CType::ptr(CType::Int(8)),
+                params: vec![CType::Int(32), CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        );
     }
 
     /// Infer types for all variables in a function.
@@ -160,10 +204,13 @@ impl TypeInference {
             }
         }
 
-        // Second pass: detect pointer arithmetic patterns
+        // Second pass: apply known API signatures to call args/returns.
+        self.infer_call_types(func);
+
+        // Third pass: detect pointer arithmetic patterns
         self.detect_pointer_patterns(func);
 
-        // Third pass: propagate types through uses
+        // Fourth pass: propagate types through uses
         let mut changed = true;
         let mut iterations = 0;
         while changed && iterations < 10 {
@@ -321,6 +368,130 @@ impl TypeInference {
         }
     }
 
+    fn infer_call_types(&mut self, func: &SSAFunction) {
+        for block in func.blocks() {
+            for (call_idx, op) in block.ops.iter().enumerate() {
+                let target = match op {
+                    SSAOp::Call { target } | SSAOp::CallInd { target } => target,
+                    _ => continue,
+                };
+
+                let Some(sig) = self.resolve_call_signature(target) else {
+                    continue;
+                };
+
+                self.apply_arg_signature(&block.ops, call_idx, &sig.params);
+                self.apply_return_signature(&block.ops, call_idx, &sig.return_type);
+            }
+        }
+    }
+
+    fn apply_arg_signature(&mut self, ops: &[SSAOp], call_idx: usize, params: &[CType]) {
+        if self.arg_regs.is_empty() || params.is_empty() {
+            return;
+        }
+
+        let mut seen: HashMap<usize, SSAVar> = HashMap::new();
+        let mut idx = call_idx;
+        while idx > 0 {
+            idx -= 1;
+            let prev = &ops[idx];
+
+            if matches!(prev, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+                break;
+            }
+
+            let (dst, src) = match prev {
+                SSAOp::Copy { dst, src }
+                | SSAOp::IntZExt { dst, src }
+                | SSAOp::IntSExt { dst, src } => (dst, src),
+                _ => continue,
+            };
+
+            let dst_lower = dst.name.to_lowercase();
+            if let Some(arg_pos) = self.arg_regs.iter().position(|r| r == &dst_lower) {
+                if arg_pos < params.len() && !seen.contains_key(&arg_pos) {
+                    let ty = params[arg_pos].clone();
+                    self.set_type(dst, ty.clone());
+                    self.set_type(src, ty);
+                    seen.insert(arg_pos, src.clone());
+                }
+            }
+        }
+    }
+
+    fn apply_return_signature(&mut self, ops: &[SSAOp], call_idx: usize, ret_ty: &CType) {
+        if matches!(ret_ty, CType::Void) {
+            return;
+        }
+
+        let mut idx = call_idx + 1;
+        while idx < ops.len() {
+            let next = &ops[idx];
+
+            if matches!(next, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+                break;
+            }
+
+            match next {
+                SSAOp::Copy { dst, src }
+                | SSAOp::IntZExt { dst, src }
+                | SSAOp::IntSExt { dst, src } => {
+                    if self.is_return_reg(src) {
+                        self.set_type(src, ret_ty.clone());
+                        self.set_type(dst, ret_ty.clone());
+                        return;
+                    }
+                }
+                _ => {}
+            }
+
+            idx += 1;
+        }
+    }
+
+    fn is_return_reg(&self, var: &SSAVar) -> bool {
+        let name = var.name.to_lowercase();
+        self.ret_regs.iter().any(|r| r == &name)
+    }
+
+    fn resolve_call_signature(&self, target: &SSAVar) -> Option<FunctionType> {
+        if let Some(addr) = parse_const_addr(&target.name) {
+            if let Some(name) = self.function_names.get(&addr) {
+                if let Some(sig) = self.lookup_function_type(name) {
+                    return Some(sig);
+                }
+            }
+        }
+
+        self.lookup_function_type(&target.name)
+    }
+
+    fn lookup_function_type(&self, name: &str) -> Option<FunctionType> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+
+        if let Some(sig) = self.func_types.get(name) {
+            return Some(sig.clone());
+        }
+
+        let lower = name.to_lowercase();
+        if let Some(sig) = self.func_types.get(&lower) {
+            return Some(sig.clone());
+        }
+
+        if let Some(stripped) = lower.strip_prefix("sym.imp.") {
+            if let Some(sig) = self.func_types.get(stripped) {
+                return Some(sig.clone());
+            }
+        }
+
+        let imp_name = format!("sym.imp.{}", lower);
+        self.func_types.get(&imp_name).cloned()
+    }
+
     /// Propagate types through uses.
     fn propagate_types(&mut self, op: &SSAOp) -> bool {
         let mut changed = false;
@@ -392,6 +563,26 @@ impl TypeInference {
             8 => CType::Int(64),
             _ => CType::Int(size.saturating_mul(8)),
         }
+    }
+
+    /// Set externally-resolved function names (address -> symbol).
+    pub fn set_function_names(&mut self, names: HashMap<u64, String>) {
+        self.function_names = names;
+    }
+
+    /// Export inferred types keyed by variable display/lowered names.
+    pub fn var_type_hints(&self) -> HashMap<String, CType> {
+        let mut out = HashMap::new();
+        for (var, ty) in &self.var_types {
+            let key = var.display_name();
+            out.insert(key.clone(), ty.clone());
+            out.insert(key.to_lowercase(), ty.clone());
+
+            let base = var.name.to_lowercase();
+            out.insert(base.clone(), ty.clone());
+            out.insert(format!("{}_{}", base, var.version), ty.clone());
+        }
+        out
     }
 
     /// Register a function type.
