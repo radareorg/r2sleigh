@@ -29,9 +29,11 @@
 //! ```
 
 pub mod ast;
+pub(crate) mod analysis;
 pub mod codegen;
 pub mod expr;
 pub mod fold;
+pub(crate) mod normalize;
 pub mod region;
 pub mod structure;
 pub mod types;

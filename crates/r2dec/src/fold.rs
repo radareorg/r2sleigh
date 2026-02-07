@@ -24,17 +24,32 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::{FunctionSSABlock, SSAFunction, SSAOp, SSAVar};
 
+use crate::analysis;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 
 // Type alias for clarity
-type SSABlock = FunctionSSABlock;
+pub(crate) type SSABlock = FunctionSSABlock;
 
-#[derive(Debug, Clone)]
-struct PtrArith {
-    base: SSAVar,
-    index: SSAVar,
-    element_size: u32,
-    is_sub: bool,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PtrArith {
+    pub(crate) base: SSAVar,
+    pub(crate) index: SSAVar,
+    pub(crate) element_size: u32,
+    pub(crate) is_sub: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompareContext {
+    Eq,
+    Ne,
+    SignedNegative,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CompareTuple {
+    lhs: CExpr,
+    rhs: CExpr,
+    context: CompareContext,
 }
 
 /// Threshold for detecting 64-bit negative values stored as unsigned.
@@ -45,20 +60,7 @@ const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
 /// Tracks use counts and definitions for expression folding.
 #[derive(Debug)]
 pub struct FoldingContext {
-    /// Maps SSA variable name to its defining expression.
-    definitions: HashMap<String, CExpr>,
-    /// Reverse map: formatted display name -> SSA definition CExpr.
-    /// Populated after analyze_blocks to allow condition reconstruction
-    /// to look up definitions by their rendered C variable names.
-    formatted_defs: HashMap<String, CExpr>,
-    /// Maps SSA variable name to its use count.
-    use_counts: HashMap<String, usize>,
-    /// Variables that should not be inlined (e.g., multiple uses, side effects).
-    pinned: HashSet<String>,
-    /// Variables that are used in control flow conditions.
-    condition_vars: HashSet<String>,
     /// Pointer size in bits (reserved for architecture-aware type sizing).
-    #[allow(dead_code)]
     ptr_size: u32,
     /// Function address to name mapping for resolving call targets.
     function_names: HashMap<u64, String>,
@@ -71,24 +73,6 @@ pub struct FoldingContext {
     /// Stack/frame pointer register names for detection.
     sp_name: String,
     fp_name: String,
-    /// Stack variable names by offset.
-    stack_vars: HashMap<i64, String>,
-    /// Counter for unique stack variable names (reserved for stack var naming).
-    #[allow(dead_code)]
-    stack_var_counter: usize,
-    /// Maps flag variable names (like ZF) to original comparison operands.
-    /// Used to reconstruct high-level comparisons from x86 cmp/test patterns.
-    flag_origins: HashMap<String, (String, String)>,
-    /// Maps subtraction result names to their operands (for CMP reconstruction).
-    sub_results: HashMap<String, (String, String)>,
-    /// Maps SSA variable keys to their copy sources (for tracing through copies).
-    /// Key is display_name, value is display_name of source.
-    copy_sources: HashMap<String, String>,
-    /// Maps memory addresses (display_name of address var) to stored values (display_name).
-    /// Used to trace through Store→Load pairs.
-    memory_stores: HashMap<String, String>,
-    /// Tracks pointer arithmetic results for subscript reconstruction.
-    ptr_arith: HashMap<String, PtrArith>,
     /// Return register name ("rax" for 64-bit, "eax" for 32-bit).
     ret_reg_name: String,
     /// The function's exit block address (block containing SSAOp::Return).
@@ -103,26 +87,121 @@ pub struct FoldingContext {
     arg_regs: Vec<String>,
     /// Caller-saved registers that can be eliminated when unused.
     caller_saved_regs: HashSet<String>,
-    /// Collected call arguments: maps (block_addr, op_index) -> ordered arg expressions.
-    call_args: HashMap<(u64, usize), Vec<CExpr>>,
-    /// SSA variable names whose definitions are consumed by call argument collection.
-    consumed_by_call: HashSet<String>,
-    /// Out-of-SSA variable aliases: maps SSA display_name -> merged C name.
-    var_aliases: HashMap<String, String>,
-    /// Type hints keyed by rendered variable name (for member/subscript recovery).
-    type_hints: HashMap<String, CType>,
-    /// Values that are only used to feed flag-setting operations.
-    flag_only_values: HashSet<String>,
+    /// Snapshot of explicit analysis passes.
+    analysis_ctx: analysis::AnalysisContext,
 }
 
 impl FoldingContext {
+    fn use_info(&self) -> &analysis::UseInfo {
+        &self.analysis_ctx.use_info
+    }
+
+    fn flag_info(&self) -> &analysis::FlagInfo {
+        &self.analysis_ctx.flag_info
+    }
+
+    fn stack_info(&self) -> &analysis::StackInfo {
+        &self.analysis_ctx.stack_info
+    }
+
+    pub(crate) fn use_counts_map(&self) -> &HashMap<String, usize> {
+        &self.use_info().use_counts
+    }
+    pub(crate) fn definitions_map(&self) -> &HashMap<String, CExpr> {
+        &self.use_info().definitions
+    }
+    pub(crate) fn formatted_defs_map(&self) -> &HashMap<String, CExpr> {
+        &self.use_info().formatted_defs
+    }
+    pub(crate) fn copy_sources_map(&self) -> &HashMap<String, String> {
+        &self.use_info().copy_sources
+    }
+    pub(crate) fn ptr_arith_map(&self) -> &HashMap<String, PtrArith> {
+        &self.use_info().ptr_arith
+    }
+    pub(crate) fn condition_vars_set(&self) -> &HashSet<String> {
+        &self.use_info().condition_vars
+    }
+    pub(crate) fn pinned_set(&self) -> &HashSet<String> {
+        &self.use_info().pinned
+    }
+    pub(crate) fn call_args_map(&self) -> &HashMap<(u64, usize), Vec<CExpr>> {
+        &self.use_info().call_args
+    }
+    pub(crate) fn consumed_by_call_set(&self) -> &HashSet<String> {
+        &self.use_info().consumed_by_call
+    }
+    pub(crate) fn var_aliases_map(&self) -> &HashMap<String, String> {
+        &self.use_info().var_aliases
+    }
+    pub(crate) fn type_hints_map(&self) -> &HashMap<String, CType> {
+        &self.use_info().type_hints
+    }
+    pub(crate) fn flag_origins_map(&self) -> &HashMap<String, (String, String)> {
+        &self.flag_info().flag_origins
+    }
+    pub(crate) fn flag_only_values_set(&self) -> &HashSet<String> {
+        &self.flag_info().flag_only_values
+    }
+    pub(crate) fn stack_vars_map(&self) -> &HashMap<i64, String> {
+        &self.stack_info().stack_vars
+    }
+    pub(crate) fn to_pass_env(&self) -> analysis::PassEnv {
+        analysis::PassEnv {
+            ptr_size: self.ptr_size,
+            sp_name: self.sp_name.clone(),
+            fp_name: self.fp_name.clone(),
+            ret_reg_name: self.ret_reg_name.clone(),
+            arg_regs: self.arg_regs.clone(),
+            caller_saved_regs: self.caller_saved_regs.clone(),
+            type_hints: self.use_info().type_hints.clone(),
+        }
+    }
+
     /// Create a new folding context.
     pub fn new(ptr_size: u32) -> Self {
+        let sp_name = if ptr_size == 64 {
+            "rsp".to_string()
+        } else {
+            "esp".to_string()
+        };
+        let fp_name = if ptr_size == 64 {
+            "rbp".to_string()
+        } else {
+            "ebp".to_string()
+        };
+        let ret_reg_name = if ptr_size == 64 {
+            "rax".to_string()
+        } else {
+            "eax".to_string()
+        };
+        let arg_regs = if ptr_size == 64 {
+            vec![
+                "rdi".to_string(),
+                "rsi".to_string(),
+                "rdx".to_string(),
+                "rcx".to_string(),
+                "r8".to_string(),
+                "r9".to_string(),
+            ]
+        } else {
+            vec![]
+        };
+        let caller_saved_regs = {
+            let mut s = HashSet::new();
+            if ptr_size == 64 {
+                for r in &["rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11"] {
+                    s.insert(r.to_string());
+                }
+            } else {
+                for r in &["eax", "ecx", "edx"] {
+                    s.insert(r.to_string());
+                }
+            }
+            s
+        };
+
         Self {
-            definitions: HashMap::new(),
-            use_counts: HashMap::new(),
-            pinned: HashSet::new(),
-            condition_vars: HashSet::new(),
             ptr_size,
             function_names: HashMap::new(),
             strings: HashMap::new(),
@@ -133,64 +212,20 @@ impl FoldingContext {
             // - ARM: sp, fp (or r13, r11)
             // - MIPS: $sp, $fp ($29, $30)
             // Use set_stack_regs() to override for other architectures.
-            sp_name: if ptr_size == 64 {
-                "rsp".to_string()
-            } else {
-                "esp".to_string()
-            },
-            fp_name: if ptr_size == 64 {
-                "rbp".to_string()
-            } else {
-                "ebp".to_string()
-            },
-            stack_vars: HashMap::new(),
-            stack_var_counter: 0,
-            flag_origins: HashMap::new(),
-            sub_results: HashMap::new(),
-            copy_sources: HashMap::new(),
-            memory_stores: HashMap::new(),
-            ptr_arith: HashMap::new(),
-            ret_reg_name: if ptr_size == 64 {
-                "rax".to_string()
-            } else {
-                "eax".to_string()
-            },
+            sp_name,
+            fp_name,
+            ret_reg_name,
             exit_block: None,
             return_blocks: HashSet::new(),
             current_block_addr: None,
             userop_names: HashMap::new(),
-            arg_regs: if ptr_size == 64 {
-                vec![
-                    "rdi".to_string(),
-                    "rsi".to_string(),
-                    "rdx".to_string(),
-                    "rcx".to_string(),
-                    "r8".to_string(),
-                    "r9".to_string(),
-                ]
-            } else {
-                // cdecl / x86-32: arguments are on the stack, no register args
-                vec![]
+            arg_regs,
+            caller_saved_regs,
+            analysis_ctx: analysis::AnalysisContext {
+                use_info: analysis::UseInfo::default(),
+                flag_info: analysis::FlagInfo::default(),
+                stack_info: analysis::StackInfo::default(),
             },
-            caller_saved_regs: {
-                let mut s = HashSet::new();
-                if ptr_size == 64 {
-                    for r in &["rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11"] {
-                        s.insert(r.to_string());
-                    }
-                } else {
-                    for r in &["eax", "ecx", "edx"] {
-                        s.insert(r.to_string());
-                    }
-                }
-                s
-            },
-            call_args: HashMap::new(),
-            consumed_by_call: HashSet::new(),
-            var_aliases: HashMap::new(),
-            formatted_defs: HashMap::new(),
-            type_hints: HashMap::new(),
-            flag_only_values: HashSet::new(),
         }
     }
 
@@ -237,7 +272,7 @@ impl FoldingContext {
                     if self.should_inline(&key) {
                         continue;
                     }
-                    if self.consumed_by_call.contains(&key) {
+                    if self.consumed_by_call_set().contains(&key) {
                         continue;
                     }
                 }
@@ -279,7 +314,7 @@ impl FoldingContext {
 
     /// Set inferred type hints keyed by rendered variable name.
     pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
-        self.type_hints = hints;
+        self.analysis_ctx.use_info.type_hints = hints;
     }
 
     /// Analyze function structure to detect return patterns.
@@ -300,6 +335,9 @@ impl FoldingContext {
 
         // Find blocks that branch directly to the exit block
         if let Some(exit_addr) = self.exit_block {
+            // Treat the exit block itself as a return context.
+            self.return_blocks.insert(exit_addr);
+
             for block in func.blocks() {
                 // Skip the exit block itself
                 if block.addr == exit_addr {
@@ -361,6 +399,22 @@ impl FoldingContext {
         false
     }
 
+    /// Return true when `name` identifies an architecture return register.
+    /// `name` is expected to be lowercase and without SSA suffix.
+    fn is_return_register_name(&self, name: &str) -> bool {
+        let name = name.to_lowercase();
+        let base = name.split('_').next().unwrap_or(&name);
+
+        if base == self.ret_reg_name {
+            return true;
+        }
+
+        match self.ptr_size {
+            8 => matches!(base, "rax" | "eax" | "ax" | "al"),
+            _ => matches!(base, "eax" | "ax" | "al"),
+        }
+    }
+
     /// Look up a function name by address.
     fn lookup_function(&self, addr: u64) -> Option<&String> {
         self.function_names.get(&addr)
@@ -386,729 +440,52 @@ impl FoldingContext {
 
     /// Analyze a block to collect use counts and definitions.
     pub fn analyze_block(&mut self, block: &SSABlock) {
-        // First pass: count uses of each variable
-        for op in &block.ops {
-            for src in op.sources() {
-                let key = src.display_name();
-                *self.use_counts.entry(key).or_insert(0) += 1;
-            }
-
-            // Mark condition variables as pinned (we want them named for readability)
-            if let SSAOp::CBranch { cond, .. } = op {
-                self.condition_vars.insert(cond.display_name());
-            }
-        }
-
-        // Second pass: build definitions and track copies/stores/loads
-        for op in &block.ops {
-            // Track Copy operations for tracing through to original sources
-            if let SSAOp::Copy { dst, src } = op {
-                self.copy_sources
-                    .insert(dst.display_name(), src.display_name());
-            }
-
-            // Track Store operations: memory[addr] = val
-            if let SSAOp::Store { addr, val, .. } = op {
-                // Normalize the address to a canonical form for matching
-                let addr_key = self.normalize_stack_address(addr);
-                self.memory_stores.insert(addr_key, val.display_name());
-            }
-
-            // Track Load operations: dst = memory[addr]
-            // If we previously stored to this address, link to the stored value
-            if let SSAOp::Load { dst, addr, .. } = op {
-                let addr_key = self.normalize_stack_address(addr);
-                if let Some(stored_val) = self.memory_stores.get(&addr_key).cloned() {
-                    // Link load result to the stored value
-                    self.copy_sources.insert(dst.display_name(), stored_val);
-                } else {
-                    // Fallback: mark as memory load
-                    self.copy_sources
-                        .insert(dst.display_name(), format!("*{}", addr.display_name()));
-                }
-            }
-
-            if let SSAOp::PtrAdd {
-                dst,
-                base,
-                index,
-                element_size,
-            } = op
-            {
-                self.ptr_arith.insert(
-                    dst.display_name(),
-                    PtrArith {
-                        base: base.clone(),
-                        index: index.clone(),
-                        element_size: *element_size,
-                        is_sub: false,
-                    },
-                );
-            }
-
-            if let SSAOp::PtrSub {
-                dst,
-                base,
-                index,
-                element_size,
-            } = op
-            {
-                self.ptr_arith.insert(
-                    dst.display_name(),
-                    PtrArith {
-                        base: base.clone(),
-                        index: index.clone(),
-                        element_size: *element_size,
-                        is_sub: true,
-                    },
-                );
-            }
-
-            if let Some(dst) = op.dst() {
-                let key = dst.display_name();
-                let expr = self.op_to_expr(op);
-                self.definitions.insert(key, expr);
-            }
-        }
-
-        // Third pass: track comparison patterns (after definitions are built)
-        // This allows us to trace through temporaries for comparison reconstruction
-        for op in &block.ops {
-            // Track values that only exist to feed flag calculations.
-            if let Some(dst) = op.dst() {
-                let dst_lower = dst.name.to_lowercase();
-                if is_cpu_flag(&dst_lower) {
-                    for src in op.sources() {
-                        let src_key = src.display_name();
-                        if self.use_counts.get(&src_key).copied().unwrap_or(0) <= 1 {
-                            self.flag_only_values.insert(src_key);
-                        }
-                    }
-                }
-
-                // Propagate flag-only marking through trivial bool glue
-                // (e.g., cond = !ZF, cond = CF || ZF).
-                let dst_key = dst.display_name();
-                let dst_uses = self.use_counts.get(&dst_key).copied().unwrap_or(0);
-                if dst_uses <= 1 {
-                    let srcs = op.sources();
-                    if !srcs.is_empty()
-                        && srcs.iter().all(|src| {
-                            is_cpu_flag(&src.name.to_lowercase())
-                                || self.flag_only_values.contains(&src.display_name())
-                        })
-                    {
-                        self.flag_only_values.insert(dst_key);
-                    }
-                }
-            }
-
-            // Track IntSub results for CMP reconstruction
-            // x86 CMP instruction is encoded as SUB that only sets flags
-            if let SSAOp::IntSub { dst, a, b } = op {
-                let dst_key = dst.display_name();
-                // Trace through copies to find the original source variable
-                let a_name = self.trace_ssa_var_to_source(a);
-                let b_name = if b.is_const() {
-                    // Format constant nicely
-                    if let Some(val) = parse_const_value(&b.name) {
-                        // Use hex for values that look like they were written as hex
-                        // (> 255 and not a round decimal number)
-                        if val > 255 && val % 10 != 0 {
-                            format!("0x{:x}", val)
-                        } else if val > 0xffff {
-                            format!("0x{:x}", val)
-                        } else {
-                            format!("{}", val)
-                        }
-                    } else {
-                        self.var_name(b)
-                    }
-                } else {
-                    self.trace_ssa_var_to_source(b)
-                };
-                self.sub_results.insert(dst_key, (a_name, b_name));
-            }
-
-            // Track ZF origins: ZF = (sub_result == 0) means the original comparison
-            // When ZF=1, it means a == b (from the subtraction a - b)
-            if let SSAOp::IntEqual { dst, a, b } = op {
-                let dst_name = dst.name.to_lowercase();
-                // Check if this sets ZF and compares to zero
-                if dst_name.contains("zf") {
-                    if b.is_const() && parse_const_value(&b.name) == Some(0) {
-                        // This is ZF = (sub_result == 0)
-                        let a_key = a.display_name();
-                        if let Some((orig_a, orig_b)) = self.sub_results.get(&a_key).cloned() {
-                            // ZF=1 when orig_a == orig_b
-                            self.flag_origins
-                                .insert(dst.display_name(), (orig_a, orig_b));
-                        }
-                    }
-                }
-            }
-
-            // Track SF origins: SF = (sub_result < 0) - sign of the subtraction result
-            // SF is set when the result is negative (high bit set)
-            if let SSAOp::IntSLess { dst, a, b } = op {
-                let dst_name = dst.name.to_lowercase();
-                if dst_name.contains("sf") {
-                    // SF = (sub_result < 0)
-                    if b.is_const() && parse_const_value(&b.name) == Some(0) {
-                        let a_key = a.display_name();
-                        if let Some((orig_a, orig_b)) = self.sub_results.get(&a_key).cloned() {
-                            self.flag_origins
-                                .insert(dst.display_name(), (orig_a, orig_b));
-                        }
-                    }
-                }
-            }
-
-            // Track OF origins: OF = IntSBorrow(a, b) - signed overflow from subtraction
-            if let SSAOp::IntSBorrow { dst, a, b } = op {
-                let dst_name = dst.name.to_lowercase();
-                if dst_name.contains("of") {
-                    // Trace operands like we do for IntSub
-                    let a_name = self.trace_ssa_var_to_source(a);
-                    let b_name = if b.is_const() {
-                        if let Some(val) = parse_const_value(&b.name) {
-                            if val > 255 && val % 10 != 0 {
-                                format!("0x{:x}", val)
-                            } else if val > 0xffff {
-                                format!("0x{:x}", val)
-                            } else {
-                                format!("{}", val)
-                            }
-                        } else {
-                            self.var_name(b)
-                        }
-                    } else {
-                        self.trace_ssa_var_to_source(b)
-                    };
-                    self.flag_origins
-                        .insert(dst.display_name(), (a_name, b_name));
-                }
-            }
-
-            // Track CF origins: CF = IntLess(a, b) - unsigned carry/borrow from subtraction
-            if let SSAOp::IntLess { dst, a, b } = op {
-                let dst_name = dst.name.to_lowercase();
-                if dst_name.contains("cf") {
-                    // Trace operands
-                    let a_name = self.trace_ssa_var_to_source(a);
-                    let b_name = if b.is_const() {
-                        if let Some(val) = parse_const_value(&b.name) {
-                            if val > 255 && val % 10 != 0 {
-                                format!("0x{:x}", val)
-                            } else if val > 0xffff {
-                                format!("0x{:x}", val)
-                            } else {
-                                format!("{}", val)
-                            }
-                        } else {
-                            self.var_name(b)
-                        }
-                    } else {
-                        self.trace_ssa_var_to_source(b)
-                    };
-                    self.flag_origins
-                        .insert(dst.display_name(), (a_name, b_name));
-                }
-            }
-        }
-    }
-
-    /// Trace an SSA variable back to its original source by following Copy operations.
-    /// This is used for comparison reconstruction to find the actual argument name.
-    fn trace_ssa_var_to_source(&self, var: &SSAVar) -> String {
-        let mut current_key = var.display_name();
-        let mut visited = HashSet::new();
-
-        // Trace through up to 20 copies to find the source
-        for _ in 0..20 {
-            if visited.contains(&current_key) {
-                break; // Cycle detected
-            }
-            visited.insert(current_key.clone());
-
-            // Use copy_sources map to trace through copies
-            if let Some(src_key) = self.copy_sources.get(&current_key) {
-                // Check if this is a memory dereference marker
-                if src_key.starts_with("*") {
-                    // This was loaded from memory - can't trace further easily
-                    // But check if the value stored there came from a register
-                    // For now, just return a placeholder
-                    return format!("var_{}", current_key.split('_').last().unwrap_or("0"));
-                }
-                current_key = src_key.clone();
-                continue;
-            }
-
-            // No more copies - check what we have
-            break;
-        }
-
-        // Format the final result nicely
-        self.format_traced_name(&current_key)
-    }
-
-    /// Normalize a stack address for matching Store→Load pairs.
-    /// Different SSA versions of the same temp can compute different addresses
-    /// (e.g., tmp:4700_1 = rbp-100, tmp:4700_2 = rbp-112).
-    /// We need to look at the definition to get the actual offset.
-    fn normalize_stack_address(&self, addr: &SSAVar) -> String {
-        let addr_key = addr.display_name();
-
-        // Check if we have a definition for this address variable
-        if let Some(expr) = self.definitions.get(&addr_key) {
-            // Try to extract the offset from the definition
-            if let Some(offset) = self.extract_offset_from_expr(expr) {
-                // Use the offset as the canonical key
-                return format!("stack:{}", offset);
-            }
-        }
-
-        // Fallback: use the full address key (including version) since
-        // different versions can compute different addresses
-        addr_key
-    }
-
-    /// Format a traced SSA variable name for display.
-    fn format_traced_name(&self, key: &str) -> String {
-        // Check coalesced alias first
-        if let Some(alias) = self.var_aliases.get(key) {
-            return alias.clone();
-        }
-
-        // Check if it's a named register (not tmp: or const:)
-        if !key.starts_with("tmp:") && !key.starts_with("const:") && !key.starts_with("ram:") {
-            // It's a register name like "EDI_0" or "RAX_1"
-            // Split into base and version
-            if let Some((base, version)) = key.rsplit_once('_') {
-                if version == "0" {
-                    // Version 0 = function input/parameter
-                    return base.to_lowercase();
-                }
-                // Other versions - show the name with version
-                return format!("{}_{}", base.to_lowercase(), version);
-            }
-            return key.to_lowercase();
-        }
-
-        // For temporaries, generate a name matching var_name() output:
-        // var_name: base="t{version}", then if version > 0: "{base}_{version}"
-        if key.starts_with("tmp:") {
-            if let Some(version_str) = key.rsplit_once('_').map(|(_, v)| v) {
-                if let Ok(ver) = version_str.parse::<u32>() {
-                    return if ver > 0 {
-                        format!("t{}_{}", ver, ver)
-                    } else {
-                        "t0".to_string()
-                    };
-                }
-                return format!("t{}", version_str);
-            }
-        }
-
-        key.to_string()
+        self.analyze_blocks(std::slice::from_ref(block));
     }
 
     /// Analyze multiple blocks (for function-level folding).
     pub fn analyze_blocks(&mut self, blocks: &[SSABlock]) {
-        for block in blocks {
-            self.analyze_block(block);
+        // Explicit pass order:
+        // 1) UseInfo
+        // 2) FlagInfo + StackInfo
+        // 3) Predicate simplification/statement emit consume analysis state
+        let env = self.to_pass_env();
+        let mut use_info = analysis::UseInfo::analyze(blocks, &env);
+        let flag_info = analysis::FlagInfo::analyze(blocks, &use_info, &env);
+        let stack_info = analysis::StackInfo::analyze(blocks, &use_info, &env);
+
+        // Deterministically merge stack-derived alias refinements.
+        for (key, expr) in &stack_info.definition_overrides {
+            if self.is_stack_alias_expr(expr) {
+                use_info.definitions.insert(key.clone(), expr.clone());
+                use_info.formatted_defs.insert(
+                    analysis::utils::format_traced_name(key, &use_info.var_aliases),
+                    expr.clone(),
+                );
+            }
         }
-        // Analyze stack variable patterns
-        self.analyze_stack_vars(blocks);
-        // Collect call arguments from pre-call register writes
-        self.analyze_call_args(blocks);
-        // Coalesce SSA versions into single variable names
-        self.coalesce_variables(blocks);
-        // Build reverse map: formatted name -> definition
-        // This allows condition reconstruction to look up definitions by rendered names
-        self.build_formatted_defs();
+        self.analysis_ctx = analysis::AnalysisContext {
+            use_info,
+            flag_info,
+            stack_info,
+        };
     }
 
-    /// Build the reverse definitions map (formatted name -> CExpr).
-    /// Must be called after coalesce_variables() since it depends on var_aliases.
-    fn build_formatted_defs(&mut self) {
-        self.formatted_defs.clear();
-        for (ssa_key, expr) in &self.definitions {
-            let formatted = self.format_traced_name(ssa_key);
-            self.formatted_defs.insert(formatted, expr.clone());
-        }
-    }
-
-    /// Coalesce SSA variable versions into single names where possible.
-    ///
-    /// Uses a union-find structure over phi node edges to group SSA versions
-    /// that represent the same logical variable. Within each group, if no two
-    /// versions appear in the same block, they all share the base register name.
-    fn coalesce_variables(&mut self, blocks: &[SSABlock]) {
-        // Step 1: Collect all named register SSA vars and build base-register map
-        let mut reg_versions: HashMap<String, Vec<(String, u32)>> = HashMap::new();
-
-        for block in blocks {
-            for op in &block.ops {
-                if let Some(dst) = op.dst() {
-                    if dst.name.starts_with("tmp:")
-                        || dst.name.starts_with("const:")
-                        || dst.name.starts_with("ram:")
-                        || dst.name.starts_with("reg:")
-                    {
-                        continue;
-                    }
-                    let base = dst.name.to_lowercase();
-                    reg_versions
-                        .entry(base)
-                        .or_default()
-                        .push((dst.display_name(), dst.version));
-                }
-                for src in op.sources() {
-                    if src.name.starts_with("tmp:")
-                        || src.name.starts_with("const:")
-                        || src.name.starts_with("ram:")
-                        || src.name.starts_with("reg:")
-                    {
-                        continue;
-                    }
-                    let base = src.name.to_lowercase();
-                    reg_versions
-                        .entry(base)
-                        .or_default()
-                        .push((src.display_name(), src.version));
-                }
+    fn is_stack_alias_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let lowered = name.to_lowercase();
+                lowered.starts_with("arg")
+                    || lowered.starts_with("local_")
+                    || lowered.starts_with("&arg")
+                    || lowered.starts_with("&local_")
             }
-            for phi in &block.phis {
-                if !phi.dst.name.starts_with("tmp:")
-                    && !phi.dst.name.starts_with("const:")
-                    && !phi.dst.name.starts_with("ram:")
-                    && !phi.dst.name.starts_with("reg:")
-                {
-                    let base = phi.dst.name.to_lowercase();
-                    reg_versions
-                        .entry(base)
-                        .or_default()
-                        .push((phi.dst.display_name(), phi.dst.version));
-                }
-                for (_, src) in &phi.sources {
-                    if !src.name.starts_with("tmp:")
-                        && !src.name.starts_with("const:")
-                        && !src.name.starts_with("ram:")
-                        && !src.name.starts_with("reg:")
-                    {
-                        let base = src.name.to_lowercase();
-                        reg_versions
-                            .entry(base)
-                            .or_default()
-                            .push((src.display_name(), src.version));
-                    }
-                }
-            }
-        }
-
-        // Step 2: Build union-find and merge phi-connected versions
-        let mut uf_parent: HashMap<String, String> = HashMap::new();
-
-        // Initialize each SSA name as its own parent
-        for versions in reg_versions.values() {
-            for (name, _) in versions {
-                uf_parent
-                    .entry(name.clone())
-                    .or_insert_with(|| name.clone());
-            }
-        }
-
-        // Union phi-connected versions
-        for block in blocks {
-            for phi in &block.phis {
-                if phi.dst.name.starts_with("tmp:")
-                    || phi.dst.name.starts_with("const:")
-                    || phi.dst.name.starts_with("ram:")
-                    || phi.dst.name.starts_with("reg:")
-                {
-                    continue;
-                }
-                let dst_key = phi.dst.display_name();
-                for (_, src) in &phi.sources {
-                    let src_key = src.display_name();
-                    // Union dst and src
-                    let root_a = uf_find(&mut uf_parent, &dst_key);
-                    let root_b = uf_find(&mut uf_parent, &src_key);
-                    if root_a != root_b {
-                        uf_parent.insert(root_a, root_b);
-                    }
-                }
-            }
-        }
-
-        // Step 3: Build block -> set of SSA names
-        let mut block_vars: HashMap<u64, HashSet<String>> = HashMap::new();
-        for block in blocks {
-            let vars = block_vars.entry(block.addr).or_default();
-            for op in &block.ops {
-                if let Some(dst) = op.dst() {
-                    vars.insert(dst.display_name());
-                }
-                for src in op.sources() {
-                    vars.insert(src.display_name());
-                }
-            }
-            for phi in &block.phis {
-                vars.insert(phi.dst.display_name());
-                for (_, src) in &phi.sources {
-                    vars.insert(src.display_name());
-                }
-            }
-        }
-
-        // Step 4: For each base register, group by union-find root and assign names
-        for (base, versions) in &reg_versions {
-            if *base == self.sp_name || *base == self.fp_name {
-                continue;
-            }
-            // Deduplicate
-            let mut unique: Vec<(String, u32)> = versions.clone();
-            unique.sort_by_key(|(_, v)| *v);
-            unique.dedup_by_key(|(k, _)| k.clone());
-            if unique.len() <= 1 {
-                continue;
-            }
-
-            // Group by union-find root
-            let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-            for (ssa_name, _) in &unique {
-                let root = uf_find(&mut uf_parent, ssa_name);
-                groups.entry(root).or_default().push(ssa_name.clone());
-            }
-
-            // For each group, check if members conflict (appear in the same block)
-            let mut group_idx = 0usize;
-            for (_root, members) in &groups {
-                let has_conflict = block_vars.values().any(|vars| {
-                    let mut count = 0;
-                    for m in members {
-                        if vars.contains(m) {
-                            count += 1;
-                        }
-                    }
-                    count > 1
-                });
-
-                if !has_conflict {
-                    // All members share the base name
-                    let alias = if group_idx == 0 {
-                        base.clone()
-                    } else {
-                        format!("{}_{}", base, group_idx + 1)
-                    };
-                    for m in members {
-                        self.var_aliases.insert(m.clone(), alias.clone());
-                    }
-                    group_idx += 1;
-                } else {
-                    // Members conflict -- assign base name to the group representative
-                    // and leave others with their versioned names
-                    let alias = if group_idx == 0 {
-                        base.clone()
-                    } else {
-                        format!("{}_{}", base, group_idx + 1)
-                    };
-                    // Only alias version 0 if present
-                    for m in members {
-                        // Check if this is version 0
-                        if let Some((_, v)) = unique.iter().find(|(n, _)| n == m) {
-                            if *v == 0 {
-                                self.var_aliases.insert(m.clone(), alias.clone());
-                            }
-                        }
-                    }
-                    group_idx += 1;
-                }
-            }
-
-            // If there are ungrouped singletons, also try to alias them
-            // (versions not in any phi chain but still non-conflicting)
-            let grouped: HashSet<&str> = groups
-                .values()
-                .flat_map(|v| v.iter().map(|s| s.as_str()))
-                .collect();
-            let ungrouped: Vec<&(String, u32)> = unique
-                .iter()
-                .filter(|(n, _)| !grouped.contains(n.as_str()) && !self.var_aliases.contains_key(n))
-                .collect();
-            if !ungrouped.is_empty() {
-                // Check if all ungrouped can share a name
-                let ug_names: Vec<&str> = ungrouped.iter().map(|(n, _)| n.as_str()).collect();
-                let has_conflict = block_vars.values().any(|vars| {
-                    let mut count = 0;
-                    for n in &ug_names {
-                        if vars.contains(*n) {
-                            count += 1;
-                        }
-                    }
-                    count > 1
-                });
-                if !has_conflict {
-                    let alias = if group_idx == 0 {
-                        base.clone()
-                    } else {
-                        format!("{}_{}", base, group_idx + 1)
-                    };
-                    for (n, _) in &ungrouped {
-                        self.var_aliases.insert(n.clone(), alias.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    /// Analyze blocks to collect call arguments from register writes preceding calls.
-    ///
-    /// For each Call/CallInd, scan backwards to find Copy ops that write to
-    /// calling-convention argument registers (RDI, RSI, RDX, RCX, R8, R9).
-    /// Also handles IntZExt targeting those registers (common for 32-bit args).
-    fn analyze_call_args(&mut self, blocks: &[SSABlock]) {
-        if self.arg_regs.is_empty() {
-            return;
-        }
-
-        for block in blocks {
-            let ops = &block.ops;
-            for (call_idx, op) in ops.iter().enumerate() {
-                let is_call = matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. });
-                if !is_call {
-                    continue;
-                }
-
-                // Scan backwards from this call to collect arg register writes
-                let mut found_regs: HashMap<String, (CExpr, String)> = HashMap::new();
-                let mut i = call_idx;
-                while i > 0 {
-                    i -= 1;
-                    let prev_op = &ops[i];
-
-                    // Stop at another call (barrier)
-                    if matches!(prev_op, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
-                        break;
-                    }
-
-                    // Check register writes that feed call arguments.
-                    let (dst_var, src_expr) = match prev_op {
-                        SSAOp::Copy { dst, src } => (dst, Some(self.get_expr(src))),
-                        SSAOp::IntZExt { dst, src } => (dst, Some(self.get_expr(src))),
-                        SSAOp::IntSExt { dst, src } => (dst, Some(self.get_expr(src))),
-                        // Common zeroing idiom before calls: xor reg, reg
-                        SSAOp::IntXor { dst, a, b } if a == b => (dst, Some(CExpr::IntLit(0))),
-                        _ => continue,
-                    };
-
-                    let dst_base = dst_var.name.to_lowercase();
-                    // Check if this writes to an arg register
-                    if let Some(_pos) = self.arg_regs.iter().position(|r| *r == dst_base) {
-                        if !found_regs.contains_key(&dst_base) {
-                            if let Some(expr) = src_expr {
-                                let dst_key = dst_var.display_name();
-                                found_regs.insert(dst_base.clone(), (expr, dst_key));
-                            }
-                        }
-                    }
-                }
-
-                // Build ordered argument list based on calling convention order
-                let mut args = Vec::new();
-                let mut consumed_keys = Vec::new();
-                for reg in &self.arg_regs {
-                    if let Some((expr, dst_key)) = found_regs.remove(reg) {
-                        args.push(expr);
-                        consumed_keys.push(dst_key);
-                    } else {
-                        // Gap in arguments - stop collecting
-                        // (e.g., if RDI and RDX are set but not RSI, only take RDI)
-                        break;
-                    }
-                }
-
-                if !args.is_empty() {
-                    self.call_args.insert((block.addr, call_idx), args);
-                    for key in consumed_keys {
-                        self.consumed_by_call.insert(key);
-                    }
-                }
-
-                // Also detect pre-call return address push pattern:
-                //   IntSub { dst: RSP_N, a: RSP_M, b: const:8 }
-                //   Store  { addr: RSP_N, val: const:RETADDR }
-                // Mark both as consumed.
-                let mut j = call_idx;
-                while j > 0 {
-                    j -= 1;
-                    let prev = &ops[j];
-                    // Stop at another call
-                    if matches!(prev, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
-                        break;
-                    }
-                    // Look for Store of a constant to an RSP-derived address
-                    if let SSAOp::Store { addr, val, .. } = prev {
-                        let addr_lower = addr.name.to_lowercase();
-                        if addr_lower.contains(&self.sp_name) && val.is_const() {
-                            // This is likely push of return address
-                            let store_val_key = val.display_name();
-                            self.consumed_by_call.insert(store_val_key);
-                            let addr_key = addr.display_name();
-                            self.consumed_by_call.insert(addr_key);
-                            // Also find the preceding IntSub that adjusted RSP
-                            if j > 0 {
-                                let prev2 = &ops[j - 1];
-                                if let SSAOp::IntSub { dst, b, .. } = prev2 {
-                                    let dst_lower = dst.name.to_lowercase();
-                                    if dst_lower.contains(&self.sp_name) && b.is_const() {
-                                        let sub_key = dst.display_name();
-                                        self.consumed_by_call.insert(sub_key);
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Analyze stack variable access patterns and assign names.
-    fn analyze_stack_vars(&mut self, blocks: &[SSABlock]) {
-        for block in blocks {
-            for op in &block.ops {
-                match op {
-                    SSAOp::Load { addr, .. } | SSAOp::Store { addr, .. } => {
-                        // Check if address is a stack offset expression
-                        if let Some(offset) = self.extract_stack_offset_from_var(addr) {
-                            self.get_or_create_stack_var(offset);
-                        }
-                    }
-                    // Also check IntAdd operations that compute stack addresses
-                    SSAOp::IntAdd { dst, a, b } => {
-                        let a_lower = a.name.to_lowercase();
-                        if a_lower.contains(&self.fp_name) || a_lower.contains(&self.sp_name) {
-                            if let Some(offset) = self.parse_const_offset(b) {
-                                // Create stack var name first to avoid borrow issues
-                                let stack_var_name = self.get_or_create_stack_var(offset);
-                                // Record that dst is a stack address
-                                let key = dst.display_name();
-                                self.definitions
-                                    .insert(key, CExpr::Var(format!("&{}", stack_var_name)));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            _ => false,
         }
     }
 
     /// Try to extract a stack offset from a variable name or its definition.
-    fn extract_stack_offset_from_var(&self, var: &SSAVar) -> Option<i64> {
+    pub(crate) fn extract_stack_offset_from_var(&self, var: &SSAVar) -> Option<i64> {
         let name_lower = var.name.to_lowercase();
 
         // Direct fp/sp reference
@@ -1118,7 +495,7 @@ impl FoldingContext {
 
         // Check if this variable was defined as fp/sp + offset
         let key = var.display_name();
-        if let Some(expr) = self.definitions.get(&key) {
+        if let Some(expr) = self.definitions_map().get(&key) {
             return self.extract_offset_from_expr(expr);
         }
 
@@ -1128,6 +505,8 @@ impl FoldingContext {
     /// Extract stack offset from an expression like (rbp + -0x48).
     fn extract_offset_from_expr(&self, expr: &CExpr) -> Option<i64> {
         match expr {
+            CExpr::Paren(inner) => self.extract_offset_from_expr(inner),
+            CExpr::Cast { expr: inner, .. } => self.extract_offset_from_expr(inner),
             CExpr::Binary {
                 op: BinaryOp::Add,
                 left,
@@ -1171,67 +550,116 @@ impl FoldingContext {
         }
     }
 
-    /// Parse a constant offset from an SSA variable.
-    fn parse_const_offset(&self, var: &SSAVar) -> Option<i64> {
-        if var.is_const() {
-            if let Some(val) = parse_const_value(&var.name) {
-                // Handle negative offsets stored as unsigned
-                if val > LIKELY_NEGATIVE_THRESHOLD {
-                    let neg = (!val).wrapping_add(1);
-                    return Some(-(neg as i64));
-                }
-                return Some(val as i64);
-            }
+    fn arg_alias_for_register_name(&self, reg_name: &str) -> Option<String> {
+        let reg = reg_name.to_lowercase();
+        if reg.contains("rdi") || reg.contains("edi") {
+            return Some("arg1".to_string());
+        }
+        if reg.contains("rsi") || reg.contains("esi") {
+            return Some("arg2".to_string());
+        }
+        if reg.contains("rdx") || reg.contains("edx") {
+            return Some("arg3".to_string());
+        }
+        if reg.contains("rcx") || reg.contains("ecx") {
+            return Some("arg4".to_string());
+        }
+        if reg.contains("r8") {
+            return Some("arg5".to_string());
+        }
+        if reg.contains("r9") {
+            return Some("arg6".to_string());
         }
         None
     }
 
-    /// Get or create a name for a stack variable at the given offset.
-    fn get_or_create_stack_var(&mut self, offset: i64) -> String {
-        if let Some(name) = self.stack_vars.get(&offset) {
-            return name.clone();
+    fn arg_alias_for_rendered_name(&self, name: &str) -> Option<String> {
+        let lower = name.to_lowercase();
+        if let Some((base, version)) = lower.rsplit_once('_') {
+            if version != "0" {
+                return None;
+            }
+            return self.arg_alias_for_register_name(base);
         }
-
-        // Generate a name based on offset
-        let name = if offset < 0 {
-            // Negative offset from fp = local variable
-            format!("local_{:x}", (-offset) as u64)
-        } else if offset == 0 {
-            "saved_fp".to_string()
-        } else {
-            // Positive offset from fp = stack argument or saved value
-            format!("stack_{:x}", offset as u64)
-        };
-
-        self.stack_vars.insert(offset, name.clone());
-        name
+        self.arg_alias_for_register_name(&lower)
     }
 
     /// Check if an address expression is a stack access and return the variable name.
     pub fn simplify_stack_access(&self, addr_expr: &CExpr) -> Option<String> {
+        match addr_expr {
+            CExpr::Paren(inner) => return self.simplify_stack_access(inner),
+            CExpr::Cast { expr: inner, .. } => return self.simplify_stack_access(inner),
+            CExpr::Var(name) => {
+                if let Some(stripped) = name.strip_prefix('&') {
+                    return Some(stripped.to_string());
+                }
+            }
+            _ => {}
+        }
+
         if let Some(offset) = self.extract_offset_from_expr(addr_expr) {
-            return self.stack_vars.get(&offset).cloned();
+            return self.stack_vars_map().get(&offset).cloned();
         }
         None
     }
 
+    fn resolve_stack_alias_from_addr_expr(&self, expr: &CExpr, depth: u32) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
+
+        if let Some(alias) = self.simplify_stack_access(expr) {
+            return Some(alias);
+        }
+
+        match expr {
+            CExpr::Var(name) => {
+                if let Some(stripped) = name.strip_prefix('&') {
+                    return Some(stripped.to_string());
+                }
+                self.lookup_definition(name)
+                    .and_then(|inner| self.resolve_stack_alias_from_addr_expr(&inner, depth + 1))
+            }
+            CExpr::Paren(inner) => self.resolve_stack_alias_from_addr_expr(inner, depth + 1),
+            CExpr::Cast { expr: inner, .. } => {
+                self.resolve_stack_alias_from_addr_expr(inner, depth + 1)
+            }
+            CExpr::Deref(inner) => self.resolve_stack_alias_from_addr_expr(inner, depth + 1),
+            _ => None,
+        }
+    }
+    pub(crate) fn stack_var_for_addr_var(&self, addr: &SSAVar) -> Option<String> {
+        let addr_key = addr.display_name();
+        if let Some(alias) =
+            self.resolve_stack_alias_from_addr_expr(&CExpr::Var(addr_key.clone()), 0)
+        {
+            return Some(alias);
+        }
+        if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&CExpr::Var(self.var_name(addr)), 0)
+        {
+            return Some(alias);
+        }
+        self.extract_stack_offset_from_var(addr)
+            .and_then(|offset| self.stack_vars_map().get(&offset).cloned())
+    }
+
     /// Check if a variable should be inlined.
     fn should_inline(&self, var_name: &str) -> bool {
-        let use_count = self.use_counts.get(var_name).copied().unwrap_or(0);
+        let use_count = self.use_counts_map().get(var_name).copied().unwrap_or(0);
         if use_count == 0 || use_count > 3 {
             return false;
         }
 
-        if self.pinned.contains(var_name) {
+        if self.pinned_set().contains(var_name) {
             return false;
         }
 
-        if self.condition_vars.contains(var_name) && !self.is_condition_inline_candidate(var_name) {
+        if self.condition_vars_set().contains(var_name) && !self.is_condition_inline_candidate(var_name) {
             return false;
         }
 
         // Values that only feed flag computation should always disappear.
-        if self.flag_only_values.contains(var_name) {
+        if self.flag_only_values_set().contains(var_name) {
             return true;
         }
 
@@ -1274,7 +702,7 @@ impl FoldingContext {
     }
 
     fn is_condition_inline_candidate(&self, var_name: &str) -> bool {
-        if self.flag_only_values.contains(var_name) {
+        if self.flag_only_values_set().contains(var_name) {
             return true;
         }
 
@@ -1286,8 +714,7 @@ impl FoldingContext {
     }
 
     fn is_simple_inline_candidate(&self, var_name: &str) -> bool {
-        self.definitions
-            .get(var_name)
+        self.definitions_map().get(var_name)
             .map(|expr| self.is_simple_expr(expr, 0))
             .unwrap_or(false)
     }
@@ -1307,8 +734,7 @@ impl FoldingContext {
                 if is_cpu_flag(&name.to_lowercase()) {
                     return true;
                 }
-                self.definitions
-                    .get(name)
+                self.definitions_map().get(name)
                     .map(|inner| self.is_simple_expr(inner, depth + 1))
                     .unwrap_or(true)
             }
@@ -1336,7 +762,7 @@ impl FoldingContext {
     /// Check if a variable is dead (never used).
     pub fn is_dead(&self, var: &SSAVar) -> bool {
         let key = var.display_name();
-        let use_count = self.use_counts.get(&key).copied().unwrap_or(0);
+        let use_count = self.use_counts_map().get(&key).copied().unwrap_or(0);
         let lower = var.name.to_lowercase();
 
         // Flag registers are rendering artifacts; keep them out of emitted code.
@@ -1345,7 +771,7 @@ impl FoldingContext {
         }
 
         // Helpers used only to feed flags are also dead in final output.
-        if self.flag_only_values.contains(&key) {
+        if self.flag_only_values_set().contains(&key) {
             return true;
         }
 
@@ -1368,7 +794,7 @@ impl FoldingContext {
         }
 
         // Variables consumed by call argument collection are dead
-        if self.consumed_by_call.contains(&key) {
+        if self.consumed_by_call_set().contains(&key) {
             return true;
         }
 
@@ -1379,7 +805,7 @@ impl FoldingContext {
 
         // Eliminate explicit zeroing idioms when the value is never used
         // beyond setup/flag chains (e.g., eax = eax ^ eax).
-        if let Some(expr) = self.definitions.get(&key) {
+        if let Some(expr) = self.definitions_map().get(&key) {
             if self.is_zeroing_expr(expr) {
                 return true;
             }
@@ -1428,7 +854,7 @@ impl FoldingContext {
                 {
                     // Check if this constant was consumed by call-arg analysis
                     let val_key = val.display_name();
-                    if self.consumed_by_call.contains(&val_key) {
+                    if self.consumed_by_call_set().contains(&val_key) {
                         return true;
                     }
                 }
@@ -1450,7 +876,7 @@ impl FoldingContext {
                     // Indirect: val is a temp, trace it back via copy_sources
                     if val.name.starts_with("tmp:") {
                         let val_key = val.display_name();
-                        if let Some(src_key) = self.copy_sources.get(&val_key) {
+                        if let Some(src_key) = self.copy_sources_map().get(&val_key) {
                             let src_lower = src_key.to_lowercase();
                             if src_lower.contains("rbx")
                                 || src_lower.contains("r12")
@@ -1569,13 +995,236 @@ impl FoldingContext {
 
         // Try to inline if appropriate
         if self.should_inline(&key) {
-            if let Some(expr) = self.definitions.get(&key) {
+            if let Some(expr) = self.definitions_map().get(&key) {
                 return expr.clone();
             }
         }
 
         // Otherwise return a variable reference
         CExpr::Var(self.var_name(var))
+    }
+
+    fn should_inline_in_return(&self, var_name: &str, depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+
+        let lower = var_name.to_lowercase();
+        if lower.starts_with("const:") || lower.starts_with("tmp:") {
+            return true;
+        }
+        if self.is_return_register_name(&lower) {
+            return true;
+        }
+
+        let is_pinned = self.pinned_set().contains(var_name)
+            || self.pinned_set().contains(&lower)
+            || var_name
+                .rsplit_once('_')
+                .map(|(base, ver)| {
+                    self.pinned_set().contains(&format!("{}_{}", base.to_lowercase(), ver))
+                        || self
+                            .pinned_set()
+                            .contains(&format!("{}_{}", base.to_uppercase(), ver))
+                })
+                .unwrap_or(false);
+        if is_pinned {
+            return false;
+        }
+
+        let use_count = self
+            .use_counts_map()
+            .get(var_name)
+            .copied()
+            .or_else(|| self.use_counts_map().get(&lower).copied())
+            .or_else(|| {
+                var_name.rsplit_once('_').and_then(|(base, ver)| {
+                    self.use_counts_map().get(&format!("{}_{}", base.to_lowercase(), ver))
+                        .copied()
+                        .or_else(|| {
+                            self.use_counts_map().get(&format!("{}_{}", base.to_uppercase(), ver))
+                                .copied()
+                        })
+                })
+            })
+            .unwrap_or(0);
+        if use_count == 0 || use_count > 3 {
+            return false;
+        }
+
+        self.lookup_definition(var_name)
+            .map(|expr| self.is_return_inline_candidate(&expr, 0))
+            .unwrap_or(false)
+    }
+
+    fn is_return_inline_candidate(&self, expr: &CExpr, depth: u32) -> bool {
+        if depth > 5 {
+            return false;
+        }
+
+        match expr {
+            CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(_)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_) => true,
+            CExpr::Var(_) => true,
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.is_return_inline_candidate(inner, depth + 1)
+            }
+            CExpr::Unary { operand, .. } => self.is_return_inline_candidate(operand, depth + 1),
+            CExpr::Binary { op, left, right } => {
+                matches!(
+                    op,
+                    BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Mod
+                        | BinaryOp::Shl
+                        | BinaryOp::Shr
+                        | BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                        | BinaryOp::And
+                        | BinaryOp::Or
+                        | BinaryOp::Eq
+                        | BinaryOp::Ne
+                        | BinaryOp::Lt
+                        | BinaryOp::Le
+                        | BinaryOp::Gt
+                        | BinaryOp::Ge
+                ) && self.is_return_inline_candidate(left, depth + 1)
+                    && self.is_return_inline_candidate(right, depth + 1)
+            }
+            CExpr::Deref(inner) => self.resolve_stack_alias_from_addr_expr(inner, 0).is_some(),
+            _ => false,
+        }
+    }
+
+    fn stack_alias_from_deref_expr(&self, expr: &CExpr) -> Option<String> {
+        match expr {
+            CExpr::Deref(inner) => self.resolve_stack_alias_from_addr_expr(inner, 0),
+            CExpr::Paren(inner) => self.stack_alias_from_deref_expr(inner),
+            CExpr::Cast { expr: inner, .. } => self.stack_alias_from_deref_expr(inner),
+            _ => None,
+        }
+    }
+
+    fn expand_return_expr(&self, expr: &CExpr, depth: u32, visited: &mut HashSet<String>) -> CExpr {
+        if depth > 8 {
+            return expr.clone();
+        }
+
+        match expr {
+            CExpr::Var(name) => {
+                if let Some(val) = parse_const_value(name) {
+                    return if val > 0x7fffffff {
+                        CExpr::UIntLit(val)
+                    } else {
+                        CExpr::IntLit(val as i64)
+                    };
+                }
+                if let Some(alias) = self.arg_alias_for_rendered_name(name) {
+                    return CExpr::Var(alias);
+                }
+                if let Some(inner) = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                {
+                    if let CExpr::Var(inner_name) = inner {
+                        if inner_name.starts_with("arg") {
+                            return CExpr::Var(inner_name);
+                        }
+                        if let Some(alias) = self.arg_alias_for_rendered_name(&inner_name) {
+                            return CExpr::Var(alias);
+                        }
+                    }
+                }
+
+                if !self.should_inline_in_return(name, depth) || !visited.insert(name.clone()) {
+                    return CExpr::Var(name.clone());
+                }
+
+                let resolved = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                    .map(|inner| self.expand_return_expr(&inner, depth + 1, visited))
+                    .unwrap_or_else(|| CExpr::Var(name.clone()));
+
+                visited.remove(name);
+                if self.is_predicate_like_expr(&resolved) {
+                    self.simplify_condition_expr(resolved)
+                } else {
+                    resolved
+                }
+            }
+            CExpr::Deref(inner) => {
+                if let Some(stack_var) = self.resolve_stack_alias_from_addr_expr(inner, 0) {
+                    CExpr::Var(stack_var)
+                } else {
+                    let expanded_inner = self.expand_return_expr(inner, depth + 1, visited);
+                    if let Some(sub) = self.try_subscript_from_addr_expr(&expanded_inner) {
+                        sub
+                    } else if let Some(member) =
+                        self.try_member_access_from_addr_expr(&expanded_inner)
+                    {
+                        member
+                    } else {
+                        CExpr::Deref(Box::new(expanded_inner))
+                    }
+                }
+            }
+            CExpr::Unary { op, operand } => {
+                CExpr::unary(*op, self.expand_return_expr(operand, depth + 1, visited))
+            }
+            CExpr::Binary { op, left, right } => {
+                let rebuilt = CExpr::binary(
+                    *op,
+                    self.expand_return_expr(left, depth + 1, visited),
+                    self.expand_return_expr(right, depth + 1, visited),
+                );
+                if self.is_predicate_like_expr(&rebuilt) {
+                    self.simplify_condition_expr(rebuilt)
+                } else {
+                    rebuilt
+                }
+            }
+            CExpr::Paren(inner) => {
+                CExpr::Paren(Box::new(self.expand_return_expr(inner, depth + 1, visited)))
+            }
+            CExpr::Cast { ty, expr: inner } => {
+                let expanded_inner = self.expand_return_expr(inner, depth + 1, visited);
+                let simplified_inner = if self.is_predicate_like_expr(&expanded_inner) {
+                    self.simplify_condition_expr(expanded_inner)
+                } else {
+                    expanded_inner
+                };
+                CExpr::Cast {
+                    ty: ty.clone(),
+                    expr: Box::new(simplified_inner),
+                }
+            }
+            _ => expr.clone(),
+        }
+    }
+
+    fn get_return_expr(&self, var: &SSAVar) -> CExpr {
+        if var.is_const() {
+            return self.const_to_expr(var);
+        }
+
+        let mut visited = HashSet::new();
+        let root_name = var.display_name();
+        let root = self
+            .lookup_definition(&root_name)
+            .unwrap_or_else(|| CExpr::Var(root_name));
+        let raw = self.expand_return_expr(&root, 0, &mut visited);
+        if self.is_predicate_like_expr(&raw) {
+            self.simplify_condition_expr(raw)
+        } else {
+            raw
+        }
     }
 
     /// Convert an SSA variable to a C variable name.
@@ -1592,7 +1241,7 @@ impl FoldingContext {
 
         // Check if coalescing mapped this SSA name to a merged name
         let display = var.display_name();
-        if let Some(alias) = self.var_aliases.get(&display) {
+        if let Some(alias) = self.var_aliases_map().get(&display) {
             return alias.clone();
         }
 
@@ -1646,7 +1295,7 @@ impl FoldingContext {
     }
 
     /// Convert an SSA operation to a C expression.
-    fn op_to_expr(&self, op: &SSAOp) -> CExpr {
+    pub(crate) fn op_to_expr(&self, op: &SSAOp) -> CExpr {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
             SSAOp::Load { addr, .. } => {
@@ -1664,10 +1313,13 @@ impl FoldingContext {
                         }
                     }
                 }
+                if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
+                    return CExpr::Var(stack_var);
+                }
                 let addr_expr = self.get_expr(addr);
                 if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                     CExpr::Var(stack_var)
-                } else if let Some(ptr) = self.ptr_arith.get(&addr.display_name()) {
+                } else if let Some(ptr) = self.ptr_arith_map().get(&addr.display_name()) {
                     self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                 } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                     sub
@@ -1703,10 +1355,18 @@ impl FoldingContext {
             SSAOp::IntNotEqual { a, b, .. } => self.binary_expr(BinaryOp::Ne, a, b),
             SSAOp::IntNegate { src, .. } => CExpr::unary(UnaryOp::Neg, self.get_expr(src)),
             SSAOp::IntNot { src, .. } => CExpr::unary(UnaryOp::BitNot, self.get_expr(src)),
-            SSAOp::BoolAnd { a, b, .. } => self.binary_expr(BinaryOp::And, a, b),
-            SSAOp::BoolOr { a, b, .. } => self.binary_expr(BinaryOp::Or, a, b),
-            SSAOp::BoolXor { a, b, .. } => self.binary_expr(BinaryOp::BitXor, a, b),
-            SSAOp::BoolNot { src, .. } => CExpr::unary(UnaryOp::Not, self.get_expr(src)),
+            SSAOp::BoolAnd { a, b, .. } => {
+                self.simplify_condition_expr(self.binary_expr(BinaryOp::And, a, b))
+            }
+            SSAOp::BoolOr { a, b, .. } => {
+                self.simplify_condition_expr(self.binary_expr(BinaryOp::Or, a, b))
+            }
+            SSAOp::BoolXor { a, b, .. } => {
+                self.simplify_condition_expr(self.binary_expr(BinaryOp::BitXor, a, b))
+            }
+            SSAOp::BoolNot { src, .. } => {
+                self.simplify_condition_expr(CExpr::unary(UnaryOp::Not, self.get_expr(src)))
+            }
             SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => {
                 let ty = type_from_size(dst.size);
                 CExpr::cast(ty, self.get_expr(src))
@@ -1859,12 +1519,15 @@ impl FoldingContext {
 
     fn try_subscript_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
         let expr = self
-            .definitions
+            .definitions_map()
             .get(&addr.display_name())
             .cloned()
             .unwrap_or_else(|| addr_expr.clone());
+        self.try_subscript_from_addr_expr(&expr)
+    }
 
-        let (base_expr, index_expr, elem_size, is_sub) = self.extract_base_index_scale(&expr)?;
+    fn try_subscript_from_addr_expr(&self, expr: &CExpr) -> Option<CExpr> {
+        let (base_expr, index_expr, elem_size, is_sub) = self.extract_base_index_scale(expr)?;
 
         if elem_size == 0 {
             return None;
@@ -1886,12 +1549,15 @@ impl FoldingContext {
 
     fn try_member_access_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
         let expr = self
-            .definitions
+            .definitions_map()
             .get(&addr.display_name())
             .cloned()
             .unwrap_or_else(|| addr_expr.clone());
+        self.try_member_access_from_addr_expr(&expr)
+    }
 
-        let (base_expr, offset) = self.extract_base_const_offset(&expr)?;
+    fn try_member_access_from_addr_expr(&self, expr: &CExpr) -> Option<CExpr> {
+        let (base_expr, offset) = self.extract_base_const_offset(expr)?;
         if offset == 0 || self.is_stackish_expr(&base_expr) || !self.looks_like_pointer(&base_expr)
         {
             return None;
@@ -1983,11 +1649,11 @@ impl FoldingContext {
     }
 
     fn lookup_type_hint(&self, name: &str) -> Option<&CType> {
-        if let Some(ty) = self.type_hints.get(name) {
+        if let Some(ty) = self.type_hints_map().get(name) {
             return Some(ty);
         }
         let lower = name.to_lowercase();
-        self.type_hints.get(&lower)
+        self.type_hints_map().get(&lower)
     }
 
     fn type_hint_for_var(&self, var: &SSAVar) -> Option<CType> {
@@ -2017,7 +1683,7 @@ impl FoldingContext {
                 .extract_base_index_from_add(left, right)
                 .map(|(b, i, s)| (b, i, s, true)),
             CExpr::Var(name) => {
-                if let Some(def) = self.definitions.get(name) {
+                if let Some(def) = self.definitions_map().get(name) {
                     self.extract_base_index_scale(def)
                 } else {
                     None
@@ -2099,13 +1765,52 @@ impl FoldingContext {
         }
     }
 
+    fn expr_mentions_stack_or_ip(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let lower = name.to_lowercase();
+                lower.contains("rsp")
+                    || lower.contains("esp")
+                    || lower.contains("sp_")
+                    || lower.contains("rip")
+                    || lower.contains("eip")
+            }
+            CExpr::Unary { operand, .. } => self.expr_mentions_stack_or_ip(operand),
+            CExpr::Binary { left, right, .. } => {
+                self.expr_mentions_stack_or_ip(left) || self.expr_mentions_stack_or_ip(right)
+            }
+            CExpr::Paren(inner) => self.expr_mentions_stack_or_ip(inner),
+            CExpr::Cast { expr: inner, .. } => self.expr_mentions_stack_or_ip(inner),
+            CExpr::Deref(inner) => self.expr_mentions_stack_or_ip(inner),
+            _ => false,
+        }
+    }
+
+    fn is_low_level_return_artifact(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Deref(inner) => self.expr_mentions_stack_or_ip(inner),
+            CExpr::Var(_) => self.expr_mentions_stack_or_ip(expr),
+            CExpr::Paren(inner) => self.is_low_level_return_artifact(inner),
+            CExpr::Cast { expr: inner, .. } => self.is_low_level_return_artifact(inner),
+            _ => false,
+        }
+    }
+
     fn lookup_definition(&self, name: &str) -> Option<CExpr> {
-        if let Some(expr) = self.definitions.get(name) {
+        if let Some(expr) = self.definitions_map().get(name) {
+            return Some(expr.clone());
+        }
+        let lower = name.to_lowercase();
+        if let Some(expr) = self.definitions_map().get(&lower) {
             return Some(expr.clone());
         }
         if let Some((base, version)) = name.rsplit_once('_') {
+            let lower = format!("{}_{}", base.to_lowercase(), version);
+            if let Some(expr) = self.definitions_map().get(&lower) {
+                return Some(expr.clone());
+            }
             let upper = format!("{}_{}", base.to_uppercase(), version);
-            if let Some(expr) = self.definitions.get(&upper) {
+            if let Some(expr) = self.definitions_map().get(&upper) {
                 return Some(expr.clone());
             }
         }
@@ -2123,11 +1828,73 @@ impl FoldingContext {
     /// Convert a block to folded C statements.
     pub fn fold_block(&self, block: &SSABlock) -> Vec<CStmt> {
         let mut stmts = Vec::new();
+        let mut last_ret_value: Option<CExpr> = None;
 
         for (op_idx, op) in block.ops.iter().enumerate() {
             // Skip stack frame setup/teardown if enabled
             if self.is_stack_frame_op(op) {
                 continue;
+            }
+
+            if self.is_current_return_block() {
+                match op {
+                    SSAOp::Copy { dst, src }
+                        if self.is_return_register_name(&dst.name.to_lowercase()) =>
+                    {
+                        last_ret_value = Some(self.get_return_expr(src));
+                    }
+                    SSAOp::IntZExt { dst, src }
+                    | SSAOp::IntSExt { dst, src }
+                    | SSAOp::Trunc { dst, src }
+                    | SSAOp::Cast { dst, src }
+                        if self.is_return_register_name(&dst.name.to_lowercase()) =>
+                    {
+                        let ty = type_from_size(dst.size);
+                        last_ret_value = Some(CExpr::cast(ty, self.get_return_expr(src)));
+                    }
+                    _ => {
+                        if let Some(dst) = op.dst() {
+                            if self.is_return_register_name(&dst.name.to_lowercase()) {
+                                let mut visited = HashSet::new();
+                                let raw = self.op_to_expr(op);
+                                let expanded = self.expand_return_expr(&raw, 0, &mut visited);
+                                let final_expr = if self.is_predicate_like_expr(&expanded) {
+                                    self.simplify_condition_expr(expanded)
+                                } else {
+                                    expanded
+                                };
+                                last_ret_value = Some(final_expr);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let SSAOp::Return { target } = op {
+                if self.is_current_return_block() {
+                    let target_expr = self.get_expr(target);
+                    let expr = match last_ret_value.clone() {
+                        Some(last) if self.is_predicate_like_expr(&last) => last,
+                        Some(last) if self.is_low_level_return_artifact(&target_expr) => last,
+                        _ => target_expr,
+                    };
+                    stmts.push(CStmt::Return(Some(expr)));
+                    break;
+                }
+                if let Some(stmt) = self.op_to_stmt_with_args(op, block.addr, op_idx) {
+                    stmts.push(stmt);
+                }
+                break;
+            }
+
+            // In return-context blocks, keep return-register writes as tracking-only.
+            // Emit a single high-level return at the SSA Return terminator.
+            if self.is_current_return_block() {
+                if let Some(dst) = op.dst() {
+                    if self.is_return_register_name(&dst.name.to_lowercase()) {
+                        continue;
+                    }
+                }
             }
 
             // Skip operations that produce dead values
@@ -2143,13 +1910,17 @@ impl FoldingContext {
                 }
 
                 // Skip if this op's destination was consumed by call argument collection
-                if self.consumed_by_call.contains(&key) {
+                if self.consumed_by_call_set().contains(&key) {
                     continue;
                 }
             }
 
             if let Some(stmt) = self.op_to_stmt_with_args(op, block.addr, op_idx) {
+                let is_return = matches!(stmt, CStmt::Return(_));
                 stmts.push(stmt);
+                if is_return {
+                    break;
+                }
             }
         }
 
@@ -2162,7 +1933,7 @@ impl FoldingContext {
             SSAOp::Call { target } => {
                 let func_expr = self.resolve_call_target(target);
                 let args = self
-                    .call_args
+                    .call_args_map()
                     .get(&(block_addr, op_idx))
                     .cloned()
                     .unwrap_or_default();
@@ -2173,7 +1944,7 @@ impl FoldingContext {
                 let target_expr = self.get_expr(target);
                 let func_expr = CExpr::Deref(Box::new(target_expr));
                 let args = self
-                    .call_args
+                    .call_args_map()
                     .get(&(block_addr, op_idx))
                     .cloned()
                     .unwrap_or_default();
@@ -2210,16 +1981,9 @@ impl FoldingContext {
     fn op_to_stmt(&self, op: &SSAOp) -> Option<CStmt> {
         match op {
             SSAOp::Copy { dst, src } => {
-                let dst_name = dst.name.to_lowercase();
-                // Check if this is a return value assignment in a return block
-                if (dst_name == self.ret_reg_name || dst_name == "rax" || dst_name == "eax")
-                    && self.is_current_return_block()
-                {
-                    // Emit return statement instead of assignment
-                    return Some(CStmt::Return(Some(self.get_expr(src))));
-                }
                 let lhs = CExpr::Var(self.var_name(dst));
-                let mut rhs = self.get_expr(src);
+                let rhs_base = self.get_expr(src);
+                let mut rhs = self.resolve_predicate_rhs_for_var(src, rhs_base);
                 if let Some(dst_ty) = self.type_hint_for_var(dst) {
                     if matches!(dst_ty, CType::Pointer(_)) && !self.looks_like_pointer(&rhs) {
                         rhs = CExpr::cast(dst_ty, rhs);
@@ -2247,12 +2011,15 @@ impl FoldingContext {
                         CExpr::Deref(Box::new(addr_expr))
                     }
                 } else {
+                    if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
+                        CExpr::Var(stack_var)
+                    } else {
                     // Try to use stack variable name if this is a stack access
                     let addr_expr = self.get_expr(addr);
                     let addr_key = addr.display_name();
                     if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                         CExpr::Var(stack_var)
-                    } else if let Some(ptr) = self.ptr_arith.get(&addr_key) {
+                    } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
                         self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                         sub
@@ -2261,6 +2028,7 @@ impl FoldingContext {
                         member
                     } else {
                         CExpr::Deref(Box::new(addr_expr))
+                    }
                     }
                 };
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
@@ -2280,12 +2048,15 @@ impl FoldingContext {
                         CExpr::Deref(Box::new(addr_expr))
                     }
                 } else {
+                    if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
+                        CExpr::Var(stack_var)
+                    } else {
                     // Try to use stack variable name if this is a stack access
                     let addr_expr = self.get_expr(addr);
                     let addr_key = addr.display_name();
                     if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                         CExpr::Var(stack_var)
-                    } else if let Some(ptr) = self.ptr_arith.get(&addr_key) {
+                    } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
                         self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                         sub
@@ -2294,6 +2065,7 @@ impl FoldingContext {
                         member
                     } else {
                         CExpr::Deref(Box::new(addr_expr))
+                    }
                     }
                 };
                 let mut rhs = self.get_expr(val);
@@ -2338,24 +2110,25 @@ impl FoldingContext {
                 let rhs = CExpr::unary(UnaryOp::BitNot, self.get_expr(src));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
-            SSAOp::BoolAnd { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::And),
-            SSAOp::BoolOr { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Or),
-            SSAOp::BoolXor { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::BitXor),
+            SSAOp::BoolAnd { dst, a, b } => self.boolean_stmt(dst, BinaryOp::And, a, b),
+            SSAOp::BoolOr { dst, a, b } => self.boolean_stmt(dst, BinaryOp::Or, a, b),
+            SSAOp::BoolXor { dst, a, b } => self.boolean_stmt(dst, BinaryOp::BitXor, a, b),
             SSAOp::BoolNot { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
-                let rhs = CExpr::unary(UnaryOp::Not, self.get_expr(src));
+                let rhs =
+                    self.simplify_condition_expr(CExpr::unary(UnaryOp::Not, self.get_expr(src)));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let ty = type_from_size(dst.size);
-                let rhs = CExpr::cast(ty, self.get_expr(src));
+                let rhs = self.normalize_assignment_predicate_rhs(CExpr::cast(ty, self.get_expr(src)));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::Trunc { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let ty = type_from_size(dst.size);
-                let rhs = CExpr::cast(ty, self.get_expr(src));
+                let rhs = self.normalize_assignment_predicate_rhs(CExpr::cast(ty, self.get_expr(src)));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::Piece { dst, hi, lo } => {
@@ -2449,7 +2222,10 @@ impl FoldingContext {
             }
             SSAOp::Cast { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
-                let rhs = CExpr::cast(type_from_size(dst.size), self.get_expr(src));
+                let rhs = self.normalize_assignment_predicate_rhs(CExpr::cast(
+                    type_from_size(dst.size),
+                    self.get_expr(src),
+                ));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
             SSAOp::Return { target } => Some(CStmt::Return(Some(self.get_expr(target)))),
@@ -2470,8 +2246,88 @@ impl FoldingContext {
     /// Create a binary operation statement.
     fn binary_stmt(&self, dst: &SSAVar, a: &SSAVar, b: &SSAVar, op: BinaryOp) -> Option<CStmt> {
         let lhs = CExpr::Var(self.var_name(dst));
-        let rhs = CExpr::binary(op, self.get_expr(a), self.get_expr(b));
+        let rhs_raw = CExpr::binary(op, self.get_expr(a), self.get_expr(b));
+        let rhs = if matches!(
+            op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) {
+            self.normalize_assignment_predicate_rhs(rhs_raw)
+        } else {
+            rhs_raw
+        };
         Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+    }
+
+    fn boolean_stmt(&self, dst: &SSAVar, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> Option<CStmt> {
+        let lhs = CExpr::Var(self.var_name(dst));
+        let rhs = self.normalize_assignment_predicate_rhs(CExpr::binary(
+            op,
+            self.get_expr(a),
+            self.get_expr(b),
+        ));
+        Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+    }
+
+    fn normalize_assignment_predicate_rhs(&self, rhs: CExpr) -> CExpr {
+        if self.is_assignment_predicate_expr(&rhs) {
+            self.simplify_condition_expr(rhs)
+        } else {
+            rhs
+        }
+    }
+
+    fn predicate_candidate_for_var(&self, var: &SSAVar) -> Option<CExpr> {
+        let key = var.display_name();
+        self.lookup_definition(&key)
+            .or_else(|| self.formatted_defs_map().get(&key).cloned())
+            .or_else(|| {
+                let rendered = self.var_name(var);
+                self.formatted_defs_map().get(&rendered).cloned()
+            })
+    }
+
+    fn resolve_predicate_rhs_for_var(&self, src: &SSAVar, fallback: CExpr) -> CExpr {
+        let fallback_simplified = self.normalize_assignment_predicate_rhs(fallback);
+        if self.is_assignment_predicate_expr(&fallback_simplified) {
+            return fallback_simplified;
+        }
+
+        if let Some(candidate) = self.predicate_candidate_for_var(src)
+            && self.is_assignment_predicate_expr(&candidate)
+        {
+            return self.simplify_condition_expr(candidate);
+        }
+
+        fallback_simplified
+    }
+
+    fn is_assignment_predicate_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                is_cpu_flag(&name.to_lowercase())
+                    || self.flag_only_values_set().contains(name)
+                    || self.condition_vars_set().contains(name)
+            }
+            CExpr::Unary {
+                op: UnaryOp::Not, ..
+            } => true,
+            CExpr::Binary { op, .. } => matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitXor
+            ),
+            CExpr::Paren(inner) => self.is_assignment_predicate_expr(inner),
+            CExpr::Cast { expr: inner, .. } => self.is_assignment_predicate_expr(inner),
+            _ => false,
+        }
     }
 
     /// Extract a condition expression from a branch operation.
@@ -2486,37 +2342,339 @@ impl FoldingContext {
     /// Unlike get_expr(), this bypasses the should_inline() check because we always
     /// want to see the actual condition expression, not a temp variable name.
     fn get_condition_expr(&self, var: &SSAVar) -> CExpr {
-        let key = var.display_name();
-
         // Always inline constants
         if var.is_const() {
             return self.const_to_expr(var);
         }
 
-        // If the variable is a flag (ZF, CF, etc.), try direct flag reconstruction first
-        let var_lower = var.name.to_lowercase();
-        if var_lower.contains("zf")
-            || var_lower.contains("cf")
-            || var_lower.contains("sf")
-            || var_lower.contains("of")
+        let key = var.display_name();
+        let expr = self
+            .definitions_map()
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| CExpr::Var(self.var_name(var)));
+        self.simplify_condition_expr(expr)
+    }
+
+    fn simplify_condition_expr(&self, expr: CExpr) -> CExpr {
+        analysis::PredicateSimplifier::new(self).simplify_condition_expr(expr)
+    }
+
+    pub(crate) fn simplify_predicate_expr(&self, expr: CExpr) -> CExpr {
+        self.simplify_predicate_expr_inner(expr, 0)
+    }
+
+    fn simplify_predicate_expr_inner(&self, expr: CExpr, depth: u32) -> CExpr {
+        if depth > 6 {
+            return expr;
+        }
+
+        let normalized = match expr {
+            CExpr::Unary { op, operand } => CExpr::Unary {
+                op,
+                operand: Box::new(self.simplify_predicate_expr_inner(*operand, depth + 1)),
+            },
+            CExpr::Binary { op, left, right } => CExpr::Binary {
+                op,
+                left: Box::new(self.simplify_predicate_expr_inner(*left, depth + 1)),
+                right: Box::new(self.simplify_predicate_expr_inner(*right, depth + 1)),
+            },
+            CExpr::Paren(inner) => CExpr::Paren(Box::new(
+                self.simplify_predicate_expr_inner(*inner, depth + 1),
+            )),
+            CExpr::Cast { ty, expr } => CExpr::Cast {
+                ty,
+                expr: Box::new(self.simplify_predicate_expr_inner(*expr, depth + 1)),
+            },
+            other => other,
+        };
+
+        let rewritten = self.rewrite_predicate_once(normalized.clone());
+        if rewritten != normalized {
+            return self.simplify_predicate_expr_inner(rewritten, depth + 1);
+        }
+        rewritten
+    }
+
+    fn rewrite_predicate_once(&self, expr: CExpr) -> CExpr {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::And,
+                left,
+                right,
+            } => {
+                if let Some(gt) = self.rewrite_signed_positive_and(left.as_ref(), right.as_ref()) {
+                    gt
+                } else {
+                    CExpr::binary(BinaryOp::And, *left, *right)
+                }
+            }
+            CExpr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => match *operand {
+                CExpr::Binary {
+                    op: BinaryOp::Eq,
+                    left,
+                    right,
+                } => CExpr::binary(BinaryOp::Ne, *left, *right),
+                CExpr::Binary {
+                    op: BinaryOp::Ne,
+                    left,
+                    right,
+                } => CExpr::binary(BinaryOp::Eq, *left, *right),
+                other => CExpr::unary(UnaryOp::Not, other),
+            },
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } if self.is_zero_expr(right.as_ref()) => *left,
+            CExpr::Binary {
+                op: BinaryOp::Eq,
+                left,
+                right,
+            } => self.rewrite_zero_comparison(BinaryOp::Eq, *left, *right),
+            CExpr::Binary {
+                op: BinaryOp::Ne,
+                left,
+                right,
+            } => self.rewrite_zero_comparison(BinaryOp::Ne, *left, *right),
+            CExpr::Binary {
+                op: BinaryOp::Lt,
+                left,
+                right,
+            } => {
+                if self.is_zero_expr(right.as_ref()) {
+                    if let Some(base) = self.strip_sub_zero(left.as_ref()) {
+                        return CExpr::binary(BinaryOp::Lt, base, CExpr::IntLit(0));
+                    }
+                }
+                CExpr::binary(BinaryOp::Lt, *left, *right)
+            }
+            CExpr::Var(name) => {
+                if let Some(val) = parse_const_value(&name) {
+                    if val > 0x7fffffff {
+                        CExpr::UIntLit(val)
+                    } else {
+                        CExpr::IntLit(val as i64)
+                    }
+                } else {
+                    CExpr::Var(name)
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn rewrite_signed_positive_and(&self, left: &CExpr, right: &CExpr) -> Option<CExpr> {
+        let left_ne = self.extract_cmp_zero_operand(left, BinaryOp::Ne);
+        let right_ge = self.extract_cmp_zero_operand(right, BinaryOp::Ge);
+        if let (Some(a), Some(b)) = (left_ne.clone(), right_ge.clone())
+            && a == b
         {
-            let var_cname = self.var_name(var);
-            if let Some(reconstructed) = self.try_reconstruct_condition(&CExpr::Var(var_cname)) {
-                return reconstructed;
+            return Some(CExpr::binary(BinaryOp::Gt, a, CExpr::IntLit(0)));
+        }
+
+        let left_ge = self.extract_cmp_zero_operand(left, BinaryOp::Ge);
+        let right_ne = self.extract_cmp_zero_operand(right, BinaryOp::Ne);
+        if let (Some(a), Some(b)) = (left_ge, right_ne)
+            && a == b
+        {
+            return Some(CExpr::binary(BinaryOp::Gt, a, CExpr::IntLit(0)));
+        }
+
+        None
+    }
+
+    fn extract_cmp_zero_operand(&self, expr: &CExpr, op: BinaryOp) -> Option<CExpr> {
+        match expr {
+            CExpr::Binary {
+                op: expr_op,
+                left,
+                right,
+            } if *expr_op == op => {
+                if self.is_zero_expr(right.as_ref()) {
+                    return Some(left.as_ref().clone());
+                }
+                if self.is_zero_expr(left.as_ref()) {
+                    return Some(right.as_ref().clone());
+                }
+                None
+            }
+            CExpr::Paren(inner) => self.extract_cmp_zero_operand(inner, op),
+            CExpr::Cast { expr: inner, .. } => self.extract_cmp_zero_operand(inner, op),
+            _ => None,
+        }
+    }
+
+    fn rewrite_zero_comparison(&self, cmp_op: BinaryOp, left: CExpr, right: CExpr) -> CExpr {
+        if self.is_zero_expr(&right) {
+            if let Some(base) = self.strip_test_self(&left) {
+                return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
+            }
+            if let Some(base) = self.strip_sub_zero(&left) {
+                return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
             }
         }
 
-        // Try to inline the condition's definition
-        if let Some(expr) = self.definitions.get(&key) {
-            // Try to reconstruct comparison from flag patterns
-            if let Some(reconstructed) = self.try_reconstruct_condition(expr) {
-                return reconstructed;
+        if self.is_zero_expr(&left) {
+            if let Some(base) = self.strip_test_self(&right) {
+                return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
             }
+            if let Some(base) = self.strip_sub_zero(&right) {
+                return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
+            }
+        }
+
+        CExpr::binary(cmp_op, left, right)
+    }
+
+    fn strip_sub_zero(&self, expr: &CExpr) -> Option<CExpr> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } if self.is_zero_expr(right.as_ref()) => Some(left.as_ref().clone()),
+            CExpr::Paren(inner) => self.strip_sub_zero(inner),
+            CExpr::Cast { expr: inner, .. } => self.strip_sub_zero(inner),
+            CExpr::Var(name) => self
+                .lookup_definition(name)
+                .or_else(|| self.formatted_defs_map().get(name).cloned())
+                .and_then(|inner| self.strip_sub_zero(&inner)),
+            _ => None,
+        }
+    }
+
+    fn strip_test_self(&self, expr: &CExpr) -> Option<CExpr> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::BitAnd,
+                left,
+                right,
+            } if left == right => Some(left.as_ref().clone()),
+            CExpr::Paren(inner) => self.strip_test_self(inner),
+            CExpr::Cast { expr: inner, .. } => self.strip_test_self(inner),
+            CExpr::Var(name) => self
+                .lookup_definition(name)
+                .or_else(|| self.formatted_defs_map().get(name).cloned())
+                .and_then(|inner| self.strip_test_self(&inner)),
+            _ => None,
+        }
+    }
+
+    fn is_zero_expr(&self, expr: &CExpr) -> bool {
+        matches!(expr, CExpr::IntLit(0) | CExpr::UIntLit(0))
+            || matches!(expr, CExpr::Var(name) if name == "0" || name == "elf_header")
+    }
+
+    fn is_predicate_like_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                is_cpu_flag(&name.to_lowercase())
+                    || self.flag_only_values_set().contains(name)
+                    || self.condition_vars_set().contains(name)
+            }
+            CExpr::Unary {
+                op: UnaryOp::Not, ..
+            } => true,
+            CExpr::Binary { op, .. } => matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitXor
+                    | BinaryOp::Sub
+            ),
+            CExpr::Paren(inner) => self.is_predicate_like_expr(inner),
+            CExpr::Cast { expr: inner, .. } => self.is_predicate_like_expr(inner),
+            CExpr::IntLit(_) | CExpr::UIntLit(_) => true,
+            _ => false,
+        }
+    }
+
+    fn should_expand_predicate_var(&self, name: &str) -> bool {
+        if is_cpu_flag(&name.to_lowercase())
+            || self.condition_vars_set().contains(name)
+            || self.flag_only_values_set().contains(name)
+        {
+            return true;
+        }
+
+        self.lookup_definition(name)
+            .or_else(|| self.formatted_defs_map().get(name).cloned())
+            .map(|expr| self.is_predicate_like_expr(&expr))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn expand_predicate_vars(
+        &self,
+        expr: &CExpr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> CExpr {
+        if depth > 6 {
             return expr.clone();
         }
 
-        // Fallback to variable reference
-        CExpr::Var(self.var_name(var))
+        match expr {
+            CExpr::Var(name) => {
+                if let Some(alias) = self.arg_alias_for_rendered_name(name) {
+                    return CExpr::Var(alias);
+                }
+                if let Some(inner) = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                {
+                    if let CExpr::Var(inner_name) = inner {
+                        if inner_name.starts_with("arg") {
+                            return CExpr::Var(inner_name);
+                        }
+                        if let Some(alias) = self.arg_alias_for_rendered_name(&inner_name) {
+                            return CExpr::Var(alias);
+                        }
+                    }
+                }
+                if !self.should_expand_predicate_var(name) || !visited.insert(name.clone()) {
+                    return CExpr::Var(name.clone());
+                }
+
+                let expanded = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                    .filter(|inner| self.is_predicate_like_expr(inner))
+                    .map(|inner| self.expand_predicate_vars(&inner, depth + 1, visited))
+                    .unwrap_or_else(|| CExpr::Var(name.clone()));
+
+                visited.remove(name);
+                expanded
+            }
+            CExpr::Unary { op, operand } => {
+                CExpr::unary(*op, self.expand_predicate_vars(operand, depth + 1, visited))
+            }
+            CExpr::Binary { op, left, right } => CExpr::binary(
+                *op,
+                self.expand_predicate_vars(left, depth + 1, visited),
+                self.expand_predicate_vars(right, depth + 1, visited),
+            ),
+            CExpr::Paren(inner) => CExpr::Paren(Box::new(self.expand_predicate_vars(
+                inner,
+                depth + 1,
+                visited,
+            ))),
+            CExpr::Cast { ty, expr: inner } => CExpr::Cast {
+                ty: ty.clone(),
+                expr: Box::new(self.expand_predicate_vars(inner, depth + 1, visited)),
+            },
+            _ => expr.clone(),
+        }
     }
 
     /// Try to reconstruct a high-level comparison from x86 flag patterns.
@@ -2531,7 +2689,7 @@ impl FoldingContext {
     /// - !CF -> a >= b (unsigned, JAE)
     /// - CF -> a < b (unsigned, JB)
     /// - CF || ZF -> a <= b (unsigned, JBE)
-    fn try_reconstruct_condition(&self, expr: &CExpr) -> Option<CExpr> {
+    pub(crate) fn try_reconstruct_condition(&self, expr: &CExpr) -> Option<CExpr> {
         match expr {
             // Pattern: Binary AND - check for signed greater than: !ZF && (OF == SF)
             CExpr::Binary {
@@ -2539,6 +2697,13 @@ impl FoldingContext {
                 left,
                 right,
             } => {
+                if let Some(rel) = self.reconstruct_signed_gt_from_and(left, right) {
+                    return Some(rel);
+                }
+                if let Some(rel) = self.reconstruct_signed_gt_from_and(right, left) {
+                    return Some(rel);
+                }
+
                 // Try !ZF && (OF == SF) -> a > b (signed)
                 if let (Some(zf_name), true) = (self.extract_not_zf(left), self.is_of_eq_sf(right))
                 {
@@ -2586,6 +2751,13 @@ impl FoldingContext {
                 left,
                 right,
             } => {
+                if let Some(rel) = self.reconstruct_signed_le_from_or(left, right) {
+                    return Some(rel);
+                }
+                if let Some(rel) = self.reconstruct_signed_le_from_or(right, left) {
+                    return Some(rel);
+                }
+
                 // Try CF || ZF -> a <= b (unsigned, JBE)
                 if let (Some(cf_name), Some(zf_name)) =
                     (self.extract_cf(left), self.extract_zf(right))
@@ -2632,6 +2804,10 @@ impl FoldingContext {
                 left,
                 right,
             } => {
+                if let Some(rel) = self.reconstruct_signed_ge_from_eq(expr) {
+                    return Some(rel);
+                }
+
                 // OF == SF -> a >= b (signed, JGE)
                 if let (Some(of_name), Some(sf_name)) =
                     (self.extract_of(left), self.extract_sf(right))
@@ -2672,6 +2848,10 @@ impl FoldingContext {
                 left,
                 right,
             } => {
+                if let Some(rel) = self.reconstruct_signed_lt_from_ne(expr) {
+                    return Some(rel);
+                }
+
                 // OF != SF -> a < b (signed, JL)
                 if let (Some(of_name), Some(sf_name)) =
                     (self.extract_of(left), self.extract_sf(right))
@@ -2703,6 +2883,15 @@ impl FoldingContext {
                 }
                 None
             }
+
+            CExpr::Paren(inner) => self.try_reconstruct_condition(inner),
+
+            CExpr::Cast { ty, expr: inner } => self
+                .try_reconstruct_condition(inner)
+                .map(|reconstructed| CExpr::Cast {
+                    ty: ty.clone(),
+                    expr: Box::new(reconstructed),
+                }),
 
             // Pattern: !ZF (BoolNot of ZF) means "not equal"
             CExpr::Unary {
@@ -2881,9 +3070,9 @@ impl FoldingContext {
 
         // Look up the definition of this variable (try SSA key first, then formatted name)
         let def = self
-            .definitions
+            .definitions_map()
             .get(var_name)
-            .or_else(|| self.formatted_defs.get(var_name))?;
+            .or_else(|| self.formatted_defs_map().get(var_name))?;
 
         match def {
             // TEST reg, reg pattern: IntAnd(a, b) where a == b
@@ -2918,44 +3107,42 @@ impl FoldingContext {
 
     // ========== Helper functions for flag pattern detection ==========
 
-    /// Extract ZF variable name from an expression (if it's a ZF flag reference).
-    fn extract_zf(&self, expr: &CExpr) -> Option<String> {
+    fn extract_flag_name(&self, expr: &CExpr, flag: &str) -> Option<String> {
         if let CExpr::Var(name) = expr {
-            if name.to_lowercase().contains("zf") {
+            if name.to_lowercase().contains(flag) {
                 return Some(name.clone());
+            }
+
+            if let Some(CExpr::Var(inner)) = self
+                .lookup_definition(name)
+                .or_else(|| self.formatted_defs_map().get(name).cloned())
+            {
+                if inner.to_lowercase().contains(flag) {
+                    return Some(inner);
+                }
             }
         }
         None
+    }
+
+    /// Extract ZF variable name from an expression (if it's a ZF flag reference).
+    fn extract_zf(&self, expr: &CExpr) -> Option<String> {
+        self.extract_flag_name(expr, "zf")
     }
 
     /// Extract CF variable name from an expression (if it's a CF flag reference).
     fn extract_cf(&self, expr: &CExpr) -> Option<String> {
-        if let CExpr::Var(name) = expr {
-            if name.to_lowercase().contains("cf") {
-                return Some(name.clone());
-            }
-        }
-        None
+        self.extract_flag_name(expr, "cf")
     }
 
     /// Extract SF variable name from an expression (if it's a SF flag reference).
     fn extract_sf(&self, expr: &CExpr) -> Option<String> {
-        if let CExpr::Var(name) = expr {
-            if name.to_lowercase().contains("sf") {
-                return Some(name.clone());
-            }
-        }
-        None
+        self.extract_flag_name(expr, "sf")
     }
 
     /// Extract OF variable name from an expression (if it's an OF flag reference).
     fn extract_of(&self, expr: &CExpr) -> Option<String> {
-        if let CExpr::Var(name) = expr {
-            if name.to_lowercase().contains("of") {
-                return Some(name.clone());
-            }
-        }
-        None
+        self.extract_flag_name(expr, "of")
     }
 
     /// Extract ZF variable name from a !ZF expression.
@@ -2990,8 +3177,8 @@ impl FoldingContext {
             right,
         } = expr
         {
-            let has_of_sf = self.extract_of(left).is_some() && self.extract_sf(right).is_some();
-            let has_sf_of = self.extract_sf(left).is_some() && self.extract_of(right).is_some();
+            let has_of_sf = self.extract_of(left).is_some() && self.is_sf_like_expr(right);
+            let has_sf_of = self.is_sf_like_expr(left) && self.extract_of(right).is_some();
             return has_of_sf || has_sf_of;
         }
         false
@@ -3005,8 +3192,8 @@ impl FoldingContext {
             right,
         } = expr
         {
-            let has_of_sf = self.extract_of(left).is_some() && self.extract_sf(right).is_some();
-            let has_sf_of = self.extract_sf(left).is_some() && self.extract_of(right).is_some();
+            let has_of_sf = self.extract_of(left).is_some() && self.is_sf_like_expr(right);
+            let has_sf_of = self.is_sf_like_expr(left) && self.extract_of(right).is_some();
             return has_of_sf || has_sf_of;
         }
         // Also check for !(OF == SF)
@@ -3018,6 +3205,414 @@ impl FoldingContext {
             return self.is_of_eq_sf(operand);
         }
         false
+    }
+
+    fn reconstruct_signed_gt_from_and(
+        &self,
+        cmp_expr: &CExpr,
+        of_sf_expr: &CExpr,
+    ) -> Option<CExpr> {
+        let cmp = self.canonical_compare_tuple(cmp_expr)?;
+        if cmp.context != CompareContext::Ne {
+            return None;
+        }
+
+        let (of_name, sf_expr) = self.extract_of_sf_pair(of_sf_expr, false)?;
+        let sf_cmp = self.canonical_compare_tuple(sf_expr)?;
+        if sf_cmp.context != CompareContext::SignedNegative {
+            return None;
+        }
+
+        if !self.compare_tuple_operands_match(&cmp, &sf_cmp) {
+            return None;
+        }
+        if !self.compare_tuple_matches_flag_origin(&cmp, &of_name) {
+            return None;
+        }
+
+        Some(CExpr::binary(BinaryOp::Gt, cmp.lhs, cmp.rhs))
+    }
+
+    fn reconstruct_signed_le_from_or(&self, cmp_expr: &CExpr, of_sf_expr: &CExpr) -> Option<CExpr> {
+        let cmp = self.canonical_compare_tuple(cmp_expr)?;
+        if cmp.context != CompareContext::Eq {
+            return None;
+        }
+
+        let (of_name, sf_expr) = self.extract_of_sf_pair(of_sf_expr, true)?;
+        let sf_cmp = self.canonical_compare_tuple(sf_expr)?;
+        if sf_cmp.context != CompareContext::SignedNegative {
+            return None;
+        }
+
+        if !self.compare_tuple_operands_match(&cmp, &sf_cmp) {
+            return None;
+        }
+        if !self.compare_tuple_matches_flag_origin(&cmp, &of_name) {
+            return None;
+        }
+
+        Some(CExpr::binary(BinaryOp::Le, cmp.lhs, cmp.rhs))
+    }
+
+    fn reconstruct_signed_ge_from_eq(&self, expr: &CExpr) -> Option<CExpr> {
+        let (_of_name, sf_expr) = self.extract_of_sf_pair(expr, false)?;
+        let sf_cmp = self.canonical_compare_tuple(sf_expr)?;
+        if sf_cmp.context != CompareContext::SignedNegative {
+            return None;
+        }
+
+        Some(CExpr::binary(BinaryOp::Ge, sf_cmp.lhs, sf_cmp.rhs))
+    }
+
+    fn reconstruct_signed_lt_from_ne(&self, expr: &CExpr) -> Option<CExpr> {
+        let (_of_name, sf_expr) = self.extract_of_sf_pair(expr, true)?;
+        let sf_cmp = self.canonical_compare_tuple(sf_expr)?;
+        if sf_cmp.context != CompareContext::SignedNegative {
+            return None;
+        }
+
+        Some(CExpr::binary(BinaryOp::Lt, sf_cmp.lhs, sf_cmp.rhs))
+    }
+
+    fn extract_of_sf_pair<'a>(
+        &self,
+        expr: &'a CExpr,
+        want_ne: bool,
+    ) -> Option<(String, &'a CExpr)> {
+        let op_match = if want_ne { BinaryOp::Ne } else { BinaryOp::Eq };
+        if let CExpr::Binary { op, left, right } = expr {
+            if *op != op_match {
+                return None;
+            }
+            if let Some(of_name) = self.extract_of(left) {
+                return Some((of_name, right));
+            }
+            if let Some(of_name) = self.extract_of(right) {
+                return Some((of_name, left));
+            }
+        }
+        None
+    }
+
+    fn canonical_compare_tuple(&self, expr: &CExpr) -> Option<CompareTuple> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Eq,
+                left,
+                right,
+            } => Some(self.normalize_compare_tuple(CompareTuple {
+                lhs: self.resolve_predicate_operand(left, 0, &mut HashSet::new()),
+                rhs: self.resolve_predicate_operand(right, 0, &mut HashSet::new()),
+                context: CompareContext::Eq,
+            })),
+            CExpr::Binary {
+                op: BinaryOp::Ne,
+                left,
+                right,
+            } => Some(self.normalize_compare_tuple(CompareTuple {
+                lhs: self.resolve_predicate_operand(left, 0, &mut HashSet::new()),
+                rhs: self.resolve_predicate_operand(right, 0, &mut HashSet::new()),
+                context: CompareContext::Ne,
+            })),
+            CExpr::Binary {
+                op: BinaryOp::Lt,
+                left,
+                right,
+            } if self.is_zero_expr(right) => {
+                if let Some((sub_lhs, sub_rhs)) = self.extract_sub_operands(left) {
+                    return Some(self.normalize_compare_tuple(CompareTuple {
+                        lhs: self.resolve_predicate_operand(&sub_lhs, 0, &mut HashSet::new()),
+                        rhs: self.resolve_predicate_operand(&sub_rhs, 0, &mut HashSet::new()),
+                        context: CompareContext::SignedNegative,
+                    }));
+                }
+                Some(self.normalize_compare_tuple(CompareTuple {
+                    lhs: self.resolve_predicate_operand(left, 0, &mut HashSet::new()),
+                    rhs: CExpr::IntLit(0),
+                    context: CompareContext::SignedNegative,
+                }))
+            }
+            CExpr::Paren(inner) => self.canonical_compare_tuple(inner),
+            CExpr::Cast { expr: inner, .. } => self.canonical_compare_tuple(inner),
+            _ => None,
+        }
+    }
+
+    fn extract_sub_operands(&self, expr: &CExpr) -> Option<(CExpr, CExpr)> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => Some((left.as_ref().clone(), right.as_ref().clone())),
+            CExpr::Paren(inner) => self.extract_sub_operands(inner),
+            CExpr::Cast { expr: inner, .. } => self.extract_sub_operands(inner),
+            CExpr::Var(name) => {
+                if let Some(def) = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                {
+                    return self.extract_sub_operands(&def);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn normalize_compare_tuple(&self, mut tuple: CompareTuple) -> CompareTuple {
+        if matches!(tuple.context, CompareContext::Eq | CompareContext::Ne)
+            && self.is_literal_expr(&tuple.lhs)
+            && !self.is_literal_expr(&tuple.rhs)
+        {
+            std::mem::swap(&mut tuple.lhs, &mut tuple.rhs);
+        }
+        tuple
+    }
+
+    fn compare_tuple_operands_match(&self, a: &CompareTuple, b: &CompareTuple) -> bool {
+        a.lhs == b.lhs && a.rhs == b.rhs
+    }
+
+    fn compare_tuple_matches_flag_origin(&self, tuple: &CompareTuple, of_name: &str) -> bool {
+        let Some(origin) = self.compare_tuple_from_flag_origin(of_name) else {
+            return true;
+        };
+
+        // If either side still contains opaque temporaries, treat origin matching as
+        // advisory only. Local tuple consistency (cmp vs SF-surrogate) remains mandatory.
+        if self.expr_contains_opaque_temp(&tuple.lhs)
+            || self.expr_contains_opaque_temp(&tuple.rhs)
+            || self.expr_contains_opaque_temp(&origin.lhs)
+            || self.expr_contains_opaque_temp(&origin.rhs)
+            || self.expr_contains_unresolved_memory(&tuple.lhs)
+            || self.expr_contains_unresolved_memory(&tuple.rhs)
+            || self.expr_contains_unresolved_memory(&origin.lhs)
+            || self.expr_contains_unresolved_memory(&origin.rhs)
+        {
+            return true;
+        }
+
+        tuple.lhs == origin.lhs && tuple.rhs == origin.rhs
+    }
+
+    fn compare_tuple_from_flag_origin(&self, flag_name: &str) -> Option<CompareTuple> {
+        let (lhs_name, rhs_name) = self.lookup_flag_origin(flag_name)?;
+        let lhs = self.resolve_predicate_operand(
+            &self.origin_name_to_expr(&lhs_name),
+            0,
+            &mut HashSet::new(),
+        );
+        let rhs = self.resolve_predicate_operand(
+            &self.origin_name_to_expr(&rhs_name),
+            0,
+            &mut HashSet::new(),
+        );
+
+        Some(self.normalize_compare_tuple(CompareTuple {
+            lhs,
+            rhs,
+            context: CompareContext::SignedNegative,
+        }))
+    }
+
+    fn origin_name_to_expr(&self, name: &str) -> CExpr {
+        if let Some(parsed) = self.parse_expr_from_name(name) {
+            return parsed;
+        }
+        CExpr::Var(name.to_string())
+    }
+
+    fn parse_expr_from_name(&self, name: &str) -> Option<CExpr> {
+        if let Some(val) = parse_const_value(name) {
+            return Some(if val > 0x7fffffff {
+                CExpr::UIntLit(val)
+            } else {
+                CExpr::IntLit(val as i64)
+            });
+        }
+
+        if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+            if let Ok(val) = u64::from_str_radix(hex, 16) {
+                return Some(if val > 0x7fffffff {
+                    CExpr::UIntLit(val)
+                } else {
+                    CExpr::IntLit(val as i64)
+                });
+            }
+        }
+
+        if let Ok(dec) = name.parse::<i64>() {
+            return Some(CExpr::IntLit(dec));
+        }
+
+        None
+    }
+
+    fn resolve_predicate_operand(
+        &self,
+        expr: &CExpr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> CExpr {
+        if depth > 6 {
+            return expr.clone();
+        }
+
+        match expr {
+            CExpr::Paren(inner) => self.resolve_predicate_operand(inner, depth + 1, visited),
+            CExpr::Cast { expr: inner, .. } => {
+                self.resolve_predicate_operand(inner, depth + 1, visited)
+            }
+            CExpr::Deref(inner) => {
+                if let Some(stack_var) = self.simplify_stack_access(inner) {
+                    CExpr::Var(stack_var)
+                } else {
+                    expr.clone()
+                }
+            }
+            CExpr::Var(name) => {
+                if let Some(parsed) = self.parse_expr_from_name(name) {
+                    return parsed;
+                }
+                if let Some(alias) = self.arg_alias_for_rendered_name(name) {
+                    return CExpr::Var(alias);
+                }
+                if !visited.insert(name.clone()) {
+                    return CExpr::Var(name.clone());
+                }
+
+                let resolved = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                    .map(|inner| {
+                        if let Some(stack_var) = self.stack_alias_from_deref_expr(&inner) {
+                            CExpr::Var(stack_var)
+                        } else if matches!(inner, CExpr::Var(_) | CExpr::Paren(_) | CExpr::Cast { .. })
+                        {
+                            self.resolve_predicate_operand(&inner, depth + 1, visited)
+                        } else {
+                            CExpr::Var(name.clone())
+                        }
+                    })
+                    .unwrap_or_else(|| CExpr::Var(name.clone()));
+
+                visited.remove(name);
+                resolved
+            }
+            _ => expr.clone(),
+        }
+    }
+
+    fn is_literal_expr(&self, expr: &CExpr) -> bool {
+        matches!(
+            expr,
+            CExpr::IntLit(_) | CExpr::UIntLit(_) | CExpr::FloatLit(_) | CExpr::CharLit(_)
+        )
+    }
+
+    fn is_opaque_temp_name(&self, name: &str) -> bool {
+        if name.starts_with("var_") {
+            return true;
+        }
+        if let Some(rest) = name.strip_prefix('t') {
+            return rest
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false);
+        }
+        false
+    }
+
+    fn expr_contains_opaque_temp(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => self.is_opaque_temp_name(name),
+            CExpr::Unary { operand, .. } => self.expr_contains_opaque_temp(operand),
+            CExpr::Binary { left, right, .. } => {
+                self.expr_contains_opaque_temp(left) || self.expr_contains_opaque_temp(right)
+            }
+            CExpr::Paren(inner) => self.expr_contains_opaque_temp(inner),
+            CExpr::Cast { expr: inner, .. } => self.expr_contains_opaque_temp(inner),
+            CExpr::Deref(inner) => self.expr_contains_opaque_temp(inner),
+            CExpr::AddrOf(inner) => self.expr_contains_opaque_temp(inner),
+            CExpr::Subscript { base, index } => {
+                self.expr_contains_opaque_temp(base) || self.expr_contains_opaque_temp(index)
+            }
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                self.expr_contains_opaque_temp(base)
+            }
+            CExpr::Call { func, args } => {
+                self.expr_contains_opaque_temp(func)
+                    || args.iter().any(|arg| self.expr_contains_opaque_temp(arg))
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_contains_unresolved_memory(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Deref(_) => true,
+            CExpr::Unary { operand, .. } => self.expr_contains_unresolved_memory(operand),
+            CExpr::Binary { left, right, .. } => {
+                self.expr_contains_unresolved_memory(left)
+                    || self.expr_contains_unresolved_memory(right)
+            }
+            CExpr::Paren(inner) => self.expr_contains_unresolved_memory(inner),
+            CExpr::Cast { expr: inner, .. } => self.expr_contains_unresolved_memory(inner),
+            CExpr::AddrOf(inner) => self.expr_contains_unresolved_memory(inner),
+            CExpr::Subscript { base, index } => {
+                self.expr_contains_unresolved_memory(base)
+                    || self.expr_contains_unresolved_memory(index)
+            }
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                self.expr_contains_unresolved_memory(base)
+            }
+            CExpr::Call { func, args } => {
+                self.expr_contains_unresolved_memory(func)
+                    || args.iter().any(|arg| self.expr_contains_unresolved_memory(arg))
+            }
+            _ => false,
+        }
+    }
+
+    fn is_sf_like_expr(&self, expr: &CExpr) -> bool {
+        self.extract_sf(expr).is_some() || self.is_sf_surrogate(expr)
+    }
+
+    fn is_sf_surrogate(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Lt,
+                left,
+                right,
+            } if self.is_zero_expr(right) => self.is_sub_like_expr(left),
+            CExpr::Paren(inner) => self.is_sf_surrogate(inner),
+            CExpr::Cast { expr: inner, .. } => self.is_sf_surrogate(inner),
+            CExpr::Var(name) => self
+                .lookup_definition(name)
+                .or_else(|| self.formatted_defs_map().get(name).cloned())
+                .map(|inner| self.is_sf_surrogate(&inner))
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn is_sub_like_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Sub, ..
+            } => true,
+            CExpr::Paren(inner) => self.is_sub_like_expr(inner),
+            CExpr::Cast { expr: inner, .. } => self.is_sub_like_expr(inner),
+            CExpr::Var(name) => self
+                .lookup_definition(name)
+                .or_else(|| self.formatted_defs_map().get(name).cloned())
+                .map(|inner| self.is_sub_like_expr(&inner))
+                .unwrap_or(false),
+            _ => false,
+        }
     }
 
     /// Extract switch expression from an operation (for switch statement detection).
@@ -3034,7 +3629,7 @@ impl FoldingContext {
         let flag_lower = flag_name.to_lowercase();
 
         // Try exact match first (case-insensitive)
-        for (key, origin) in &self.flag_origins {
+        for (key, origin) in self.flag_origins_map() {
             if key.to_lowercase() == flag_lower {
                 return Some(origin.clone());
             }
@@ -3042,7 +3637,7 @@ impl FoldingContext {
 
         // Try matching by base name (without version suffix)
         // e.g., "zf_1" should match "ZF_1", "zf" should match "zf_1"
-        for (key, origin) in &self.flag_origins {
+        for (key, origin) in self.flag_origins_map() {
             let key_lower = key.to_lowercase();
             // Check if they share the same base (e.g., "zf" part)
             let flag_base = flag_lower.split('_').next().unwrap_or(&flag_lower);
@@ -3057,7 +3652,7 @@ impl FoldingContext {
 }
 
 /// Check if a name is a CPU flag that should be eliminated when unused.
-fn is_cpu_flag(name: &str) -> bool {
+pub(crate) fn is_cpu_flag(name: &str) -> bool {
     // Match exact flag names
     if matches!(
         name,
@@ -3091,7 +3686,7 @@ fn is_cpu_flag(name: &str) -> bool {
 }
 
 /// Parse a constant value from a name like "const:0x42" or "const:42".
-fn parse_const_value(name: &str) -> Option<u64> {
+pub(crate) fn parse_const_value(name: &str) -> Option<u64> {
     let val_str = name.strip_prefix("const:")?;
     // Remove any SSA version suffix (e.g., "const:42_0" -> "42")
     let val_str = val_str.split('_').next().unwrap_or(val_str);
@@ -3123,17 +3718,6 @@ fn parse_const_value(name: &str) -> Option<u64> {
 }
 
 /// Extract address from a call target name like "ram:401110_0" or "const:401110".
-/// Union-find: find the root representative with path compression.
-fn uf_find(parent: &mut HashMap<String, String>, x: &str) -> String {
-    let p = parent.get(x).cloned().unwrap_or_else(|| x.to_string());
-    if p == x {
-        return x.to_string();
-    }
-    let root = uf_find(parent, &p);
-    parent.insert(x.to_string(), root.clone());
-    root
-}
-
 fn extract_call_address(name: &str) -> Option<u64> {
     // Try ram:address_version format (e.g., "ram:401110_0")
     if let Some(rest) = name.strip_prefix("ram:") {
@@ -3203,6 +3787,7 @@ pub fn fold_blocks(blocks: &[SSABlock]) -> Vec<(u64, Vec<CStmt>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use r2il::{R2ILBlock, R2ILOp, Varnode};
 
     fn make_var(name: &str, version: u32, size: u32) -> SSAVar {
         SSAVar::new(name, version, size)
@@ -3214,6 +3799,91 @@ mod tests {
             size: 4,
             ops,
             phis: Vec::new(),
+        }
+    }
+
+    fn expr_contains_binary_op(expr: &CExpr, target: BinaryOp) -> bool {
+        match expr {
+            CExpr::Binary { op, left, right } => {
+                *op == target
+                    || expr_contains_binary_op(left, target)
+                    || expr_contains_binary_op(right, target)
+            }
+            CExpr::Unary { operand, .. } => expr_contains_binary_op(operand, target),
+            CExpr::Paren(inner) => expr_contains_binary_op(inner, target),
+            CExpr::Cast { expr: inner, .. } => expr_contains_binary_op(inner, target),
+            _ => false,
+        }
+    }
+
+    fn expr_contains_flag_artifact(expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let lower = name.to_lowercase();
+                lower.starts_with("of_")
+                    || lower.starts_with("zf_")
+                    || lower.starts_with("sf_")
+                    || lower.starts_with("cf_")
+            }
+            CExpr::Binary { left, right, .. } => {
+                expr_contains_flag_artifact(left) || expr_contains_flag_artifact(right)
+            }
+            CExpr::Unary { operand, .. } => expr_contains_flag_artifact(operand),
+            CExpr::Paren(inner) => expr_contains_flag_artifact(inner),
+            CExpr::Cast { expr: inner, .. } => expr_contains_flag_artifact(inner),
+            CExpr::Deref(inner) => expr_contains_flag_artifact(inner),
+            CExpr::Subscript { base, index } => {
+                expr_contains_flag_artifact(base) || expr_contains_flag_artifact(index)
+            }
+            CExpr::Member { base, .. } => expr_contains_flag_artifact(base),
+            CExpr::PtrMember { base, .. } => expr_contains_flag_artifact(base),
+            CExpr::Call { func, args } => {
+                expr_contains_flag_artifact(func)
+                    || args.iter().any(expr_contains_flag_artifact)
+            }
+            _ => false,
+        }
+    }
+
+    fn expr_contains_sub_zero_cmp_scaffold(expr: &CExpr) -> bool {
+        fn is_zero(expr: &CExpr) -> bool {
+            matches!(expr, CExpr::IntLit(0) | CExpr::UIntLit(0))
+        }
+
+        fn is_sub_zero(expr: &CExpr) -> bool {
+            matches!(
+                expr,
+                CExpr::Binary {
+                    op: BinaryOp::Sub,
+                    right,
+                    ..
+                } if is_zero(right)
+            )
+        }
+
+        match expr {
+            CExpr::Binary { op, left, right } => {
+                ((*op == BinaryOp::Eq || *op == BinaryOp::Ne)
+                    && ((is_sub_zero(left) && is_zero(right))
+                        || (is_sub_zero(right) && is_zero(left))))
+                    || expr_contains_sub_zero_cmp_scaffold(left)
+                    || expr_contains_sub_zero_cmp_scaffold(right)
+            }
+            CExpr::Unary { operand, .. } => expr_contains_sub_zero_cmp_scaffold(operand),
+            CExpr::Paren(inner) => expr_contains_sub_zero_cmp_scaffold(inner),
+            CExpr::Cast { expr: inner, .. } => expr_contains_sub_zero_cmp_scaffold(inner),
+            CExpr::Deref(inner) => expr_contains_sub_zero_cmp_scaffold(inner),
+            CExpr::Subscript { base, index } => {
+                expr_contains_sub_zero_cmp_scaffold(base)
+                    || expr_contains_sub_zero_cmp_scaffold(index)
+            }
+            CExpr::Member { base, .. } => expr_contains_sub_zero_cmp_scaffold(base),
+            CExpr::PtrMember { base, .. } => expr_contains_sub_zero_cmp_scaffold(base),
+            CExpr::Call { func, args } => {
+                expr_contains_sub_zero_cmp_scaffold(func)
+                    || args.iter().any(expr_contains_sub_zero_cmp_scaffold)
+            }
+            _ => false,
         }
     }
 
@@ -3406,13 +4076,560 @@ mod tests {
 
         // Check that flag_origins was populated
         assert!(
-            ctx.flag_origins.contains_key("ZF_1"),
+            ctx.flag_origins_map().contains_key("ZF_1"),
             "ZF_1 should be in flag_origins"
         );
 
         // Check the origin values
-        let (left, right) = ctx.flag_origins.get("ZF_1").unwrap();
+        let (left, right) = ctx.flag_origins_map().get("ZF_1").unwrap();
         assert_eq!(left, "edi", "Left operand should be edi");
         assert_eq!(right, "0xdead", "Right operand should be 0xdead");
+    }
+
+    #[test]
+    fn test_flag_only_transitive_marking() {
+        let edi_0 = make_var("EDI", 0, 4);
+        let tmp = make_var("tmp:3000", 1, 4);
+        let zf_1 = make_var("ZF", 1, 1);
+        let cond = make_var("tmp:3001", 1, 1);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let block = make_block(vec![
+            SSAOp::IntSub {
+                dst: tmp.clone(),
+                a: edi_0,
+                b: const_0.clone(),
+            },
+            SSAOp::IntEqual {
+                dst: zf_1.clone(),
+                a: tmp.clone(),
+                b: const_0,
+            },
+            SSAOp::BoolNot {
+                dst: cond.clone(),
+                src: zf_1,
+            },
+            SSAOp::CBranch {
+                cond,
+                target: make_var("const:1000", 0, 8),
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+
+        assert!(ctx.flag_only_values_set().contains(&tmp.display_name()));
+        assert!(ctx.is_dead(&tmp));
+    }
+
+    #[test]
+    fn test_flag_only_preserved_for_non_flag_consumer() {
+        let edi_0 = make_var("EDI", 0, 4);
+        let tmp = make_var("tmp:4000", 1, 4);
+        let zf_1 = make_var("ZF", 1, 1);
+        let cond = make_var("tmp:4001", 1, 1);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let block = make_block(vec![
+            SSAOp::IntSub {
+                dst: tmp.clone(),
+                a: edi_0,
+                b: const_0.clone(),
+            },
+            SSAOp::IntEqual {
+                dst: zf_1.clone(),
+                a: tmp.clone(),
+                b: const_0.clone(),
+            },
+            SSAOp::BoolNot {
+                dst: cond.clone(),
+                src: zf_1,
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("const:0x2000", 0, 8),
+                val: tmp.clone(),
+            },
+            SSAOp::CBranch {
+                cond,
+                target: make_var("const:1000", 0, 8),
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+
+        assert!(!ctx.flag_only_values_set().contains(&tmp.display_name()));
+        assert!(!ctx.is_dead(&tmp));
+    }
+
+    #[test]
+    fn test_simplify_predicate_rewrites_cmp_zero() {
+        let ctx = FoldingContext::new(64);
+        let expr = CExpr::unary(
+            UnaryOp::Not,
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::binary(BinaryOp::Sub, CExpr::Var("x".to_string()), CExpr::IntLit(0)),
+                CExpr::IntLit(0),
+            ),
+        );
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("x".to_string()), CExpr::IntLit(0))
+        );
+    }
+
+    #[test]
+    fn test_simplify_predicate_rewrites_ne_ge_zero_to_gt_zero() {
+        let ctx = FoldingContext::new(64);
+        let expr = CExpr::binary(
+            BinaryOp::And,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("x".to_string()), CExpr::IntLit(0)),
+            CExpr::binary(BinaryOp::Ge, CExpr::Var("x".to_string()), CExpr::IntLit(0)),
+        );
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(BinaryOp::Gt, CExpr::Var("x".to_string()), CExpr::IntLit(0))
+        );
+    }
+
+    #[test]
+    fn test_copy_predicate_assignment_uses_simplified_rhs() {
+        let edi_0 = make_var("EDI", 0, 4);
+        let sub = make_var("tmp:9100", 1, 4);
+        let zf_1 = make_var("ZF", 1, 1);
+        let cond = make_var("tmp:9101", 1, 1);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let block = make_block(vec![
+            SSAOp::IntSub {
+                dst: sub.clone(),
+                a: edi_0,
+                b: const_0.clone(),
+            },
+            SSAOp::IntEqual {
+                dst: zf_1.clone(),
+                a: sub,
+                b: const_0,
+            },
+            SSAOp::BoolNot {
+                dst: cond.clone(),
+                src: zf_1,
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        let rhs = ctx.resolve_predicate_rhs_for_var(&cond, ctx.get_expr(&cond));
+
+        assert!(
+            expr_contains_binary_op(&rhs, BinaryOp::Ne),
+            "Predicate copy helper should preserve high-level comparison form"
+        );
+        assert!(
+            !expr_contains_flag_artifact(&rhs),
+            "Predicate copy helper output should not contain raw flag temporaries"
+        );
+        assert!(
+            !expr_contains_sub_zero_cmp_scaffold(&rhs),
+            "Predicate copy helper output should not contain cmp-to-zero subtraction scaffold"
+        );
+    }
+
+    #[test]
+    fn test_simplify_signed_gt_from_ne_and_of_eq_sf() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx.flag_info.flag_origins.insert(
+            "OF_1".to_string(),
+            ("a".to_string(), "const:0_0".to_string()),
+        );
+
+        let expr = CExpr::binary(
+            BinaryOp::And,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("a".to_string()), CExpr::IntLit(0)),
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::Var("of_1".to_string()),
+                CExpr::binary(BinaryOp::Lt, CExpr::Var("a".to_string()), CExpr::IntLit(0)),
+            ),
+        );
+
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(BinaryOp::Gt, CExpr::Var("a".to_string()), CExpr::IntLit(0))
+        );
+    }
+
+    #[test]
+    fn test_simplify_signed_ge_from_of_eq_sf() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx.flag_info.flag_origins
+            .insert("OF_2".to_string(), ("a".to_string(), "b".to_string()));
+
+        let expr = CExpr::binary(
+            BinaryOp::Eq,
+            CExpr::Var("of_2".to_string()),
+            CExpr::binary(
+                BinaryOp::Lt,
+                CExpr::binary(
+                    BinaryOp::Sub,
+                    CExpr::Var("a".to_string()),
+                    CExpr::Var("b".to_string()),
+                ),
+                CExpr::IntLit(0),
+            ),
+        );
+
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(
+                BinaryOp::Ge,
+                CExpr::Var("a".to_string()),
+                CExpr::Var("b".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn test_simplify_signed_lt_from_of_ne_sf() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx.flag_info.flag_origins
+            .insert("OF_3".to_string(), ("a".to_string(), "b".to_string()));
+
+        let expr = CExpr::binary(
+            BinaryOp::Ne,
+            CExpr::Var("of_3".to_string()),
+            CExpr::binary(
+                BinaryOp::Lt,
+                CExpr::binary(
+                    BinaryOp::Sub,
+                    CExpr::Var("a".to_string()),
+                    CExpr::Var("b".to_string()),
+                ),
+                CExpr::IntLit(0),
+            ),
+        );
+
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(
+                BinaryOp::Lt,
+                CExpr::Var("a".to_string()),
+                CExpr::Var("b".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn test_signed_canonicalization_mismatch_does_not_collapse() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx.flag_info.flag_origins
+            .insert("OF_4".to_string(), ("a".to_string(), "b".to_string()));
+
+        let expr = CExpr::binary(
+            BinaryOp::And,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("x".to_string()), CExpr::IntLit(0)),
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::Var("of_4".to_string()),
+                CExpr::binary(BinaryOp::Lt, CExpr::Var("y".to_string()), CExpr::IntLit(0)),
+            ),
+        );
+
+        let simplified = ctx.simplify_condition_expr(expr.clone());
+        assert_eq!(simplified, expr);
+    }
+
+    #[test]
+    fn test_stack_prologue_arg_alias_recovery() {
+        let rbp_1 = make_var("RBP", 1, 8);
+        let edi_0 = make_var("EDI", 0, 4);
+        let addr = make_var("tmp:7000", 1, 8);
+        let arg_copy = make_var("tmp:7001", 1, 4);
+        let loaded = make_var("tmp:7002", 1, 4);
+        let cond = make_var("tmp:7003", 1, 1);
+        let const_neg4 = make_var("const:fffffffffffffffc", 0, 8);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let block = make_block(vec![
+            SSAOp::IntAdd {
+                dst: addr.clone(),
+                a: rbp_1.clone(),
+                b: const_neg4,
+            },
+            SSAOp::Copy {
+                dst: arg_copy.clone(),
+                src: edi_0,
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: addr.clone(),
+                val: arg_copy,
+            },
+            SSAOp::Load {
+                dst: loaded.clone(),
+                space: "ram".to_string(),
+                addr: addr,
+            },
+            SSAOp::IntNotEqual {
+                dst: cond.clone(),
+                a: loaded.clone(),
+                b: const_0,
+            },
+            SSAOp::CBranch {
+                cond,
+                target: make_var("const:1000", 0, 8),
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_blocks(std::slice::from_ref(&block));
+
+        assert_eq!(ctx.stack_vars_map().get(&-4), Some(&"arg1".to_string()));
+
+        let mut visited = HashSet::new();
+        let resolved =
+            ctx.resolve_predicate_operand(&CExpr::Var(loaded.display_name()), 0, &mut visited);
+        assert_eq!(resolved, CExpr::Var("arg1".to_string()));
+    }
+
+    #[test]
+    fn test_use_info_deterministic() {
+        let eax_0 = make_var("EAX", 0, 4);
+        let tmp = make_var("tmp:8200", 1, 4);
+        let block = make_block(vec![
+            SSAOp::IntAdd {
+                dst: tmp.clone(),
+                a: eax_0,
+                b: make_var("const:1", 0, 4),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("const:1000", 0, 8),
+                val: tmp,
+            },
+        ]);
+
+        let ctx_a = FoldingContext::new(64);
+        let ctx_b = FoldingContext::new(64);
+        let blocks = vec![block];
+
+        let cfg_a = ctx_a.to_pass_env();
+        let cfg_b = ctx_b.to_pass_env();
+        let info_a = analysis::UseInfo::analyze(&blocks, &cfg_a);
+        let info_b = analysis::UseInfo::analyze(&blocks, &cfg_b);
+        assert_eq!(info_a, info_b, "UseInfo analysis should be deterministic");
+    }
+
+    #[test]
+    fn test_flag_info_transitive_marking_and_guard() {
+        let edi_0 = make_var("EDI", 0, 4);
+        let tmp = make_var("tmp:8300", 1, 4);
+        let zf_1 = make_var("ZF", 1, 1);
+        let cond = make_var("tmp:8301", 1, 1);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let flag_only_block = make_block(vec![
+            SSAOp::IntSub {
+                dst: tmp.clone(),
+                a: edi_0.clone(),
+                b: const_0.clone(),
+            },
+            SSAOp::IntEqual {
+                dst: zf_1.clone(),
+                a: tmp.clone(),
+                b: const_0.clone(),
+            },
+            SSAOp::BoolNot {
+                dst: cond.clone(),
+                src: zf_1,
+            },
+            SSAOp::CBranch {
+                cond,
+                target: make_var("const:1000", 0, 8),
+            },
+        ]);
+
+        let ctx = FoldingContext::new(64);
+        let blocks = vec![flag_only_block];
+        let cfg = ctx.to_pass_env();
+        let use_info = analysis::UseInfo::analyze(&blocks, &cfg);
+        let flag_info = analysis::FlagInfo::analyze(&blocks, &use_info, &cfg);
+        assert!(flag_info.flag_only_values.contains(&tmp.display_name()));
+
+        let tmp2 = make_var("tmp:8400", 1, 4);
+        let zf_2 = make_var("ZF", 2, 1);
+        let cond2 = make_var("tmp:8401", 1, 1);
+        let guarded_block = make_block(vec![
+            SSAOp::IntSub {
+                dst: tmp2.clone(),
+                a: edi_0,
+                b: const_0.clone(),
+            },
+            SSAOp::IntEqual {
+                dst: zf_2,
+                a: tmp2.clone(),
+                b: const_0,
+            },
+            SSAOp::BoolNot {
+                dst: cond2.clone(),
+                src: make_var("ZF", 2, 1),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("const:2000", 0, 8),
+                val: tmp2.clone(),
+            },
+            SSAOp::CBranch {
+                cond: cond2,
+                target: make_var("const:1000", 0, 8),
+            },
+        ]);
+
+        let ctx = FoldingContext::new(64);
+        let blocks = vec![guarded_block];
+        let cfg = ctx.to_pass_env();
+        let use_info = analysis::UseInfo::analyze(&blocks, &cfg);
+        let flag_info = analysis::FlagInfo::analyze(&blocks, &use_info, &cfg);
+        assert!(!flag_info.flag_only_values.contains(&tmp2.display_name()));
+    }
+
+    #[test]
+    fn test_stack_info_arg_alias_requires_version_zero() {
+        let rbp_1 = make_var("RBP", 1, 8);
+        let eax_1 = make_var("EAX", 1, 4);
+        let addr = make_var("tmp:8500", 1, 8);
+        let const_neg4 = make_var("const:fffffffffffffffc", 0, 8);
+        let block = make_block(vec![
+            SSAOp::IntAdd {
+                dst: addr.clone(),
+                a: rbp_1,
+                b: const_neg4,
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr,
+                val: eax_1,
+            },
+        ]);
+
+        let ctx = FoldingContext::new(64);
+        let blocks = vec![block];
+        let cfg = ctx.to_pass_env();
+        let use_info = analysis::UseInfo::analyze(&blocks, &cfg);
+        let stack_info = analysis::StackInfo::analyze(&blocks, &use_info, &cfg);
+
+        assert!(
+            !stack_info.stack_arg_aliases.values().any(|v| v == "arg1"),
+            "Non-argument registers must not be treated as prologue arg aliases"
+        );
+    }
+
+    #[test]
+    fn test_analyze_function_structure_marks_exit_as_return_context() {
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let func = SSAFunction::from_blocks(&[block]).expect("SSA function should build");
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_function_structure(&func);
+
+        assert!(ctx.return_blocks.contains(&0x1000));
+    }
+
+    #[test]
+    fn test_return_expr_inlines_simple_xor_chain_and_stops_after_return() {
+        let eax_1 = make_var("EAX", 1, 4);
+        let edi_0 = make_var("EDI", 0, 4);
+        let esi_0 = make_var("ESI", 0, 4);
+        let t1 = make_var("tmp:8000", 1, 1);
+        let t2 = make_var("tmp:8001", 1, 1);
+        let t3 = make_var("tmp:8002", 1, 1);
+        let rip_1 = make_var("RIP", 1, 8);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let block = make_block(vec![
+            SSAOp::IntNotEqual {
+                dst: t1.clone(),
+                a: edi_0,
+                b: const_0.clone(),
+            },
+            SSAOp::IntNotEqual {
+                dst: t2.clone(),
+                a: esi_0,
+                b: const_0,
+            },
+            SSAOp::IntXor {
+                dst: t3.clone(),
+                a: t1,
+                b: t2,
+            },
+            SSAOp::Copy {
+                dst: eax_1,
+                src: t3,
+            },
+            SSAOp::Return { target: rip_1 },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        ctx.return_blocks.insert(block.addr);
+        ctx.set_current_block(block.addr);
+
+        let stmts = ctx.fold_block(&block);
+        assert_eq!(stmts.len(), 1, "Should stop emitting after high-level return");
+
+        match &stmts[0] {
+            CStmt::Return(Some(expr)) => {
+                assert!(
+                    expr_contains_binary_op(expr, BinaryOp::BitXor),
+                    "Return expression should inline XOR chain"
+                );
+                assert!(
+                    expr_contains_binary_op(expr, BinaryOp::Ne),
+                    "Return expression should include inlined predicate comparisons"
+                );
+            }
+            other => panic!("Expected return statement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_no_duplicate_low_level_return_after_high_level_return() {
+        let eax_1 = make_var("EAX", 1, 4);
+        let tmp = make_var("tmp:8100", 1, 4);
+        let rip_1 = make_var("RIP", 1, 8);
+
+        let block = make_block(vec![
+            SSAOp::Copy {
+                dst: tmp.clone(),
+                src: make_var("const:1", 0, 4),
+            },
+            SSAOp::Copy {
+                dst: eax_1,
+                src: tmp,
+            },
+            SSAOp::Return { target: rip_1 },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        ctx.return_blocks.insert(block.addr);
+        ctx.set_current_block(block.addr);
+
+        let stmts = ctx.fold_block(&block);
+        let return_count = stmts
+            .iter()
+            .filter(|stmt| matches!(stmt, CStmt::Return(_)))
+            .count();
+        assert_eq!(return_count, 1, "Should emit a single high-level return");
     }
 }
