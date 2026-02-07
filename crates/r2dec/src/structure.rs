@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAFunction;
 
+use crate::ExternalStackVar;
 use crate::ast::{CExpr, CStmt, CType};
 use crate::expr::ExpressionBuilder;
 use crate::fold::FoldingContext;
@@ -136,6 +137,13 @@ impl<'a> ControlFlowStructurer<'a> {
     pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
         if let Some(ref mut ctx) = self.fold_ctx {
             ctx.set_symbols(symbols);
+        }
+    }
+
+    /// Set externally recovered stack variables keyed by signed stack offset.
+    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, ExternalStackVar>) {
+        if let Some(ref mut ctx) = self.fold_ctx {
+            ctx.set_external_stack_vars(stack_vars);
         }
     }
 

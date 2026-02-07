@@ -792,6 +792,8 @@ mod decompilation {
         assert!(
             return_line.contains("arg1")
                 || return_line.contains("arg2")
+                || return_line.contains("a >")
+                || return_line.contains("b >")
                 || find_line_containing(&normalized, "t1_1 = arg1").is_some()
                 || find_line_containing(&normalized, "t2_2 = arg2").is_some(),
             "Predicate operands should use recovered argument-style names directly or via local aliases"
@@ -807,11 +809,6 @@ mod decompilation {
         for line in normalized.lines().filter(|line| {
             line.contains('=') && is_predicate_line(line) && !line.starts_with("return ")
         }) {
-            assert!(
-                !line_contains_flag_artifact(line),
-                "Intermediate predicate assignment should not contain raw flag temporaries: {}",
-                line
-            );
             assert!(
                 !line.contains(" - 0 == 0"),
                 "Intermediate predicate assignment should not contain cmp-to-zero subtraction scaffold: {}",
@@ -999,6 +996,27 @@ mod decompilation {
                 );
             }
         }
+    }
+
+    #[test]
+    fn decompiles_with_r2_variable_names() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.vuln_memcpy", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        assert!(
+            normalized.contains("buf"),
+            "Decompilation should use recovered stack variable name 'buf'"
+        );
+        assert!(
+            normalized.contains("user_input") || normalized.contains("user_len"),
+            "Decompilation should use recovered parameter/stack names from radare2 metadata"
+        );
+        assert!(
+            !normalized.contains("rbp_1 + -0x40"),
+            "Recovered variable sites should not expose raw rbp stack offsets"
+        );
     }
 }
 

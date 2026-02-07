@@ -50,6 +50,14 @@ pub use variable::VariableRecovery;
 
 use r2ssa::SSAFunction;
 
+fn is_generic_arg_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower
+        .strip_prefix("arg")
+        .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
 /// Decompiler configuration.
 #[derive(Debug, Clone)]
 pub struct DecompilerConfig {
@@ -112,6 +120,34 @@ impl DecompilerConfig {
 }
 
 /// External information for decompilation (function names, strings, symbols).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFunctionParam {
+    /// Parameter name recovered from external metadata.
+    pub name: String,
+    /// Optional type recovered from external metadata.
+    pub ty: Option<CType>,
+}
+
+/// External function signature recovered from host analysis.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExternalFunctionSignature {
+    /// Optional return type.
+    pub ret_type: Option<CType>,
+    /// Ordered parameters.
+    pub params: Vec<ExternalFunctionParam>,
+}
+
+/// External stack variable metadata recovered from host analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalStackVar {
+    /// Variable name.
+    pub name: String,
+    /// Optional variable type.
+    pub ty: Option<CType>,
+    /// Base register used by the analysis backend (e.g. RBP/RSP).
+    pub base: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DecompilerContext {
     /// Function address to name mapping.
@@ -120,6 +156,10 @@ pub struct DecompilerContext {
     pub strings: std::collections::HashMap<u64, String>,
     /// Symbol/global variable names.
     pub symbols: std::collections::HashMap<u64, String>,
+    /// Optional external function signature.
+    pub function_signature: Option<ExternalFunctionSignature>,
+    /// Stack variables keyed by signed stack offset.
+    pub stack_vars: std::collections::HashMap<i64, ExternalStackVar>,
 }
 
 /// The main decompiler.
@@ -158,6 +198,16 @@ impl Decompiler {
         self.context.symbols = symbols;
     }
 
+    /// Set an externally recovered function signature.
+    pub fn set_function_signature(&mut self, signature: Option<ExternalFunctionSignature>) {
+        self.context.function_signature = signature;
+    }
+
+    /// Set externally recovered stack variables keyed by signed stack offset.
+    pub fn set_stack_vars(&mut self, stack_vars: std::collections::HashMap<i64, ExternalStackVar>) {
+        self.context.stack_vars = stack_vars;
+    }
+
     /// Decompile an SSA function to C code.
     pub fn decompile(&self, func: &SSAFunction) -> String {
         // Build the C function
@@ -181,6 +231,9 @@ impl Decompiler {
         }
         if !self.context.symbols.is_empty() {
             structurer.set_symbols(self.context.symbols.clone());
+        }
+        if !self.context.stack_vars.is_empty() {
+            structurer.set_external_stack_vars(self.context.stack_vars.clone());
         }
         if !type_hints.is_empty() {
             structurer.set_type_hints(type_hints.clone());
@@ -235,6 +288,9 @@ impl Decompiler {
             &self.config.fp_name,
             self.config.ptr_size,
         );
+        if let Some(signature) = &self.context.function_signature {
+            var_recovery.set_external_signature(signature.clone());
+        }
         var_recovery.recover(func);
 
         // Infer types
@@ -309,7 +365,7 @@ impl Decompiler {
             .unwrap_or_else(|| format!("sub_{:x}", func.entry));
 
         // Collect parameters -- always include in signature even if inlined in body
-        let mut params: Vec<ast::CParam> = var_recovery
+        let mut recovered_params: Vec<ast::CParam> = var_recovery
             .parameters()
             .iter()
             .map(|v| ast::CParam {
@@ -317,8 +373,50 @@ impl Decompiler {
                 name: v.name.clone(),
             })
             .collect();
-        // Sort by arg number for stable ordering (arg1, arg2, ...)
-        params.sort_by(|a, b| a.name.cmp(&b.name));
+        // Sort by arg number when available, then by name.
+        recovered_params.sort_by(|a, b| {
+            let ai = a
+                .name
+                .strip_prefix("arg")
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            let bi = b
+                .name
+                .strip_prefix("arg")
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            ai.cmp(&bi).then_with(|| a.name.cmp(&b.name))
+        });
+
+        let params: Vec<ast::CParam> = if let Some(signature) = &self.context.function_signature {
+            if signature.params.is_empty() {
+                recovered_params
+            } else {
+                let total = recovered_params.len().max(signature.params.len());
+                (0..total)
+                    .map(|idx| {
+                        let fallback_name = format!("arg{}", idx + 1);
+                        let mut param = recovered_params.get(idx).cloned().unwrap_or(ast::CParam {
+                            ty: CType::Int(32),
+                            name: fallback_name,
+                        });
+
+                        if let Some(ext) = signature.params.get(idx) {
+                            if !is_generic_arg_name(&ext.name) {
+                                param.name = ext.name.clone();
+                            }
+                            if let Some(ext_ty) = &ext.ty {
+                                param.ty = ext_ty.clone();
+                            }
+                        }
+
+                        param
+                    })
+                    .collect()
+            }
+        } else {
+            recovered_params
+        };
 
         // Collect locals -- on fallback keep locals conservatively.
         let locals: Vec<ast::CLocal> = if use_conservative_locals {
@@ -349,7 +447,12 @@ impl Decompiler {
 
         CFunction {
             name: func_name,
-            ret_type: CType::Int(32), // Default to int
+            ret_type: self
+                .context
+                .function_signature
+                .as_ref()
+                .and_then(|sig| sig.ret_type.clone())
+                .unwrap_or(CType::Int(32)),
             params,
             locals,
             body,

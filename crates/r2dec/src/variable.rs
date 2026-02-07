@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
 
+use crate::ExternalFunctionSignature;
 use crate::ast::CType;
 
 /// Variable information.
@@ -49,6 +50,8 @@ pub struct VariableRecovery {
     loop_var_idx: usize,
     /// Return value register name.
     ret_reg: String,
+    /// Optional external signature metadata.
+    external_signature: Option<ExternalFunctionSignature>,
 }
 
 impl VariableRecovery {
@@ -72,7 +75,13 @@ impl VariableRecovery {
             ptr_size,
             loop_var_idx: 0,
             ret_reg,
+            external_signature: None,
         }
+    }
+
+    /// Set an externally recovered function signature.
+    pub fn set_external_signature(&mut self, signature: ExternalFunctionSignature) {
+        self.external_signature = Some(signature);
     }
 
     /// Recover variables from an SSA function.
@@ -368,9 +377,10 @@ impl VariableRecovery {
         // Emit parameters in CC order, stopping at the first gap
         for (idx, &cc_reg) in cc_arg_regs.iter().enumerate() {
             if let Some(var) = seen_v0.get(cc_reg) {
-                let name = format!("arg{}", idx + 1);
+                let mut name = format!("arg{}", idx + 1);
+                let mut ty = self.type_from_size(var.size);
+                self.apply_external_param_override(idx, &mut name, &mut ty);
                 let name = self.make_unique_param_name(name);
-                let ty = self.type_from_size(var.size);
                 self.vars.insert(
                     var.clone(),
                     VarInfo {
@@ -386,6 +396,22 @@ impl VariableRecovery {
                 // No gap: stop at first unused arg register
                 break;
             }
+        }
+    }
+
+    fn apply_external_param_override(&self, index: usize, name: &mut String, ty: &mut CType) {
+        let Some(signature) = self.external_signature.as_ref() else {
+            return;
+        };
+        let Some(ext) = signature.params.get(index) else {
+            return;
+        };
+
+        if !is_generic_arg_name(&ext.name) {
+            *name = ext.name.clone();
+        }
+        if let Some(ext_ty) = &ext.ty {
+            *ty = ext_ty.clone();
         }
     }
 
@@ -528,9 +554,18 @@ impl VariableRecovery {
     }
 }
 
+fn is_generic_arg_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower
+        .strip_prefix("arg")
+        .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ExternalFunctionParam, ExternalFunctionSignature};
 
     #[test]
     fn test_gen_param_name() {
@@ -565,5 +600,62 @@ mod tests {
 
         let name = vr.gen_stack_var_name(-8);
         assert_eq!(name, "arg_8");
+    }
+
+    #[test]
+    fn test_external_signature_overrides_meaningful_param_name_and_type() {
+        let mut vr = VariableRecovery::new("rsp", "rbp", 64);
+        vr.set_external_signature(ExternalFunctionSignature {
+            ret_type: None,
+            params: vec![ExternalFunctionParam {
+                name: "user_input".to_string(),
+                ty: Some(CType::ptr(CType::Int(8))),
+            }],
+        });
+
+        let mut name = "arg1".to_string();
+        let mut ty = CType::Int(64);
+        vr.apply_external_param_override(0, &mut name, &mut ty);
+
+        assert_eq!(name, "user_input");
+        assert_eq!(ty, CType::ptr(CType::Int(8)));
+    }
+
+    #[test]
+    fn test_external_signature_generic_param_name_is_ignored() {
+        let mut vr = VariableRecovery::new("rsp", "rbp", 64);
+        vr.set_external_signature(ExternalFunctionSignature {
+            ret_type: None,
+            params: vec![ExternalFunctionParam {
+                name: "arg0".to_string(),
+                ty: Some(CType::Int(32)),
+            }],
+        });
+
+        let mut name = "arg1".to_string();
+        let mut ty = CType::Int(64);
+        vr.apply_external_param_override(0, &mut name, &mut ty);
+
+        assert_eq!(name, "arg1");
+        assert_eq!(ty, CType::Int(32));
+    }
+
+    #[test]
+    fn test_external_signature_type_override_only_when_available() {
+        let mut vr = VariableRecovery::new("rsp", "rbp", 64);
+        vr.set_external_signature(ExternalFunctionSignature {
+            ret_type: None,
+            params: vec![ExternalFunctionParam {
+                name: "count".to_string(),
+                ty: None,
+            }],
+        });
+
+        let mut name = "arg1".to_string();
+        let mut ty = CType::Int(64);
+        vr.apply_external_param_override(0, &mut name, &mut ty);
+
+        assert_eq!(name, "count");
+        assert_eq!(ty, CType::Int(64));
     }
 }

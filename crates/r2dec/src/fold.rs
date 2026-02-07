@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use r2ssa::{FunctionSSABlock, SSAFunction, SSAOp, SSAVar};
 
 use crate::analysis;
+use crate::ExternalStackVar;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 
 // Type alias for clarity
@@ -89,6 +90,8 @@ pub struct FoldingContext {
     caller_saved_regs: HashSet<String>,
     /// Snapshot of explicit analysis passes.
     analysis_ctx: analysis::AnalysisContext,
+    /// Stack variables recovered from external analysis metadata.
+    external_stack_vars: HashMap<i64, ExternalStackVar>,
 }
 
 impl FoldingContext {
@@ -226,6 +229,7 @@ impl FoldingContext {
                 flag_info: analysis::FlagInfo::default(),
                 stack_info: analysis::StackInfo::default(),
             },
+            external_stack_vars: HashMap::new(),
         }
     }
 
@@ -315,6 +319,11 @@ impl FoldingContext {
     /// Set inferred type hints keyed by rendered variable name.
     pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
         self.analysis_ctx.use_info.type_hints = hints;
+    }
+
+    /// Set externally recovered stack variables keyed by signed stack offset.
+    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, ExternalStackVar>) {
+        self.external_stack_vars = stack_vars;
     }
 
     /// Analyze function structure to detect return patterns.
@@ -452,7 +461,26 @@ impl FoldingContext {
         let env = self.to_pass_env();
         let mut use_info = analysis::UseInfo::analyze(blocks, &env);
         let flag_info = analysis::FlagInfo::analyze(blocks, &use_info, &env);
-        let stack_info = analysis::StackInfo::analyze(blocks, &use_info, &env);
+        let mut stack_info = analysis::StackInfo::analyze(blocks, &use_info, &env);
+
+        for (offset, ext_var) in &self.external_stack_vars {
+            if ext_var.name.is_empty() {
+                continue;
+            }
+            let should_replace = match stack_info.stack_vars.get(offset) {
+                None => true,
+                Some(existing) => {
+                    existing.starts_with("local_")
+                        || existing.starts_with("stack_")
+                        || existing.starts_with("arg_")
+                        || existing == "saved_fp"
+                        || is_generic_arg_name(existing)
+                }
+            };
+            if should_replace {
+                stack_info.stack_vars.insert(*offset, ext_var.name.clone());
+            }
+        }
 
         // Deterministically merge stack-derived alias refinements.
         for (key, expr) in &stack_info.definition_overrides {
@@ -504,21 +532,39 @@ impl FoldingContext {
 
     /// Extract stack offset from an expression like (rbp + -0x48).
     fn extract_offset_from_expr(&self, expr: &CExpr) -> Option<i64> {
+        self.extract_offset_from_expr_with_depth(expr, 0)
+    }
+
+    fn extract_offset_from_expr_with_depth(&self, expr: &CExpr, depth: u32) -> Option<i64> {
+        if depth > 8 {
+            return None;
+        }
+
         match expr {
-            CExpr::Paren(inner) => self.extract_offset_from_expr(inner),
-            CExpr::Cast { expr: inner, .. } => self.extract_offset_from_expr(inner),
+            CExpr::Paren(inner) => self.extract_offset_from_expr_with_depth(inner, depth + 1),
+            CExpr::Cast { expr: inner, .. } => {
+                self.extract_offset_from_expr_with_depth(inner, depth + 1)
+            }
             CExpr::Binary {
                 op: BinaryOp::Add,
                 left,
                 right,
             } => {
-                // Check if left is fp/sp
-                if let CExpr::Var(name) = left.as_ref() {
-                    let name_lower = name.to_lowercase();
-                    if name_lower.contains(&self.fp_name) || name_lower.contains(&self.sp_name) {
-                        // Get offset from right
-                        return self.expr_to_offset(right);
-                    }
+                if self.is_stack_base_expr(left) {
+                    return self.expr_to_offset(right);
+                }
+                if self.is_stack_base_expr(right) {
+                    return self.expr_to_offset(left);
+                }
+                None
+            }
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => {
+                if self.is_stack_base_expr(left) {
+                    return self.expr_to_offset(right).map(|off| -off);
                 }
                 None
             }
@@ -527,9 +573,21 @@ impl FoldingContext {
                 if name_lower.contains(&self.fp_name) || name_lower.contains(&self.sp_name) {
                     return Some(0);
                 }
-                None
+                self.lookup_definition(name)
+                    .and_then(|inner| self.extract_offset_from_expr_with_depth(&inner, depth + 1))
             }
             _ => None,
+        }
+    }
+
+    fn is_stack_base_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let name_lower = name.to_lowercase();
+                name_lower.contains(&self.fp_name) || name_lower.contains(&self.sp_name)
+            }
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => self.is_stack_base_expr(inner),
+            _ => false,
         }
     }
 
@@ -598,7 +656,7 @@ impl FoldingContext {
         }
 
         if let Some(offset) = self.extract_offset_from_expr(addr_expr) {
-            return self.stack_vars_map().get(&offset).cloned();
+            return self.resolve_stack_var(offset);
         }
         None
     }
@@ -641,7 +699,106 @@ impl FoldingContext {
             return Some(alias);
         }
         self.extract_stack_offset_from_var(addr)
-            .and_then(|offset| self.stack_vars_map().get(&offset).cloned())
+            .and_then(|offset| self.resolve_stack_var(offset))
+    }
+
+    /// Resolve a stack variable name by signed stack offset.
+    pub fn resolve_stack_var(&self, offset: i64) -> Option<String> {
+        self.stack_vars_map().get(&offset).cloned()
+    }
+
+    fn rewrite_stack_expr(&self, expr: CExpr) -> CExpr {
+        let rewritten = match expr {
+            CExpr::Unary { op, operand } => CExpr::Unary {
+                op,
+                operand: Box::new(self.rewrite_stack_expr(*operand)),
+            },
+            CExpr::Binary { op, left, right } => CExpr::Binary {
+                op,
+                left: Box::new(self.rewrite_stack_expr(*left)),
+                right: Box::new(self.rewrite_stack_expr(*right)),
+            },
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => CExpr::Ternary {
+                cond: Box::new(self.rewrite_stack_expr(*cond)),
+                then_expr: Box::new(self.rewrite_stack_expr(*then_expr)),
+                else_expr: Box::new(self.rewrite_stack_expr(*else_expr)),
+            },
+            CExpr::Call { func, args } => CExpr::Call {
+                func: Box::new(self.rewrite_stack_expr(*func)),
+                args: args
+                    .into_iter()
+                    .map(|arg| self.rewrite_stack_expr(arg))
+                    .collect(),
+            },
+            CExpr::Cast { ty, expr } => CExpr::Cast {
+                ty,
+                expr: Box::new(self.rewrite_stack_expr(*expr)),
+            },
+            CExpr::Paren(inner) => CExpr::Paren(Box::new(self.rewrite_stack_expr(*inner))),
+            CExpr::Deref(inner) => CExpr::Deref(Box::new(self.rewrite_stack_expr(*inner))),
+            CExpr::AddrOf(inner) => CExpr::AddrOf(Box::new(self.rewrite_stack_expr(*inner))),
+            CExpr::Subscript { base, index } => CExpr::Subscript {
+                base: Box::new(self.rewrite_stack_expr(*base)),
+                index: Box::new(self.rewrite_stack_expr(*index)),
+            },
+            CExpr::Member { base, member } => CExpr::Member {
+                base: Box::new(self.rewrite_stack_expr(*base)),
+                member,
+            },
+            CExpr::PtrMember { base, member } => CExpr::PtrMember {
+                base: Box::new(self.rewrite_stack_expr(*base)),
+                member,
+            },
+            CExpr::Sizeof(inner) => CExpr::Sizeof(Box::new(self.rewrite_stack_expr(*inner))),
+            CExpr::Comma(items) => {
+                CExpr::Comma(items.into_iter().map(|item| self.rewrite_stack_expr(item)).collect())
+            }
+            other => other,
+        };
+
+        if matches!(
+            rewritten,
+            CExpr::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                ..
+            } | CExpr::Paren(_) | CExpr::Cast { .. }
+        ) && let Some(alias) = self.resolve_stack_alias_from_addr_expr(&rewritten, 0)
+        {
+            return CExpr::Var(alias);
+        }
+
+        match rewritten {
+            CExpr::Deref(inner) => {
+                if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&inner, 0) {
+                    return CExpr::Var(alias);
+                }
+                if let Some(var_name) = self.extract_known_stack_var_name(&inner) {
+                    return CExpr::Var(var_name);
+                }
+                CExpr::Deref(inner)
+            }
+            other => other,
+        }
+    }
+
+    fn extract_known_stack_var_name(&self, expr: &CExpr) -> Option<String> {
+        match expr {
+            CExpr::Var(name) => {
+                if self.stack_vars_map().values().any(|candidate| candidate == name) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.extract_known_stack_var_name(inner)
+            }
+            _ => None,
+        }
     }
 
     /// Check if a variable should be inlined.
@@ -1584,7 +1741,8 @@ impl FoldingContext {
     }
 
     fn assign_stmt(&self, lhs: CExpr, rhs: CExpr) -> Option<CStmt> {
-        let rhs = self.identity_simplify_expr(rhs);
+        let lhs = self.rewrite_stack_expr(lhs);
+        let rhs = self.rewrite_stack_expr(self.identity_simplify_expr(rhs));
         if lhs == rhs {
             return None;
         }
@@ -1994,7 +2152,7 @@ impl FoldingContext {
                         Some(last) if self.is_low_level_return_artifact(&target_expr) => last,
                         _ => target_expr,
                     };
-                    stmts.push(CStmt::Return(Some(expr)));
+                    stmts.push(CStmt::Return(Some(self.rewrite_stack_expr(expr))));
                     break;
                 }
                 if let Some(stmt) = self.op_to_stmt_with_args(op, block.addr, op_idx) {
@@ -2294,7 +2452,10 @@ impl FoldingContext {
                     .call_args_map()
                     .get(&(block_addr, op_idx))
                     .cloned()
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|arg| self.rewrite_stack_expr(arg))
+                    .collect();
                 let call = CExpr::call(func_expr, args);
                 Some(CStmt::Expr(call))
             }
@@ -2305,7 +2466,10 @@ impl FoldingContext {
                     .call_args_map()
                     .get(&(block_addr, op_idx))
                     .cloned()
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|arg| self.rewrite_stack_expr(arg))
+                    .collect();
                 let call = CExpr::call(func_expr, args);
                 Some(CStmt::Expr(call))
             }
@@ -2600,7 +2764,9 @@ impl FoldingContext {
                 ));
                 self.assign_stmt(lhs, rhs)
             }
-            SSAOp::Return { target } => Some(CStmt::Return(Some(self.get_expr(target)))),
+            SSAOp::Return { target } => {
+                Some(CStmt::Return(Some(self.rewrite_stack_expr(self.get_expr(target)))))
+            }
             SSAOp::Branch { .. } | SSAOp::CBranch { .. } => {
                 // Handled by control flow structuring
                 None
@@ -4139,6 +4305,14 @@ pub(crate) fn parse_const_value(name: &str) -> Option<u64> {
     }
 }
 
+fn is_generic_arg_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower
+        .strip_prefix("arg")
+        .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
 /// Extract address from a call target name like "ram:401110_0" or "const:401110".
 fn extract_call_address(name: &str) -> Option<u64> {
     // Try ram:address_version format (e.g., "ram:401110_0")
@@ -4209,6 +4383,7 @@ pub fn fold_blocks(blocks: &[SSABlock]) -> Vec<(u64, Vec<CStmt>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExternalStackVar;
     use r2il::{R2ILBlock, R2ILOp, Varnode};
 
     fn make_var(name: &str, version: u32, size: u32) -> SSAVar {
@@ -4749,6 +4924,106 @@ mod tests {
         let rhs = CExpr::binary(BinaryOp::Sub, CExpr::Var("x".to_string()), CExpr::IntLit(0));
         let stmt = ctx.assign_stmt(lhs, rhs);
         assert!(stmt.is_none(), "x = x - 0 should be suppressed as a no-op");
+    }
+
+    #[test]
+    fn test_rewrite_stack_deref_to_external_name() {
+        let mut ctx = FoldingContext::new(64);
+        let mut external = HashMap::new();
+        external.insert(
+            -64,
+            ExternalStackVar {
+                name: "buf".to_string(),
+                ty: Some(CType::Array(Box::new(CType::Int(8)), Some(64))),
+                base: Some("RBP".to_string()),
+            },
+        );
+        ctx.set_external_stack_vars(external);
+        ctx.analyze_blocks(&[]);
+
+        let expr = CExpr::Deref(Box::new(CExpr::binary(
+            BinaryOp::Add,
+            CExpr::Var("rbp_1".to_string()),
+            CExpr::IntLit(-0x40),
+        )));
+
+        assert_eq!(ctx.rewrite_stack_expr(expr), CExpr::Var("buf".to_string()));
+    }
+
+    #[test]
+    fn test_rewrite_stack_address_expr_for_call_arg() {
+        let mut ctx = FoldingContext::new(64);
+        let mut external = HashMap::new();
+        external.insert(
+            -64,
+            ExternalStackVar {
+                name: "buf".to_string(),
+                ty: None,
+                base: Some("RBP".to_string()),
+            },
+        );
+        ctx.set_external_stack_vars(external);
+        ctx.analyze_blocks(&[]);
+
+        let expr = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::Var("rbp_1".to_string()),
+            CExpr::IntLit(-0x40),
+        );
+        assert_eq!(ctx.rewrite_stack_expr(expr), CExpr::Var("buf".to_string()));
+    }
+
+    #[test]
+    fn test_rewrite_stack_cast_paren_expr() {
+        let mut ctx = FoldingContext::new(64);
+        let mut external = HashMap::new();
+        external.insert(
+            -72,
+            ExternalStackVar {
+                name: "user_input".to_string(),
+                ty: Some(CType::ptr(CType::Int(8))),
+                base: Some("RBP".to_string()),
+            },
+        );
+        ctx.set_external_stack_vars(external);
+        ctx.analyze_blocks(&[]);
+
+        let expr = CExpr::Deref(Box::new(CExpr::Cast {
+            ty: CType::ptr(CType::Int(8)),
+            expr: Box::new(CExpr::Paren(Box::new(CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("rbp_1".to_string()),
+                CExpr::IntLit(-0x48),
+            )))),
+        }));
+
+        assert_eq!(
+            ctx.rewrite_stack_expr(expr),
+            CExpr::Var("user_input".to_string())
+        );
+    }
+
+    #[test]
+    fn test_rewrite_stack_unknown_offset_preserved() {
+        let mut ctx = FoldingContext::new(64);
+        let mut external = HashMap::new();
+        external.insert(
+            -64,
+            ExternalStackVar {
+                name: "buf".to_string(),
+                ty: None,
+                base: Some("RBP".to_string()),
+            },
+        );
+        ctx.set_external_stack_vars(external);
+        ctx.analyze_blocks(&[]);
+
+        let expr = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::Var("rbp_1".to_string()),
+            CExpr::IntLit(-0x20),
+        );
+        assert_eq!(ctx.rewrite_stack_expr(expr.clone()), expr);
     }
 
     #[test]

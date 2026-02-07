@@ -3435,7 +3435,290 @@ pub extern "C" fn r2dec_function(
     CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
-/// Decompile a function with external context (function names, strings, symbols).
+#[derive(Debug, Deserialize)]
+struct AfcfjArg {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "type")]
+    ty: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AfcfjFunction {
+    #[serde(default, rename = "return")]
+    return_type: Option<String>,
+    #[serde(default)]
+    ret: Option<String>,
+    #[serde(default)]
+    args: Vec<AfcfjArg>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum AfvjRef {
+    Stack { base: String, offset: i64 },
+    Other(serde_json::Value),
+}
+
+#[derive(Debug, Deserialize)]
+struct AfvjVar {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "type")]
+    ty: Option<String>,
+    #[serde(default, rename = "ref")]
+    reference: Option<AfvjRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AfvjPayload {
+    #[serde(default)]
+    bp: Vec<AfvjVar>,
+    #[serde(default)]
+    sp: Vec<AfvjVar>,
+}
+
+fn parse_addr_name_map(json_str: &str) -> std::collections::HashMap<u64, String> {
+    serde_json::from_str::<std::collections::HashMap<String, String>>(json_str)
+        .ok()
+        .map(|map| {
+            map.into_iter()
+                .filter_map(|(k, v)| {
+                    let addr = if k.starts_with("0x") || k.starts_with("0X") {
+                        u64::from_str_radix(&k[2..], 16).ok()
+                    } else {
+                        k.parse().ok()
+                    };
+                    addr.map(|a| (a, v))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn sanitize_c_identifier(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    for (idx, ch) in trimmed.chars().enumerate() {
+        let normalized = if ch.is_ascii_alphanumeric() || ch == '_' {
+            ch
+        } else {
+            '_'
+        };
+        if idx == 0 && normalized.is_ascii_digit() {
+            out.push('_');
+        }
+        out.push(normalized);
+    }
+
+    if out.chars().all(|c| c == '_') {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn uniquify_name(base: String, used: &mut std::collections::HashSet<String>) -> String {
+    if used.insert(base.clone()) {
+        return base;
+    }
+    let mut idx = 2usize;
+    loop {
+        let candidate = format!("{}_{}", base, idx);
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        idx += 1;
+    }
+}
+
+fn is_generic_arg_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower
+        .strip_prefix("arg")
+        .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false)
+}
+
+fn is_low_quality_stack_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("var_")
+        || lower.starts_with("local_")
+        || lower.starts_with("stack_")
+        || lower == "saved_fp"
+        || is_generic_arg_name(&lower)
+}
+
+fn parse_external_type(raw_ty: &str, ptr_bits: u32) -> Option<r2dec::CType> {
+    let mut ty = raw_ty.trim().to_string();
+    if ty.is_empty() {
+        return None;
+    }
+
+    for qualifier in ["const", "volatile", "restrict", "signed"] {
+        ty = ty
+            .split_whitespace()
+            .filter(|part| !part.eq_ignore_ascii_case(qualifier))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    let mut array_size = None;
+    if let Some(open) = ty.rfind('[')
+        && ty.ends_with(']')
+    {
+        let len_str = ty[open + 1..ty.len() - 1].trim();
+        if !len_str.is_empty() {
+            array_size = len_str.parse::<usize>().ok();
+        }
+        ty = ty[..open].trim().to_string();
+    }
+
+    let mut ptr_count = 0usize;
+    loop {
+        let trimmed = ty.trim_end();
+        if let Some(stripped) = trimmed.strip_suffix('*') {
+            ptr_count += 1;
+            ty = stripped.trim_end().to_string();
+        } else {
+            break;
+        }
+    }
+
+    let base_key = ty
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("")
+        .to_ascii_lowercase();
+    let mut base = if let Some(rest) = base_key.strip_prefix("int")
+        && let Some(bits) = rest.strip_suffix("_t")
+    {
+        bits.parse::<u32>().ok().map(r2dec::CType::Int)
+    } else if let Some(rest) = base_key.strip_prefix("uint")
+        && let Some(bits) = rest.strip_suffix("_t")
+    {
+        bits.parse::<u32>().ok().map(r2dec::CType::UInt)
+    } else {
+        match base_key.as_str() {
+            "void" => Some(r2dec::CType::Void),
+            "bool" => Some(r2dec::CType::Bool),
+            "char" | "signedchar" => Some(r2dec::CType::Int(8)),
+            "unsignedchar" => Some(r2dec::CType::UInt(8)),
+            "short" | "shortint" => Some(r2dec::CType::Int(16)),
+            "unsignedshort" | "unsignedshortint" => Some(r2dec::CType::UInt(16)),
+            "int" => Some(r2dec::CType::Int(32)),
+            "unsigned" | "unsignedint" => Some(r2dec::CType::UInt(32)),
+            "long" | "longint" | "longlong" | "longlongint" => Some(r2dec::CType::Int(ptr_bits)),
+            "unsignedlong" | "unsignedlongint" | "unsignedlonglong" | "unsignedlonglongint" => {
+                Some(r2dec::CType::UInt(ptr_bits))
+            }
+            "size_t" => Some(r2dec::CType::UInt(ptr_bits)),
+            "float" => Some(r2dec::CType::Float(32)),
+            "double" => Some(r2dec::CType::Float(64)),
+            _ => None,
+        }
+    }?;
+
+    if let Some(size) = array_size {
+        base = r2dec::CType::Array(Box::new(base), Some(size));
+    }
+    for _ in 0..ptr_count {
+        base = r2dec::CType::ptr(base);
+    }
+    Some(base)
+}
+
+fn parse_external_signature(
+    json_str: &str,
+    ptr_bits: u32,
+) -> Option<r2dec::ExternalFunctionSignature> {
+    let entries = serde_json::from_str::<Vec<AfcfjFunction>>(json_str).ok()?;
+    let first = entries.into_iter().next()?;
+
+    let mut used_names = std::collections::HashSet::new();
+    let params = first
+        .args
+        .into_iter()
+        .enumerate()
+        .map(|(idx, arg)| {
+            let fallback = format!("arg{}", idx + 1);
+            let raw_name = arg.name.unwrap_or(fallback);
+            let mut name = sanitize_c_identifier(&raw_name).unwrap_or_else(|| format!("arg{}", idx + 1));
+            if !is_generic_arg_name(&name) {
+                name = uniquify_name(name, &mut used_names);
+            }
+            r2dec::ExternalFunctionParam {
+                name,
+                ty: arg
+                    .ty
+                    .as_deref()
+                    .and_then(|raw| parse_external_type(raw, ptr_bits)),
+            }
+        })
+        .collect();
+
+    let ret_type_raw = first.return_type.or(first.ret);
+    let ret_type = ret_type_raw
+        .as_deref()
+        .and_then(|raw| parse_external_type(raw, ptr_bits));
+
+    Some(r2dec::ExternalFunctionSignature { ret_type, params })
+}
+
+fn parse_external_stack_vars(
+    json_str: &str,
+    ptr_bits: u32,
+) -> std::collections::HashMap<i64, r2dec::ExternalStackVar> {
+    let payload = match serde_json::from_str::<AfvjPayload>(json_str) {
+        Ok(v) => v,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+
+    let mut vars = std::collections::HashMap::new();
+    let mut used_names = std::collections::HashSet::new();
+
+    for entry in payload.bp.into_iter().chain(payload.sp.into_iter()) {
+        let Some(AfvjRef::Stack { base, offset }) = entry.reference else {
+            continue;
+        };
+
+        let raw_name = entry.name.unwrap_or_else(|| format!("stack_{:x}", offset.unsigned_abs()));
+        let Some(clean_name) = sanitize_c_identifier(&raw_name) else {
+            continue;
+        };
+        let var_name = uniquify_name(clean_name, &mut used_names);
+        let candidate = r2dec::ExternalStackVar {
+            name: var_name,
+            ty: entry
+                .ty
+                .as_deref()
+                .and_then(|raw| parse_external_type(raw, ptr_bits)),
+            base: Some(base),
+        };
+
+        match vars.get(&offset) {
+            None => {
+                vars.insert(offset, candidate);
+            }
+            Some(existing) => {
+                if is_low_quality_stack_name(&existing.name)
+                    && !is_low_quality_stack_name(&candidate.name)
+                {
+                    vars.insert(offset, candidate);
+                }
+            }
+        }
+    }
+
+    vars
+}
+
+/// Decompile a function with external context (function names, strings, symbols, signature, stack vars).
 /// Returns C code as a string. Caller must free with r2il_string_free().
 #[unsafe(no_mangle)]
 pub extern "C" fn r2dec_function_with_context(
@@ -3446,6 +3729,8 @@ pub extern "C" fn r2dec_function_with_context(
     func_names_json: *const c_char,
     strings_json: *const c_char,
     symbols_json: *const c_char,
+    signature_json: *const c_char,
+    stack_vars_json: *const c_char,
 ) -> *mut c_char {
     if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
         return ptr::null_mut();
@@ -3488,9 +3773,10 @@ pub extern "C" fn r2dec_function_with_context(
         None => return ptr::null_mut(),
     };
 
+    let ptr_bits = ctx_ref.arch.as_ref().map(|arch| arch.addr_size * 8).unwrap_or(64);
+
     // Create decompiler with architecture-aware config
     let config = if let Some(arch) = &ctx_ref.arch {
-        let ptr_bits = arch.addr_size * 8;
         match (arch.name.as_str(), ptr_bits) {
             ("x86", 32) | ("x86-32", _) => r2dec::DecompilerConfig::x86(),
             ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => r2dec::DecompilerConfig::x86_64(),
@@ -3511,57 +3797,33 @@ pub extern "C" fn r2dec_function_with_context(
     // Parse function names JSON: {"0x401000": "main", "0x401100": "printf", ...}
     if !func_names_json.is_null() {
         let json_str = unsafe { CStr::from_ptr(func_names_json).to_str().unwrap_or("{}") };
-        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(json_str) {
-            let func_map: std::collections::HashMap<u64, String> = map
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    let addr = if k.starts_with("0x") || k.starts_with("0X") {
-                        u64::from_str_radix(&k[2..], 16).ok()
-                    } else {
-                        k.parse().ok()
-                    };
-                    addr.map(|a| (a, v))
-                })
-                .collect();
-            decompiler.set_function_names(func_map);
-        }
+        decompiler.set_function_names(parse_addr_name_map(json_str));
     }
 
     // Parse strings JSON
     if !strings_json.is_null() {
         let json_str = unsafe { CStr::from_ptr(strings_json).to_str().unwrap_or("{}") };
-        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(json_str) {
-            let str_map: std::collections::HashMap<u64, String> = map
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    let addr = if k.starts_with("0x") || k.starts_with("0X") {
-                        u64::from_str_radix(&k[2..], 16).ok()
-                    } else {
-                        k.parse().ok()
-                    };
-                    addr.map(|a| (a, v))
-                })
-                .collect();
-            decompiler.set_strings(str_map);
-        }
+        decompiler.set_strings(parse_addr_name_map(json_str));
     }
 
     // Parse symbols JSON
     if !symbols_json.is_null() {
         let json_str = unsafe { CStr::from_ptr(symbols_json).to_str().unwrap_or("{}") };
-        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, String>>(json_str) {
-            let sym_map: std::collections::HashMap<u64, String> = map
-                .into_iter()
-                .filter_map(|(k, v)| {
-                    let addr = if k.starts_with("0x") || k.starts_with("0X") {
-                        u64::from_str_radix(&k[2..], 16).ok()
-                    } else {
-                        k.parse().ok()
-                    };
-                    addr.map(|a| (a, v))
-                })
-                .collect();
-            decompiler.set_symbols(sym_map);
+        decompiler.set_symbols(parse_addr_name_map(json_str));
+    }
+
+    // Parse external signature JSON (`afcfj`).
+    if !signature_json.is_null() {
+        let json_str = unsafe { CStr::from_ptr(signature_json).to_str().unwrap_or("[]") };
+        decompiler.set_function_signature(parse_external_signature(json_str, ptr_bits));
+    }
+
+    // Parse external stack variables JSON (`afvj`).
+    if !stack_vars_json.is_null() {
+        let json_str = unsafe { CStr::from_ptr(stack_vars_json).to_str().unwrap_or("{}") };
+        let stack_vars = parse_external_stack_vars(json_str, ptr_bits);
+        if !stack_vars.is_empty() {
+            decompiler.set_stack_vars(stack_vars);
         }
     }
 
@@ -4245,6 +4507,52 @@ mod tests {
         assert!(r2il_arch_name(ptr::null()).is_null());
         r2il_free(ptr::null_mut());
         r2il_block_free(ptr::null_mut());
+    }
+
+    #[test]
+    fn test_parse_external_signature_with_args() {
+        let json = r#"[{"name":"dbg.vuln_memcpy","args":[{"name":"user_input","type":"char *"},{"name":"user_len","type":"int32_t"}],"count":2}]"#;
+        let sig = parse_external_signature(json, 64).expect("signature should parse");
+        assert!(sig.ret_type.is_none());
+        assert_eq!(sig.params.len(), 2);
+        assert_eq!(sig.params[0].name, "user_input");
+        assert_eq!(sig.params[1].name, "user_len");
+        assert_eq!(sig.params[0].ty, Some(r2dec::CType::ptr(r2dec::CType::Int(8))));
+        assert_eq!(sig.params[1].ty, Some(r2dec::CType::Int(32)));
+    }
+
+    #[test]
+    fn test_parse_external_signature_missing_return() {
+        let json = r#"[{"name":"dbg.main","args":[{"name":"arg0","type":"int64_t"}]}]"#;
+        let sig = parse_external_signature(json, 64).expect("signature should parse");
+        assert!(sig.ret_type.is_none());
+        assert_eq!(sig.params[0].name, "arg0");
+    }
+
+    #[test]
+    fn test_parse_external_stack_vars_bp_sp() {
+        let json = r#"{"sp":[{"name":"var_8h","kind":"var","type":"int64_t","ref":{"base":"RSP","offset":80}}],"bp":[{"name":"buf","kind":"var","type":"char[64]","ref":{"base":"RBP","offset":-64}},{"name":"user_input","kind":"var","type":"char *","ref":{"base":"RBP","offset":-72}}]}"#;
+        let vars = parse_external_stack_vars(json, 64);
+        assert_eq!(vars.get(&-64).map(|v| v.name.as_str()), Some("buf"));
+        assert_eq!(vars.get(&-72).map(|v| v.name.as_str()), Some("user_input"));
+        assert_eq!(vars.get(&80).map(|v| v.base.as_deref()), Some(Some("RSP")));
+    }
+
+    #[test]
+    fn test_name_sanitization_and_collisions() {
+        let json = r#"{"bp":[{"name":"bad-name","type":"int","ref":{"base":"RBP","offset":-8}},{"name":"bad name","type":"int","ref":{"base":"RBP","offset":-16}}]}"#;
+        let vars = parse_external_stack_vars(json, 64);
+        let first = vars.get(&-8).expect("first var");
+        let second = vars.get(&-16).expect("second var");
+        assert_eq!(first.name, "bad_name");
+        assert_ne!(first.name, second.name);
+    }
+
+    #[test]
+    fn test_generic_arg_detection() {
+        assert!(is_generic_arg_name("arg0"));
+        assert!(is_generic_arg_name("Arg12"));
+        assert!(!is_generic_arg_name("user_input"));
     }
 }
 
