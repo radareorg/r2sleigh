@@ -293,4 +293,3 @@ pub(crate) fn arg_alias_for_store_source(
     let traced = trace_ssa_var_to_source(src, copy_sources, var_aliases);
     arg_alias_for_register_name(&traced)
 }
-

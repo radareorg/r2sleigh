@@ -263,6 +263,21 @@ int test_multi_use_temp(int x) {
     return y + y + y;
 }
 
+// Test 24: Arithmetic identity elimination patterns
+int test_identity_ops(int x) {
+    volatile int sub0 = x - 0;
+    volatile int add0 = x + 0;
+    volatile int or0 = x | 0;
+    volatile int xor0 = x ^ 0;
+    volatile int mul1 = x * 1;
+    volatile int div1 = x / 1;
+    volatile unsigned int and_all_ones = ((unsigned int)x) & 0xffffffffU;
+    volatile int keep_sub = x - 1;
+    volatile int keep_add = x + 2;
+    volatile int keep_or = x | 1;
+    return sub0 + add0 + or0 + xor0 + mul1 + div1 + (int)and_all_ones + keep_sub + keep_add + keep_or;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -433,6 +448,12 @@ int main(int argc, char *argv[]) {
             if (argc > 2) {
                 int x = atoi(argv[2]);
                 printf("test_multi_use_temp(%d) = %d\n", x, test_multi_use_temp(x));
+            }
+            break;
+        case 24:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf("test_identity_ops(%d) = %d\n", x, test_identity_ops(x));
             }
             break;
         default:

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAOp;
 
-use super::{utils, FlagInfo, PassEnv, UseInfo};
+use super::{FlagInfo, PassEnv, UseInfo, utils};
 use crate::fold::SSABlock;
 
 #[derive(Debug, Default)]
@@ -39,7 +39,8 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
     for op in &block.ops {
         if let SSAOp::IntSub { dst, a, b } = op {
             let dst_key = dst.display_name();
-            let a_name = utils::trace_ssa_var_to_source(a, &use_info.copy_sources, &use_info.var_aliases);
+            let a_name =
+                utils::trace_ssa_var_to_source(a, &use_info.copy_sources, &use_info.var_aliases);
             let b_name = if b.is_const() {
                 format_compare_operand(&b.name)
             } else {
@@ -50,7 +51,10 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
 
         if let SSAOp::IntEqual { dst, a, b } = op {
             let dst_name = dst.name.to_lowercase();
-            if dst_name.contains("zf") && b.is_const() && utils::parse_const_value(&b.name) == Some(0) {
+            if dst_name.contains("zf")
+                && b.is_const()
+                && utils::parse_const_value(&b.name) == Some(0)
+            {
                 let a_key = a.display_name();
                 if let Some((orig_a, orig_b)) = scratch.info.sub_results.get(&a_key).cloned() {
                     scratch
@@ -63,7 +67,10 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
 
         if let SSAOp::IntSLess { dst, a, b } = op {
             let dst_name = dst.name.to_lowercase();
-            if dst_name.contains("sf") && b.is_const() && utils::parse_const_value(&b.name) == Some(0) {
+            if dst_name.contains("sf")
+                && b.is_const()
+                && utils::parse_const_value(&b.name) == Some(0)
+            {
                 let a_key = a.display_name();
                 if let Some((orig_a, orig_b)) = scratch.info.sub_results.get(&a_key).cloned() {
                     scratch
@@ -77,7 +84,11 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
         if let SSAOp::IntSBorrow { dst, a, b } = op {
             let dst_name = dst.name.to_lowercase();
             if dst_name.contains("of") {
-                let a_name = utils::trace_ssa_var_to_source(a, &use_info.copy_sources, &use_info.var_aliases);
+                let a_name = utils::trace_ssa_var_to_source(
+                    a,
+                    &use_info.copy_sources,
+                    &use_info.var_aliases,
+                );
                 let b_name = if b.is_const() {
                     format_compare_operand(&b.name)
                 } else {
@@ -93,7 +104,11 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
         if let SSAOp::IntLess { dst, a, b } = op {
             let dst_name = dst.name.to_lowercase();
             if dst_name.contains("cf") {
-                let a_name = utils::trace_ssa_var_to_source(a, &use_info.copy_sources, &use_info.var_aliases);
+                let a_name = utils::trace_ssa_var_to_source(
+                    a,
+                    &use_info.copy_sources,
+                    &use_info.var_aliases,
+                );
                 let b_name = if b.is_const() {
                     format_compare_operand(&b.name)
                 } else {
@@ -136,7 +151,8 @@ fn consumer_is_flag_context(op: &SSAOp, flag_context_dsts: &HashSet<String>) -> 
 
     if let Some(dst) = op.dst() {
         let dst_key = dst.display_name();
-        return utils::is_cpu_flag(&dst.name.to_lowercase()) || flag_context_dsts.contains(&dst_key);
+        return utils::is_cpu_flag(&dst.name.to_lowercase())
+            || flag_context_dsts.contains(&dst_key);
     }
 
     false
@@ -201,7 +217,10 @@ fn recompute_flag_only_values(scratch: &mut FlagScratch, blocks: &[SSABlock]) {
             }
 
             if op_consumers.iter().all(|(consumer_block, consumer_op)| {
-                consumer_is_flag_context(&blocks[*consumer_block].ops[*consumer_op], &flag_context_dsts)
+                consumer_is_flag_context(
+                    &blocks[*consumer_block].ops[*consumer_op],
+                    &flag_context_dsts,
+                )
             }) {
                 flag_context_dsts.insert(dst_key.clone());
                 changed = true;
@@ -219,10 +238,12 @@ fn recompute_flag_only_values(scratch: &mut FlagScratch, blocks: &[SSABlock]) {
         }
 
         if src_consumers.iter().all(|(consumer_block, consumer_op)| {
-            consumer_is_flag_context(&blocks[*consumer_block].ops[*consumer_op], &flag_context_dsts)
+            consumer_is_flag_context(
+                &blocks[*consumer_block].ops[*consumer_op],
+                &flag_context_dsts,
+            )
         }) {
             scratch.info.flag_only_values.insert(src_key);
         }
     }
 }
-

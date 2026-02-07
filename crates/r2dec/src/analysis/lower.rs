@@ -158,7 +158,9 @@ impl<'a> LowerCtx<'a> {
                 let ty = CType::Float(dst.size);
                 CExpr::cast(ty, self.get_expr(src))
             }
-            SSAOp::Float2Int { dst, src } => CExpr::cast(type_from_size(dst.size), self.get_expr(src)),
+            SSAOp::Float2Int { dst, src } => {
+                CExpr::cast(type_from_size(dst.size), self.get_expr(src))
+            }
             SSAOp::Cast { dst, src } => CExpr::cast(type_from_size(dst.size), self.get_expr(src)),
             SSAOp::Call { target } => CExpr::call(self.get_expr(target), vec![]),
             SSAOp::CallInd { target } => {

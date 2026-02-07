@@ -28,6 +28,10 @@ pub struct ControlFlowStructurer<'a> {
     region_analyzer: Option<RegionAnalyzer<'a>>,
     /// Whether finalize_analysis has been called.
     analysis_finalized: bool,
+    /// Safety budget for recursive region structuring.
+    safety_budget_remaining: usize,
+    safety_budget_max: usize,
+    safety_reason: Option<String>,
 }
 
 impl<'a> ControlFlowStructurer<'a> {
@@ -37,6 +41,7 @@ impl<'a> ControlFlowStructurer<'a> {
     pub fn new(func: &'a SSAFunction, ptr_size: u32) -> Self {
         let fold_ctx = FoldingContext::new(ptr_size);
         let region_analyzer = RegionAnalyzer::new(func);
+        let safety_budget_max = Self::compute_safety_budget(func.num_blocks());
 
         Self {
             func,
@@ -46,6 +51,9 @@ impl<'a> ControlFlowStructurer<'a> {
             label_counter: 0,
             region_analyzer: Some(region_analyzer),
             analysis_finalized: false,
+            safety_budget_remaining: safety_budget_max,
+            safety_budget_max,
+            safety_reason: None,
         }
     }
 
@@ -66,6 +74,7 @@ impl<'a> ControlFlowStructurer<'a> {
 
     /// Create a structurer without expression folding (for comparison).
     pub fn new_unfolded(func: &'a SSAFunction, ptr_size: u32) -> Self {
+        let safety_budget_max = Self::compute_safety_budget(func.num_blocks());
         Self {
             func,
             expr_builder: ExpressionBuilder::new(ptr_size),
@@ -74,7 +83,39 @@ impl<'a> ControlFlowStructurer<'a> {
             label_counter: 0,
             region_analyzer: None,
             analysis_finalized: true, // No folding context, nothing to finalize
+            safety_budget_remaining: safety_budget_max,
+            safety_budget_max,
+            safety_reason: None,
         }
+    }
+
+    fn compute_safety_budget(num_blocks: usize) -> usize {
+        num_blocks.saturating_mul(128).max(256)
+    }
+
+    fn reset_safety_budget(&mut self) {
+        self.safety_budget_remaining = self.safety_budget_max;
+        self.safety_reason = None;
+    }
+
+    fn consume_safety_budget(&mut self, units: usize) -> bool {
+        if self.safety_budget_remaining >= units {
+            self.safety_budget_remaining -= units;
+            true
+        } else {
+            if self.safety_reason.is_none() {
+                self.safety_reason = Some(format!(
+                    "structuring budget exceeded (limit: {})",
+                    self.safety_budget_max
+                ));
+            }
+            false
+        }
+    }
+
+    /// Returns the reason why structuring short-circuited, if any.
+    pub fn safety_reason(&self) -> Option<&str> {
+        self.safety_reason.as_deref()
     }
 
     /// Set function names for call target resolution.
@@ -121,15 +162,22 @@ impl<'a> ControlFlowStructurer<'a> {
     pub fn structure(&mut self) -> CStmt {
         // Ensure analysis is finalized (idempotent)
         self.finalize_analysis();
+        self.reset_safety_budget();
         let mut analyzer = RegionAnalyzer::new(self.func);
         let region = analyzer.analyze();
         let stmt = self.structure_region(&region);
+        if self.safety_reason.is_some() {
+            return CStmt::Empty;
+        }
         // Post-process: flatten, simplify loops, remove redundant control flow
         Self::cleanup(stmt)
     }
 
     /// Structure a region into C statements.
     fn structure_region(&mut self, region: &Region) -> CStmt {
+        if !self.consume_safety_budget(1) {
+            return CStmt::Empty;
+        }
         match region {
             Region::Block(addr) => self.structure_block(*addr),
             Region::Sequence(regions) => {

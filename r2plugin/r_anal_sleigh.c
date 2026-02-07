@@ -1470,11 +1470,18 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		char *result = r2dec_function_with_context (ctx, (const R2ILBlock **)blocks.blocks, blocks.count,
 		                                             fcn->name, func_names_json, strings_json, symbols_json);
 
-		if (cons && result) {
-			r_cons_printf (cons, "%s\n", result);
+		if (cons) {
+			if (result && result[0]) {
+				r_cons_printf (cons, "%s\n", result);
+			} else {
+				const char *fname = (fcn && fcn->name) ? fcn->name : "unknown";
+				r_cons_printf (cons, "/* r2dec fallback: empty decompilation output for %s */\n", fname);
+			}
 		}
 
-		r2il_string_free (result);
+		if (result) {
+			r2il_string_free (result);
+		}
 		free (func_names_json);
 		free (strings_json);
 		free (symbols_json);

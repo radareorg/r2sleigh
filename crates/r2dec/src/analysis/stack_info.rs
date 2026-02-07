@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAOp;
 
-use super::{lower::LowerCtx, utils, PassEnv, StackInfo, UseInfo};
+use super::{PassEnv, StackInfo, UseInfo, lower::LowerCtx, utils};
 use crate::ast::CExpr;
 use crate::fold::SSABlock;
 
@@ -29,19 +29,27 @@ fn analyze_stack_vars(
         for op in &block.ops {
             match op {
                 SSAOp::Load { addr, .. } => {
-                    if let Some(offset) =
-                        utils::extract_stack_offset_from_var(addr, &use_info.definitions, &env.fp_name, &env.sp_name)
-                    {
+                    if let Some(offset) = utils::extract_stack_offset_from_var(
+                        addr,
+                        &use_info.definitions,
+                        &env.fp_name,
+                        &env.sp_name,
+                    ) {
                         get_or_create_stack_var(scratch, offset);
                     }
                 }
                 SSAOp::Store { addr, val, .. } => {
-                    if let Some(offset) =
-                        utils::extract_stack_offset_from_var(addr, &use_info.definitions, &env.fp_name, &env.sp_name)
-                    {
-                        if let Some(arg_alias) =
-                            utils::arg_alias_for_store_source(val, &use_info.copy_sources, &use_info.var_aliases)
-                        {
+                    if let Some(offset) = utils::extract_stack_offset_from_var(
+                        addr,
+                        &use_info.definitions,
+                        &env.fp_name,
+                        &env.sp_name,
+                    ) {
+                        if let Some(arg_alias) = utils::arg_alias_for_store_source(
+                            val,
+                            &use_info.copy_sources,
+                            &use_info.var_aliases,
+                        ) {
                             set_stack_arg_alias(scratch, offset, arg_alias);
                         }
                         get_or_create_stack_var(scratch, offset);
@@ -82,9 +90,13 @@ fn analyze_stack_vars(
                     }
                 }
                 SSAOp::Load { dst, addr, .. } => {
-                    if let Some(stack_var_name) =
-                        stack_var_for_addr_var(addr, &merged_defs, &scratch.info.stack_vars, &use_info.var_aliases, env)
-                        && stack_var_name.starts_with("arg")
+                    if let Some(stack_var_name) = stack_var_for_addr_var(
+                        addr,
+                        &merged_defs,
+                        &scratch.info.stack_vars,
+                        &use_info.var_aliases,
+                        env,
+                    ) && stack_var_name.starts_with("arg")
                     {
                         let expr = CExpr::Var(stack_var_name);
                         scratch
@@ -110,7 +122,9 @@ fn set_stack_arg_alias(scratch: &mut StackScratch, offset: i64, alias: String) {
     let should_replace = match scratch.info.stack_vars.get(&offset) {
         None => true,
         Some(existing) => {
-            existing.starts_with("local_") || existing.starts_with("stack_") || existing == "saved_fp"
+            existing.starts_with("local_")
+                || existing.starts_with("stack_")
+                || existing == "saved_fp"
         }
     };
 
@@ -197,7 +211,8 @@ fn resolve_stack_alias_from_addr_expr(
         return None;
     }
 
-    if let Some(alias) = utils::simplify_stack_access(expr, stack_vars, &env.fp_name, &env.sp_name) {
+    if let Some(alias) = utils::simplify_stack_access(expr, stack_vars, &env.fp_name, &env.sp_name)
+    {
         return Some(alias);
     }
 
@@ -210,18 +225,40 @@ fn resolve_stack_alias_from_addr_expr(
                 return None;
             }
             definitions.get(name).and_then(|inner| {
-                resolve_stack_alias_from_addr_expr(inner, definitions, stack_vars, env, depth + 1, visited)
+                resolve_stack_alias_from_addr_expr(
+                    inner,
+                    definitions,
+                    stack_vars,
+                    env,
+                    depth + 1,
+                    visited,
+                )
             })
         }
-        CExpr::Paren(inner) => {
-            resolve_stack_alias_from_addr_expr(inner, definitions, stack_vars, env, depth + 1, visited)
-        }
-        CExpr::Cast { expr: inner, .. } => {
-            resolve_stack_alias_from_addr_expr(inner, definitions, stack_vars, env, depth + 1, visited)
-        }
-        CExpr::Deref(inner) => {
-            resolve_stack_alias_from_addr_expr(inner, definitions, stack_vars, env, depth + 1, visited)
-        }
+        CExpr::Paren(inner) => resolve_stack_alias_from_addr_expr(
+            inner,
+            definitions,
+            stack_vars,
+            env,
+            depth + 1,
+            visited,
+        ),
+        CExpr::Cast { expr: inner, .. } => resolve_stack_alias_from_addr_expr(
+            inner,
+            definitions,
+            stack_vars,
+            env,
+            depth + 1,
+            visited,
+        ),
+        CExpr::Deref(inner) => resolve_stack_alias_from_addr_expr(
+            inner,
+            definitions,
+            stack_vars,
+            env,
+            depth + 1,
+            visited,
+        ),
         _ => None,
     }
 }

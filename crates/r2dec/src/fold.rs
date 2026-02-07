@@ -635,7 +635,8 @@ impl FoldingContext {
         {
             return Some(alias);
         }
-        if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&CExpr::Var(self.var_name(addr)), 0)
+        if let Some(alias) =
+            self.resolve_stack_alias_from_addr_expr(&CExpr::Var(self.var_name(addr)), 0)
         {
             return Some(alias);
         }
@@ -654,7 +655,9 @@ impl FoldingContext {
             return false;
         }
 
-        if self.condition_vars_set().contains(var_name) && !self.is_condition_inline_candidate(var_name) {
+        if self.condition_vars_set().contains(var_name)
+            && !self.is_condition_inline_candidate(var_name)
+        {
             return false;
         }
 
@@ -714,7 +717,8 @@ impl FoldingContext {
     }
 
     fn is_simple_inline_candidate(&self, var_name: &str) -> bool {
-        self.definitions_map().get(var_name)
+        self.definitions_map()
+            .get(var_name)
             .map(|expr| self.is_simple_expr(expr, 0))
             .unwrap_or(false)
     }
@@ -734,7 +738,8 @@ impl FoldingContext {
                 if is_cpu_flag(&name.to_lowercase()) {
                     return true;
                 }
-                self.definitions_map().get(name)
+                self.definitions_map()
+                    .get(name)
                     .map(|inner| self.is_simple_expr(inner, depth + 1))
                     .unwrap_or(true)
             }
@@ -1022,7 +1027,8 @@ impl FoldingContext {
             || var_name
                 .rsplit_once('_')
                 .map(|(base, ver)| {
-                    self.pinned_set().contains(&format!("{}_{}", base.to_lowercase(), ver))
+                    self.pinned_set()
+                        .contains(&format!("{}_{}", base.to_lowercase(), ver))
                         || self
                             .pinned_set()
                             .contains(&format!("{}_{}", base.to_uppercase(), ver))
@@ -1039,10 +1045,12 @@ impl FoldingContext {
             .or_else(|| self.use_counts_map().get(&lower).copied())
             .or_else(|| {
                 var_name.rsplit_once('_').and_then(|(base, ver)| {
-                    self.use_counts_map().get(&format!("{}_{}", base.to_lowercase(), ver))
+                    self.use_counts_map()
+                        .get(&format!("{}_{}", base.to_lowercase(), ver))
                         .copied()
                         .or_else(|| {
-                            self.use_counts_map().get(&format!("{}_{}", base.to_uppercase(), ver))
+                            self.use_counts_map()
+                                .get(&format!("{}_{}", base.to_uppercase(), ver))
                                 .copied()
                         })
                 })
@@ -1472,7 +1480,115 @@ impl FoldingContext {
 
     /// Create a binary expression.
     fn binary_expr(&self, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> CExpr {
-        CExpr::binary(op, self.get_expr(a), self.get_expr(b))
+        let width_bytes = if a.size > 0 && a.size == b.size {
+            Some(a.size)
+        } else {
+            None
+        };
+        self.identity_simplify_binary(op, self.get_expr(a), self.get_expr(b), width_bytes)
+    }
+
+    fn is_literal_zero_expr(&self, expr: &CExpr) -> bool {
+        matches!(expr, CExpr::IntLit(0) | CExpr::UIntLit(0))
+    }
+
+    fn is_one_expr(&self, expr: &CExpr) -> bool {
+        matches!(expr, CExpr::IntLit(1) | CExpr::UIntLit(1))
+    }
+
+    fn is_all_ones_mask_expr(&self, expr: &CExpr, width_bytes: u32) -> bool {
+        if width_bytes == 0 || width_bytes > 8 {
+            return false;
+        }
+        let bits = width_bytes.saturating_mul(8);
+        let mask = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+
+        match expr {
+            CExpr::UIntLit(v) => *v == mask,
+            CExpr::IntLit(v) => *v == -1 || u64::try_from(*v).map(|n| n == mask).unwrap_or(false),
+            CExpr::Paren(inner) => self.is_all_ones_mask_expr(inner, width_bytes),
+            CExpr::Cast { expr: inner, .. } => self.is_all_ones_mask_expr(inner, width_bytes),
+            _ => false,
+        }
+    }
+
+    fn identity_simplify_binary(
+        &self,
+        op: BinaryOp,
+        left: CExpr,
+        right: CExpr,
+        width_bytes: Option<u32>,
+    ) -> CExpr {
+        match op {
+            BinaryOp::Sub if self.is_literal_zero_expr(&right) => left,
+            BinaryOp::Add => {
+                if self.is_literal_zero_expr(&right) {
+                    left
+                } else if self.is_literal_zero_expr(&left) {
+                    right
+                } else {
+                    CExpr::binary(op, left, right)
+                }
+            }
+            BinaryOp::BitOr | BinaryOp::BitXor => {
+                if self.is_literal_zero_expr(&right) {
+                    left
+                } else if self.is_literal_zero_expr(&left) {
+                    right
+                } else {
+                    CExpr::binary(op, left, right)
+                }
+            }
+            BinaryOp::Mul => {
+                if self.is_one_expr(&right) {
+                    left
+                } else if self.is_one_expr(&left) {
+                    right
+                } else {
+                    CExpr::binary(op, left, right)
+                }
+            }
+            BinaryOp::Div => {
+                if self.is_one_expr(&right) {
+                    left
+                } else {
+                    CExpr::binary(op, left, right)
+                }
+            }
+            BinaryOp::BitAnd => {
+                if let Some(width) = width_bytes {
+                    if self.is_all_ones_mask_expr(&right, width) {
+                        return left;
+                    }
+                    if self.is_all_ones_mask_expr(&left, width) {
+                        return right;
+                    }
+                }
+                CExpr::binary(op, left, right)
+            }
+            _ => CExpr::binary(op, left, right),
+        }
+    }
+
+    fn identity_simplify_expr(&self, expr: CExpr) -> CExpr {
+        match expr {
+            CExpr::Binary { op, left, right } => {
+                self.identity_simplify_binary(op, *left, *right, None)
+            }
+            other => other,
+        }
+    }
+
+    fn assign_stmt(&self, lhs: CExpr, rhs: CExpr) -> Option<CStmt> {
+        let rhs = self.identity_simplify_expr(rhs);
+        if lhs == rhs {
+            return None;
+        }
+        Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
     }
 
     fn ptr_arith_expr(
@@ -1924,7 +2040,249 @@ impl FoldingContext {
             }
         }
 
-        stmts
+        self.prune_dead_temp_assignments(stmts)
+    }
+
+    fn assignment_target_and_rhs(stmt: &CStmt) -> Option<(&str, &CExpr)> {
+        let CStmt::Expr(CExpr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        }) = stmt
+        else {
+            return None;
+        };
+
+        let CExpr::Var(name) = left.as_ref() else {
+            return None;
+        };
+
+        Some((name.as_str(), right.as_ref()))
+    }
+
+    fn expr_is_pure(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(_)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_)
+            | CExpr::Var(_) => true,
+            CExpr::Unary { operand, .. }
+            | CExpr::Paren(operand)
+            | CExpr::Deref(operand)
+            | CExpr::AddrOf(operand)
+            | CExpr::Sizeof(operand) => self.expr_is_pure(operand),
+            CExpr::Binary { op, left, right } => {
+                !matches!(
+                    op,
+                    BinaryOp::Assign
+                        | BinaryOp::AddAssign
+                        | BinaryOp::SubAssign
+                        | BinaryOp::MulAssign
+                        | BinaryOp::DivAssign
+                        | BinaryOp::ModAssign
+                        | BinaryOp::BitAndAssign
+                        | BinaryOp::BitOrAssign
+                        | BinaryOp::BitXorAssign
+                        | BinaryOp::ShlAssign
+                        | BinaryOp::ShrAssign
+                ) && self.expr_is_pure(left)
+                    && self.expr_is_pure(right)
+            }
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                self.expr_is_pure(cond)
+                    && self.expr_is_pure(then_expr)
+                    && self.expr_is_pure(else_expr)
+            }
+            CExpr::Cast { expr, .. } => self.expr_is_pure(expr),
+            CExpr::Call { .. } => false,
+            CExpr::Subscript { base, index } => self.expr_is_pure(base) && self.expr_is_pure(index),
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => self.expr_is_pure(base),
+            CExpr::SizeofType(_) => true,
+            CExpr::Comma(items) => items.iter().all(|item| self.expr_is_pure(item)),
+        }
+    }
+
+    fn collect_expr_reads(&self, expr: &CExpr, out: &mut HashSet<String>) {
+        match expr {
+            CExpr::Var(name) => {
+                out.insert(name.clone());
+            }
+            CExpr::Unary { operand, .. }
+            | CExpr::Paren(operand)
+            | CExpr::Deref(operand)
+            | CExpr::AddrOf(operand)
+            | CExpr::Sizeof(operand) => self.collect_expr_reads(operand, out),
+            CExpr::Binary { left, right, .. } => {
+                self.collect_expr_reads(left, out);
+                self.collect_expr_reads(right, out);
+            }
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                self.collect_expr_reads(cond, out);
+                self.collect_expr_reads(then_expr, out);
+                self.collect_expr_reads(else_expr, out);
+            }
+            CExpr::Cast { expr, .. } => self.collect_expr_reads(expr, out),
+            CExpr::Call { func, args } => {
+                self.collect_expr_reads(func, out);
+                for arg in args {
+                    self.collect_expr_reads(arg, out);
+                }
+            }
+            CExpr::Subscript { base, index } => {
+                self.collect_expr_reads(base, out);
+                self.collect_expr_reads(index, out);
+            }
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                self.collect_expr_reads(base, out);
+            }
+            CExpr::Comma(items) => {
+                for item in items {
+                    self.collect_expr_reads(item, out);
+                }
+            }
+            CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(_)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_)
+            | CExpr::SizeofType(_) => {}
+        }
+    }
+
+    fn stmt_reads_and_def(&self, stmt: &CStmt) -> (HashSet<String>, Option<String>) {
+        let mut reads = HashSet::new();
+        let mut def = None;
+
+        match stmt {
+            CStmt::Expr(CExpr::Binary {
+                op: BinaryOp::Assign,
+                left,
+                right,
+            }) => {
+                if let CExpr::Var(name) = left.as_ref() {
+                    def = Some(name.clone());
+                } else {
+                    self.collect_expr_reads(left, &mut reads);
+                }
+                self.collect_expr_reads(right, &mut reads);
+            }
+            CStmt::Expr(expr) => self.collect_expr_reads(expr, &mut reads),
+            CStmt::Decl { init, .. } => {
+                if let Some(expr) = init {
+                    self.collect_expr_reads(expr, &mut reads);
+                }
+            }
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                self.collect_expr_reads(cond, &mut reads);
+                let (then_reads, _) = self.stmt_reads_and_def(then_body);
+                reads.extend(then_reads);
+                if let Some(else_stmt) = else_body {
+                    let (else_reads, _) = self.stmt_reads_and_def(else_stmt);
+                    reads.extend(else_reads);
+                }
+            }
+            CStmt::While { cond, body } | CStmt::DoWhile { cond, body } => {
+                self.collect_expr_reads(cond, &mut reads);
+                let (body_reads, _) = self.stmt_reads_and_def(body);
+                reads.extend(body_reads);
+            }
+            CStmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                if let Some(init_stmt) = init {
+                    let (init_reads, _) = self.stmt_reads_and_def(init_stmt);
+                    reads.extend(init_reads);
+                }
+                if let Some(cond_expr) = cond {
+                    self.collect_expr_reads(cond_expr, &mut reads);
+                }
+                if let Some(update_expr) = update {
+                    self.collect_expr_reads(update_expr, &mut reads);
+                }
+                let (body_reads, _) = self.stmt_reads_and_def(body);
+                reads.extend(body_reads);
+            }
+            CStmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                self.collect_expr_reads(expr, &mut reads);
+                for case in cases {
+                    for stmt in &case.body {
+                        let (case_reads, _) = self.stmt_reads_and_def(stmt);
+                        reads.extend(case_reads);
+                    }
+                }
+                if let Some(default_stmts) = default {
+                    for stmt in default_stmts {
+                        let (default_reads, _) = self.stmt_reads_and_def(stmt);
+                        reads.extend(default_reads);
+                    }
+                }
+            }
+            CStmt::Return(Some(expr)) => self.collect_expr_reads(expr, &mut reads),
+            CStmt::Block(stmts) => {
+                for stmt in stmts {
+                    let (stmt_reads, _) = self.stmt_reads_and_def(stmt);
+                    reads.extend(stmt_reads);
+                }
+            }
+            CStmt::Label(_)
+            | CStmt::Goto(_)
+            | CStmt::Break
+            | CStmt::Continue
+            | CStmt::Return(None)
+            | CStmt::Comment(_)
+            | CStmt::Empty => {}
+        }
+
+        (reads, def)
+    }
+
+    fn prune_dead_temp_assignments(&self, stmts: Vec<CStmt>) -> Vec<CStmt> {
+        let mut live = HashSet::new();
+        let mut kept_rev = Vec::with_capacity(stmts.len());
+
+        for stmt in stmts.into_iter().rev() {
+            let (reads, def) = self.stmt_reads_and_def(&stmt);
+
+            let drop_stmt = if let Some((target, rhs)) = Self::assignment_target_and_rhs(&stmt) {
+                self.is_opaque_temp_name(target) && !live.contains(target) && self.expr_is_pure(rhs)
+            } else {
+                false
+            };
+
+            if drop_stmt {
+                continue;
+            }
+
+            if let Some(def_name) = def {
+                live.remove(&def_name);
+            }
+            live.extend(reads);
+            kept_rev.push(stmt);
+        }
+
+        kept_rev.reverse();
+        kept_rev
     }
 
     /// Convert an SSA operation to a C statement, with call argument context.
@@ -1989,7 +2347,7 @@ impl FoldingContext {
                         rhs = CExpr::cast(dst_ty, rhs);
                     }
                 }
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::Load { dst, addr, .. } => {
                 let lhs = CExpr::Var(self.var_name(dst));
@@ -2014,24 +2372,30 @@ impl FoldingContext {
                     if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
                         CExpr::Var(stack_var)
                     } else {
-                    // Try to use stack variable name if this is a stack access
-                    let addr_expr = self.get_expr(addr);
-                    let addr_key = addr.display_name();
-                    if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
-                        CExpr::Var(stack_var)
-                    } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
-                        self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
-                    } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
-                        sub
-                    } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr)
-                    {
-                        member
-                    } else {
-                        CExpr::Deref(Box::new(addr_expr))
-                    }
+                        // Try to use stack variable name if this is a stack access
+                        let addr_expr = self.get_expr(addr);
+                        let addr_key = addr.display_name();
+                        if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
+                            CExpr::Var(stack_var)
+                        } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
+                            self.ptr_subscript_expr(
+                                &ptr.base,
+                                &ptr.index,
+                                ptr.element_size,
+                                ptr.is_sub,
+                            )
+                        } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
+                            sub
+                        } else if let Some(member) =
+                            self.try_member_access_from_expr(addr, &addr_expr)
+                        {
+                            member
+                        } else {
+                            CExpr::Deref(Box::new(addr_expr))
+                        }
                     }
                 };
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::Store { addr, val, .. } => {
                 // Try to resolve ram: address to a global symbol name directly
@@ -2051,21 +2415,27 @@ impl FoldingContext {
                     if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
                         CExpr::Var(stack_var)
                     } else {
-                    // Try to use stack variable name if this is a stack access
-                    let addr_expr = self.get_expr(addr);
-                    let addr_key = addr.display_name();
-                    if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
-                        CExpr::Var(stack_var)
-                    } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
-                        self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
-                    } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
-                        sub
-                    } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr)
-                    {
-                        member
-                    } else {
-                        CExpr::Deref(Box::new(addr_expr))
-                    }
+                        // Try to use stack variable name if this is a stack access
+                        let addr_expr = self.get_expr(addr);
+                        let addr_key = addr.display_name();
+                        if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
+                            CExpr::Var(stack_var)
+                        } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
+                            self.ptr_subscript_expr(
+                                &ptr.base,
+                                &ptr.index,
+                                ptr.element_size,
+                                ptr.is_sub,
+                            )
+                        } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
+                            sub
+                        } else if let Some(member) =
+                            self.try_member_access_from_expr(addr, &addr_expr)
+                        {
+                            member
+                        } else {
+                            CExpr::Deref(Box::new(addr_expr))
+                        }
                     }
                 };
                 let mut rhs = self.get_expr(val);
@@ -2074,7 +2444,7 @@ impl FoldingContext {
                         rhs = CExpr::cast(val_ty, rhs);
                     }
                 }
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::IntAdd { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Add),
             SSAOp::IntSub { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Sub),
@@ -2103,12 +2473,12 @@ impl FoldingContext {
             SSAOp::IntNegate { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs = CExpr::unary(UnaryOp::Neg, self.get_expr(src));
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::IntNot { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs = CExpr::unary(UnaryOp::BitNot, self.get_expr(src));
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::BoolAnd { dst, a, b } => self.boolean_stmt(dst, BinaryOp::And, a, b),
             SSAOp::BoolOr { dst, a, b } => self.boolean_stmt(dst, BinaryOp::Or, a, b),
@@ -2117,19 +2487,21 @@ impl FoldingContext {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs =
                     self.simplify_condition_expr(CExpr::unary(UnaryOp::Not, self.get_expr(src)));
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let ty = type_from_size(dst.size);
-                let rhs = self.normalize_assignment_predicate_rhs(CExpr::cast(ty, self.get_expr(src)));
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                let rhs =
+                    self.normalize_assignment_predicate_rhs(CExpr::cast(ty, self.get_expr(src)));
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::Trunc { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let ty = type_from_size(dst.size);
-                let rhs = self.normalize_assignment_predicate_rhs(CExpr::cast(ty, self.get_expr(src)));
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                let rhs =
+                    self.normalize_assignment_predicate_rhs(CExpr::cast(ty, self.get_expr(src)));
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::Piece { dst, hi, lo } => {
                 let lhs = CExpr::Var(self.var_name(dst));
@@ -2143,7 +2515,7 @@ impl FoldingContext {
                     CExpr::binary(BinaryOp::Shl, hi_cast, CExpr::IntLit(shift_bits as i64))
                 };
                 let rhs = CExpr::binary(BinaryOp::BitOr, shifted, lo_cast);
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::Subpiece { dst, src, offset } => {
                 let lhs = CExpr::Var(self.var_name(dst));
@@ -2158,7 +2530,7 @@ impl FoldingContext {
                         CExpr::binary(BinaryOp::Shr, src_cast, CExpr::IntLit(shift_bits as i64));
                     CExpr::cast(uint_type_from_size(dst.size), shifted)
                 };
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::Call { target } => {
                 // Note: Call arguments are handled by op_to_stmt_with_args().
@@ -2208,7 +2580,7 @@ impl FoldingContext {
             } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs = self.ptr_arith_expr(base, index, *element_size, false);
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::PtrSub {
                 dst,
@@ -2218,7 +2590,7 @@ impl FoldingContext {
             } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs = self.ptr_arith_expr(base, index, *element_size, true);
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::Cast { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
@@ -2226,7 +2598,7 @@ impl FoldingContext {
                     type_from_size(dst.size),
                     self.get_expr(src),
                 ));
-                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+                self.assign_stmt(lhs, rhs)
             }
             SSAOp::Return { target } => Some(CStmt::Return(Some(self.get_expr(target)))),
             SSAOp::Branch { .. } | SSAOp::CBranch { .. } => {
@@ -2246,7 +2618,12 @@ impl FoldingContext {
     /// Create a binary operation statement.
     fn binary_stmt(&self, dst: &SSAVar, a: &SSAVar, b: &SSAVar, op: BinaryOp) -> Option<CStmt> {
         let lhs = CExpr::Var(self.var_name(dst));
-        let rhs_raw = CExpr::binary(op, self.get_expr(a), self.get_expr(b));
+        let rhs_raw = self.identity_simplify_binary(
+            op,
+            self.get_expr(a),
+            self.get_expr(b),
+            (dst.size > 0).then_some(dst.size),
+        );
         let rhs = if matches!(
             op,
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
@@ -2255,7 +2632,7 @@ impl FoldingContext {
         } else {
             rhs_raw
         };
-        Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+        self.assign_stmt(lhs, rhs)
     }
 
     fn boolean_stmt(&self, dst: &SSAVar, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> Option<CStmt> {
@@ -2265,7 +2642,7 @@ impl FoldingContext {
             self.get_expr(a),
             self.get_expr(b),
         ));
-        Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+        self.assign_stmt(lhs, rhs)
     }
 
     fn normalize_assignment_predicate_rhs(&self, rhs: CExpr) -> CExpr {
@@ -2886,12 +3263,13 @@ impl FoldingContext {
 
             CExpr::Paren(inner) => self.try_reconstruct_condition(inner),
 
-            CExpr::Cast { ty, expr: inner } => self
-                .try_reconstruct_condition(inner)
-                .map(|reconstructed| CExpr::Cast {
-                    ty: ty.clone(),
-                    expr: Box::new(reconstructed),
-                }),
+            CExpr::Cast { ty, expr: inner } => {
+                self.try_reconstruct_condition(inner)
+                    .map(|reconstructed| CExpr::Cast {
+                        ty: ty.clone(),
+                        expr: Box::new(reconstructed),
+                    })
+            }
 
             // Pattern: !ZF (BoolNot of ZF) means "not equal"
             CExpr::Unary {
@@ -3489,8 +3867,10 @@ impl FoldingContext {
                     .map(|inner| {
                         if let Some(stack_var) = self.stack_alias_from_deref_expr(&inner) {
                             CExpr::Var(stack_var)
-                        } else if matches!(inner, CExpr::Var(_) | CExpr::Paren(_) | CExpr::Cast { .. })
-                        {
+                        } else if matches!(
+                            inner,
+                            CExpr::Var(_) | CExpr::Paren(_) | CExpr::Cast { .. }
+                        ) {
                             self.resolve_predicate_operand(&inner, depth + 1, visited)
                         } else {
                             CExpr::Var(name.clone())
@@ -3571,7 +3951,9 @@ impl FoldingContext {
             }
             CExpr::Call { func, args } => {
                 self.expr_contains_unresolved_memory(func)
-                    || args.iter().any(|arg| self.expr_contains_unresolved_memory(arg))
+                    || args
+                        .iter()
+                        .any(|arg| self.expr_contains_unresolved_memory(arg))
             }
             _ => false,
         }
@@ -3582,35 +3964,75 @@ impl FoldingContext {
     }
 
     fn is_sf_surrogate(&self, expr: &CExpr) -> bool {
+        let mut visited = HashSet::new();
+        self.is_sf_surrogate_inner(expr, &mut visited, 0)
+    }
+
+    fn is_sf_surrogate_inner(
+        &self,
+        expr: &CExpr,
+        visited: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        // Guard against deeply nested/cyclic definitions from large CFGs.
+        if depth > 128 {
+            return false;
+        }
         match expr {
             CExpr::Binary {
                 op: BinaryOp::Lt,
                 left,
                 right,
-            } if self.is_zero_expr(right) => self.is_sub_like_expr(left),
-            CExpr::Paren(inner) => self.is_sf_surrogate(inner),
-            CExpr::Cast { expr: inner, .. } => self.is_sf_surrogate(inner),
-            CExpr::Var(name) => self
-                .lookup_definition(name)
-                .or_else(|| self.formatted_defs_map().get(name).cloned())
-                .map(|inner| self.is_sf_surrogate(&inner))
-                .unwrap_or(false),
+            } if self.is_zero_expr(right) => self.is_sub_like_expr_inner(left, visited, depth + 1),
+            CExpr::Paren(inner) => self.is_sf_surrogate_inner(inner, visited, depth + 1),
+            CExpr::Cast { expr: inner, .. } => {
+                self.is_sf_surrogate_inner(inner, visited, depth + 1)
+            }
+            CExpr::Var(name) => {
+                if !visited.insert(name.clone()) {
+                    return false;
+                }
+                let resolved = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                    .map(|inner| self.is_sf_surrogate_inner(&inner, visited, depth + 1))
+                    .unwrap_or(false);
+                visited.remove(name);
+                resolved
+            }
             _ => false,
         }
     }
 
-    fn is_sub_like_expr(&self, expr: &CExpr) -> bool {
+    fn is_sub_like_expr_inner(
+        &self,
+        expr: &CExpr,
+        visited: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        if depth > 128 {
+            return false;
+        }
         match expr {
             CExpr::Binary {
                 op: BinaryOp::Sub, ..
             } => true,
-            CExpr::Paren(inner) => self.is_sub_like_expr(inner),
-            CExpr::Cast { expr: inner, .. } => self.is_sub_like_expr(inner),
-            CExpr::Var(name) => self
-                .lookup_definition(name)
-                .or_else(|| self.formatted_defs_map().get(name).cloned())
-                .map(|inner| self.is_sub_like_expr(&inner))
-                .unwrap_or(false),
+            CExpr::Paren(inner) => self.is_sub_like_expr_inner(inner, visited, depth + 1),
+            CExpr::Cast { expr: inner, .. } => {
+                self.is_sub_like_expr_inner(inner, visited, depth + 1)
+            }
+            CExpr::Var(name) => {
+                if !visited.insert(name.clone()) {
+                    return false;
+                }
+                let resolved = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                    .map(|inner| self.is_sub_like_expr_inner(&inner, visited, depth + 1))
+                    .unwrap_or(false);
+                visited.remove(name);
+                resolved
+            }
             _ => false,
         }
     }
@@ -3838,8 +4260,7 @@ mod tests {
             CExpr::Member { base, .. } => expr_contains_flag_artifact(base),
             CExpr::PtrMember { base, .. } => expr_contains_flag_artifact(base),
             CExpr::Call { func, args } => {
-                expr_contains_flag_artifact(func)
-                    || args.iter().any(expr_contains_flag_artifact)
+                expr_contains_flag_artifact(func) || args.iter().any(expr_contains_flag_artifact)
             }
             _ => false,
         }
@@ -4197,6 +4618,207 @@ mod tests {
     }
 
     #[test]
+    fn test_identity_sub_zero() {
+        let ctx = FoldingContext::new(64);
+        let simplified = ctx.identity_simplify_binary(
+            BinaryOp::Sub,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(0),
+            Some(4),
+        );
+        assert_eq!(simplified, CExpr::Var("x".to_string()));
+    }
+
+    #[test]
+    fn test_identity_add_zero() {
+        let ctx = FoldingContext::new(64);
+        let simplified = ctx.identity_simplify_binary(
+            BinaryOp::Add,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(0),
+            Some(4),
+        );
+        assert_eq!(simplified, CExpr::Var("x".to_string()));
+    }
+
+    #[test]
+    fn test_identity_or_zero() {
+        let ctx = FoldingContext::new(64);
+        let simplified = ctx.identity_simplify_binary(
+            BinaryOp::BitOr,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(0),
+            Some(4),
+        );
+        assert_eq!(simplified, CExpr::Var("x".to_string()));
+    }
+
+    #[test]
+    fn test_identity_xor_zero() {
+        let ctx = FoldingContext::new(64);
+        let simplified = ctx.identity_simplify_binary(
+            BinaryOp::BitXor,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(0),
+            Some(4),
+        );
+        assert_eq!(simplified, CExpr::Var("x".to_string()));
+    }
+
+    #[test]
+    fn test_identity_mul_one() {
+        let ctx = FoldingContext::new(64);
+        let simplified = ctx.identity_simplify_binary(
+            BinaryOp::Mul,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(1),
+            Some(4),
+        );
+        assert_eq!(simplified, CExpr::Var("x".to_string()));
+    }
+
+    #[test]
+    fn test_identity_div_one() {
+        let ctx = FoldingContext::new(64);
+        let simplified = ctx.identity_simplify_binary(
+            BinaryOp::Div,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(1),
+            Some(4),
+        );
+        assert_eq!(simplified, CExpr::Var("x".to_string()));
+    }
+
+    #[test]
+    fn test_identity_and_all_ones_with_explicit_width() {
+        let ctx = FoldingContext::new(64);
+        let simplified = ctx.identity_simplify_binary(
+            BinaryOp::BitAnd,
+            CExpr::Var("x".to_string()),
+            CExpr::UIntLit(0xffff_ffff),
+            Some(4),
+        );
+        assert_eq!(simplified, CExpr::Var("x".to_string()));
+    }
+
+    #[test]
+    fn test_identity_negative_cases_preserved() {
+        let ctx = FoldingContext::new(64);
+        let sub = ctx.identity_simplify_binary(
+            BinaryOp::Sub,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(1),
+            Some(4),
+        );
+        assert_eq!(
+            sub,
+            CExpr::binary(BinaryOp::Sub, CExpr::Var("x".to_string()), CExpr::IntLit(1))
+        );
+
+        let add = ctx.identity_simplify_binary(
+            BinaryOp::Add,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(2),
+            Some(4),
+        );
+        assert_eq!(
+            add,
+            CExpr::binary(BinaryOp::Add, CExpr::Var("x".to_string()), CExpr::IntLit(2))
+        );
+
+        let or = ctx.identity_simplify_binary(
+            BinaryOp::BitOr,
+            CExpr::Var("x".to_string()),
+            CExpr::IntLit(1),
+            Some(4),
+        );
+        assert_eq!(
+            or,
+            CExpr::binary(
+                BinaryOp::BitOr,
+                CExpr::Var("x".to_string()),
+                CExpr::IntLit(1)
+            )
+        );
+    }
+
+    #[test]
+    fn test_noop_assignment_is_suppressed() {
+        let ctx = FoldingContext::new(64);
+        let lhs = CExpr::Var("x".to_string());
+        let rhs = CExpr::binary(BinaryOp::Sub, CExpr::Var("x".to_string()), CExpr::IntLit(0));
+        let stmt = ctx.assign_stmt(lhs, rhs);
+        assert!(stmt.is_none(), "x = x - 0 should be suppressed as a no-op");
+    }
+
+    #[test]
+    fn test_sf_surrogate_cycle_is_guarded() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx
+            .use_info
+            .definitions
+            .insert("sf_1".to_string(), CExpr::Var("sf_2".to_string()));
+        ctx.analysis_ctx
+            .use_info
+            .definitions
+            .insert("sf_2".to_string(), CExpr::Var("sf_1".to_string()));
+
+        assert!(
+            !ctx.is_sf_surrogate(&CExpr::Var("sf_1".to_string())),
+            "Cyclic surrogate definitions must short-circuit without recursion overflow"
+        );
+    }
+
+    #[test]
+    fn test_prune_dead_temp_assignments_removes_unused_pure_copy() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("t1_1".to_string()),
+                CExpr::Var("arg1".to_string()),
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("t2_2".to_string()),
+                CExpr::Var("arg2".to_string()),
+            )),
+            CStmt::Return(Some(CExpr::Var("t2_2".to_string()))),
+        ];
+
+        let pruned = ctx.prune_dead_temp_assignments(stmts);
+        assert_eq!(pruned.len(), 2, "Unused pure temp copy should be removed");
+        assert!(
+            !matches!(
+                pruned.first(),
+                Some(CStmt::Expr(CExpr::Binary {
+                    op: BinaryOp::Assign,
+                    left,
+                    right: _,
+                })) if left.as_ref() == &CExpr::Var("t1_1".to_string())
+            ),
+            "t1_1 copy should be pruned"
+        );
+    }
+
+    #[test]
+    fn test_prune_dead_temp_assignments_keeps_side_effecting_rhs() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("t1_1".to_string()),
+                CExpr::call(CExpr::Var("foo".to_string()), vec![]),
+            )),
+            CStmt::Return(Some(CExpr::IntLit(0))),
+        ];
+
+        let pruned = ctx.prune_dead_temp_assignments(stmts);
+        assert_eq!(
+            pruned.len(),
+            2,
+            "Dead temp assignment must be kept when RHS has side effects"
+        );
+    }
+
+    #[test]
     fn test_copy_predicate_assignment_uses_simplified_rhs() {
         let edi_0 = make_var("EDI", 0, 4);
         let sub = make_var("tmp:9100", 1, 4);
@@ -4267,7 +4889,9 @@ mod tests {
     #[test]
     fn test_simplify_signed_ge_from_of_eq_sf() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx.flag_info.flag_origins
+        ctx.analysis_ctx
+            .flag_info
+            .flag_origins
             .insert("OF_2".to_string(), ("a".to_string(), "b".to_string()));
 
         let expr = CExpr::binary(
@@ -4298,7 +4922,9 @@ mod tests {
     #[test]
     fn test_simplify_signed_lt_from_of_ne_sf() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx.flag_info.flag_origins
+        ctx.analysis_ctx
+            .flag_info
+            .flag_origins
             .insert("OF_3".to_string(), ("a".to_string(), "b".to_string()));
 
         let expr = CExpr::binary(
@@ -4329,7 +4955,9 @@ mod tests {
     #[test]
     fn test_signed_canonicalization_mismatch_does_not_collapse() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx.flag_info.flag_origins
+        ctx.analysis_ctx
+            .flag_info
+            .flag_origins
             .insert("OF_4".to_string(), ("a".to_string(), "b".to_string()));
 
         let expr = CExpr::binary(
@@ -4585,7 +5213,11 @@ mod tests {
         ctx.set_current_block(block.addr);
 
         let stmts = ctx.fold_block(&block);
-        assert_eq!(stmts.len(), 1, "Should stop emitting after high-level return");
+        assert_eq!(
+            stmts.len(),
+            1,
+            "Should stop emitting after high-level return"
+        );
 
         match &stmts[0] {
             CStmt::Return(Some(expr)) => {

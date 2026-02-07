@@ -28,8 +28,8 @@
 //! println!("{}", c_code);
 //! ```
 
-pub mod ast;
 pub(crate) mod analysis;
+pub mod ast;
 pub mod codegen;
 pub mod expr;
 pub mod fold;
@@ -168,6 +168,65 @@ impl Decompiler {
         codegen.generate_function(&c_func)
     }
 
+    fn configure_structurer(
+        &self,
+        structurer: &mut ControlFlowStructurer<'_>,
+        type_hints: &std::collections::HashMap<String, CType>,
+    ) {
+        if !self.context.function_names.is_empty() {
+            structurer.set_function_names(self.context.function_names.clone());
+        }
+        if !self.context.strings.is_empty() {
+            structurer.set_strings(self.context.strings.clone());
+        }
+        if !self.context.symbols.is_empty() {
+            structurer.set_symbols(self.context.symbols.clone());
+        }
+        if !type_hints.is_empty() {
+            structurer.set_type_hints(type_hints.clone());
+        }
+    }
+
+    fn stmt_has_content(stmt: &CStmt) -> bool {
+        match stmt {
+            CStmt::Empty => false,
+            CStmt::Block(stmts) => !stmts.is_empty(),
+            _ => true,
+        }
+    }
+
+    fn prepend_comment(stmt: CStmt, text: String) -> CStmt {
+        let comment = CStmt::comment(text);
+        match stmt {
+            CStmt::Empty => CStmt::Block(vec![comment]),
+            CStmt::Block(mut stmts) => {
+                stmts.insert(0, comment);
+                CStmt::Block(stmts)
+            }
+            other => CStmt::Block(vec![comment, other]),
+        }
+    }
+
+    fn linearize_function_body(&self, func: &SSAFunction) -> Vec<CStmt> {
+        let builder = ExpressionBuilder::new(self.config.ptr_size);
+        let mut stmts = Vec::new();
+
+        for &addr in func.block_addrs() {
+            let Some(block) = func.get_block(addr) else {
+                continue;
+            };
+            for op in &block.ops {
+                if let Some(stmt) = builder.op_to_stmt(op)
+                    && !matches!(stmt, CStmt::Empty)
+                {
+                    stmts.push(stmt);
+                }
+            }
+        }
+
+        stmts
+    }
+
     /// Build a C function from an SSA function.
     pub fn build_function(&self, func: &SSAFunction) -> CFunction {
         // Recover variables
@@ -186,27 +245,62 @@ impl Decompiler {
         type_inference.infer_function(func);
         let type_hints = type_inference.var_type_hints();
 
-        // Structure control flow
+        // Structure control flow (primary path: folded)
         let mut structurer = ControlFlowStructurer::new(func, self.config.ptr_size);
+        self.configure_structurer(&mut structurer, &type_hints);
 
-        // Pass external context to structurer
-        if !self.context.function_names.is_empty() {
-            structurer.set_function_names(self.context.function_names.clone());
-        }
-        if !self.context.strings.is_empty() {
-            structurer.set_strings(self.context.strings.clone());
-        }
-        if !self.context.symbols.is_empty() {
-            structurer.set_symbols(self.context.symbols.clone());
-        }
-        if !type_hints.is_empty() {
-            structurer.set_type_hints(type_hints);
-        }
-
-        // Get set of variables that survive folding before structuring
+        // Get set of variables that survive folding before structuring.
         let emitted_vars = structurer.emitted_var_names();
+        let mut use_conservative_locals = false;
 
-        let body_stmt = structurer.structure();
+        let folded_stmt = structurer.structure();
+        let mut body_stmt = folded_stmt;
+
+        if !Self::stmt_has_content(&body_stmt) {
+            let folded_reason = structurer
+                .safety_reason()
+                .map(str::to_string)
+                .unwrap_or_else(|| "folded structuring produced empty output".to_string());
+
+            // Fallback 1: unfolded structuring
+            let mut unfolded = ControlFlowStructurer::new_unfolded(func, self.config.ptr_size);
+            self.configure_structurer(&mut unfolded, &type_hints);
+            let unfolded_stmt = unfolded.structure();
+
+            if Self::stmt_has_content(&unfolded_stmt) {
+                use_conservative_locals = true;
+                body_stmt = Self::prepend_comment(
+                    unfolded_stmt,
+                    format!("r2dec fallback: {}", folded_reason),
+                );
+            } else {
+                let unfolded_reason = unfolded
+                    .safety_reason()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "unfolded structuring produced empty output".to_string());
+
+                // Fallback 2: linear block emission
+                let mut linear_stmts = self.linearize_function_body(func);
+                let fallback_reason = format!("{}; {}", folded_reason, unfolded_reason);
+
+                use_conservative_locals = true;
+                if linear_stmts.is_empty() {
+                    body_stmt = CStmt::Block(vec![CStmt::comment(format!(
+                        "r2dec fallback: {} -> no statements recovered",
+                        fallback_reason
+                    ))]);
+                } else {
+                    linear_stmts.insert(
+                        0,
+                        CStmt::comment(format!(
+                            "r2dec fallback: {} -> linear block emission",
+                            fallback_reason
+                        )),
+                    );
+                    body_stmt = CStmt::Block(linear_stmts);
+                }
+            }
+        }
 
         // Build the C function
         let func_name = func
@@ -226,17 +320,29 @@ impl Decompiler {
         // Sort by arg number for stable ordering (arg1, arg2, ...)
         params.sort_by(|a, b| a.name.cmp(&b.name));
 
-        // Collect locals -- keep only those whose names appear in emitted output
-        let locals: Vec<ast::CLocal> = var_recovery
-            .locals()
-            .iter()
-            .filter(|v| emitted_vars.contains(&v.name))
-            .map(|v| ast::CLocal {
-                ty: type_inference.get_type(&v.ssa_var),
-                name: v.name.clone(),
-                stack_offset: v.stack_offset,
-            })
-            .collect();
+        // Collect locals -- on fallback keep locals conservatively.
+        let locals: Vec<ast::CLocal> = if use_conservative_locals {
+            var_recovery
+                .locals()
+                .iter()
+                .map(|v| ast::CLocal {
+                    ty: type_inference.get_type(&v.ssa_var),
+                    name: v.name.clone(),
+                    stack_offset: v.stack_offset,
+                })
+                .collect()
+        } else {
+            var_recovery
+                .locals()
+                .iter()
+                .filter(|v| emitted_vars.contains(&v.name))
+                .map(|v| ast::CLocal {
+                    ty: type_inference.get_type(&v.ssa_var),
+                    name: v.name.clone(),
+                    stack_offset: v.stack_offset,
+                })
+                .collect()
+        };
 
         // Convert body to statements
         let body = self.stmt_to_vec(body_stmt);

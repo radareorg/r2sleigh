@@ -41,7 +41,8 @@ fn expect_object<'a>(value: &'a Value, label: &str) -> &'a serde_json::Map<Strin
 fn contains_named_register(value: &Value) -> bool {
     match value {
         Value::Object(map) => {
-            let is_varnode = map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
+            let is_varnode =
+                map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
             if is_varnode {
                 let space = map.get("space").and_then(Value::as_str);
                 if let Some(space_str) = space {
@@ -99,11 +100,7 @@ mod plugin_status {
     #[test]
     fn plugin_arch_override_roundtrip() {
         setup();
-        let result = r2_at_func(
-            vuln_test_binary(),
-            "main",
-            "a:sla.arch x86-64; a:sla.arch",
-        );
+        let result = r2_at_func(vuln_test_binary(), "main", "a:sla.arch x86-64; a:sla.arch");
         result.assert_ok();
         assert!(
             result.contains_any(&["x86-64", "x86_64"]),
@@ -400,12 +397,9 @@ mod cfg {
             .get("blocks")
             .and_then(|v| v.as_array())
             .expect("a:sla.cfg.json should include blocks");
-        let has_successors = blocks.iter().any(|block| {
-            block
-                .get("successors")
-                .and_then(|v| v.as_array())
-                .is_some()
-        });
+        let has_successors = blocks
+            .iter()
+            .any(|block| block.get("successors").and_then(|v| v.as_array()).is_some());
         assert!(has_successors, "CFG blocks should include successors");
     }
 }
@@ -462,11 +456,11 @@ mod slicing {
         result.assert_ok();
         let json = parse_json(&result, "a:sla.slice");
         let obj = expect_object(&json, "a:sla.slice");
-        
+
         // Check ops array exists and has entries
         let ops = obj.get("ops").and_then(|v| v.as_array());
         assert!(ops.is_some(), "Slice should contain ops array");
-        
+
         // ZF (zero flag) should have some defining operations
         let ops_arr = ops.unwrap();
         if !ops_arr.is_empty() {
@@ -486,16 +480,20 @@ mod slicing {
         result.assert_ok();
         let json = parse_json(&result, "a:sla.slice");
         let obj = expect_object(&json, "a:sla.slice");
-        
+
         // Check blocks array exists
         let blocks = obj.get("blocks").and_then(|v| v.as_array());
         assert!(blocks.is_some(), "Slice should contain blocks array");
-        
+
         // Blocks should be hex addresses
         let blocks_arr = blocks.unwrap();
         for block in blocks_arr {
             let addr = block.as_str().unwrap_or("");
-            assert!(addr.starts_with("0x"), "Block address should be hex: {}", addr);
+            assert!(
+                addr.starts_with("0x"),
+                "Block address should be hex: {}",
+                addr
+            );
         }
     }
 
@@ -507,7 +505,7 @@ mod slicing {
         result.assert_ok();
         let json = parse_json(&result, "a:sla.slice");
         let obj = expect_object(&json, "a:sla.slice");
-        
+
         // Should have sink_var set correctly
         let sink = obj.get("sink_var").and_then(|v| v.as_str());
         assert_eq!(sink, Some("RAX_1"), "Sink var should be RAX_1");
@@ -603,10 +601,7 @@ mod paths {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.sym.paths");
         result.assert_ok();
-        assert!(
-            result.contains("0xdead"),
-            "Should find magic value 0xdead"
-        );
+        assert!(result.contains("0xdead"), "Should find magic value 0xdead");
     }
 
     #[test]
@@ -681,6 +676,19 @@ mod decompilation {
 
     fn find_line_containing<'a>(normalized: &'a str, needle: &str) -> Option<&'a str> {
         normalized.lines().find(|line| line.contains(needle))
+    }
+
+    fn has_self_sub_zero_assignment(line: &str) -> bool {
+        let trimmed = line.trim();
+        if !trimmed.ends_with(';') {
+            return false;
+        }
+        let Some((lhs, rhs)) = trimmed.split_once('=') else {
+            return false;
+        };
+        let lhs = lhs.trim();
+        let rhs = rhs.trim().trim_end_matches(';').trim();
+        rhs == format!("{lhs} - 0")
     }
 
     #[test]
@@ -759,10 +767,7 @@ mod decompilation {
         setup();
         let piece = r2_at_func(vuln_test_binary(), "dbg.test_piece", "a:sla.dec");
         piece.assert_ok();
-        assert!(
-            piece.contains("<<"),
-            "Should show a shift for PIECE"
-        );
+        assert!(piece.contains("<<"), "Should show a shift for PIECE");
         assert!(piece.contains("|"), "Should show bitwise OR for PIECE");
     }
 
@@ -774,7 +779,10 @@ mod decompilation {
         let normalized = normalized_dec_output(&result.stdout);
         let return_line =
             find_header_line(&normalized, "return ").expect("Should emit direct return statement");
-        assert!(return_line.contains("^"), "Return should preserve XOR behavior");
+        assert!(
+            return_line.contains("^"),
+            "Return should preserve XOR behavior"
+        );
         let has_direct_gt = return_line.contains("> 0");
         let has_ge_with_ne = return_line.contains(">= 0") && return_line.contains("!= 0");
         assert!(
@@ -796,10 +804,9 @@ mod decompilation {
             !line_contains_flag_artifact(return_line),
             "Return should not contain raw flag temporaries"
         );
-        for line in normalized
-            .lines()
-            .filter(|line| line.contains('=') && is_predicate_line(line) && !line.starts_with("return "))
-        {
+        for line in normalized.lines().filter(|line| {
+            line.contains('=') && is_predicate_line(line) && !line.starts_with("return ")
+        }) {
             assert!(
                 !line_contains_flag_artifact(line),
                 "Intermediate predicate assignment should not contain raw flag temporaries: {}",
@@ -814,6 +821,14 @@ mod decompilation {
         assert!(
             !normalized.contains("return *rsp"),
             "Should not emit low-level stack-return artifact after high-level return"
+        );
+        assert!(
+            !normalized.contains("t1_1 = arg1;"),
+            "Should prune dead temp copy assignment for arg1"
+        );
+        assert!(
+            !normalized.contains("t2_2 = arg2;"),
+            "Should prune dead temp copy assignment for arg2"
         );
     }
 
@@ -848,10 +863,7 @@ mod decompilation {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.test_cast_u8", "a:sla.dec");
         result.assert_ok();
-        assert!(
-            result.contains("(int64_t)"),
-            "Should show a cast in output"
-        );
+        assert!(result.contains("(int64_t)"), "Should show a cast in output");
     }
 
     #[test]
@@ -908,9 +920,16 @@ mod decompilation {
     #[test]
     fn decompiles_setlocale_with_pointer_type() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.test_setlocale_wrapper", "a:sla.dec");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_setlocale_wrapper",
+            "a:sla.dec",
+        );
         result.assert_ok();
-        assert!(result.contains("setlocale("), "Should resolve setlocale call name");
+        assert!(
+            result.contains("setlocale("),
+            "Should resolve setlocale call name"
+        );
         assert!(
             result.contains("int8_t*")
                 || result.contains("char*")
@@ -928,6 +947,58 @@ mod decompilation {
             !result.contains(" = arg1 + 1;"),
             "Simple temporary used multiple times should be inlined"
         );
+    }
+
+    #[test]
+    fn decompiles_main_not_empty() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.main", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        assert!(
+            !normalized.is_empty(),
+            "Main decompilation should not be empty"
+        );
+        assert!(
+            normalized.contains("main(") || normalized.contains("dbg.main("),
+            "Main output should include a function header"
+        );
+        assert!(
+            normalized.contains('{') && normalized.contains('}'),
+            "Main output should include function braces"
+        );
+        assert!(
+            normalized.len() > 50,
+            "Main output should contain a minimum amount of code"
+        );
+    }
+
+    #[test]
+    fn decompiles_without_identity_residuals() {
+        setup();
+        let cases = [
+            "dbg.alloc_and_copy",
+            "dbg.test_boolxor",
+            "dbg.test_setlocale_wrapper",
+            "dbg.safe_array_access",
+            "dbg.test_identity_ops",
+        ];
+
+        for func in cases {
+            let result = r2_at_func(vuln_test_binary(), func, "a:sla.dec");
+            result.assert_ok();
+            let normalized = normalized_dec_output(&result.stdout);
+
+            for line in normalized.lines() {
+                assert!(
+                    !has_self_sub_zero_assignment(line),
+                    "{} should not contain self-sub-zero identity residue: {}",
+                    func,
+                    line
+                );
+            }
+        }
     }
 }
 
@@ -963,13 +1034,21 @@ mod ffi {
                 unsafe extern "C" fn(*const std::ffi::c_void) -> i32,
             > = lib.get(b"r2il_is_loaded").unwrap();
             let r2il_lift: libloading::Symbol<
-                unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64) -> *mut std::ffi::c_void,
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_lift").unwrap();
             let r2il_block_op_count: libloading::Symbol<
                 unsafe extern "C" fn(*const std::ffi::c_void) -> usize,
             > = lib.get(b"r2il_block_op_count").unwrap();
             let r2il_block_to_esil: libloading::Symbol<
-                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> *mut c_char,
             > = lib.get(b"r2il_block_to_esil").unwrap();
             let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
                 lib.get(b"r2il_free").unwrap();
@@ -1020,10 +1099,18 @@ mod ffi {
                 unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_arch_init").unwrap();
             let r2il_lift: libloading::Symbol<
-                unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64) -> *mut std::ffi::c_void,
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_lift").unwrap();
             let r2il_block_to_ssa_json: libloading::Symbol<
-                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> *mut c_char,
             > = lib.get(b"r2il_block_to_ssa_json").unwrap();
             let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
                 lib.get(b"r2il_free").unwrap();
@@ -1057,7 +1144,6 @@ mod ffi {
             r2il_free(ctx);
         }
     }
-
 }
 
 // ============================================================================
@@ -1189,7 +1275,10 @@ mod deep_integration {
         result.assert_ok();
         // main() should have disassembly output
         assert!(
-            result.contains("push") || result.contains("mov") || result.contains("call") || result.contains("0x"),
+            result.contains("push")
+                || result.contains("mov")
+                || result.contains("call")
+                || result.contains("0x"),
             "pdf should show disassembly"
         );
     }
@@ -1202,7 +1291,8 @@ mod deep_integration {
         result.assert_ok();
         // SSA output should be valid JSON (may be empty array if function is complex)
         // The output format is JSON array of SSA blocks
-        let is_json = result.stdout.trim().starts_with("[") || result.stdout.trim().starts_with("{");
+        let is_json =
+            result.stdout.trim().starts_with("[") || result.stdout.trim().starts_with("{");
         assert!(
             is_json || result.stdout.trim().is_empty(),
             "a:sla.ssa should produce JSON output or be empty"

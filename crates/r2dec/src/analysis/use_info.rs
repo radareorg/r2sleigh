@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAOp;
 
-use super::{lower::LowerCtx, utils, PassEnv, UseInfo};
+use super::{PassEnv, UseInfo, lower::LowerCtx, utils};
 use crate::ast::CExpr;
 use crate::fold::{PtrArith, SSABlock};
 
@@ -58,7 +58,10 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
                 &env.fp_name,
                 &env.sp_name,
             );
-            scratch.info.memory_stores.insert(addr_key, val.display_name());
+            scratch
+                .info
+                .memory_stores
+                .insert(addr_key, val.display_name());
         }
 
         if let SSAOp::Load { dst, addr, .. } = op {
@@ -69,7 +72,10 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
                 &env.sp_name,
             );
             if let Some(stored_val) = scratch.info.memory_stores.get(&addr_key).cloned() {
-                scratch.info.copy_sources.insert(dst.display_name(), stored_val);
+                scratch
+                    .info
+                    .copy_sources
+                    .insert(dst.display_name(), stored_val);
             } else {
                 scratch
                     .info
@@ -206,7 +212,9 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
     let mut uf_parent: HashMap<String, String> = HashMap::new();
     for versions in reg_versions.values() {
         for (name, _) in versions {
-            uf_parent.entry(name.clone()).or_insert_with(|| name.clone());
+            uf_parent
+                .entry(name.clone())
+                .or_insert_with(|| name.clone());
         }
     }
 
@@ -387,7 +395,8 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                 };
 
                 let dst_base = dst_var.name.to_lowercase();
-                if env.arg_regs.iter().any(|r| *r == dst_base) && !found_regs.contains_key(&dst_base)
+                if env.arg_regs.iter().any(|r| *r == dst_base)
+                    && !found_regs.contains_key(&dst_base)
                 {
                     let dst_key = dst_var.display_name();
                     found_regs.insert(dst_base.clone(), (expr, dst_key));
