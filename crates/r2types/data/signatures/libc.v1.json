@@ -105,6 +105,36 @@
       "return": "char*",
       "params": ["char*", "char*"],
       "variadic": false
+    },
+    "sprintf": {
+      "return": "i32",
+      "params": ["char*", "char*"],
+      "variadic": true
+    },
+    "fprintf": {
+      "return": "i32",
+      "params": ["void*", "char*"],
+      "variadic": true
+    },
+    "exit": {
+      "return": "void",
+      "params": ["i32"],
+      "variadic": false
+    },
+    "abort": {
+      "return": "void",
+      "params": [],
+      "variadic": false
+    },
+    "getenv": {
+      "return": "char*",
+      "params": ["char*"],
+      "variadic": false
+    },
+    "system": {
+      "return": "i32",
+      "params": ["char*"],
+      "variadic": false
     }
   }
 }

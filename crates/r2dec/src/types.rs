@@ -921,6 +921,12 @@ fn collect_vars(func: &SSAFunction) -> Vec<SSAVar> {
 fn parse_const_addr(name: &str) -> Option<u64> {
     if let Some(val_str) = name.strip_prefix("const:") {
         let val_str = val_str.split('_').next().unwrap_or(val_str);
+        if let Some(dec) = val_str
+            .strip_prefix("0d")
+            .or_else(|| val_str.strip_prefix("0D"))
+        {
+            return dec.parse().ok();
+        }
         if let Some(hex) = val_str
             .strip_prefix("0x")
             .or_else(|| val_str.strip_prefix("0X"))
@@ -1033,6 +1039,8 @@ mod tests {
     #[test]
     fn test_parse_const_addr() {
         assert_eq!(parse_const_addr("const:0x40_0"), Some(0x40));
+        assert_eq!(parse_const_addr("const:40"), Some(0x40));
+        assert_eq!(parse_const_addr("const:0d40"), Some(40));
         assert_eq!(parse_const_addr("ram:401000_0"), Some(0x401000));
         assert_eq!(parse_const_addr("RAX_1"), None);
     }

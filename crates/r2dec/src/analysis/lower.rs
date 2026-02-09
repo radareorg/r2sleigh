@@ -110,25 +110,61 @@ impl<'a> LowerCtx<'a> {
             SSAOp::IntAdd { a, b, .. } => self.binary_expr(BinaryOp::Add, a, b),
             SSAOp::IntSub { a, b, .. } => self.binary_expr(BinaryOp::Sub, a, b),
             SSAOp::IntMult { a, b, .. } => self.binary_expr(BinaryOp::Mul, a, b),
-            SSAOp::IntDiv { a, b, .. } | SSAOp::IntSDiv { a, b, .. } => {
-                self.binary_expr(BinaryOp::Div, a, b)
+            SSAOp::IntDiv { dst, a, b } => self.typed_binary_expr(
+                BinaryOp::Div,
+                a,
+                b,
+                Some(uint_type_from_size(dst.size)),
+            ),
+            SSAOp::IntSDiv { dst, a, b } => {
+                self.typed_binary_expr(BinaryOp::Div, a, b, Some(type_from_size(dst.size)))
             }
-            SSAOp::IntRem { a, b, .. } | SSAOp::IntSRem { a, b, .. } => {
-                self.binary_expr(BinaryOp::Mod, a, b)
+            SSAOp::IntRem { dst, a, b } => self.typed_binary_expr(
+                BinaryOp::Mod,
+                a,
+                b,
+                Some(uint_type_from_size(dst.size)),
+            ),
+            SSAOp::IntSRem { dst, a, b } => {
+                self.typed_binary_expr(BinaryOp::Mod, a, b, Some(type_from_size(dst.size)))
             }
             SSAOp::IntAnd { a, b, .. } => self.binary_expr(BinaryOp::BitAnd, a, b),
             SSAOp::IntOr { a, b, .. } => self.binary_expr(BinaryOp::BitOr, a, b),
             SSAOp::IntXor { a, b, .. } => self.binary_expr(BinaryOp::BitXor, a, b),
             SSAOp::IntLeft { a, b, .. } => self.binary_expr(BinaryOp::Shl, a, b),
-            SSAOp::IntRight { a, b, .. } | SSAOp::IntSRight { a, b, .. } => {
-                self.binary_expr(BinaryOp::Shr, a, b)
+            SSAOp::IntRight { dst, a, b } => self.typed_binary_expr(
+                BinaryOp::Shr,
+                a,
+                b,
+                Some(uint_type_from_size(dst.size)),
+            ),
+            SSAOp::IntSRight { dst, a, b } => {
+                self.typed_binary_expr(BinaryOp::Shr, a, b, Some(type_from_size(dst.size)))
             }
-            SSAOp::IntLess { a, b, .. } | SSAOp::IntSLess { a, b, .. } => {
-                self.binary_expr(BinaryOp::Lt, a, b)
-            }
-            SSAOp::IntLessEqual { a, b, .. } | SSAOp::IntSLessEqual { a, b, .. } => {
-                self.binary_expr(BinaryOp::Le, a, b)
-            }
+            SSAOp::IntLess { a, b, .. } => self.typed_binary_expr(
+                BinaryOp::Lt,
+                a,
+                b,
+                Some(uint_type_from_size(a.size.max(b.size))),
+            ),
+            SSAOp::IntSLess { a, b, .. } => self.typed_binary_expr(
+                BinaryOp::Lt,
+                a,
+                b,
+                Some(type_from_size(a.size.max(b.size))),
+            ),
+            SSAOp::IntLessEqual { a, b, .. } => self.typed_binary_expr(
+                BinaryOp::Le,
+                a,
+                b,
+                Some(uint_type_from_size(a.size.max(b.size))),
+            ),
+            SSAOp::IntSLessEqual { a, b, .. } => self.typed_binary_expr(
+                BinaryOp::Le,
+                a,
+                b,
+                Some(type_from_size(a.size.max(b.size))),
+            ),
             SSAOp::IntEqual { a, b, .. } => self.binary_expr(BinaryOp::Eq, a, b),
             SSAOp::IntNotEqual { a, b, .. } => self.binary_expr(BinaryOp::Ne, a, b),
             SSAOp::IntNegate { src, .. } => CExpr::unary(UnaryOp::Neg, self.get_expr(src)),
@@ -280,6 +316,31 @@ impl<'a> LowerCtx<'a> {
 
     fn binary_expr(&self, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> CExpr {
         CExpr::binary(op, self.get_expr(a), self.get_expr(b))
+    }
+
+    fn cast_expr_if_needed(&self, expr: CExpr, ty: CType) -> CExpr {
+        if let CExpr::Cast { ty: existing, .. } = &expr
+            && *existing == ty
+        {
+            return expr;
+        }
+        CExpr::cast(ty, expr)
+    }
+
+    fn typed_binary_expr(
+        &self,
+        op: BinaryOp,
+        a: &SSAVar,
+        b: &SSAVar,
+        operand_ty: Option<CType>,
+    ) -> CExpr {
+        let mut lhs = self.get_expr(a);
+        let mut rhs = self.get_expr(b);
+        if let Some(ty) = operand_ty {
+            lhs = self.cast_expr_if_needed(lhs, ty.clone());
+            rhs = self.cast_expr_if_needed(rhs, ty);
+        }
+        CExpr::binary(op, lhs, rhs)
     }
 
     fn ptr_arith_expr(

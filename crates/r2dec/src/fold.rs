@@ -1958,11 +1958,6 @@ impl<'a> FoldingContext<'a> {
             if let Some(name) = oracle.field_name(base_ty, offset) {
                 return Some(name.to_string());
             }
-            if let Some(hex_offset) = reinterpret_decimal_as_hex(offset)
-                && let Some(name) = oracle.field_name(base_ty, hex_offset)
-            {
-                return Some(name.to_string());
-            }
         }
 
         if let CExpr::Var(base_name) = base_expr {
@@ -1977,20 +1972,10 @@ impl<'a> FoldingContext<'a> {
                 if let Some(name) = oracle.field_name(base_ty, offset) {
                     return Some(name.to_string());
                 }
-                if let Some(hex_offset) = reinterpret_decimal_as_hex(offset)
-                    && let Some(name) = oracle.field_name(base_ty, hex_offset)
-                {
-                    return Some(name.to_string());
-                }
             }
         }
 
         if let Some(name) = oracle.field_name_any(offset) {
-            return Some(name.to_string());
-        }
-        if let Some(hex_offset) = reinterpret_decimal_as_hex(offset)
-            && let Some(name) = oracle.field_name_any(hex_offset)
-        {
             return Some(name.to_string());
         }
 
@@ -2054,6 +2039,64 @@ impl<'a> FoldingContext<'a> {
 
         let rendered = self.var_name(var);
         self.lookup_type_hint(&rendered).cloned()
+    }
+
+    fn int_meta(&self, ty: &CType) -> Option<(bool, u32)> {
+        match ty {
+            CType::Int(bits) => Some((true, *bits)),
+            CType::UInt(bits) => Some((false, *bits)),
+            CType::Bool => Some((false, 1)),
+            _ => None,
+        }
+    }
+
+    fn cast_needed(&self, target: &CType, source: Option<&CType>) -> bool {
+        let Some(source) = source else {
+            return false;
+        };
+
+        if target == source {
+            return false;
+        }
+
+        if let (Some((dst_signed, dst_bits)), Some((src_signed, src_bits))) =
+            (self.int_meta(target), self.int_meta(source))
+        {
+            return dst_signed != src_signed || dst_bits != src_bits;
+        }
+
+        matches!(
+            (target, source),
+            (CType::Pointer(_), CType::Int(_) | CType::UInt(_) | CType::Bool)
+                | (CType::Int(_) | CType::UInt(_), CType::Pointer(_))
+        )
+    }
+
+    fn cast_expr_if_needed(&self, expr: CExpr, target: CType, source: Option<&CType>) -> CExpr {
+        if let CExpr::Cast { ty, .. } = &expr
+            && *ty == target
+        {
+            return expr;
+        }
+        if self.cast_needed(&target, source) {
+            CExpr::cast(target, expr)
+        } else {
+            expr
+        }
+    }
+
+    fn assignment_rhs_with_type_policy(
+        &self,
+        dst: &SSAVar,
+        src: Option<&SSAVar>,
+        rhs: CExpr,
+    ) -> CExpr {
+        let Some(dst_ty) = self.type_hint_for_var(dst) else {
+            return rhs;
+        };
+
+        let src_ty = src.and_then(|var| self.type_hint_for_var(var));
+        self.cast_expr_if_needed(rhs, dst_ty, src_ty.as_ref())
     }
 
     fn extract_base_index_scale(&self, expr: &CExpr) -> Option<(CExpr, CExpr, u32, bool)> {
@@ -2621,12 +2664,8 @@ impl<'a> FoldingContext<'a> {
             SSAOp::Copy { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs_base = self.get_expr(src);
-                let mut rhs = self.resolve_predicate_rhs_for_var(src, rhs_base);
-                if let Some(dst_ty) = self.type_hint_for_var(dst) {
-                    if matches!(dst_ty, CType::Pointer(_)) && !self.looks_like_pointer(&rhs) {
-                        rhs = CExpr::cast(dst_ty, rhs);
-                    }
-                }
+                let rhs = self.resolve_predicate_rhs_for_var(src, rhs_base);
+                let rhs = self.assignment_rhs_with_type_policy(dst, Some(src), rhs);
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Load { dst, addr, .. } => {
@@ -2719,35 +2758,79 @@ impl<'a> FoldingContext<'a> {
                     }
                 };
                 let mut rhs = self.get_expr(val);
-                if let Some(val_ty) = self.type_hint_for_var(val) {
-                    if matches!(val_ty, CType::Pointer(_)) && !self.looks_like_pointer(&rhs) {
-                        rhs = CExpr::cast(val_ty, rhs);
-                    }
+                if let Some(val_ty) = self.type_hint_for_var(val)
+                    && matches!(val_ty, CType::Pointer(_))
+                    && !self.looks_like_pointer(&rhs)
+                {
+                    rhs = CExpr::cast(val_ty, rhs);
                 }
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::IntAdd { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Add),
             SSAOp::IntSub { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Sub),
             SSAOp::IntMult { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Mul),
-            SSAOp::IntDiv { dst, a, b } | SSAOp::IntSDiv { dst, a, b } => {
-                self.binary_stmt(dst, a, b, BinaryOp::Div)
+            SSAOp::IntDiv { dst, a, b } => self.binary_stmt_typed(
+                dst,
+                a,
+                b,
+                BinaryOp::Div,
+                Some(uint_type_from_size(dst.size)),
+            ),
+            SSAOp::IntSDiv { dst, a, b } => {
+                self.binary_stmt_typed(dst, a, b, BinaryOp::Div, Some(type_from_size(dst.size)))
             }
-            SSAOp::IntRem { dst, a, b } | SSAOp::IntSRem { dst, a, b } => {
-                self.binary_stmt(dst, a, b, BinaryOp::Mod)
+            SSAOp::IntRem { dst, a, b } => self.binary_stmt_typed(
+                dst,
+                a,
+                b,
+                BinaryOp::Mod,
+                Some(uint_type_from_size(dst.size)),
+            ),
+            SSAOp::IntSRem { dst, a, b } => {
+                self.binary_stmt_typed(dst, a, b, BinaryOp::Mod, Some(type_from_size(dst.size)))
             }
             SSAOp::IntAnd { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::BitAnd),
             SSAOp::IntOr { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::BitOr),
             SSAOp::IntXor { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::BitXor),
             SSAOp::IntLeft { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Shl),
-            SSAOp::IntRight { dst, a, b } | SSAOp::IntSRight { dst, a, b } => {
-                self.binary_stmt(dst, a, b, BinaryOp::Shr)
+            SSAOp::IntRight { dst, a, b } => self.binary_stmt_typed(
+                dst,
+                a,
+                b,
+                BinaryOp::Shr,
+                Some(uint_type_from_size(dst.size)),
+            ),
+            SSAOp::IntSRight { dst, a, b } => {
+                self.binary_stmt_typed(dst, a, b, BinaryOp::Shr, Some(type_from_size(dst.size)))
             }
-            SSAOp::IntLess { dst, a, b } | SSAOp::IntSLess { dst, a, b } => {
-                self.binary_stmt(dst, a, b, BinaryOp::Lt)
-            }
-            SSAOp::IntLessEqual { dst, a, b } | SSAOp::IntSLessEqual { dst, a, b } => {
-                self.binary_stmt(dst, a, b, BinaryOp::Le)
-            }
+            SSAOp::IntLess { dst, a, b } => self.binary_stmt_typed(
+                dst,
+                a,
+                b,
+                BinaryOp::Lt,
+                Some(uint_type_from_size(a.size.max(b.size))),
+            ),
+            SSAOp::IntSLess { dst, a, b } => self.binary_stmt_typed(
+                dst,
+                a,
+                b,
+                BinaryOp::Lt,
+                Some(type_from_size(a.size.max(b.size))),
+            ),
+            SSAOp::IntLessEqual { dst, a, b } => self.binary_stmt_typed(
+                dst,
+                a,
+                b,
+                BinaryOp::Le,
+                Some(uint_type_from_size(a.size.max(b.size))),
+            ),
+            SSAOp::IntSLessEqual { dst, a, b } => self.binary_stmt_typed(
+                dst,
+                a,
+                b,
+                BinaryOp::Le,
+                Some(type_from_size(a.size.max(b.size))),
+            ),
             SSAOp::IntEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Eq),
             SSAOp::IntNotEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Ne),
             SSAOp::IntNegate { dst, src } => {
@@ -2899,11 +2982,30 @@ impl<'a> FoldingContext<'a> {
 
     /// Create a binary operation statement.
     fn binary_stmt(&self, dst: &SSAVar, a: &SSAVar, b: &SSAVar, op: BinaryOp) -> Option<CStmt> {
+        self.binary_stmt_typed(dst, a, b, op, None)
+    }
+
+    fn binary_stmt_typed(
+        &self,
+        dst: &SSAVar,
+        a: &SSAVar,
+        b: &SSAVar,
+        op: BinaryOp,
+        operand_ty: Option<CType>,
+    ) -> Option<CStmt> {
         let lhs = CExpr::Var(self.var_name(dst));
+        let mut lhs_expr = self.get_expr(a);
+        let mut rhs_expr = self.get_expr(b);
+        if let Some(ty) = operand_ty {
+            let a_hint = self.type_hint_for_var(a);
+            let b_hint = self.type_hint_for_var(b);
+            lhs_expr = self.cast_expr_if_needed(lhs_expr, ty.clone(), a_hint.as_ref());
+            rhs_expr = self.cast_expr_if_needed(rhs_expr, ty, b_hint.as_ref());
+        }
         let rhs_raw = self.identity_simplify_binary(
             op,
-            self.get_expr(a),
-            self.get_expr(b),
+            lhs_expr,
+            rhs_expr,
             (dst.size > 0).then_some(dst.size),
         );
         let rhs = if matches!(
@@ -2914,6 +3016,7 @@ impl<'a> FoldingContext<'a> {
         } else {
             rhs_raw
         };
+        let rhs = self.assignment_rhs_with_type_policy(dst, None, rhs);
         self.assign_stmt(lhs, rhs)
     }
 
@@ -4399,8 +4502,10 @@ pub(crate) fn parse_const_value(name: &str) -> Option<u64> {
         .strip_prefix("0x")
         .or_else(|| val_str.strip_prefix("0X"))
     {
-        u64::from_str_radix(hex, 16).ok()
-    } else if val_str.chars().all(|c| c.is_ascii_hexdigit()) {
+        return u64::from_str_radix(hex, 16).ok();
+    }
+
+    if val_str.chars().all(|c| c.is_ascii_hexdigit()) {
         // All hex digits - could be hex without 0x prefix
         // Try hex first if it contains a-f, otherwise try decimal
         if val_str.chars().any(|c| c.is_ascii_alphabetic()) {
@@ -4440,13 +4545,19 @@ fn extract_call_address(name: &str) -> Option<u64> {
     // Try const:address format
     if let Some(rest) = name.strip_prefix("const:") {
         let addr_str = rest.split('_').next().unwrap_or(rest);
+        if let Some(dec) = addr_str
+            .strip_prefix("0d")
+            .or_else(|| addr_str.strip_prefix("0D"))
+        {
+            return dec.parse().ok();
+        }
         if let Some(hex) = addr_str
             .strip_prefix("0x")
             .or_else(|| addr_str.strip_prefix("0X"))
         {
             return u64::from_str_radix(hex, 16).ok();
         }
-        // Try as plain hex
+        // Plain const payloads are interpreted as addresses in hex form.
         return u64::from_str_radix(addr_str, 16).ok();
     }
 
@@ -4479,15 +4590,6 @@ fn uint_type_from_size(size: u32) -> CType {
         8 => CType::UInt(64),
         _ => CType::UInt(size.saturating_mul(8)),
     }
-}
-
-fn reinterpret_decimal_as_hex(offset: u64) -> Option<u64> {
-    let text = offset.to_string();
-    if text.chars().any(|c| !c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let parsed = u64::from_str_radix(&text, 16).ok()?;
-    if parsed == offset { None } else { Some(parsed) }
 }
 
 /// Fold expressions in a block, returning simplified C statements.

@@ -52,6 +52,7 @@ pub use variable::VariableRecovery;
 use r2ssa::SSAFunction;
 use r2types::ExternalTypeDb;
 use r2types::TypeOracle;
+use types::FunctionType;
 
 fn is_generic_arg_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
@@ -161,6 +162,8 @@ pub struct DecompilerContext {
     pub symbols: std::collections::HashMap<u64, String>,
     /// Optional external function signature.
     pub function_signature: Option<ExternalFunctionSignature>,
+    /// Optional known function signatures from host analysis.
+    pub known_function_signatures: std::collections::HashMap<String, FunctionType>,
     /// Stack variables keyed by signed stack offset.
     pub stack_vars: std::collections::HashMap<i64, ExternalStackVar>,
     /// Optional external host type database (e.g. tsj payload).
@@ -206,6 +209,14 @@ impl Decompiler {
     /// Set an externally recovered function signature.
     pub fn set_function_signature(&mut self, signature: Option<ExternalFunctionSignature>) {
         self.context.function_signature = signature;
+    }
+
+    /// Set externally recovered known function signatures keyed by name.
+    pub fn set_known_function_signatures(
+        &mut self,
+        signatures: std::collections::HashMap<String, FunctionType>,
+    ) {
+        self.context.known_function_signatures = signatures;
     }
 
     /// Set externally recovered stack variables keyed by signed stack offset.
@@ -303,6 +314,10 @@ impl Decompiler {
 
     /// Build a C function from an SSA function.
     pub fn build_function(&self, func: &SSAFunction) -> CFunction {
+        // Materialize phis on non-critical edges to reduce SSA artifacts in output.
+        let normalized_func = normalize::materialize_phis(func);
+        let func = &normalized_func;
+
         // Recover variables
         let mut var_recovery = VariableRecovery::new(
             &self.config.sp_name,
@@ -321,6 +336,9 @@ impl Decompiler {
         }
         if self.context.function_signature.is_some() {
             type_inference.set_external_signature(self.context.function_signature.clone());
+        }
+        for (name, signature) in &self.context.known_function_signatures {
+            type_inference.add_function_type(name, signature.clone());
         }
         if !self.context.stack_vars.is_empty() {
             type_inference.set_external_stack_vars(self.context.stack_vars.clone());

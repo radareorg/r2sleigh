@@ -4214,6 +4214,19 @@ fn parse_external_signature(
     ptr_bits: u32,
 ) -> Option<r2dec::ExternalFunctionSignature> {
     let entries = serde_json::from_str::<Vec<AfcfjFunction>>(json_str).ok()?;
+    parse_afcfj_signature_entries(entries, ptr_bits)
+}
+
+#[derive(Debug, Default)]
+struct ParsedSignatureContext {
+    current: Option<r2dec::ExternalFunctionSignature>,
+    known: std::collections::HashMap<String, r2dec::types::FunctionType>,
+}
+
+fn parse_afcfj_signature_entries(
+    entries: Vec<AfcfjFunction>,
+    ptr_bits: u32,
+) -> Option<r2dec::ExternalFunctionSignature> {
     let first = entries.into_iter().next()?;
 
     let mut used_names = std::collections::HashSet::new();
@@ -4245,6 +4258,134 @@ fn parse_external_signature(
         .and_then(|raw| parse_external_type(raw, ptr_bits));
 
     Some(r2dec::ExternalFunctionSignature { ret_type, params })
+}
+
+fn parse_afcfj_signature_value(
+    value: &serde_json::Value,
+    ptr_bits: u32,
+) -> Option<r2dec::ExternalFunctionSignature> {
+    if value.is_array() {
+        let entries = serde_json::from_value::<Vec<AfcfjFunction>>(value.clone()).ok()?;
+        return parse_afcfj_signature_entries(entries, ptr_bits);
+    }
+    if value.is_object() {
+        let entry = serde_json::from_value::<AfcfjFunction>(value.clone()).ok()?;
+        return parse_afcfj_signature_entries(vec![entry], ptr_bits);
+    }
+    None
+}
+
+fn maybe_insert_known_signature(
+    known: &mut std::collections::HashMap<String, r2dec::types::FunctionType>,
+    name: &str,
+    sig: r2dec::types::FunctionType,
+) {
+    if name.is_empty() {
+        return;
+    }
+    known.insert(name.to_string(), sig.clone());
+
+    for prefix in ["sym.imp.", "sym.", "dbg.", "fcn."] {
+        if let Some(stripped) = name.strip_prefix(prefix)
+            && !stripped.is_empty()
+        {
+            known.insert(stripped.to_string(), sig.clone());
+        }
+    }
+}
+
+fn parse_known_function_signatures(
+    value: &serde_json::Value,
+    ptr_bits: u32,
+) -> std::collections::HashMap<String, r2dec::types::FunctionType> {
+    let mut out = std::collections::HashMap::new();
+    let Some(entries) = value.as_array() else {
+        return out;
+    };
+
+    for entry in entries {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+
+        let Some(name) = obj.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        let mut params = Vec::new();
+        if let Some(args) = obj.get("args").and_then(|v| v.as_array()) {
+            for arg in args {
+                if let Some(arg_obj) = arg.as_object() {
+                    let ty = arg_obj
+                        .get("type")
+                        .or_else(|| arg_obj.get("ty"))
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| parse_external_type(raw, ptr_bits));
+                    params.push(ty.unwrap_or(r2dec::CType::Unknown));
+                } else if let Some(raw) = arg.as_str() {
+                    params.push(parse_external_type(raw, ptr_bits).unwrap_or(r2dec::CType::Unknown));
+                }
+            }
+        } else if let Some(argtypes) = obj.get("argtypes").and_then(|v| v.as_array()) {
+            for raw in argtypes.iter().filter_map(|v| v.as_str()) {
+                params.push(parse_external_type(raw, ptr_bits).unwrap_or(r2dec::CType::Unknown));
+            }
+        }
+
+        let ret = obj
+            .get("return")
+            .or_else(|| obj.get("ret"))
+            .or_else(|| obj.get("return_type"))
+            .or_else(|| obj.get("rettype"))
+            .or_else(|| obj.get("type"))
+            .and_then(|v| v.as_str())
+            .and_then(|raw| parse_external_type(raw, ptr_bits))
+            .unwrap_or(r2dec::CType::Unknown);
+
+        let variadic = obj
+            .get("variadic")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if params.is_empty() && matches!(ret, r2dec::CType::Unknown) {
+            continue;
+        }
+
+        let sig = r2dec::types::FunctionType {
+            return_type: ret,
+            params,
+            variadic,
+        };
+        maybe_insert_known_signature(&mut out, name, sig);
+    }
+
+    out
+}
+
+fn parse_signature_context(json_str: &str, ptr_bits: u32) -> ParsedSignatureContext {
+    let mut parsed = ParsedSignatureContext::default();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
+        parsed.current = parse_external_signature(json_str, ptr_bits);
+        return parsed;
+    };
+
+    if value.is_array() {
+        parsed.current = parse_afcfj_signature_value(&value, ptr_bits);
+        return parsed;
+    }
+
+    let Some(obj) = value.as_object() else {
+        return parsed;
+    };
+
+    if let Some(current) = obj.get("current") {
+        parsed.current = parse_afcfj_signature_value(current, ptr_bits);
+    }
+    if let Some(known) = obj.get("known") {
+        parsed.known = parse_known_function_signatures(known, ptr_bits);
+    }
+
+    parsed
 }
 
 fn parse_external_stack_vars(
@@ -4399,10 +4540,14 @@ pub extern "C" fn r2dec_function_with_context(
         decompiler.set_symbols(parse_addr_name_map(json_str));
     }
 
-    // Parse external signature JSON (`afcfj`).
+    // Parse external signature JSON (legacy `afcfj` array or context object).
     if !signature_json.is_null() {
         let json_str = unsafe { CStr::from_ptr(signature_json).to_str().unwrap_or("[]") };
-        decompiler.set_function_signature(parse_external_signature(json_str, ptr_bits));
+        let sig_ctx = parse_signature_context(json_str, ptr_bits);
+        decompiler.set_function_signature(sig_ctx.current);
+        if !sig_ctx.known.is_empty() {
+            decompiler.set_known_function_signatures(sig_ctx.known);
+        }
     }
 
     // Parse external stack variables JSON (`afvj`).
@@ -4985,15 +5130,15 @@ fn parse_const_value(name: &str) -> Option<u64> {
         .strip_prefix("0x")
         .or_else(|| val_str.strip_prefix("0X"))
     {
-        u64::from_str_radix(hex, 16).ok()
-    } else {
-        // Try parsing as decimal first
-        if let Ok(v) = val_str.parse::<u64>() {
-            return Some(v);
-        }
-        // Try parsing as hex without 0x prefix (common for constants like "ffffffffffffffb8")
-        u64::from_str_radix(val_str, 16).ok()
+        return u64::from_str_radix(hex, 16).ok();
     }
+
+    // Try parsing as decimal first
+    if let Ok(v) = val_str.parse::<u64>() {
+        return Some(v);
+    }
+    // Try parsing as hex without 0x prefix (common for constants like "ffffffffffffffb8")
+    u64::from_str_radix(val_str, 16).ok()
 }
 
 /// Convert size in bytes to C type string
@@ -5140,6 +5285,43 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_signature_context_legacy_array() {
+        let json = r#"[{"name":"dbg.main","return":"int32_t","args":[{"name":"x","type":"int32_t"}]}]"#;
+        let ctx = parse_signature_context(json, 64);
+        assert!(ctx.current.is_some(), "legacy payload should parse current signature");
+        assert!(
+            ctx.known.is_empty(),
+            "legacy payload should not synthesize known signatures"
+        );
+    }
+
+    #[test]
+    fn test_parse_signature_context_object_with_known() {
+        let json = r#"{
+          "current":[{"name":"dbg.main","return":"int32_t","args":[{"name":"x","type":"int32_t"}]}],
+          "known":[
+            {"name":"sym.imp.printf","return":"int32_t","args":[{"name":"fmt","type":"char *"}],"variadic":true},
+            {"name":"sym.imp.strlen","return":"size_t","args":[{"name":"s","type":"char *"}]}
+          ],
+          "cc":{"sysv":{"ret":"rax"}}
+        }"#;
+        let ctx = parse_signature_context(json, 64);
+        assert!(ctx.current.is_some(), "current signature should parse");
+        assert!(
+            ctx.known.contains_key("sym.imp.printf"),
+            "known map should include original symbol names"
+        );
+        assert!(
+            ctx.known.contains_key("printf"),
+            "known map should include stripped fallback aliases"
+        );
+        assert!(
+            ctx.known.contains_key("sym.imp.strlen"),
+            "known map should include additional signatures"
+        );
+    }
+
+    #[test]
     fn test_parse_external_stack_vars_bp_sp() {
         let json = r#"{"sp":[{"name":"var_8h","kind":"var","type":"int64_t","ref":{"base":"RSP","offset":80}}],"bp":[{"name":"buf","kind":"var","type":"char[64]","ref":{"base":"RBP","offset":-64}},{"name":"user_input","kind":"var","type":"char *","ref":{"base":"RBP","offset":-72}}]}"#;
         let vars = parse_external_stack_vars(json, 64);
@@ -5244,7 +5426,9 @@ mod tests {
         assert!(
             output.contains("thirteenth")
                 || output.contains("*(rdi + 30)")
-                || output.contains("*(rdi + const_30)"),
+                || output.contains("*(rdi + const_30)")
+                || output.contains("*(rdi + 48)")
+                || output.contains("*(rdi + const_48)"),
             "decompiler should keep decompilation stable with tsj context, got: {}",
             output
         );

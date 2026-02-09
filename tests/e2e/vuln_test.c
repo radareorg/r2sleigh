@@ -313,6 +313,17 @@ int test_struct_array_index(DemoStruct *arr, int idx, int v) {
     return arr[idx].third + arr[idx].fourteenth;
 }
 
+typedef struct {
+    char pad[0x100];
+    int marker;
+} LargeOffsetStruct;
+
+// Test 29: Large constant offset should remain 0x100 (hex) in recovered access patterns
+int test_struct_offset_0x100(LargeOffsetStruct *obj, int v) {
+    obj->marker = v;
+    return obj->marker + 1;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -531,6 +542,18 @@ int main(int argc, char *argv[]) {
                     idx,
                     v,
                     test_struct_array_index(arr, idx, v)
+                );
+            }
+            break;
+        }
+        case 29: {
+            LargeOffsetStruct obj = {0};
+            if (argc > 2) {
+                int v = atoi(argv[2]);
+                printf(
+                    "test_struct_offset_0x100(&obj, %d) = %d\n",
+                    v,
+                    test_struct_offset_0x100(&obj, v)
                 );
             }
             break;

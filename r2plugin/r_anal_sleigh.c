@@ -5,6 +5,7 @@
 #include <r_lib.h>
 #include <r_util/r_json.h>
 #include <r_util/r_num.h>
+#include <r_util/r_str.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -2416,11 +2417,39 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		}
 		free (fj);
 
-		/* Get structured function signature metadata for current function. */
-		signature_json = r_core_cmd_str (core, "afcfj");
-		if (!signature_json || signature_json[0] != '[') {
-			free (signature_json);
-			signature_json = strdup ("[]");
+		/* Build signature context payload:
+		 * {"current":[...], "known":[...], "cc":{...}}
+		 * Keep single FFI argument for ABI stability.
+		 */
+		char *signature_current_json = r_core_cmd_str (core, "afcfj");
+		if (!signature_current_json || signature_current_json[0] != '[') {
+			free (signature_current_json);
+			signature_current_json = strdup ("[]");
+		}
+
+		char *signature_known_json = r_core_cmd_str (core, "aflj");
+		if (!signature_known_json || signature_known_json[0] != '[') {
+			free (signature_known_json);
+			signature_known_json = strdup ("[]");
+		}
+
+		char *cc_json = r_core_cmd_str (core, "tccj");
+		if (!cc_json || (cc_json[0] != '{' && cc_json[0] != '[')) {
+			free (cc_json);
+			cc_json = strdup ("{}");
+		}
+
+		signature_json = r_str_newf (
+			"{\"current\":%s,\"known\":%s,\"cc\":%s}",
+			signature_current_json,
+			signature_known_json,
+			cc_json
+		);
+		free (signature_current_json);
+		free (signature_known_json);
+		free (cc_json);
+		if (!signature_json) {
+			signature_json = strdup ("{\"current\":[],\"known\":[],\"cc\":{}}");
 		}
 
 			/* Get recovered function variables metadata for current function. */
