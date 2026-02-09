@@ -4,6 +4,7 @@
 #include <r_core.h>
 #include <r_lib.h>
 #include <r_util/r_json.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* FFI declarations for r2sleigh Rust library */
@@ -94,6 +95,8 @@ static char *sleigh_arch_override = NULL;
 /* Minimum bytes to pass to libsla (it reads ahead for variable-length instructions) */
 #define SLEIGH_MIN_BYTES 16
 #define SLEIGH_BLOCK_MAX_BYTES 256
+#define SLEIGH_TAINT_MAX_BLOCKS 200
+#define SLEIGH_TAINT_LABEL_MAX 6
 
 /* Helper to lift all basic blocks of a function */
 typedef struct {
@@ -519,6 +522,664 @@ static void print_reg_values_json(RCons *cons, const RVecRArchValue *vec) {
 		r_cons_printf (cons, "\"%s\"", value->reg);
 		first = false;
 	}
+}
+
+typedef struct {
+	char *label;
+	ut64 *blocks;
+	size_t count;
+	size_t capacity;
+} TaintLabelSource;
+
+typedef struct {
+	TaintLabelSource *items;
+	size_t count;
+	size_t capacity;
+} TaintSourceMap;
+
+typedef struct {
+	ut64 addr;
+	int hits;
+	int call_hits;
+	int store_hits;
+	char **labels;
+	size_t nlabels;
+	size_t label_cap;
+} TaintBlockSummary;
+
+typedef struct {
+	TaintBlockSummary *items;
+	size_t count;
+	size_t capacity;
+} TaintSummaryMap;
+
+typedef struct {
+	ut64 from;
+	ut64 to;
+} EdgePair;
+
+typedef struct {
+	EdgePair *items;
+	size_t count;
+	size_t capacity;
+} EdgeSet;
+
+static bool append_unique_ut64(ut64 **items, size_t *count, size_t *capacity, ut64 value) {
+	size_t i;
+	ut64 *next;
+
+	if (!items || !count || !capacity) {
+		return false;
+	}
+
+	for (i = 0; i < *count; i++) {
+		if ((*items)[i] == value) {
+			return true;
+		}
+	}
+
+	if (*count >= *capacity) {
+		size_t new_capacity = *capacity ? (*capacity * 2) : 4;
+		next = realloc (*items, new_capacity * sizeof (ut64));
+		if (!next) {
+			return false;
+		}
+		*items = next;
+		*capacity = new_capacity;
+	}
+
+	(*items)[(*count)++] = value;
+	return true;
+}
+
+static bool append_unique_string(char ***items, size_t *count, size_t *capacity, const char *value) {
+	size_t i;
+	char **next;
+	char *dup;
+
+	if (!items || !count || !capacity || !value || !*value) {
+		return false;
+	}
+
+	for (i = 0; i < *count; i++) {
+		if (!strcmp ((*items)[i], value)) {
+			return true;
+		}
+	}
+
+	if (*count >= *capacity) {
+		size_t new_capacity = *capacity ? (*capacity * 2) : 4;
+		next = realloc (*items, new_capacity * sizeof (char *));
+		if (!next) {
+			return false;
+		}
+		*items = next;
+		*capacity = new_capacity;
+	}
+
+	dup = strdup (value);
+	if (!dup) {
+		return false;
+	}
+	(*items)[(*count)++] = dup;
+	return true;
+}
+
+static void free_string_array(char **items, size_t count) {
+	size_t i;
+	if (!items) {
+		return;
+	}
+	for (i = 0; i < count; i++) {
+		free (items[i]);
+	}
+	free (items);
+}
+
+static void taint_source_map_init(TaintSourceMap *map) {
+	if (!map) {
+		return;
+	}
+	map->items = NULL;
+	map->count = 0;
+	map->capacity = 0;
+}
+
+static void taint_source_map_free(TaintSourceMap *map) {
+	size_t i;
+	if (!map) {
+		return;
+	}
+	for (i = 0; i < map->count; i++) {
+		free (map->items[i].label);
+		free (map->items[i].blocks);
+	}
+	free (map->items);
+	map->items = NULL;
+	map->count = 0;
+	map->capacity = 0;
+}
+
+static TaintLabelSource *taint_source_map_get_or_add(TaintSourceMap *map, const char *label) {
+	size_t i;
+	TaintLabelSource *next;
+
+	if (!map || !label || !*label) {
+		return NULL;
+	}
+
+	for (i = 0; i < map->count; i++) {
+		if (!strcmp (map->items[i].label, label)) {
+			return &map->items[i];
+		}
+	}
+
+	if (map->count >= map->capacity) {
+		size_t new_capacity = map->capacity ? (map->capacity * 2) : 8;
+		next = realloc (map->items, new_capacity * sizeof (TaintLabelSource));
+		if (!next) {
+			return NULL;
+		}
+		map->items = next;
+		map->capacity = new_capacity;
+	}
+
+	map->items[map->count].label = strdup (label);
+	map->items[map->count].blocks = NULL;
+	map->items[map->count].count = 0;
+	map->items[map->count].capacity = 0;
+	if (!map->items[map->count].label) {
+		return NULL;
+	}
+	return &map->items[map->count++];
+}
+
+static const TaintLabelSource *taint_source_map_find(const TaintSourceMap *map, const char *label) {
+	size_t i;
+	if (!map || !label || !*label) {
+		return NULL;
+	}
+	for (i = 0; i < map->count; i++) {
+		if (!strcmp (map->items[i].label, label)) {
+			return &map->items[i];
+		}
+	}
+	return NULL;
+}
+
+static bool taint_source_map_add(TaintSourceMap *map, const char *label, ut64 block_addr) {
+	TaintLabelSource *entry = taint_source_map_get_or_add (map, label);
+	if (!entry) {
+		return false;
+	}
+	return append_unique_ut64 (&entry->blocks, &entry->count, &entry->capacity, block_addr);
+}
+
+static void taint_summary_map_init(TaintSummaryMap *map) {
+	if (!map) {
+		return;
+	}
+	map->items = NULL;
+	map->count = 0;
+	map->capacity = 0;
+}
+
+static void taint_summary_map_free(TaintSummaryMap *map) {
+	size_t i;
+	if (!map) {
+		return;
+	}
+	for (i = 0; i < map->count; i++) {
+		free_string_array (map->items[i].labels, map->items[i].nlabels);
+	}
+	free (map->items);
+	map->items = NULL;
+	map->count = 0;
+	map->capacity = 0;
+}
+
+static TaintBlockSummary *taint_summary_map_get_or_add(TaintSummaryMap *map, ut64 addr) {
+	size_t i;
+	TaintBlockSummary *next;
+
+	if (!map) {
+		return NULL;
+	}
+	for (i = 0; i < map->count; i++) {
+		if (map->items[i].addr == addr) {
+			return &map->items[i];
+		}
+	}
+
+	if (map->count >= map->capacity) {
+		size_t new_capacity = map->capacity ? (map->capacity * 2) : 8;
+		next = realloc (map->items, new_capacity * sizeof (TaintBlockSummary));
+		if (!next) {
+			return NULL;
+		}
+		map->items = next;
+		map->capacity = new_capacity;
+	}
+
+	map->items[map->count].addr = addr;
+	map->items[map->count].hits = 0;
+	map->items[map->count].call_hits = 0;
+	map->items[map->count].store_hits = 0;
+	map->items[map->count].labels = NULL;
+	map->items[map->count].nlabels = 0;
+	map->items[map->count].label_cap = 0;
+	return &map->items[map->count++];
+}
+
+static bool taint_summary_add_label(TaintBlockSummary *summary, const char *label) {
+	if (!summary) {
+		return false;
+	}
+	return append_unique_string (&summary->labels, &summary->nlabels, &summary->label_cap, label);
+}
+
+static void edge_set_init(EdgeSet *set) {
+	if (!set) {
+		return;
+	}
+	set->items = NULL;
+	set->count = 0;
+	set->capacity = 0;
+}
+
+static void edge_set_free(EdgeSet *set) {
+	if (!set) {
+		return;
+	}
+	free (set->items);
+	set->items = NULL;
+	set->count = 0;
+	set->capacity = 0;
+}
+
+static bool edge_set_has(const EdgeSet *set, ut64 from, ut64 to) {
+	size_t i;
+	if (!set) {
+		return false;
+	}
+	for (i = 0; i < set->count; i++) {
+		if (set->items[i].from == from && set->items[i].to == to) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool edge_set_add(EdgeSet *set, ut64 from, ut64 to) {
+	EdgePair *next;
+
+	if (!set) {
+		return false;
+	}
+	if (edge_set_has (set, from, to)) {
+		return true;
+	}
+
+	if (set->count >= set->capacity) {
+		size_t new_capacity = set->capacity ? (set->capacity * 2) : 8;
+		next = realloc (set->items, new_capacity * sizeof (EdgePair));
+		if (!next) {
+			return false;
+		}
+		set->items = next;
+		set->capacity = new_capacity;
+	}
+
+	set->items[set->count].from = from;
+	set->items[set->count].to = to;
+	set->count++;
+	return true;
+}
+
+static bool is_noisy_taint_label(const char *label) {
+	if (!label || !*label) {
+		return true;
+	}
+
+	return !strcmp (label, "input:rsp")
+		|| !strcmp (label, "input:rbp")
+		|| !strcmp (label, "input:esp")
+		|| !strcmp (label, "input:ebp")
+		|| !strcmp (label, "input:sp")
+		|| !strcmp (label, "input:bp")
+		|| !strcmp (label, "input:rip")
+		|| !strcmp (label, "input:eip")
+		|| !strcmp (label, "input:ip")
+		|| r_str_startswith (label, "input:ram:");
+}
+
+static int label_rank(const char *label) {
+	const char *name = label;
+	if (!name) {
+		return 1000;
+	}
+	if (r_str_startswith (name, "input:")) {
+		name += 6;
+	}
+
+	if (!strcmp (name, "rdi") || !strcmp (name, "edi")) {
+		return 0;
+	}
+	if (!strcmp (name, "rsi") || !strcmp (name, "esi")) {
+		return 1;
+	}
+	if (!strcmp (name, "rdx") || !strcmp (name, "edx")) {
+		return 2;
+	}
+	if (!strcmp (name, "rcx") || !strcmp (name, "ecx")) {
+		return 3;
+	}
+	if (!strcmp (name, "r8") || !strcmp (name, "r8d")) {
+		return 4;
+	}
+	if (!strcmp (name, "r9") || !strcmp (name, "r9d")) {
+		return 5;
+	}
+	if (!strcmp (name, "rax") || !strcmp (name, "eax")) {
+		return 10;
+	}
+	if (!strcmp (name, "rbx") || !strcmp (name, "ebx")) {
+		return 11;
+	}
+	if (!strcmp (name, "r10") || !strcmp (name, "r10d")) {
+		return 12;
+	}
+	if (!strcmp (name, "r11") || !strcmp (name, "r11d")) {
+		return 13;
+	}
+	if (!strcmp (name, "r12") || !strcmp (name, "r12d")) {
+		return 14;
+	}
+	if (!strcmp (name, "r13") || !strcmp (name, "r13d")) {
+		return 15;
+	}
+	if (!strcmp (name, "r14") || !strcmp (name, "r14d")) {
+		return 16;
+	}
+	if (!strcmp (name, "r15") || !strcmp (name, "r15d")) {
+		return 17;
+	}
+	if (r_str_startswith (name, "xmm")) {
+		return 40;
+	}
+	if (r_str_startswith (name, "input:")) {
+		return 90;
+	}
+	return 100;
+}
+
+static int cmp_labels_interesting(const void *a, const void *b) {
+	const char *la = *(const char * const *)a;
+	const char *lb = *(const char * const *)b;
+	int ra = label_rank (la);
+	int rb = label_rank (lb);
+
+	if (ra < rb) {
+		return -1;
+	}
+	if (ra > rb) {
+		return 1;
+	}
+	return strcmp (la ? la : "", lb ? lb : "");
+}
+
+static bool is_sla_taint_line(const char *line, size_t len) {
+	const char *prefix = "sla.taint:";
+	size_t prefix_len = strlen (prefix);
+
+	if (!line) {
+		return false;
+	}
+	while (len > 0 && (*line == ' ' || *line == '\t')) {
+		line++;
+		len--;
+	}
+	return len >= prefix_len && !strncmp (line, prefix, prefix_len);
+}
+
+static bool append_bytes(char **buf, size_t *len, size_t *cap, const char *src, size_t src_len) {
+	char *next;
+
+	if (!buf || !len || !cap || !src) {
+		return false;
+	}
+	if (*len + src_len + 1 > *cap) {
+		size_t new_cap = *cap ? *cap : 64;
+		while (*len + src_len + 1 > new_cap) {
+			new_cap *= 2;
+		}
+		next = realloc (*buf, new_cap);
+		if (!next) {
+			return false;
+		}
+		*buf = next;
+		*cap = new_cap;
+	}
+	memcpy (*buf + *len, src, src_len);
+	*len += src_len;
+	(*buf)[*len] = '\0';
+	return true;
+}
+
+static char *strip_sla_taint_line(const char *existing_comment) {
+	const char *cursor;
+	char *out = NULL;
+	size_t out_len = 0;
+	size_t out_cap = 0;
+	bool first = true;
+
+	if (!existing_comment || !*existing_comment) {
+		return strdup ("");
+	}
+
+	cursor = existing_comment;
+	while (*cursor) {
+		const char *line_start = cursor;
+		const char *line_end = strchr (cursor, '\n');
+		size_t line_len = line_end ? (size_t)(line_end - line_start) : strlen (line_start);
+
+		if (!is_sla_taint_line (line_start, line_len)) {
+			if (!first) {
+				append_bytes (&out, &out_len, &out_cap, "\n", 1);
+			}
+			append_bytes (&out, &out_len, &out_cap, line_start, line_len);
+			first = false;
+		}
+
+		if (!line_end) {
+			break;
+		}
+			cursor = line_end + 1;
+	}
+
+	if (!out) {
+		return strdup ("");
+	}
+	return out;
+}
+
+static char *merge_sla_taint_line(const char *existing_comment, const char *taint_line) {
+	char *cleaned;
+	char *merged;
+	size_t cleaned_len;
+	size_t taint_len;
+
+	if (!taint_line || !*taint_line) {
+		return strip_sla_taint_line (existing_comment);
+	}
+
+	cleaned = strip_sla_taint_line (existing_comment);
+	if (!cleaned) {
+		return NULL;
+	}
+	if (!*cleaned) {
+		free (cleaned);
+		return strdup (taint_line);
+	}
+
+	cleaned_len = strlen (cleaned);
+	taint_len = strlen (taint_line);
+	merged = malloc (cleaned_len + 1 + taint_len + 1);
+	if (!merged) {
+		free (cleaned);
+		return NULL;
+	}
+	memcpy (merged, cleaned, cleaned_len);
+	merged[cleaned_len] = '\n';
+	memcpy (merged + cleaned_len + 1, taint_line, taint_len);
+	merged[cleaned_len + 1 + taint_len] = '\0';
+	free (cleaned);
+	return merged;
+}
+
+static void set_sla_taint_comment_line(RAnal *anal, ut64 addr, const char *taint_line) {
+	const char *existing;
+	char *updated;
+
+	if (!anal) {
+		return;
+	}
+
+	existing = r_meta_get_string (anal, R_META_TYPE_COMMENT, addr);
+	updated = taint_line
+		? merge_sla_taint_line (existing, taint_line)
+		: strip_sla_taint_line (existing);
+	if (!updated) {
+		return;
+	}
+
+	if (*updated) {
+		r_meta_set_string (anal, R_META_TYPE_COMMENT, addr, updated);
+	} else {
+		r_meta_del (anal, R_META_TYPE_COMMENT, addr, 1);
+	}
+	free (updated);
+}
+
+static void clear_taint_function_artifacts(RAnal *anal, RCore *core, const RAnalFunction *fcn, const BlockArray *blocks) {
+	size_t i;
+	char glob[128];
+
+	if (!anal || !fcn || !blocks) {
+		return;
+	}
+
+	if (core && core->flags) {
+		snprintf (glob, sizeof (glob), "sla.taint.fcn_%"PFMT64x".*", fcn->addr);
+		r_flag_unset_glob (core->flags, glob);
+	}
+
+	for (i = 0; i < blocks->count; i++) {
+		set_sla_taint_comment_line (anal, r2il_block_addr (blocks->blocks[i]), NULL);
+	}
+}
+
+static bool has_xref(RAnal *anal, ut64 from, ut64 to, RAnalRefType type) {
+	RVecAnalRef *refs;
+	size_t i;
+	size_t len;
+
+	if (!anal) {
+		return false;
+	}
+	refs = r_anal_xrefs_get (anal, to);
+	if (!refs) {
+		return false;
+	}
+
+	len = RVecAnalRef_length (refs);
+	for (i = 0; i < len; i++) {
+		RAnalRef *ref = RVecAnalRef_at (refs, i);
+		if (ref && ref->at == from && ref->addr == to && ref->type == type) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool maybe_add_taint_xref(RAnal *anal, EdgeSet *seen, ut64 from, ut64 to, RAnalRefType type, int *added_count) {
+	if (!anal || !seen || !from || !to) {
+		return false;
+	}
+	if (edge_set_has (seen, from, to)) {
+		return false;
+	}
+	if (!edge_set_add (seen, from, to)) {
+		return false;
+	}
+	if (has_xref (anal, from, to, type)) {
+		return false;
+	}
+	if (r_anal_xrefs_set (anal, from, to, type)) {
+		if (added_count) {
+			(*added_count)++;
+		}
+		return true;
+	}
+	return false;
+}
+
+static char *format_taint_summary_comment(TaintBlockSummary *summary) {
+	char *comment;
+	char *cursor;
+	size_t total_len;
+	size_t i;
+	size_t label_limit;
+	int prefix_len;
+
+	if (!summary || !summary->labels || summary->nlabels == 0) {
+		return NULL;
+	}
+
+	qsort (summary->labels, summary->nlabels, sizeof (char *), cmp_labels_interesting);
+	label_limit = R_MIN (summary->nlabels, (size_t)SLEIGH_TAINT_LABEL_MAX);
+
+	prefix_len = snprintf (NULL, 0, "sla.taint: hits=%d calls=%d stores=%d labels=",
+		summary->hits, summary->call_hits, summary->store_hits);
+	if (prefix_len < 0) {
+		return NULL;
+	}
+
+	total_len = (size_t)prefix_len;
+	for (i = 0; i < label_limit; i++) {
+		total_len += strlen (summary->labels[i]);
+		if (i > 0) {
+			total_len += 1;
+		}
+	}
+	if (summary->nlabels > label_limit) {
+		total_len += 4;
+	}
+
+	comment = calloc (1, total_len + 1);
+	if (!comment) {
+		return NULL;
+	}
+
+	snprintf (comment, total_len + 1, "sla.taint: hits=%d calls=%d stores=%d labels=",
+		summary->hits, summary->call_hits, summary->store_hits);
+	cursor = comment + strlen (comment);
+
+	for (i = 0; i < label_limit; i++) {
+		if (i > 0) {
+			*cursor++ = ',';
+		}
+		size_t label_len = strlen (summary->labels[i]);
+		memcpy (cursor, summary->labels[i], label_len);
+		cursor += label_len;
+	}
+	if (summary->nlabels > label_limit) {
+		memcpy (cursor, ",...", 4);
+		cursor += 4;
+	}
+	*cursor = '\0';
+	return comment;
 }
 
 /* Lift all basic blocks of a function */
@@ -1852,9 +2513,23 @@ static int sleigh_eligible(RAnal *anal) {
 /* Called at end of aaaa for global post-analysis passes */
 static bool sleigh_post_analysis(RAnal *anal) {
 	R2ILContext *ctx = get_context (anal);
+	RCore *core;
+	int xrefs_added = 0;
+	int taint_comments = 0;
+	int taint_flags = 0;
+	int taint_xrefs = 0;
+	int taint_parse_failures = 0;
+	int taint_fcns_eligible = 0;
+	int taint_fcns_skipped = 0;
+	int taint_sink_hits = 0;
+	int best_sink_rank = 1000;
+	ut64 best_sink_addr = 0;
+	char *best_sink_label = NULL;
+
 	if (!ctx) {
 		return false;
 	}
+	core = anal->coreb.core;
 
 	int num_fcns = r_list_length (anal->fcns);
 	if (num_fcns == 0) {
@@ -1863,76 +2538,288 @@ static bool sleigh_post_analysis(RAnal *anal) {
 
 	R_LOG_INFO ("r2sleigh: post-analysis xref pass over %d functions", num_fcns);
 
-	int xrefs_added = 0;
 	RListIter *iter;
 	RAnalFunction *fcn;
 	r_list_foreach (anal->fcns, iter, fcn) {
+		int bb_count = (fcn && fcn->bbs) ? r_list_length (fcn->bbs) : 0;
+		bool taint_eligible = bb_count <= SLEIGH_TAINT_MAX_BLOCKS;
+		const char *fcn_name = (fcn && fcn->name) ? fcn->name : "unknown";
 		BlockArray blocks;
-		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+		char *json;
+		RJson *root;
+
+		if (taint_eligible) {
+			taint_fcns_eligible++;
+		} else {
+			taint_fcns_skipped++;
+		}
+
+		if (!fcn || !lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			continue;
 		}
 
-		char *json = r2sleigh_get_data_refs (ctx,
+		json = r2sleigh_get_data_refs (ctx,
 			(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
-		block_array_free (&blocks);
-
 		if (!json || !*json) {
 			r2il_string_free (json);
-			continue;
+		} else {
+			root = r_json_parse (json);
+			if (!root || root->type != R_JSON_ARRAY) {
+				r_json_free (root);
+				r2il_string_free (json);
+			} else {
+				const RJson *item;
+				for (item = root->children.first; item; item = item->next) {
+					if (item->type != R_JSON_OBJECT) {
+						continue;
+					}
+					const RJson *j_from = r_json_get (item, "from");
+					const RJson *j_to = r_json_get (item, "to");
+					const RJson *j_type = r_json_get (item, "type");
+					if (!j_from || !j_to) {
+						continue;
+					}
+
+					ut64 from = (ut64)j_from->num.u_value;
+					ut64 to = (ut64)j_to->num.u_value;
+					RAnalRefType type = R_ANAL_REF_TYPE_DATA;
+
+					if (j_type && j_type->str_value) {
+						switch (j_type->str_value[0]) {
+						case 'c':
+						case 'C':
+							type = R_ANAL_REF_TYPE_CALL;
+							break;
+						case 'j':
+						case 'J':
+							type = R_ANAL_REF_TYPE_JUMP;
+							break;
+						case 's':
+						case 'S':
+							type = R_ANAL_REF_TYPE_STRN;
+							break;
+						default:
+							type = R_ANAL_REF_TYPE_DATA;
+						}
+					}
+
+					if (r_anal_xrefs_set (anal, from, to, type)) {
+						xrefs_added++;
+					}
+				}
+				r_json_free (root);
+				r2il_string_free (json);
+			}
 		}
 
-		RJson *root = r_json_parse (json);
-		if (!root || root->type != R_JSON_ARRAY) {
-			r_json_free (root);
-			r2il_string_free (json);
-			continue;
-		}
+		/* Remove previous auto-generated taint artifacts for this function. */
+		clear_taint_function_artifacts (anal, core, fcn, &blocks);
 
-		const RJson *item;
-		for (item = root->children.first; item; item = item->next) {
-			if (item->type != R_JSON_OBJECT) {
-				continue;
-			}
-			const RJson *j_from = r_json_get (item, "from");
-			const RJson *j_to = r_json_get (item, "to");
-			const RJson *j_type = r_json_get (item, "type");
-			if (!j_from || !j_to) {
-				continue;
-			}
+		if (taint_eligible) {
+			char *taint_json = r2taint_function_json (ctx,
+				(const R2ILBlock **)blocks.blocks, blocks.count);
+			if (taint_json && *taint_json) {
+				RJson *taint_root = r_json_parse (taint_json);
+				if (!taint_root || taint_root->type != R_JSON_OBJECT) {
+					taint_parse_failures++;
+					R_LOG_WARN ("r2sleigh: taint post-analysis parse failed for %s @ 0x%"PFMT64x,
+						fcn_name, fcn->addr);
+					r_json_free (taint_root);
+				} else {
+					const RJson *j_sources = r_json_get (taint_root, "sources");
+					const RJson *j_sink_hits = r_json_get (taint_root, "sink_hits");
+					TaintSourceMap source_map;
+					TaintSummaryMap summaries;
+					EdgeSet seen_edges;
 
-			ut64 from = (ut64)j_from->num.u_value;
-			ut64 to = (ut64)j_to->num.u_value;
-			RAnalRefType type = R_ANAL_REF_TYPE_DATA;
+					taint_source_map_init (&source_map);
+					taint_summary_map_init (&summaries);
+					edge_set_init (&seen_edges);
 
-			if (j_type && j_type->str_value) {
-				switch (j_type->str_value[0]) {
-				case 'c':
-				case 'C':
-					type = R_ANAL_REF_TYPE_CALL;
-					break;
-				case 'j':
-				case 'J':
-					type = R_ANAL_REF_TYPE_JUMP;
-					break;
-				case 's':
-				case 'S':
-					type = R_ANAL_REF_TYPE_STRN;
-					break;
-				default:
-					type = R_ANAL_REF_TYPE_DATA;
+					if (j_sources && j_sources->type == R_JSON_ARRAY) {
+						const RJson *src_item;
+						for (src_item = j_sources->children.first; src_item; src_item = src_item->next) {
+							const RJson *j_block;
+							const RJson *j_labels;
+							const RJson *label;
+							ut64 src_block;
+
+							if (src_item->type != R_JSON_OBJECT) {
+								continue;
+							}
+							j_block = r_json_get (src_item, "block");
+							j_labels = r_json_get (src_item, "labels");
+							if (!j_block || !j_labels || j_labels->type != R_JSON_ARRAY) {
+								continue;
+							}
+							src_block = (ut64)j_block->num.u_value;
+							for (label = j_labels->children.first; label; label = label->next) {
+								if (label->type == R_JSON_STRING && label->str_value) {
+									taint_source_map_add (&source_map, label->str_value, src_block);
+								}
+							}
+						}
+					}
+
+					if (!j_sink_hits || j_sink_hits->type != R_JSON_ARRAY) {
+						taint_parse_failures++;
+						R_LOG_WARN ("r2sleigh: taint sink_hits missing/invalid for %s @ 0x%"PFMT64x,
+							fcn_name, fcn->addr);
+					} else {
+						const RJson *hit_item;
+						for (hit_item = j_sink_hits->children.first; hit_item; hit_item = hit_item->next) {
+							const RJson *j_block;
+							const RJson *j_op;
+							const RJson *j_tainted_vars;
+							const RJson *tv_item;
+							const char *op_name = NULL;
+							char **sink_labels = NULL;
+							size_t sink_label_count = 0;
+							size_t sink_label_cap = 0;
+							size_t li;
+							ut64 sink_block;
+							bool had_primary_sources = false;
+							bool added_nonself = false;
+
+							if (hit_item->type != R_JSON_OBJECT) {
+								continue;
+							}
+
+							j_block = r_json_get (hit_item, "block");
+							j_op = r_json_get (hit_item, "op");
+							j_tainted_vars = r_json_get (hit_item, "tainted_vars");
+							if (!j_block || !j_tainted_vars || j_tainted_vars->type != R_JSON_ARRAY) {
+								continue;
+							}
+							sink_block = (ut64)j_block->num.u_value;
+
+							if (j_op && j_op->type == R_JSON_OBJECT) {
+								const RJson *j_op_name = r_json_get (j_op, "op");
+								if (j_op_name && j_op_name->type == R_JSON_STRING && j_op_name->str_value) {
+									op_name = j_op_name->str_value;
+								}
+							}
+
+							for (tv_item = j_tainted_vars->children.first; tv_item; tv_item = tv_item->next) {
+								const RJson *j_labels;
+								const RJson *label;
+								if (tv_item->type != R_JSON_OBJECT) {
+									continue;
+								}
+								j_labels = r_json_get (tv_item, "labels");
+								if (!j_labels || j_labels->type != R_JSON_ARRAY) {
+									continue;
+								}
+								for (label = j_labels->children.first; label; label = label->next) {
+									if (label->type != R_JSON_STRING || !label->str_value) {
+										continue;
+									}
+									if (is_noisy_taint_label (label->str_value)) {
+										continue;
+									}
+									append_unique_string (&sink_labels, &sink_label_count, &sink_label_cap, label->str_value);
+								}
+							}
+
+							if (sink_label_count == 0) {
+								free_string_array (sink_labels, sink_label_count);
+								continue;
+							}
+
+							taint_sink_hits++;
+							TaintBlockSummary *summary = taint_summary_map_get_or_add (&summaries, sink_block);
+							if (summary) {
+								summary->hits++;
+								if (op_name && (!strcmp (op_name, "Call") || !strcmp (op_name, "CallInd"))) {
+									summary->call_hits++;
+								}
+								if (op_name && !strcmp (op_name, "Store")) {
+									summary->store_hits++;
+								}
+								for (li = 0; li < sink_label_count; li++) {
+									taint_summary_add_label (summary, sink_labels[li]);
+								}
+							}
+
+							for (li = 0; li < sink_label_count; li++) {
+								const TaintLabelSource *srcs = taint_source_map_find (&source_map, sink_labels[li]);
+								size_t si;
+								if (!srcs || srcs->count == 0) {
+									continue;
+								}
+								had_primary_sources = true;
+								for (si = 0; si < srcs->count; si++) {
+									ut64 src_block = srcs->blocks[si];
+									if (src_block == sink_block) {
+										continue;
+									}
+									if (maybe_add_taint_xref (anal, &seen_edges, src_block, sink_block, R_ANAL_REF_TYPE_DATA, &taint_xrefs)) {
+										added_nonself = true;
+									}
+								}
+							}
+
+							if (had_primary_sources && !added_nonself && sink_block != fcn->addr) {
+								maybe_add_taint_xref (anal, &seen_edges, fcn->addr, sink_block, R_ANAL_REF_TYPE_DATA, &taint_xrefs);
+							}
+
+							free_string_array (sink_labels, sink_label_count);
+						}
+					}
+
+					size_t si;
+					for (si = 0; si < summaries.count; si++) {
+						TaintBlockSummary *summary = &summaries.items[si];
+						char *comment = format_taint_summary_comment (summary);
+						if (!comment || !*comment) {
+							free (comment);
+							continue;
+						}
+						set_sla_taint_comment_line (anal, summary->addr, comment);
+						taint_comments++;
+
+						if (core && core->flags) {
+							char flag_name[160];
+							snprintf (flag_name, sizeof (flag_name),
+								"sla.taint.fcn_%"PFMT64x".blk_%"PFMT64x, fcn->addr, summary->addr);
+							if (r_flag_set (core->flags, flag_name, summary->addr, 1)) {
+								taint_flags++;
+							}
+						}
+
+						if (summary->labels && summary->nlabels > 0) {
+							int rank = label_rank (summary->labels[0]);
+							if (rank < best_sink_rank) {
+								free (best_sink_label);
+								best_sink_label = strdup (summary->labels[0]);
+								best_sink_addr = summary->addr;
+								best_sink_rank = rank;
+							}
+						}
+						free (comment);
+					}
+
+					edge_set_free (&seen_edges);
+					taint_summary_map_free (&summaries);
+					taint_source_map_free (&source_map);
+					r_json_free (taint_root);
 				}
 			}
-
-			if (r_anal_xrefs_set (anal, from, to, type)) {
-				xrefs_added++;
-			}
+			r2il_string_free (taint_json);
 		}
 
-		r_json_free (root);
-		r2il_string_free (json);
+		block_array_free (&blocks);
 	}
 
 	R_LOG_INFO ("r2sleigh: post-analysis added %d xrefs", xrefs_added);
+	R_LOG_INFO ("r2sleigh: post-analysis taint eligible=%d skipped=%d comments=%d flags=%d xrefs=%d sink_hits=%d parse_failures=%d",
+		taint_fcns_eligible, taint_fcns_skipped, taint_comments, taint_flags, taint_xrefs,
+		taint_sink_hits, taint_parse_failures);
+	if (best_sink_label) {
+		R_LOG_INFO ("r2sleigh: post-analysis most interesting sink 0x%"PFMT64x" label=%s",
+			best_sink_addr, best_sink_label);
+		free (best_sink_label);
+	}
 	return true;
 }
 

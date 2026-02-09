@@ -1421,4 +1421,133 @@ mod deep_integration {
             "aaaa should run plugin post-analysis hooks"
         );
     }
+
+    #[test]
+    fn aaaa_auto_taint_writes_comment_vuln_memcpy() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.vuln_memcpy", "aaaa; s dbg.vuln_memcpy; CC.");
+        result.assert_ok();
+        assert!(
+            result.contains("sla.taint: hits="),
+            "post-analysis should annotate vuln_memcpy with taint summary"
+        );
+        assert!(
+            result.contains("labels="),
+            "taint summary should include labels"
+        );
+        let taint_line = result
+            .stdout
+            .lines()
+            .find(|line| line.contains("sla.taint:"))
+            .unwrap_or("");
+        assert!(
+            !taint_line.trim_end().ends_with("labels="),
+            "taint labels should not be empty"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_taint_writes_flag_vuln_memcpy() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.vuln_memcpy",
+            "aaaa; f~sla.taint.fcn_4012c9.blk_4012c9",
+        );
+        result.assert_ok();
+        assert!(
+            result.contains("sla.taint.fcn_4012c9.blk_4012c9"),
+            "post-analysis should create taint flag for vuln_memcpy block"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_taint_idempotent_comment_line() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.vuln_memcpy",
+            "aaaa; aaaa; s dbg.vuln_memcpy; CC.",
+        );
+        result.assert_ok();
+        let count = result.stdout.matches("sla.taint:").count();
+        assert_eq!(count, 1, "taint comment should not duplicate across repeated aaaa");
+    }
+
+    #[test]
+    fn aaaa_auto_taint_noise_filter_applied() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.vuln_memcpy", "aaaa; s dbg.vuln_memcpy; CC.");
+        result.assert_ok();
+        assert!(
+            !result.contains("input:rsp"),
+            "noise filter should remove rsp-only taint labels from comments"
+        );
+        assert!(
+            !result.contains("input:ram:"),
+            "noise filter should remove ram:* taint labels from comments"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_taint_no_comment_for_filtered_clean_case() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_setlocale_wrapper",
+            "aaaa; s dbg.test_setlocale_wrapper; CC.",
+        );
+        result.assert_ok();
+        assert!(
+            !result.contains("sla.taint:"),
+            "function with only filtered taint labels should not get auto-taint comment"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_taint_preserves_user_comment() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.vuln_memcpy",
+            "s 0x4012cd; CCu user-note; aaaa; s 0x4012cd; CC.; s dbg.vuln_memcpy; CC.",
+        );
+        result.assert_ok();
+        assert!(
+            result.contains("user-note"),
+            "user comment should be preserved after taint annotation"
+        );
+        assert!(
+            result.contains("sla.taint:"),
+            "taint summary should coexist with existing user comment"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_taint_emits_xref_with_entry_fallback() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.main", "aaaa; s 0x401814; axtj");
+        result.assert_ok();
+        let json = parse_json(&result, "axtj");
+        let refs = expect_array(&json, "axtj");
+        let has_expected_ref = refs.iter().any(|item| {
+            item.get("from").and_then(Value::as_u64) == Some(0x4017c4)
+                && item.get("type").and_then(Value::as_str) == Some("DATA")
+        });
+        assert!(
+            has_expected_ref,
+            "should emit DATA xref from main entry (0x4017c4) to tainted sink block (0x401814)"
+        );
+    }
+
+    #[test]
+    fn aaaa_post_analysis_still_succeeds() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "main", "aaaa");
+        result.assert_ok();
+        assert!(
+            !result.contains("ERROR"),
+            "aaaa should still complete successfully after auto-taint integration"
+        );
+    }
 }
