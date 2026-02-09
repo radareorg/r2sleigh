@@ -5,7 +5,7 @@ mod tests {
     use r2sleigh_lift::Disassembler;
     use r2ssa::block::to_ssa;
     use r2ssa::taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintSet};
-    use r2ssa::{def_use, SSAFunction, SSAOp, SSAVar};
+    use r2ssa::{SSAFunction, SSAOp, SSAVar, def_use};
 
     fn create_x86_64_disasm() -> Disassembler {
         // Use sleigh-config precompiled data
@@ -174,6 +174,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1000,
                 size: 3,
+                switch_info: None,
                 ops: vec![
                     // mov rax, rdi
                     R2ILOp::Copy {
@@ -185,6 +186,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1003,
                 size: 3,
+                switch_info: None,
                 ops: vec![
                     // mov [rbx], rax
                     R2ILOp::Store {
@@ -249,6 +251,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1000,
                 size: 3,
+                switch_info: None,
                 ops: vec![
                     // mov rax, rdi
                     R2ILOp::Copy {
@@ -260,6 +263,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1003,
                 size: 4,
+                switch_info: None,
                 ops: vec![
                     // and rax, 0xff (mask - should clear taint per our policy)
                     R2ILOp::IntAnd {
@@ -272,6 +276,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1007,
                 size: 3,
+                switch_info: None,
                 ops: vec![
                     // call rax (would be a sink, but RAX is now clean)
                     R2ILOp::Call {
@@ -306,6 +311,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1000,
                 size: 2,
+                switch_info: None,
                 ops: vec![R2ILOp::CBranch {
                     target: make_const(0x1010, 8), // jump to right
                     cond: make_const(1, 1),
@@ -315,6 +321,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1002,
                 size: 3,
+                switch_info: None,
                 ops: vec![
                     R2ILOp::Copy {
                         dst: make_reg(RAX, 8),
@@ -329,6 +336,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1010,
                 size: 3,
+                switch_info: None,
                 ops: vec![R2ILOp::Copy {
                     dst: make_reg(RAX, 8),
                     src: make_reg(RSI, 8),
@@ -338,6 +346,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1020,
                 size: 3,
+                switch_info: None,
                 ops: vec![R2ILOp::Store {
                     space: SpaceId::Ram,
                     addr: make_reg(RCX, 8),

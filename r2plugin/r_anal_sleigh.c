@@ -76,7 +76,8 @@ extern char *r2dec_function(const R2ILContext *ctx, const R2ILBlock **blocks, si
 extern char *r2dec_function_with_context(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
                                           const char *func_name, const char *func_names_json,
                                           const char *strings_json, const char *symbols_json,
-                                          const char *signature_json, const char *stack_vars_json);
+                                          const char *signature_json, const char *stack_vars_json,
+                                          const char *types_json);
 
 /* CFG */
 extern char *r2cfg_function_ascii(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
@@ -2321,6 +2322,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		char *symbols_json = NULL;
 		char *signature_json = NULL;
 		char *stack_vars_json = NULL;
+		char *types_json = NULL;
 
 		/* Get function list as JSON and convert to our format */
 		/* aflj returns [{addr:0x401000,name:"main"}, ...] */
@@ -2421,17 +2423,24 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			signature_json = strdup ("[]");
 		}
 
-		/* Get recovered function variables metadata for current function. */
-		stack_vars_json = r_core_cmd_str (core, "afvj");
-		if (!stack_vars_json || stack_vars_json[0] != '{') {
-			free (stack_vars_json);
-			stack_vars_json = strdup ("{}");
-		}
+			/* Get recovered function variables metadata for current function. */
+			stack_vars_json = r_core_cmd_str (core, "afvj");
+			if (!stack_vars_json || stack_vars_json[0] != '{') {
+				free (stack_vars_json);
+				stack_vars_json = strdup ("{}");
+			}
 
-		/* Decompile with context */
-		char *result = r2dec_function_with_context (ctx, (const R2ILBlock **)blocks.blocks, blocks.count,
-		                                             fcn->name, func_names_json, strings_json, symbols_json,
-		                                             signature_json, stack_vars_json);
+			/* Get host type DB metadata (structs) in JSON form. */
+			types_json = r_core_cmd_str (core, "tsj");
+			if (!types_json || (types_json[0] != '{' && types_json[0] != '[')) {
+				free (types_json);
+				types_json = strdup ("{}");
+			}
+
+			/* Decompile with context */
+			char *result = r2dec_function_with_context (ctx, (const R2ILBlock **)blocks.blocks, blocks.count,
+			                                             fcn->name, func_names_json, strings_json, symbols_json,
+			                                             signature_json, stack_vars_json, types_json);
 
 		if (cons) {
 			if (result && result[0]) {
@@ -2447,12 +2456,13 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		}
 		free (func_names_json);
 		free (strings_json);
-		free (symbols_json);
-		free (signature_json);
-		free (stack_vars_json);
-		block_array_free (&blocks);
-		return strdup("");
-	}
+			free (symbols_json);
+			free (signature_json);
+			free (stack_vars_json);
+			free (types_json);
+			block_array_free (&blocks);
+			return strdup("");
+		}
 
 	if (!strcmp (cmd, "sla.cfg") || !strcmp (cmd, "sla.cfg.json")) {
 		R2ILContext *ctx = get_context (anal);

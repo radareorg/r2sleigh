@@ -11,7 +11,7 @@ pub(crate) struct StackScratch {
     pub(crate) info: StackInfo,
 }
 
-pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, env: &PassEnv) -> StackInfo {
+pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, env: &PassEnv<'_>) -> StackInfo {
     let mut scratch = StackScratch::default();
 
     analyze_stack_vars(&mut scratch, blocks, use_info, env);
@@ -23,7 +23,7 @@ fn analyze_stack_vars(
     scratch: &mut StackScratch,
     blocks: &[SSABlock],
     use_info: &UseInfo,
-    env: &PassEnv,
+    env: &PassEnv<'_>,
 ) {
     for block in blocks {
         for op in &block.ops {
@@ -158,7 +158,7 @@ fn stack_var_for_addr_var(
     definitions: &HashMap<String, CExpr>,
     stack_vars: &HashMap<i64, String>,
     var_aliases: &HashMap<String, String>,
-    env: &PassEnv,
+    env: &PassEnv<'_>,
 ) -> Option<String> {
     let addr_key = addr.display_name();
     if let Some(alias) = resolve_stack_alias_from_addr_expr(
@@ -185,6 +185,7 @@ fn stack_var_for_addr_var(
         function_names: &env.function_names,
         strings: &env.strings,
         symbols: &env.symbols,
+        type_oracle: env.type_oracle,
     };
     let rendered = lower.var_name(addr);
     if let Some(alias) = resolve_stack_alias_from_addr_expr(
@@ -206,7 +207,7 @@ fn resolve_stack_alias_from_addr_expr(
     expr: &CExpr,
     definitions: &HashMap<String, CExpr>,
     stack_vars: &HashMap<i64, String>,
-    env: &PassEnv,
+    env: &PassEnv<'_>,
     depth: u32,
     visited: &mut HashSet<String>,
 ) -> Option<String> {

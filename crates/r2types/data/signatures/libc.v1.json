@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "signatures": {
+    "memcpy": {
+      "return": "void*",
+      "params": ["void*", "void*", "size_t"],
+      "variadic": false
+    },
+    "printf": {
+      "return": "i32",
+      "params": ["char*"],
+      "variadic": true
+    },
+    "strcmp": {
+      "return": "i32",
+      "params": ["char*", "char*"],
+      "variadic": false
+    },
+    "strlen": {
+      "return": "size_t",
+      "params": ["char*"],
+      "variadic": false
+    },
+    "malloc": {
+      "return": "void*",
+      "params": ["size_t"],
+      "variadic": false
+    },
+    "calloc": {
+      "return": "void*",
+      "params": ["size_t", "size_t"],
+      "variadic": false
+    },
+    "realloc": {
+      "return": "void*",
+      "params": ["void*", "size_t"],
+      "variadic": false
+    },
+    "free": {
+      "return": "void",
+      "params": ["void*"],
+      "variadic": false
+    },
+    "memset": {
+      "return": "void*",
+      "params": ["void*", "i32", "size_t"],
+      "variadic": false
+    },
+    "memmove": {
+      "return": "void*",
+      "params": ["void*", "void*", "size_t"],
+      "variadic": false
+    },
+    "strncpy": {
+      "return": "char*",
+      "params": ["char*", "char*", "size_t"],
+      "variadic": false
+    },
+    "snprintf": {
+      "return": "i32",
+      "params": ["char*", "size_t", "char*"],
+      "variadic": true
+    },
+    "fopen": {
+      "return": "void*",
+      "params": ["char*", "char*"],
+      "variadic": false
+    },
+    "fclose": {
+      "return": "i32",
+      "params": ["void*"],
+      "variadic": false
+    },
+    "fread": {
+      "return": "size_t",
+      "params": ["void*", "size_t", "size_t", "void*"],
+      "variadic": false
+    },
+    "fwrite": {
+      "return": "size_t",
+      "params": ["void*", "size_t", "size_t", "void*"],
+      "variadic": false
+    },
+    "atoi": {
+      "return": "i32",
+      "params": ["char*"],
+      "variadic": false
+    },
+    "strtol": {
+      "return": "i64",
+      "params": ["char*", "char**", "i32"],
+      "variadic": false
+    },
+    "strchr": {
+      "return": "char*",
+      "params": ["char*", "i32"],
+      "variadic": false
+    },
+    "strrchr": {
+      "return": "char*",
+      "params": ["char*", "i32"],
+      "variadic": false
+    },
+    "strstr": {
+      "return": "char*",
+      "params": ["char*", "char*"],
+      "variadic": false
+    }
+  }
+}

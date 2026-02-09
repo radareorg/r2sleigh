@@ -546,7 +546,10 @@ mod tests {
     fn test_var_to_expr_unknown_address_falls_back() {
         let builder = ExpressionBuilder::new(64);
         let var = SSAVar::new("const:5000", 0, 8);
-        assert_eq!(builder.var_to_expr(&var), CExpr::Var("const_5000".to_string()));
+        assert_eq!(
+            builder.var_to_expr(&var),
+            CExpr::Var("const_5000".to_string())
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use z3::ast::{Bool, BV};
+use z3::ast::{BV, Bool};
 use z3::{Context, Model, Params, Solver};
 
 use crate::state::SymState;

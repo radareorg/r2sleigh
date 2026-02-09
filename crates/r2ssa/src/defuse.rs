@@ -4,10 +4,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::SSABlock;
 use crate::function::{DefLocation, SSAFunction};
 use crate::op::SSAOp;
 use crate::var::SSAVar;
-use crate::SSABlock;
 
 /// Information about where a variable is defined and used.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

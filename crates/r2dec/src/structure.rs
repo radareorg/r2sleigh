@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAFunction;
+use r2types::TypeOracle;
 
 use crate::ExternalStackVar;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
@@ -16,11 +17,11 @@ use crate::region::{Region, RegionAnalyzer};
 /// Control flow structurer.
 ///
 /// Converts a region tree into structured C statements.
-pub struct ControlFlowStructurer<'a> {
+pub struct ControlFlowStructurer<'a, 'o> {
     func: &'a SSAFunction,
     expr_builder: ExpressionBuilder,
     /// Folding context for expression optimization.
-    fold_ctx: Option<FoldingContext>,
+    fold_ctx: Option<FoldingContext<'o>>,
     /// Labels for blocks that need gotos.
     labels: HashMap<u64, String>,
     /// Counter for generating unique labels.
@@ -35,7 +36,7 @@ pub struct ControlFlowStructurer<'a> {
     safety_reason: Option<String>,
 }
 
-impl<'a> ControlFlowStructurer<'a> {
+impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     /// Create a new structurer with the specified pointer size.
     /// NOTE: Call set_function_names/set_strings/set_symbols before structure()
     /// so that definitions are resolved with full context.
@@ -154,6 +155,13 @@ impl<'a> ControlFlowStructurer<'a> {
     pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
         if let Some(ref mut ctx) = self.fold_ctx {
             ctx.set_type_hints(hints);
+        }
+    }
+
+    /// Set optional type oracle for type-driven expression recovery.
+    pub fn set_type_oracle(&mut self, type_oracle: Option<&'o dyn TypeOracle>) {
+        if let Some(ref mut ctx) = self.fold_ctx {
+            ctx.set_type_oracle(type_oracle);
         }
     }
 
@@ -609,8 +617,7 @@ impl<'a> ControlFlowStructurer<'a> {
         preheader_stmt: CStmt,
         while_stmt: CStmt,
     ) -> Option<Vec<CStmt>> {
-        let (prefix_stmts, init_stmt, induction_var) =
-            Self::split_preheader_init(preheader_stmt)?;
+        let (prefix_stmts, init_stmt, induction_var) = Self::split_preheader_init(preheader_stmt)?;
         let CStmt::While { cond, body } = while_stmt else {
             return None;
         };
@@ -868,8 +875,11 @@ impl<'a> ControlFlowStructurer<'a> {
                 Self::collect_expr_vars_into(then_expr, out);
                 Self::collect_expr_vars_into(else_expr, out);
             }
-            CExpr::Cast { expr, .. } | CExpr::Paren(expr) | CExpr::Deref(expr)
-            | CExpr::AddrOf(expr) | CExpr::Sizeof(expr) => Self::collect_expr_vars_into(expr, out),
+            CExpr::Cast { expr, .. }
+            | CExpr::Paren(expr)
+            | CExpr::Deref(expr)
+            | CExpr::AddrOf(expr)
+            | CExpr::Sizeof(expr) => Self::collect_expr_vars_into(expr, out),
             CExpr::Call { func, args } => {
                 Self::collect_expr_vars_into(func, out);
                 for arg in args {
@@ -1057,7 +1067,10 @@ mod tests {
         };
         assert!(init.is_some(), "for-loop should keep init statement");
         assert!(cond.is_some(), "for-loop should keep loop condition");
-        assert!(update.is_some(), "for-loop should extract update expression");
+        assert!(
+            update.is_some(),
+            "for-loop should extract update expression"
+        );
         assert!(
             !matches!(*body, CStmt::Empty),
             "for-loop body should retain side-effect statements"
@@ -1095,11 +1108,23 @@ mod tests {
             panic!("Expected guarded while(1) rewrite to produce CStmt::For");
         };
         assert!(
-            matches!(cond, CExpr::Unary { op: UnaryOp::Not, .. }),
+            matches!(
+                cond,
+                CExpr::Unary {
+                    op: UnaryOp::Not,
+                    ..
+                }
+            ),
             "guard-break form should negate break condition for for-loop cond"
         );
         assert!(
-            matches!(update, CExpr::Unary { op: UnaryOp::PostInc, .. }),
+            matches!(
+                update,
+                CExpr::Unary {
+                    op: UnaryOp::PostInc,
+                    ..
+                }
+            ),
             "guard-break form should preserve update expression"
         );
     }

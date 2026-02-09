@@ -294,6 +294,25 @@ int test_global_symbol_flow(int x) {
     return global_counter;
 }
 
+// Test 26: Mixed struct offsets from same base pointer
+int test_struct_mixed_offsets(DemoStruct *obj, int x) {
+    obj->first = x;
+    obj->fifth = x + 5;
+    obj->thirteenth = obj->fifth + 1;
+    return obj->thirteenth + obj->first;
+}
+
+// Test 27: Non-4-byte stride array indexing
+uint16_t test_u16_stride(uint16_t *arr, int idx) {
+    return arr[idx];
+}
+
+// Test 28: Pointer-to-struct-array indexing pattern
+int test_struct_array_index(DemoStruct *arr, int idx, int v) {
+    arr[idx].third = v;
+    return arr[idx].third + arr[idx].fourteenth;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -478,6 +497,44 @@ int main(int argc, char *argv[]) {
                 printf("test_global_symbol_flow(%d) = %d\n", x, test_global_symbol_flow(x));
             }
             break;
+        case 26: {
+            DemoStruct obj = {0};
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf(
+                    "test_struct_mixed_offsets(&obj, %d) = %d\n",
+                    x,
+                    test_struct_mixed_offsets(&obj, x)
+                );
+            }
+            break;
+        }
+        case 27: {
+            uint16_t arr[] = {10, 20, 30, 40, 50};
+            if (argc > 2) {
+                int idx = atoi(argv[2]);
+                printf(
+                    "test_u16_stride(arr, %d) = %u\n",
+                    idx,
+                    (unsigned int)test_u16_stride(arr, idx)
+                );
+            }
+            break;
+        }
+        case 28: {
+            DemoStruct arr[4] = {0};
+            if (argc > 3) {
+                int idx = atoi(argv[2]);
+                int v = atoi(argv[3]);
+                printf(
+                    "test_struct_array_index(arr, %d, %d) = %d\n",
+                    idx,
+                    v,
+                    test_struct_array_index(arr, idx, v)
+                );
+            }
+            break;
+        }
         default:
             printf("Unknown test: %d\n", test);
             return 1;

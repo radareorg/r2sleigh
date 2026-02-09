@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use z3::ast::{Bool, BV};
+use z3::ast::{BV, Bool};
 use z3::{Context, SatResult, Solver};
 
 use crate::value::SymValue;

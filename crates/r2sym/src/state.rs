@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use z3::ast::{Bool, BV};
 use z3::Context;
+use z3::ast::{BV, Bool};
 
 use crate::memory::SymMemory;
 use crate::value::SymValue;

@@ -37,9 +37,9 @@ pub use context::LiftContext;
 pub use disasm::Disassembler;
 pub use esil::{format_op, op_to_esil, op_to_esil_named};
 pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
-pub use sleigh::{build_arch_spec, extract_arch_spec, get_sleigh_info, SleighInfo};
-pub use userops::userop_map_for_arch;
 use r2il::ArchSpec;
+pub use sleigh::{SleighInfo, build_arch_spec, extract_arch_spec, get_sleigh_info};
+pub use userops::userop_map_for_arch;
 
 /// Errors that can occur during lifting.
 #[derive(Debug, Error)]

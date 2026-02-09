@@ -8,8 +8,8 @@
 use std::fmt;
 
 use std::marker::PhantomData;
-use z3::ast::BV;
 use z3::Context;
+use z3::ast::BV;
 
 /// A symbolic value that can be concrete, symbolic, or unknown.
 ///
@@ -324,11 +324,7 @@ impl<'ctx> SymValue<'ctx> {
                 new_value &= low_mask;
                 if src_bits > 0 && ((new_value >> (src_bits - 1)) & 1) == 1 {
                     let extend_mask = if new_bits >= 64 {
-                        if src_bits >= 64 {
-                            0
-                        } else {
-                            !low_mask
-                        }
+                        if src_bits >= 64 { 0 } else { !low_mask }
                     } else {
                         let new_mask = (1u64 << new_bits) - 1;
                         new_mask & !low_mask

@@ -32,11 +32,10 @@ pub mod var;
 pub use block::SSABlock;
 pub use cfg::{BasicBlock, BlockTerminator, CFG, CFGEdge};
 pub use defuse::{
-    backward_slice_from_op, backward_slice_from_var, BackwardSlice, DefUseInfo, SliceOpRef,
-    def_use,
+    BackwardSlice, DefUseInfo, SliceOpRef, backward_slice_from_op, backward_slice_from_var, def_use,
 };
 pub use function::{PhiNode, SSABlock as FunctionSSABlock, SSAFunction};
 pub use op::SSAOp;
-pub use optimize::{optimize_function, OptimizationConfig, OptimizationStats};
+pub use optimize::{OptimizationConfig, OptimizationStats, optimize_function};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use var::SSAVar;

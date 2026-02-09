@@ -8,11 +8,11 @@
 
 use clap::{Parser, Subcommand};
 use r2il::serialize;
-use r2sleigh_lift::{create_arm_spec, create_x86_64_spec, Lifter};
+use r2sleigh_lift::{Lifter, create_arm_spec, create_x86_64_spec};
 use std::path::PathBuf;
 
 #[cfg(feature = "sleigh-config")]
-use r2sleigh_lift::{format_op, op_to_esil_named, userop_map_for_arch, Disassembler};
+use r2sleigh_lift::{Disassembler, format_op, op_to_esil_named, userop_map_for_arch};
 
 /// r2sleigh - Sleigh to r2il compiler for radare2
 #[derive(Parser)]
@@ -140,14 +140,18 @@ fn cmd_compile(input: &PathBuf, output: Option<&PathBuf>, _variant: &str) -> Res
     // Create spec based on architecture detection
     // Note: For raw .slaspec files, use sleigh-compiler to compile first.
     // This command works best with pre-built specs.
-    let spec = if arch_name.contains("x86") || arch_name.contains("ia") || arch_name.contains("64") {
+    let spec = if arch_name.contains("x86") || arch_name.contains("ia") || arch_name.contains("64")
+    {
         println!("  Detected x86-64 architecture");
         create_x86_64_spec()
     } else if arch_name.to_lowercase().contains("arm") {
         println!("  Detected ARM architecture");
         create_arm_spec()
     } else {
-        println!("  Using generic architecture based on filename: {}", arch_name);
+        println!(
+            "  Using generic architecture based on filename: {}",
+            arch_name
+        );
         // Create a minimal spec
         let lifter = Lifter::new(arch_name);
         lifter.compile().map_err(|e| e.to_string())?
@@ -182,7 +186,10 @@ fn cmd_info(input: &PathBuf, show_registers: bool, show_spaces: bool) -> Result<
     println!("r2il File: {}", input.display());
     println!("Architecture: {}", spec.name);
     println!("Variant: {}", spec.variant);
-    println!("Endianness: {}", if spec.big_endian { "big" } else { "little" });
+    println!(
+        "Endianness: {}",
+        if spec.big_endian { "big" } else { "little" }
+    );
     println!("Address size: {} bytes", spec.addr_size);
     println!("Alignment: {}", spec.alignment);
     println!("Registers: {}", spec.registers.len());
@@ -270,7 +277,10 @@ fn cmd_test_arch(arch: &str, output: Option<&PathBuf>) -> Result<(), String> {
 fn cmd_version() -> Result<(), String> {
     println!("r2sleigh {}", env!("CARGO_PKG_VERSION"));
     println!("r2il format version: {}", r2il::FORMAT_VERSION);
-    println!("Magic bytes: {:?}", std::str::from_utf8(r2il::MAGIC).unwrap_or("R2IL"));
+    println!(
+        "Magic bytes: {:?}",
+        std::str::from_utf8(r2il::MAGIC).unwrap_or("R2IL")
+    );
 
     #[cfg(feature = "sleigh-config")]
     println!("Disasm support: enabled");
@@ -286,7 +296,8 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
 
     match value {
         Value::Object(map) => {
-            let is_varnode = map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
+            let is_varnode =
+                map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
             if is_varnode {
                 let space = map.get("space").and_then(Value::as_str);
                 if let Some(space_str) = space {
@@ -376,7 +387,11 @@ fn build_disasm_json(
 }
 
 #[cfg(feature = "sleigh-config")]
-fn render_esil_lines(disasm: &Disassembler, bytes: &[u8], addr: u64) -> Result<Vec<String>, String> {
+fn render_esil_lines(
+    disasm: &Disassembler,
+    bytes: &[u8],
+    addr: u64,
+) -> Result<Vec<String>, String> {
     const MIN_BYTES: usize = 16;
     let mut lines = Vec::new();
     let mut offset = 0usize;
@@ -427,7 +442,9 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
     let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
         u64::from_str_radix(&addr_str[2..], 16).map_err(|e| format!("Invalid address: {}", e))?
     } else {
-        addr_str.parse::<u64>().map_err(|e| format!("Invalid address: {}", e))?
+        addr_str
+            .parse::<u64>()
+            .map_err(|e| format!("Invalid address: {}", e))?
     };
 
     // Parse hex bytes
@@ -442,10 +459,13 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
     let disasm = get_disassembler(arch)?;
 
     // Lift the instruction
-    let block = disasm.lift(&bytes, addr).map_err(|e| format!("Lift failed: {}", e))?;
+    let block = disasm
+        .lift(&bytes, addr)
+        .map_err(|e| format!("Lift failed: {}", e))?;
 
     // Also get the native disassembly for display
-    let (mnemonic, size) = disasm.disasm_native(&bytes, addr)
+    let (mnemonic, size) = disasm
+        .disasm_native(&bytes, addr)
         .map_err(|e| format!("Native disasm failed: {}", e))?;
 
     match format {
@@ -482,7 +502,7 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
             let mut disasm = Disassembler::from_sla(
                 sleigh_config::processor_x86::SLA_X86_64,
                 sleigh_config::processor_x86::PSPEC_X86_64,
-                "x86-64"
+                "x86-64",
             )
             .map_err(|e| e.to_string())?;
             disasm.set_userop_map(userop_map_for_arch("x86-64"));
@@ -493,7 +513,7 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
             let mut disasm = Disassembler::from_sla(
                 sleigh_config::processor_x86::SLA_X86,
                 sleigh_config::processor_x86::PSPEC_X86,
-                "x86"
+                "x86",
             )
             .map_err(|e| e.to_string())?;
             disasm.set_userop_map(userop_map_for_arch("x86"));
@@ -505,7 +525,7 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
                 sleigh_config::processor_arm::SLA_ARM8_LE,
                 // sleigh-config 1.x does not ship an ARM8 pspec; use a Cortex pspec instead.
                 sleigh_config::processor_arm::PSPEC_ARMCORTEX,
-                "ARM"
+                "ARM",
             )
             .map_err(|e| e.to_string())?;
             disasm.set_userop_map(userop_map_for_arch("arm"));
@@ -519,9 +539,16 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
             supported.push("arm");
 
             if supported.is_empty() {
-                Err("No architectures enabled. Build with --features x86 or --features arm".to_string())
+                Err(
+                    "No architectures enabled. Build with --features x86 or --features arm"
+                        .to_string(),
+                )
             } else {
-                Err(format!("Unknown architecture '{}'. Supported: {}", arch, supported.join(", ")))
+                Err(format!(
+                    "Unknown architecture '{}'. Supported: {}",
+                    arch,
+                    supported.join(", ")
+                ))
             }
         }
     }
@@ -534,13 +561,15 @@ mod tests {
     fn contains_named_register(value: &serde_json::Value) -> bool {
         match value {
             serde_json::Value::Object(map) => {
-                let is_varnode =
-                    map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
+                let is_varnode = map.contains_key("space")
+                    && map.contains_key("offset")
+                    && map.contains_key("size");
                 if is_varnode {
                     let space = map.get("space").and_then(serde_json::Value::as_str);
                     if let Some(space_str) = space {
                         if space_str.eq_ignore_ascii_case("register") {
-                            if let Some(name) = map.get("name").and_then(serde_json::Value::as_str) {
+                            if let Some(name) = map.get("name").and_then(serde_json::Value::as_str)
+                            {
                                 if !name.is_empty() {
                                     return true;
                                 }
@@ -563,7 +592,10 @@ mod tests {
         let block = disasm.lift(&bytes, 0x1000).expect("lift");
         let (mnemonic, size) = disasm.disasm_native(&bytes, 0x1000).expect("disasm");
         let json = build_disasm_json(&disasm, &block, &mnemonic, size).expect("json");
-        let ops = json.get("ops").and_then(serde_json::Value::as_array).expect("ops array");
+        let ops = json
+            .get("ops")
+            .and_then(serde_json::Value::as_array)
+            .expect("ops array");
         assert!(!ops.is_empty(), "CLI JSON should include ops");
         assert!(ops[0].is_object(), "CLI JSON ops should be objects");
         assert!(
@@ -578,7 +610,9 @@ mod tests {
         let bytes = hex::decode("31c00fa2c3ffffffffffffffffffffffff").expect("bytes");
         let lines = render_esil_lines(&disasm, &bytes, 0x1000).expect("render esil");
         assert!(
-            lines.iter().any(|line| line.contains("CALLOTHER(") && line.contains("cpuid")),
+            lines
+                .iter()
+                .any(|line| line.contains("CALLOTHER(") && line.contains("cpuid")),
             "ESIL should include named CallOther ops across multiple instructions"
         );
     }

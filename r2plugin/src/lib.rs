@@ -4,10 +4,10 @@
 //! specs from disk, or build Sleigh-based disassemblers and lift instruction
 //! bytes into r2il blocks with ESIL rendering.
 
-use r2il::{serialize, ArchSpec, R2ILBlock, R2ILOp};
 use r2il::serialize::UserOpDef;
+use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize};
+use r2sleigh_lift::{Disassembler, build_arch_spec, op_to_esil, userop_map_for_arch};
 use r2ssa::TaintPolicy;
-use r2sleigh_lift::{build_arch_spec, op_to_esil, userop_map_for_arch, Disassembler};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
@@ -128,13 +128,7 @@ pub extern "C" fn r2il_is_loaded(ctx: *const R2ILContext) -> i32 {
         return 0;
     }
 
-    unsafe {
-        if (*ctx).arch.is_some() {
-            1
-        } else {
-            0
-        }
-    }
+    unsafe { if (*ctx).arch.is_some() { 1 } else { 0 } }
 }
 
 /// Get the architecture name.
@@ -264,11 +258,19 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
             if sp.is_none() {
                 sp = Some(&reg.name);
             }
-        } else if name_lower == "bp" || name_lower == "rbp" || name_lower == "ebp" || name_lower == "fp" {
+        } else if name_lower == "bp"
+            || name_lower == "rbp"
+            || name_lower == "ebp"
+            || name_lower == "fp"
+        {
             if bp.is_none() {
                 bp = Some(&reg.name);
             }
-        } else if name_lower == "r0" || name_lower == "rax" || name_lower == "eax" || name_lower == "v0" {
+        } else if name_lower == "r0"
+            || name_lower == "rax"
+            || name_lower == "eax"
+            || name_lower == "v0"
+        {
             if r0.is_none() {
                 r0 = Some(&reg.name);
             }
@@ -407,7 +409,7 @@ pub extern "C" fn r2il_block_free(block: *mut R2ILBlock) {
 
 /// Set switch table information for a block.
 /// This should be called after lifting if the block contains a switch statement.
-/// 
+///
 /// # Arguments
 /// * `block` - The block to set switch info on
 /// * `switch_addr` - Address of the switch instruction
@@ -433,7 +435,7 @@ pub extern "C" fn r2il_block_set_switch_info(
     }
 
     let block = unsafe { &mut *block };
-    
+
     // Build cases from arrays
     let mut cases = Vec::with_capacity(num_cases);
     for i in 0..num_cases {
@@ -450,7 +452,11 @@ pub extern "C" fn r2il_block_set_switch_info(
         switch_addr,
         min_val,
         max_val,
-        default_target: if default_target != 0 { Some(default_target) } else { None },
+        default_target: if default_target != 0 {
+            Some(default_target)
+        } else {
+            None
+        },
         cases,
     };
 
@@ -468,7 +474,10 @@ pub extern "C" fn r2il_block_op_count(block: *const R2ILBlock) -> usize {
 
 /// Get the ESIL string for a block (one line per op, joined with ';').
 #[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_to_esil(ctx: *const R2ILContext, block: *const R2ILBlock) -> *mut c_char {
+pub extern "C" fn r2il_block_to_esil(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut c_char {
     if ctx.is_null() || block.is_null() {
         return ptr::null_mut();
     }
@@ -489,7 +498,8 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
 
     match value {
         Value::Object(map) => {
-            let is_varnode = map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
+            let is_varnode =
+                map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
             if is_varnode {
                 let space = map.get("space").and_then(Value::as_str);
                 if let Some(space_str) = space {
@@ -645,9 +655,7 @@ pub extern "C" fn r2il_block_mnemonic(
 
     let slice = unsafe { slice::from_raw_parts(bytes, len) };
     match disasm.disasm_native(slice, addr) {
-        Ok((mnemonic, _size)) => {
-            CString::new(mnemonic).map_or(ptr::null_mut(), |c| c.into_raw())
-        }
+        Ok((mnemonic, _size)) => CString::new(mnemonic).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
     }
 }
@@ -736,9 +744,12 @@ pub extern "C" fn r2il_block_type(block: *const R2ILBlock) -> u32 {
             R2ILOp::IntLeft { .. } => return R2AnalOpType::SHL,
             R2ILOp::IntRight { .. } => return R2AnalOpType::SHR,
             R2ILOp::IntSRight { .. } => return R2AnalOpType::SAR,
-            R2ILOp::IntEqual { .. } | R2ILOp::IntNotEqual { .. } |
-            R2ILOp::IntLess { .. } | R2ILOp::IntSLess { .. } |
-            R2ILOp::IntLessEqual { .. } | R2ILOp::IntSLessEqual { .. } => return R2AnalOpType::CMP,
+            R2ILOp::IntEqual { .. }
+            | R2ILOp::IntNotEqual { .. }
+            | R2ILOp::IntLess { .. }
+            | R2ILOp::IntSLess { .. }
+            | R2ILOp::IntLessEqual { .. }
+            | R2ILOp::IntSLessEqual { .. } => return R2AnalOpType::CMP,
             R2ILOp::Copy { .. } => return R2AnalOpType::MOV,
             _ => {}
         }
@@ -764,9 +775,9 @@ pub extern "C" fn r2il_block_jump(block: *const R2ILBlock) -> u64 {
 
     for op in &blk.ops {
         match op {
-            R2ILOp::Branch { target } |
-            R2ILOp::Call { target } |
-            R2ILOp::CBranch { target, .. } => {
+            R2ILOp::Branch { target }
+            | R2ILOp::Call { target }
+            | R2ILOp::CBranch { target, .. } => {
                 // Only return if target is a constant (direct jump)
                 if target.space == r2il::SpaceId::Const || target.space == r2il::SpaceId::Ram {
                     return target.offset;
@@ -809,8 +820,8 @@ pub extern "C" fn r2il_string_free(s: *mut c_char) {
 
 // ========== Typed Analysis FFI ==========
 
-use std::collections::{BTreeSet, HashMap, HashSet};
 use r2il::Varnode;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Helper: extract all register varnodes that are read by an operation.
 fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
@@ -819,148 +830,197 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
     match op {
         // Data movement - src is read
         R2ILOp::Copy { src, .. } => {
-            if src.is_register() { regs.push(src); }
+            if src.is_register() {
+                regs.push(src);
+            }
         }
         R2ILOp::Load { addr, .. } => {
-            if addr.is_register() { regs.push(addr); }
+            if addr.is_register() {
+                regs.push(addr);
+            }
         }
         R2ILOp::Store { addr, val, .. } => {
-            if addr.is_register() { regs.push(addr); }
-            if val.is_register() { regs.push(val); }
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if val.is_register() {
+                regs.push(val);
+            }
         }
 
         // Binary ops - a and b are read
-        R2ILOp::IntAdd { a, b, .. } |
-        R2ILOp::IntSub { a, b, .. } |
-        R2ILOp::IntMult { a, b, .. } |
-        R2ILOp::IntDiv { a, b, .. } |
-        R2ILOp::IntSDiv { a, b, .. } |
-        R2ILOp::IntRem { a, b, .. } |
-        R2ILOp::IntSRem { a, b, .. } |
-        R2ILOp::IntAnd { a, b, .. } |
-        R2ILOp::IntOr { a, b, .. } |
-        R2ILOp::IntXor { a, b, .. } |
-        R2ILOp::IntLeft { a, b, .. } |
-        R2ILOp::IntRight { a, b, .. } |
-        R2ILOp::IntSRight { a, b, .. } |
-        R2ILOp::IntEqual { a, b, .. } |
-        R2ILOp::IntNotEqual { a, b, .. } |
-        R2ILOp::IntLess { a, b, .. } |
-        R2ILOp::IntSLess { a, b, .. } |
-        R2ILOp::IntLessEqual { a, b, .. } |
-        R2ILOp::IntSLessEqual { a, b, .. } |
-        R2ILOp::IntCarry { a, b, .. } |
-        R2ILOp::IntSCarry { a, b, .. } |
-        R2ILOp::IntSBorrow { a, b, .. } |
-        R2ILOp::BoolAnd { a, b, .. } |
-        R2ILOp::BoolOr { a, b, .. } |
-        R2ILOp::BoolXor { a, b, .. } |
-        R2ILOp::Piece { hi: a, lo: b, .. } |
-        R2ILOp::FloatAdd { a, b, .. } |
-        R2ILOp::FloatSub { a, b, .. } |
-        R2ILOp::FloatMult { a, b, .. } |
-        R2ILOp::FloatDiv { a, b, .. } |
-        R2ILOp::FloatEqual { a, b, .. } |
-        R2ILOp::FloatNotEqual { a, b, .. } |
-        R2ILOp::FloatLess { a, b, .. } |
-        R2ILOp::FloatLessEqual { a, b, .. } => {
-            if a.is_register() { regs.push(a); }
-            if b.is_register() { regs.push(b); }
+        R2ILOp::IntAdd { a, b, .. }
+        | R2ILOp::IntSub { a, b, .. }
+        | R2ILOp::IntMult { a, b, .. }
+        | R2ILOp::IntDiv { a, b, .. }
+        | R2ILOp::IntSDiv { a, b, .. }
+        | R2ILOp::IntRem { a, b, .. }
+        | R2ILOp::IntSRem { a, b, .. }
+        | R2ILOp::IntAnd { a, b, .. }
+        | R2ILOp::IntOr { a, b, .. }
+        | R2ILOp::IntXor { a, b, .. }
+        | R2ILOp::IntLeft { a, b, .. }
+        | R2ILOp::IntRight { a, b, .. }
+        | R2ILOp::IntSRight { a, b, .. }
+        | R2ILOp::IntEqual { a, b, .. }
+        | R2ILOp::IntNotEqual { a, b, .. }
+        | R2ILOp::IntLess { a, b, .. }
+        | R2ILOp::IntSLess { a, b, .. }
+        | R2ILOp::IntLessEqual { a, b, .. }
+        | R2ILOp::IntSLessEqual { a, b, .. }
+        | R2ILOp::IntCarry { a, b, .. }
+        | R2ILOp::IntSCarry { a, b, .. }
+        | R2ILOp::IntSBorrow { a, b, .. }
+        | R2ILOp::BoolAnd { a, b, .. }
+        | R2ILOp::BoolOr { a, b, .. }
+        | R2ILOp::BoolXor { a, b, .. }
+        | R2ILOp::Piece { hi: a, lo: b, .. }
+        | R2ILOp::FloatAdd { a, b, .. }
+        | R2ILOp::FloatSub { a, b, .. }
+        | R2ILOp::FloatMult { a, b, .. }
+        | R2ILOp::FloatDiv { a, b, .. }
+        | R2ILOp::FloatEqual { a, b, .. }
+        | R2ILOp::FloatNotEqual { a, b, .. }
+        | R2ILOp::FloatLess { a, b, .. }
+        | R2ILOp::FloatLessEqual { a, b, .. } => {
+            if a.is_register() {
+                regs.push(a);
+            }
+            if b.is_register() {
+                regs.push(b);
+            }
         }
 
         // Unary ops - src is read
-        R2ILOp::IntNegate { src, .. } |
-        R2ILOp::IntNot { src, .. } |
-        R2ILOp::IntZExt { src, .. } |
-        R2ILOp::IntSExt { src, .. } |
-        R2ILOp::BoolNot { src, .. } |
-        R2ILOp::PopCount { src, .. } |
-        R2ILOp::Lzcount { src, .. } |
-        R2ILOp::Subpiece { src, .. } |
-        R2ILOp::FloatNeg { src, .. } |
-        R2ILOp::FloatAbs { src, .. } |
-        R2ILOp::FloatSqrt { src, .. } |
-        R2ILOp::FloatNaN { src, .. } |
-        R2ILOp::Int2Float { src, .. } |
-        R2ILOp::FloatFloat { src, .. } |
-        R2ILOp::Trunc { src, .. } |
-        R2ILOp::FloatCeil { src, .. } |
-        R2ILOp::FloatFloor { src, .. } |
-        R2ILOp::FloatRound { src, .. } => {
-            if src.is_register() { regs.push(src); }
+        R2ILOp::IntNegate { src, .. }
+        | R2ILOp::IntNot { src, .. }
+        | R2ILOp::IntZExt { src, .. }
+        | R2ILOp::IntSExt { src, .. }
+        | R2ILOp::BoolNot { src, .. }
+        | R2ILOp::PopCount { src, .. }
+        | R2ILOp::Lzcount { src, .. }
+        | R2ILOp::Subpiece { src, .. }
+        | R2ILOp::FloatNeg { src, .. }
+        | R2ILOp::FloatAbs { src, .. }
+        | R2ILOp::FloatSqrt { src, .. }
+        | R2ILOp::FloatNaN { src, .. }
+        | R2ILOp::Int2Float { src, .. }
+        | R2ILOp::FloatFloat { src, .. }
+        | R2ILOp::Trunc { src, .. }
+        | R2ILOp::FloatCeil { src, .. }
+        | R2ILOp::FloatFloor { src, .. }
+        | R2ILOp::FloatRound { src, .. } => {
+            if src.is_register() {
+                regs.push(src);
+            }
         }
 
         // Control flow - target/cond are read
-        R2ILOp::Branch { target } |
-        R2ILOp::BranchInd { target } |
-        R2ILOp::Call { target } |
-        R2ILOp::CallInd { target } |
-        R2ILOp::Return { target } => {
-            if target.is_register() { regs.push(target); }
+        R2ILOp::Branch { target }
+        | R2ILOp::BranchInd { target }
+        | R2ILOp::Call { target }
+        | R2ILOp::CallInd { target }
+        | R2ILOp::Return { target } => {
+            if target.is_register() {
+                regs.push(target);
+            }
         }
         R2ILOp::CBranch { cond, target } => {
-            if cond.is_register() { regs.push(cond); }
-            if target.is_register() { regs.push(target); }
+            if cond.is_register() {
+                regs.push(cond);
+            }
+            if target.is_register() {
+                regs.push(target);
+            }
         }
 
         // CallOther - inputs are read
         R2ILOp::CallOther { inputs, .. } => {
             for inp in inputs {
-                if inp.is_register() { regs.push(inp); }
+                if inp.is_register() {
+                    regs.push(inp);
+                }
             }
         }
 
         // Float2Int - src is read
-        R2ILOp::Float2Int { src, .. } |
-        R2ILOp::New { src, .. } |
-        R2ILOp::Cast { src, .. } => {
-            if src.is_register() { regs.push(src); }
+        R2ILOp::Float2Int { src, .. } | R2ILOp::New { src, .. } | R2ILOp::Cast { src, .. } => {
+            if src.is_register() {
+                regs.push(src);
+            }
         }
 
         // Extract - src and position are read
         R2ILOp::Extract { src, position, .. } => {
-            if src.is_register() { regs.push(src); }
-            if position.is_register() { regs.push(position); }
+            if src.is_register() {
+                regs.push(src);
+            }
+            if position.is_register() {
+                regs.push(position);
+            }
         }
 
         // Insert - src, value, position are read
-        R2ILOp::Insert { src, value, position, .. } => {
-            if src.is_register() { regs.push(src); }
-            if value.is_register() { regs.push(value); }
-            if position.is_register() { regs.push(position); }
+        R2ILOp::Insert {
+            src,
+            value,
+            position,
+            ..
+        } => {
+            if src.is_register() {
+                regs.push(src);
+            }
+            if value.is_register() {
+                regs.push(value);
+            }
+            if position.is_register() {
+                regs.push(position);
+            }
         }
 
         // SegmentOp - segment and offset are read
-        R2ILOp::SegmentOp { segment, offset, .. } => {
-            if segment.is_register() { regs.push(segment); }
-            if offset.is_register() { regs.push(offset); }
+        R2ILOp::SegmentOp {
+            segment, offset, ..
+        } => {
+            if segment.is_register() {
+                regs.push(segment);
+            }
+            if offset.is_register() {
+                regs.push(offset);
+            }
         }
 
         // PtrAdd/PtrSub - base and index are read
-        R2ILOp::PtrAdd { base, index, .. } |
-        R2ILOp::PtrSub { base, index, .. } => {
-            if base.is_register() { regs.push(base); }
-            if index.is_register() { regs.push(index); }
+        R2ILOp::PtrAdd { base, index, .. } | R2ILOp::PtrSub { base, index, .. } => {
+            if base.is_register() {
+                regs.push(base);
+            }
+            if index.is_register() {
+                regs.push(index);
+            }
         }
 
         // Multiequal - inputs are read
         R2ILOp::Multiequal { inputs, .. } => {
             for inp in inputs {
-                if inp.is_register() { regs.push(inp); }
+                if inp.is_register() {
+                    regs.push(inp);
+                }
             }
         }
 
         // Indirect - src and indirect are read
         R2ILOp::Indirect { src, indirect, .. } => {
-            if src.is_register() { regs.push(src); }
-            if indirect.is_register() { regs.push(indirect); }
+            if src.is_register() {
+                regs.push(src);
+            }
+            if indirect.is_register() {
+                regs.push(indirect);
+            }
         }
 
         // Ops with no register reads
-        R2ILOp::Nop |
-        R2ILOp::Unimplemented |
-        R2ILOp::Breakpoint |
-        R2ILOp::CpuId { .. } => {}
+        R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint | R2ILOp::CpuId { .. } => {}
     }
 
     regs
@@ -972,100 +1032,104 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
 
     match op {
         // All ops with dst field write to dst
-        R2ILOp::Copy { dst, .. } |
-        R2ILOp::Load { dst, .. } |
-        R2ILOp::IntAdd { dst, .. } |
-        R2ILOp::IntSub { dst, .. } |
-        R2ILOp::IntMult { dst, .. } |
-        R2ILOp::IntDiv { dst, .. } |
-        R2ILOp::IntSDiv { dst, .. } |
-        R2ILOp::IntRem { dst, .. } |
-        R2ILOp::IntSRem { dst, .. } |
-        R2ILOp::IntNegate { dst, .. } |
-        R2ILOp::IntAnd { dst, .. } |
-        R2ILOp::IntOr { dst, .. } |
-        R2ILOp::IntXor { dst, .. } |
-        R2ILOp::IntNot { dst, .. } |
-        R2ILOp::IntLeft { dst, .. } |
-        R2ILOp::IntRight { dst, .. } |
-        R2ILOp::IntSRight { dst, .. } |
-        R2ILOp::IntEqual { dst, .. } |
-        R2ILOp::IntNotEqual { dst, .. } |
-        R2ILOp::IntLess { dst, .. } |
-        R2ILOp::IntSLess { dst, .. } |
-        R2ILOp::IntLessEqual { dst, .. } |
-        R2ILOp::IntSLessEqual { dst, .. } |
-        R2ILOp::IntZExt { dst, .. } |
-        R2ILOp::IntSExt { dst, .. } |
-        R2ILOp::IntCarry { dst, .. } |
-        R2ILOp::IntSCarry { dst, .. } |
-        R2ILOp::IntSBorrow { dst, .. } |
-        R2ILOp::BoolAnd { dst, .. } |
-        R2ILOp::BoolOr { dst, .. } |
-        R2ILOp::BoolXor { dst, .. } |
-        R2ILOp::BoolNot { dst, .. } |
-        R2ILOp::PopCount { dst, .. } |
-        R2ILOp::Lzcount { dst, .. } |
-        R2ILOp::Piece { dst, .. } |
-        R2ILOp::Subpiece { dst, .. } |
-        R2ILOp::FloatAdd { dst, .. } |
-        R2ILOp::FloatSub { dst, .. } |
-        R2ILOp::FloatMult { dst, .. } |
-        R2ILOp::FloatDiv { dst, .. } |
-        R2ILOp::FloatNeg { dst, .. } |
-        R2ILOp::FloatAbs { dst, .. } |
-        R2ILOp::FloatSqrt { dst, .. } |
-        R2ILOp::FloatEqual { dst, .. } |
-        R2ILOp::FloatNotEqual { dst, .. } |
-        R2ILOp::FloatLess { dst, .. } |
-        R2ILOp::FloatLessEqual { dst, .. } |
-        R2ILOp::FloatNaN { dst, .. } |
-        R2ILOp::Int2Float { dst, .. } |
-        R2ILOp::FloatFloat { dst, .. } |
-        R2ILOp::Trunc { dst, .. } |
-        R2ILOp::FloatCeil { dst, .. } |
-        R2ILOp::FloatFloor { dst, .. } |
-        R2ILOp::FloatRound { dst, .. } => {
-            if dst.is_register() { regs.push(dst); }
+        R2ILOp::Copy { dst, .. }
+        | R2ILOp::Load { dst, .. }
+        | R2ILOp::IntAdd { dst, .. }
+        | R2ILOp::IntSub { dst, .. }
+        | R2ILOp::IntMult { dst, .. }
+        | R2ILOp::IntDiv { dst, .. }
+        | R2ILOp::IntSDiv { dst, .. }
+        | R2ILOp::IntRem { dst, .. }
+        | R2ILOp::IntSRem { dst, .. }
+        | R2ILOp::IntNegate { dst, .. }
+        | R2ILOp::IntAnd { dst, .. }
+        | R2ILOp::IntOr { dst, .. }
+        | R2ILOp::IntXor { dst, .. }
+        | R2ILOp::IntNot { dst, .. }
+        | R2ILOp::IntLeft { dst, .. }
+        | R2ILOp::IntRight { dst, .. }
+        | R2ILOp::IntSRight { dst, .. }
+        | R2ILOp::IntEqual { dst, .. }
+        | R2ILOp::IntNotEqual { dst, .. }
+        | R2ILOp::IntLess { dst, .. }
+        | R2ILOp::IntSLess { dst, .. }
+        | R2ILOp::IntLessEqual { dst, .. }
+        | R2ILOp::IntSLessEqual { dst, .. }
+        | R2ILOp::IntZExt { dst, .. }
+        | R2ILOp::IntSExt { dst, .. }
+        | R2ILOp::IntCarry { dst, .. }
+        | R2ILOp::IntSCarry { dst, .. }
+        | R2ILOp::IntSBorrow { dst, .. }
+        | R2ILOp::BoolAnd { dst, .. }
+        | R2ILOp::BoolOr { dst, .. }
+        | R2ILOp::BoolXor { dst, .. }
+        | R2ILOp::BoolNot { dst, .. }
+        | R2ILOp::PopCount { dst, .. }
+        | R2ILOp::Lzcount { dst, .. }
+        | R2ILOp::Piece { dst, .. }
+        | R2ILOp::Subpiece { dst, .. }
+        | R2ILOp::FloatAdd { dst, .. }
+        | R2ILOp::FloatSub { dst, .. }
+        | R2ILOp::FloatMult { dst, .. }
+        | R2ILOp::FloatDiv { dst, .. }
+        | R2ILOp::FloatNeg { dst, .. }
+        | R2ILOp::FloatAbs { dst, .. }
+        | R2ILOp::FloatSqrt { dst, .. }
+        | R2ILOp::FloatEqual { dst, .. }
+        | R2ILOp::FloatNotEqual { dst, .. }
+        | R2ILOp::FloatLess { dst, .. }
+        | R2ILOp::FloatLessEqual { dst, .. }
+        | R2ILOp::FloatNaN { dst, .. }
+        | R2ILOp::Int2Float { dst, .. }
+        | R2ILOp::FloatFloat { dst, .. }
+        | R2ILOp::Trunc { dst, .. }
+        | R2ILOp::FloatCeil { dst, .. }
+        | R2ILOp::FloatFloor { dst, .. }
+        | R2ILOp::FloatRound { dst, .. } => {
+            if dst.is_register() {
+                regs.push(dst);
+            }
         }
 
         // Store doesn't have a register dst
         R2ILOp::Store { .. } => {}
 
         // Control flow ops don't write registers directly
-        R2ILOp::Branch { .. } |
-        R2ILOp::BranchInd { .. } |
-        R2ILOp::CBranch { .. } |
-        R2ILOp::Call { .. } |
-        R2ILOp::CallInd { .. } |
-        R2ILOp::Return { .. } => {}
+        R2ILOp::Branch { .. }
+        | R2ILOp::BranchInd { .. }
+        | R2ILOp::CBranch { .. }
+        | R2ILOp::Call { .. }
+        | R2ILOp::CallInd { .. }
+        | R2ILOp::Return { .. } => {}
 
         // CallOther may have output
         R2ILOp::CallOther { output, .. } => {
             if let Some(out) = output {
-                if out.is_register() { regs.push(out); }
+                if out.is_register() {
+                    regs.push(out);
+                }
             }
         }
 
         // Ops with dst field that write
-        R2ILOp::Float2Int { dst, .. } |
-        R2ILOp::CpuId { dst, .. } |
-        R2ILOp::SegmentOp { dst, .. } |
-        R2ILOp::New { dst, .. } |
-        R2ILOp::Cast { dst, .. } |
-        R2ILOp::Extract { dst, .. } |
-        R2ILOp::Insert { dst, .. } |
-        R2ILOp::Multiequal { dst, .. } |
-        R2ILOp::Indirect { dst, .. } |
-        R2ILOp::PtrAdd { dst, .. } |
-        R2ILOp::PtrSub { dst, .. } => {
-            if dst.is_register() { regs.push(dst); }
+        R2ILOp::Float2Int { dst, .. }
+        | R2ILOp::CpuId { dst, .. }
+        | R2ILOp::SegmentOp { dst, .. }
+        | R2ILOp::New { dst, .. }
+        | R2ILOp::Cast { dst, .. }
+        | R2ILOp::Extract { dst, .. }
+        | R2ILOp::Insert { dst, .. }
+        | R2ILOp::Multiequal { dst, .. }
+        | R2ILOp::Indirect { dst, .. }
+        | R2ILOp::PtrAdd { dst, .. }
+        | R2ILOp::PtrSub { dst, .. } => {
+            if dst.is_register() {
+                regs.push(dst);
+            }
         }
 
         // Ops with no register writes
-        R2ILOp::Nop |
-        R2ILOp::Unimplemented |
-        R2ILOp::Breakpoint => {}
+        R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint => {}
     }
 
     regs
@@ -1099,7 +1163,8 @@ pub extern "C" fn r2il_block_regs_read(
         }
     }
 
-    let json_array = serde_json::to_string(&regs.into_iter().collect::<Vec<_>>()).unwrap_or_default();
+    let json_array =
+        serde_json::to_string(&regs.into_iter().collect::<Vec<_>>()).unwrap_or_default();
     CString::new(json_array).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
@@ -1127,7 +1192,11 @@ pub extern "C" fn r2il_block_mem_access(
 
     for op in &blk.ops {
         match op {
-            R2ILOp::Load { dst, space: _, addr } => {
+            R2ILOp::Load {
+                dst,
+                space: _,
+                addr,
+            } => {
                 let mut access = serde_json::json!({
                     "type": "load",
                     "size": dst.size,
@@ -1147,7 +1216,11 @@ pub extern "C" fn r2il_block_mem_access(
 
                 accesses.push(access);
             }
-            R2ILOp::Store { space: _, addr, val } => {
+            R2ILOp::Store {
+                space: _,
+                addr,
+                val,
+            } => {
                 let mut access = serde_json::json!({
                     "type": "store",
                     "size": val.size,
@@ -1466,7 +1539,8 @@ pub extern "C" fn r2il_block_regs_write(
         }
     }
 
-    let json_array = serde_json::to_string(&regs.into_iter().collect::<Vec<_>>()).unwrap_or_default();
+    let json_array =
+        serde_json::to_string(&regs.into_iter().collect::<Vec<_>>()).unwrap_or_default();
     CString::new(json_array).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
@@ -1490,26 +1564,44 @@ fn op_all_varnodes(op: &R2ILOp) -> Vec<&Varnode> {
     // Also get non-register varnodes
     match op {
         R2ILOp::Copy { dst, src } => {
-            if !dst.is_register() { vns.push(dst); }
-            if !src.is_register() { vns.push(src); }
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !src.is_register() {
+                vns.push(src);
+            }
         }
         R2ILOp::Load { dst, addr, .. } => {
-            if !dst.is_register() { vns.push(dst); }
-            if !addr.is_register() { vns.push(addr); }
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
         }
         R2ILOp::Store { addr, val, .. } => {
-            if !addr.is_register() { vns.push(addr); }
-            if !val.is_register() { vns.push(val); }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !val.is_register() {
+                vns.push(val);
+            }
         }
         // For binary ops, get non-register operands
-        R2ILOp::IntAdd { dst, a, b } |
-        R2ILOp::IntSub { dst, a, b } |
-        R2ILOp::IntAnd { dst, a, b } |
-        R2ILOp::IntOr { dst, a, b } |
-        R2ILOp::IntXor { dst, a, b } => {
-            if !dst.is_register() { vns.push(dst); }
-            if !a.is_register() { vns.push(a); }
-            if !b.is_register() { vns.push(b); }
+        R2ILOp::IntAdd { dst, a, b }
+        | R2ILOp::IntSub { dst, a, b }
+        | R2ILOp::IntAnd { dst, a, b }
+        | R2ILOp::IntOr { dst, a, b }
+        | R2ILOp::IntXor { dst, a, b } => {
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !a.is_register() {
+                vns.push(a);
+            }
+            if !b.is_register() {
+                vns.push(b);
+            }
         }
         _ => {} // Other ops handled by op_regs_read/write
     }
@@ -1741,7 +1833,6 @@ pub extern "C" fn r2taint_function_json(
     }
     let ctx = unsafe { &*ctx };
 
-
     // Collect R2IL blocks
     let mut r2il_blocks = Vec::new();
     for i in 0..num_blocks {
@@ -1757,7 +1848,8 @@ pub extern "C" fn r2taint_function_json(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx.arch.as_ref()) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx.arch.as_ref())
+    {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -1783,17 +1875,20 @@ pub extern "C" fn r2taint_function_json(
     let result = analysis.analyze();
 
     // Collect sources
-    let mut source_map: std::collections::HashMap<String, TaintSourceJson> = std::collections::HashMap::new();
+    let mut source_map: std::collections::HashMap<String, TaintSourceJson> =
+        std::collections::HashMap::new();
     for block in ssa_func.blocks() {
         for phi in &block.phis {
             for (_, src) in &phi.sources {
                 if let Some(labels) = policy.is_source(src, block.addr) {
-                    let entry = source_map.entry(src.display_name()).or_insert(TaintSourceJson {
-                        var: src.display_name(),
-                        labels: Vec::new(),
-                        block: block.addr,
-                        block_hex: format!("0x{:x}", block.addr),
-                    });
+                    let entry = source_map
+                        .entry(src.display_name())
+                        .or_insert(TaintSourceJson {
+                            var: src.display_name(),
+                            labels: Vec::new(),
+                            block: block.addr,
+                            block_hex: format!("0x{:x}", block.addr),
+                        });
                     for label in labels {
                         entry.labels.push(label.id);
                     }
@@ -1806,12 +1901,14 @@ pub extern "C" fn r2taint_function_json(
         for op in &block.ops {
             for src in op.sources() {
                 if let Some(labels) = policy.is_source(src, block.addr) {
-                    let entry = source_map.entry(src.display_name()).or_insert(TaintSourceJson {
-                        var: src.display_name(),
-                        labels: Vec::new(),
-                        block: block.addr,
-                        block_hex: format!("0x{:x}", block.addr),
-                    });
+                    let entry = source_map
+                        .entry(src.display_name())
+                        .or_insert(TaintSourceJson {
+                            var: src.display_name(),
+                            labels: Vec::new(),
+                            block: block.addr,
+                            block_hex: format!("0x{:x}", block.addr),
+                        });
                     for label in labels {
                         entry.labels.push(label.id);
                     }
@@ -2063,7 +2160,9 @@ pub extern "C" fn r2ssa_function_json(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe {
+        (*ctx).arch.as_ref()
+    }) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -2119,10 +2218,9 @@ pub extern "C" fn r2ssa_function_opt_json(
         return ptr::null_mut();
     }
 
-    let mut ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(
-        &r2il_blocks,
-        unsafe { (*ctx).arch.as_ref() },
-    ) {
+    let mut ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe {
+        (*ctx).arch.as_ref()
+    }) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -2172,7 +2270,7 @@ struct UseLocationJson {
 struct FunctionDefUseJson {
     definitions: std::collections::HashMap<String, DefLocationJson>,
     uses: std::collections::HashMap<String, Vec<UseLocationJson>>,
-    live_in: std::collections::HashMap<String, Vec<String>>,  // block_hex -> vars
+    live_in: std::collections::HashMap<String, Vec<String>>, // block_hex -> vars
     live_out: std::collections::HashMap<String, Vec<String>>, // block_hex -> vars
 }
 
@@ -2203,14 +2301,17 @@ pub extern "C" fn r2ssa_defuse_function_json(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe {
+        (*ctx).arch.as_ref()
+    }) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
 
     // Collect definitions and uses across all blocks
     let mut definitions = std::collections::HashMap::new();
-    let mut uses: std::collections::HashMap<String, Vec<UseLocationJson>> = std::collections::HashMap::new();
+    let mut uses: std::collections::HashMap<String, Vec<UseLocationJson>> =
+        std::collections::HashMap::new();
     let mut live_in = std::collections::HashMap::new();
     let mut live_out = std::collections::HashMap::new();
 
@@ -2224,22 +2325,27 @@ pub extern "C" fn r2ssa_defuse_function_json(
             // Process phi nodes
             for phi in &block.phis {
                 let dst_name = phi.dst.display_name();
-                definitions.insert(dst_name.clone(), DefLocationJson {
-                    block: addr,
-                    block_hex: block_hex.clone(),
-                    op_idx: 0, // Phi nodes are at the start
-                });
+                definitions.insert(
+                    dst_name.clone(),
+                    DefLocationJson {
+                        block: addr,
+                        block_hex: block_hex.clone(),
+                        op_idx: 0, // Phi nodes are at the start
+                    },
+                );
                 defined_in_block.insert(dst_name.clone());
                 block_outputs.push(dst_name);
 
                 // Sources are uses
                 for (_pred, src) in &phi.sources {
                     let src_name = src.display_name();
-                    uses.entry(src_name.clone()).or_default().push(UseLocationJson {
-                        block: addr,
-                        block_hex: block_hex.clone(),
-                        op_idx: 0,
-                    });
+                    uses.entry(src_name.clone())
+                        .or_default()
+                        .push(UseLocationJson {
+                            block: addr,
+                            block_hex: block_hex.clone(),
+                            op_idx: 0,
+                        });
                 }
             }
 
@@ -2248,11 +2354,14 @@ pub extern "C" fn r2ssa_defuse_function_json(
                 // Record definition
                 if let Some(dst) = op.dst() {
                     let dst_name = dst.display_name();
-                    definitions.insert(dst_name.clone(), DefLocationJson {
-                        block: addr,
-                        block_hex: block_hex.clone(),
-                        op_idx: op_idx + 1, // +1 because phi nodes are at 0
-                    });
+                    definitions.insert(
+                        dst_name.clone(),
+                        DefLocationJson {
+                            block: addr,
+                            block_hex: block_hex.clone(),
+                            op_idx: op_idx + 1, // +1 because phi nodes are at 0
+                        },
+                    );
                     defined_in_block.insert(dst_name.clone());
                     block_outputs.push(dst_name);
                 }
@@ -2260,11 +2369,13 @@ pub extern "C" fn r2ssa_defuse_function_json(
                 // Record uses
                 for src in op.sources() {
                     let src_name = src.display_name();
-                    uses.entry(src_name.clone()).or_default().push(UseLocationJson {
-                        block: addr,
-                        block_hex: block_hex.clone(),
-                        op_idx: op_idx + 1,
-                    });
+                    uses.entry(src_name.clone())
+                        .or_default()
+                        .push(UseLocationJson {
+                            block: addr,
+                            block_hex: block_hex.clone(),
+                            op_idx: op_idx + 1,
+                        });
 
                     // If used before defined in this block, it's a live-in
                     if !defined_in_block.contains(&src_name) && !block_inputs.contains(&src_name) {
@@ -2296,10 +2407,10 @@ pub extern "C" fn r2ssa_defuse_function_json(
 struct DomTreeJson {
     entry: u64,
     entry_hex: String,
-    idom: std::collections::HashMap<String, String>,  // block_hex -> idom_hex
-    children: std::collections::HashMap<String, Vec<String>>,  // block_hex -> children_hex
-    dominance_frontier: std::collections::HashMap<String, Vec<String>>,  // block_hex -> frontier_hex
-    depth: std::collections::HashMap<String, usize>,  // block_hex -> depth
+    idom: std::collections::HashMap<String, String>, // block_hex -> idom_hex
+    children: std::collections::HashMap<String, Vec<String>>, // block_hex -> children_hex
+    dominance_frontier: std::collections::HashMap<String, Vec<String>>, // block_hex -> frontier_hex
+    depth: std::collections::HashMap<String, usize>, // block_hex -> depth
 }
 
 /// Get dominator tree as JSON.
@@ -2329,7 +2440,9 @@ pub extern "C" fn r2ssa_domtree_json(
     }
 
     // Build SSA function to get dominator tree
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe {
+        (*ctx).arch.as_ref()
+    }) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -2351,14 +2464,16 @@ pub extern "C" fn r2ssa_domtree_json(
         }
 
         // Children
-        let children: Vec<String> = domtree.children(addr)
+        let children: Vec<String> = domtree
+            .children(addr)
             .iter()
             .map(|c| format!("0x{:x}", c))
             .collect();
         children_map.insert(block_hex.clone(), children);
 
         // Dominance frontier
-        let frontier: Vec<String> = domtree.frontier(addr)
+        let frontier: Vec<String> = domtree
+            .frontier(addr)
             .map(|f| format!("0x{:x}", f))
             .collect();
         frontier_map.insert(block_hex.clone(), frontier);
@@ -2434,7 +2549,9 @@ pub extern "C" fn r2ssa_backward_slice_json(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe {
+        (*ctx).arch.as_ref()
+    }) {
         Some(f) => f,
         None => return ptr::null_mut(),
     };
@@ -2467,10 +2584,7 @@ pub extern "C" fn r2ssa_backward_slice_json(
             Some(v) => v,
             None => {
                 // Variable not found - return error JSON
-                let error_json = format!(
-                    r#"{{"error": "Variable '{}' not found"}}"#,
-                    var_name_str
-                );
+                let error_json = format!(r#"{{"error": "Variable '{}' not found"}}"#, var_name_str);
                 return CString::new(error_json).map_or(ptr::null_mut(), |c| c.into_raw());
             }
         }
@@ -2483,7 +2597,10 @@ pub extern "C" fn r2ssa_backward_slice_json(
     let mut ops_json = Vec::new();
     for op_ref in &slice.ops {
         match op_ref {
-            r2ssa::SliceOpRef::Phi { block_addr, phi_idx } => {
+            r2ssa::SliceOpRef::Phi {
+                block_addr,
+                phi_idx,
+            } => {
                 let mut op_str = None;
                 if let Some(block) = ssa_func.get_block(*block_addr) {
                     if let Some(phi) = block.phis.get(*phi_idx) {
@@ -2598,13 +2715,21 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
             if supported.is_empty() {
                 Err("No architectures enabled; build with feature x86 or arm".to_string())
             } else {
-                Err(format!("Unknown architecture '{}'. Supported: {}", arch, supported.join(", ")))
+                Err(format!(
+                    "Unknown architecture '{}'. Supported: {}",
+                    arch,
+                    supported.join(", ")
+                ))
             }
         }
     }
 }
 
-fn apply_userop_map(mut spec: ArchSpec, mut disasm: Disassembler, arch: &str) -> (ArchSpec, Disassembler) {
+fn apply_userop_map(
+    mut spec: ArchSpec,
+    mut disasm: Disassembler,
+    arch: &str,
+) -> (ArchSpec, Disassembler) {
     let userop_map = userop_map_for_arch(arch);
     disasm.set_userop_map(userop_map.clone());
 
@@ -2788,11 +2913,7 @@ pub extern "C" fn r2sym_available() -> i32 {
 /// Get whether state merging is enabled for symbolic execution.
 #[unsafe(no_mangle)]
 pub extern "C" fn r2sym_merge_is_enabled() -> i32 {
-    if merge_states_enabled() {
-        1
-    } else {
-        0
-    }
+    if merge_states_enabled() { 1 } else { 0 }
 }
 
 /// Enable or disable state merging for symbolic execution.
@@ -3040,10 +3161,11 @@ pub extern "C" fn r2sym_function(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
-        Some(f) => f,
-        None => return ptr::null_mut(),
-    };
+    let ssa_func =
+        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+            Some(f) => f,
+            None => return ptr::null_mut(),
+        };
 
     // Create Z3 context and run symbolic execution
     // Note: z3 0.19 uses thread-local context
@@ -3056,7 +3178,8 @@ pub extern "C" fn r2sym_function(
         let config = sym_default_config();
 
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
-        let _hook_stats = install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
+        let _hook_stats =
+            install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
         let results = explorer.explore(&ssa_func, initial_state);
         let stats = explorer.stats().clone();
         (results, stats)
@@ -3236,10 +3359,11 @@ pub extern "C" fn r2sym_paths(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
-        Some(f) => f,
-        None => return ptr::null_mut(),
-    };
+    let ssa_func =
+        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+            Some(f) => f,
+            None => return ptr::null_mut(),
+        };
 
     // Create Z3 context and run symbolic execution
     // Note: z3 0.19 uses thread-local context
@@ -3252,7 +3376,8 @@ pub extern "C" fn r2sym_paths(
         let config = sym_default_config();
 
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
-        let _hook_stats = install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
+        let _hook_stats =
+            install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
         let results = explorer.explore(&ssa_func, initial_state);
         (results, explorer)
     }));
@@ -3310,17 +3435,19 @@ pub extern "C" fn r2sym_explore_to(
         return sym_error_json("no blocks to explore");
     }
 
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
-        Some(f) => f,
-        None => return sym_error_json("failed to build SSA function"),
-    };
+    let ssa_func =
+        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+            Some(f) => f,
+            None => return sym_error_json("failed to build SSA function"),
+        };
 
     let z3_ctx = Context::thread_local();
     let explore_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
         seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, sym_default_config());
-        let _hook_stats = install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
+        let _hook_stats =
+            install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
         let matched = explorer.find_paths_to(&ssa_func, initial_state, target_addr);
         let stats = explorer.stats().clone();
         let paths: Vec<PathInfo> = matched
@@ -3389,17 +3516,19 @@ pub extern "C" fn r2sym_solve_to(
         return sym_error_json("no blocks to solve");
     }
 
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
-        Some(f) => f,
-        None => return sym_error_json("failed to build SSA function"),
-    };
+    let ssa_func =
+        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+            Some(f) => f,
+            None => return sym_error_json("failed to build SSA function"),
+        };
 
     let z3_ctx = Context::thread_local();
     let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
         seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, sym_default_config());
-        let _hook_stats = install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
+        let _hook_stats =
+            install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
         let matched = explorer.find_paths_to(&ssa_func, initial_state, target_addr);
         let stats = explorer.stats().clone();
 
@@ -3505,9 +3634,15 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
             // Block header
             let is_entry = cfg.entry == *addr;
             let entry_marker = if is_entry { " [entry]" } else { "" };
-            let _ = writeln!(output, "┌─────────────────────────────────────────────────┐");
+            let _ = writeln!(
+                output,
+                "┌─────────────────────────────────────────────────┐"
+            );
             let _ = writeln!(output, "│ 0x{:x}{:<30} │", addr, entry_marker);
-            let _ = writeln!(output, "├─────────────────────────────────────────────────┤");
+            let _ = writeln!(
+                output,
+                "├─────────────────────────────────────────────────┤"
+            );
 
             // Show a few representative operations
             let ops_to_show = std::cmp::min(5, block.ops.len());
@@ -3521,29 +3656,44 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
                 let _ = writeln!(output, "│ {:<47} │", truncated);
             }
             if block.ops.len() > ops_to_show {
-                let _ = writeln!(output, "│ ... ({} more ops)                               │", block.ops.len() - ops_to_show);
+                let _ = writeln!(
+                    output,
+                    "│ ... ({} more ops)                               │",
+                    block.ops.len() - ops_to_show
+                );
             }
 
             // Block terminator
             let term_str = match &block.terminator {
                 r2ssa::cfg::BlockTerminator::Fallthrough { next } => format!("→ 0x{:x}", next),
                 r2ssa::cfg::BlockTerminator::Branch { target } => format!("jmp 0x{:x}", target),
-                r2ssa::cfg::BlockTerminator::ConditionalBranch { true_target, false_target } => {
+                r2ssa::cfg::BlockTerminator::ConditionalBranch {
+                    true_target,
+                    false_target,
+                } => {
                     format!("jcc t:0x{:x} f:0x{:x}", true_target, false_target)
                 }
                 r2ssa::cfg::BlockTerminator::Return => "ret".to_string(),
                 r2ssa::cfg::BlockTerminator::Call { target, .. } => format!("call 0x{:x}", target),
                 r2ssa::cfg::BlockTerminator::IndirectBranch => "jmp [reg]".to_string(),
                 r2ssa::cfg::BlockTerminator::IndirectCall { .. } => "call [reg]".to_string(),
-                r2ssa::cfg::BlockTerminator::Switch { cases, .. } => format!("switch ({} cases)", cases.len()),
+                r2ssa::cfg::BlockTerminator::Switch { cases, .. } => {
+                    format!("switch ({} cases)", cases.len())
+                }
                 r2ssa::cfg::BlockTerminator::None => "???".to_string(),
             };
             let _ = writeln!(output, "│ {:<47} │", term_str);
-            let _ = writeln!(output, "└─────────────────────────────────────────────────┘");
+            let _ = writeln!(
+                output,
+                "└─────────────────────────────────────────────────┘"
+            );
 
             // Draw edges
             match &block.terminator {
-                r2ssa::cfg::BlockTerminator::ConditionalBranch { true_target, false_target } => {
+                r2ssa::cfg::BlockTerminator::ConditionalBranch {
+                    true_target,
+                    false_target,
+                } => {
                     let _ = writeln!(output, "        │ t         f │");
                     let _ = writeln!(output, "        ├─────┐ ┌─────┤");
                     let _ = writeln!(output, "        v     │ │     v");
@@ -3572,40 +3722,91 @@ fn render_cfg_ascii(cfg: &r2ssa::CFG, disasm: &r2sleigh_lift::Disassembler) -> S
 fn format_r2il_op_short(op: &R2ILOp, disasm: &r2sleigh_lift::Disassembler) -> String {
     match op {
         R2ILOp::Copy { dst, src } => {
-            format!("{} = {}", disasm.format_varnode(dst), disasm.format_varnode(src))
+            format!(
+                "{} = {}",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(src)
+            )
         }
         R2ILOp::Load { dst, addr, .. } => {
-            format!("{} = [{}]", disasm.format_varnode(dst), disasm.format_varnode(addr))
+            format!(
+                "{} = [{}]",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(addr)
+            )
         }
         R2ILOp::Store { addr, val, .. } => {
-            format!("[{}] = {}", disasm.format_varnode(addr), disasm.format_varnode(val))
+            format!(
+                "[{}] = {}",
+                disasm.format_varnode(addr),
+                disasm.format_varnode(val)
+            )
         }
         R2ILOp::IntAdd { dst, a, b } => {
-            format!("{} = {} + {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+            format!(
+                "{} = {} + {}",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(a),
+                disasm.format_varnode(b)
+            )
         }
         R2ILOp::IntSub { dst, a, b } => {
-            format!("{} = {} - {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+            format!(
+                "{} = {} - {}",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(a),
+                disasm.format_varnode(b)
+            )
         }
         R2ILOp::IntAnd { dst, a, b } => {
-            format!("{} = {} & {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+            format!(
+                "{} = {} & {}",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(a),
+                disasm.format_varnode(b)
+            )
         }
         R2ILOp::IntOr { dst, a, b } => {
-            format!("{} = {} | {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+            format!(
+                "{} = {} | {}",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(a),
+                disasm.format_varnode(b)
+            )
         }
         R2ILOp::IntXor { dst, a, b } => {
-            format!("{} = {} ^ {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+            format!(
+                "{} = {} ^ {}",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(a),
+                disasm.format_varnode(b)
+            )
         }
         R2ILOp::IntEqual { dst, a, b } => {
-            format!("{} = {} == {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+            format!(
+                "{} = {} == {}",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(a),
+                disasm.format_varnode(b)
+            )
         }
         R2ILOp::IntLess { dst, a, b } => {
-            format!("{} = {} < {}", disasm.format_varnode(dst), disasm.format_varnode(a), disasm.format_varnode(b))
+            format!(
+                "{} = {} < {}",
+                disasm.format_varnode(dst),
+                disasm.format_varnode(a),
+                disasm.format_varnode(b)
+            )
         }
         R2ILOp::Branch { target } => {
             format!("jmp {}", disasm.format_varnode(target))
         }
         R2ILOp::CBranch { cond, target } => {
-            format!("if {} jmp {}", disasm.format_varnode(cond), disasm.format_varnode(target))
+            format!(
+                "if {} jmp {}",
+                disasm.format_varnode(cond),
+                disasm.format_varnode(target)
+            )
         }
         R2ILOp::Call { target } => {
             format!("call {}", disasm.format_varnode(target))
@@ -3701,7 +3902,8 @@ pub extern "C" fn r2cfg_function_json(
 
             // Add edges
             for succ in cfg.successors(addr) {
-                let edge_type = cfg.edge_type(addr, succ)
+                let edge_type = cfg
+                    .edge_type(addr, succ)
                     .map(|e| format!("{:?}", e))
                     .unwrap_or_else(|| "unknown".to_string());
                 json_edges.push(CFGEdgeJson {
@@ -3775,17 +3977,20 @@ pub extern "C" fn r2dec_function(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
-        Some(f) => f.with_name(&func_name_str),
-        None => return ptr::null_mut(),
-    };
+    let ssa_func =
+        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+            Some(f) => f.with_name(&func_name_str),
+            None => return ptr::null_mut(),
+        };
 
     // Create decompiler with architecture-aware config
     let config = if let Some(arch) = &ctx_ref.arch {
         let ptr_bits = arch.addr_size * 8; // addr_size is in bytes
         match (arch.name.as_str(), ptr_bits) {
             ("x86", 32) | ("x86-32", _) => r2dec::DecompilerConfig::x86(),
-            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => r2dec::DecompilerConfig::x86_64(),
+            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => {
+                r2dec::DecompilerConfig::x86_64()
+            }
             ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
             ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
             _ => {
@@ -4019,7 +4224,8 @@ fn parse_external_signature(
         .map(|(idx, arg)| {
             let fallback = format!("arg{}", idx + 1);
             let raw_name = arg.name.unwrap_or(fallback);
-            let mut name = sanitize_c_identifier(&raw_name).unwrap_or_else(|| format!("arg{}", idx + 1));
+            let mut name =
+                sanitize_c_identifier(&raw_name).unwrap_or_else(|| format!("arg{}", idx + 1));
             if !is_generic_arg_name(&name) {
                 name = uniquify_name(name, &mut used_names);
             }
@@ -4058,7 +4264,9 @@ fn parse_external_stack_vars(
             continue;
         };
 
-        let raw_name = entry.name.unwrap_or_else(|| format!("stack_{:x}", offset.unsigned_abs()));
+        let raw_name = entry
+            .name
+            .unwrap_or_else(|| format!("stack_{:x}", offset.unsigned_abs()));
         let Some(clean_name) = sanitize_c_identifier(&raw_name) else {
             continue;
         };
@@ -4102,6 +4310,7 @@ pub extern "C" fn r2dec_function_with_context(
     symbols_json: *const c_char,
     signature_json: *const c_char,
     stack_vars_json: *const c_char,
+    types_json: *const c_char,
 ) -> *mut c_char {
     if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
         return ptr::null_mut();
@@ -4139,18 +4348,25 @@ pub extern "C" fn r2dec_function_with_context(
     }
 
     // Build SSA function
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
-        Some(f) => f.with_name(&func_name_str),
-        None => return ptr::null_mut(),
-    };
+    let ssa_func =
+        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+            Some(f) => f.with_name(&func_name_str),
+            None => return ptr::null_mut(),
+        };
 
-    let ptr_bits = ctx_ref.arch.as_ref().map(|arch| arch.addr_size * 8).unwrap_or(64);
+    let ptr_bits = ctx_ref
+        .arch
+        .as_ref()
+        .map(|arch| arch.addr_size * 8)
+        .unwrap_or(64);
 
     // Create decompiler with architecture-aware config
     let config = if let Some(arch) = &ctx_ref.arch {
         match (arch.name.as_str(), ptr_bits) {
             ("x86", 32) | ("x86-32", _) => r2dec::DecompilerConfig::x86(),
-            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => r2dec::DecompilerConfig::x86_64(),
+            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => {
+                r2dec::DecompilerConfig::x86_64()
+            }
             ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
             ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
             _ => {
@@ -4162,7 +4378,7 @@ pub extern "C" fn r2dec_function_with_context(
     } else {
         r2dec::DecompilerConfig::default()
     };
-    
+
     let mut decompiler = r2dec::Decompiler::new(config);
 
     // Parse function names JSON: {"0x401000": "main", "0x401100": "printf", ...}
@@ -4198,6 +4414,15 @@ pub extern "C" fn r2dec_function_with_context(
         }
     }
 
+    // Parse external type DB JSON (`tsj`).
+    if !types_json.is_null() {
+        let json_str = unsafe { CStr::from_ptr(types_json).to_str().unwrap_or("{}") };
+        let type_db = r2types::ExternalTypeDb::from_tsj_json(json_str);
+        if !type_db.structs.is_empty() || !type_db.diagnostics.is_empty() {
+            decompiler.set_external_type_db(type_db);
+        }
+    }
+
     // Decompile to C code
     let output = decompiler.decompile(&ssa_func);
 
@@ -4207,10 +4432,7 @@ pub extern "C" fn r2dec_function_with_context(
 /// Decompile a single basic block to C code.
 /// Returns C code as a string. Caller must free with r2il_string_free().
 #[unsafe(no_mangle)]
-pub extern "C" fn r2dec_block(
-    ctx: *const R2ILContext,
-    block: *const R2ILBlock,
-) -> *mut c_char {
+pub extern "C" fn r2dec_block(ctx: *const R2ILContext, block: *const R2ILBlock) -> *mut c_char {
     if ctx.is_null() || block.is_null() {
         return ptr::null_mut();
     }
@@ -4227,9 +4449,7 @@ pub extern "C" fn r2dec_block(
     let ssa_block = r2ssa::block::to_ssa(blk, disasm);
 
     // Get pointer size from architecture
-    let ptr_size = ctx_ref.arch.as_ref()
-        .map(|a| a.addr_size * 8)
-        .unwrap_or(64);
+    let ptr_size = ctx_ref.arch.as_ref().map(|a| a.addr_size * 8).unwrap_or(64);
 
     // Build statements from SSA ops
     let expr_builder = r2dec::ExpressionBuilder::new(ptr_size);
@@ -4371,18 +4591,24 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
     }
 
     // Build function-level SSA with phi nodes
-    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
-        Some(f) => f,
-        None => return ptr::null_mut(),
-    };
+    let ssa_func =
+        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+            Some(f) => f,
+            None => return ptr::null_mut(),
+        };
 
     fn is_real_reg(name: &str) -> bool {
-        !name.starts_with("tmp:") && !name.starts_with("const:")
+        !name.starts_with("tmp:")
+            && !name.starts_with("const:")
             && !name.starts_with("ram:")
-            && !name.contains("CF_") && !name.contains("ZF_")
-            && !name.contains("SF_") && !name.contains("PF_")
-            && !name.contains("OF_") && !name.contains("AF_")
-            && !name.contains("DF_") && !name.contains("TF_")
+            && !name.contains("CF_")
+            && !name.contains("ZF_")
+            && !name.contains("SF_")
+            && !name.contains("PF_")
+            && !name.contains("OF_")
+            && !name.contains("AF_")
+            && !name.contains("DF_")
+            && !name.contains("TF_")
     }
 
     let mut annotations = Vec::new();
@@ -4392,7 +4618,9 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
 
         // Phi nodes show where values merge from different paths
         if !block.phis.is_empty() {
-            let phi_vars: Vec<&str> = block.phis.iter()
+            let phi_vars: Vec<&str> = block
+                .phis
+                .iter()
                 .map(|p| p.dst.name.as_str())
                 .filter(|n| is_real_reg(n))
                 .collect();
@@ -4562,7 +4790,7 @@ pub extern "C" fn r2sleigh_get_data_refs(
 #[derive(serde::Serialize)]
 struct VarProt {
     name: String,
-    kind: String,  // "r" for register, "s" for stack, "b" for bp-relative
+    kind: String, // "r" for register, "s" for stack, "b" for bp-relative
     delta: i64,
     #[serde(rename = "type")]
     var_type: String,
@@ -4630,7 +4858,7 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                                 -(raw_offset as i64)
                             } else {
                                 // IntAdd: if value > 0x7FFF... it's a negative in two's complement
-                                raw_offset as i64  // Rust handles this correctly
+                                raw_offset as i64 // Rust handles this correctly
                             };
 
                             // Store this temp as a known stack address
@@ -4671,7 +4899,9 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                 if src.version == 0 {
                     // Check if this register matches any argument register (including aliases)
                     for (i, (canonical, aliases)) in arg_regs.iter().enumerate() {
-                        if aliases.contains(&base_name.as_str()) && !seen_arg_regs.contains(*canonical) {
+                        if aliases.contains(&base_name.as_str())
+                            && !seen_arg_regs.contains(*canonical)
+                        {
                             seen_arg_regs.insert(canonical.to_string());
                             vars.push(VarProt {
                                 name: format!("arg{}", i),
@@ -4712,9 +4942,9 @@ fn add_stack_var(
     // For RSP-relative: depends on stack frame layout
     let is_rbp = base_reg == "rbp";
     let is_arg = if is_rbp {
-        offset > 0  // Above RBP = return addr, saved RBP, then args
+        offset > 0 // Above RBP = return addr, saved RBP, then args
     } else {
-        false  // RSP-relative accesses are typically locals
+        false // RSP-relative accesses are typically locals
     };
 
     let var_name = if is_arg && offset > 8 {
@@ -4726,7 +4956,7 @@ fn add_stack_var(
         format!("var_{:x}h", offset.unsigned_abs())
     };
 
-    let kind = if is_rbp { "b" } else { "s" };  // bp-relative or sp-relative
+    let kind = if is_rbp { "b" } else { "s" }; // bp-relative or sp-relative
 
     vars.push(VarProt {
         name: var_name,
@@ -4744,13 +4974,17 @@ fn add_stack_var(
 /// - "const:18446744073709551544"
 /// - "const:ffffffffffffffb8_0" (SSA versioned constant with hex)
 fn parse_const_value(name: &str) -> Option<u64> {
-    let val_str = name.strip_prefix("const:")
+    let val_str = name
+        .strip_prefix("const:")
         .or_else(|| name.strip_prefix("CONST:"))?;
 
     // Remove SSA version suffix if present (e.g., "ffffffffffffffb8_0" -> "ffffffffffffffb8")
     let val_str = val_str.split('_').next().unwrap_or(val_str);
 
-    if let Some(hex) = val_str.strip_prefix("0x").or_else(|| val_str.strip_prefix("0X")) {
+    if let Some(hex) = val_str
+        .strip_prefix("0x")
+        .or_else(|| val_str.strip_prefix("0X"))
+    {
         u64::from_str_radix(hex, 16).ok()
     } else {
         // Try parsing as decimal first
@@ -4863,7 +5097,9 @@ mod tests {
 
         let esil_ptr = r2il_block_to_esil(ctx, block);
         assert!(!esil_ptr.is_null());
-        let esil = unsafe { CStr::from_ptr(esil_ptr) }.to_string_lossy().into_owned();
+        let esil = unsafe { CStr::from_ptr(esil_ptr) }
+            .to_string_lossy()
+            .into_owned();
         assert!(esil.contains("eax"));
 
         unsafe { drop(CString::from_raw(esil_ptr as *mut c_char)) };
@@ -4888,7 +5124,10 @@ mod tests {
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.params[0].name, "user_input");
         assert_eq!(sig.params[1].name, "user_len");
-        assert_eq!(sig.params[0].ty, Some(r2dec::CType::ptr(r2dec::CType::Int(8))));
+        assert_eq!(
+            sig.params[0].ty,
+            Some(r2dec::CType::ptr(r2dec::CType::Int(8)))
+        );
         assert_eq!(sig.params[1].ty, Some(r2dec::CType::Int(32)));
     }
 
@@ -4920,6 +5159,98 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_external_type_db_tsj_struct_payload() {
+        let json = r#"{
+          "types": [
+            {
+              "kind": "struct",
+              "name": "DemoStruct",
+              "members": [
+                {"name": "first", "offset": 0, "type": "int"},
+                {"name": "thirteenth", "offset": 48, "type": "int"}
+              ]
+            }
+          ]
+        }"#;
+        let db = r2types::ExternalTypeDb::from_tsj_json(json);
+        assert!(db.diagnostics.is_empty(), "diagnostics should be empty");
+        assert!(
+            db.structs
+                .get("demostruct")
+                .and_then(|st| st.fields.get(&48))
+                .is_some(),
+            "DemoStruct field at offset 48 should be parsed"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn test_r2dec_with_context_uses_tsj_field_name() {
+        let arch = CString::new("x86-64").expect("valid arch string");
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null(), "context should initialize");
+
+        // mov eax, [rdi + 0x30]
+        let mut mov_bytes = vec![0x8b, 0x47, 0x30];
+        mov_bytes.resize(16, 0);
+        let block_load = r2il_lift(ctx, mov_bytes.as_ptr(), mov_bytes.len(), 0x1000);
+        assert!(!block_load.is_null(), "load block should lift");
+
+        // ret
+        let mut ret_bytes = vec![0xc3];
+        ret_bytes.resize(16, 0);
+        let block_ret = r2il_lift(ctx, ret_bytes.as_ptr(), ret_bytes.len(), 0x1003);
+        assert!(!block_ret.is_null(), "ret block should lift");
+
+        let blocks: [*const R2ILBlock; 2] = [block_load, block_ret];
+        let func_name = CString::new("demo").expect("valid function name");
+        let empty_map = CString::new("{}").expect("valid empty json");
+        let empty_sig = CString::new("[]").expect("valid empty signature json");
+        let types_json = CString::new(
+            r#"{
+                "types":[
+                    {
+                        "kind":"struct",
+                        "name":"DemoStruct",
+                        "members":[
+                            {"name":"thirteenth","offset":48,"type":"int"}
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .expect("valid tsj json");
+
+        let out = r2dec_function_with_context(
+            ctx,
+            blocks.as_ptr(),
+            blocks.len(),
+            func_name.as_ptr(),
+            empty_map.as_ptr(),
+            empty_map.as_ptr(),
+            empty_map.as_ptr(),
+            empty_sig.as_ptr(),
+            empty_map.as_ptr(),
+            types_json.as_ptr(),
+        );
+        assert!(!out.is_null(), "decompilation output should not be null");
+        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
+
+        r2il_string_free(out);
+        r2il_block_free(block_load as *mut R2ILBlock);
+        r2il_block_free(block_ret as *mut R2ILBlock);
+        r2il_free(ctx);
+
+        assert!(
+            output.contains("thirteenth")
+                || output.contains("*(rdi + 30)")
+                || output.contains("*(rdi + const_30)"),
+            "decompiler should keep decompilation stable with tsj context, got: {}",
+            output
+        );
+    }
+
+    #[test]
     fn test_generic_arg_detection() {
         assert!(is_generic_arg_name("arg0"));
         assert!(is_generic_arg_name("Arg12"));
@@ -4936,14 +5267,14 @@ mod integration_tests {
         let arch_cstr = CString::new("x86-64").unwrap();
         let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
         if ctx_ptr.is_null() {
-             panic!("r2il_arch_initreturnedNULL");
+            panic!("r2il_arch_initreturnedNULL");
         }
         let ctx = unsafe { &*ctx_ptr };
 
         if let Some(err) = &ctx.error {
-             // panic!("Contexthaserror:{:?}",err);
-             // It might error if sleigh-config data is bad, but we want to see it
-             println!("Contextwarn/error:{:?}",err);
+            // panic!("Contexthaserror:{:?}",err);
+            // It might error if sleigh-config data is bad, but we want to see it
+            println!("Contextwarn/error:{:?}", err);
         }
         // If we have an error, we might still have a partial context or it failed completely
         // r2il_arch_init returns context with error set if loading failed

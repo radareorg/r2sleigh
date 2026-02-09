@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAOp;
 
-use super::{utils, FlagInfo, PassEnv, UseInfo};
+use super::{FlagInfo, PassEnv, UseInfo, utils};
 use crate::fold::SSABlock;
 
 #[derive(Debug, Default)]
@@ -10,7 +10,7 @@ pub(crate) struct FlagScratch {
     pub(crate) info: FlagInfo,
 }
 
-pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, _env: &PassEnv) -> FlagInfo {
+pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, _env: &PassEnv<'_>) -> FlagInfo {
     let mut scratch = FlagScratch::default();
 
     for block in blocks {

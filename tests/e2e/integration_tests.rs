@@ -1158,8 +1158,41 @@ mod decompilation {
         let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_field", "a:sla.dec");
         result.assert_ok();
         assert!(
-            result.contains("->field_"),
-            "Should recover pointer member access for fixed offsets"
+            result.contains_any(&["->thirteenth", "->first", "->field_"]),
+            "Should recover pointer member access and prefer tsj-derived field names when available"
+        );
+    }
+
+    #[test]
+    fn decompiles_struct_mixed_offset_member_access() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_mixed_offsets", "a:sla.dec");
+        result.assert_ok();
+        assert!(
+            result.contains_any(&["->first", "->fifth", "->thirteenth", "->field_"]),
+            "Should keep member-style access, preferring tsj field names when available"
+        );
+    }
+
+    #[test]
+    fn decompiles_non_four_byte_stride_as_subscript() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_u16_stride", "a:sla.dec");
+        result.assert_ok();
+        assert!(result.contains("["), "Should render scaled index as subscript");
+    }
+
+    #[test]
+    fn decompiles_struct_array_index_pattern() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_array_index", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        assert!(
+            normalized.contains("[")
+                || normalized.contains("->field_")
+                || normalized.contains("*(arr +"),
+            "Should recover a structured or at least stable pointer-indexing expression for struct array indexing"
         );
     }
 
@@ -1786,17 +1819,53 @@ mod deep_integration {
     #[test]
     fn aaaa_auto_taint_emits_xref_with_entry_fallback() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.main", "aaaa; s 0x401814; axtj");
+        let meta = r2_at_func(
+            vuln_test_binary(),
+            "dbg.main",
+            "aaaa; s dbg.main; ?v $$; f~sla.taint.fcn_",
+        );
+        meta.assert_ok();
+
+        let main_addr = meta
+            .stdout
+            .lines()
+            .find_map(|line| {
+                let token = line.trim();
+                token
+                    .strip_prefix("0x")
+                    .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+            })
+            .expect("should print main address via '?v $$'");
+        let fcn_tag = format!("sla.taint.fcn_{main_addr:x}.blk_");
+
+        let sink_addr = meta
+            .stdout
+            .lines()
+            .filter(|line| line.contains(&fcn_tag))
+            .filter_map(|line| line.split_whitespace().next())
+            .find_map(|token| {
+                token
+                    .strip_prefix("0x")
+                    .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                    .filter(|addr| *addr != main_addr)
+            })
+            .expect("should find at least one taint flag block for main");
+
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.main",
+            &format!("aaaa; s 0x{sink_addr:x}; axtj"),
+        );
         result.assert_ok();
         let json = parse_json(&result, "axtj");
         let refs = expect_array(&json, "axtj");
         let has_expected_ref = refs.iter().any(|item| {
-            item.get("from").and_then(Value::as_u64) == Some(0x4017c4)
+            item.get("from").and_then(Value::as_u64) == Some(main_addr)
                 && item.get("type").and_then(Value::as_str) == Some("DATA")
         });
         assert!(
             has_expected_ref,
-            "should emit DATA xref from main entry (0x4017c4) to tainted sink block (0x401814)"
+            "should emit DATA xref from main entry to at least one tainted sink block"
         );
     }
 

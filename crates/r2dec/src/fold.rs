@@ -23,9 +23,10 @@
 use std::collections::{HashMap, HashSet};
 
 use r2ssa::{FunctionSSABlock, SSAFunction, SSAOp, SSAVar};
+use r2types::TypeOracle;
 
-use crate::analysis;
 use crate::ExternalStackVar;
+use crate::analysis;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 
 // Type alias for clarity
@@ -59,8 +60,7 @@ struct CompareTuple {
 const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
 
 /// Tracks use counts and definitions for expression folding.
-#[derive(Debug)]
-pub struct FoldingContext {
+pub struct FoldingContext<'a> {
     /// Pointer size in bits (reserved for architecture-aware type sizing).
     ptr_size: u32,
     /// Function address to name mapping for resolving call targets.
@@ -92,9 +92,11 @@ pub struct FoldingContext {
     analysis_ctx: analysis::AnalysisContext,
     /// Stack variables recovered from external analysis metadata.
     external_stack_vars: HashMap<i64, ExternalStackVar>,
+    /// Optional oracle for richer type-driven rendering.
+    type_oracle: Option<&'a dyn TypeOracle>,
 }
 
-impl FoldingContext {
+impl<'a> FoldingContext<'a> {
     fn use_info(&self) -> &analysis::UseInfo {
         &self.analysis_ctx.use_info
     }
@@ -121,6 +123,9 @@ impl FoldingContext {
     }
     pub(crate) fn ptr_arith_map(&self) -> &HashMap<String, PtrArith> {
         &self.use_info().ptr_arith
+    }
+    pub(crate) fn ptr_members_map(&self) -> &HashMap<String, (SSAVar, i64)> {
+        &self.use_info().ptr_members
     }
     pub(crate) fn condition_vars_set(&self) -> &HashSet<String> {
         &self.use_info().condition_vars
@@ -149,7 +154,7 @@ impl FoldingContext {
     pub(crate) fn stack_vars_map(&self) -> &HashMap<i64, String> {
         &self.stack_info().stack_vars
     }
-    pub(crate) fn to_pass_env(&self) -> analysis::PassEnv {
+    pub(crate) fn to_pass_env(&self) -> analysis::PassEnv<'a> {
         analysis::PassEnv {
             ptr_size: self.ptr_size,
             sp_name: self.sp_name.clone(),
@@ -161,6 +166,7 @@ impl FoldingContext {
             arg_regs: self.arg_regs.clone(),
             caller_saved_regs: self.caller_saved_regs.clone(),
             type_hints: self.use_info().type_hints.clone(),
+            type_oracle: self.type_oracle,
         }
     }
 
@@ -233,6 +239,7 @@ impl FoldingContext {
                 stack_info: analysis::StackInfo::default(),
             },
             external_stack_vars: HashMap::new(),
+            type_oracle: None,
         }
     }
 
@@ -327,6 +334,11 @@ impl FoldingContext {
     /// Set externally recovered stack variables keyed by signed stack offset.
     pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, ExternalStackVar>) {
         self.external_stack_vars = stack_vars;
+    }
+
+    /// Set optional type oracle for type-driven expression rendering.
+    pub fn set_type_oracle(&mut self, type_oracle: Option<&'a dyn TypeOracle>) {
+        self.type_oracle = type_oracle;
     }
 
     /// Analyze function structure to detect return patterns.
@@ -757,9 +769,12 @@ impl FoldingContext {
                 member,
             },
             CExpr::Sizeof(inner) => CExpr::Sizeof(Box::new(self.rewrite_stack_expr(*inner))),
-            CExpr::Comma(items) => {
-                CExpr::Comma(items.into_iter().map(|item| self.rewrite_stack_expr(item)).collect())
-            }
+            CExpr::Comma(items) => CExpr::Comma(
+                items
+                    .into_iter()
+                    .map(|item| self.rewrite_stack_expr(item))
+                    .collect(),
+            ),
             other => other,
         };
 
@@ -768,7 +783,8 @@ impl FoldingContext {
             CExpr::Binary {
                 op: BinaryOp::Add | BinaryOp::Sub,
                 ..
-            } | CExpr::Paren(_) | CExpr::Cast { .. }
+            } | CExpr::Paren(_)
+                | CExpr::Cast { .. }
         ) && let Some(alias) = self.resolve_stack_alias_from_addr_expr(&rewritten, 0)
         {
             return CExpr::Var(alias);
@@ -791,7 +807,11 @@ impl FoldingContext {
     fn extract_known_stack_var_name(&self, expr: &CExpr) -> Option<String> {
         match expr {
             CExpr::Var(name) => {
-                if self.stack_vars_map().values().any(|candidate| candidate == name) {
+                if self
+                    .stack_vars_map()
+                    .values()
+                    .any(|candidate| candidate == name)
+                {
                     Some(name.clone())
                 } else {
                     None
@@ -1335,7 +1355,7 @@ impl FoldingContext {
                     if let Some(sub) = self.try_subscript_from_addr_expr(&expanded_inner) {
                         sub
                     } else if let Some(member) =
-                        self.try_member_access_from_addr_expr(&expanded_inner)
+                        self.try_member_access_from_addr_expr(None, &expanded_inner)
                     {
                         member
                     } else {
@@ -1790,7 +1810,7 @@ impl FoldingContext {
         element_size: u32,
         is_sub: bool,
     ) -> CExpr {
-        let elem_ty = uint_type_from_size(element_size);
+        let elem_ty = self.infer_subscript_elem_type(base, element_size);
         let base_expr = CExpr::cast(CType::ptr(elem_ty), self.get_expr(base));
         let index_expr = if is_sub {
             CExpr::unary(UnaryOp::Neg, self.get_expr(index))
@@ -1833,23 +1853,47 @@ impl FoldingContext {
         })
     }
 
+    fn infer_subscript_elem_type(&self, base: &SSAVar, element_size: u32) -> CType {
+        if let Some(oracle) = self.type_oracle {
+            let base_ty = oracle.type_of(base);
+            if (oracle.is_array(base_ty) || oracle.is_pointer(base_ty))
+                && let Some(hint) = self.type_hint_for_var(base)
+            {
+                match hint {
+                    CType::Pointer(inner) | CType::Array(inner, _) => return *inner,
+                    _ => {}
+                }
+            }
+        }
+        uint_type_from_size(element_size)
+    }
+
     fn try_member_access_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
         let expr = self
             .definitions_map()
             .get(&addr.display_name())
             .cloned()
             .unwrap_or_else(|| addr_expr.clone());
-        self.try_member_access_from_addr_expr(&expr)
+        self.try_member_access_from_addr_expr(Some(addr), &expr)
     }
 
-    fn try_member_access_from_addr_expr(&self, expr: &CExpr) -> Option<CExpr> {
+    fn try_member_access_from_addr_expr(
+        &self,
+        addr: Option<&SSAVar>,
+        expr: &CExpr,
+    ) -> Option<CExpr> {
         let (base_expr, offset) = self.extract_base_const_offset(expr)?;
-        if offset == 0 || self.is_stackish_expr(&base_expr) || !self.looks_like_pointer(&base_expr)
-        {
+        if offset == 0 || self.is_stackish_expr(&base_expr) {
+            return None;
+        }
+        let oracle_member = self.oracle_member_name(addr, &base_expr, offset);
+        if oracle_member.is_none() && !self.looks_like_pointer(&base_expr) {
             return None;
         }
 
-        let member = if offset < 0 {
+        let member = if let Some(name) = oracle_member {
+            name
+        } else if offset < 0 {
             format!("field_neg_{:x}", (-offset) as u64)
         } else {
             format!("field_{:x}", offset as u64)
@@ -1891,6 +1935,66 @@ impl FoldingContext {
                 .and_then(|def| self.extract_base_const_offset(&def)),
             _ => None,
         }
+    }
+
+    fn oracle_member_name(
+        &self,
+        addr: Option<&SSAVar>,
+        base_expr: &CExpr,
+        offset: i64,
+    ) -> Option<String> {
+        if offset < 0 {
+            return None;
+        }
+        let oracle = self.type_oracle?;
+        let offset = offset as u64;
+
+        // Best-effort: prefer base pointer identities captured during analysis.
+        if let Some(addr) = addr
+            && let Some((base, mapped_offset)) = self.ptr_members_map().get(&addr.display_name())
+            && *mapped_offset == offset as i64
+        {
+            let base_ty = oracle.type_of(base);
+            if let Some(name) = oracle.field_name(base_ty, offset) {
+                return Some(name.to_string());
+            }
+            if let Some(hex_offset) = reinterpret_decimal_as_hex(offset)
+                && let Some(name) = oracle.field_name(base_ty, hex_offset)
+            {
+                return Some(name.to_string());
+            }
+        }
+
+        if let CExpr::Var(base_name) = base_expr {
+            for (base, mapped_offset) in self.ptr_members_map().values() {
+                if *mapped_offset != offset as i64 {
+                    continue;
+                }
+                if self.var_name(base) != *base_name {
+                    continue;
+                }
+                let base_ty = oracle.type_of(base);
+                if let Some(name) = oracle.field_name(base_ty, offset) {
+                    return Some(name.to_string());
+                }
+                if let Some(hex_offset) = reinterpret_decimal_as_hex(offset)
+                    && let Some(name) = oracle.field_name(base_ty, hex_offset)
+                {
+                    return Some(name.to_string());
+                }
+            }
+        }
+
+        if let Some(name) = oracle.field_name_any(offset) {
+            return Some(name.to_string());
+        }
+        if let Some(hex_offset) = reinterpret_decimal_as_hex(offset)
+            && let Some(name) = oracle.field_name_any(hex_offset)
+        {
+            return Some(name.to_string());
+        }
+
+        None
     }
 
     fn looks_like_pointer(&self, expr: &CExpr) -> bool {
@@ -2776,9 +2880,9 @@ impl FoldingContext {
                 ));
                 self.assign_stmt(lhs, rhs)
             }
-            SSAOp::Return { target } => {
-                Some(CStmt::Return(Some(self.rewrite_stack_expr(self.get_expr(target)))))
-            }
+            SSAOp::Return { target } => Some(CStmt::Return(Some(
+                self.rewrite_stack_expr(self.get_expr(target)),
+            ))),
             SSAOp::Branch { .. } | SSAOp::CBranch { .. } => {
                 // Handled by control flow structuring
                 None
@@ -3831,11 +3935,11 @@ impl FoldingContext {
         Some(CExpr::binary(BinaryOp::Lt, sf_cmp.lhs, sf_cmp.rhs))
     }
 
-    fn extract_of_sf_pair<'a>(
+    fn extract_of_sf_pair<'b>(
         &self,
-        expr: &'a CExpr,
+        expr: &'b CExpr,
         want_ne: bool,
-    ) -> Option<(String, &'a CExpr)> {
+    ) -> Option<(String, &'b CExpr)> {
         let op_match = if want_ne { BinaryOp::Ne } else { BinaryOp::Eq };
         if let CExpr::Binary { op, left, right } = expr {
             if *op != op_match {
@@ -4377,6 +4481,15 @@ fn uint_type_from_size(size: u32) -> CType {
     }
 }
 
+fn reinterpret_decimal_as_hex(offset: u64) -> Option<u64> {
+    let text = offset.to_string();
+    if text.chars().any(|c| !c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let parsed = u64::from_str_radix(&text, 16).ok()?;
+    if parsed == offset { None } else { Some(parsed) }
+}
+
 /// Fold expressions in a block, returning simplified C statements.
 pub fn fold_block(block: &SSABlock) -> Vec<CStmt> {
     let mut ctx = FoldingContext::new(64);
@@ -4395,8 +4508,11 @@ pub fn fold_blocks(blocks: &[SSABlock]) -> Vec<(u64, Vec<CStmt>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use crate::ExternalStackVar;
     use r2il::{R2ILBlock, R2ILOp, Varnode};
+    use r2types::{Signedness, SolvedTypes, SolverDiagnostics, TypeArena};
 
     fn make_var(name: &str, version: u32, size: u32) -> SSAVar {
         SSAVar::new(name, version, size)
@@ -4408,6 +4524,23 @@ mod tests {
             size: 4,
             ops,
             phis: Vec::new(),
+        }
+    }
+
+    fn make_oracle_for_member(base: SSAVar, offset: u64, field_name: &str) -> SolvedTypes {
+        let mut arena = TypeArena::default();
+        let i32_ty = arena.int(32, Signedness::Signed);
+        let st = arena.struct_named_or_existing("DemoStruct");
+        let st = arena.struct_with_field(st, offset, Some(field_name.to_string()), i32_ty);
+        let ptr = arena.ptr(st);
+        let mut var_types = HashMap::new();
+        var_types.insert(base, ptr);
+        let top_id = arena.top();
+        SolvedTypes {
+            arena,
+            var_types,
+            diagnostics: SolverDiagnostics::default(),
+            top_id,
         }
     }
 
@@ -4637,6 +4770,78 @@ mod tests {
         // inlining it gets inlined into the dead expression, which is then eliminated.
         // Both statements should be eliminated.
         assert_eq!(stmts.len(), 0);
+    }
+
+    #[test]
+    fn test_member_access_uses_oracle_field_name() {
+        let base = make_var("arg1", 0, 8);
+        let addr = make_var("tmp:9100", 1, 8);
+        let dst = make_var("tmp:9101", 1, 4);
+        let block = make_block(vec![
+            SSAOp::IntAdd {
+                dst: addr.clone(),
+                a: base.clone(),
+                b: make_var("const:0x30", 0, 8),
+            },
+            SSAOp::Load {
+                dst: dst.clone(),
+                space: "ram".to_string(),
+                addr: addr.clone(),
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        let mut hints = HashMap::new();
+        hints.insert(base.display_name(), CType::ptr(CType::Int(32)));
+        ctx.set_type_hints(hints);
+        let oracle = make_oracle_for_member(base, 0x30, "thirteenth");
+        ctx.set_type_oracle(Some(&oracle));
+        ctx.analyze_block(&block);
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst,
+            space: "ram".to_string(),
+            addr,
+        });
+        let CExpr::PtrMember { member, .. } = expr else {
+            panic!("expected pointer member access");
+        };
+        assert_eq!(member, "thirteenth");
+    }
+
+    #[test]
+    fn test_member_access_falls_back_without_oracle_name() {
+        let base = make_var("arg1", 0, 8);
+        let addr = make_var("tmp:9200", 1, 8);
+        let dst = make_var("tmp:9201", 1, 4);
+        let block = make_block(vec![
+            SSAOp::IntAdd {
+                dst: addr.clone(),
+                a: base.clone(),
+                b: make_var("const:0x30", 0, 8),
+            },
+            SSAOp::Load {
+                dst: dst.clone(),
+                space: "ram".to_string(),
+                addr: addr.clone(),
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        let mut hints = HashMap::new();
+        hints.insert(base.display_name(), CType::ptr(CType::Int(32)));
+        ctx.set_type_hints(hints);
+        ctx.analyze_block(&block);
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst,
+            space: "ram".to_string(),
+            addr,
+        });
+        let CExpr::PtrMember { member, .. } = expr else {
+            panic!("expected pointer member access");
+        };
+        assert_eq!(member, "field_30");
     }
 
     #[test]

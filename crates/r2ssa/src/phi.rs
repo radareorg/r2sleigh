@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::cfg::{BasicBlock, CFG};
 use crate::domtree::DomTree;
-use crate::naming::{varnode_to_name, RegisterNameMap};
+use crate::naming::{RegisterNameMap, varnode_to_name};
 use crate::op::SSAOp;
 use crate::var::SSAVar;
 

@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "signatures": {
+    "setlocale": {
+      "return": "char*",
+      "params": ["i32", "char*"],
+      "variadic": false
+    },
+    "puts": {
+      "return": "i32",
+      "params": ["char*"],
+      "variadic": false
+    },
+    "strdup": {
+      "return": "char*",
+      "params": ["char*"],
+      "variadic": false
+    },
+    "open": {
+      "return": "i32",
+      "params": ["char*", "i32"],
+      "variadic": true
+    },
+    "close": {
+      "return": "i32",
+      "params": ["i32"],
+      "variadic": false
+    },
+    "read": {
+      "return": "i64",
+      "params": ["i32", "void*", "size_t"],
+      "variadic": false
+    },
+    "write": {
+      "return": "i64",
+      "params": ["i32", "void*", "size_t"],
+      "variadic": false
+    }
+  }
+}

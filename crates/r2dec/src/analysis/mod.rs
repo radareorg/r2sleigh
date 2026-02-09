@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use r2types::TypeOracle;
+
 use crate::ast::{CExpr, CType};
 use crate::fold::{PtrArith, SSABlock};
 
@@ -23,8 +25,8 @@ pub(crate) struct AnalysisContext {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(crate) struct PassEnv {
+#[derive(Clone)]
+pub(crate) struct PassEnv<'a> {
     pub(crate) ptr_size: u32,
     pub(crate) sp_name: String,
     pub(crate) fp_name: String,
@@ -35,6 +37,7 @@ pub(crate) struct PassEnv {
     pub(crate) arg_regs: Vec<String>,
     pub(crate) caller_saved_regs: HashSet<String>,
     pub(crate) type_hints: HashMap<String, CType>,
+    pub(crate) type_oracle: Option<&'a dyn TypeOracle>,
 }
 
 #[allow(dead_code)]
@@ -46,6 +49,7 @@ pub(crate) struct UseInfo {
     pub(crate) copy_sources: HashMap<String, String>,
     pub(crate) memory_stores: HashMap<String, String>,
     pub(crate) ptr_arith: HashMap<String, PtrArith>,
+    pub(crate) ptr_members: HashMap<String, (r2ssa::SSAVar, i64)>,
     pub(crate) condition_vars: HashSet<String>,
     pub(crate) pinned: HashSet<String>,
     pub(crate) call_args: HashMap<(u64, usize), Vec<CExpr>>,
@@ -71,19 +75,19 @@ pub(crate) struct StackInfo {
 }
 
 impl UseInfo {
-    pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv) -> Self {
+    pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv<'_>) -> Self {
         use_info::analyze(blocks, env)
     }
 }
 
 impl FlagInfo {
-    pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, env: &PassEnv) -> Self {
+    pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, env: &PassEnv<'_>) -> Self {
         flag_info::analyze(blocks, use_info, env)
     }
 }
 
 impl StackInfo {
-    pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, env: &PassEnv) -> Self {
+    pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, env: &PassEnv<'_>) -> Self {
         stack_info::analyze(blocks, use_info, env)
     }
 }

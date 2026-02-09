@@ -36,9 +36,8 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let plugin_dir = find_plugin_dir().ok_or_else(|| {
-        "could not locate r2plugin directory; run from the repo root".to_string()
-    })?;
+    let plugin_dir = find_plugin_dir()
+        .ok_or_else(|| "could not locate r2plugin directory; run from the repo root".to_string())?;
 
     let mut cmd = Command::new("make");
     cmd.arg("install").current_dir(&plugin_dir);

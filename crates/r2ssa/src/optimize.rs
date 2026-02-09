@@ -185,8 +185,12 @@ fn compute_constants(func: &SSAFunction, max_iters: usize) -> HashMap<VarKey, u6
                 continue;
             }
             let mut iter = phi.sources.iter();
-            let Some((_, first)) = iter.next() else { continue };
-            let Some(first_val) = const_for_var(first, &consts) else { continue };
+            let Some((_, first)) = iter.next() else {
+                continue;
+            };
+            let Some(first_val) = const_for_var(first, &consts) else {
+                continue;
+            };
             if iter.all(|(_, src)| const_for_var(src, &consts) == Some(first_val)) {
                 consts.insert(dst_key, first_val);
                 changed = true;
@@ -408,7 +412,9 @@ fn replace_sources_with_constants(
     let block_addrs = func.block_addrs().to_vec();
 
     for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else { continue };
+        let Some(block) = func.get_block_mut(addr) else {
+            continue;
+        };
 
         for phi in &mut block.phis {
             for (_, src) in &mut phi.sources {
@@ -464,7 +470,9 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let block_addrs = func.block_addrs().to_vec();
 
     for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else { continue };
+        let Some(block) = func.get_block_mut(addr) else {
+            continue;
+        };
         for op in &mut block.ops {
             if let Some(new_op) = simplify_op(op) {
                 if &new_op != op {
@@ -726,11 +734,15 @@ fn build_copy_replacements(
     let block_addrs = func.block_addrs().to_vec();
 
     for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else { continue };
+        let Some(block) = func.get_block_mut(addr) else {
+            continue;
+        };
 
         block.phis.retain(|phi| {
             let mut iter = phi.sources.iter();
-            let Some((_, first)) = iter.next() else { return true };
+            let Some((_, first)) = iter.next() else {
+                return true;
+            };
             if iter.all(|(_, src)| src == first) {
                 let dst_key = VarKey::from_var(&phi.dst);
                 if phi.dst != *first {
@@ -802,7 +814,9 @@ fn apply_replacements(
     };
 
     for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else { continue };
+        let Some(block) = func.get_block_mut(addr) else {
+            continue;
+        };
 
         for phi in &mut block.phis {
             for (_, src) in &mut phi.sources {
@@ -1000,11 +1014,15 @@ fn common_subexpr_elim(func: &mut SSAFunction, stats: &mut OptimizationStats) ->
     let block_addrs = func.block_addrs().to_vec();
 
     for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else { continue };
+        let Some(block) = func.get_block_mut(addr) else {
+            continue;
+        };
         let mut available: HashMap<ExprKey, SSAVar> = HashMap::new();
 
         for op in &mut block.ops {
-            let Some(dst) = op.dst().cloned() else { continue };
+            let Some(dst) = op.dst().cloned() else {
+                continue;
+            };
             let Some(key) = expr_key(op) else { continue };
 
             if let Some(existing) = available.get(&key).cloned() {
@@ -1052,7 +1070,9 @@ fn dead_code_elim(
         let block_addrs = func.block_addrs().to_vec();
 
         for addr in block_addrs {
-            let Some(block) = func.get_block_mut(addr) else { continue };
+            let Some(block) = func.get_block_mut(addr) else {
+                continue;
+            };
 
             let before_ops = block.ops.len();
             block.ops.retain(|op| {

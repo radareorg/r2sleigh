@@ -41,11 +41,10 @@ fn main() {
         .find(|path| path.feasible && path.final_pc() == SUCCESS)
         .expect("no satisfying path");
 
-    let solved = explorer.solve_path(success).expect("no model for success path");
-    let bytes = solved
-        .memory
-        .get("input")
-        .expect("missing input buffer");
+    let solved = explorer
+        .solve_path(success)
+        .expect("no model for success path");
+    let bytes = solved.memory.get("input").expect("missing input buffer");
 
     let printable = String::from_utf8_lossy(bytes);
     println!("input bytes: {:02x?}", bytes);

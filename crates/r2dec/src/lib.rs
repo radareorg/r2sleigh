@@ -28,8 +28,8 @@
 //! println!("{}", c_code);
 //! ```
 
-pub(crate) mod analysis;
 pub(crate) mod address;
+pub(crate) mod analysis;
 pub mod ast;
 pub mod codegen;
 pub mod expr;
@@ -50,6 +50,8 @@ pub use types::TypeInference;
 pub use variable::VariableRecovery;
 
 use r2ssa::SSAFunction;
+use r2types::ExternalTypeDb;
+use r2types::TypeOracle;
 
 fn is_generic_arg_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
@@ -161,6 +163,8 @@ pub struct DecompilerContext {
     pub function_signature: Option<ExternalFunctionSignature>,
     /// Stack variables keyed by signed stack offset.
     pub stack_vars: std::collections::HashMap<i64, ExternalStackVar>,
+    /// Optional external host type database (e.g. tsj payload).
+    pub external_type_db: ExternalTypeDb,
 }
 
 /// The main decompiler.
@@ -209,6 +213,11 @@ impl Decompiler {
         self.context.stack_vars = stack_vars;
     }
 
+    /// Set externally recovered host type database.
+    pub fn set_external_type_db(&mut self, external_type_db: ExternalTypeDb) {
+        self.context.external_type_db = external_type_db;
+    }
+
     /// Decompile an SSA function to C code.
     pub fn decompile(&self, func: &SSAFunction) -> String {
         // Build the C function
@@ -219,10 +228,11 @@ impl Decompiler {
         codegen.generate_function(&c_func)
     }
 
-    fn configure_structurer(
+    fn configure_structurer<'o>(
         &self,
-        structurer: &mut ControlFlowStructurer<'_>,
+        structurer: &mut ControlFlowStructurer<'_, 'o>,
         type_hints: &std::collections::HashMap<String, CType>,
+        type_oracle: Option<&'o dyn TypeOracle>,
     ) {
         if !self.context.function_names.is_empty() {
             structurer.set_function_names(self.context.function_names.clone());
@@ -239,6 +249,7 @@ impl Decompiler {
         if !type_hints.is_empty() {
             structurer.set_type_hints(type_hints.clone());
         }
+        structurer.set_type_oracle(type_oracle);
     }
 
     fn stmt_has_content(stmt: &CStmt) -> bool {
@@ -308,12 +319,24 @@ impl Decompiler {
         if !self.context.function_names.is_empty() {
             type_inference.set_function_names(self.context.function_names.clone());
         }
+        if self.context.function_signature.is_some() {
+            type_inference.set_external_signature(self.context.function_signature.clone());
+        }
+        if !self.context.stack_vars.is_empty() {
+            type_inference.set_external_stack_vars(self.context.stack_vars.clone());
+        }
+        if !self.context.external_type_db.structs.is_empty() {
+            type_inference.set_external_type_db(self.context.external_type_db.clone());
+        }
         type_inference.infer_function(func);
         let type_hints = type_inference.var_type_hints();
+        let type_oracle = type_inference
+            .solved_types()
+            .map(|solved| solved as &dyn TypeOracle);
 
         // Structure control flow (primary path: folded)
         let mut structurer = ControlFlowStructurer::new(func, self.config.ptr_size);
-        self.configure_structurer(&mut structurer, &type_hints);
+        self.configure_structurer(&mut structurer, &type_hints, type_oracle);
 
         // Get set of variables that survive folding before structuring.
         let emitted_vars = structurer.emitted_var_names();
@@ -330,7 +353,7 @@ impl Decompiler {
 
             // Fallback 1: unfolded structuring
             let mut unfolded = ControlFlowStructurer::new_unfolded(func, self.config.ptr_size);
-            self.configure_structurer(&mut unfolded, &type_hints);
+            self.configure_structurer(&mut unfolded, &type_hints, type_oracle);
             let unfolded_stmt = unfolded.structure();
 
             if Self::stmt_has_content(&unfolded_stmt) {

@@ -45,7 +45,10 @@ mod tests {
 
     #[test]
     fn parses_const_addresses() {
-        assert_eq!(parse_address_from_var_name("const:0x403000"), Some(0x403000));
+        assert_eq!(
+            parse_address_from_var_name("const:0x403000"),
+            Some(0x403000)
+        );
         assert_eq!(parse_address_from_var_name("const:403000"), Some(0x403000));
         assert_eq!(parse_address_from_var_name("const:42"), Some(42));
         assert_eq!(parse_address_from_var_name("const:0x42_0"), Some(0x42));
@@ -55,7 +58,10 @@ mod tests {
     fn parses_ram_addresses() {
         assert_eq!(parse_address_from_var_name("ram:403000"), Some(0x403000));
         assert_eq!(parse_address_from_var_name("ram:403000_0"), Some(0x403000));
-        assert_eq!(parse_address_from_var_name("ram:0x403000_1"), Some(0x403000));
+        assert_eq!(
+            parse_address_from_var_name("ram:0x403000_1"),
+            Some(0x403000)
+        );
     }
 
     #[test]

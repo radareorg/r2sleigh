@@ -3,17 +3,23 @@
 //! This module provides type inference for decompiled code,
 //! mapping SSA variables to C types.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
+use r2types::{
+    CTypeLike, Constraint, ConstraintSource, ExternalTypeDb, MemoryCapability, ResolvedSignature,
+    SignatureRegistry, Signedness, SolvedTypes, SolverConfig, TypeArena, TypeId, TypeOracle,
+    TypeSolver, to_c_type_like,
+};
 
 use crate::ast::CType;
+use crate::{ExternalFunctionSignature, ExternalStackVar};
 
 /// Type inference context.
 pub struct TypeInference {
     /// Inferred types for variables.
     var_types: HashMap<SSAVar, CType>,
-    /// Known function signatures.
+    /// User-provided function signatures.
     func_types: HashMap<String, FunctionType>,
     /// Function names by address (injected from external context).
     function_names: HashMap<u64, String>,
@@ -23,6 +29,16 @@ pub struct TypeInference {
     arg_regs: Vec<String>,
     /// Return-value registers for the active architecture.
     ret_regs: Vec<String>,
+    /// Embedded signature registry.
+    signature_registry: SignatureRegistry,
+    /// Optional externally recovered function signature.
+    external_signature: Option<ExternalFunctionSignature>,
+    /// Optional externally recovered stack variables.
+    external_stack_vars: HashMap<i64, ExternalStackVar>,
+    /// Optional external host type database.
+    external_type_db: ExternalTypeDb,
+    /// Last solver output for this function inference pass.
+    solved_types: Option<SolvedTypes>,
 }
 
 /// Function type signature.
@@ -36,7 +52,7 @@ pub struct FunctionType {
 impl TypeInference {
     /// Create a new type inference context.
     pub fn new(ptr_size: u32) -> Self {
-        let mut ti = Self {
+        Self {
             var_types: HashMap::new(),
             func_types: HashMap::new(),
             function_names: HashMap::new(),
@@ -58,317 +74,481 @@ impl TypeInference {
             } else {
                 vec!["eax".to_string()]
             },
-        };
-        // Add known libc function signatures
-        ti.add_known_functions();
-        ti
+            signature_registry: SignatureRegistry::from_embedded_json(),
+            external_signature: None,
+            external_stack_vars: HashMap::new(),
+            external_type_db: ExternalTypeDb::default(),
+            solved_types: None,
+        }
     }
 
-    /// Add known C library function signatures.
-    fn add_known_functions(&mut self) {
-        let size_t = CType::UInt(self.ptr_size);
+    /// Set externally-resolved function names (address -> symbol).
+    pub fn set_function_names(&mut self, names: HashMap<u64, String>) {
+        self.function_names = names;
+    }
 
-        // memcpy(void* dst, const void* src, size_t n)
-        self.func_types.insert(
-            "memcpy".to_string(),
-            FunctionType {
-                return_type: CType::void_ptr(),
-                params: vec![CType::void_ptr(), CType::void_ptr(), size_t.clone()],
-                variadic: false,
-            },
-        );
-        self.func_types.insert(
-            "sym.imp.memcpy".to_string(),
-            FunctionType {
-                return_type: CType::void_ptr(),
-                params: vec![CType::void_ptr(), CType::void_ptr(), size_t.clone()],
-                variadic: false,
-            },
-        );
+    /// Set externally recovered function signature.
+    pub fn set_external_signature(&mut self, signature: Option<ExternalFunctionSignature>) {
+        self.external_signature = signature;
+    }
 
-        // printf(const char* fmt, ...)
-        self.func_types.insert(
-            "printf".to_string(),
-            FunctionType {
-                return_type: CType::Int(32),
-                params: vec![CType::ptr(CType::Int(8))],
-                variadic: true,
-            },
-        );
-        self.func_types.insert(
-            "sym.imp.printf".to_string(),
-            FunctionType {
-                return_type: CType::Int(32),
-                params: vec![CType::ptr(CType::Int(8))],
-                variadic: true,
-            },
-        );
+    /// Set externally recovered stack variables.
+    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, ExternalStackVar>) {
+        self.external_stack_vars = stack_vars;
+    }
 
-        // strcmp(const char* s1, const char* s2)
-        self.func_types.insert(
-            "strcmp".to_string(),
-            FunctionType {
-                return_type: CType::Int(32),
-                params: vec![CType::ptr(CType::Int(8)), CType::ptr(CType::Int(8))],
-                variadic: false,
-            },
-        );
-        self.func_types.insert(
-            "sym.imp.strcmp".to_string(),
-            FunctionType {
-                return_type: CType::Int(32),
-                params: vec![CType::ptr(CType::Int(8)), CType::ptr(CType::Int(8))],
-                variadic: false,
-            },
-        );
-
-        // strlen(const char* s)
-        self.func_types.insert(
-            "strlen".to_string(),
-            FunctionType {
-                return_type: size_t.clone(),
-                params: vec![CType::ptr(CType::Int(8))],
-                variadic: false,
-            },
-        );
-        self.func_types.insert(
-            "sym.imp.strlen".to_string(),
-            FunctionType {
-                return_type: size_t.clone(),
-                params: vec![CType::ptr(CType::Int(8))],
-                variadic: false,
-            },
-        );
-
-        // malloc(size_t size)
-        self.func_types.insert(
-            "malloc".to_string(),
-            FunctionType {
-                return_type: CType::void_ptr(),
-                params: vec![size_t.clone()],
-                variadic: false,
-            },
-        );
-        self.func_types.insert(
-            "sym.imp.malloc".to_string(),
-            FunctionType {
-                return_type: CType::void_ptr(),
-                params: vec![size_t],
-                variadic: false,
-            },
-        );
-
-        // free(void* ptr)
-        self.func_types.insert(
-            "free".to_string(),
-            FunctionType {
-                return_type: CType::Void,
-                params: vec![CType::void_ptr()],
-                variadic: false,
-            },
-        );
-        self.func_types.insert(
-            "sym.imp.free".to_string(),
-            FunctionType {
-                return_type: CType::Void,
-                params: vec![CType::void_ptr()],
-                variadic: false,
-            },
-        );
-
-        // setlocale(int category, const char* locale) -> char*
-        self.func_types.insert(
-            "setlocale".to_string(),
-            FunctionType {
-                return_type: CType::ptr(CType::Int(8)),
-                params: vec![CType::Int(32), CType::ptr(CType::Int(8))],
-                variadic: false,
-            },
-        );
-        self.func_types.insert(
-            "sym.imp.setlocale".to_string(),
-            FunctionType {
-                return_type: CType::ptr(CType::Int(8)),
-                params: vec![CType::Int(32), CType::ptr(CType::Int(8))],
-                variadic: false,
-            },
-        );
+    /// Set externally recovered type database (from tsj payload).
+    pub fn set_external_type_db(&mut self, db: ExternalTypeDb) {
+        self.external_type_db = db;
     }
 
     /// Infer types for all variables in a function.
     pub fn infer_function(&mut self, func: &SSAFunction) {
-        // First pass: collect explicit type information from operations
+        let mut arena = TypeArena::default();
+        let mut constraints = Vec::new();
+
+        let defs = build_def_map(func);
+        let mut struct_hints: HashMap<SSAVar, String> = HashMap::new();
+
+        self.emit_inferred_constraints(
+            func,
+            &defs,
+            &mut arena,
+            &mut constraints,
+            &mut struct_hints,
+        );
+        self.emit_external_function_constraints(
+            func,
+            &mut arena,
+            &mut constraints,
+            &mut struct_hints,
+        );
+        self.emit_call_signature_constraints(func, &mut arena, &mut constraints, &mut struct_hints);
+
+        let solver = TypeSolver::new(SolverConfig::default());
+        let solved = solver.solve(arena, &constraints);
+
+        self.var_types.clear();
+        let vars = collect_vars(func);
+        for var in vars {
+            let ty_id = solved.type_of(&var);
+            let hinted = self.type_id_to_ctype(&solved.arena, ty_id, var.size);
+            self.var_types.insert(var, hinted);
+        }
+        self.solved_types = Some(solved);
+    }
+
+    fn emit_inferred_constraints(
+        &self,
+        func: &SSAFunction,
+        defs: &HashMap<String, SSAOp>,
+        arena: &mut TypeArena,
+        constraints: &mut Vec<Constraint>,
+        struct_hints: &mut HashMap<SSAVar, String>,
+    ) {
         for block in func.blocks() {
+            for phi in &block.phis {
+                for src in &phi.sources {
+                    constraints.push(Constraint::Equal {
+                        a: phi.dst.clone(),
+                        b: src.1.clone(),
+                        source: ConstraintSource::Inferred,
+                    });
+                }
+            }
+
             for op in &block.ops {
-                self.infer_from_op(op);
-            }
-        }
-
-        // Second pass: apply known API signatures to call args/returns.
-        self.infer_call_types(func);
-
-        // Third pass: detect pointer arithmetic patterns
-        self.detect_pointer_patterns(func);
-
-        // Fourth pass: propagate types through uses
-        let mut changed = true;
-        let mut iterations = 0;
-        while changed && iterations < 10 {
-            changed = false;
-            for block in func.blocks() {
-                for op in &block.ops {
-                    if self.propagate_types(op) {
-                        changed = true;
+                match op {
+                    SSAOp::Copy { dst, src } | SSAOp::Cast { dst, src } => {
+                        constraints.push(Constraint::Equal {
+                            a: dst.clone(),
+                            b: src.clone(),
+                            source: ConstraintSource::Inferred,
+                        });
                     }
+                    SSAOp::Phi { dst, sources } => {
+                        for src in sources {
+                            constraints.push(Constraint::Equal {
+                                a: dst.clone(),
+                                b: src.clone(),
+                                source: ConstraintSource::Inferred,
+                            });
+                        }
+                    }
+                    SSAOp::Load { dst, addr, .. } => {
+                        let elem = self.integer_type_id(dst.size, Signedness::Unknown, arena);
+                        constraints.push(Constraint::HasCapability {
+                            ptr: addr.clone(),
+                            capability: MemoryCapability::Load,
+                            elem_ty: elem,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: elem,
+                            source: ConstraintSource::Inferred,
+                        });
+
+                        if let Some((base, offset, stride)) = self.detect_addr_pattern(addr, defs) {
+                            let field_name =
+                                self.lookup_field_name(offset, struct_hints.get(&base));
+                            constraints.push(Constraint::FieldAccess {
+                                base_ptr: base.clone(),
+                                offset,
+                                field_ty: elem,
+                                field_name,
+                                source: ConstraintSource::Inferred,
+                            });
+                            if let Some(element_size) = stride {
+                                let array_elem =
+                                    self.integer_type_id(element_size, Signedness::Unknown, arena);
+                                let arr_ty = arena.array(array_elem, None, Some(element_size * 8));
+                                let arr_ptr = arena.ptr(arr_ty);
+                                constraints.push(Constraint::SetType {
+                                    var: base,
+                                    ty: arr_ptr,
+                                    source: ConstraintSource::Inferred,
+                                });
+                            }
+                        }
+                    }
+                    SSAOp::Store { addr, val, .. } => {
+                        let elem = self.integer_type_id(val.size, Signedness::Unknown, arena);
+                        constraints.push(Constraint::HasCapability {
+                            ptr: addr.clone(),
+                            capability: MemoryCapability::Store,
+                            elem_ty: elem,
+                            source: ConstraintSource::Inferred,
+                        });
+
+                        if let Some((base, offset, stride)) = self.detect_addr_pattern(addr, defs) {
+                            let field_name =
+                                self.lookup_field_name(offset, struct_hints.get(&base));
+                            constraints.push(Constraint::FieldAccess {
+                                base_ptr: base.clone(),
+                                offset,
+                                field_ty: elem,
+                                field_name,
+                                source: ConstraintSource::Inferred,
+                            });
+                            if let Some(element_size) = stride {
+                                let array_elem =
+                                    self.integer_type_id(element_size, Signedness::Unknown, arena);
+                                let arr_ty = arena.array(array_elem, None, Some(element_size * 8));
+                                let arr_ptr = arena.ptr(arr_ty);
+                                constraints.push(Constraint::SetType {
+                                    var: base,
+                                    ty: arr_ptr,
+                                    source: ConstraintSource::Inferred,
+                                });
+                            }
+                        }
+                    }
+                    SSAOp::IntAdd { dst, a, b }
+                    | SSAOp::IntSub { dst, a, b }
+                    | SSAOp::IntMult { dst, a, b }
+                    | SSAOp::IntAnd { dst, a, b }
+                    | SSAOp::IntOr { dst, a, b }
+                    | SSAOp::IntXor { dst, a, b }
+                    | SSAOp::IntLeft { dst, a, b }
+                    | SSAOp::IntRight { dst, a, b }
+                    | SSAOp::IntSRight { dst, a, b } => {
+                        let ty = self.integer_type_id(dst.size, Signedness::Unknown, arena);
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: a.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: b.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::IntDiv { dst, a, b } | SSAOp::IntRem { dst, a, b } => {
+                        let ty = self.integer_type_id(dst.size, Signedness::Unsigned, arena);
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: a.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: b.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::IntSDiv { dst, a, b } | SSAOp::IntSRem { dst, a, b } => {
+                        let ty = self.integer_type_id(dst.size, Signedness::Signed, arena);
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: a.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: b.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::IntEqual { dst, a, b }
+                    | SSAOp::IntNotEqual { dst, a, b }
+                    | SSAOp::IntLess { dst, a, b }
+                    | SSAOp::IntLessEqual { dst, a, b } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: arena.bool_ty(),
+                            source: ConstraintSource::Inferred,
+                        });
+                        let ty = self.integer_type_id(a.size, Signedness::Unknown, arena);
+                        constraints.push(Constraint::SetType {
+                            var: a.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: b.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::IntSLess { dst, a, b } | SSAOp::IntSLessEqual { dst, a, b } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: arena.bool_ty(),
+                            source: ConstraintSource::Inferred,
+                        });
+                        let ty = self.integer_type_id(a.size, Signedness::Signed, arena);
+                        constraints.push(Constraint::SetType {
+                            var: a.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: b.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::IntZExt { dst, src } => {
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: self.integer_type_id(src.size, Signedness::Unsigned, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: self.integer_type_id(dst.size, Signedness::Unsigned, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::IntSExt { dst, src } => {
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: self.integer_type_id(src.size, Signedness::Signed, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: self.integer_type_id(dst.size, Signedness::Signed, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::BoolAnd { dst, a, b }
+                    | SSAOp::BoolOr { dst, a, b }
+                    | SSAOp::BoolXor { dst, a, b } => {
+                        let bool_ty = arena.bool_ty();
+                        for var in [dst, a, b] {
+                            constraints.push(Constraint::SetType {
+                                var: var.clone(),
+                                ty: bool_ty,
+                                source: ConstraintSource::Inferred,
+                            });
+                        }
+                    }
+                    SSAOp::BoolNot { dst, src } => {
+                        let bool_ty = arena.bool_ty();
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: bool_ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: bool_ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::FloatAdd { dst, a, b }
+                    | SSAOp::FloatSub { dst, a, b }
+                    | SSAOp::FloatMult { dst, a, b }
+                    | SSAOp::FloatDiv { dst, a, b } => {
+                        let ty = arena.float(dst.size.saturating_mul(8));
+                        for var in [dst, a, b] {
+                            constraints.push(Constraint::SetType {
+                                var: var.clone(),
+                                ty,
+                                source: ConstraintSource::Inferred,
+                            });
+                        }
+                    }
+                    SSAOp::FloatNeg { dst, src }
+                    | SSAOp::FloatAbs { dst, src }
+                    | SSAOp::FloatSqrt { dst, src } => {
+                        let ty = arena.float(dst.size.saturating_mul(8));
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::FloatLess { dst, a, b }
+                    | SSAOp::FloatLessEqual { dst, a, b }
+                    | SSAOp::FloatEqual { dst, a, b }
+                    | SSAOp::FloatNotEqual { dst, a, b } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: arena.bool_ty(),
+                            source: ConstraintSource::Inferred,
+                        });
+                        let ty = arena.float(a.size.saturating_mul(8));
+                        constraints.push(Constraint::SetType {
+                            var: a.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: b.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::PtrAdd {
+                        dst,
+                        base,
+                        index,
+                        element_size,
+                    }
+                    | SSAOp::PtrSub {
+                        dst,
+                        base,
+                        index,
+                        element_size,
+                    } => {
+                        let elem = self.integer_type_id(*element_size, Signedness::Unknown, arena);
+                        let ptr = arena.ptr(elem);
+                        constraints.push(Constraint::SetType {
+                            var: base.clone(),
+                            ty: ptr,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: ptr,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: index.clone(),
+                            ty: self.integer_type_id(index.size, Signedness::Unknown, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    _ => {}
                 }
             }
-            iterations += 1;
         }
     }
 
-    /// Infer types from a single operation.
-    fn infer_from_op(&mut self, op: &SSAOp) {
-        match op {
-            SSAOp::Copy { dst, src } => {
-                let ty = self.type_from_size(dst.size);
-                self.set_type(dst, ty.clone());
-                self.set_type(src, ty);
+    fn emit_external_function_constraints(
+        &self,
+        func: &SSAFunction,
+        arena: &mut TypeArena,
+        constraints: &mut Vec<Constraint>,
+        struct_hints: &mut HashMap<SSAVar, String>,
+    ) {
+        let Some(signature) = &self.external_signature else {
+            return;
+        };
+        if signature.params.is_empty() {
+            return;
+        }
+
+        let vars = collect_vars(func);
+        let mut reg0_map: HashMap<String, SSAVar> = HashMap::new();
+        for var in vars {
+            if var.version == 0 {
+                reg0_map.entry(var.name.to_ascii_lowercase()).or_insert(var);
             }
-            SSAOp::Load { dst, addr, .. } => {
-                let ty = self.type_from_size(dst.size);
-                self.set_type(dst, ty);
-                self.set_type(addr, CType::ptr(CType::Void));
+        }
+
+        for (idx, ext) in signature.params.iter().enumerate() {
+            let Some(raw_ty) = &ext.ty else {
+                continue;
+            };
+            let Some(reg_name) = self.arg_regs.get(idx) else {
+                continue;
+            };
+            let Some(reg_var) = reg0_map.get(reg_name).cloned() else {
+                continue;
+            };
+            let (ty_id, struct_name) = self.ctype_to_typeid(raw_ty, arena);
+            constraints.push(Constraint::SetType {
+                var: reg_var.clone(),
+                ty: ty_id,
+                source: ConstraintSource::External,
+            });
+            if let Some(name) = struct_name {
+                struct_hints.insert(reg_var, name);
             }
-            SSAOp::Store { addr, val, .. } => {
-                self.set_type(addr, CType::ptr(CType::Void));
-                let ty = self.type_from_size(val.size);
-                self.set_type(val, ty);
+        }
+
+        for stack_var in self.external_stack_vars.values() {
+            let Some(ty) = &stack_var.ty else {
+                continue;
+            };
+            let key = stack_var.name.to_ascii_lowercase();
+            let Some(var) = reg0_map.get(&key).cloned() else {
+                continue;
+            };
+            let (ty_id, struct_name) = self.ctype_to_typeid(ty, arena);
+            constraints.push(Constraint::SetType {
+                var: var.clone(),
+                ty: ty_id,
+                source: ConstraintSource::External,
+            });
+            if let Some(name) = struct_name {
+                struct_hints.insert(var, name);
             }
-            SSAOp::IntAdd { dst, a, b }
-            | SSAOp::IntSub { dst, a, b }
-            | SSAOp::IntMult { dst, a, b }
-            | SSAOp::IntAnd { dst, a, b }
-            | SSAOp::IntOr { dst, a, b }
-            | SSAOp::IntXor { dst, a, b } => {
-                let ty = self.type_from_size(dst.size);
-                self.set_type(dst, ty.clone());
-                self.set_type(a, ty.clone());
-                self.set_type(b, ty);
-            }
-            SSAOp::IntDiv { dst, a, b } | SSAOp::IntRem { dst, a, b } => {
-                let ty = CType::UInt(dst.size);
-                self.set_type(dst, ty.clone());
-                self.set_type(a, ty.clone());
-                self.set_type(b, ty);
-            }
-            SSAOp::IntSDiv { dst, a, b } | SSAOp::IntSRem { dst, a, b } => {
-                let ty = CType::Int(dst.size);
-                self.set_type(dst, ty.clone());
-                self.set_type(a, ty.clone());
-                self.set_type(b, ty);
-            }
-            SSAOp::IntLess { dst, a, b }
-            | SSAOp::IntLessEqual { dst, a, b }
-            | SSAOp::IntEqual { dst, a, b }
-            | SSAOp::IntNotEqual { dst, a, b } => {
-                self.set_type(dst, CType::Bool);
-                let ty = self.type_from_size(a.size);
-                self.set_type(a, ty.clone());
-                self.set_type(b, ty);
-            }
-            SSAOp::IntSLess { dst, a, b } | SSAOp::IntSLessEqual { dst, a, b } => {
-                self.set_type(dst, CType::Bool);
-                let ty = CType::Int(a.size);
-                self.set_type(a, ty.clone());
-                self.set_type(b, ty);
-            }
-            SSAOp::IntNegate { dst, src } | SSAOp::IntNot { dst, src } => {
-                let ty = self.type_from_size(dst.size);
-                self.set_type(dst, ty.clone());
-                self.set_type(src, ty);
-            }
-            SSAOp::IntLeft { dst, a, b }
-            | SSAOp::IntRight { dst, a, b }
-            | SSAOp::IntSRight { dst, a, b } => {
-                let ty = self.type_from_size(dst.size);
-                self.set_type(dst, ty.clone());
-                self.set_type(a, ty);
-                self.set_type(b, CType::UInt(8));
-            }
-            SSAOp::IntZExt { dst, src } => {
-                self.set_type(dst, CType::UInt(dst.size));
-                self.set_type(src, CType::UInt(src.size));
-            }
-            SSAOp::IntSExt { dst, src } => {
-                self.set_type(dst, CType::Int(dst.size));
-                self.set_type(src, CType::Int(src.size));
-            }
-            SSAOp::BoolAnd { dst, a, b }
-            | SSAOp::BoolOr { dst, a, b }
-            | SSAOp::BoolXor { dst, a, b } => {
-                self.set_type(dst, CType::Bool);
-                self.set_type(a, CType::Bool);
-                self.set_type(b, CType::Bool);
-            }
-            SSAOp::BoolNot { dst, src } => {
-                self.set_type(dst, CType::Bool);
-                self.set_type(src, CType::Bool);
-            }
-            SSAOp::FloatAdd { dst, a, b }
-            | SSAOp::FloatSub { dst, a, b }
-            | SSAOp::FloatMult { dst, a, b }
-            | SSAOp::FloatDiv { dst, a, b } => {
-                let ty = CType::Float(dst.size);
-                self.set_type(dst, ty.clone());
-                self.set_type(a, ty.clone());
-                self.set_type(b, ty);
-            }
-            SSAOp::FloatNeg { dst, src }
-            | SSAOp::FloatAbs { dst, src }
-            | SSAOp::FloatSqrt { dst, src } => {
-                let ty = CType::Float(dst.size);
-                self.set_type(dst, ty.clone());
-                self.set_type(src, ty);
-            }
-            SSAOp::FloatLess { dst, a, b }
-            | SSAOp::FloatLessEqual { dst, a, b }
-            | SSAOp::FloatEqual { dst, a, b }
-            | SSAOp::FloatNotEqual { dst, a, b } => {
-                self.set_type(dst, CType::Bool);
-                let ty = CType::Float(a.size);
-                self.set_type(a, ty.clone());
-                self.set_type(b, ty);
-            }
-            SSAOp::Int2Float { dst, src } => {
-                self.set_type(dst, CType::Float(dst.size));
-                self.set_type(src, CType::Int(src.size));
-            }
-            SSAOp::Float2Int { dst, src } => {
-                self.set_type(dst, CType::Int(dst.size));
-                self.set_type(src, CType::Float(src.size));
-            }
-            SSAOp::FloatFloat { dst, src } => {
-                self.set_type(dst, CType::Float(dst.size));
-                self.set_type(src, CType::Float(src.size));
-            }
-            SSAOp::Trunc { dst, src } => {
-                let dst_ty = self.type_from_size(dst.size);
-                let src_ty = self.type_from_size(src.size);
-                self.set_type(dst, dst_ty);
-                self.set_type(src, src_ty);
-            }
-            SSAOp::Phi { dst, sources } => {
-                let ty = self.type_from_size(dst.size);
-                self.set_type(dst, ty.clone());
-                for src in sources {
-                    self.set_type(src, ty.clone());
-                }
-            }
-            _ => {}
         }
     }
 
-    fn infer_call_types(&mut self, func: &SSAFunction) {
+    fn emit_call_signature_constraints(
+        &self,
+        func: &SSAFunction,
+        arena: &mut TypeArena,
+        constraints: &mut Vec<Constraint>,
+        struct_hints: &mut HashMap<SSAVar, String>,
+    ) {
         for block in func.blocks() {
             for (call_idx, op) in block.ops.iter().enumerate() {
                 let target = match op {
@@ -376,173 +556,264 @@ impl TypeInference {
                     _ => continue,
                 };
 
-                let Some(sig) = self.resolve_call_signature(target) else {
+                let Some(sig) = self.resolve_call_signature(target, arena) else {
                     continue;
                 };
 
-                self.apply_arg_signature(&block.ops, call_idx, &sig.params);
-                self.apply_return_signature(&block.ops, call_idx, &sig.return_type);
-            }
-        }
-    }
-
-    fn apply_arg_signature(&mut self, ops: &[SSAOp], call_idx: usize, params: &[CType]) {
-        if self.arg_regs.is_empty() || params.is_empty() {
-            return;
-        }
-
-        let mut seen: HashMap<usize, SSAVar> = HashMap::new();
-        let mut idx = call_idx;
-        while idx > 0 {
-            idx -= 1;
-            let prev = &ops[idx];
-
-            if matches!(prev, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
-                break;
-            }
-
-            let (dst, src) = match prev {
-                SSAOp::Copy { dst, src }
-                | SSAOp::IntZExt { dst, src }
-                | SSAOp::IntSExt { dst, src } => (dst, src),
-                _ => continue,
-            };
-
-            let dst_lower = dst.name.to_lowercase();
-            if let Some(arg_pos) = self.arg_regs.iter().position(|r| r == &dst_lower) {
-                if arg_pos < params.len() && !seen.contains_key(&arg_pos) {
-                    let ty = params[arg_pos].clone();
-                    self.set_type(dst, ty.clone());
-                    self.set_type(src, ty);
-                    seen.insert(arg_pos, src.clone());
-                }
-            }
-        }
-    }
-
-    fn apply_return_signature(&mut self, ops: &[SSAOp], call_idx: usize, ret_ty: &CType) {
-        if matches!(ret_ty, CType::Void) {
-            return;
-        }
-
-        let mut idx = call_idx + 1;
-        while idx < ops.len() {
-            let next = &ops[idx];
-
-            if matches!(next, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
-                break;
-            }
-
-            match next {
-                SSAOp::Copy { dst, src }
-                | SSAOp::IntZExt { dst, src }
-                | SSAOp::IntSExt { dst, src } => {
-                    if self.is_return_reg(src) {
-                        self.set_type(src, ret_ty.clone());
-                        self.set_type(dst, ret_ty.clone());
-                        return;
-                    }
-                }
-                _ => {}
-            }
-
-            idx += 1;
-        }
-    }
-
-    fn is_return_reg(&self, var: &SSAVar) -> bool {
-        let name = var.name.to_lowercase();
-        self.ret_regs.iter().any(|r| r == &name)
-    }
-
-    fn resolve_call_signature(&self, target: &SSAVar) -> Option<FunctionType> {
-        if let Some(addr) = parse_const_addr(&target.name) {
-            if let Some(name) = self.function_names.get(&addr) {
-                if let Some(sig) = self.lookup_function_type(name) {
-                    return Some(sig);
-                }
-            }
-        }
-
-        self.lookup_function_type(&target.name)
-    }
-
-    fn lookup_function_type(&self, name: &str) -> Option<FunctionType> {
-        let name = name.trim();
-        if name.is_empty() {
-            return None;
-        }
-
-        if let Some(sig) = self.func_types.get(name) {
-            return Some(sig.clone());
-        }
-
-        let lower = name.to_lowercase();
-        if let Some(sig) = self.func_types.get(&lower) {
-            return Some(sig.clone());
-        }
-
-        if let Some(stripped) = lower.strip_prefix("sym.imp.") {
-            if let Some(sig) = self.func_types.get(stripped) {
-                return Some(sig.clone());
-            }
-        }
-
-        let imp_name = format!("sym.imp.{}", lower);
-        self.func_types.get(&imp_name).cloned()
-    }
-
-    /// Propagate types through uses.
-    fn propagate_types(&mut self, op: &SSAOp) -> bool {
-        let mut changed = false;
-
-        // If we have a type for the destination, propagate to sources
-        if let Some(dst) = op.dst() {
-            if let Some(dst_ty) = self.var_types.get(dst).cloned() {
-                for src in op.sources() {
-                    if !self.var_types.contains_key(src) {
-                        self.var_types.insert(src.clone(), dst_ty.clone());
-                        changed = true;
-                    }
-                }
-            }
-        }
-
-        // If we have types for sources, propagate to destination
-        if let Some(dst) = op.dst() {
-            if !self.var_types.contains_key(dst) {
-                for src in op.sources() {
-                    if let Some(src_ty) = self.var_types.get(src).cloned() {
-                        self.var_types.insert(dst.clone(), src_ty);
-                        changed = true;
+                let args = collect_call_args(&block.ops, call_idx, &self.arg_regs);
+                for (idx, arg_var) in args.iter().enumerate() {
+                    if idx >= sig.params.len() {
                         break;
                     }
+                    let ty = sig.params[idx];
+                    constraints.push(Constraint::SetType {
+                        var: arg_var.clone(),
+                        ty,
+                        source: ConstraintSource::SignatureRegistry,
+                    });
+                    if let Some(name) = struct_name_from_type(arena, ty) {
+                        struct_hints.insert(arg_var.clone(), name.to_string());
+                    }
+                }
+
+                let ret = collect_call_return(&block.ops, call_idx, &self.ret_regs)
+                    .map(|ret_var| (ret_var, sig.ret));
+                constraints.push(Constraint::CallSig {
+                    target: target.clone(),
+                    args,
+                    params: sig.params,
+                    ret,
+                    source: ConstraintSource::SignatureRegistry,
+                });
+            }
+        }
+    }
+
+    fn resolve_call_signature(
+        &self,
+        target: &SSAVar,
+        arena: &mut TypeArena,
+    ) -> Option<ResolvedSignature> {
+        let mut candidates = Vec::new();
+        candidates.push(target.name.clone());
+
+        if let Some(addr) = parse_const_addr(&target.name)
+            && let Some(name) = self.function_names.get(&addr)
+        {
+            candidates.push(name.clone());
+        }
+
+        for candidate in candidates {
+            if let Some(sig) = self.func_types.get(&candidate) {
+                let params = sig
+                    .params
+                    .iter()
+                    .map(|ty| self.ctype_to_typeid(ty, arena).0)
+                    .collect();
+                let ret = self.ctype_to_typeid(&sig.return_type, arena).0;
+                return Some(ResolvedSignature {
+                    ret,
+                    params,
+                    variadic: sig.variadic,
+                });
+            }
+            if let Some(sig) = self
+                .signature_registry
+                .resolve(&candidate, arena, self.ptr_size)
+            {
+                return Some(sig);
+            }
+        }
+
+        None
+    }
+
+    fn lookup_field_name(&self, offset: u64, struct_name_hint: Option<&String>) -> Option<String> {
+        if let Some(name) = struct_name_hint {
+            let key = name.to_ascii_lowercase();
+            if let Some(st) = self.external_type_db.structs.get(&key)
+                && let Some(field) = st.fields.get(&offset)
+            {
+                return Some(field.name.clone());
+            }
+        }
+
+        let mut found: Option<String> = None;
+        for st in self.external_type_db.structs.values() {
+            if let Some(field) = st.fields.get(&offset) {
+                if let Some(existing) = &found {
+                    if existing != &field.name {
+                        return None;
+                    }
+                } else {
+                    found = Some(field.name.clone());
                 }
             }
         }
 
-        changed
+        found
     }
 
-    /// Set the type of a variable.
-    fn set_type(&mut self, var: &SSAVar, ty: CType) {
-        // Don't overwrite more specific types
-        if let Some(existing) = self.var_types.get(var) {
-            if self.is_more_specific(existing, &ty) {
-                return;
+    fn detect_addr_pattern(
+        &self,
+        addr: &SSAVar,
+        defs: &HashMap<String, SSAOp>,
+    ) -> Option<(SSAVar, u64, Option<u32>)> {
+        let op = defs.get(&addr.display_name())?;
+
+        match op {
+            SSAOp::PtrAdd {
+                base,
+                index: _,
+                element_size,
+                ..
             }
+            | SSAOp::PtrSub {
+                base,
+                index: _,
+                element_size,
+                ..
+            } => Some((base.clone(), 0, Some(*element_size))),
+            SSAOp::IntAdd { a, b, .. } => {
+                if a.is_const()
+                    && let Some(offset) = parse_const_addr(&a.name)
+                {
+                    return Some((b.clone(), offset, None));
+                }
+                if b.is_const()
+                    && let Some(offset) = parse_const_addr(&b.name)
+                {
+                    return Some((a.clone(), offset, None));
+                }
+
+                if let Some((base, stride)) = self.match_base_plus_scaled_index(a, b, defs) {
+                    return Some((base, 0, Some(stride)));
+                }
+                if let Some((base, stride)) = self.match_base_plus_scaled_index(b, a, defs) {
+                    return Some((base, 0, Some(stride)));
+                }
+                None
+            }
+            SSAOp::IntSub { a, b, .. } => {
+                if b.is_const()
+                    && let Some(offset) = parse_const_addr(&b.name)
+                {
+                    return Some((a.clone(), offset, None));
+                }
+                None
+            }
+            _ => None,
         }
-        self.var_types.insert(var.clone(), ty);
     }
 
-    /// Check if type A is more specific than type B.
-    fn is_more_specific(&self, a: &CType, b: &CType) -> bool {
-        match (a, b) {
-            (CType::Pointer(_), CType::Int(_) | CType::UInt(_)) => true,
-            (CType::Int(_), CType::UInt(_)) => true,
-            (CType::Struct(_), CType::Pointer(_)) => true,
-            _ => false,
+    fn match_base_plus_scaled_index(
+        &self,
+        base: &SSAVar,
+        candidate: &SSAVar,
+        defs: &HashMap<String, SSAOp>,
+    ) -> Option<(SSAVar, u32)> {
+        let mul = defs.get(&candidate.display_name())?;
+        match mul {
+            SSAOp::IntMult { a, b, .. } => {
+                if let Some(scale) = parse_const_addr(&a.name) {
+                    return Some((base.clone(), scale as u32));
+                }
+                if let Some(scale) = parse_const_addr(&b.name) {
+                    return Some((base.clone(), scale as u32));
+                }
+                None
+            }
+            SSAOp::IntLeft { b, .. } => {
+                let shift = parse_const_addr(&b.name)?;
+                let scale = 1u32.checked_shl(shift as u32)?;
+                Some((base.clone(), scale))
+            }
+            _ => None,
         }
+    }
+
+    fn ctype_to_typeid(&self, ty: &CType, arena: &mut TypeArena) -> (TypeId, Option<String>) {
+        match ty {
+            CType::Void => (arena.unknown_alias("void"), None),
+            CType::Bool => (arena.bool_ty(), None),
+            CType::Int(bits) => (arena.int(*bits, Signedness::Signed), None),
+            CType::UInt(bits) => (arena.int(*bits, Signedness::Unsigned), None),
+            CType::Float(bits) => (arena.float(*bits), None),
+            CType::Pointer(inner) => {
+                let (inner_ty, struct_name) = self.ctype_to_typeid(inner, arena);
+                (arena.ptr(inner_ty), struct_name)
+            }
+            CType::Array(inner, len) => {
+                let (elem_ty, struct_name) = self.ctype_to_typeid(inner, arena);
+                (arena.array(elem_ty, *len, None), struct_name)
+            }
+            CType::Struct(name) => (
+                arena.struct_named_or_existing(name.clone()),
+                Some(name.clone()),
+            ),
+            CType::Union(name) | CType::Enum(name) | CType::Typedef(name) => {
+                (arena.unknown_alias(name.clone()), None)
+            }
+            CType::Function { params, ret } => {
+                let param_ids = params
+                    .iter()
+                    .map(|param| self.ctype_to_typeid(param, arena).0)
+                    .collect();
+                let (ret_id, _) = self.ctype_to_typeid(ret, arena);
+                (arena.function(param_ids, ret_id, false), None)
+            }
+            CType::Unknown => (arena.top(), None),
+        }
+    }
+
+    fn type_id_to_ctype(&self, arena: &TypeArena, ty_id: TypeId, fallback_size: u32) -> CType {
+        match to_c_type_like(arena, ty_id) {
+            CTypeLike::Void => CType::Void,
+            CTypeLike::Bool => CType::Bool,
+            CTypeLike::Int { bits, signedness } => match signedness {
+                Signedness::Unsigned => CType::UInt(bits),
+                Signedness::Signed | Signedness::Unknown => CType::Int(bits),
+            },
+            CTypeLike::Float(bits) => CType::Float(bits),
+            CTypeLike::Pointer(inner) => CType::Pointer(Box::new(self.ctype_like_to_ctype(*inner))),
+            CTypeLike::Array(inner, len) => {
+                CType::Array(Box::new(self.ctype_like_to_ctype(*inner)), len)
+            }
+            CTypeLike::Struct(name) => CType::Struct(name),
+            CTypeLike::Function => CType::Unknown,
+            CTypeLike::Unknown => self.type_from_size(fallback_size),
+        }
+    }
+
+    fn ctype_like_to_ctype(&self, ty: CTypeLike) -> CType {
+        match ty {
+            CTypeLike::Void => CType::Void,
+            CTypeLike::Bool => CType::Bool,
+            CTypeLike::Int { bits, signedness } => match signedness {
+                Signedness::Unsigned => CType::UInt(bits),
+                Signedness::Signed | Signedness::Unknown => CType::Int(bits),
+            },
+            CTypeLike::Float(bits) => CType::Float(bits),
+            CTypeLike::Pointer(inner) => CType::Pointer(Box::new(self.ctype_like_to_ctype(*inner))),
+            CTypeLike::Array(inner, len) => {
+                CType::Array(Box::new(self.ctype_like_to_ctype(*inner)), len)
+            }
+            CTypeLike::Struct(name) => CType::Struct(name),
+            CTypeLike::Function | CTypeLike::Unknown => CType::Unknown,
+        }
+    }
+
+    fn integer_type_id(
+        &self,
+        size_bytes: u32,
+        signedness: Signedness,
+        arena: &mut TypeArena,
+    ) -> TypeId {
+        let bits = match size_bytes {
+            0 => 1,
+            _ => size_bytes.saturating_mul(8),
+        };
+        arena.int(bits, signedness)
     }
 
     /// Get the type of a variable.
@@ -563,11 +834,6 @@ impl TypeInference {
             8 => CType::Int(64),
             _ => CType::Int(size.saturating_mul(8)),
         }
-    }
-
-    /// Set externally-resolved function names (address -> symbol).
-    pub fn set_function_names(&mut self, names: HashMap<u64, String>) {
-        self.function_names = names;
     }
 
     /// Export inferred types keyed by variable display/lowered names.
@@ -595,91 +861,63 @@ impl TypeInference {
         self.func_types.get(name)
     }
 
-    /// Detect pointer arithmetic patterns.
-    pub fn detect_pointer_patterns(&mut self, func: &SSAFunction) {
-        for block in func.blocks() {
-            for op in &block.ops {
-                match op {
-                    // Pointer arithmetic: ptr + offset
-                    SSAOp::IntAdd { dst, a, b } => {
-                        let ty_a = self.get_type(a);
-                        let ty_b = self.get_type(b);
-
-                        if matches!(ty_a, CType::Pointer(_)) {
-                            self.set_type(dst, ty_a);
-                        } else if matches!(ty_b, CType::Pointer(_)) {
-                            self.set_type(dst, ty_b);
-                        }
-                    }
-                    // Pointer arithmetic: ptr - offset
-                    SSAOp::IntSub { dst, a, b } => {
-                        let ty_a = self.get_type(a);
-                        let ty_b = self.get_type(b);
-
-                        // ptr - int = ptr
-                        if matches!(ty_a, CType::Pointer(_)) && !matches!(ty_b, CType::Pointer(_)) {
-                            self.set_type(dst, ty_a);
-                        }
-                        // ptr - ptr = size_t (not a pointer)
-                    }
-                    // Copy propagates pointer type
-                    SSAOp::Copy { dst, src } => {
-                        let ty_src = self.get_type(src);
-                        if matches!(ty_src, CType::Pointer(_)) {
-                            self.set_type(dst, ty_src);
-                        }
-                    }
-                    // Load/Store addresses are always pointers
-                    SSAOp::Load { addr, .. } | SSAOp::Store { addr, .. } => {
-                        // Mark the address as a pointer if not already
-                        let ty = self.get_type(addr);
-                        if !matches!(ty, CType::Pointer(_)) {
-                            self.set_type(addr, CType::void_ptr());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    /// Detect if a variable is used as a string (passed to string functions).
-    pub fn detect_string_usage(
-        &mut self,
-        func: &SSAFunction,
-        function_names: &HashMap<u64, String>,
-    ) {
-        for block in func.blocks() {
-            for op in &block.ops {
-                if let SSAOp::Call { target } = op {
-                    // Try to get the function name from the call target
-                    if target.is_const() {
-                        if let Some(addr) = parse_const_addr(&target.name) {
-                            if let Some(name) = function_names.get(&addr) {
-                                // Check if this is a string function
-                                if let Some(func_type) = self.func_types.get(name) {
-                                    // Mark parameters as the appropriate types
-                                    // This is a simplified version - full implementation would
-                                    // track which registers hold the arguments
-                                    if name.contains("printf")
-                                        || name.contains("strlen")
-                                        || name.contains("strcmp")
-                                    {
-                                        // First param is a char*
-                                        // We'd need call analysis to properly track this
-                                    }
-                                    let _ = func_type; // Silence unused warning for now
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    /// Get the last solved type lattice for oracle-based consumers.
+    pub fn solved_types(&self) -> Option<&SolvedTypes> {
+        self.solved_types.as_ref()
     }
 }
 
-/// Parse a constant address from an SSA variable name.
+fn build_def_map(func: &SSAFunction) -> HashMap<String, SSAOp> {
+    let mut defs = HashMap::new();
+    for block in func.blocks() {
+        for op in &block.ops {
+            if let Some(dst) = op.dst() {
+                defs.insert(dst.display_name(), op.clone());
+            }
+        }
+        for phi in &block.phis {
+            defs.insert(
+                phi.dst.display_name(),
+                SSAOp::Phi {
+                    dst: phi.dst.clone(),
+                    sources: phi.sources.iter().map(|(_, src)| src.clone()).collect(),
+                },
+            );
+        }
+    }
+    defs
+}
+
+fn collect_vars(func: &SSAFunction) -> Vec<SSAVar> {
+    let mut seen = HashSet::new();
+    let mut vars = Vec::new();
+
+    let push = |v: &SSAVar, vars: &mut Vec<SSAVar>, seen: &mut HashSet<SSAVar>| {
+        if seen.insert(v.clone()) {
+            vars.push(v.clone());
+        }
+    };
+
+    for block in func.blocks() {
+        for phi in &block.phis {
+            push(&phi.dst, &mut vars, &mut seen);
+            for (_, src) in &phi.sources {
+                push(src, &mut vars, &mut seen);
+            }
+        }
+        for op in &block.ops {
+            if let Some(dst) = op.dst() {
+                push(dst, &mut vars, &mut seen);
+            }
+            for src in op.sources() {
+                push(src, &mut vars, &mut seen);
+            }
+        }
+    }
+
+    vars
+}
+
 fn parse_const_addr(name: &str) -> Option<u64> {
     if let Some(val_str) = name.strip_prefix("const:") {
         let val_str = val_str.split('_').next().unwrap_or(val_str);
@@ -689,13 +927,92 @@ fn parse_const_addr(name: &str) -> Option<u64> {
         {
             return u64::from_str_radix(hex, 16).ok();
         }
-        // Try as plain hex
         u64::from_str_radix(val_str, 16).ok()
     } else if let Some(val_str) = name.strip_prefix("ram:") {
         let val_str = val_str.split('_').next().unwrap_or(val_str);
         u64::from_str_radix(val_str, 16).ok()
     } else {
         None
+    }
+}
+
+fn collect_call_args(ops: &[SSAOp], call_idx: usize, arg_regs: &[String]) -> Vec<SSAVar> {
+    if arg_regs.is_empty() {
+        return Vec::new();
+    }
+
+    let mut found: HashMap<String, SSAVar> = HashMap::new();
+    let mut idx = call_idx;
+    while idx > 0 {
+        idx -= 1;
+        let prev = &ops[idx];
+
+        if matches!(prev, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+            break;
+        }
+
+        let (dst, src) = match prev {
+            SSAOp::Copy { dst, src }
+            | SSAOp::IntZExt { dst, src }
+            | SSAOp::IntSExt { dst, src }
+            | SSAOp::Cast { dst, src } => (dst, src),
+            _ => continue,
+        };
+
+        let dst_name = dst.name.to_ascii_lowercase();
+        if arg_regs.iter().any(|reg| reg == &dst_name) && !found.contains_key(&dst_name) {
+            found.insert(dst_name, src.clone());
+        }
+    }
+
+    let mut ordered = Vec::new();
+    for reg in arg_regs {
+        if let Some(var) = found.remove(reg) {
+            ordered.push(var);
+        } else {
+            break;
+        }
+    }
+
+    ordered
+}
+
+fn collect_call_return(ops: &[SSAOp], call_idx: usize, ret_regs: &[String]) -> Option<SSAVar> {
+    let mut idx = call_idx + 1;
+    while idx < ops.len() {
+        let next = &ops[idx];
+
+        if matches!(next, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+            break;
+        }
+
+        match next {
+            SSAOp::Copy { dst, src }
+            | SSAOp::IntZExt { dst, src }
+            | SSAOp::IntSExt { dst, src }
+            | SSAOp::Cast { dst, src } => {
+                let src_name = src.name.to_ascii_lowercase();
+                if ret_regs.iter().any(|reg| reg == &src_name) {
+                    return Some(dst.clone());
+                }
+            }
+            _ => {}
+        }
+
+        idx += 1;
+    }
+
+    None
+}
+
+fn struct_name_from_type(arena: &TypeArena, ty: TypeId) -> Option<&str> {
+    match arena.get(ty) {
+        r2types::Type::Struct(shape) => shape.name.as_deref(),
+        r2types::Type::Ptr(inner) => match arena.get(*inner) {
+            r2types::Type::Struct(shape) => shape.name.as_deref(),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -714,13 +1031,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_more_specific() {
-        let ti = TypeInference::new(64);
-
-        // Pointer is more specific than int
-        assert!(ti.is_more_specific(&CType::ptr(CType::Void), &CType::Int(64)));
-
-        // Signed is more specific than unsigned
-        assert!(ti.is_more_specific(&CType::Int(32), &CType::UInt(32)));
+    fn test_parse_const_addr() {
+        assert_eq!(parse_const_addr("const:0x40_0"), Some(0x40));
+        assert_eq!(parse_const_addr("ram:401000_0"), Some(0x401000));
+        assert_eq!(parse_const_addr("RAX_1"), None);
     }
 }

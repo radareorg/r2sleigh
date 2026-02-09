@@ -11,7 +11,7 @@ pub(crate) struct UseScratch {
     pub(crate) info: UseInfo,
 }
 
-pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv) -> UseInfo {
+pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv<'_>) -> UseInfo {
     let mut scratch = UseScratch::default();
     scratch.info.type_hints = env.type_hints.clone();
 
@@ -42,7 +42,7 @@ fn count_uses_and_conditions(scratch: &mut UseScratch, block: &SSABlock) {
     }
 }
 
-fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv) {
+fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv<'_>) {
     for op in &block.ops {
         if let SSAOp::Copy { dst, src } = op {
             scratch
@@ -120,6 +120,31 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
             );
         }
 
+        match op {
+            SSAOp::IntAdd { dst, a, b } => {
+                if let Some(offset) = utils::parse_const_offset(a) {
+                    scratch
+                        .info
+                        .ptr_members
+                        .insert(dst.display_name(), (b.clone(), offset));
+                } else if let Some(offset) = utils::parse_const_offset(b) {
+                    scratch
+                        .info
+                        .ptr_members
+                        .insert(dst.display_name(), (a.clone(), offset));
+                }
+            }
+            SSAOp::IntSub { dst, a, b } => {
+                if let Some(offset) = utils::parse_const_offset(b) {
+                    scratch
+                        .info
+                        .ptr_members
+                        .insert(dst.display_name(), (a.clone(), -offset));
+                }
+            }
+            _ => {}
+        }
+
         if let Some(dst) = op.dst() {
             let key = dst.display_name();
             let expr = {
@@ -133,6 +158,7 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
                     function_names: &env.function_names,
                     strings: &env.strings,
                     symbols: &env.symbols,
+                    type_oracle: env.type_oracle,
                 };
                 lower.op_to_expr(op)
             };
@@ -150,7 +176,7 @@ fn build_formatted_defs(scratch: &mut UseScratch) {
     }
 }
 
-fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEnv) {
+fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEnv<'_>) {
     let mut reg_versions: HashMap<String, Vec<(String, u32)>> = HashMap::new();
 
     for block in blocks {
@@ -352,7 +378,7 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
     }
 }
 
-fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEnv) {
+fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEnv<'_>) {
     if env.arg_regs.is_empty() {
         return;
     }
@@ -386,6 +412,7 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                         function_names: &env.function_names,
                         strings: &env.strings,
                         symbols: &env.symbols,
+                        type_oracle: env.type_oracle,
                     };
                     match prev_op {
                         SSAOp::Copy { dst, src } => Some((dst, lower.get_expr(src))),

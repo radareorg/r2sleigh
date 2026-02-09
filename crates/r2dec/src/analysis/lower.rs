@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use r2ssa::{SSAOp, SSAVar};
+use r2types::TypeOracle;
 
 use super::utils::parse_const_value;
 use crate::address::parse_address_from_var_name;
@@ -17,6 +18,7 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) function_names: &'a HashMap<u64, String>,
     pub(crate) strings: &'a HashMap<u64, String>,
     pub(crate) symbols: &'a HashMap<u64, String>,
+    pub(crate) type_oracle: Option<&'a dyn TypeOracle>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -309,7 +311,16 @@ impl<'a> LowerCtx<'a> {
         element_size: u32,
         is_sub: bool,
     ) -> CExpr {
-        let elem_ty = uint_type_from_size(element_size);
+        let elem_ty = if let Some(oracle) = self.type_oracle {
+            let base_ty = oracle.type_of(base);
+            if oracle.is_array(base_ty) || oracle.is_pointer(base_ty) {
+                uint_type_from_size(element_size)
+            } else {
+                type_from_size(element_size)
+            }
+        } else {
+            uint_type_from_size(element_size)
+        };
         let base_expr = CExpr::cast(CType::ptr(elem_ty), self.get_expr(base));
         let index_expr = if is_sub {
             CExpr::unary(UnaryOp::Neg, self.get_expr(index))
@@ -374,6 +385,7 @@ mod tests {
             function_names,
             strings,
             symbols,
+            type_oracle: None,
         }
     }
 

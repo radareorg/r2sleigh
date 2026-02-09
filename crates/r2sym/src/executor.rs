@@ -6,12 +6,12 @@
 use std::collections::HashMap;
 
 use r2ssa::{FunctionSSABlock, SSAOp, SSAVar};
-use z3::ast::BV;
 use z3::Context;
+use z3::ast::BV;
 
+use crate::SymResult;
 use crate::state::{ExitStatus, SymState};
 use crate::value::SymValue;
-use crate::SymResult;
 
 /// Result of a call hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -833,6 +833,6 @@ mod tests {
         let forked = executor.step(&mut state, &op).unwrap();
         assert_eq!(forked.len(), 1); // Fork created
         assert_eq!(forked[0].pc, 0x2000); // True branch goes to target
-                                          // Original state is false branch (PC unchanged in this test)
+        // Original state is false branch (PC unchanged in this test)
     }
 }
