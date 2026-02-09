@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAOp;
 
-use super::{FlagInfo, PassEnv, UseInfo, utils};
+use super::{utils, FlagInfo, PassEnv, UseInfo};
 use crate::fold::SSABlock;
 
 #[derive(Debug, Default)]

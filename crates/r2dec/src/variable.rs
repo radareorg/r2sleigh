@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
 
-use crate::ExternalFunctionSignature;
 use crate::ast::CType;
+use crate::ExternalFunctionSignature;
 
 /// Variable information.
 #[derive(Debug, Clone)]
