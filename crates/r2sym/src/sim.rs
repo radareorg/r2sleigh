@@ -17,6 +17,12 @@ use crate::value::SymValue;
 pub const DEFAULT_MAX_STRLEN: u64 = 0x1000;
 /// Default upper bound for memory copy operations.
 pub const DEFAULT_MAX_MEMCPY: u64 = 0x1000;
+/// Default upper bound for memory set operations.
+pub const DEFAULT_MAX_MEMSET: u64 = 0x1000;
+/// Default upper bound for memcmp operations.
+pub const DEFAULT_MAX_MEMCMP: u64 = 0x1000;
+/// Default upper bound for basic printf/puts modeled return values.
+pub const DEFAULT_MAX_PRINTF_SCAN: u64 = 0x400;
 
 /// Summary execution outcome.
 pub enum SummaryEffect<'ctx> {
@@ -127,10 +133,14 @@ impl<'ctx> SummaryRegistry<'ctx> {
     pub fn with_core(callconv: CallConv) -> Self {
         let mut registry = Self::new(callconv);
         registry.register_summary(MemcpySummary::new(DEFAULT_MAX_MEMCPY));
+        registry.register_summary(MemsetSummary::new(DEFAULT_MAX_MEMSET));
         registry.register_summary(StrlenSummary::new(DEFAULT_MAX_STRLEN));
         registry.register_summary(StrcmpSummary::new());
+        registry.register_summary(MemcmpSummary::new(DEFAULT_MAX_MEMCMP));
         registry.register_summary(MallocSummary::new());
         registry.register_summary(FreeSummary::new());
+        registry.register_summary(PutsSummary::new(DEFAULT_MAX_PRINTF_SCAN));
+        registry.register_summary(PrintfSummaryBasic::new(DEFAULT_MAX_PRINTF_SCAN));
         registry.register_summary(ExitSummary::new());
         registry
     }
@@ -374,6 +384,194 @@ impl<'ctx> FunctionSummary<'ctx> for StrcmpSummary {
     }
 }
 
+/// memcmp(a, b, n) summary.
+pub struct MemcmpSummary {
+    max_cmp: u64,
+}
+
+impl MemcmpSummary {
+    /// Create a memcmp summary with an upper bound on compared length.
+    pub fn new(max_cmp: u64) -> Self {
+        Self { max_cmp }
+    }
+}
+
+impl<'ctx> FunctionSummary<'ctx> for MemcmpSummary {
+    fn name(&self) -> &'static str {
+        "memcmp"
+    }
+
+    fn arity(&self) -> usize {
+        3
+    }
+
+    fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
+        let a = call
+            .args
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
+        let b = call
+            .args
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
+        let n = call
+            .args
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
+
+        if n.as_concrete() == Some(0) {
+            return SummaryEffect::Return(Some(SymValue::concrete(0, call.ret_bits)));
+        }
+
+        if n.as_concrete().is_none() {
+            state.constrain_range(&n, 0, self.max_cmp);
+        }
+
+        let a_taint = if a.as_concrete().is_some() {
+            state.mem_read(&a, 1).get_taint()
+        } else {
+            0
+        };
+        let b_taint = if b.as_concrete().is_some() {
+            state.mem_read(&b, 1).get_taint()
+        } else {
+            0
+        };
+        let taint = a.get_taint() | b.get_taint() | n.get_taint() | a_taint | b_taint;
+
+        let ret_ast = BV::fresh_const("memcmp_ret", call.ret_bits);
+        let ret = SymValue::symbolic_tainted(ret_ast, call.ret_bits, taint);
+        constrain_ret_tristate(state, &ret, call.ret_bits);
+        SummaryEffect::Return(Some(ret))
+    }
+}
+
+/// memset(dst, c, n) summary.
+pub struct MemsetSummary {
+    max_set: u64,
+}
+
+impl MemsetSummary {
+    /// Create a memset summary with an upper bound on set size.
+    pub fn new(max_set: u64) -> Self {
+        Self { max_set }
+    }
+}
+
+impl<'ctx> FunctionSummary<'ctx> for MemsetSummary {
+    fn name(&self) -> &'static str {
+        "memset"
+    }
+
+    fn arity(&self) -> usize {
+        3
+    }
+
+    fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
+        let dst = call
+            .args
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
+        let c = call
+            .args
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
+        let n = call
+            .args
+            .get(2)
+            .cloned()
+            .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
+
+        set_bytes(state, &dst, &c, &n, self.max_set);
+        SummaryEffect::Return(Some(dst))
+    }
+}
+
+/// puts(s) summary.
+pub struct PutsSummary {
+    max_ret: u64,
+}
+
+impl PutsSummary {
+    /// Create a puts summary.
+    pub fn new(max_ret: u64) -> Self {
+        Self { max_ret }
+    }
+}
+
+impl<'ctx> FunctionSummary<'ctx> for PutsSummary {
+    fn name(&self) -> &'static str {
+        "puts"
+    }
+
+    fn arity(&self) -> usize {
+        1
+    }
+
+    fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
+        let s = call
+            .args
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
+        let mem_taint = if s.as_concrete().is_some() {
+            state.mem_read(&s, 1).get_taint()
+        } else {
+            0
+        };
+        let taint = s.get_taint() | mem_taint;
+        let ret_ast = BV::fresh_const("puts_ret", call.ret_bits);
+        let ret = SymValue::symbolic_tainted(ret_ast, call.ret_bits, taint);
+        state.constrain_range(&ret, 0, self.max_ret);
+        SummaryEffect::Return(Some(ret))
+    }
+}
+
+/// Basic printf(fmt, ...) summary.
+pub struct PrintfSummaryBasic {
+    max_ret: u64,
+}
+
+impl PrintfSummaryBasic {
+    /// Create a basic printf summary.
+    pub fn new(max_ret: u64) -> Self {
+        Self { max_ret }
+    }
+}
+
+impl<'ctx> FunctionSummary<'ctx> for PrintfSummaryBasic {
+    fn name(&self) -> &'static str {
+        "printf"
+    }
+
+    fn arity(&self) -> usize {
+        1
+    }
+
+    fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
+        let fmt = call
+            .args
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
+        let mem_taint = if fmt.as_concrete().is_some() {
+            state.mem_read(&fmt, 1).get_taint()
+        } else {
+            0
+        };
+        let taint = fmt.get_taint() | mem_taint;
+        let ret_ast = BV::fresh_const("printf_ret", call.ret_bits);
+        let ret = SymValue::symbolic_tainted(ret_ast, call.ret_bits, taint);
+        state.constrain_range(&ret, 0, self.max_ret);
+        SummaryEffect::Return(Some(ret))
+    }
+}
+
 /// malloc(size) summary.
 pub struct MallocSummary;
 
@@ -496,4 +694,55 @@ fn copy_bytes<'ctx>(
             state.mem_write(&dst_addr, &merged, 1);
         }
     }
+}
+
+fn set_bytes<'ctx>(
+    state: &mut SymState<'ctx>,
+    dst: &SymValue<'ctx>,
+    c: &SymValue<'ctx>,
+    n: &SymValue<'ctx>,
+    max_set: u64,
+) {
+    let ctx = state.context();
+    let n_concrete = n.as_concrete();
+    let set_len = n_concrete.unwrap_or(max_set).min(max_set);
+
+    if n_concrete.is_none() {
+        state.constrain_range(n, 0, max_set);
+    }
+
+    let c_byte = if let Some(concrete) = c.as_concrete() {
+        SymValue::concrete_tainted(concrete & 0xff, 8, c.get_taint())
+    } else {
+        c.extract(ctx, 7, 0).with_taint(c.get_taint())
+    };
+
+    for offset in 0..set_len {
+        let offset_val = SymValue::concrete(offset, dst.bits());
+        let dst_addr = dst.add(ctx, &offset_val);
+        if n_concrete.is_some() {
+            state.mem_write(&dst_addr, &c_byte, 1);
+        } else {
+            let dst_old = state.mem_read(&dst_addr, 1);
+            let idx_val = SymValue::concrete(offset, n.bits());
+            let cond = idx_val.ult(ctx, n);
+            let cond_bool = cond.to_bv(ctx).eq(&BV::from_u64(1, 1));
+            let taint = c_byte.get_taint() | dst_old.get_taint() | n.get_taint();
+            let merged = SymValue::symbolic_tainted(
+                cond_bool.ite(&c_byte.to_bv(ctx), &dst_old.to_bv(ctx)),
+                8,
+                taint,
+            );
+            state.mem_write(&dst_addr, &merged, 1);
+        }
+    }
+}
+
+fn constrain_ret_tristate<'ctx>(state: &mut SymState<'ctx>, ret: &SymValue<'ctx>, ret_bits: u32) {
+    let ret_bv = ret.to_bv(state.context());
+    let neg_one = BV::from_i64(-1, ret_bits);
+    let zero = BV::from_u64(0, ret_bits);
+    let one = BV::from_u64(1, ret_bits);
+    let cond = ret_bv.eq(&neg_one) | ret_bv.eq(&zero) | ret_bv.eq(&one);
+    state.add_constraint(cond);
 }

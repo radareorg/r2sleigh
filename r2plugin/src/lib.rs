@@ -2816,6 +2816,185 @@ fn sym_error_json(message: &str) -> *mut c_char {
     CString::new(payload).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
+fn sym_symbol_map() -> &'static Mutex<HashMap<u64, String>> {
+    static MAP: OnceLock<Mutex<HashMap<u64, String>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Set symbolic call target map as a JSON object of address->name pairs.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_set_symbol_map_json(json: *const c_char) -> i32 {
+    if json.is_null() {
+        return 0;
+    }
+
+    let json_str = unsafe {
+        match CStr::from_ptr(json).to_str() {
+            Ok(s) => s,
+            Err(_) => return 0,
+        }
+    };
+
+    let parsed = parse_addr_name_map(json_str);
+    match sym_symbol_map().lock() {
+        Ok(mut map) => {
+            *map = parsed;
+            1
+        }
+        Err(_) => 0,
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+struct SymHookStats {
+    attempted: usize,
+    installed: usize,
+    skipped_unknown: usize,
+    duplicates: usize,
+}
+
+fn supports_x86_64_sysv(arch: Option<&ArchSpec>) -> bool {
+    let Some(arch) = arch else {
+        return false;
+    };
+    if arch.addr_size != 8 {
+        return false;
+    }
+    arch.name.to_ascii_lowercase().contains("x86")
+}
+
+fn normalize_sim_name(name: &str) -> Option<&'static str> {
+    let mut normalized = name.trim().to_ascii_lowercase();
+
+    for prefix in ["sym.imp.", "sym.", "imp.", "reloc.", "dbg."] {
+        while let Some(rest) = normalized.strip_prefix(prefix) {
+            normalized = rest.to_string();
+        }
+    }
+
+    while let Some(rest) = normalized.strip_suffix("@plt") {
+        normalized = rest.to_string();
+    }
+    while let Some(rest) = normalized.strip_suffix(".plt") {
+        normalized = rest.to_string();
+    }
+    if let Some((base, _)) = normalized.split_once('@') {
+        normalized = base.to_string();
+    }
+
+    if let Some(rest) = normalized.strip_prefix("__isoc99_") {
+        normalized = rest.to_string();
+    }
+    if let Some(rest) = normalized.strip_prefix("__gi_") {
+        normalized = rest.to_string();
+    }
+
+    match normalized.as_str() {
+        "strlen" | "__strlen_chk" => Some("strlen"),
+        "strcmp" => Some("strcmp"),
+        "memcmp" => Some("memcmp"),
+        "memcpy" | "__memcpy_chk" => Some("memcpy"),
+        "memset" => Some("memset"),
+        "malloc" | "__libc_malloc" | "__gi___libc_malloc" => Some("malloc"),
+        "free" => Some("free"),
+        "puts" => Some("puts"),
+        "printf" | "__printf_chk" => Some("printf"),
+        "exit" | "_exit" => Some("exit"),
+        _ => {
+            if normalized.starts_with("strlen") {
+                Some("strlen")
+            } else if normalized.starts_with("strcmp") {
+                Some("strcmp")
+            } else if normalized.starts_with("memcmp") {
+                Some("memcmp")
+            } else if normalized.starts_with("memcpy") {
+                Some("memcpy")
+            } else if normalized.starts_with("memset") {
+                Some("memset")
+            } else if normalized.starts_with("printf") || normalized == "__printf_chk" {
+                Some("printf")
+            } else if normalized.starts_with("puts") {
+                Some("puts")
+            } else if normalized == "malloc" || normalized.ends_with("malloc") {
+                Some("malloc")
+            } else if normalized == "free" || normalized.ends_with("free") {
+                Some("free")
+            } else if normalized.starts_with("exit") {
+                Some("exit")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn extract_call_target(vn: &r2il::Varnode) -> Option<u64> {
+    match vn.space {
+        r2il::SpaceId::Const | r2il::SpaceId::Ram => Some(vn.offset),
+        _ => None,
+    }
+}
+
+fn install_core_summaries_for_function<'ctx>(
+    explorer: &mut r2sym::PathExplorer<'ctx>,
+    func: &r2ssa::SSAFunction,
+    arch: Option<&ArchSpec>,
+) -> SymHookStats {
+    let mut stats = SymHookStats::default();
+    if !supports_x86_64_sysv(arch) {
+        return stats;
+    }
+
+    let mut targets = BTreeSet::new();
+    for block in func.cfg().blocks() {
+        if let r2ssa::cfg::BlockTerminator::Call { target, .. } = block.terminator {
+            targets.insert(target);
+        }
+        for op in &block.ops {
+            if let R2ILOp::Call { target } = op {
+                if let Some(addr) = extract_call_target(target) {
+                    targets.insert(addr);
+                }
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        return stats;
+    }
+
+    let names = sym_symbol_map().lock().ok();
+    let registry = r2sym::SummaryRegistry::with_core(r2sym::CallConv::x86_64_sysv());
+    let mut seen: HashSet<(u64, &'static str)> = HashSet::new();
+
+    for target in targets {
+        stats.attempted += 1;
+        let raw_name = names
+            .as_ref()
+            .and_then(|map| map.get(&target))
+            .map(String::as_str);
+        let Some(raw_name) = raw_name else {
+            stats.skipped_unknown += 1;
+            continue;
+        };
+        let Some(summary_name) = normalize_sim_name(raw_name) else {
+            stats.skipped_unknown += 1;
+            continue;
+        };
+        if !seen.insert((target, summary_name)) {
+            stats.duplicates += 1;
+            continue;
+        }
+        if registry.install_for_explorer(explorer, target, summary_name) {
+            stats.installed += 1;
+        } else {
+            stats.skipped_unknown += 1;
+        }
+    }
+
+    stats
+}
+
 /// Symbolic execution summary for JSON output.
 #[derive(Serialize, Clone)]
 struct SymExecSummary {
@@ -2877,6 +3056,7 @@ pub extern "C" fn r2sym_function(
         let config = sym_default_config();
 
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
+        let _hook_stats = install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
         let results = explorer.explore(&ssa_func, initial_state);
         let stats = explorer.stats().clone();
         (results, stats)
@@ -3072,6 +3252,7 @@ pub extern "C" fn r2sym_paths(
         let config = sym_default_config();
 
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
+        let _hook_stats = install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
         let results = explorer.explore(&ssa_func, initial_state);
         (results, explorer)
     }));
@@ -3139,6 +3320,7 @@ pub extern "C" fn r2sym_explore_to(
         let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
         seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, sym_default_config());
+        let _hook_stats = install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
         let matched = explorer.find_paths_to(&ssa_func, initial_state, target_addr);
         let stats = explorer.stats().clone();
         let paths: Vec<PathInfo> = matched
@@ -3217,6 +3399,7 @@ pub extern "C" fn r2sym_solve_to(
         let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
         seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, sym_default_config());
+        let _hook_stats = install_core_summaries_for_function(&mut explorer, &ssa_func, ctx_ref.arch.as_ref());
         let matched = explorer.find_paths_to(&ssa_func, initial_state, target_addr);
         let stats = explorer.stats().clone();
 

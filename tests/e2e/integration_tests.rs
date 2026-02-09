@@ -635,7 +635,11 @@ mod interactive_sym {
     #[test]
     fn sym_explore_command_exists_and_returns_json() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sym.explore 0x401296");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "a:sym.explore 0x401296",
+        );
         result.assert_ok();
         let json = parse_json(&result, "a:sym.explore");
         let obj = expect_object(&json, "a:sym.explore");
@@ -647,7 +651,11 @@ mod interactive_sym {
     #[test]
     fn sym_solve_command_exists_and_returns_json() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sym.solve 0x401296");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "a:sym.solve 0x401296",
+        );
         result.assert_ok();
         let json = parse_json(&result, "a:sym.solve");
         let obj = expect_object(&json, "a:sym.solve");
@@ -728,7 +736,8 @@ mod interactive_sym {
     #[test]
     fn sym_state_returns_last_solve_result_in_same_session() {
         setup();
-        let command = format!("aaa; s dbg.check_secret; a:sym.solve 0x{CHECK_SECRET_RET:x}; a:sym.state");
+        let command =
+            format!("aaa; s dbg.check_secret; a:sym.solve 0x{CHECK_SECRET_RET:x}; a:sym.state");
         let result = r2_cmd(vuln_test_binary(), &command);
         result.assert_ok();
         let state_line = result
@@ -787,7 +796,79 @@ mod interactive_sym {
 }
 
 // ============================================================================
-// 10. State Merging
+// 10. Function Simulation Coverage
+// ============================================================================
+
+mod sim_summaries {
+    use super::*;
+
+    fn assert_paths_json_without_error(result: &e2e::R2Result, label: &str) {
+        let json = parse_json(result, label);
+        let paths = expect_array(&json, label);
+        assert!(!paths.is_empty(), "{label} should return at least one path");
+        assert!(
+            !paths.iter().any(|entry| entry.get("error").is_some()),
+            "{label} should not contain error objects"
+        );
+    }
+
+    #[test]
+    fn sym_paths_survives_strlen_calls_process_string() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.process_string", "a:sla.sym.paths");
+        result.assert_ok();
+        assert_paths_json_without_error(&result, "a:sla.sym.paths process_string");
+    }
+
+    #[test]
+    fn sym_paths_survives_strcmp_calls_authenticate() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.authenticate", "a:sla.sym.paths");
+        result.assert_ok();
+        assert_paths_json_without_error(&result, "a:sla.sym.paths authenticate");
+    }
+
+    #[test]
+    fn sym_paths_survives_memcpy_malloc_calls_alloc_and_copy() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.alloc_and_copy", "a:sla.sym.paths");
+        result.assert_ok();
+        assert_paths_json_without_error(&result, "a:sla.sym.paths alloc_and_copy");
+    }
+
+    #[test]
+    fn sym_paths_survives_printf_calls_vuln_printf() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.vuln_printf", "a:sla.sym.paths");
+        result.assert_ok();
+        assert_paths_json_without_error(&result, "a:sla.sym.paths vuln_printf");
+    }
+
+    #[test]
+    fn sym_paths_survives_memcpy_printf_calls_vuln_memcpy() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.vuln_memcpy", "a:sla.sym.paths");
+        result.assert_ok();
+        assert_paths_json_without_error(&result, "a:sla.sym.paths vuln_memcpy");
+    }
+
+    #[test]
+    fn sym_solve_still_works_on_check_secret_regression() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "a:sym.solve 0x401296",
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "a:sym.solve");
+        let obj = expect_object(&json, "a:sym.solve");
+        assert_eq!(obj.get("found").and_then(Value::as_bool), Some(true));
+    }
+}
+
+// ============================================================================
+// 11. State Merging
 // ============================================================================
 
 mod merging {
@@ -819,7 +900,7 @@ mod merging {
 }
 
 // ============================================================================
-// 11. Decompilation
+// 12. Decompilation
 // ============================================================================
 
 mod decompilation {
@@ -1153,12 +1234,16 @@ mod decompilation {
     #[test]
     fn decompiles_global_symbol_names_in_non_call_contexts() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.test_global_symbol_flow", "a:sla.dec");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_global_symbol_flow",
+            "a:sla.dec",
+        );
         result.assert_ok();
         let normalized = normalized_dec_output(&result.stdout);
 
-        let has_counter_name = normalized.contains("obj.global_counter")
-            || normalized.contains("global_counter");
+        let has_counter_name =
+            normalized.contains("obj.global_counter") || normalized.contains("global_counter");
         let has_limit_name =
             normalized.contains("obj.global_limit") || normalized.contains("global_limit");
 
@@ -1589,7 +1674,11 @@ mod deep_integration {
     #[test]
     fn aaaa_auto_taint_writes_comment_vuln_memcpy() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.vuln_memcpy", "aaaa; s dbg.vuln_memcpy; CC.");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.vuln_memcpy",
+            "aaaa; s dbg.vuln_memcpy; CC.",
+        );
         result.assert_ok();
         assert!(
             result.contains("sla.taint: hits="),
@@ -1635,13 +1724,20 @@ mod deep_integration {
         );
         result.assert_ok();
         let count = result.stdout.matches("sla.taint:").count();
-        assert_eq!(count, 1, "taint comment should not duplicate across repeated aaaa");
+        assert_eq!(
+            count, 1,
+            "taint comment should not duplicate across repeated aaaa"
+        );
     }
 
     #[test]
     fn aaaa_auto_taint_noise_filter_applied() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.vuln_memcpy", "aaaa; s dbg.vuln_memcpy; CC.");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.vuln_memcpy",
+            "aaaa; s dbg.vuln_memcpy; CC.",
+        );
         result.assert_ok();
         assert!(
             !result.contains("input:rsp"),

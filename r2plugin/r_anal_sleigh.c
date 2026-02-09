@@ -67,6 +67,7 @@ extern char *r2sym_explore_to(const R2ILContext *ctx, const R2ILBlock **blocks, 
 	unsigned long long entry_addr, unsigned long long target_addr);
 extern char *r2sym_solve_to(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
 	unsigned long long entry_addr, unsigned long long target_addr);
+extern int r2sym_set_symbol_map_json(const char *json);
 extern int r2sym_merge_is_enabled(void);
 extern void r2sym_merge_set_enabled(int enabled);
 
@@ -250,6 +251,67 @@ static bool parse_sym_target_expr(RCore *core, const char *expr, ut64 *target) {
 	}
 	*target = r_num_math (core->num, expr);
 	return true;
+}
+
+static char *build_sym_symbol_map_json(RCore *core) {
+	if (!core) {
+		return strdup ("{}");
+	}
+
+	PJ *pj = pj_new ();
+	if (!pj) {
+		return strdup ("{}");
+	}
+	pj_o (pj);
+
+	/* aflj: [{addr:0x...,name:"..."}] */
+	char *aflj = r_core_cmd_str (core, "aflj");
+	if (aflj && aflj[0] == '[') {
+		RJson *root = r_json_parse (aflj);
+		if (root && root->type == R_JSON_ARRAY) {
+			RJson *elem;
+			for (elem = root->children.first; elem; elem = elem->next) {
+				if (elem->type != R_JSON_OBJECT) {
+					continue;
+				}
+				const RJson *addr = r_json_get (elem, "addr");
+				const RJson *name = r_json_get (elem, "name");
+				if (addr && name && addr->type == R_JSON_INTEGER && name->type == R_JSON_STRING && name->str_value) {
+					char key[32];
+					snprintf (key, sizeof (key), "0x%llx", (unsigned long long)addr->num.u_value);
+					pj_ks (pj, key, name->str_value);
+				}
+			}
+			r_json_free (root);
+		}
+	}
+	free (aflj);
+
+	/* fs *;fj: include import/plt flags such as sym.imp.memcpy */
+	char *fj = r_core_cmd_str (core, "fs *;fj");
+	if (fj && fj[0] == '[') {
+		RJson *root = r_json_parse (fj);
+		if (root && root->type == R_JSON_ARRAY) {
+			RJson *elem;
+			for (elem = root->children.first; elem; elem = elem->next) {
+				if (elem->type != R_JSON_OBJECT) {
+					continue;
+				}
+				const RJson *addr = r_json_get (elem, "addr");
+				const RJson *name = r_json_get (elem, "name");
+				if (addr && name && addr->type == R_JSON_INTEGER && name->type == R_JSON_STRING && name->str_value) {
+					char key[32];
+					snprintf (key, sizeof (key), "0x%llx", (unsigned long long)addr->num.u_value);
+					pj_ks (pj, key, name->str_value);
+				}
+			}
+			r_json_free (root);
+		}
+	}
+	free (fj);
+
+	pj_end (pj);
+	return pj_drain (pj);
 }
 
 static bool ssa_var_to_reg_name(const char *ssa_name, char *out, size_t out_size) {
@@ -1614,6 +1676,11 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
 			return strdup("");
 		}
+		char *sym_map_json = build_sym_symbol_map_json (core);
+		if (sym_map_json) {
+			r2sym_set_symbol_map_json (sym_map_json);
+			free (sym_map_json);
+		}
 
 		if (is_explore) {
 			result = r2sym_explore_to (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, target);
@@ -2171,6 +2238,11 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
 			return strdup("");
+		}
+		char *sym_map_json = build_sym_symbol_map_json (core);
+		if (sym_map_json) {
+			r2sym_set_symbol_map_json (sym_map_json);
+			free (sym_map_json);
 		}
 
 		/* Call symbolic execution */

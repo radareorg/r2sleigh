@@ -5,7 +5,12 @@
 
 use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
 use r2ssa::SSAFunction;
+use r2sym::SymSolver;
 use r2sym::path::ExploreStrategy;
+use r2sym::sim::{
+    CallInfo, FunctionSummary, MemcmpSummary, MemsetSummary, PrintfSummaryBasic, PutsSummary,
+    SummaryRegistry,
+};
 use r2sym::{ExploreConfig, PathExplorer, SymState, SymValue};
 use z3::Context;
 
@@ -581,4 +586,166 @@ fn test_different_bitwidth_operations() {
     let sym_result = sym8.add(&ctx, &sym64);
     assert!(sym_result.is_symbolic());
     assert_eq!(sym_result.bits(), 64);
+}
+
+#[test]
+fn memset_summary_writes_bounded_bytes() {
+    let ctx = Context::thread_local();
+    let mut state = SymState::new(&ctx, 0x1000);
+    let summary = MemsetSummary::new(4);
+    let call = CallInfo {
+        args: vec![
+            SymValue::concrete(0x2000, 64),
+            SymValue::concrete(0x41, 64),
+            SymValue::concrete(10, 64),
+        ],
+        arg_bits: 64,
+        ret_bits: 64,
+    };
+
+    let effect = summary.execute(&mut state, &call);
+    match effect {
+        r2sym::SummaryEffect::Return(Some(ret)) => {
+            assert_eq!(ret.as_concrete(), Some(0x2000));
+        }
+        _ => panic!("memset summary should return destination pointer"),
+    }
+
+    let bytes = state
+        .memory
+        .read_bytes(0x2000, 4)
+        .expect("memset should materialize concrete bytes");
+    assert_eq!(bytes, vec![0x41, 0x41, 0x41, 0x41]);
+    assert!(
+        state.memory.read_bytes(0x2004, 1).is_none(),
+        "memset should be bounded by configured max"
+    );
+}
+
+#[test]
+fn memcmp_summary_returns_trivalued_result() {
+    let ctx = Context::thread_local();
+    let mut state = SymState::new(&ctx, 0x1000);
+    let summary = MemcmpSummary::new(32);
+    let call = CallInfo {
+        args: vec![
+            SymValue::concrete(0x3000, 64),
+            SymValue::concrete(0x4000, 64),
+            SymValue::concrete(8, 64),
+        ],
+        arg_bits: 64,
+        ret_bits: 64,
+    };
+
+    let ret = match summary.execute(&mut state, &call) {
+        r2sym::SummaryEffect::Return(Some(ret)) => ret,
+        _ => panic!("memcmp summary should return a value"),
+    };
+
+    let solver = SymSolver::new(&ctx);
+    for allowed in [u64::MAX, 0, 1] {
+        let mut candidate = state.fork();
+        candidate.constrain_eq(&ret, allowed);
+        assert!(
+            solver.is_sat(&candidate),
+            "memcmp return should allow value {allowed:#x}"
+        );
+    }
+
+    let mut disallowed = state.fork();
+    disallowed.constrain_eq(&ret, 2);
+    assert!(
+        !solver.is_sat(&disallowed),
+        "memcmp return must be constrained to -1/0/1"
+    );
+}
+
+#[test]
+fn printf_summary_does_not_terminate_path() {
+    let ctx = Context::thread_local();
+    let mut state = SymState::new(&ctx, 0x1000);
+    let summary = PrintfSummaryBasic::new(32);
+    let call = CallInfo {
+        args: vec![SymValue::concrete(0x5000, 64)],
+        arg_bits: 64,
+        ret_bits: 64,
+    };
+
+    let effect = summary.execute(&mut state, &call);
+    assert!(matches!(effect, r2sym::SummaryEffect::Return(Some(_))));
+    assert!(
+        state.active,
+        "printf summary should not terminate the state"
+    );
+}
+
+#[test]
+fn puts_summary_does_not_terminate_path() {
+    let ctx = Context::thread_local();
+    let mut state = SymState::new(&ctx, 0x1000);
+    let summary = PutsSummary::new(32);
+    let call = CallInfo {
+        args: vec![SymValue::concrete(0x6000, 64)],
+        arg_bits: 64,
+        ret_bits: 64,
+    };
+
+    let effect = summary.execute(&mut state, &call);
+    assert!(matches!(effect, r2sym::SummaryEffect::Return(Some(_))));
+    assert!(state.active, "puts summary should not terminate the state");
+}
+
+#[test]
+fn registry_with_core_contains_new_summaries() {
+    let ctx = Context::thread_local();
+    let registry = SummaryRegistry::with_core(r2sym::CallConv::x86_64_sysv());
+    let mut explorer = PathExplorer::new(&ctx);
+
+    assert!(registry.install_for_explorer(&mut explorer, 0x1000, "memcmp"));
+    assert!(registry.install_for_explorer(&mut explorer, 0x1001, "memset"));
+    assert!(registry.install_for_explorer(&mut explorer, 0x1002, "puts"));
+    assert!(registry.install_for_explorer(&mut explorer, 0x1003, "printf"));
+}
+
+#[test]
+fn symbolic_n_constraints_bounded_for_memset_memcmp() {
+    let ctx = Context::thread_local();
+
+    let mut state_memset = SymState::new(&ctx, 0x1000);
+    let memset = MemsetSummary::new(8);
+    let n_memset = SymValue::new_symbolic(&ctx, "sym_memset_n", 64);
+    let call_memset = CallInfo {
+        args: vec![
+            SymValue::concrete(0x7000, 64),
+            SymValue::concrete(0x7f, 64),
+            n_memset,
+        ],
+        arg_bits: 64,
+        ret_bits: 64,
+    };
+    let before_memset = state_memset.num_constraints();
+    let _ = memset.execute(&mut state_memset, &call_memset);
+    assert!(
+        state_memset.num_constraints() > before_memset,
+        "symbolic memset length should add bounds constraints"
+    );
+
+    let mut state_memcmp = SymState::new(&ctx, 0x1000);
+    let memcmp = MemcmpSummary::new(8);
+    let n_memcmp = SymValue::new_symbolic(&ctx, "sym_memcmp_n", 64);
+    let call_memcmp = CallInfo {
+        args: vec![
+            SymValue::concrete(0x7100, 64),
+            SymValue::concrete(0x7200, 64),
+            n_memcmp,
+        ],
+        arg_bits: 64,
+        ret_bits: 64,
+    };
+    let before_memcmp = state_memcmp.num_constraints();
+    let _ = memcmp.execute(&mut state_memcmp, &call_memcmp);
+    assert!(
+        state_memcmp.num_constraints() > before_memcmp,
+        "symbolic memcmp length should add bounds constraints"
+    );
 }
