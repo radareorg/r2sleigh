@@ -696,7 +696,7 @@ mod decompilation {
         setup();
         let cases = [
             ("dbg.test_boolxor", "^"),
-            ("dbg.test_loop_switch", "while ("),
+            ("dbg.test_loop_switch", "for ("),
             ("dbg.test_piece", "<<"),
             ("dbg.test_array_index", "["),
             ("dbg.test_array_index_neg", "["),
@@ -875,30 +875,34 @@ mod decompilation {
     }
 
     #[test]
-    fn decompiles_loop_as_while_and_switch() {
+    fn decompiles_loop_as_for_and_switch() {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.test_loop_switch", "a:sla.dec");
         result.assert_ok();
         let normalized = normalized_dec_output(&result.stdout);
-        let while_header =
-            find_header_line(&normalized, "while (").expect("Should recover while loop header");
+        let for_header =
+            find_header_line(&normalized, "for (").expect("Should recover for loop header");
         let switch_header =
             find_header_line(&normalized, "switch (").expect("Should recover switch header");
 
         assert!(
-            while_header.contains('<')
-                || while_header.contains('>')
-                || while_header.contains("==")
-                || while_header.contains("!="),
-            "While predicate should be comparator-shaped"
+            for_header.contains('<')
+                || for_header.contains('>')
+                || for_header.contains("==")
+                || for_header.contains("!="),
+            "For predicate should be comparator-shaped"
         );
         assert!(
-            !line_contains_flag_artifact(while_header),
-            "While predicate should not contain raw flag temporaries"
+            !line_contains_flag_artifact(for_header),
+            "For predicate should not contain raw flag temporaries"
         );
         assert!(
             switch_header.contains("switch ("),
             "Switch header should be present"
+        );
+        assert!(
+            !normalized.contains("while ("),
+            "Converted canonical loop should not remain as while-loop"
         );
         assert_no_flag_artifacts_in_predicate_lines(&normalized, "loop decompilation");
     }

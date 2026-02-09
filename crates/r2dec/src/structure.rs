@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use r2ssa::SSAFunction;
 
 use crate::ExternalStackVar;
-use crate::ast::{CExpr, CStmt, CType};
+use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 use crate::expr::ExpressionBuilder;
 use crate::fold::FoldingContext;
 use crate::region::{Region, RegionAnalyzer};
@@ -508,17 +508,18 @@ impl<'a> ControlFlowStructurer<'a> {
     fn cleanup_recurse(stmt: CStmt) -> CStmt {
         match stmt {
             CStmt::Block(stmts) => {
-                let cleaned: Vec<CStmt> = stmts
+                let cleaned = stmts
                     .into_iter()
                     .map(Self::cleanup_recurse)
                     .filter(|s| !matches!(s, CStmt::Empty))
                     .collect();
-                if cleaned.is_empty() {
+                let rewritten = Self::rewrite_block_loops_to_for(cleaned);
+                if rewritten.is_empty() {
                     CStmt::Empty
-                } else if cleaned.len() == 1 {
-                    cleaned.into_iter().next().unwrap()
+                } else if rewritten.len() == 1 {
+                    rewritten.into_iter().next().unwrap()
                 } else {
-                    CStmt::Block(cleaned)
+                    CStmt::Block(rewritten)
                 }
             }
             CStmt::If {
@@ -580,6 +581,319 @@ impl<'a> ControlFlowStructurer<'a> {
                 }
             }
             other => other,
+        }
+    }
+
+    /// Rewrite adjacent `init; while (...) { ...; update; }` into `for (...)`.
+    fn rewrite_block_loops_to_for(stmts: Vec<CStmt>) -> Vec<CStmt> {
+        let mut rewritten = Vec::with_capacity(stmts.len());
+        let mut i = 0;
+        while i < stmts.len() {
+            if i + 1 < stmts.len()
+                && let Some(mut for_stmts) = Self::try_rewrite_while_with_preheader_init(
+                    stmts[i].clone(),
+                    stmts[i + 1].clone(),
+                )
+            {
+                rewritten.append(&mut for_stmts);
+                i += 2;
+                continue;
+            }
+            rewritten.push(stmts[i].clone());
+            i += 1;
+        }
+        rewritten
+    }
+
+    fn try_rewrite_while_with_preheader_init(
+        preheader_stmt: CStmt,
+        while_stmt: CStmt,
+    ) -> Option<Vec<CStmt>> {
+        let (prefix_stmts, init_stmt, induction_var) =
+            Self::split_preheader_init(preheader_stmt)?;
+        let CStmt::While { cond, body } = while_stmt else {
+            return None;
+        };
+
+        let (loop_cond, loop_body) = match cond {
+            CExpr::IntLit(v) if v != 0 => {
+                let (exit_cond, stripped_body) = Self::extract_guard_break_cond(*body)?;
+                (CExpr::unary(UnaryOp::Not, exit_cond), stripped_body)
+            }
+            _ => (cond, *body),
+        };
+
+        let cond_vars = Self::collect_expr_vars(&loop_cond);
+        let cond_reads_induction = cond_vars.contains(&induction_var);
+        let (update, body_without_update, update_links_cond) =
+            Self::extract_loop_update(&induction_var, &cond_vars, loop_body)?;
+
+        if !cond_reads_induction && !update_links_cond {
+            return None;
+        }
+
+        let mut rewritten = prefix_stmts;
+        rewritten.push(CStmt::For {
+            init: Some(Box::new(init_stmt)),
+            cond: Some(loop_cond),
+            update: Some(update),
+            body: Box::new(body_without_update),
+        });
+        Some(rewritten)
+    }
+
+    fn extract_induction_var_from_init(init_stmt: &CStmt) -> Option<String> {
+        match init_stmt {
+            CStmt::Expr(CExpr::Binary {
+                op: BinaryOp::Assign,
+                left,
+                ..
+            }) => match left.as_ref() {
+                CExpr::Var(name) => Some(name.clone()),
+                _ => None,
+            },
+            CStmt::Decl {
+                name,
+                init: Some(_),
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn split_preheader_init(preheader_stmt: CStmt) -> Option<(Vec<CStmt>, CStmt, String)> {
+        if let Some(var) = Self::extract_induction_var_from_init(&preheader_stmt) {
+            return Some((Vec::new(), preheader_stmt, var));
+        }
+
+        let CStmt::Block(mut prefix) = preheader_stmt else {
+            return None;
+        };
+        while matches!(prefix.last(), Some(CStmt::Empty)) {
+            prefix.pop();
+        }
+        let init_stmt = prefix.pop()?;
+        let var = Self::extract_induction_var_from_init(&init_stmt)?;
+        Some((prefix, init_stmt, var))
+    }
+
+    fn extract_loop_update(
+        var: &str,
+        cond_vars: &HashSet<String>,
+        body: CStmt,
+    ) -> Option<(CExpr, CStmt, bool)> {
+        let stmts = Self::stmt_into_vec(body);
+        if stmts.is_empty() {
+            return None;
+        }
+
+        // Trim unreachable statements after the first unconditional transfer.
+        let mut effective = Vec::new();
+        for stmt in stmts {
+            let is_terminator = Self::stmt_is_unconditional_terminator(&stmt);
+            effective.push(stmt);
+            if is_terminator {
+                break;
+            }
+        }
+
+        while matches!(effective.last(), Some(CStmt::Empty | CStmt::Continue)) {
+            effective.pop();
+        }
+        if effective.is_empty() {
+            return None;
+        }
+
+        let prev_stmt = if effective.len() >= 2 {
+            effective.get(effective.len() - 2)
+        } else {
+            None
+        };
+        let (update, update_links_cond) =
+            Self::update_expr_from_stmt(var, cond_vars, prev_stmt, effective.last().unwrap())?;
+        effective.pop();
+        Some((update, Self::stmt_from_vec(effective), update_links_cond))
+    }
+
+    fn extract_guard_break_cond(body: CStmt) -> Option<(CExpr, CStmt)> {
+        let mut stmts = Self::stmt_into_vec(body);
+        let first = stmts.first()?;
+        let break_cond = Self::is_if_break_without_else(first)?;
+        stmts.remove(0);
+        Some((break_cond, Self::stmt_from_vec(stmts)))
+    }
+
+    fn update_expr_from_stmt(
+        var: &str,
+        cond_vars: &HashSet<String>,
+        prev_stmt: Option<&CStmt>,
+        stmt: &CStmt,
+    ) -> Option<(CExpr, bool)> {
+        let CStmt::Expr(expr) = stmt else {
+            return None;
+        };
+        match expr {
+            CExpr::Unary { op, operand }
+                if matches!(
+                    op,
+                    UnaryOp::PreInc | UnaryOp::PostInc | UnaryOp::PreDec | UnaryOp::PostDec
+                ) && matches!(operand.as_ref(), CExpr::Var(_)) =>
+            {
+                Some((expr.clone(), false))
+            }
+            CExpr::Binary { op, left, right } if matches!(left.as_ref(), CExpr::Var(_)) => {
+                if *op == BinaryOp::Assign {
+                    let rhs_vars = Self::collect_expr_vars(right);
+                    let links_cond_direct = !rhs_vars.is_disjoint(cond_vars);
+                    let reads_induction = rhs_vars.contains(var);
+                    let links_cond_via_alias =
+                        Self::rhs_links_cond_via_alias(prev_stmt, &rhs_vars, cond_vars);
+                    if reads_induction || links_cond_direct || links_cond_via_alias {
+                        return Some((expr.clone(), links_cond_direct || links_cond_via_alias));
+                    }
+                }
+                if Self::is_compound_assign_op(*op) {
+                    return Some((expr.clone(), false));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn is_if_break_without_else(stmt: &CStmt) -> Option<CExpr> {
+        let CStmt::If {
+            cond,
+            then_body,
+            else_body: None,
+        } = stmt
+        else {
+            return None;
+        };
+        if matches!(then_body.as_ref(), CStmt::Break)
+            || matches!(then_body.as_ref(), CStmt::Block(v) if v.len() == 1 && matches!(v[0], CStmt::Break))
+        {
+            return Some(cond.clone());
+        }
+        None
+    }
+
+    fn is_compound_assign_op(op: BinaryOp) -> bool {
+        matches!(
+            op,
+            BinaryOp::AddAssign
+                | BinaryOp::SubAssign
+                | BinaryOp::MulAssign
+                | BinaryOp::DivAssign
+                | BinaryOp::ModAssign
+                | BinaryOp::BitAndAssign
+                | BinaryOp::BitOrAssign
+                | BinaryOp::BitXorAssign
+                | BinaryOp::ShlAssign
+                | BinaryOp::ShrAssign
+        )
+    }
+
+    fn stmt_is_unconditional_terminator(stmt: &CStmt) -> bool {
+        matches!(
+            stmt,
+            CStmt::Break | CStmt::Continue | CStmt::Return(_) | CStmt::Goto(_)
+        )
+    }
+
+    fn stmt_into_vec(stmt: CStmt) -> Vec<CStmt> {
+        match stmt {
+            CStmt::Block(stmts) => stmts,
+            CStmt::Empty => Vec::new(),
+            other => vec![other],
+        }
+    }
+
+    fn stmt_from_vec(stmts: Vec<CStmt>) -> CStmt {
+        match stmts.len() {
+            0 => CStmt::Empty,
+            1 => stmts.into_iter().next().unwrap(),
+            _ => CStmt::Block(stmts),
+        }
+    }
+
+    fn rhs_links_cond_via_alias(
+        prev_stmt: Option<&CStmt>,
+        rhs_vars: &HashSet<String>,
+        cond_vars: &HashSet<String>,
+    ) -> bool {
+        let Some((def, prev_reads)) = prev_stmt.and_then(Self::stmt_def_and_reads) else {
+            return false;
+        };
+        rhs_vars.contains(&def) && !prev_reads.is_disjoint(cond_vars)
+    }
+
+    fn stmt_def_and_reads(stmt: &CStmt) -> Option<(String, HashSet<String>)> {
+        let CStmt::Expr(CExpr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        }) = stmt
+        else {
+            return None;
+        };
+        let CExpr::Var(def) = left.as_ref() else {
+            return None;
+        };
+        Some((def.clone(), Self::collect_expr_vars(right)))
+    }
+
+    fn collect_expr_vars(expr: &CExpr) -> HashSet<String> {
+        let mut vars = HashSet::new();
+        Self::collect_expr_vars_into(expr, &mut vars);
+        vars
+    }
+
+    fn collect_expr_vars_into(expr: &CExpr, out: &mut HashSet<String>) {
+        match expr {
+            CExpr::Var(name) => {
+                out.insert(name.clone());
+            }
+            CExpr::Unary { operand, .. } => Self::collect_expr_vars_into(operand, out),
+            CExpr::Binary { left, right, .. } => {
+                Self::collect_expr_vars_into(left, out);
+                Self::collect_expr_vars_into(right, out);
+            }
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                Self::collect_expr_vars_into(cond, out);
+                Self::collect_expr_vars_into(then_expr, out);
+                Self::collect_expr_vars_into(else_expr, out);
+            }
+            CExpr::Cast { expr, .. } | CExpr::Paren(expr) | CExpr::Deref(expr)
+            | CExpr::AddrOf(expr) | CExpr::Sizeof(expr) => Self::collect_expr_vars_into(expr, out),
+            CExpr::Call { func, args } => {
+                Self::collect_expr_vars_into(func, out);
+                for arg in args {
+                    Self::collect_expr_vars_into(arg, out);
+                }
+            }
+            CExpr::Subscript { base, index } => {
+                Self::collect_expr_vars_into(base, out);
+                Self::collect_expr_vars_into(index, out);
+            }
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                Self::collect_expr_vars_into(base, out);
+            }
+            CExpr::Comma(values) => {
+                for value in values {
+                    Self::collect_expr_vars_into(value, out);
+                }
+            }
+            CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(_)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_)
+            | CExpr::SizeofType(_) => {}
         }
     }
 
@@ -703,6 +1017,176 @@ impl<'a> ControlFlowStructurer<'a> {
 
 #[cfg(test)]
 mod tests {
-    // Tests would require constructing SSAFunctions
-    // which needs r2il blocks
+    use super::ControlFlowStructurer;
+    use crate::ast::{BinaryOp, CExpr, CStmt, UnaryOp};
+
+    fn v(name: &str) -> CExpr {
+        CExpr::Var(name.to_string())
+    }
+
+    fn expr_stmt(expr: CExpr) -> CStmt {
+        CStmt::Expr(expr)
+    }
+
+    fn assign(lhs: &str, rhs: CExpr) -> CStmt {
+        expr_stmt(CExpr::assign(v(lhs), rhs))
+    }
+
+    #[test]
+    fn rewrites_canonical_while_to_for() {
+        let input = CStmt::Block(vec![
+            assign("i", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::binary(BinaryOp::Lt, v("i"), CExpr::IntLit(10)),
+                CStmt::Block(vec![
+                    assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("i"))),
+                    assign("i", CExpr::binary(BinaryOp::Add, v("i"), CExpr::IntLit(1))),
+                ]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        let CStmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } = cleaned
+        else {
+            panic!("Expected canonical loop rewrite to produce CStmt::For");
+        };
+        assert!(init.is_some(), "for-loop should keep init statement");
+        assert!(cond.is_some(), "for-loop should keep loop condition");
+        assert!(update.is_some(), "for-loop should extract update expression");
+        assert!(
+            !matches!(*body, CStmt::Empty),
+            "for-loop body should retain side-effect statements"
+        );
+    }
+
+    #[test]
+    fn rewrites_guard_break_while1_to_for() {
+        let input = CStmt::Block(vec![
+            assign("i", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::IntLit(1),
+                CStmt::Block(vec![
+                    CStmt::if_stmt(
+                        CExpr::binary(BinaryOp::Ge, v("i"), v("n")),
+                        CStmt::Break,
+                        None,
+                    ),
+                    assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("i"))),
+                    expr_stmt(CExpr::Unary {
+                        op: UnaryOp::PostInc,
+                        operand: Box::new(v("i")),
+                    }),
+                ]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        let CStmt::For {
+            cond: Some(cond),
+            update: Some(update),
+            ..
+        } = cleaned
+        else {
+            panic!("Expected guarded while(1) rewrite to produce CStmt::For");
+        };
+        assert!(
+            matches!(cond, CExpr::Unary { op: UnaryOp::Not, .. }),
+            "guard-break form should negate break condition for for-loop cond"
+        );
+        assert!(
+            matches!(update, CExpr::Unary { op: UnaryOp::PostInc, .. }),
+            "guard-break form should preserve update expression"
+        );
+    }
+
+    #[test]
+    fn does_not_rewrite_without_tail_update() {
+        let input = CStmt::Block(vec![
+            assign("i", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::binary(BinaryOp::Lt, v("i"), CExpr::IntLit(10)),
+                CStmt::Block(vec![assign(
+                    "sum",
+                    CExpr::binary(BinaryOp::Add, v("sum"), CExpr::IntLit(1)),
+                )]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        let CStmt::Block(stmts) = cleaned else {
+            panic!("Expected unmatched loop to remain a block");
+        };
+        assert!(
+            matches!(stmts.get(1), Some(CStmt::While { .. })),
+            "loop without a recognized update should remain while-loop"
+        );
+    }
+
+    #[test]
+    fn does_not_rewrite_when_cond_var_mismatch() {
+        let input = CStmt::Block(vec![
+            assign("i", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::binary(BinaryOp::Lt, v("j"), CExpr::IntLit(10)),
+                CStmt::Block(vec![assign(
+                    "i",
+                    CExpr::binary(BinaryOp::Add, v("i"), CExpr::IntLit(1)),
+                )]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        let CStmt::Block(stmts) = cleaned else {
+            panic!("Expected unmatched condition var to remain a block");
+        };
+        assert!(
+            matches!(stmts.get(1), Some(CStmt::While { .. })),
+            "condition must reference same induction variable as init/update"
+        );
+    }
+
+    #[test]
+    fn accepts_self_assign_update_forms() {
+        let updates = vec![
+            CExpr::binary(
+                BinaryOp::Assign,
+                v("i"),
+                CExpr::binary(BinaryOp::Add, v("i"), CExpr::IntLit(2)),
+            ),
+            CExpr::binary(BinaryOp::AddAssign, v("i"), CExpr::IntLit(2)),
+            CExpr::binary(
+                BinaryOp::Assign,
+                v("i"),
+                CExpr::call(v("next_i"), vec![v("i"), v("x")]),
+            ),
+        ];
+
+        for update_expr in updates {
+            let input = CStmt::Block(vec![
+                assign("i", CExpr::IntLit(0)),
+                CStmt::while_loop(
+                    CExpr::binary(BinaryOp::Lt, v("i"), v("n")),
+                    CStmt::Block(vec![
+                        assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("i"))),
+                        expr_stmt(update_expr.clone()),
+                    ]),
+                ),
+            ]);
+
+            let cleaned = ControlFlowStructurer::cleanup(input);
+            let CStmt::For {
+                update: Some(update),
+                ..
+            } = cleaned
+            else {
+                panic!("Expected loop rewrite for accepted self-assign update form");
+            };
+            assert_eq!(update, update_expr);
+        }
+    }
 }
