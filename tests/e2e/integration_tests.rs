@@ -936,6 +936,53 @@ mod decompilation {
     }
 
     #[test]
+    fn decompiles_main_printf_format_string_literal() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.main", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        assert!(
+            normalized.contains("sym.imp.printf(\"Usage: %s <test_num> [args...]\\\\n\""),
+            "Main should emit the usage format string as a C string literal"
+        );
+        assert!(
+            !normalized.contains("sym.imp.printf(0x403048"),
+            "Main should not emit raw address for usage format string"
+        );
+    }
+
+    #[test]
+    fn decompiles_authenticate_strcmp_string_literal() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.authenticate", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        assert!(
+            normalized.contains("sym.imp.strcmp(password, \"secret123\""),
+            "authenticate should emit strcmp string operand as a literal"
+        );
+        assert!(
+            !normalized.contains("0x403014"),
+            "authenticate should not use raw string address in strcmp call"
+        );
+    }
+
+    #[test]
+    fn decompiles_main_puts_string_literal() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.main", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        assert!(
+            normalized.contains("sym.imp.puts(\"test_cpuid() = ok\")"),
+            "Main should emit puts argument as a string literal"
+        );
+    }
+
+    #[test]
     fn decompiles_multi_use_simple_temp_inlined() {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.test_multi_use_temp", "a:sla.dec");

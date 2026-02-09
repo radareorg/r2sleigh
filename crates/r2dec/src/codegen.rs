@@ -657,6 +657,14 @@ mod tests {
     }
 
     #[test]
+    fn test_string_literal_escaping() {
+        let mut codegen = CodeGenerator::new(CodeGenConfig::default());
+        let expr = CExpr::StringLit("line1\n\t\"quote\"\\slash\u{0001}".to_string());
+        let code = codegen.generate_expr(&expr);
+        assert_eq!(code, "\"line1\\n\\t\\\"quote\\\"\\\\slash\\x01\"");
+    }
+
+    #[test]
     fn test_function_with_locals() {
         let func = CFunction {
             name: "test".to_string(),

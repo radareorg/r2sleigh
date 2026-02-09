@@ -13,6 +13,9 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) pinned: &'a HashSet<String>,
     pub(crate) var_aliases: &'a HashMap<String, String>,
     pub(crate) ptr_arith: &'a HashMap<String, PtrArith>,
+    pub(crate) function_names: &'a HashMap<u64, String>,
+    pub(crate) strings: &'a HashMap<u64, String>,
+    pub(crate) symbols: &'a HashMap<u64, String>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -62,6 +65,12 @@ impl<'a> LowerCtx<'a> {
     ) -> CExpr {
         if var.is_const() {
             return self.const_to_expr(var);
+        }
+
+        if let Some(addr) = parse_ram_address(&var.name)
+            && let Some(expr) = self.resolve_addr_literal(addr)
+        {
+            return expr;
         }
 
         let key = var.display_name();
@@ -227,11 +236,32 @@ impl<'a> LowerCtx<'a> {
 
     fn const_to_expr(&self, var: &SSAVar) -> CExpr {
         let val = parse_const_value(&var.name).unwrap_or(0);
+        if let Some(expr) = self.resolve_addr_literal(val) {
+            return expr;
+        }
         if val > 0x7fffffff {
             CExpr::UIntLit(val)
         } else {
             CExpr::IntLit(val as i64)
         }
+    }
+
+    fn resolve_addr_literal(&self, addr: u64) -> Option<CExpr> {
+        if addr <= 0xff {
+            return None;
+        }
+
+        if let Some(name) = self.function_names.get(&addr) {
+            return Some(CExpr::Var(name.clone()));
+        }
+        if let Some(s) = self.strings.get(&addr) {
+            return Some(CExpr::StringLit(s.clone()));
+        }
+        if let Some(name) = self.symbols.get(&addr) {
+            return Some(CExpr::Var(name.clone()));
+        }
+
+        None
     }
 
     fn binary_expr(&self, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> CExpr {
@@ -305,4 +335,155 @@ fn uint_type_from_size(size: u32) -> CType {
 
 fn is_hex_name(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn parse_ram_address(name: &str) -> Option<u64> {
+    let rest = name.strip_prefix("ram:")?;
+    let addr_str = rest.split('_').next().unwrap_or(rest);
+    let addr_hex = addr_str
+        .strip_prefix("0x")
+        .or_else(|| addr_str.strip_prefix("0X"))
+        .unwrap_or(addr_str);
+    u64::from_str_radix(addr_hex, 16).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ctx<'a>(
+        definitions: &'a HashMap<String, CExpr>,
+        use_counts: &'a HashMap<String, usize>,
+        condition_vars: &'a HashSet<String>,
+        pinned: &'a HashSet<String>,
+        var_aliases: &'a HashMap<String, String>,
+        ptr_arith: &'a HashMap<String, PtrArith>,
+        function_names: &'a HashMap<u64, String>,
+        strings: &'a HashMap<u64, String>,
+        symbols: &'a HashMap<u64, String>,
+    ) -> LowerCtx<'a> {
+        LowerCtx {
+            definitions,
+            use_counts,
+            condition_vars,
+            pinned,
+            var_aliases,
+            ptr_arith,
+            function_names,
+            strings,
+            symbols,
+        }
+    }
+
+    #[test]
+    fn resolve_addr_literal_prefers_function_then_string_then_symbol() {
+        let mut fn_map = HashMap::new();
+        let mut str_map = HashMap::new();
+        let mut sym_map = HashMap::new();
+
+        fn_map.insert(0x401000, "sym.main".to_string());
+        str_map.insert(0x402000, "format: %d\\n".to_string());
+        sym_map.insert(0x403000, "obj.global".to_string());
+        str_map.insert(0x404000, "string_wins_over_symbol".to_string());
+        sym_map.insert(0x404000, "obj.same_addr".to_string());
+        fn_map.insert(0x405000, "sym.wins".to_string());
+        str_map.insert(0x405000, "string_loses".to_string());
+        sym_map.insert(0x405000, "symbol_loses".to_string());
+        let definitions = HashMap::new();
+        let use_counts = HashMap::new();
+        let condition_vars = HashSet::new();
+        let pinned = HashSet::new();
+        let var_aliases = HashMap::new();
+        let ptr_arith = HashMap::new();
+        let ctx = make_ctx(
+            &definitions,
+            &use_counts,
+            &condition_vars,
+            &pinned,
+            &var_aliases,
+            &ptr_arith,
+            &fn_map,
+            &str_map,
+            &sym_map,
+        );
+
+        assert_eq!(
+            ctx.resolve_addr_literal(0x401000),
+            Some(CExpr::Var("sym.main".to_string()))
+        );
+        assert_eq!(
+            ctx.resolve_addr_literal(0x402000),
+            Some(CExpr::StringLit("format: %d\\n".to_string()))
+        );
+        assert_eq!(
+            ctx.resolve_addr_literal(0x403000),
+            Some(CExpr::Var("obj.global".to_string()))
+        );
+        assert_eq!(
+            ctx.resolve_addr_literal(0x404000),
+            Some(CExpr::StringLit("string_wins_over_symbol".to_string()))
+        );
+        assert_eq!(
+            ctx.resolve_addr_literal(0x405000),
+            Some(CExpr::Var("sym.wins".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_addr_literal_skips_small_and_unknown_values() {
+        let fn_map = HashMap::new();
+        let str_map = HashMap::new();
+        let sym_map = HashMap::new();
+        let definitions = HashMap::new();
+        let use_counts = HashMap::new();
+        let condition_vars = HashSet::new();
+        let pinned = HashSet::new();
+        let var_aliases = HashMap::new();
+        let ptr_arith = HashMap::new();
+        let ctx = make_ctx(
+            &definitions,
+            &use_counts,
+            &condition_vars,
+            &pinned,
+            &var_aliases,
+            &ptr_arith,
+            &fn_map,
+            &str_map,
+            &sym_map,
+        );
+
+        assert_eq!(ctx.resolve_addr_literal(0xff), None);
+        assert_eq!(ctx.resolve_addr_literal(0x5000), None);
+    }
+
+    #[test]
+    fn get_expr_resolves_ram_addresses_to_strings() {
+        let fn_map = HashMap::new();
+        let mut str_map = HashMap::new();
+        let sym_map = HashMap::new();
+        str_map.insert(0x403048, "Usage: %s <test_num> [args...]\\n".to_string());
+        let definitions = HashMap::new();
+        let use_counts = HashMap::new();
+        let condition_vars = HashSet::new();
+        let pinned = HashSet::new();
+        let var_aliases = HashMap::new();
+        let ptr_arith = HashMap::new();
+        let ctx = make_ctx(
+            &definitions,
+            &use_counts,
+            &condition_vars,
+            &pinned,
+            &var_aliases,
+            &ptr_arith,
+            &fn_map,
+            &str_map,
+            &sym_map,
+        );
+
+        let var = SSAVar::new("ram:403048", 0, 8);
+        assert_eq!(
+            ctx.get_expr(&var),
+            CExpr::StringLit("Usage: %s <test_num> [args...]\\n".to_string())
+        );
+    }
 }

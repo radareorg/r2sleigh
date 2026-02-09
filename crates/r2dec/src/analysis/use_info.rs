@@ -130,6 +130,9 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
                     pinned: &scratch.info.pinned,
                     var_aliases: &scratch.info.var_aliases,
                     ptr_arith: &scratch.info.ptr_arith,
+                    function_names: &env.function_names,
+                    strings: &env.strings,
+                    symbols: &env.symbols,
                 };
                 lower.op_to_expr(op)
             };
@@ -380,6 +383,9 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                         pinned: &scratch.info.pinned,
                         var_aliases: &scratch.info.var_aliases,
                         ptr_arith: &scratch.info.ptr_arith,
+                        function_names: &env.function_names,
+                        strings: &env.strings,
+                        symbols: &env.symbols,
                     };
                     match prev_op {
                         SSAOp::Copy { dst, src } => Some((dst, lower.get_expr(src))),

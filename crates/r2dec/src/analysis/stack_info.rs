@@ -182,6 +182,9 @@ fn stack_var_for_addr_var(
         pinned: &empty_names,
         var_aliases,
         ptr_arith: &empty_ptrs,
+        function_names: &env.function_names,
+        strings: &env.strings,
+        symbols: &env.symbols,
     };
     let rendered = lower.var_name(addr);
     if let Some(alias) = resolve_stack_alias_from_addr_expr(
