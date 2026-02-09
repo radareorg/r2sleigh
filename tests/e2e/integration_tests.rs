@@ -983,6 +983,47 @@ mod decompilation {
     }
 
     #[test]
+    fn decompiles_global_symbol_names_in_non_call_contexts() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_global_symbol_flow", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        let has_counter_name = normalized.contains("obj.global_counter")
+            || normalized.contains("global_counter");
+        let has_limit_name =
+            normalized.contains("obj.global_limit") || normalized.contains("global_limit");
+
+        assert!(
+            has_counter_name,
+            "Should resolve global_counter symbol name in non-call contexts"
+        );
+        assert!(
+            has_limit_name,
+            "Should resolve global_limit symbol name in non-call contexts"
+        );
+
+        let has_non_call_counter_use = normalized.lines().any(|line| {
+            (line.contains("obj.global_counter") || line.contains("global_counter"))
+                && !line.contains("sym.imp.")
+                && (line.contains(" = ") || line.contains("==") || line.contains("!="))
+        });
+        assert!(
+            has_non_call_counter_use,
+            "Should show non-call assignment/comparison use for global_counter"
+        );
+
+        assert!(
+            !normalized.contains("ram:"),
+            "Should not expose raw ram: names in decompiled output"
+        );
+        assert!(
+            !normalized.contains("*(0x") && !normalized.contains("*0x"),
+            "Should not expose direct raw-address dereference artifacts for this flow"
+        );
+    }
+
+    #[test]
     fn decompiles_multi_use_simple_temp_inlined() {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.test_multi_use_temp", "a:sla.dec");

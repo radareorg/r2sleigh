@@ -1407,6 +1407,15 @@ impl FoldingContext {
             }
         }
 
+        if let Some(addr) = extract_call_address(&var.name) {
+            if let Some(sym) = self.lookup_symbol(addr) {
+                return sym.clone();
+            }
+            if let Some(name) = self.lookup_function(addr) {
+                return name.clone();
+            }
+        }
+
         // Check if coalescing mapped this SSA name to a merged name
         let display = var.display_name();
         if let Some(alias) = self.var_aliases_map().get(&display) {

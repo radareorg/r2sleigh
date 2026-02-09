@@ -29,6 +29,7 @@
 //! ```
 
 pub(crate) mod analysis;
+pub(crate) mod address;
 pub mod ast;
 pub mod codegen;
 pub mod expr;
@@ -261,7 +262,16 @@ impl Decompiler {
     }
 
     fn linearize_function_body(&self, func: &SSAFunction) -> Vec<CStmt> {
-        let builder = ExpressionBuilder::new(self.config.ptr_size);
+        let mut builder = ExpressionBuilder::new(self.config.ptr_size);
+        if !self.context.function_names.is_empty() {
+            builder.set_function_names(self.context.function_names.clone());
+        }
+        if !self.context.strings.is_empty() {
+            builder.set_strings(self.context.strings.clone());
+        }
+        if !self.context.symbols.is_empty() {
+            builder.set_symbols(self.context.symbols.clone());
+        }
         let mut stmts = Vec::new();
 
         for &addr in func.block_addrs() {

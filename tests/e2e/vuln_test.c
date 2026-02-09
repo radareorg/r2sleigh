@@ -21,6 +21,10 @@
 #include <string.h>
 #include <locale.h>
 
+volatile int global_counter = 0;
+volatile int global_limit = 10;
+volatile int global_tail = 0;
+
 // Test 1: Simple password check (symbolic should find 0xDEAD)
 int check_secret(int x) {
     if (x == 0xDEAD) {
@@ -278,6 +282,18 @@ int test_identity_ops(int x) {
     return sub0 + add0 + or0 + xor0 + mul1 + div1 + (int)and_all_ones + keep_sub + keep_add + keep_or;
 }
 
+// Test 25: Global symbol flow in non-call contexts (load/store/compare)
+int test_global_symbol_flow(int x) {
+    global_counter = x;
+    int current = global_counter;
+    if (current == global_limit) {
+        global_counter = current + global_limit;
+    } else {
+        global_counter = current - global_limit;
+    }
+    return global_counter;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -454,6 +470,12 @@ int main(int argc, char *argv[]) {
             if (argc > 2) {
                 int x = atoi(argv[2]);
                 printf("test_identity_ops(%d) = %d\n", x, test_identity_ops(x));
+            }
+            break;
+        case 25:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf("test_global_symbol_flow(%d) = %d\n", x, test_global_symbol_flow(x));
             }
             break;
         default:

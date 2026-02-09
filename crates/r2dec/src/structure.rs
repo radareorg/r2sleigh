@@ -122,22 +122,25 @@ impl<'a> ControlFlowStructurer<'a> {
     /// Set function names for call target resolution.
     pub fn set_function_names(&mut self, names: HashMap<u64, String>) {
         if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_function_names(names);
+            ctx.set_function_names(names.clone());
         }
+        self.expr_builder.set_function_names(names);
     }
 
     /// Set string literals for constant address resolution.
     pub fn set_strings(&mut self, strings: HashMap<u64, String>) {
         if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_strings(strings);
+            ctx.set_strings(strings.clone());
         }
+        self.expr_builder.set_strings(strings);
     }
 
     /// Set symbol names for global variable resolution.
     pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
         if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_symbols(symbols);
+            ctx.set_symbols(symbols.clone());
         }
+        self.expr_builder.set_symbols(symbols);
     }
 
     /// Set externally recovered stack variables keyed by signed stack offset.

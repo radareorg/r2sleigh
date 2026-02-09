@@ -3,14 +3,23 @@
 //! This module converts SSA operations to C expressions and performs
 //! algebraic simplifications.
 
+use std::collections::HashMap;
+
 use r2ssa::{SSAOp, SSAVar};
 
+use crate::address::parse_address_from_var_name;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 
 /// Expression builder that converts SSA operations to C expressions.
 pub struct ExpressionBuilder {
     /// Pointer size in bits.
     _ptr_size: u32,
+    /// Function address to name mapping.
+    function_names: HashMap<u64, String>,
+    /// String literal address mapping.
+    strings: HashMap<u64, String>,
+    /// Symbol/global address mapping.
+    symbols: HashMap<u64, String>,
 }
 
 impl ExpressionBuilder {
@@ -18,11 +27,34 @@ impl ExpressionBuilder {
     pub fn new(ptr_size: u32) -> Self {
         Self {
             _ptr_size: ptr_size,
+            function_names: HashMap::new(),
+            strings: HashMap::new(),
+            symbols: HashMap::new(),
         }
+    }
+
+    /// Set function names for address resolution.
+    pub fn set_function_names(&mut self, names: HashMap<u64, String>) {
+        self.function_names = names;
+    }
+
+    /// Set string literals for address resolution.
+    pub fn set_strings(&mut self, strings: HashMap<u64, String>) {
+        self.strings = strings;
+    }
+
+    /// Set symbol names for address resolution.
+    pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
+        self.symbols = symbols;
     }
 
     /// Convert an SSA variable to a C expression.
     pub fn var_to_expr(&self, var: &SSAVar) -> CExpr {
+        if let Some(addr) = parse_address_from_var_name(&var.name)
+            && let Some(resolved) = self.resolve_addr_literal(addr)
+        {
+            return resolved;
+        }
         let name = self.var_name(var);
         CExpr::Var(name)
     }
@@ -209,6 +241,22 @@ impl ExpressionBuilder {
             8 => CType::Int(64),
             _ => CType::Int(size.saturating_mul(8)),
         }
+    }
+
+    fn resolve_addr_literal(&self, addr: u64) -> Option<CExpr> {
+        if addr <= 0xff {
+            return None;
+        }
+        if let Some(name) = self.function_names.get(&addr) {
+            return Some(CExpr::Var(name.clone()));
+        }
+        if let Some(s) = self.strings.get(&addr) {
+            return Some(CExpr::StringLit(s.clone()));
+        }
+        if let Some(name) = self.symbols.get(&addr) {
+            return Some(CExpr::Var(name.clone()));
+        }
+        None
     }
 
     /// Simplify an expression.
@@ -423,6 +471,7 @@ fn is_hex_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_var_name() {
@@ -433,6 +482,71 @@ mod tests {
 
         let var = SSAVar::new("unique:1234", 0, 32);
         assert!(builder.var_name(&var).starts_with("t"));
+    }
+
+    #[test]
+    fn test_var_to_expr_resolves_const_symbol() {
+        let mut builder = ExpressionBuilder::new(64);
+        let mut symbols = HashMap::new();
+        symbols.insert(0x404080, "obj.global_counter".to_string());
+        builder.set_symbols(symbols);
+
+        let var = SSAVar::new("const:404080", 0, 8);
+        assert_eq!(
+            builder.var_to_expr(&var),
+            CExpr::Var("obj.global_counter".to_string())
+        );
+    }
+
+    #[test]
+    fn test_var_to_expr_resolves_ram_symbol_with_suffix() {
+        let mut builder = ExpressionBuilder::new(64);
+        let mut symbols = HashMap::new();
+        symbols.insert(0x404080, "obj.global_counter".to_string());
+        builder.set_symbols(symbols);
+
+        let var = SSAVar::new("ram:404080_7", 0, 8);
+        assert_eq!(
+            builder.var_to_expr(&var),
+            CExpr::Var("obj.global_counter".to_string())
+        );
+    }
+
+    #[test]
+    fn test_var_to_expr_resolution_precedence() {
+        let mut builder = ExpressionBuilder::new(64);
+        let mut functions = HashMap::new();
+        let mut strings = HashMap::new();
+        let mut symbols = HashMap::new();
+        functions.insert(0x401000, "sym.main".to_string());
+        strings.insert(0x401000, "string_loses".to_string());
+        symbols.insert(0x401000, "obj.loses".to_string());
+        strings.insert(0x402000, "string_wins".to_string());
+        symbols.insert(0x402000, "obj.loses".to_string());
+        symbols.insert(0x403000, "obj.wins".to_string());
+        builder.set_function_names(functions);
+        builder.set_strings(strings);
+        builder.set_symbols(symbols);
+
+        assert_eq!(
+            builder.var_to_expr(&SSAVar::new("const:401000", 0, 8)),
+            CExpr::Var("sym.main".to_string())
+        );
+        assert_eq!(
+            builder.var_to_expr(&SSAVar::new("const:402000", 0, 8)),
+            CExpr::StringLit("string_wins".to_string())
+        );
+        assert_eq!(
+            builder.var_to_expr(&SSAVar::new("const:403000", 0, 8)),
+            CExpr::Var("obj.wins".to_string())
+        );
+    }
+
+    #[test]
+    fn test_var_to_expr_unknown_address_falls_back() {
+        let builder = ExpressionBuilder::new(64);
+        let var = SSAVar::new("const:5000", 0, 8);
+        assert_eq!(builder.var_to_expr(&var), CExpr::Var("const_5000".to_string()));
     }
 
     #[test]

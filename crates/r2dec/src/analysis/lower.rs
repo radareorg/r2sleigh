@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use r2ssa::{SSAOp, SSAVar};
 
 use super::utils::parse_const_value;
+use crate::address::parse_address_from_var_name;
 use crate::ast::{BinaryOp, CExpr, CType, UnaryOp};
 use crate::fold::PtrArith;
 
@@ -26,6 +27,15 @@ impl<'a> LowerCtx<'a> {
                 return format!("0x{:x}", val);
             }
             return format!("{}", val);
+        }
+
+        if let Some(addr) = parse_address_from_var_name(&var.name) {
+            if let Some(name) = self.function_names.get(&addr) {
+                return name.clone();
+            }
+            if let Some(name) = self.symbols.get(&addr) {
+                return name.clone();
+            }
         }
 
         let display = var.display_name();
@@ -67,7 +77,7 @@ impl<'a> LowerCtx<'a> {
             return self.const_to_expr(var);
         }
 
-        if let Some(addr) = parse_ram_address(&var.name)
+        if let Some(addr) = parse_address_from_var_name(&var.name)
             && let Some(expr) = self.resolve_addr_literal(addr)
         {
             return expr;
@@ -236,7 +246,9 @@ impl<'a> LowerCtx<'a> {
 
     fn const_to_expr(&self, var: &SSAVar) -> CExpr {
         let val = parse_const_value(&var.name).unwrap_or(0);
-        if let Some(expr) = self.resolve_addr_literal(val) {
+        if let Some(addr) = parse_address_from_var_name(&var.name)
+            && let Some(expr) = self.resolve_addr_literal(addr)
+        {
             return expr;
         }
         if val > 0x7fffffff {
@@ -335,16 +347,6 @@ fn uint_type_from_size(size: u32) -> CType {
 
 fn is_hex_name(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn parse_ram_address(name: &str) -> Option<u64> {
-    let rest = name.strip_prefix("ram:")?;
-    let addr_str = rest.split('_').next().unwrap_or(rest);
-    let addr_hex = addr_str
-        .strip_prefix("0x")
-        .or_else(|| addr_str.strip_prefix("0X"))
-        .unwrap_or(addr_str);
-    u64::from_str_radix(addr_hex, 16).ok()
 }
 
 #[cfg(test)]
