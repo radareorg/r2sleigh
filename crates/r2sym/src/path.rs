@@ -468,6 +468,89 @@ impl<'ctx> PathExplorer<'ctx> {
         None
     }
 
+    /// Explore paths to collect all feasible states that reach a target address.
+    pub fn find_paths_to(
+        &mut self,
+        func: &SSAFunction,
+        initial_state: SymState<'ctx>,
+        target_addr: u64,
+    ) -> Vec<PathResult<'ctx>> {
+        let start_time = Instant::now();
+        let mut matches = Vec::new();
+        let mut worklist: VecDeque<SymState<'ctx>> = VecDeque::new();
+        worklist.push_back(initial_state);
+
+        while let Some(mut state) = self.next_state(&mut worklist) {
+            if self.config.merge_states {
+                if let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
+                    state = state.merge_with(&other);
+                }
+            }
+            if let Some(timeout) = self.config.timeout {
+                if start_time.elapsed() > timeout {
+                    break;
+                }
+            }
+
+            if state.pc == target_addr {
+                let feasible = self.solver.is_sat(&state);
+                if feasible {
+                    if state.depth > self.stats.max_depth_reached {
+                        self.stats.max_depth_reached = state.depth;
+                    }
+                    self.stats.paths_completed += 1;
+                    matches.push(PathResult::new(state, true));
+                }
+                continue;
+            }
+
+            if self.stats.states_explored >= self.config.max_states {
+                break;
+            }
+            if state.depth >= self.config.max_depth {
+                self.stats.paths_max_depth += 1;
+                continue;
+            }
+
+            self.stats.states_explored += 1;
+
+            if self.config.prune_infeasible && !self.solver.is_sat(&state) {
+                self.stats.paths_pruned += 1;
+                continue;
+            }
+
+            let block_addr = state.pc;
+            let Some(block) = func.get_block(block_addr) else {
+                continue;
+            };
+
+            match self.executor.execute_block(&mut state, block) {
+                Ok(forked_states) => {
+                    for mut forked in forked_states {
+                        forked.set_prev_pc(Some(block_addr));
+                        worklist.push_back(forked);
+                    }
+
+                    if !state.is_terminated() {
+                        if state.pc == block_addr {
+                            if let Some(next) = self.fallthrough_target(func, block_addr) {
+                                state.pc = next;
+                            }
+                        }
+                        state.set_prev_pc(Some(block_addr));
+                        worklist.push_back(state);
+                    }
+                }
+                Err(_) => {
+                    self.stats.paths_completed += 1;
+                }
+            }
+        }
+
+        self.stats.total_time = start_time.elapsed();
+        matches
+    }
+
     /// Explore paths to find inputs that avoid a target address.
     pub fn find_path_avoiding(
         &mut self,

@@ -204,6 +204,134 @@ fn test_symbolic_execution_conditional_branch() {
 }
 
 #[test]
+fn test_find_paths_to_collects_multiple_matches() {
+    let blocks = vec![
+        R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntEqual {
+                    dst: make_reg(RCX, 1),
+                    a: make_reg(RDI, 8),
+                    b: make_const(0x1337, 8),
+                },
+                R2ILOp::CBranch {
+                    target: make_const(0x1010, 8),
+                    cond: make_reg(RCX, 1),
+                },
+            ],
+            switch_info: None,
+        },
+        R2ILBlock {
+            addr: 0x1004,
+            size: 4,
+            ops: vec![R2ILOp::Branch {
+                target: make_const(0x1010, 8),
+            }],
+            switch_info: None,
+        },
+        R2ILBlock {
+            addr: 0x1010,
+            size: 4,
+            ops: vec![R2ILOp::Copy {
+                dst: make_reg(RAX, 8),
+                src: make_const(1, 8),
+            }],
+            switch_info: None,
+        },
+    ];
+
+    let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
+    let ctx = Context::thread_local();
+    let mut state = SymState::new(&ctx, 0x1000);
+    state.make_symbolic("reg:56_0", 64);
+
+    let mut explorer = PathExplorer::new(&ctx);
+    let paths = explorer.find_paths_to(&func, state, 0x1010);
+    assert!(
+        paths.len() >= 2,
+        "Expected multiple target-reaching paths, got {}",
+        paths.len()
+    );
+}
+
+#[test]
+fn test_find_paths_to_unreachable_returns_empty() {
+    let blocks = vec![R2ILBlock {
+        addr: 0x1000,
+        size: 4,
+        ops: vec![R2ILOp::Copy {
+            dst: make_reg(RAX, 8),
+            src: make_const(1, 8),
+        }],
+        switch_info: None,
+    }];
+
+    let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
+    let ctx = Context::thread_local();
+    let state = SymState::new(&ctx, 0x1000);
+    let mut explorer = PathExplorer::new(&ctx);
+    let paths = explorer.find_paths_to(&func, state, 0x2000);
+    assert!(
+        paths.is_empty(),
+        "Expected no paths for unreachable target, got {}",
+        paths.len()
+    );
+}
+
+#[test]
+fn test_find_paths_to_honors_limits() {
+    let blocks = vec![
+        R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntEqual {
+                    dst: make_reg(RCX, 1),
+                    a: make_reg(RDI, 8),
+                    b: make_const(0, 8),
+                },
+                R2ILOp::CBranch {
+                    target: make_const(0x1010, 8),
+                    cond: make_reg(RCX, 1),
+                },
+            ],
+            switch_info: None,
+        },
+        R2ILBlock {
+            addr: 0x1010,
+            size: 4,
+            ops: vec![R2ILOp::Copy {
+                dst: make_reg(RAX, 8),
+                src: make_const(1, 8),
+            }],
+            switch_info: None,
+        },
+    ];
+
+    let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
+    let ctx = Context::thread_local();
+    let mut state = SymState::new(&ctx, 0x1000);
+    state.make_symbolic("reg:56_0", 64);
+
+    let config = ExploreConfig {
+        max_states: 0,
+        max_depth: 50,
+        timeout: None,
+        strategy: ExploreStrategy::Dfs,
+        prune_infeasible: true,
+        merge_states: false,
+    };
+    let mut explorer = PathExplorer::with_config(&ctx, config);
+    let paths = explorer.find_paths_to(&func, state, 0x1010);
+    assert!(
+        paths.is_empty(),
+        "Expected no matches when max_states=0, got {}",
+        paths.len()
+    );
+}
+
+#[test]
 fn test_symbolic_arithmetic_operations() {
     // Test all arithmetic operations with symbolic values
     let ctx = Context::thread_local();

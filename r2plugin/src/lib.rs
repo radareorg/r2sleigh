@@ -2801,8 +2801,23 @@ pub extern "C" fn r2sym_merge_set_enabled(enabled: i32) {
     MERGE_STATES.store(enabled != 0, Ordering::Relaxed);
 }
 
+fn sym_default_config() -> r2sym::ExploreConfig {
+    r2sym::ExploreConfig {
+        max_states: 100,
+        max_depth: 200,
+        merge_states: merge_states_enabled(),
+        timeout: Some(std::time::Duration::from_secs(5)),
+        ..Default::default()
+    }
+}
+
+fn sym_error_json(message: &str) -> *mut c_char {
+    let payload = format!(r#"{{"error":"{}"}}"#, message);
+    CString::new(payload).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
 /// Symbolic execution summary for JSON output.
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct SymExecSummary {
     paths_explored: usize,
     paths_feasible: usize,
@@ -2859,13 +2874,7 @@ pub extern "C" fn r2sym_function(
     let explore_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
         seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
-        let config = r2sym::ExploreConfig {
-            max_states: 100,
-            max_depth: 200,
-            merge_states: merge_states_enabled(),
-            timeout: Some(std::time::Duration::from_secs(5)),
-            ..Default::default()
-        };
+        let config = sym_default_config();
 
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
         let results = explorer.explore(&ssa_func, initial_state);
@@ -2954,6 +2963,65 @@ struct PathSolution {
     registers: std::collections::HashMap<String, String>,
 }
 
+#[derive(Serialize)]
+struct SymTargetExploreResult {
+    entry: String,
+    target: String,
+    matched_paths: usize,
+    stats: SymExecSummary,
+    paths: Vec<PathInfo>,
+}
+
+#[derive(Serialize)]
+struct SymTargetSolveResult {
+    entry: String,
+    target: String,
+    matched_paths: usize,
+    found: bool,
+    stats: SymExecSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_path: Option<PathInfo>,
+}
+
+fn path_solution_from_result<'ctx>(
+    explorer: &r2sym::PathExplorer<'ctx>,
+    result: &r2sym::PathResult<'ctx>,
+) -> Option<PathSolution> {
+    if !result.feasible {
+        return None;
+    }
+
+    explorer.solve_path(result).map(|solved| PathSolution {
+        inputs: solved
+            .inputs
+            .into_iter()
+            .map(|(k, v)| (k, format!("0x{:x}", v)))
+            .collect(),
+        registers: solved
+            .registers
+            .into_iter()
+            .filter(|(name, _)| !name.starts_with("tmp:") && !name.contains("_0"))
+            .map(|(k, v)| (k, format!("0x{:x}", v)))
+            .collect(),
+    })
+}
+
+fn path_info_from_result<'ctx>(
+    path_id: usize,
+    result: &r2sym::PathResult<'ctx>,
+    explorer: &r2sym::PathExplorer<'ctx>,
+) -> PathInfo {
+    PathInfo {
+        path_id,
+        feasible: result.feasible,
+        depth: result.depth,
+        exit_status: format!("{:?}", result.exit_status),
+        final_pc: format!("0x{:x}", result.final_pc()),
+        num_constraints: result.num_constraints(),
+        solution: path_solution_from_result(explorer, result),
+    }
+}
+
 /// Explore paths in a function and return detailed results as JSON.
 /// Caller must free the returned string with r2il_string_free().
 #[unsafe(no_mangle)]
@@ -3001,13 +3069,7 @@ pub extern "C" fn r2sym_paths(
     let explore_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
         seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
-        let config = r2sym::ExploreConfig {
-            max_states: 100,
-            max_depth: 200,
-            merge_states: merge_states_enabled(),
-            timeout: Some(std::time::Duration::from_secs(5)),
-            ..Default::default()
-        };
+        let config = sym_default_config();
 
         let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, config);
         let results = explorer.explore(&ssa_func, initial_state);
@@ -3026,44 +3088,170 @@ pub extern "C" fn r2sym_paths(
     let paths: Vec<PathInfo> = results
         .iter()
         .enumerate()
-        .map(|(i, r)| {
-            // Try to solve the path and get concrete values
-            let solution = if r.feasible {
-                explorer.solve_path(r).map(|solved| PathSolution {
-                    inputs: solved
-                        .inputs
-                        .into_iter()
-                        .map(|(k, v)| (k, format!("0x{:x}", v)))
-                        .collect(),
-                    registers: solved
-                        .registers
-                        .into_iter()
-                        .filter(|(name, _)| {
-                            // Filter to show only interesting registers (not temporaries)
-                            !name.starts_with("tmp:") && !name.contains("_0")
-                        })
-                        .map(|(k, v)| (k, format!("0x{:x}", v)))
-                        .collect(),
-                })
-            } else {
-                None
-            };
-
-            PathInfo {
-                path_id: i,
-                feasible: r.feasible,
-                depth: r.depth,
-                exit_status: format!("{:?}", r.exit_status),
-                final_pc: format!("0x{:x}", r.final_pc()),
-                num_constraints: r.num_constraints(),
-                solution,
-            }
-        })
+        .map(|(i, r)| path_info_from_result(i, r, &explorer))
         .collect();
 
     match serde_json::to_string_pretty(&paths) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Explore all feasible paths that reach a target address.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_explore_to(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    entry_addr: u64,
+    target_addr: u64,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return sym_error_json("invalid symbolic exploration arguments");
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let _disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return sym_error_json("missing disassembler context"),
+    };
+
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+    if r2il_blocks.is_empty() {
+        return sym_error_json("no blocks to explore");
+    }
+
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+        Some(f) => f,
+        None => return sym_error_json("failed to build SSA function"),
+    };
+
+    let z3_ctx = Context::thread_local();
+    let explore_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
+        seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
+        let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, sym_default_config());
+        let matched = explorer.find_paths_to(&ssa_func, initial_state, target_addr);
+        let stats = explorer.stats().clone();
+        let paths: Vec<PathInfo> = matched
+            .iter()
+            .enumerate()
+            .map(|(i, r)| path_info_from_result(i, r, &explorer))
+            .collect();
+        (paths, stats)
+    }));
+
+    let (paths, stats) = match explore_result {
+        Ok(value) => value,
+        Err(_) => return sym_error_json("symbolic execution failed (z3 context error)"),
+    };
+
+    let output = SymTargetExploreResult {
+        entry: format!("0x{:x}", entry_addr),
+        target: format!("0x{:x}", target_addr),
+        matched_paths: paths.len(),
+        stats: SymExecSummary {
+            paths_explored: stats.paths_completed,
+            paths_feasible: paths.len(),
+            paths_pruned: stats.paths_pruned,
+            max_depth: stats.max_depth_reached,
+            states_explored: stats.states_explored,
+            time_ms: stats.total_time.as_millis() as u64,
+        },
+        paths,
+    };
+
+    match serde_json::to_string(&output) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => sym_error_json("failed to serialize symbolic exploration output"),
+    }
+}
+
+/// Solve a target address by returning one deterministic best feasible path.
+/// Caller must free the returned string with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sym_solve_to(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    entry_addr: u64,
+    target_addr: u64,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return sym_error_json("invalid symbolic solving arguments");
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let _disasm = match &ctx_ref.disasm {
+        Some(d) => d,
+        None => return sym_error_json("missing disassembler context"),
+    };
+
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if !blk_ptr.is_null() {
+            let blk = unsafe { &*blk_ptr };
+            r2il_blocks.push(blk.clone());
+        }
+    }
+    if r2il_blocks.is_empty() {
+        return sym_error_json("no blocks to solve");
+    }
+
+    let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+        Some(f) => f,
+        None => return sym_error_json("failed to build SSA function"),
+    };
+
+    let z3_ctx = Context::thread_local();
+    let solve_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut initial_state = r2sym::SymState::new(&z3_ctx, entry_addr);
+        seed_symbolic_state(&mut initial_state, &ssa_func, ctx_ref.arch.as_ref());
+        let mut explorer = r2sym::PathExplorer::with_config(&z3_ctx, sym_default_config());
+        let matched = explorer.find_paths_to(&ssa_func, initial_state, target_addr);
+        let stats = explorer.stats().clone();
+
+        let selected = matched
+            .iter()
+            .enumerate()
+            .min_by_key(|(idx, path)| (path.num_constraints(), path.depth, *idx))
+            .map(|(idx, path)| path_info_from_result(idx, path, &explorer));
+        (matched.len(), selected, stats)
+    }));
+
+    let (matched_paths, selected_path, stats) = match solve_result {
+        Ok(value) => value,
+        Err(_) => return sym_error_json("symbolic execution failed (z3 context error)"),
+    };
+
+    let output = SymTargetSolveResult {
+        entry: format!("0x{:x}", entry_addr),
+        target: format!("0x{:x}", target_addr),
+        matched_paths,
+        found: selected_path.is_some(),
+        stats: SymExecSummary {
+            paths_explored: stats.paths_completed,
+            paths_feasible: matched_paths,
+            paths_pruned: stats.paths_pruned,
+            max_depth: stats.max_depth_reached,
+            states_explored: stats.states_explored,
+            time_ms: stats.total_time.as_millis() as u64,
+        },
+        selected_path,
+    };
+
+    match serde_json::to_string(&output) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => sym_error_json("failed to serialize symbolic solve output"),
     }
 }
 

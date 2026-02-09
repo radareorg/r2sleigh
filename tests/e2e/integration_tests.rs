@@ -3,7 +3,7 @@
 //! These tests invoke radare2 with the r2sleigh plugin and validate output.
 //! Run with: `cargo test -p r2sleigh-e2e-tests`
 
-use e2e::{r2_at_addr, r2_at_func, require_binary, vuln_test_binary};
+use e2e::{r2_at_addr, r2_at_func, r2_cmd, require_binary, vuln_test_binary};
 use rstest::rstest;
 use serde_json::Value;
 
@@ -623,7 +623,171 @@ mod paths {
 }
 
 // ============================================================================
-// 9. State Merging
+// 9. Interactive Symbolic Commands
+// ============================================================================
+
+mod interactive_sym {
+    use super::*;
+
+    const CHECK_SECRET_RET: u64 = 0x401296;
+    const UNREACHABLE_TARGET: u64 = 0xdeadbeef;
+
+    #[test]
+    fn sym_explore_command_exists_and_returns_json() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sym.explore 0x401296");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sym.explore");
+        let obj = expect_object(&json, "a:sym.explore");
+        assert!(obj.contains_key("target"));
+        assert!(obj.contains_key("matched_paths"));
+        assert!(obj.contains_key("paths"));
+    }
+
+    #[test]
+    fn sym_solve_command_exists_and_returns_json() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sym.solve 0x401296");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sym.solve");
+        let obj = expect_object(&json, "a:sym.solve");
+        assert!(obj.contains_key("found"));
+        assert!(obj.contains_key("stats"));
+    }
+
+    #[test]
+    fn sym_state_reports_empty_before_any_run() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sym.state");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sym.state");
+        let obj = expect_object(&json, "a:sym.state");
+        assert_eq!(obj.get("has_state").and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn sym_namespace_alias_keeps_old_sla_sym_paths_working() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.sym.paths");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sla.sym.paths");
+        let arr = expect_array(&json, "a:sla.sym.paths");
+        assert!(!arr.is_empty(), "a:sla.sym.paths should still return paths");
+    }
+
+    #[test]
+    fn sym_explore_finds_all_matching_paths_for_check_secret_target() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            &format!("a:sym.explore 0x{CHECK_SECRET_RET:x}"),
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "a:sym.explore");
+        let obj = expect_object(&json, "a:sym.explore");
+        let matched_paths = obj
+            .get("matched_paths")
+            .and_then(Value::as_u64)
+            .expect("matched_paths should be numeric");
+        assert!(matched_paths >= 1, "Expected at least one matching path");
+        let paths = obj
+            .get("paths")
+            .and_then(Value::as_array)
+            .expect("paths should be an array");
+        assert!(!paths.is_empty(), "paths should not be empty");
+    }
+
+    #[test]
+    fn sym_solve_returns_concrete_input_for_check_secret_target() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            &format!("a:sym.solve 0x{CHECK_SECRET_RET:x}"),
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "a:sym.solve");
+        let obj = expect_object(&json, "a:sym.solve");
+        assert_eq!(obj.get("found").and_then(Value::as_bool), Some(true));
+        let selected_path = obj
+            .get("selected_path")
+            .and_then(Value::as_object)
+            .expect("selected_path should be an object");
+        let solution = selected_path
+            .get("solution")
+            .and_then(Value::as_object)
+            .expect("selected_path.solution should be an object");
+        let inputs = solution
+            .get("inputs")
+            .and_then(Value::as_object)
+            .expect("selected_path.solution.inputs should be an object");
+        assert!(!inputs.is_empty(), "solve should return concrete inputs");
+    }
+
+    #[test]
+    fn sym_state_returns_last_solve_result_in_same_session() {
+        setup();
+        let command = format!("aaa; s dbg.check_secret; a:sym.solve 0x{CHECK_SECRET_RET:x}; a:sym.state");
+        let result = r2_cmd(vuln_test_binary(), &command);
+        result.assert_ok();
+        let state_line = result
+            .stdout
+            .lines()
+            .rev()
+            .find(|line| line.contains("\"has_state\""))
+            .expect("expected a:sym.state JSON line");
+        let state_json: Value =
+            serde_json::from_str(state_line).expect("a:sym.state line should be valid JSON");
+        let obj = expect_object(&state_json, "a:sym.state");
+        let expected_target = format!("0x{CHECK_SECRET_RET:x}");
+        assert_eq!(obj.get("has_state").and_then(Value::as_bool), Some(true));
+        assert_eq!(obj.get("mode").and_then(Value::as_str), Some("solve"));
+        assert_eq!(
+            obj.get("target").and_then(Value::as_str),
+            Some(expected_target.as_str())
+        );
+    }
+
+    #[test]
+    fn sym_explore_missing_target_shows_usage() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sym.explore");
+        result.assert_ok();
+        assert!(
+            result.contains("Usage: a:sym.explore <target_addr_expr>"),
+            "Expected usage message for missing target"
+        );
+    }
+
+    #[test]
+    fn sym_solve_invalid_target_expr_reports_error() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sym.solve (()");
+        result.assert_ok();
+        assert!(
+            result.contains("Usage: a:sym.solve <target_addr_expr>"),
+            "Expected usage message for invalid target expression"
+        );
+    }
+
+    #[test]
+    fn sym_solve_unreachable_target_reports_found_false() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            &format!("a:sym.solve 0x{UNREACHABLE_TARGET:x}"),
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "a:sym.solve");
+        let obj = expect_object(&json, "a:sym.solve");
+        assert_eq!(obj.get("found").and_then(Value::as_bool), Some(false));
+    }
+}
+
+// ============================================================================
+// 10. State Merging
 // ============================================================================
 
 mod merging {
@@ -655,7 +819,7 @@ mod merging {
 }
 
 // ============================================================================
-// 10. Decompilation
+// 11. Decompilation
 // ============================================================================
 
 mod decompilation {

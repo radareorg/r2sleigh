@@ -4,6 +4,7 @@
 #include <r_core.h>
 #include <r_lib.h>
 #include <r_util/r_json.h>
+#include <r_util/r_num.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -62,6 +63,10 @@ extern char *r2taint_sources_sinks_json(const char *json);
 /* Symbolic execution */
 extern char *r2sym_function(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long entry_addr);
 extern char *r2sym_paths(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long entry_addr);
+extern char *r2sym_explore_to(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
+	unsigned long long entry_addr, unsigned long long target_addr);
+extern char *r2sym_solve_to(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
+	unsigned long long entry_addr, unsigned long long target_addr);
 extern int r2sym_merge_is_enabled(void);
 extern void r2sym_merge_set_enabled(int enabled);
 
@@ -91,6 +96,17 @@ extern char *r2sleigh_get_data_refs(const R2ILContext *ctx, const R2ILBlock **bl
 static R2ILContext *sleigh_ctx = NULL;
 static char *sleigh_arch = NULL;
 static char *sleigh_arch_override = NULL;
+
+typedef struct {
+	bool has_state;
+	char *mode;
+	ut64 function_addr;
+	ut64 entry_addr;
+	ut64 target_addr;
+	char *result_json;
+} SymStateCache;
+
+static SymStateCache sym_state_cache = {0};
 
 /* Minimum bytes to pass to libsla (it reads ahead for variable-length instructions) */
 #define SLEIGH_MIN_BYTES 16
@@ -128,6 +144,112 @@ static void block_array_free(BlockArray *arr) {
 	arr->blocks = NULL;
 	arr->count = 0;
 	arr->capacity = 0;
+}
+
+static void sym_state_cache_clear(void) {
+	free (sym_state_cache.mode);
+	free (sym_state_cache.result_json);
+	sym_state_cache.mode = NULL;
+	sym_state_cache.result_json = NULL;
+	sym_state_cache.function_addr = 0;
+	sym_state_cache.entry_addr = 0;
+	sym_state_cache.target_addr = 0;
+	sym_state_cache.has_state = false;
+}
+
+static void sym_state_cache_update(const char *mode, ut64 function_addr, ut64 entry_addr, ut64 target_addr, const char *result_json) {
+	if (!mode || !result_json || !*result_json) {
+		return;
+	}
+	sym_state_cache_clear ();
+	sym_state_cache.mode = strdup (mode);
+	sym_state_cache.result_json = strdup (result_json);
+	if (!sym_state_cache.mode || !sym_state_cache.result_json) {
+		sym_state_cache_clear ();
+		return;
+	}
+	sym_state_cache.function_addr = function_addr;
+	sym_state_cache.entry_addr = entry_addr;
+	sym_state_cache.target_addr = target_addr;
+	sym_state_cache.has_state = true;
+}
+
+static bool sym_result_has_error(const char *json) {
+	char *json_copy;
+	RJson *root;
+	const RJson *error_field;
+	bool has_error;
+
+	if (!json || !*json) {
+		return true;
+	}
+	json_copy = strdup (json);
+	if (!json_copy) {
+		return true;
+	}
+	root = r_json_parse (json_copy);
+	free (json_copy);
+	if (!root) {
+		return true;
+	}
+	has_error = false;
+	if (root->type == R_JSON_OBJECT) {
+		error_field = r_json_get (root, "error");
+		if (error_field && error_field->type == R_JSON_STRING && error_field->str_value && *error_field->str_value) {
+			has_error = true;
+		}
+	}
+	r_json_free (root);
+	return has_error;
+}
+
+static char *sym_state_cache_to_json(void) {
+	int needed;
+	char *json;
+
+	if (!sym_state_cache.has_state || !sym_state_cache.result_json) {
+		return strdup ("{\"has_state\":false}");
+	}
+	needed = snprintf (NULL, 0,
+		"{\"has_state\":true,\"mode\":\"%s\",\"entry\":\"0x%"PFMT64x"\",\"target\":\"0x%"PFMT64x"\",\"function\":\"0x%"PFMT64x"\",\"result\":%s}",
+		sym_state_cache.mode ? sym_state_cache.mode : "",
+		sym_state_cache.entry_addr,
+		sym_state_cache.target_addr,
+		sym_state_cache.function_addr,
+		sym_state_cache.result_json);
+	if (needed < 0) {
+		return strdup ("{\"has_state\":false}");
+	}
+	json = malloc ((size_t)needed + 1);
+	if (!json) {
+		return strdup ("{\"has_state\":false}");
+	}
+	snprintf (json, (size_t)needed + 1,
+		"{\"has_state\":true,\"mode\":\"%s\",\"entry\":\"0x%"PFMT64x"\",\"target\":\"0x%"PFMT64x"\",\"function\":\"0x%"PFMT64x"\",\"result\":%s}",
+		sym_state_cache.mode ? sym_state_cache.mode : "",
+		sym_state_cache.entry_addr,
+		sym_state_cache.target_addr,
+		sym_state_cache.function_addr,
+		sym_state_cache.result_json);
+	return json;
+}
+
+static const char *skip_cmd_spaces(const char *s) {
+	while (s && *s == ' ') {
+		s++;
+	}
+	return s;
+}
+
+static bool parse_sym_target_expr(RCore *core, const char *expr, ut64 *target) {
+	if (!core || !core->num || !expr || !*expr || !target) {
+		return false;
+	}
+	if (!r_num_is_valid_input (core->num, expr)) {
+		return false;
+	}
+	*target = r_num_math (core->num, expr);
+	return true;
 }
 
 static bool ssa_var_to_reg_name(const char *ssa_name, char *out, size_t out_size) {
@@ -1395,11 +1517,14 @@ static bool sleigh_fini(RAnal *anal) {
 	}
 	free (sleigh_arch);
 	sleigh_arch = NULL;
+	sym_state_cache_clear ();
 	return true;
 }
 
 static char *sleigh_cmd(RAnal *anal, const char *cmd) {
-	if (!r_str_startswith (cmd, "sla")) {
+	bool is_sla_ns = r_str_startswith (cmd, "sla");
+	bool is_sym_ns = r_str_startswith (cmd, "sym");
+	if (!is_sla_ns && !is_sym_ns) {
 		return NULL;
 	}
 
@@ -1430,7 +1555,89 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.dec    - Decompile current function to C");
 			r_cons_println (cons, "| a:sla.cfg    - Show ASCII CFG for current function");
 			r_cons_println (cons, "| a:sla.cfg.json - Show CFG as JSON for current function");
+			r_cons_println (cons, "| a:sym.explore <target> - Explore symbolic paths reaching target");
+			r_cons_println (cons, "| a:sym.solve <target> - Solve concrete input for target reachability");
+			r_cons_println (cons, "| a:sym.state  - Show last symbolic explore/solve cached result");
 		}
+		return strdup("");
+	}
+
+	if (is_sym_ns && !strcmp (cmd, "sym.state")) {
+		char *state_json = sym_state_cache_to_json ();
+		if (cons && state_json) {
+			r_cons_printf (cons, "%s\n", state_json);
+		}
+		free (state_json);
+		return strdup("");
+	}
+
+	if (is_sym_ns && (!strncmp (cmd, "sym.explore", 11) || !strncmp (cmd, "sym.solve", 9))) {
+		bool is_explore = r_str_startswith (cmd, "sym.explore");
+		size_t prefix_len = is_explore ? 11 : 9;
+		const char *arg = skip_cmd_spaces (cmd + prefix_len);
+		ut64 target = 0;
+		R2ILContext *ctx;
+		RAnalFunction *fcn;
+		BlockArray blocks;
+		char *result = NULL;
+		bool rust_owned = true;
+
+		if (!arg || !*arg) {
+			if (cons) {
+				r_cons_println (cons, is_explore
+					? "Usage: a:sym.explore <target_addr_expr>"
+					: "Usage: a:sym.solve <target_addr_expr>");
+			}
+			return strdup("");
+		}
+		if (!parse_sym_target_expr (core, arg, &target)) {
+			R_LOG_ERROR ("r2sleigh: invalid symbolic target expression: %s", arg);
+			if (cons) {
+				r_cons_println (cons, is_explore
+					? "Usage: a:sym.explore <target_addr_expr>"
+					: "Usage: a:sym.solve <target_addr_expr>");
+			}
+			return strdup("");
+		}
+
+		ctx = get_context (anal);
+		if (!ctx) {
+			R_LOG_ERROR ("r2sleigh: no context");
+			return strdup("");
+		}
+		fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		if (!fcn) {
+			R_LOG_ERROR ("r2sleigh: no function at current address");
+			return strdup("");
+		}
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			R_LOG_ERROR ("r2sleigh: failed to lift function blocks");
+			return strdup("");
+		}
+
+		if (is_explore) {
+			result = r2sym_explore_to (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, target);
+		} else {
+			result = r2sym_solve_to (ctx, (const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, target);
+		}
+		if (!result) {
+			rust_owned = false;
+			result = strdup ("{\"error\":\"symbolic execution failed\"}");
+		}
+
+		if (cons && result) {
+			r_cons_printf (cons, "%s\n", result);
+		}
+		if (result && !sym_result_has_error (result)) {
+			sym_state_cache_update (is_explore ? "explore" : "solve", fcn->addr, fcn->addr, target, result);
+		}
+
+		if (rust_owned) {
+			r2il_string_free (result);
+		} else {
+			free (result);
+		}
+		block_array_free (&blocks);
 		return strdup("");
 	}
 
@@ -2213,7 +2420,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		return strdup("");
 	}
 
-	R_LOG_ERROR ("Unknown subcommand. See 'a:sla?' for help");
+	R_LOG_ERROR ("Unknown subcommand. See 'a:sla?' or 'a:sym?' for help");
 	return strdup("");
 }
 
