@@ -110,21 +110,15 @@ impl<'a> LowerCtx<'a> {
             SSAOp::IntAdd { a, b, .. } => self.binary_expr(BinaryOp::Add, a, b),
             SSAOp::IntSub { a, b, .. } => self.binary_expr(BinaryOp::Sub, a, b),
             SSAOp::IntMult { a, b, .. } => self.binary_expr(BinaryOp::Mul, a, b),
-            SSAOp::IntDiv { dst, a, b } => self.typed_binary_expr(
-                BinaryOp::Div,
-                a,
-                b,
-                Some(uint_type_from_size(dst.size)),
-            ),
+            SSAOp::IntDiv { dst, a, b } => {
+                self.typed_binary_expr(BinaryOp::Div, a, b, Some(uint_type_from_size(dst.size)))
+            }
             SSAOp::IntSDiv { dst, a, b } => {
                 self.typed_binary_expr(BinaryOp::Div, a, b, Some(type_from_size(dst.size)))
             }
-            SSAOp::IntRem { dst, a, b } => self.typed_binary_expr(
-                BinaryOp::Mod,
-                a,
-                b,
-                Some(uint_type_from_size(dst.size)),
-            ),
+            SSAOp::IntRem { dst, a, b } => {
+                self.typed_binary_expr(BinaryOp::Mod, a, b, Some(uint_type_from_size(dst.size)))
+            }
             SSAOp::IntSRem { dst, a, b } => {
                 self.typed_binary_expr(BinaryOp::Mod, a, b, Some(type_from_size(dst.size)))
             }
@@ -132,12 +126,9 @@ impl<'a> LowerCtx<'a> {
             SSAOp::IntOr { a, b, .. } => self.binary_expr(BinaryOp::BitOr, a, b),
             SSAOp::IntXor { a, b, .. } => self.binary_expr(BinaryOp::BitXor, a, b),
             SSAOp::IntLeft { a, b, .. } => self.binary_expr(BinaryOp::Shl, a, b),
-            SSAOp::IntRight { dst, a, b } => self.typed_binary_expr(
-                BinaryOp::Shr,
-                a,
-                b,
-                Some(uint_type_from_size(dst.size)),
-            ),
+            SSAOp::IntRight { dst, a, b } => {
+                self.typed_binary_expr(BinaryOp::Shr, a, b, Some(uint_type_from_size(dst.size)))
+            }
             SSAOp::IntSRight { dst, a, b } => {
                 self.typed_binary_expr(BinaryOp::Shr, a, b, Some(type_from_size(dst.size)))
             }
@@ -147,24 +138,18 @@ impl<'a> LowerCtx<'a> {
                 b,
                 Some(uint_type_from_size(a.size.max(b.size))),
             ),
-            SSAOp::IntSLess { a, b, .. } => self.typed_binary_expr(
-                BinaryOp::Lt,
-                a,
-                b,
-                Some(type_from_size(a.size.max(b.size))),
-            ),
+            SSAOp::IntSLess { a, b, .. } => {
+                self.typed_binary_expr(BinaryOp::Lt, a, b, Some(type_from_size(a.size.max(b.size))))
+            }
             SSAOp::IntLessEqual { a, b, .. } => self.typed_binary_expr(
                 BinaryOp::Le,
                 a,
                 b,
                 Some(uint_type_from_size(a.size.max(b.size))),
             ),
-            SSAOp::IntSLessEqual { a, b, .. } => self.typed_binary_expr(
-                BinaryOp::Le,
-                a,
-                b,
-                Some(type_from_size(a.size.max(b.size))),
-            ),
+            SSAOp::IntSLessEqual { a, b, .. } => {
+                self.typed_binary_expr(BinaryOp::Le, a, b, Some(type_from_size(a.size.max(b.size))))
+            }
             SSAOp::IntEqual { a, b, .. } => self.binary_expr(BinaryOp::Eq, a, b),
             SSAOp::IntNotEqual { a, b, .. } => self.binary_expr(BinaryOp::Ne, a, b),
             SSAOp::IntNegate { src, .. } => CExpr::unary(UnaryOp::Neg, self.get_expr(src)),

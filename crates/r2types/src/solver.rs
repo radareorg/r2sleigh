@@ -475,7 +475,11 @@ mod tests {
         ];
 
         let solved = TypeSolver::new(SolverConfig { max_iterations: 1 }).solve(arena, &constraints);
-        let t3 = solved.var_types.get(&v3).copied().expect("v3 should be typed");
+        let t3 = solved
+            .var_types
+            .get(&v3)
+            .copied()
+            .expect("v3 should be typed");
         assert_eq!(solved.arena.get(t3), solved.arena.get(ptr_ty));
     }
 

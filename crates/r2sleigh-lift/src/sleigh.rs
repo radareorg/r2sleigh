@@ -6,8 +6,8 @@
 use libsla::{GhidraSleigh, Sleigh};
 use r2il::ArchSpec;
 
-use crate::LiftError;
 use crate::context::LiftContext;
+use crate::LiftError;
 
 /// Extract architecture metadata from a loaded GhidraSleigh instance.
 ///

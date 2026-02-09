@@ -25,9 +25,9 @@ use std::collections::{HashMap, HashSet};
 use r2ssa::{FunctionSSABlock, SSAFunction, SSAOp, SSAVar};
 use r2types::TypeOracle;
 
-use crate::ExternalStackVar;
 use crate::analysis;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
+use crate::ExternalStackVar;
 
 // Type alias for clarity
 pub(crate) type SSABlock = FunctionSSABlock;
@@ -2067,8 +2067,10 @@ impl<'a> FoldingContext<'a> {
 
         matches!(
             (target, source),
-            (CType::Pointer(_), CType::Int(_) | CType::UInt(_) | CType::Bool)
-                | (CType::Int(_) | CType::UInt(_), CType::Pointer(_))
+            (
+                CType::Pointer(_),
+                CType::Int(_) | CType::UInt(_) | CType::Bool
+            ) | (CType::Int(_) | CType::UInt(_), CType::Pointer(_))
         )
     }
 

@@ -41,13 +41,10 @@ pub(crate) fn materialize_phis(func: &SSAFunction) -> SSAFunction {
             let mut all_materialized = true;
             for (pred, src) in &phi.sources {
                 if func.successors(*pred).len() == 1 {
-                    copies_by_pred
-                        .entry(*pred)
-                        .or_default()
-                        .push(SSAOp::Copy {
-                            dst: phi.dst.clone(),
-                            src: src.clone(),
-                        });
+                    copies_by_pred.entry(*pred).or_default().push(SSAOp::Copy {
+                        dst: phi.dst.clone(),
+                        src: src.clone(),
+                    });
                 } else {
                     all_materialized = false;
                 }
@@ -150,6 +147,9 @@ mod tests {
 
         let normalized = materialize_phis(&func);
         let any_phi = normalized.blocks().any(|b| !b.phis.is_empty());
-        assert!(!any_phi, "phis should be removed when all edges materialize");
+        assert!(
+            !any_phi,
+            "phis should be removed when all edges materialize"
+        );
     }
 }

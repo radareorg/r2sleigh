@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::ast::CExpr;
 use crate::fold::FoldingContext;
-use crate::normalize::{NormalizeMode, normalize_expr};
+use crate::normalize::{normalize_expr, NormalizeMode};
 
 pub(crate) struct PredicateSimplifier<'a, 'o> {
     ctx: &'a FoldingContext<'o>,

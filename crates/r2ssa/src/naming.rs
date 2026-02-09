@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use r2il::{ArchSpec, SpaceId, Varnode, select_register_name};
+use r2il::{select_register_name, ArchSpec, SpaceId, Varnode};
 
 pub type RegisterNameMap = HashMap<(u64, u32), String>;
 

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAOp;
 
-use super::{PassEnv, UseInfo, lower::LowerCtx, utils};
+use super::{lower::LowerCtx, utils, PassEnv, UseInfo};
 use crate::ast::CExpr;
 use crate::fold::{PtrArith, SSABlock};
 

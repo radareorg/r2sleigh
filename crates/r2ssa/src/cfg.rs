@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
+use petgraph::Direction;
 use r2il::{R2ILBlock, R2ILOp};
 use serde::{Deserialize, Serialize};
 
