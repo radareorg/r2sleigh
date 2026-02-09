@@ -20,7 +20,7 @@ crates/
 ├── r2sleigh-cli/   # CLI tool (compile, disasm, info)
 ├── r2ssa/          # SSA transformation and analysis
 ├── r2sym/          # Symbolic execution + taint analysis
-└── r2dec/          # Decompiler (scaffolding)
+└── r2dec/          # Decompiler (expression folding, structuring, symbols)
 r2plugin/           # C-ABI for radare2 integration
 ```
 
@@ -52,7 +52,9 @@ r2plugin/           # C-ABI for radare2 integration
 | `DefUseInfo` | `r2ssa/defuse.rs` | Def-use chain analysis results |
 | `CExpr` | `r2dec/ast.rs` | C expression AST |
 | `CStmt` | `r2dec/ast.rs` | C statement AST |
-| `FoldingContext` | `r2dec/fold.rs` | Expression folding/dead code elimination |
+| `FoldingContext` | `r2dec/fold.rs` | Expression folding, dead code elimination, predicate simplification |
+| `AnalysisContext` | `r2dec/analysis/mod.rs` | Top-level struct holding UseInfo, FlagInfo, StackInfo |
+| `LowerCtx` | `r2dec/analysis/lower.rs` | SSA to CExpr lowering with symbol resolution |
 
 ## Build Commands
 
@@ -268,19 +270,24 @@ r2 -qc 's entry0+4; a:sleigh.defuse' /bin/ls
 | `r2sym/state.rs` | ~300 | Symbolic state (regs, mem, constraints) |
 | `r2sym/solver.rs` | ~200 | Z3 integration and model extraction |
 | `r2sym/path.rs` | ~200 | Path exploration and results |
-| `r2dec/structure.rs` | ~275 | Control-flow structuring |
-| `r2dec/fold.rs` | ~500 | Expression folding and dead code elimination |
-| `r2dec/expr.rs` | ~500 | Expression builder (legacy, use fold.rs) |
-| `r2dec/codegen.rs` | ~680 | C code generation |
-| `r2dec/ast.rs` | ~690 | C AST types (CExpr, CStmt, CType) |
+| `r2dec/structure.rs` | ~800 | Control-flow structuring (if/while/for/switch) |
+| `r2dec/fold.rs` | ~2500 | Expression folding, predicate simplification, identity elimination |
+| `r2dec/expr.rs` | ~500 | Expression builder (used for fallback paths) |
+| `r2dec/codegen.rs` | ~720 | C code generation with string escaping |
+| `r2dec/ast.rs` | ~720 | C AST types (CExpr, CStmt, CType, For) |
 | `r2dec/region.rs` | ~200 | Region analysis for control flow |
 | `r2dec/types.rs` | ~200 | Type inference |
-| `r2dec/variable.rs` | ~200 | Variable recovery |
-| `r2plugin/lib.rs` | ~1200 | C-ABI exports for radare2 |
-| `r2plugin/r_anal_sleigh.c` | ~400 | radare2 RAnalPlugin wrapper |
-| `tests/e2e/integration_tests.rs` | ~500 | Integration tests (REQUIRED for new features) |
-| `tests/e2e/lib.rs` | ~150 | Test harness utilities |
-| `tests/e2e/vuln_test.c` | ~220 | Test binary source (add functions for new features) |
+| `r2dec/variable.rs` | ~450 | Variable recovery with external signature support |
+| `r2dec/address.rs` | ~50 | Address parsing utilities (const:/ram:) |
+| `r2dec/analysis/mod.rs` | ~80 | Analysis context and PassEnv |
+| `r2dec/analysis/lower.rs` | ~400 | SSA to CExpr lowering with symbol resolution |
+| `r2dec/analysis/use_info.rs` | ~450 | Use counting and call argument analysis |
+| `r2dec/analysis/stack_info.rs` | ~200 | Stack variable detection |
+| `r2plugin/lib.rs` | ~4000 | C-ABI exports, JSON parsing, taint FFI |
+| `r2plugin/r_anal_sleigh.c` | ~2600 | radare2 RAnalPlugin wrapper, auto-taint post-analysis |
+| `tests/e2e/integration_tests.rs` | ~1600 | Integration tests (REQUIRED for new features) |
+| `tests/e2e/lib.rs` | ~200 | Test harness utilities |
+| `tests/e2e/vuln_test.c` | ~320 | Test binary source (add functions for new features) |
 
 ## Testing Checklist
 
@@ -350,6 +357,9 @@ int test_new_feature(int x) {
 5. **Width mismatches**: normalize widths and use explicit sign/zero-extend ops.
 6. **Const vs Unique**: Const is literal, Unique is temp SSA space (not memory).
 7. **Register aliasing**: overlapping regs need a deterministic policy in output.
+8. **Fallback paths**: Both `structure.rs` and `lib.rs` have fallback paths for decompilation; ensure symbol maps are wired to both.
+9. **Address parsing**: Use `address.rs::parse_address_from_var_name()` for consistent `const:`/`ram:` parsing.
+10. **Taint noise**: Stack/frame pointers are filtered out; check `is_noisy_taint_label()` in `r_anal_sleigh.c`.
 
 ## Dependencies
 
@@ -376,7 +386,7 @@ int test_new_feature(int x) {
 | `a:sla.vars` | JSON | All varnodes |
 | `a:sla.ssa` | JSON | SSA form for current function |
 | `a:sla.defuse` | JSON | Def-use analysis |
-| `a:sla.taint` | JSON | Taint analysis |
+| `a:sla.taint` | JSON | Taint analysis (sources → sinks) |
 | `a:sla.slice [var]` | JSON | Backward slice from variable |
 | `a:sla.dec` | text | Decompile function to C |
 | `a:sla.cfg` | JSON | Control flow graph |
@@ -384,6 +394,16 @@ int test_new_feature(int x) {
 | `a:sla.sym.solve` | JSON | Solve for target address |
 
 **Note**: Commands use `a:sla` prefix (short for `a:sleigh`). Both work.
+
+### Auto-Analysis Integration
+
+During `aaaa`, the plugin automatically:
+- **Taint analysis**: Runs on functions with ≤200 blocks
+- **Taint comments**: Writes `sla.taint: hits=N calls=C stores=S labels=...` at block addresses
+- **Taint flags**: Creates `sla.taint.fcn_<addr>.blk_<addr>` for scripting
+- **Taint xrefs**: Adds `R_ANAL_REF_TYPE_DATA` from source blocks to sink blocks
+- **Noise filtering**: Filters out stack/frame pointers from taint labels
+- **User comment preservation**: Merges with existing comments at same address
 
 ## r2dec Decompiler Architecture
 
@@ -395,19 +415,37 @@ The decompiler (`r2dec`) converts SSA form to readable C code.
 SSAFunction → RegionAnalyzer → ControlFlowStructurer → FoldingContext → CodeGenerator → C code
      ↓              ↓                    ↓                   ↓               ↓
   SSA ops     Region tree         CStmt/CExpr        Optimized AST     String output
+                                      ↓
+                              LowerCtx (symbol resolution)
+                                      ↓
+                              PredicateSimplifier
+                                      ↓
+                              IdentityElimination
 ```
+
+### Fallback Mechanism
+
+For large/complex functions, the decompiler uses a three-tier fallback:
+1. **Folded structuring** (primary): Full expression folding + control flow structuring
+2. **Unfolded structuring**: Minimal folding, more conservative
+3. **Linear emission**: Per-block statement output as last resort
+
+When fallback is used, output includes: `/* r2dec fallback: <reason> */`
 
 ### Key Types in r2dec
 
 | Type | Location | Purpose |
 |------|----------|---------|
-| `CExpr` | `r2dec/ast.rs` | C expression AST (Binary, Unary, Var, Call, etc.) |
-| `CStmt` | `r2dec/ast.rs` | C statement AST (If, While, Return, Block, etc.) |
+| `CExpr` | `r2dec/ast.rs` | C expression AST (Binary, Unary, Var, Call, StringLit, etc.) |
+| `CStmt` | `r2dec/ast.rs` | C statement AST (If, While, For, Switch, Return, Block, etc.) |
 | `CType` | `r2dec/ast.rs` | C type representation (Int, Ptr, Struct, etc.) |
 | `CFunction` | `r2dec/ast.rs` | Complete function with params, locals, body |
-| `FoldingContext` | `r2dec/fold.rs` | Expression folding and dead code elimination |
+| `FoldingContext` | `r2dec/fold.rs` | Expression folding, predicate simplification, identity elimination |
+| `LowerCtx` | `r2dec/analysis/lower.rs` | SSA to CExpr lowering with symbol/string resolution |
 | `Region` | `r2dec/region.rs` | Control flow region (Block, IfThenElse, While, etc.) |
 | `CodeGenerator` | `r2dec/codegen.rs` | Converts AST to C string with pretty printing |
+| `ExternalFunctionSignature` | `r2dec/lib.rs` | Parsed radare2 function signature (afcfj) |
+| `ExternalStackVar` | `r2dec/lib.rs` | Parsed radare2 stack variable (afvj) |
 
 ### Two SSABlock Types (Important!)
 
@@ -434,11 +472,15 @@ let block = FunctionSSABlock {
 
 ### Expression Folding (fold.rs)
 
-The `FoldingContext` performs three key optimizations:
+The `FoldingContext` performs multiple optimizations:
 
 1. **Use-counting**: Tracks how many times each SSA variable is used
 2. **Single-use inlining**: Variables used only once get inlined at use site
 3. **Dead code elimination**: Unused CPU flags (CF, ZF, SF, etc.) are removed
+4. **Predicate simplification**: `!ZF && OF==SF` → `a > b`
+5. **Arithmetic identity elimination**: `x - 0`, `x + 0`, `x * 1` → `x`
+6. **Dead-temp assignment pruning**: Removes unused pure temporary assignments
+7. **Flag-only temp elimination**: Removes temps consumed only by flag ops
 
 **CPU flags that are auto-eliminated when unused**:
 - `cf`, `pf`, `af`, `zf`, `sf`, `of`, `df`, `tf`
@@ -447,6 +489,11 @@ The `FoldingContext` performs three key optimizations:
 **Constant handling**: `const:xxx` → actual numeric values
 - `const:0x42` → `0x42`
 - `const:fffffffc` → `0xfffffffcU`
+
+**Symbol resolution** (via LowerCtx):
+- Function addresses → `printf`, `malloc`, etc.
+- String addresses → `"Usage: %s\n"` (with proper C escaping)
+- Global addresses → `obj.global_counter`, `sym.imported_func`
 
 ### Adding Decompiler Support for New SSA Operations
 
@@ -471,9 +518,19 @@ The `ControlFlowStructurer` converts region trees to C statements:
 |-------------|----------|
 | `Region::Block` | Statement sequence |
 | `Region::IfThenElse` | `if (cond) { ... } else { ... }` |
-| `Region::WhileLoop` | `while (cond) { ... }` |
+| `Region::WhileLoop` | `while (cond) { ... }` or `for (init; cond; update) { ... }` |
 | `Region::DoWhileLoop` | `do { ... } while (cond);` |
+| `Region::Switch` | `switch (var) { case N: ... }` |
 | `Region::Irreducible` | Labels + gotos |
+
+**For-loop detection** (`try_rewrite_while_with_preheader_init`):
+- Detects `init; while(cond) { body; update }` patterns
+- Also handles `while(1) { if(cond) break; ... }` patterns
+- Converts to `CStmt::For` AST node
+
+**Switch detection**:
+- Detects cascaded `if-else` on same variable
+- Converts to `CStmt::Switch` with cases
 
 ### Debugging Decompiler Output
 
@@ -500,7 +557,22 @@ The plugin provides callbacks that radare2 calls automatically during analysis.
 | `sleigh_recover_vars` | `afva` | Provide SSA-derived variables |
 | `sleigh_analyze_fcn` | After `af` | Per-function SSA/analysis |
 | `sleigh_get_data_refs` | After `aar` | Provide def-use xrefs |
-| `sleigh_post_analysis` | End of `aaaa` | Cross-function analysis |
+| `sleigh_post_analysis` | End of `aaaa` | Taint analysis + xrefs for all functions |
+
+### Post-Analysis Taint Integration
+
+`sleigh_post_analysis` runs automatic taint analysis during `aaaa`:
+
+1. **Function iteration**: Processes all analyzed functions
+2. **Block limit**: Skips functions with >200 blocks (configurable via `SLEIGH_TAINT_MAX_BLOCKS`)
+3. **Taint execution**: Calls `r2taint_function_json()` for eligible functions
+4. **Per-block summaries**: Builds filtered summaries from sink_hits
+5. **Noise filtering**: Removes `input:rsp`, `input:rbp`, `input:ram:*` labels
+6. **Label ranking**: Sorts by "interestingness" (function args > memory > others)
+7. **Comment writing**: `sla.taint: hits=N calls=C stores=S labels=l1,l2,...`
+8. **Flag creation**: `sla.taint.fcn_<addr>.blk_<addr>`
+9. **Xref creation**: Source block → sink block with entry fallback
+10. **Idempotency**: Clears old taint artifacts before writing new ones
 
 ### Variable Recovery (recover_vars)
 
