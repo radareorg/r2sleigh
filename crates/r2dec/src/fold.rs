@@ -433,6 +433,10 @@ impl<'a> FoldingContext<'a> {
             return true;
         }
 
+        if matches!(base, "xmm0" | "st0") {
+            return true;
+        }
+
         match self.ptr_size {
             8 => matches!(base, "rax" | "eax" | "ax" | "al"),
             _ => matches!(base, "eax" | "ax" | "al"),
@@ -601,7 +605,9 @@ impl<'a> FoldingContext<'a> {
                 let name_lower = name.to_lowercase();
                 name_lower.contains(&self.fp_name) || name_lower.contains(&self.sp_name)
             }
-            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => self.is_stack_base_expr(inner),
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } | CExpr::AddrOf(inner) => {
+                self.is_stack_base_expr(inner)
+            }
             _ => false,
         }
     }
@@ -662,6 +668,7 @@ impl<'a> FoldingContext<'a> {
         match addr_expr {
             CExpr::Paren(inner) => return self.simplify_stack_access(inner),
             CExpr::Cast { expr: inner, .. } => return self.simplify_stack_access(inner),
+            CExpr::AddrOf(inner) => return self.simplify_stack_access(inner),
             CExpr::Var(name) => {
                 if let Some(stripped) = name.strip_prefix('&') {
                     return Some(stripped.to_string());
@@ -1602,6 +1609,24 @@ impl<'a> FoldingContext<'a> {
             SSAOp::FloatMult { a, b, .. } => self.binary_expr(BinaryOp::Mul, a, b),
             SSAOp::FloatDiv { a, b, .. } => self.binary_expr(BinaryOp::Div, a, b),
             SSAOp::FloatNeg { src, .. } => CExpr::unary(UnaryOp::Neg, self.get_expr(src)),
+            SSAOp::FloatAbs { src, .. } => {
+                CExpr::call(CExpr::Var("fabs".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatSqrt { src, .. } => {
+                CExpr::call(CExpr::Var("sqrt".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatCeil { src, .. } => {
+                CExpr::call(CExpr::Var("ceil".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatFloor { src, .. } => {
+                CExpr::call(CExpr::Var("floor".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatRound { src, .. } => {
+                CExpr::call(CExpr::Var("round".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatNaN { src, .. } => {
+                CExpr::call(CExpr::Var("isnan".to_string()), vec![self.get_expr(src)])
+            }
             SSAOp::FloatLess { a, b, .. } => self.binary_expr(BinaryOp::Lt, a, b),
             SSAOp::FloatLessEqual { a, b, .. } => self.binary_expr(BinaryOp::Le, a, b),
             SSAOp::FloatEqual { a, b, .. } => self.binary_expr(BinaryOp::Eq, a, b),
@@ -1612,6 +1637,10 @@ impl<'a> FoldingContext<'a> {
             }
             SSAOp::Float2Int { dst, src } => {
                 let ty = type_from_size(dst.size);
+                CExpr::cast(ty, self.get_expr(src))
+            }
+            SSAOp::FloatFloat { dst, src } => {
+                let ty = CType::Float(dst.size);
                 CExpr::cast(ty, self.get_expr(src))
             }
             SSAOp::Cast { dst, src } => {
@@ -2359,6 +2388,13 @@ impl<'a> FoldingContext<'a> {
             }
         }
 
+        if self.is_current_return_block()
+            && !stmts.iter().any(|stmt| matches!(stmt, CStmt::Return(_)))
+            && let Some(expr) = last_ret_value
+        {
+            stmts.push(CStmt::Return(Some(self.rewrite_stack_expr(expr))));
+        }
+
         self.prune_dead_temp_assignments(stmts)
     }
 
@@ -2377,6 +2413,15 @@ impl<'a> FoldingContext<'a> {
         };
 
         Some((name.as_str(), right.as_ref()))
+    }
+
+    fn ssa_base_name(name: &str) -> Option<&str> {
+        let (base, version) = name.rsplit_once('_')?;
+        if version.chars().all(|c| c.is_ascii_digit()) {
+            Some(base)
+        } else {
+            None
+        }
     }
 
     fn expr_is_pure(&self, expr: &CExpr) -> bool {
@@ -2584,7 +2629,22 @@ impl<'a> FoldingContext<'a> {
             let (reads, def) = self.stmt_reads_and_def(&stmt);
 
             let drop_stmt = if let Some((target, rhs)) = Self::assignment_target_and_rhs(&stmt) {
-                self.is_opaque_temp_name(target) && !live.contains(target) && self.expr_is_pure(rhs)
+                let dead_opaque = self.is_opaque_temp_name(target)
+                    && !live.contains(target)
+                    && self.expr_is_pure(rhs);
+
+                let dead_phi_copy = if let CExpr::Var(src) = rhs {
+                    let same_name = src == target;
+                    let same_base = match (Self::ssa_base_name(src), Self::ssa_base_name(target)) {
+                        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                        _ => false,
+                    };
+                    !live.contains(target) && (same_name || same_base)
+                } else {
+                    false
+                };
+
+                dead_opaque || dead_phi_copy
             } else {
                 false
             };
@@ -2895,6 +2955,64 @@ impl<'a> FoldingContext<'a> {
                         CExpr::binary(BinaryOp::Shr, src_cast, CExpr::IntLit(shift_bits as i64));
                     CExpr::cast(uint_type_from_size(dst.size), shifted)
                 };
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatAdd { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Add),
+            SSAOp::FloatSub { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Sub),
+            SSAOp::FloatMult { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Mul),
+            SSAOp::FloatDiv { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Div),
+            SSAOp::FloatNeg { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::unary(UnaryOp::Neg, self.get_expr(src));
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatAbs { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::call(CExpr::Var("fabs".to_string()), vec![self.get_expr(src)]);
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatSqrt { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::call(CExpr::Var("sqrt".to_string()), vec![self.get_expr(src)]);
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatCeil { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::call(CExpr::Var("ceil".to_string()), vec![self.get_expr(src)]);
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatFloor { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::call(CExpr::Var("floor".to_string()), vec![self.get_expr(src)]);
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatRound { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::call(CExpr::Var("round".to_string()), vec![self.get_expr(src)]);
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatNaN { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::call(CExpr::Var("isnan".to_string()), vec![self.get_expr(src)]);
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatLess { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Lt),
+            SSAOp::FloatLessEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Le),
+            SSAOp::FloatEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Eq),
+            SSAOp::FloatNotEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Ne),
+            SSAOp::Int2Float { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::cast(CType::Float(dst.size), self.get_expr(src));
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::Float2Int { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::cast(type_from_size(dst.size), self.get_expr(src));
+                self.assign_stmt(lhs, rhs)
+            }
+            SSAOp::FloatFloat { dst, src } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let rhs = CExpr::cast(CType::Float(dst.size), self.get_expr(src));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Call { target } => {

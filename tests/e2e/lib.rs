@@ -4,7 +4,16 @@
 
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
+fn r2_exec_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Get path to vuln_test binary (handles both workspace root and tests/e2e dir)
 pub fn vuln_test_binary() -> &'static str {
@@ -25,6 +34,28 @@ pub fn test_func_binary() -> &'static str {
         "tests/e2e/test_func"
     } else {
         "test_func"
+    }
+}
+
+/// Get path to stress_test binary
+pub fn stress_test_binary() -> &'static str {
+    if Path::new("stress_test").exists() {
+        "stress_test"
+    } else if Path::new("tests/e2e/stress_test").exists() {
+        "tests/e2e/stress_test"
+    } else {
+        "stress_test"
+    }
+}
+
+/// Get path to optimized stress_test binary
+pub fn stress_test_opt_binary() -> &'static str {
+    if Path::new("stress_test_opt").exists() {
+        "stress_test_opt"
+    } else if Path::new("tests/e2e/stress_test_opt").exists() {
+        "tests/e2e/stress_test_opt"
+    } else {
+        "stress_test_opt"
     }
 }
 
@@ -92,8 +123,64 @@ pub fn r2_cmd_timeout(binary: &str, cmd: &str, timeout: Duration) -> R2Result {
         command.env("R2_USER_PLUGINS", plugin_dir);
     }
 
+    let _guard = r2_exec_lock().lock().ok();
     let output = command.output();
 
+    parse_output(output)
+}
+
+/// Run radare2 without a timeout wrapper and with extra environment variables.
+pub fn r2_cmd_with_env(binary: &str, cmd: &str, env: &[(&str, &str)]) -> R2Result {
+    let mut command = Command::new("r2");
+    command.args([
+        "-q",
+        "-e", "bin.relocs.apply=true",
+        "-c", cmd,
+        binary,
+    ]);
+
+    if let Ok(home) = std::env::var("HOME") {
+        let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
+        command.env("R2_USER_PLUGINS", plugin_dir);
+    }
+
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    let _guard = r2_exec_lock().lock().ok();
+    let output = command.output();
+    parse_output(output)
+}
+
+/// Run radare2 with custom timeout and extra environment variables.
+pub fn r2_cmd_timeout_with_env(
+    binary: &str,
+    cmd: &str,
+    timeout: Duration,
+    env: &[(&str, &str)],
+) -> R2Result {
+    let mut command = Command::new("timeout");
+    command.args([
+        &format!("{}s", timeout.as_secs()),
+        "r2",
+        "-q",
+        "-e", "bin.relocs.apply=true",
+        "-c", cmd,
+        binary,
+    ]);
+
+    if let Ok(home) = std::env::var("HOME") {
+        let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
+        command.env("R2_USER_PLUGINS", plugin_dir);
+    }
+
+    for (key, value) in env {
+        command.env(key, value);
+    }
+
+    let _guard = r2_exec_lock().lock().ok();
+    let output = command.output();
     parse_output(output)
 }
 
@@ -116,8 +203,14 @@ fn parse_output(output: Result<Output, std::io::Error>) -> R2Result {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let exit_code = out.status.code();
             
-            // Crash detection: SIGABRT=134, SIGSEGV=139, SIGFPE=136
-            let crashed = matches!(exit_code, Some(134) | Some(139) | Some(136));
+            // Detect real crashes: signal termination (SIGSEGV, SIGABRT, etc.) or
+            // timeout-wrapper exit codes (128+signal).  Do NOT treat a plain non-zero
+            // exit code as a crash — r2 legitimately returns non-zero sometimes.
+            #[cfg(unix)]
+            let crashed = out.status.signal().is_some()
+                || matches!(exit_code, Some(134) | Some(139) | Some(136) | Some(137));
+            #[cfg(not(unix))]
+            let crashed = matches!(exit_code, Some(134) | Some(139) | Some(136) | Some(137));
             
             // Panic detection
             let panicked = stdout.contains("panicked") 

@@ -192,6 +192,24 @@ impl<'a> LowerCtx<'a> {
             SSAOp::FloatMult { a, b, .. } => self.binary_expr(BinaryOp::Mul, a, b),
             SSAOp::FloatDiv { a, b, .. } => self.binary_expr(BinaryOp::Div, a, b),
             SSAOp::FloatNeg { src, .. } => CExpr::unary(UnaryOp::Neg, self.get_expr(src)),
+            SSAOp::FloatAbs { src, .. } => {
+                CExpr::call(CExpr::Var("fabs".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatSqrt { src, .. } => {
+                CExpr::call(CExpr::Var("sqrt".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatCeil { src, .. } => {
+                CExpr::call(CExpr::Var("ceil".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatFloor { src, .. } => {
+                CExpr::call(CExpr::Var("floor".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatRound { src, .. } => {
+                CExpr::call(CExpr::Var("round".to_string()), vec![self.get_expr(src)])
+            }
+            SSAOp::FloatNaN { src, .. } => {
+                CExpr::call(CExpr::Var("isnan".to_string()), vec![self.get_expr(src)])
+            }
             SSAOp::FloatLess { a, b, .. } => self.binary_expr(BinaryOp::Lt, a, b),
             SSAOp::FloatLessEqual { a, b, .. } => self.binary_expr(BinaryOp::Le, a, b),
             SSAOp::FloatEqual { a, b, .. } => self.binary_expr(BinaryOp::Eq, a, b),
@@ -202,6 +220,9 @@ impl<'a> LowerCtx<'a> {
             }
             SSAOp::Float2Int { dst, src } => {
                 CExpr::cast(type_from_size(dst.size), self.get_expr(src))
+            }
+            SSAOp::FloatFloat { dst, src } => {
+                CExpr::cast(CType::Float(dst.size), self.get_expr(src))
             }
             SSAOp::Cast { dst, src } => CExpr::cast(type_from_size(dst.size), self.get_expr(src)),
             SSAOp::Call { target } => CExpr::call(self.get_expr(target), vec![]),

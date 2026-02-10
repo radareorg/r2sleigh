@@ -50,6 +50,7 @@ pub use types::TypeInference;
 pub use variable::VariableRecovery;
 
 use r2ssa::SSAFunction;
+use r2ssa::SSAOp;
 use r2types::ExternalTypeDb;
 use r2types::TypeOracle;
 use types::FunctionType;
@@ -73,6 +74,8 @@ pub struct DecompilerConfig {
     pub sp_name: String,
     /// Frame pointer register name.
     pub fp_name: String,
+    /// Soft cap for function blocks before forcing fallback.
+    pub max_blocks: usize,
 }
 
 impl Default for DecompilerConfig {
@@ -82,6 +85,7 @@ impl Default for DecompilerConfig {
             ptr_size: 64,
             sp_name: "rsp".to_string(),
             fp_name: "rbp".to_string(),
+            max_blocks: 200,
         }
     }
 }
@@ -343,7 +347,10 @@ impl Decompiler {
         if !self.context.stack_vars.is_empty() {
             type_inference.set_external_stack_vars(self.context.stack_vars.clone());
         }
-        if !self.context.external_type_db.structs.is_empty() {
+        if !self.context.external_type_db.structs.is_empty()
+            || !self.context.external_type_db.unions.is_empty()
+            || !self.context.external_type_db.enums.is_empty()
+        {
             type_inference.set_external_type_db(self.context.external_type_db.clone());
         }
         type_inference.infer_function(func);
@@ -495,6 +502,7 @@ impl Decompiler {
 
         // Convert body to statements
         let body = self.stmt_to_vec(body_stmt);
+        let inferred_ret_type = self.infer_return_type(func, &type_inference);
 
         CFunction {
             name: func_name,
@@ -503,7 +511,7 @@ impl Decompiler {
                 .function_signature
                 .as_ref()
                 .and_then(|sig| sig.ret_type.clone())
-                .unwrap_or(CType::Int(32)),
+                .unwrap_or(inferred_ret_type),
             params,
             locals,
             body,
@@ -517,6 +525,54 @@ impl Decompiler {
             CStmt::Empty => vec![],
             other => vec![other],
         }
+    }
+
+    fn infer_return_type(&self, func: &SSAFunction, type_inference: &TypeInference) -> CType {
+        let mut candidates = Vec::new();
+
+        for block in func.blocks() {
+            for op in &block.ops {
+                let SSAOp::Return { target } = op else {
+                    continue;
+                };
+
+                let target_name = target.name.to_ascii_lowercase();
+                if target_name.starts_with("xmm0") || target_name.starts_with("st0") {
+                    let bits = if target.size.saturating_mul(8) <= 32 {
+                        32
+                    } else {
+                        64
+                    };
+                    candidates.push(CType::Float(bits));
+                    continue;
+                }
+
+                candidates.push(type_inference.get_type(target));
+            }
+        }
+
+        if candidates.is_empty() {
+            return CType::Void;
+        }
+
+        let mut meaningful: Vec<CType> = candidates
+            .into_iter()
+            .filter(|ty| !matches!(ty, CType::Unknown))
+            .collect();
+        if meaningful.is_empty() {
+            return CType::Int(32);
+        }
+        if meaningful.iter().all(|ty| ty == &meaningful[0]) {
+            return meaningful.remove(0);
+        }
+        if let Some(float_ty) = meaningful
+            .iter()
+            .find(|ty| matches!(ty, CType::Float(_)))
+            .cloned()
+        {
+            return float_ty;
+        }
+        meaningful.remove(0)
     }
 }
 

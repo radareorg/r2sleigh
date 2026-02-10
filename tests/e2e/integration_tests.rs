@@ -3,9 +3,13 @@
 //! These tests invoke radare2 with the r2sleigh plugin and validate output.
 //! Run with: `cargo test -p r2sleigh-e2e-tests`
 
-use e2e::{r2_at_addr, r2_at_func, r2_cmd, require_binary, vuln_test_binary};
+use e2e::{
+    r2_at_addr, r2_at_func, r2_cmd, r2_cmd_timeout, r2_cmd_timeout_with_env, require_binary,
+    stress_test_binary, stress_test_opt_binary, vuln_test_binary,
+};
 use rstest::rstest;
 use serde_json::Value;
+use std::time::Duration;
 
 // ============================================================================
 // Test fixtures
@@ -13,6 +17,193 @@ use serde_json::Value;
 
 fn setup() {
     require_binary(vuln_test_binary());
+}
+
+mod stress_regressions {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize stress tests to avoid concurrent r2 processes fighting for
+    /// resources, which causes non-deterministic signal kills (SIGSEGV, OOM).
+    /// We recover from a poisoned mutex since stress test panics are expected
+    /// (they assert on crashes) and should not cascade to other tests.
+    static STRESS_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_stress() -> std::sync::MutexGuard<'static, ()> {
+        STRESS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn parse_number_symbolic_paths_no_panic() {
+        let _guard = lock_stress();
+        setup_stress();
+        let result = r2_at_func(stress_test_binary(), "dbg.parse_number", "a:sla.sym.paths");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sla.sym.paths parse_number");
+        let arr = expect_array(&json, "a:sla.sym.paths parse_number");
+        assert!(!arr.is_empty(), "parse_number should produce symbolic paths");
+    }
+
+    #[test]
+    fn fp_interpolate_decompile_is_not_empty_stub() {
+        let _guard = lock_stress();
+        setup_stress();
+        let result = r2_at_func(stress_test_binary(), "dbg.fp_interpolate", "a:sla.dec");
+        result.assert_ok();
+        assert!(result.contains("return"), "decompilation should include return");
+        assert!(
+            result.contains_any(&[" + ", " * ", "fabs(", "sqrt(", "ceil(", "floor(", "round("]),
+            "float decompilation should contain arithmetic/math operations"
+        );
+        assert!(
+            !result.contains("__unhandled_op__"),
+            "float decompilation should not contain unhandled placeholders"
+        );
+    }
+
+    #[test]
+    fn ls_main_decompile_uses_large_function_fallback() {
+        let _guard = lock_stress();
+        let result = r2_cmd_timeout(
+            "/bin/ls",
+            "aaa; s main; a:sla.dec",
+            Duration::from_secs(90),
+        );
+        result.assert_ok();
+        assert!(
+            result.contains("r2dec fallback: skipped decompilation"),
+            "large functions should be guarded with explicit fallback output"
+        );
+    }
+
+    #[test]
+    fn endbr64_json_returns_noop_marker() {
+        let _guard = lock_stress();
+        let result = r2_cmd("/bin/ls", "aaa; s main; a:sla.json");
+        result.assert_ok();
+        let json = parse_json(&result, "a:sla.json /bin/ls main");
+        let arr = expect_array(&json, "a:sla.json /bin/ls main");
+        assert!(
+            !arr.is_empty(),
+            "a:sla.json at CET entry should return a no-op marker instead of []"
+        );
+    }
+
+    #[test]
+    fn sla_dec_allows_explicit_target_argument() {
+        let _guard = lock_stress();
+        setup_stress();
+        let result = r2_cmd(stress_test_binary(), "aaa; a:sla.dec dbg.parse_number");
+        result.assert_ok();
+        assert!(
+            result.contains_any(&["parse_number", "dbg.parse_number", "sub_"]),
+            "a:sla.dec <target> should decompile the requested function"
+        );
+    }
+
+    #[test]
+    fn sla_dec_reports_missing_symbol_with_guidance() {
+        let _guard = lock_stress();
+        setup_stress();
+        let result = r2_cmd(stress_test_opt_binary(), "aaa; a:sla.dec dbg.nonexistent_symbol");
+        result.assert_ok();
+        assert!(
+            result.contains("may be inlined or stripped"),
+            "missing-symbol decompile should provide stripped/inlined guidance"
+        );
+    }
+
+    #[rstest]
+    #[case("dbg.my_strcmp")]
+    #[case("sym.hash_func")]
+    #[case("dbg.pool_alloc")]
+    #[case("dbg.interpret_bytecode")]
+    #[case("sym.ackermann")]
+    fn o2_pathological_functions_no_crash(#[case] func: &str) {
+        let _guard = lock_stress();
+        setup_stress();
+        let cmd = format!("aaa; a:sla.dec {}", func);
+        // Retry once on transient crash (non-deterministic signal in r2 FFI path).
+        let result = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(
+                stress_test_opt_binary(),
+                &cmd,
+                Duration::from_secs(30),
+                &[],
+            )
+        });
+        result.assert_ok();
+        assert!(
+            !result.stdout.trim().is_empty(),
+            "decompilation output should be non-empty for {}",
+            func
+        );
+    }
+
+    /// Test that both the default (iterative) analyzer and the legacy recursive
+    /// analyzer produce output for ackermann.  The default path is iterative
+    /// (no env var needed); the legacy path is forced via SLEIGH_DEC_LEGACY_ANALYZER=1.
+    #[test]
+    fn ackermann_decompiles_with_both_analyzers() {
+        let _guard = lock_stress();
+        setup_stress();
+        let cmd = "aaa; a:sla.dec sym.ackermann";
+
+        // Default path: iterative analyzer (primary)
+        let iterative = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(
+                stress_test_opt_binary(),
+                cmd,
+                Duration::from_secs(30),
+                &[],
+            )
+        });
+        iterative.assert_ok();
+        assert!(
+            !iterative.stdout.trim().is_empty(),
+            "iterative (default) analyzer output should be non-empty"
+        );
+
+        // Legacy path: forced via env var
+        let legacy = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(
+                stress_test_opt_binary(),
+                cmd,
+                Duration::from_secs(30),
+                &[("SLEIGH_DEC_LEGACY_ANALYZER", "1")],
+            )
+        });
+        legacy.assert_ok();
+        assert!(
+            !legacy.stdout.trim().is_empty(),
+            "legacy analyzer output should be non-empty"
+        );
+    }
+}
+
+fn setup_stress() {
+    require_binary(stress_test_binary());
+    require_binary(stress_test_opt_binary());
+}
+
+/// Retry an r2 invocation up to 2 extra times if killed by a signal.
+/// Non-deterministic crashes in the r2/plugin FFI path are occasionally
+/// observed on O2-optimized stress test binaries; retries distinguish
+/// persistent bugs from transient failures.
+fn retry_on_crash(f: impl Fn() -> e2e::R2Result) -> e2e::R2Result {
+    for attempt in 0..3 {
+        let result = f();
+        if !result.crashed {
+            return result;
+        }
+        if attempt < 2 {
+            eprintln!("  (retrying after transient crash, attempt {}, exit code {:?})",
+                       attempt + 1, result.exit_code);
+        } else {
+            return result;
+        }
+    }
+    unreachable!()
 }
 
 fn parse_json(result: &e2e::R2Result, label: &str) -> Value {

@@ -83,7 +83,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             fold_ctx: None,
             labels: HashMap::new(),
             label_counter: 0,
-            region_analyzer: None,
+            region_analyzer: Some(RegionAnalyzer::new(func)),
             analysis_finalized: true, // No folding context, nothing to finalize
             safety_budget_remaining: safety_budget_max,
             safety_budget_max,
@@ -182,8 +182,22 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // Ensure analysis is finalized (idempotent)
         self.finalize_analysis();
         self.reset_safety_budget();
-        let mut analyzer = RegionAnalyzer::new(self.func);
-        let region = analyzer.analyze();
+        if self.region_analyzer.is_none() {
+            self.region_analyzer = Some(RegionAnalyzer::new(self.func));
+        }
+        let region = if let Some(analyzer) = self.region_analyzer.as_mut() {
+            let region = analyzer.analyze();
+            if let Some(reason) = analyzer.analysis_reason() {
+                self.safety_reason = Some(reason.to_string());
+            }
+            region
+        } else {
+            self.safety_reason = Some("missing region analyzer".to_string());
+            Region::Irreducible {
+                entry: self.func.entry,
+                blocks: self.func.block_addrs().to_vec(),
+            }
+        };
         let stmt = self.structure_region(&region);
         if self.safety_reason.is_some() {
             return CStmt::Empty;
@@ -343,6 +357,11 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 stmts.push(CStmt::Continue);
             } else if analyzer.is_loop_break(addr) {
                 stmts.push(CStmt::Break);
+            } else if analyzer.is_loop_goto(addr)
+                && let Some(target) = analyzer.get_loop_goto_target(addr)
+            {
+                let label = self.ensure_label(target);
+                stmts.push(CStmt::Goto(label));
             }
         }
 
@@ -420,8 +439,23 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 stmts.push(CStmt::Continue);
             } else if analyzer.is_loop_break(addr) {
                 stmts.push(CStmt::Break);
+            } else if analyzer.is_loop_goto(addr)
+                && let Some(target) = analyzer.get_loop_goto_target(addr)
+            {
+                let label = self.ensure_label(target);
+                stmts.push(CStmt::Goto(label));
             }
         }
+    }
+
+    fn ensure_label(&mut self, addr: u64) -> String {
+        if let Some(label) = self.labels.get(&addr) {
+            return label.clone();
+        }
+        let label = format!("L{}", self.label_counter);
+        self.label_counter += 1;
+        self.labels.insert(addr, label.clone());
+        label
     }
 
     /// Emit side-effecting statements for a block without labels or loop markers.

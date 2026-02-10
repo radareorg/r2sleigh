@@ -9,6 +9,9 @@ Rust-based integration tests for the r2sleigh plugin.
    cd tests/e2e
    gcc -O0 -g -o vuln_test vuln_test.c
    gcc -O0 -g -o test_func test_func.c
+   # optional stress corpus binaries used by regression tests
+   gcc -O0 -g -o stress_test stress_test.c
+   gcc -O2 -g -o stress_test_opt stress_test.c
    ```
 
 2. Build the plugin:

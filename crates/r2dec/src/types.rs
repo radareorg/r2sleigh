@@ -70,9 +70,16 @@ impl TypeInference {
                 vec![]
             },
             ret_regs: if ptr_size == 64 {
-                vec!["rax".to_string(), "eax".to_string()]
+                vec![
+                    "rax".to_string(),
+                    "eax".to_string(),
+                    "xmm0".to_string(),
+                    "xmm0_qa".to_string(),
+                    "xmm0_qb".to_string(),
+                    "st0".to_string(),
+                ]
             } else {
-                vec!["eax".to_string()]
+                vec!["eax".to_string(), "xmm0".to_string(), "st0".to_string()]
             },
             signature_registry: SignatureRegistry::from_embedded_json(),
             external_signature: None,
@@ -409,7 +416,10 @@ impl TypeInference {
                     }
                     SSAOp::FloatNeg { dst, src }
                     | SSAOp::FloatAbs { dst, src }
-                    | SSAOp::FloatSqrt { dst, src } => {
+                    | SSAOp::FloatSqrt { dst, src }
+                    | SSAOp::FloatCeil { dst, src }
+                    | SSAOp::FloatFloor { dst, src }
+                    | SSAOp::FloatRound { dst, src } => {
                         let ty = arena.float(dst.size.saturating_mul(8));
                         constraints.push(Constraint::SetType {
                             var: dst.clone(),
@@ -419,6 +429,18 @@ impl TypeInference {
                         constraints.push(Constraint::SetType {
                             var: src.clone(),
                             ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::FloatNaN { dst, src } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: arena.bool_ty(),
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: arena.float(src.size.saturating_mul(8)),
                             source: ConstraintSource::Inferred,
                         });
                     }
@@ -440,6 +462,42 @@ impl TypeInference {
                         constraints.push(Constraint::SetType {
                             var: b.clone(),
                             ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::Int2Float { dst, src } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: arena.float(dst.size.saturating_mul(8)),
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: self.integer_type_id(src.size, Signedness::Unknown, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::FloatFloat { dst, src } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: arena.float(dst.size.saturating_mul(8)),
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: arena.float(src.size.saturating_mul(8)),
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::Float2Int { dst, src } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: self.integer_type_id(dst.size, Signedness::Unknown, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: arena.float(src.size.saturating_mul(8)),
                             source: ConstraintSource::Inferred,
                         });
                     }
@@ -636,11 +694,27 @@ impl TypeInference {
             {
                 return Some(field.name.clone());
             }
+            if let Some(un) = self.external_type_db.unions.get(&key)
+                && let Some(field) = un.fields.get(&offset)
+            {
+                return Some(field.name.clone());
+            }
         }
 
         let mut found: Option<String> = None;
         for st in self.external_type_db.structs.values() {
             if let Some(field) = st.fields.get(&offset) {
+                if let Some(existing) = &found {
+                    if existing != &field.name {
+                        return None;
+                    }
+                } else {
+                    found = Some(field.name.clone());
+                }
+            }
+        }
+        for un in self.external_type_db.unions.values() {
+            if let Some(field) = un.fields.get(&offset) {
                 if let Some(existing) = &found {
                     if existing != &field.name {
                         return None;
@@ -984,6 +1058,13 @@ fn collect_call_args(ops: &[SSAOp], call_idx: usize, arg_regs: &[String]) -> Vec
 }
 
 fn collect_call_return(ops: &[SSAOp], call_idx: usize, ret_regs: &[String]) -> Option<SSAVar> {
+    let is_ret_reg = |name: &str| {
+        let base = name.split('_').next().unwrap_or(name);
+        ret_regs
+            .iter()
+            .any(|reg| reg == name || reg == base || name.starts_with(reg))
+    };
+
     let mut idx = call_idx + 1;
     while idx < ops.len() {
         let next = &ops[idx];
@@ -998,7 +1079,7 @@ fn collect_call_return(ops: &[SSAOp], call_idx: usize, ret_regs: &[String]) -> O
             | SSAOp::IntSExt { dst, src }
             | SSAOp::Cast { dst, src } => {
                 let src_name = src.name.to_ascii_lowercase();
-                if ret_regs.iter().any(|reg| reg == &src_name) {
+                if is_ret_reg(&src_name) {
                     return Some(dst.clone());
                 }
             }

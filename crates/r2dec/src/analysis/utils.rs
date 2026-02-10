@@ -218,6 +218,25 @@ pub(crate) fn extract_offset_from_expr(expr: &CExpr, fp_name: &str, sp_name: &st
                     return expr_to_offset(right);
                 }
             }
+            if let CExpr::Var(name) = right.as_ref() {
+                let name_lower = name.to_lowercase();
+                if name_lower.contains(fp_name) || name_lower.contains(sp_name) {
+                    return expr_to_offset(left);
+                }
+            }
+            None
+        }
+        CExpr::Binary {
+            op: BinaryOp::Sub,
+            left,
+            right,
+        } => {
+            if let CExpr::Var(name) = left.as_ref() {
+                let name_lower = name.to_lowercase();
+                if name_lower.contains(fp_name) || name_lower.contains(sp_name) {
+                    return expr_to_offset(right).map(|off| -off);
+                }
+            }
             None
         }
         CExpr::Var(name) => {
@@ -243,9 +262,57 @@ pub(crate) fn extract_stack_offset_from_var(
     }
 
     let key = var.display_name();
-    definitions
-        .get(&key)
-        .and_then(|expr| extract_offset_from_expr(expr, fp_name, sp_name))
+    let mut visited = HashSet::new();
+    definitions.get(&key).and_then(|expr| {
+        extract_offset_from_expr_with_defs(expr, definitions, fp_name, sp_name, 0, &mut visited)
+    })
+}
+
+fn extract_offset_from_expr_with_defs(
+    expr: &CExpr,
+    definitions: &HashMap<String, CExpr>,
+    fp_name: &str,
+    sp_name: &str,
+    depth: u32,
+    visited: &mut HashSet<String>,
+) -> Option<i64> {
+    if depth > 10 {
+        return None;
+    }
+
+    if let Some(offset) = extract_offset_from_expr(expr, fp_name, sp_name) {
+        return Some(offset);
+    }
+
+    match expr {
+        CExpr::Var(name) => {
+            if !visited.insert(name.clone()) {
+                return None;
+            }
+            definitions.get(name).and_then(|inner| {
+                extract_offset_from_expr_with_defs(
+                    inner,
+                    definitions,
+                    fp_name,
+                    sp_name,
+                    depth + 1,
+                    visited,
+                )
+            })
+        }
+        CExpr::Paren(inner)
+        | CExpr::Cast { expr: inner, .. }
+        | CExpr::Deref(inner)
+        | CExpr::Unary { operand: inner, .. } => extract_offset_from_expr_with_defs(
+            inner,
+            definitions,
+            fp_name,
+            sp_name,
+            depth + 1,
+            visited,
+        ),
+        _ => None,
+    }
 }
 
 pub(crate) fn normalize_stack_address(
@@ -274,6 +341,7 @@ pub(crate) fn simplify_stack_access(
         CExpr::Cast { expr: inner, .. } => {
             return simplify_stack_access(inner, stack_vars, fp_name, sp_name);
         }
+        CExpr::AddrOf(inner) => return simplify_stack_access(inner, stack_vars, fp_name, sp_name),
         CExpr::Var(name) => {
             if let Some(stripped) = name.strip_prefix('&') {
                 return Some(stripped.to_string());

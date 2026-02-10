@@ -46,25 +46,34 @@ pub enum SymValue<'ctx> {
 }
 
 impl<'ctx> SymValue<'ctx> {
+    #[inline]
+    fn normalize_bv_bits(bits: u32) -> u32 {
+        bits.max(1)
+    }
+
     /// Create a concrete value (untainted).
     pub fn concrete(value: u64, bits: u32) -> Self {
         Self::Concrete {
             value,
-            bits,
+            bits: Self::normalize_bv_bits(bits),
             taint: 0,
         }
     }
 
     /// Create a concrete value with taint.
     pub fn concrete_tainted(value: u64, bits: u32, taint: u64) -> Self {
-        Self::Concrete { value, bits, taint }
+        Self::Concrete {
+            value,
+            bits: Self::normalize_bv_bits(bits),
+            taint,
+        }
     }
 
     /// Create a symbolic value from a Z3 bitvector (untainted).
     pub fn symbolic(ast: BV, bits: u32) -> Self {
         Self::Symbolic {
             ast,
-            bits,
+            bits: Self::normalize_bv_bits(bits),
             taint: 0,
             _marker: PhantomData,
         }
@@ -74,7 +83,7 @@ impl<'ctx> SymValue<'ctx> {
     pub fn symbolic_tainted(ast: BV, bits: u32, taint: u64) -> Self {
         Self::Symbolic {
             ast,
-            bits,
+            bits: Self::normalize_bv_bits(bits),
             taint,
             _marker: PhantomData,
         }
@@ -82,12 +91,18 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Create an unknown value (untainted).
     pub fn unknown(bits: u32) -> Self {
-        Self::Unknown { bits, taint: 0 }
+        Self::Unknown {
+            bits: Self::normalize_bv_bits(bits),
+            taint: 0,
+        }
     }
 
     /// Create an unknown value with taint.
     pub fn unknown_tainted(bits: u32, taint: u64) -> Self {
-        Self::Unknown { bits, taint }
+        Self::Unknown {
+            bits: Self::normalize_bv_bits(bits),
+            taint,
+        }
     }
 
     /// Get the taint mask of this value.
@@ -134,6 +149,7 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Create a new symbolic variable (untainted).
     pub fn new_symbolic(_ctx: &'ctx Context, name: &str, bits: u32) -> Self {
+        let bits = Self::normalize_bv_bits(bits);
         let ast = BV::new_const(name, bits);
         Self::Symbolic {
             ast,
@@ -145,6 +161,7 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Create a new symbolic variable with taint.
     pub fn new_symbolic_tainted(_ctx: &'ctx Context, name: &str, bits: u32, taint: u64) -> Self {
+        let bits = Self::normalize_bv_bits(bits);
         let ast = BV::new_const(name, bits);
         Self::Symbolic {
             ast,
@@ -158,7 +175,7 @@ impl<'ctx> SymValue<'ctx> {
     pub fn from_u64(_ctx: &'ctx Context, value: u64, bits: u32) -> Self {
         Self::Concrete {
             value,
-            bits,
+            bits: Self::normalize_bv_bits(bits),
             taint: 0,
         }
     }
@@ -262,11 +279,13 @@ impl<'ctx> SymValue<'ctx> {
     /// Convert to a Z3 bitvector (concretizing if needed).
     pub fn to_bv(&self, _ctx: &'ctx Context) -> BV {
         match self {
-            Self::Concrete { value, bits, .. } => BV::from_u64(*value, *bits),
+            Self::Concrete { value, bits, .. } => {
+                BV::from_u64(*value, Self::normalize_bv_bits(*bits))
+            }
             Self::Symbolic { ast, .. } => ast.clone(),
             Self::Unknown { bits, .. } => {
                 // Create a fresh symbolic variable for unknown values
-                BV::fresh_const("unknown", *bits)
+                BV::fresh_const("unknown", Self::normalize_bv_bits(*bits))
             }
         }
     }
@@ -355,12 +374,20 @@ impl<'ctx> SymValue<'ctx> {
 
     /// Extract bits [high:low] from this value.
     pub fn extract(&self, _ctx: &'ctx Context, high: u32, low: u32) -> Self {
-        let new_bits = high - low + 1;
         let taint = self.get_taint();
+        let src_bits = self.bits().max(1);
+        if high < low || low >= src_bits {
+            return Self::Unknown { bits: 1, taint };
+        }
+        let clamped_high = high.min(src_bits - 1);
+        if clamped_high < low {
+            return Self::Unknown { bits: 1, taint };
+        }
+        let new_bits = clamped_high - low + 1;
         match self {
             Self::Concrete { value, .. } => {
-                if new_bits > 64 || high >= 64 {
-                    let new_ast = self.to_bv(_ctx).extract(high, low);
+                if new_bits > 64 || clamped_high >= 64 {
+                    let new_ast = self.to_bv(_ctx).extract(clamped_high, low);
                     return Self::symbolic_tainted(new_ast, new_bits, taint);
                 }
                 let mask = if new_bits >= 64 {
@@ -376,7 +403,7 @@ impl<'ctx> SymValue<'ctx> {
                 }
             }
             Self::Symbolic { ast, .. } => {
-                let new_ast = ast.extract(high, low);
+                let new_ast = ast.extract(clamped_high, low);
                 Self::Symbolic {
                     ast: new_ast,
                     bits: new_bits,
@@ -1263,5 +1290,27 @@ mod bitwidth_tests {
         let shift_amt = SymValue::concrete_tainted(4, 32, TAINT_STDIN);
         let shifted = constant.shl(&ctx, &shift_amt);
         assert!(shifted.is_tainted());
+    }
+
+    #[test]
+    fn test_zero_width_values_are_normalized() {
+        let ctx = Context::thread_local();
+        let v = SymValue::concrete(0, 0);
+        assert_eq!(v.bits(), 1);
+        let bv = v.to_bv(&ctx);
+        assert_eq!(bv.get_size(), 1);
+
+        let u = SymValue::unknown(0);
+        assert_eq!(u.bits(), 1);
+        assert_eq!(u.to_bv(&ctx).get_size(), 1);
+    }
+
+    #[test]
+    fn test_extract_out_of_range_returns_safe_unknown() {
+        let ctx = Context::thread_local();
+        let v = SymValue::concrete(0x41, 8);
+        let out = v.extract(&ctx, 15, 16);
+        assert_eq!(out.bits(), 1);
+        assert!(out.is_unknown());
     }
 }

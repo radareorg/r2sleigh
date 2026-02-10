@@ -237,6 +237,8 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
     };
 
     let mut profile = String::new();
+    let mut reg_meta: std::collections::HashMap<String, (u32, u64, String)> =
+        std::collections::HashMap::new();
     let mut pc = None;
     let mut sp = None;
     let mut bp = None;
@@ -298,6 +300,16 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
             reg.size * 8,
             reg.offset
         ));
+        reg_meta.insert(
+            name_lower.clone(),
+            (reg.size * 8, reg.offset, reg.name.clone()),
+        );
+    }
+
+    for (name_lower, (bits, offset, original)) in &reg_meta {
+        if original != name_lower {
+            profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", name_lower, bits, offset));
+        }
     }
 
     if let Some(n) = pc {
@@ -3932,6 +3944,21 @@ pub extern "C" fn r2cfg_function_json(
 // Decompiler Functions
 // ============================================================================
 
+fn decompiler_max_blocks() -> usize {
+    std::env::var("SLEIGH_DEC_MAX_BLOCKS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(200)
+}
+
+fn decompile_block_guard_fallback(func_name: &str, blocks: usize, max_blocks: usize) -> String {
+    format!(
+        "/* r2dec fallback: skipped decompilation for {} ({} blocks > limit {}). Set SLEIGH_DEC_MAX_BLOCKS to override. */",
+        func_name, blocks, max_blocks
+    )
+}
+
 /// Decompile a function given its SSA representation.
 /// Returns C code as a string. Caller must free with r2il_string_free().
 #[unsafe(no_mangle)]
@@ -3976,6 +4003,12 @@ pub extern "C" fn r2dec_function(
         return ptr::null_mut();
     }
 
+    let max_blocks = decompiler_max_blocks();
+    if r2il_blocks.len() > max_blocks {
+        let output = decompile_block_guard_fallback(&func_name_str, r2il_blocks.len(), max_blocks);
+        return CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw());
+    }
+
     // Build SSA function
     let ssa_func =
         match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
@@ -4005,8 +4038,8 @@ pub extern "C" fn r2dec_function(
     };
     let decompiler = r2dec::Decompiler::new(config);
 
-    // Decompile to C code
-    let output = decompiler.decompile(&ssa_func);
+    // Decompile to C code on a large-stack thread (same as r2dec_function_with_context).
+    let output = run_decompile_on_large_stack(decompiler, ssa_func);
 
     CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
 }
@@ -4323,7 +4356,8 @@ fn parse_known_function_signatures(
                         .and_then(|raw| parse_external_type(raw, ptr_bits));
                     params.push(ty.unwrap_or(r2dec::CType::Unknown));
                 } else if let Some(raw) = arg.as_str() {
-                    params.push(parse_external_type(raw, ptr_bits).unwrap_or(r2dec::CType::Unknown));
+                    params
+                        .push(parse_external_type(raw, ptr_bits).unwrap_or(r2dec::CType::Unknown));
                 }
             }
         } else if let Some(argtypes) = obj.get("argtypes").and_then(|v| v.as_array()) {
@@ -4488,12 +4522,11 @@ pub extern "C" fn r2dec_function_with_context(
         return ptr::null_mut();
     }
 
-    // Build SSA function
-    let ssa_func =
-        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
-            Some(f) => f.with_name(&func_name_str),
-            None => return ptr::null_mut(),
-        };
+    let max_blocks = decompiler_max_blocks();
+    if r2il_blocks.len() > max_blocks {
+        let output = decompile_block_guard_fallback(&func_name_str, r2il_blocks.len(), max_blocks);
+        return CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw());
+    }
 
     let ptr_bits = ctx_ref
         .arch
@@ -4501,77 +4534,140 @@ pub extern "C" fn r2dec_function_with_context(
         .map(|arch| arch.addr_size * 8)
         .unwrap_or(64);
 
-    // Create decompiler with architecture-aware config
-    let config = if let Some(arch) = &ctx_ref.arch {
-        match (arch.name.as_str(), ptr_bits) {
-            ("x86", 32) | ("x86-32", _) => r2dec::DecompilerConfig::x86(),
-            ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => {
-                r2dec::DecompilerConfig::x86_64()
-            }
-            ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
-            ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
-            _ => {
-                let mut cfg = r2dec::DecompilerConfig::default();
-                cfg.ptr_size = ptr_bits;
-                cfg
-            }
-        }
-    } else {
-        r2dec::DecompilerConfig::default()
-    };
+    // Collect all JSON context strings on the main thread (from C pointers),
+    // then move everything into the large-stack thread for SSA + decompilation.
+    let func_names_str = if func_names_json.is_null() { "{}".to_string() }
+        else { unsafe { CStr::from_ptr(func_names_json).to_str().unwrap_or("{}").to_string() } };
+    let strings_str = if strings_json.is_null() { "{}".to_string() }
+        else { unsafe { CStr::from_ptr(strings_json).to_str().unwrap_or("{}").to_string() } };
+    let symbols_str = if symbols_json.is_null() { "{}".to_string() }
+        else { unsafe { CStr::from_ptr(symbols_json).to_str().unwrap_or("{}").to_string() } };
+    let signature_str = if signature_json.is_null() { "[]".to_string() }
+        else { unsafe { CStr::from_ptr(signature_json).to_str().unwrap_or("[]").to_string() } };
+    let stack_vars_str = if stack_vars_json.is_null() { "{}".to_string() }
+        else { unsafe { CStr::from_ptr(stack_vars_json).to_str().unwrap_or("{}").to_string() } };
+    let types_str = if types_json.is_null() { "{}".to_string() }
+        else { unsafe { CStr::from_ptr(types_json).to_str().unwrap_or("{}").to_string() } };
 
-    let mut decompiler = r2dec::Decompiler::new(config);
+    let arch_clone = ctx_ref.arch.clone();
 
-    // Parse function names JSON: {"0x401000": "main", "0x401100": "printf", ...}
-    if !func_names_json.is_null() {
-        let json_str = unsafe { CStr::from_ptr(func_names_json).to_str().unwrap_or("{}") };
-        decompiler.set_function_names(parse_addr_name_map(json_str));
-    }
-
-    // Parse strings JSON
-    if !strings_json.is_null() {
-        let json_str = unsafe { CStr::from_ptr(strings_json).to_str().unwrap_or("{}") };
-        decompiler.set_strings(parse_addr_name_map(json_str));
-    }
-
-    // Parse symbols JSON
-    if !symbols_json.is_null() {
-        let json_str = unsafe { CStr::from_ptr(symbols_json).to_str().unwrap_or("{}") };
-        decompiler.set_symbols(parse_addr_name_map(json_str));
-    }
-
-    // Parse external signature JSON (legacy `afcfj` array or context object).
-    if !signature_json.is_null() {
-        let json_str = unsafe { CStr::from_ptr(signature_json).to_str().unwrap_or("[]") };
-        let sig_ctx = parse_signature_context(json_str, ptr_bits);
-        decompiler.set_function_signature(sig_ctx.current);
-        if !sig_ctx.known.is_empty() {
-            decompiler.set_known_function_signatures(sig_ctx.known);
-        }
-    }
-
-    // Parse external stack variables JSON (`afvj`).
-    if !stack_vars_json.is_null() {
-        let json_str = unsafe { CStr::from_ptr(stack_vars_json).to_str().unwrap_or("{}") };
-        let stack_vars = parse_external_stack_vars(json_str, ptr_bits);
-        if !stack_vars.is_empty() {
-            decompiler.set_stack_vars(stack_vars);
-        }
-    }
-
-    // Parse external type DB JSON (`tsj`).
-    if !types_json.is_null() {
-        let json_str = unsafe { CStr::from_ptr(types_json).to_str().unwrap_or("{}") };
-        let type_db = r2types::ExternalTypeDb::from_tsj_json(json_str);
-        if !type_db.structs.is_empty() || !type_db.diagnostics.is_empty() {
-            decompiler.set_external_type_db(type_db);
-        }
-    }
-
-    // Decompile to C code
-    let output = decompiler.decompile(&ssa_func);
+    // Run SSA construction + decompilation on a dedicated thread with a large
+    // stack to prevent stack overflow on complex O2-optimized CFGs.
+    let output = run_full_decompile_on_large_stack(
+        r2il_blocks, func_name_str, arch_clone, ptr_bits,
+        func_names_str, strings_str, symbols_str, signature_str,
+        stack_vars_str, types_str,
+    );
 
     CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+/// Run SSA construction + decompilation on a thread with a 32 MB stack to
+/// avoid stack overflow on complex O2-optimized CFGs.
+#[allow(clippy::too_many_arguments)]
+fn run_full_decompile_on_large_stack(
+    r2il_blocks: Vec<R2ILBlock>,
+    func_name_str: String,
+    arch: Option<r2il::ArchSpec>,
+    ptr_bits: u32,
+    func_names_str: String,
+    strings_str: String,
+    symbols_str: String,
+    signature_str: String,
+    stack_vars_str: String,
+    types_str: String,
+) -> String {
+    const STACK_SIZE: usize = 32 * 1024 * 1024; // 32 MB
+
+    let handle = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            // Build SSA function
+            let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(
+                &r2il_blocks, arch.as_ref(),
+            ) {
+                Some(f) => f.with_name(&func_name_str),
+                None => return String::new(),
+            };
+
+            // Create decompiler with architecture-aware config
+            let config = if let Some(arch) = &arch {
+                match (arch.name.as_str(), ptr_bits) {
+                    ("x86", 32) | ("x86-32", _) => r2dec::DecompilerConfig::x86(),
+                    ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => {
+                        r2dec::DecompilerConfig::x86_64()
+                    }
+                    ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
+                    ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
+                    _ => {
+                        let mut cfg = r2dec::DecompilerConfig::default();
+                        cfg.ptr_size = ptr_bits;
+                        cfg
+                    }
+                }
+            } else {
+                r2dec::DecompilerConfig::default()
+            };
+
+            let mut decompiler = r2dec::Decompiler::new(config);
+            decompiler.set_function_names(parse_addr_name_map(&func_names_str));
+            decompiler.set_strings(parse_addr_name_map(&strings_str));
+            decompiler.set_symbols(parse_addr_name_map(&symbols_str));
+
+            let sig_ctx = parse_signature_context(&signature_str, ptr_bits);
+            decompiler.set_function_signature(sig_ctx.current);
+            if !sig_ctx.known.is_empty() {
+                decompiler.set_known_function_signatures(sig_ctx.known);
+            }
+
+            let stack_vars = parse_external_stack_vars(&stack_vars_str, ptr_bits);
+            if !stack_vars.is_empty() {
+                decompiler.set_stack_vars(stack_vars);
+            }
+
+            let type_db = r2types::ExternalTypeDb::from_tsj_json(&types_str);
+            if !type_db.structs.is_empty()
+                || !type_db.unions.is_empty()
+                || !type_db.enums.is_empty()
+                || !type_db.diagnostics.is_empty()
+            {
+                decompiler.set_external_type_db(type_db);
+            }
+
+            decompiler.decompile(&ssa_func)
+        });
+
+    match handle {
+        Ok(h) => match h.join() {
+            Ok(output) => output,
+            Err(_) => "/* r2dec: decompilation panicked (internal error) */".to_string(),
+        },
+        Err(e) => {
+            format!("/* r2dec: failed to spawn decompiler thread: {} */", e)
+        }
+    }
+}
+
+/// Run just the decompiler (already-built SSA + decompiler) on a large-stack thread.
+fn run_decompile_on_large_stack(
+    decompiler: r2dec::Decompiler,
+    ssa_func: r2ssa::SSAFunction,
+) -> String {
+    const STACK_SIZE: usize = 32 * 1024 * 1024; // 32 MB
+
+    let handle = std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || decompiler.decompile(&ssa_func));
+
+    match handle {
+        Ok(h) => match h.join() {
+            Ok(output) => output,
+            Err(_) => "/* r2dec: decompilation panicked (internal error) */".to_string(),
+        },
+        Err(e) => {
+            format!("/* r2dec: failed to spawn decompiler thread: {} */", e)
+        }
+    }
 }
 
 /// Decompile a single basic block to C code.
@@ -5286,9 +5382,13 @@ mod tests {
 
     #[test]
     fn test_parse_signature_context_legacy_array() {
-        let json = r#"[{"name":"dbg.main","return":"int32_t","args":[{"name":"x","type":"int32_t"}]}]"#;
+        let json =
+            r#"[{"name":"dbg.main","return":"int32_t","args":[{"name":"x","type":"int32_t"}]}]"#;
         let ctx = parse_signature_context(json, 64);
-        assert!(ctx.current.is_some(), "legacy payload should parse current signature");
+        assert!(
+            ctx.current.is_some(),
+            "legacy payload should parse current signature"
+        );
         assert!(
             ctx.known.is_empty(),
             "legacy payload should not synthesize known signatures"

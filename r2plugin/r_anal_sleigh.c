@@ -1616,7 +1616,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.sym.paths - Explore paths in current function");
 			r_cons_println (cons, "| a:sla.sym.merge [on|off] - Toggle symbolic state merging");
 			r_cons_println (cons, "| a:sla.taint  - Taint analysis for current function");
-			r_cons_println (cons, "| a:sla.dec    - Decompile current function to C");
+			r_cons_println (cons, "| a:sla.dec [name|addr] - Decompile function (current by default)");
 			r_cons_println (cons, "| a:sla.cfg    - Show ASCII CFG for current function");
 			r_cons_println (cons, "| a:sla.cfg.json - Show CFG as JSON for current function");
 			r_cons_println (cons, "| a:sym.explore <target> - Explore symbolic paths reaching target");
@@ -1786,12 +1786,18 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		if (cons) {
 			r_cons_println (cons, "[");
 		}
-		size_t i;
-		for (i = 0; i < count; i++) {
-			char *json = r2il_block_op_json_named (ctx, block, i);
-			if (json && cons) {
-				r_cons_printf (cons, "  %s%s\n", json, (i + 1 < count) ? "," : "");
-				r2il_string_free (json);
+		if (count == 0) {
+			if (cons) {
+				r_cons_println (cons, "  {\"Nop\":{},\"note\":\"instruction lifted with no semantic ops\"}");
+			}
+		} else {
+			size_t i;
+			for (i = 0; i < count; i++) {
+				char *json = r2il_block_op_json_named (ctx, block, i);
+				if (json && cons) {
+					r_cons_printf (cons, "  %s%s\n", json, (i + 1 < count) ? "," : "");
+					r2il_string_free (json);
+				}
 			}
 		}
 		if (cons) {
@@ -2296,17 +2302,36 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		return strdup("");
 	}
 
-	if (!strcmp (cmd, "sla.dec")) {
+	if (!strncmp (cmd, "sla.dec", 7)) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
 			R_LOG_ERROR ("r2sleigh: no context");
 			return strdup("");
 		}
 
-		/* Get current function */
-		RAnalFunction *fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		const char *target_arg = skip_cmd_spaces (cmd + 7);
+		RAnalFunction *fcn = NULL;
+		if (target_arg && *target_arg) {
+			ut64 target_addr = 0;
+			if (parse_sym_target_expr (core, target_arg, &target_addr)) {
+				fcn = r_anal_get_fcn_in (anal, target_addr, R_ANAL_FCN_TYPE_ANY);
+			} else {
+				fcn = r_anal_get_function_byname (anal, target_arg);
+			}
+		} else {
+			fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
+		}
+
 		if (!fcn) {
-			R_LOG_ERROR ("r2sleigh: no function at current address");
+			if (target_arg && *target_arg) {
+				if (cons) {
+					r_cons_printf (cons,
+						"/* r2dec: function target '%s' not found. It may be inlined or stripped. Try 'afl' or 'a:sla.dec 0xADDR'. */\n",
+						target_arg);
+				}
+			} else {
+				R_LOG_ERROR ("r2sleigh: no function at current address");
+			}
 			return strdup("");
 		}
 

@@ -168,6 +168,36 @@ impl ExpressionBuilder {
                 let rhs = CExpr::unary(UnaryOp::Neg, self.var_to_expr(src));
                 Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
             }
+            SSAOp::FloatAbs { dst, src } => {
+                let lhs = self.var_to_expr(dst);
+                let rhs = CExpr::call(CExpr::Var("fabs".to_string()), vec![self.var_to_expr(src)]);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::FloatSqrt { dst, src } => {
+                let lhs = self.var_to_expr(dst);
+                let rhs = CExpr::call(CExpr::Var("sqrt".to_string()), vec![self.var_to_expr(src)]);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::FloatCeil { dst, src } => {
+                let lhs = self.var_to_expr(dst);
+                let rhs = CExpr::call(CExpr::Var("ceil".to_string()), vec![self.var_to_expr(src)]);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::FloatFloor { dst, src } => {
+                let lhs = self.var_to_expr(dst);
+                let rhs = CExpr::call(CExpr::Var("floor".to_string()), vec![self.var_to_expr(src)]);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::FloatRound { dst, src } => {
+                let lhs = self.var_to_expr(dst);
+                let rhs = CExpr::call(CExpr::Var("round".to_string()), vec![self.var_to_expr(src)]);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
+            SSAOp::FloatNaN { dst, src } => {
+                let lhs = self.var_to_expr(dst);
+                let rhs = CExpr::call(CExpr::Var("isnan".to_string()), vec![self.var_to_expr(src)]);
+                Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+            }
             SSAOp::FloatLess { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Lt),
             SSAOp::FloatLessEqual { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Le),
             SSAOp::FloatEqual { dst, a, b } => self.binary_op_stmt(dst, a, b, BinaryOp::Eq),

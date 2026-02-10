@@ -255,6 +255,14 @@ fn resolve_stack_alias_from_addr_expr(
             depth + 1,
             visited,
         ),
+        CExpr::AddrOf(inner) => resolve_stack_alias_from_addr_expr(
+            inner,
+            definitions,
+            stack_vars,
+            env,
+            depth + 1,
+            visited,
+        ),
         CExpr::Deref(inner) => resolve_stack_alias_from_addr_expr(
             inner,
             definitions,

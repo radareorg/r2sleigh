@@ -5,7 +5,7 @@
 //! - If-then-else (diamond patterns)
 //! - Loops (natural loops with back edges)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use r2ssa::SSAFunction;
 
@@ -142,11 +142,21 @@ pub struct RegionAnalyzer<'a> {
     loop_exits: HashMap<u64, u64>,
     /// Blocks that continue to loop header: block_addr -> header.
     loop_continues: HashMap<u64, u64>,
+    /// Blocks that need an explicit goto target for cross-loop control flow.
+    loop_gotos: HashMap<u64, u64>,
+    /// Optional reason when analysis had to abort/degrade.
+    analysis_reason: Option<String>,
+    /// Recursion guard for legacy recursive analysis.
+    recursion_depth: usize,
+    recursion_depth_limit: usize,
+    /// Iterative collapse guard.
+    max_collapse_iterations: usize,
 }
 
 impl<'a> RegionAnalyzer<'a> {
     /// Create a new region analyzer.
     pub fn new(func: &'a SSAFunction) -> Self {
+        let num_blocks = func.num_blocks();
         let mut analyzer = Self {
             func,
             back_edges: HashMap::new(),
@@ -154,6 +164,11 @@ impl<'a> RegionAnalyzer<'a> {
             processed: HashSet::new(),
             loop_exits: HashMap::new(),
             loop_continues: HashMap::new(),
+            loop_gotos: HashMap::new(),
+            analysis_reason: None,
+            recursion_depth: 0,
+            recursion_depth_limit: (num_blocks.saturating_mul(8)).max(256),
+            max_collapse_iterations: num_blocks.saturating_mul(10).max(256),
         };
         analyzer.find_back_edges();
         analyzer.find_loops();
@@ -234,30 +249,134 @@ impl<'a> RegionAnalyzer<'a> {
         self.loop_continues.contains_key(&block)
     }
 
+    /// Check if a block needs an explicit goto.
+    pub fn is_loop_goto(&self, block: u64) -> bool {
+        self.loop_gotos.contains_key(&block)
+    }
+
+    /// Get the goto target for a block, when present.
+    pub fn get_loop_goto_target(&self, block: u64) -> Option<u64> {
+        self.loop_gotos.get(&block).copied()
+    }
+
     /// Get the loop exit target for a block.
     pub fn get_loop_exit_target(&self, block: u64) -> Option<u64> {
         self.loop_exits.get(&block).copied()
     }
 
-    fn collect_loop_body(&self, block: u64, header: u64, body: &mut HashSet<u64>) {
-        if body.contains(&block) {
-            return;
-        }
-        body.insert(block);
+    /// Reason for analysis degradation/short-circuit, if any.
+    pub fn analysis_reason(&self) -> Option<&str> {
+        self.analysis_reason.as_deref()
+    }
 
-        for pred in self.func.predecessors(block) {
-            if pred != header {
-                self.collect_loop_body(pred, header, body);
+    fn collect_loop_body(&self, source: u64, header: u64, body: &mut HashSet<u64>) {
+        let mut worklist = vec![source];
+        while let Some(block) = worklist.pop() {
+            if !body.insert(block) {
+                continue;
+            }
+            for pred in self.func.predecessors(block) {
+                if pred != header && !body.contains(&pred) {
+                    worklist.push(pred);
+                }
             }
         }
     }
 
     /// Analyze the function and build a region tree.
+    ///
+    /// Default path: iterative bottom-up loop collapsing (handles complex O2 CFGs).
+    /// Fallback: recursive analysis with depth guard.
+    /// `SLEIGH_DEC_LEGACY_ANALYZER=1`: force legacy recursive-only (A/B testing).
     pub fn analyze(&mut self) -> Region {
-        self.analyze_region(self.func.entry)
+        self.processed.clear();
+        self.loop_gotos.clear();
+        self.analysis_reason = None;
+        self.recursion_depth = 0;
+
+        let force_legacy = std::env::var("SLEIGH_DEC_LEGACY_ANALYZER")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes" || v == "on"
+            })
+            .unwrap_or(false);
+
+        let back_edge_count: usize = self.back_edges.values().map(Vec::len).sum();
+        let loop_count = self.loops.len();
+
+        // Legacy-only path: opt-in via env var.  Guard complex graphs since the
+        // recursive analyzer cannot handle deeply nested loop structures.
+        if force_legacy {
+            if loop_count > 8 || back_edge_count > 16 {
+                self.analysis_reason = Some(format!(
+                    "legacy region analyzer skipped for complex loop graph (loops={}, back_edges={})",
+                    loop_count, back_edge_count
+                ));
+                return Region::Irreducible {
+                    entry: self.func.entry,
+                    blocks: self.func.block_addrs().to_vec(),
+                };
+            }
+            return self.analyze_region_recursive(self.func.entry);
+        }
+
+        // Primary path: iterative analysis.  No complexity guard — the iterative
+        // algorithm has its own safety via max_collapse_iterations.
+        if let Some(region) = self.analyze_iterative() {
+            return region;
+        }
+
+        // Iterative path failed to converge; fall back to recursive with depth guard.
+        self.analysis_reason = None;
+        self.processed.clear();
+        self.loop_gotos.clear();
+        self.recursion_depth = 0;
+
+        // Guard the recursive fallback against complex graphs.
+        if loop_count > 8 || back_edge_count > 16 {
+            self.analysis_reason = Some(format!(
+                "recursive fallback skipped for complex loop graph (loops={}, back_edges={})",
+                loop_count, back_edge_count
+            ));
+            return Region::Irreducible {
+                entry: self.func.entry,
+                blocks: self.func.block_addrs().to_vec(),
+            };
+        }
+
+        let region = self.analyze_region_recursive(self.func.entry);
+        if self.analysis_reason.is_some() {
+            return Region::Irreducible {
+                entry: self.func.entry,
+                blocks: self.func.block_addrs().to_vec(),
+            };
+        }
+        region
     }
 
-    fn analyze_region(&mut self, entry: u64) -> Region {
+    fn analyze_region_recursive(&mut self, entry: u64) -> Region {
+        if self.recursion_depth >= self.recursion_depth_limit {
+            if self.analysis_reason.is_none() {
+                self.analysis_reason = Some(format!(
+                    "region analysis recursion limit exceeded (limit: {})",
+                    self.recursion_depth_limit
+                ));
+            }
+            let mut blocks = self.func.successors(entry);
+            blocks.insert(0, entry);
+            blocks.sort_unstable();
+            blocks.dedup();
+            return Region::Irreducible { entry, blocks };
+        }
+
+        self.recursion_depth += 1;
+        let result = self.analyze_region_recursive_inner(entry);
+        self.recursion_depth = self.recursion_depth.saturating_sub(1);
+        result
+    }
+
+    fn analyze_region_recursive_inner(&mut self, entry: u64) -> Region {
         if self.processed.contains(&entry) {
             return Region::Block(entry);
         }
@@ -293,7 +412,7 @@ impl<'a> RegionAnalyzer<'a> {
 
                 if (preds.len() == 1 && !self.loops.contains_key(&next)) || is_loop_preheader {
                     // Can extend sequence
-                    let next_region = self.analyze_region(next);
+                    let next_region = self.analyze_region_recursive(next);
                     match next_region {
                         Region::Sequence(mut regions) => {
                             regions.insert(0, Region::Block(entry));
@@ -333,13 +452,13 @@ impl<'a> RegionAnalyzer<'a> {
 
         // Analyze then and else branches
         let then_region = if true_target != merge.unwrap_or(u64::MAX) {
-            Some(Box::new(self.analyze_region(true_target)))
+            Some(Box::new(self.analyze_region_recursive(true_target)))
         } else {
             None
         };
 
         let else_region = if false_target != merge.unwrap_or(u64::MAX) {
-            Some(Box::new(self.analyze_region(false_target)))
+            Some(Box::new(self.analyze_region_recursive(false_target)))
         } else {
             None
         };
@@ -467,7 +586,7 @@ impl<'a> RegionAnalyzer<'a> {
             if self.processed.contains(&b) {
                 continue;
             }
-            regions.push(self.analyze_region(b));
+            regions.push(self.analyze_region_recursive(b));
         }
 
         if regions.is_empty() {
@@ -481,18 +600,24 @@ impl<'a> RegionAnalyzer<'a> {
 
     fn collect_loop_body_order(
         &self,
-        block: u64,
+        start: u64,
         body: &HashSet<u64>,
         seen: &mut HashSet<u64>,
         out: &mut Vec<u64>,
     ) {
-        if !body.contains(&block) || !seen.insert(block) {
-            return;
-        }
-        out.push(block);
-        for succ in self.func.successors(block) {
-            if body.contains(&succ) {
-                self.collect_loop_body_order(succ, body, seen, out);
+        // Iterative DFS that produces the same pre-order as the recursive version.
+        let mut stack = vec![start];
+        while let Some(block) = stack.pop() {
+            if !body.contains(&block) || !seen.insert(block) {
+                continue;
+            }
+            out.push(block);
+            // Push successors in reverse order so the first successor is processed first.
+            let succs: Vec<u64> = self.func.successors(block).into_iter()
+                .filter(|s| body.contains(s))
+                .collect();
+            for s in succs.into_iter().rev() {
+                stack.push(s);
             }
         }
     }
@@ -588,7 +713,7 @@ impl<'a> RegionAnalyzer<'a> {
                 }
                 // Use the first value for this target
                 let case_value = values.first().copied();
-                let case_region = Box::new(self.analyze_region(target));
+                let case_region = Box::new(self.analyze_region_recursive(target));
                 cases.push((case_value, case_region));
             }
         } else {
@@ -600,13 +725,13 @@ impl<'a> RegionAnalyzer<'a> {
                 }
 
                 let case_value = Some(idx as u64);
-                let case_region = Box::new(self.analyze_region(target));
+                let case_region = Box::new(self.analyze_region_recursive(target));
                 cases.push((case_value, case_region));
             }
         }
 
         // Build default region if we have one
-        let default = default_target.map(|addr| Box::new(self.analyze_region(addr)));
+        let default = default_target.map(|addr| Box::new(self.analyze_region_recursive(addr)));
 
         Some(Region::Switch {
             switch_block: entry,
@@ -643,14 +768,14 @@ impl<'a> RegionAnalyzer<'a> {
             if Some(target) == merge || Some(target) == default {
                 continue;
             }
-            let case_region = Box::new(self.analyze_region(target));
+            let case_region = Box::new(self.analyze_region_recursive(target));
             cases.push((values.first().copied(), case_region));
         }
         cases.sort_by_key(|(v, _)| v.unwrap_or(u64::MAX));
 
         let default_region = default
             .filter(|t| Some(*t) != merge)
-            .map(|addr| Box::new(self.analyze_region(addr)));
+            .map(|addr| Box::new(self.analyze_region_recursive(addr)));
 
         Region::Switch {
             switch_block: entry,
@@ -689,11 +814,800 @@ impl<'a> RegionAnalyzer<'a> {
 
         None
     }
+
+    fn analyze_iterative(&mut self) -> Option<Region> {
+        let mut graph = WorkingGraph::from_function(self.func);
+        let all_loops = self.collect_ordered_loops();
+        if all_loops.is_empty() {
+            return Some(self.analyze_region_recursive(self.func.entry));
+        }
+
+        let mut iterations = 0usize;
+        for loop_info in &all_loops {
+            iterations = iterations.saturating_add(1);
+            if iterations > self.max_collapse_iterations {
+                self.analysis_reason = Some(format!(
+                    "iterative region collapse iteration limit exceeded (limit: {})",
+                    self.max_collapse_iterations
+                ));
+                return None;
+            }
+
+            if graph.collapse_loop(self, loop_info, &all_loops).is_err() {
+                return None;
+            }
+        }
+
+        let topo = match graph.topological_order() {
+            Some(order) => order,
+            None => {
+                self.analysis_reason = Some("iterative region graph still cyclic after loop collapse".to_string());
+                return None;
+            }
+        };
+
+        let entry_node = graph.node_for_block(self.func.entry)?;
+        let region = self.analyze_post_collapse_iterative(entry_node, &graph, &topo);
+        Some(region)
+    }
+
+    /// Build the final region tree from a post-collapse acyclic WorkingGraph
+    /// using an iterative reverse-topological-order pass (no recursion).
+    fn analyze_post_collapse_iterative(
+        &self,
+        entry: usize,
+        graph: &WorkingGraph,
+        topo: &[usize],
+    ) -> Region {
+        // Build a set of nodes reachable from entry so we skip disconnected parts.
+        let reachable: HashSet<usize> = {
+            let mut set = HashSet::new();
+            let mut stack = vec![entry];
+            while let Some(n) = stack.pop() {
+                if set.insert(n) {
+                    for s in graph.sorted_succs(n) {
+                        stack.push(s);
+                    }
+                }
+            }
+            set
+        };
+
+        // Reverse topological order: leaves are processed first.
+        let rev_topo: Vec<usize> = topo.iter().rev().copied()
+            .filter(|id| reachable.contains(id))
+            .collect();
+
+        // Map from node → composed region.
+        let mut region_map: HashMap<usize, Region> = HashMap::new();
+
+        for node in &rev_topo {
+            let node = *node;
+            let base = match graph.node_region(node) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            let succs = graph.sorted_succs(node);
+            let composed = match succs.len() {
+                0 => base,
+                1 => {
+                    let next = succs[0];
+                    if graph.preds_len(next) == 1 {
+                        if let Some(next_region) = region_map.remove(&next) {
+                            Self::sequence_merge(base, next_region)
+                        } else {
+                            base
+                        }
+                    } else {
+                        // Multi-predecessor: don't absorb; leave next for its own composition.
+                        base
+                    }
+                }
+                2 => {
+                    let cond_block = match &base {
+                        Region::Block(addr) => *addr,
+                        _ => {
+                            let mut blocks = graph.node_blocks(node);
+                            blocks.extend(succs.iter().flat_map(|id| graph.node_blocks(*id)));
+                            blocks.sort_unstable();
+                            blocks.dedup();
+                            region_map.insert(node, Region::Irreducible {
+                                entry: graph.node_entry(node).unwrap_or(self.func.entry),
+                                blocks,
+                            });
+                            continue;
+                        }
+                    };
+                    let merge = self.find_working_merge_point(succs[0], succs[1], graph);
+                    let then_region = if Some(succs[0]) != merge {
+                        region_map.remove(&succs[0]).map(Box::new)
+                    } else {
+                        None
+                    };
+                    let else_region = if Some(succs[1]) != merge {
+                        region_map.remove(&succs[1]).map(Box::new)
+                    } else {
+                        None
+                    };
+                    match (then_region, else_region) {
+                        (Some(then_r), Some(else_r)) => Region::IfThenElse {
+                            cond_block,
+                            then_region: then_r,
+                            else_region: Some(else_r),
+                            merge_block: merge.and_then(|id| graph.node_entry(id)),
+                        },
+                        (Some(then_r), None) => Region::IfThenElse {
+                            cond_block,
+                            then_region: then_r,
+                            else_region: None,
+                            merge_block: merge.and_then(|id| graph.node_entry(id)),
+                        },
+                        (None, Some(else_r)) => Region::IfThenElse {
+                            cond_block,
+                            then_region: else_r,
+                            else_region: None,
+                            merge_block: merge.and_then(|id| graph.node_entry(id)),
+                        },
+                        _ => base,
+                    }
+                }
+                _ => {
+                    // 3+ successors: switch
+                    let switch_block = match &base {
+                        Region::Block(addr) => *addr,
+                        _ => {
+                            let mut blocks = graph.node_blocks(node);
+                            blocks.extend(succs.iter().flat_map(|id| graph.node_blocks(*id)));
+                            blocks.sort_unstable();
+                            blocks.dedup();
+                            region_map.insert(node, Region::Irreducible {
+                                entry: graph.node_entry(node).unwrap_or(self.func.entry),
+                                blocks,
+                            });
+                            continue;
+                        }
+                    };
+                    let merge = self.find_working_switch_merge(&succs, graph);
+                    let mut cases = Vec::new();
+                    if let Some((switch_cases, default)) = self.func.switch_info(switch_block) {
+                        let mut grouped: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+                        for (value, target) in &switch_cases {
+                            grouped.entry(*target).or_default().push(*value);
+                        }
+                        for (target_block, values) in grouped {
+                            let Some(target_node) = graph.node_for_block(target_block) else {
+                                continue;
+                            };
+                            if Some(target_node) == merge {
+                                continue;
+                            }
+                            if default
+                                .and_then(|addr| graph.node_for_block(addr))
+                                .is_some_and(|def_node| def_node == target_node)
+                            {
+                                continue;
+                            }
+                            let case_region = region_map.remove(&target_node)
+                                .unwrap_or_else(|| graph.node_region(target_node)
+                                    .unwrap_or(Region::Block(target_block)));
+                            cases.push((values.first().copied(), Box::new(case_region)));
+                        }
+                        let default_region = default
+                            .and_then(|addr| graph.node_for_block(addr))
+                            .filter(|node_id| Some(*node_id) != merge)
+                            .map(|node_id| {
+                                let r = region_map.remove(&node_id)
+                                    .unwrap_or_else(|| graph.node_region(node_id)
+                                        .unwrap_or(Region::Block(default.unwrap_or(self.func.entry))));
+                                Box::new(r)
+                            });
+                        region_map.insert(node, Region::Switch {
+                            switch_block,
+                            cases,
+                            default: default_region,
+                            merge_block: merge.and_then(|id| graph.node_entry(id)),
+                        });
+                        continue;
+                    }
+
+                    for (idx, succ) in succs.iter().enumerate() {
+                        if Some(*succ) == merge {
+                            continue;
+                        }
+                        let case_region = region_map.remove(succ)
+                            .unwrap_or_else(|| graph.node_region(*succ)
+                                .unwrap_or(Region::Block(graph.node_entry(*succ).unwrap_or(self.func.entry))));
+                        cases.push((Some(idx as u64), Box::new(case_region)));
+                    }
+                    Region::Switch {
+                        switch_block,
+                        cases,
+                        default: None,
+                        merge_block: merge.and_then(|id| graph.node_entry(id)),
+                    }
+                }
+            };
+            region_map.insert(node, composed);
+        }
+
+        // The entry node's composed region is the final result.
+        region_map.remove(&entry).unwrap_or_else(|| Region::Irreducible {
+            entry: self.func.entry,
+            blocks: self.func.block_addrs().to_vec(),
+        })
+    }
+
+    /// Merge two regions into a sequence, flattening nested Sequences.
+    fn sequence_merge(a: Region, b: Region) -> Region {
+        match (a, b) {
+            (Region::Sequence(mut va), Region::Sequence(mut vb)) => {
+                va.append(&mut vb);
+                Region::Sequence(va)
+            }
+            (Region::Sequence(mut va), b) => {
+                va.push(b);
+                Region::Sequence(va)
+            }
+            (a, Region::Sequence(mut vb)) => {
+                let mut out = vec![a];
+                out.append(&mut vb);
+                Region::Sequence(out)
+            }
+            (a, b) => Region::Sequence(vec![a, b]),
+        }
+    }
+
+    fn collect_ordered_loops(&self) -> Vec<LoopInfo> {
+        let mut loop_infos: Vec<LoopInfo> = self
+            .loops
+            .iter()
+            .map(|(header, body)| LoopInfo {
+                header: *header,
+                body: body.clone(),
+                depth: 0,
+            })
+            .collect();
+
+        for i in 0..loop_infos.len() {
+            let mut depth = 0usize;
+            for j in 0..loop_infos.len() {
+                if i == j {
+                    continue;
+                }
+                if loop_infos[j].body.len() > loop_infos[i].body.len()
+                    && loop_infos[j].body.contains(&loop_infos[i].header)
+                    && loop_infos[i].body.is_subset(&loop_infos[j].body)
+                {
+                    depth = depth.saturating_add(1);
+                }
+            }
+            loop_infos[i].depth = depth;
+        }
+
+        loop_infos.sort_by(|a, b| {
+            b.depth
+                .cmp(&a.depth)
+                .then(a.body.len().cmp(&b.body.len()))
+                .then(a.header.cmp(&b.header))
+        });
+        loop_infos
+    }
+
+    fn find_working_merge_point(
+        &self,
+        true_target: usize,
+        false_target: usize,
+        graph: &WorkingGraph,
+    ) -> Option<usize> {
+        let mut true_reachable = HashSet::new();
+        graph.collect_reachable_limited(true_target, &mut true_reachable, 10);
+        let mut false_reachable = HashSet::new();
+        graph.collect_reachable_limited(false_target, &mut false_reachable, 10);
+        true_reachable.into_iter().find(|id| false_reachable.contains(id))
+    }
+
+    fn find_working_switch_merge(&self, targets: &[usize], graph: &WorkingGraph) -> Option<usize> {
+        if targets.is_empty() {
+            return None;
+        }
+        let mut reachable_sets: Vec<HashSet<usize>> = Vec::new();
+        for target in targets {
+            let mut reachable = HashSet::new();
+            graph.collect_reachable_limited(*target, &mut reachable, 10);
+            reachable_sets.push(reachable);
+        }
+        let first = reachable_sets.first()?;
+        let common: HashSet<usize> = first
+            .iter()
+            .copied()
+            .filter(|id| reachable_sets.iter().all(|s| s.contains(id)))
+            .collect();
+        common.into_iter().min_by_key(|id| graph.node_entry(*id).unwrap_or(u64::MAX))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LoopInfo {
+    header: u64,
+    body: HashSet<u64>,
+    depth: usize,
+}
+
+#[derive(Debug, Clone)]
+struct WorkingNode {
+    entry: u64,
+    blocks: BTreeSet<u64>,
+    region: Region,
+}
+
+#[derive(Debug, Clone)]
+struct WorkingGraph {
+    nodes: HashMap<usize, WorkingNode>,
+    preds: HashMap<usize, HashSet<usize>>,
+    succs: HashMap<usize, HashSet<usize>>,
+    block_to_node: HashMap<u64, usize>,
+    next_id: usize,
+}
+
+impl WorkingGraph {
+    fn from_function(func: &SSAFunction) -> Self {
+        let mut nodes = HashMap::new();
+        let mut preds: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut succs: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut block_to_node = HashMap::new();
+
+        let mut blocks = func.block_addrs().to_vec();
+        blocks.sort_unstable();
+        for (idx, block) in blocks.iter().enumerate() {
+            nodes.insert(
+                idx,
+                WorkingNode {
+                    entry: *block,
+                    blocks: BTreeSet::from([*block]),
+                    region: Region::Block(*block),
+                },
+            );
+            preds.insert(idx, HashSet::new());
+            succs.insert(idx, HashSet::new());
+            block_to_node.insert(*block, idx);
+        }
+
+        for block in blocks {
+            let Some(from) = block_to_node.get(&block).copied() else {
+                continue;
+            };
+            for succ_block in func.successors(block) {
+                let Some(to) = block_to_node.get(&succ_block).copied() else {
+                    continue;
+                };
+                succs.entry(from).or_default().insert(to);
+                preds.entry(to).or_default().insert(from);
+            }
+        }
+
+        Self {
+            next_id: nodes.len(),
+            nodes,
+            preds,
+            succs,
+            block_to_node,
+        }
+    }
+
+    fn node_for_block(&self, block: u64) -> Option<usize> {
+        self.block_to_node.get(&block).copied()
+    }
+
+    fn node_region(&self, node: usize) -> Option<Region> {
+        self.nodes.get(&node).map(|n| n.region.clone())
+    }
+
+    fn node_entry(&self, node: usize) -> Option<u64> {
+        self.nodes.get(&node).map(|n| n.entry)
+    }
+
+    fn node_blocks(&self, node: usize) -> Vec<u64> {
+        self.nodes
+            .get(&node)
+            .map(|n| n.blocks.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    fn sorted_succs(&self, node: usize) -> Vec<usize> {
+        let mut out: Vec<usize> = self
+            .succs
+            .get(&node)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        out.sort_by_key(|id| self.node_entry(*id).unwrap_or(u64::MAX));
+        out
+    }
+
+    fn preds_len(&self, node: usize) -> usize {
+        self.preds.get(&node).map_or(0, HashSet::len)
+    }
+
+    fn collect_reachable_limited(
+        &self,
+        start: usize,
+        reachable: &mut HashSet<usize>,
+        depth: usize,
+    ) {
+        let mut queue = VecDeque::new();
+        queue.push_back((start, depth));
+        while let Some((node, d)) = queue.pop_front() {
+            if d == 0 || !reachable.insert(node) {
+                continue;
+            }
+            for succ in self.sorted_succs(node) {
+                queue.push_back((succ, d.saturating_sub(1)));
+            }
+        }
+    }
+
+    /// Kahn's algorithm: returns nodes in topological order, or None if cyclic.
+    fn topological_order(&self) -> Option<Vec<usize>> {
+        let mut indegree: HashMap<usize, usize> = self
+            .nodes
+            .keys()
+            .map(|id| (*id, self.preds.get(id).map_or(0, HashSet::len)))
+            .collect();
+        let mut queue: VecDeque<usize> = indegree
+            .iter()
+            .filter_map(|(id, deg)| (*deg == 0).then_some(*id))
+            .collect();
+        let mut order = Vec::with_capacity(self.nodes.len());
+        while let Some(node) = queue.pop_front() {
+            order.push(node);
+            for succ in self.sorted_succs(node) {
+                if let Some(deg) = indegree.get_mut(&succ) {
+                    *deg = deg.saturating_sub(1);
+                    if *deg == 0 {
+                        queue.push_back(succ);
+                    }
+                }
+            }
+        }
+        if order.len() == self.nodes.len() {
+            Some(order)
+        } else {
+            None
+        }
+    }
+
+    fn collapse_loop(
+        &mut self,
+        analyzer: &mut RegionAnalyzer<'_>,
+        loop_info: &LoopInfo,
+        all_loops: &[LoopInfo],
+    ) -> Result<(), ()> {
+        let header = loop_info.header;
+        let body = &loop_info.body;
+        let Some(header_node) = self.node_for_block(header) else {
+            return Ok(());
+        };
+
+        let mut internal_nodes = HashSet::new();
+        let mut partial_overlap = false;
+        for (node_id, node) in &self.nodes {
+            let in_count = node.blocks.iter().filter(|b| body.contains(b)).count();
+            if in_count == 0 {
+                continue;
+            }
+            if in_count != node.blocks.len() {
+                partial_overlap = true;
+                break;
+            }
+            internal_nodes.insert(*node_id);
+        }
+        if partial_overlap || !internal_nodes.contains(&header_node) {
+            analyzer.analysis_reason = Some("iterative loop collapse encountered partial overlap".to_string());
+            return Err(());
+        }
+
+        let mut external_preds = HashSet::new();
+        let mut external_succs = HashSet::new();
+
+        for node in &internal_nodes {
+            if let Some(preds) = self.preds.get(node) {
+                for pred in preds {
+                    if !internal_nodes.contains(pred) {
+                        external_preds.insert(*pred);
+                    }
+                }
+            }
+            if let Some(succs) = self.succs.get(node) {
+                for succ in succs {
+                    if !internal_nodes.contains(succ) {
+                        external_succs.insert(*succ);
+                    }
+                }
+            }
+        }
+
+        // Classify edges leaving the loop body.
+        //
+        // - Continue: back-edge to this loop's header (from non-header block)
+        // - Break (loop_exit): edge leaving this loop body, normal exit
+        // - Goto: edge that targets a block inside a *different* loop's body
+        //   (cross-nesting jump), excluding our own enclosing loops' headers
+        //   which would be outer-loop continues.
+        for block in body {
+            for succ in analyzer.func.successors(*block) {
+                // Continue: back to this loop header
+                if succ == header && *block != header {
+                    analyzer.loop_continues.insert(*block, header);
+                    continue;
+                }
+                // Internal edge
+                if body.contains(&succ) {
+                    continue;
+                }
+                // Already recorded as exit with same target — skip
+                if analyzer.loop_exits.get(block).is_some_and(|existing| *existing == succ) {
+                    continue;
+                }
+
+                // Determine whether this is a cross-nesting goto or a normal break.
+                // A goto targets a block that is inside a *sibling* or *unrelated*
+                // loop body (not our body, not an enclosing loop's body).
+                let is_cross_nesting = Self::is_cross_nesting_target(
+                    succ, header, body, all_loops,
+                );
+
+                if is_cross_nesting {
+                    analyzer.loop_gotos.insert(*block, succ);
+                } else {
+                    // Normal break.  If this block already has a loop_exit recorded
+                    // (multi-exit conditional), keep the first and ignore the rest —
+                    // both are normal breaks, not gotos.
+                    if !analyzer.loop_exits.contains_key(block) {
+                        analyzer.loop_exits.insert(*block, succ);
+                    }
+                }
+            }
+        }
+
+        let loop_region = self.make_loop_region(analyzer, loop_info, &internal_nodes);
+        let mut collapsed_blocks = BTreeSet::new();
+        for node_id in &internal_nodes {
+            if let Some(node) = self.nodes.get(node_id) {
+                collapsed_blocks.extend(node.blocks.iter().copied());
+            }
+        }
+
+        let new_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.nodes.insert(
+            new_id,
+            WorkingNode {
+                entry: header,
+                blocks: collapsed_blocks.clone(),
+                region: loop_region,
+            },
+        );
+        self.preds.insert(new_id, external_preds.clone());
+        self.succs.insert(new_id, external_succs.clone());
+
+        for pred in &external_preds {
+            if let Some(succs) = self.succs.get_mut(pred) {
+                succs.retain(|id| !internal_nodes.contains(id));
+                succs.insert(new_id);
+            }
+        }
+        for succ in &external_succs {
+            if let Some(preds) = self.preds.get_mut(succ) {
+                preds.retain(|id| !internal_nodes.contains(id));
+                preds.insert(new_id);
+            }
+        }
+
+        for node_id in &internal_nodes {
+            self.nodes.remove(node_id);
+            self.preds.remove(node_id);
+            self.succs.remove(node_id);
+        }
+        for block in collapsed_blocks {
+            self.block_to_node.insert(block, new_id);
+        }
+
+        Ok(())
+    }
+
+    /// Determine whether `target` is a cross-nesting jump target.
+    ///
+    /// A target is cross-nesting if it is inside some other loop's body that
+    /// does NOT enclose our current loop (i.e. it's a sibling or unrelated loop).
+    /// Targets that are simply outside the current loop body (normal breaks)
+    /// or inside an enclosing loop's body are NOT cross-nesting.
+    fn is_cross_nesting_target(
+        target: u64,
+        current_header: u64,
+        current_body: &HashSet<u64>,
+        all_loops: &[LoopInfo],
+    ) -> bool {
+        for other in all_loops {
+            // Skip our own loop
+            if other.header == current_header && other.body == *current_body {
+                continue;
+            }
+            // Skip enclosing loops (they contain our header)
+            if other.body.contains(&current_header) && current_body.is_subset(&other.body) {
+                continue;
+            }
+            // If the target is inside a sibling/unrelated loop's body, it's cross-nesting
+            if other.body.contains(&target) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn make_loop_region(
+        &self,
+        analyzer: &RegionAnalyzer<'_>,
+        loop_info: &LoopInfo,
+        internal_nodes: &HashSet<usize>,
+    ) -> Region {
+        let header = loop_info.header;
+        let body = &loop_info.body;
+        let succs = analyzer.func.successors(header);
+        let is_while = succs.len() == 2 && succs.iter().any(|s| !body.contains(s));
+
+        if is_while {
+            let body_entry = succs.iter().find(|s| body.contains(s)).copied();
+            let mut body_blocks = body.clone();
+            body_blocks.remove(&header);
+            let loop_body = self.make_loop_body_region(analyzer, internal_nodes, &body_blocks, body_entry);
+            return Region::WhileLoop {
+                header,
+                body: Box::new(loop_body),
+            };
+        }
+
+        if let Some((guard_block, body_entry)) = analyzer.find_precheck_guard(header, body) {
+            let mut body_blocks = body.clone();
+            body_blocks.remove(&guard_block);
+            if header != guard_block && analyzer.func.successors(header).len() == 1 {
+                body_blocks.remove(&header);
+            }
+            let loop_body = self.make_loop_body_region(analyzer, internal_nodes, &body_blocks, Some(body_entry));
+            return Region::WhileLoop {
+                header: guard_block,
+                body: Box::new(loop_body),
+            };
+        }
+
+        let loop_body = self.make_loop_body_region(analyzer, internal_nodes, body, Some(header));
+        Region::DoWhileLoop {
+            body: Box::new(loop_body),
+            cond_block: header,
+        }
+    }
+
+    fn make_loop_body_region(
+        &self,
+        analyzer: &RegionAnalyzer<'_>,
+        internal_nodes: &HashSet<usize>,
+        body_blocks: &HashSet<u64>,
+        start_block: Option<u64>,
+    ) -> Region {
+        if body_blocks.is_empty() {
+            return Region::Sequence(Vec::new());
+        }
+
+        let relevant_nodes: HashSet<usize> = internal_nodes
+            .iter()
+            .copied()
+            .filter(|node_id| {
+                self.nodes
+                    .get(node_id)
+                    .map(|node| node.blocks.iter().all(|b| body_blocks.contains(b)))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if relevant_nodes.is_empty() {
+            return Region::Sequence(Vec::new());
+        }
+
+        // Build a subgraph of just the relevant body nodes.
+        let sub = self.subgraph(&relevant_nodes);
+
+        // Try structured composition via topological ordering.
+        let entry = start_block.and_then(|b| sub.node_for_block(b));
+        if let Some(entry_id) = entry {
+            if let Some(topo) = sub.topological_order() {
+                return analyzer.analyze_post_collapse_iterative(entry_id, &sub, &topo);
+            }
+        }
+
+        // Fallback: flat sequence ordered by DFS.
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+        if let Some(start_block) = start_block
+            && let Some(start_node) = self.node_for_block(start_block)
+            && relevant_nodes.contains(&start_node)
+        {
+            let mut stack = vec![start_node];
+            while let Some(node) = stack.pop() {
+                if !seen.insert(node) {
+                    continue;
+                }
+                ordered.push(node);
+                let mut succs = self.sorted_succs(node);
+                succs.retain(|id| relevant_nodes.contains(id));
+                succs.reverse();
+                stack.extend(succs);
+            }
+        }
+
+        let mut leftovers: Vec<usize> = relevant_nodes
+            .iter()
+            .copied()
+            .filter(|id| !seen.contains(id))
+            .collect();
+        leftovers.sort_by_key(|id| self.node_entry(*id).unwrap_or(u64::MAX));
+        ordered.extend(leftovers);
+
+        let mut regions = Vec::new();
+        for node_id in ordered {
+            if let Some(node) = self.nodes.get(&node_id) {
+                regions.push(node.region.clone());
+            }
+        }
+
+        match regions.len() {
+            0 => Region::Sequence(Vec::new()),
+            1 => regions.remove(0),
+            _ => Region::Sequence(regions),
+        }
+    }
+
+    /// Create a subgraph containing only the specified node IDs.
+    /// Edges between included nodes are preserved; external edges are dropped.
+    fn subgraph(&self, node_ids: &HashSet<usize>) -> WorkingGraph {
+        let mut nodes = HashMap::new();
+        let mut preds: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut succs: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut block_to_node = HashMap::new();
+
+        for &id in node_ids {
+            if let Some(node) = self.nodes.get(&id) {
+                nodes.insert(id, node.clone());
+                for b in &node.blocks {
+                    block_to_node.insert(*b, id);
+                }
+            }
+            // Filter edges to only include nodes within the subgraph.
+            let pred_set: HashSet<usize> = self.preds.get(&id)
+                .map(|p| p.iter().copied().filter(|pid| node_ids.contains(pid)).collect())
+                .unwrap_or_default();
+            preds.insert(id, pred_set);
+            let succ_set: HashSet<usize> = self.succs.get(&id)
+                .map(|s| s.iter().copied().filter(|sid| node_ids.contains(sid)).collect())
+                .unwrap_or_default();
+            succs.insert(id, succ_set);
+        }
+
+        WorkingGraph {
+            next_id: self.next_id,
+            nodes,
+            preds,
+            succs,
+            block_to_node,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use r2il::{R2ILBlock, R2ILOp, Varnode};
+    use r2ssa::SSAFunction;
 
     // Note: Full tests would require constructing SSAFunctions
     // which requires r2il blocks. These are placeholder tests.
@@ -728,5 +1642,78 @@ mod tests {
         assert!(blocks.contains(&0x1004));
         assert!(blocks.contains(&0x1008));
         assert!(blocks.contains(&0x100c));
+    }
+
+    #[test]
+    fn recursive_guard_returns_irreducible_on_limit() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1000, 8),
+        });
+        let func = SSAFunction::from_blocks(&[block]).expect("ssa function");
+        let mut analyzer = RegionAnalyzer::new(&func);
+        analyzer.recursion_depth_limit = 0;
+
+        let region = analyzer.analyze_region_recursive(func.entry);
+        assert!(
+            matches!(region, Region::Irreducible { .. }),
+            "recursive guard should degrade to irreducible region"
+        );
+        assert!(
+            analyzer.analysis_reason().is_some(),
+            "recursive guard should set analysis reason"
+        );
+    }
+
+    #[test]
+    fn iterative_path_handles_nested_cross_loop_cfg() {
+        // Outer header: 0x1000 (back edge from 0x1020)
+        let mut b0 = R2ILBlock::new(0x1000, 4);
+        b0.push(R2ILOp::CBranch {
+            cond: Varnode::constant(1, 1),
+            target: Varnode::constant(0x1010, 8),
+        });
+
+        // Outer exit
+        let mut b1 = R2ILBlock::new(0x1004, 4);
+        b1.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1030, 8),
+        });
+
+        // Inner header: true -> 0x1014, false(fallthrough) -> 0x1020
+        let mut b2 = R2ILBlock::new(0x1010, 0x10);
+        b2.push(R2ILOp::CBranch {
+            cond: Varnode::constant(1, 1),
+            target: Varnode::constant(0x1014, 8),
+        });
+
+        // Inner back edge
+        let mut b3 = R2ILBlock::new(0x1014, 4);
+        b3.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1010, 8),
+        });
+
+        // Cross level edge: back to outer header
+        let mut b4 = R2ILBlock::new(0x1020, 4);
+        b4.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1000, 8),
+        });
+
+        let mut b5 = R2ILBlock::new(0x1030, 4);
+        b5.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+
+        let func = SSAFunction::from_blocks(&[b0, b1, b2, b3, b4, b5]).expect("ssa function");
+        let mut analyzer = RegionAnalyzer::new(&func);
+        let region = analyzer.analyze();
+        assert!(
+            !matches!(region, Region::Irreducible { entry, .. } if entry == func.entry),
+            "iterative analyzer should produce a structured region for nested cross-loop cfg"
+        );
+        assert!(
+            analyzer.analysis_reason().is_none(),
+            "iterative analyzer should not trip safety limits on this fixture"
+        );
     }
 }

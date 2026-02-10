@@ -169,10 +169,24 @@ impl<'ctx> SymExecutor<'ctx> {
                 let a_val = self.read_var(state, a);
                 let b_val = self.read_var(state, b);
                 // Signed overflow occurs when signs of operands are same but result sign differs
-                let a_bv = a_val.to_bv(self.ctx);
-                let b_bv = b_val.to_bv(self.ctx);
+                let a_bits = a_val.bits().max(1);
+                let b_bits = b_val.bits().max(1);
+                let (a_bv, b_bv, bits) = if a_bits == b_bits {
+                    (a_val.to_bv(self.ctx), b_val.to_bv(self.ctx), a_bits)
+                } else if a_bits > b_bits {
+                    (
+                        a_val.to_bv(self.ctx),
+                        b_val.to_bv(self.ctx).sign_ext(a_bits - b_bits),
+                        a_bits,
+                    )
+                } else {
+                    (
+                        a_val.to_bv(self.ctx).sign_ext(b_bits - a_bits),
+                        b_val.to_bv(self.ctx),
+                        b_bits,
+                    )
+                };
                 let sum_bv = a_bv.bvadd(&b_bv);
-                let bits = a_val.bits();
                 let a_sign = a_bv.extract(bits - 1, bits - 1);
                 let b_sign = b_bv.extract(bits - 1, bits - 1);
                 let sum_sign = sum_bv.extract(bits - 1, bits - 1);
@@ -190,10 +204,24 @@ impl<'ctx> SymExecutor<'ctx> {
                 // Signed borrow
                 let a_val = self.read_var(state, a);
                 let b_val = self.read_var(state, b);
-                let a_bv = a_val.to_bv(self.ctx);
-                let b_bv = b_val.to_bv(self.ctx);
+                let a_bits = a_val.bits().max(1);
+                let b_bits = b_val.bits().max(1);
+                let (a_bv, b_bv, bits) = if a_bits == b_bits {
+                    (a_val.to_bv(self.ctx), b_val.to_bv(self.ctx), a_bits)
+                } else if a_bits > b_bits {
+                    (
+                        a_val.to_bv(self.ctx),
+                        b_val.to_bv(self.ctx).sign_ext(a_bits - b_bits),
+                        a_bits,
+                    )
+                } else {
+                    (
+                        a_val.to_bv(self.ctx).sign_ext(b_bits - a_bits),
+                        b_val.to_bv(self.ctx),
+                        b_bits,
+                    )
+                };
                 let diff_bv = a_bv.bvsub(&b_bv);
-                let bits = a_val.bits();
                 let a_sign = a_bv.extract(bits - 1, bits - 1);
                 let b_sign = b_bv.extract(bits - 1, bits - 1);
                 let diff_sign = diff_bv.extract(bits - 1, bits - 1);
@@ -385,9 +413,22 @@ impl<'ctx> SymExecutor<'ctx> {
 
             Subpiece { dst, src, offset } => {
                 let val = self.read_var(state, src);
-                let low = *offset * 8;
-                let high = low + (dst.size * 8) - 1;
-                let result = val.extract(self.ctx, high, low);
+                let low = offset.saturating_mul(8);
+                let dst_bits = dst.size.saturating_mul(8).max(8);
+                let src_bits = val.bits().max(1);
+                let result = if low >= src_bits {
+                    SymValue::unknown(dst_bits)
+                } else {
+                    let high = low
+                        .saturating_add(dst_bits.saturating_sub(1))
+                        .min(src_bits.saturating_sub(1));
+                    let extracted = val.extract(self.ctx, high, low);
+                    if extracted.bits() < dst_bits {
+                        extracted.zero_extend(self.ctx, dst_bits)
+                    } else {
+                        extracted
+                    }
+                };
                 self.write_var(state, dst, result);
                 Ok(vec![])
             }
@@ -614,7 +655,7 @@ impl<'ctx> SymExecutor<'ctx> {
 
             Cast { dst, src } => {
                 let val = self.read_var(state, src);
-                let dst_bits = dst.size * 8;
+                let dst_bits = dst.size.saturating_mul(8).max(1);
                 let result = if dst_bits > val.bits() {
                     val.zero_extend(self.ctx, dst_bits)
                 } else if dst_bits < val.bits() {
@@ -631,8 +672,21 @@ impl<'ctx> SymExecutor<'ctx> {
                 let pos = self.read_var(state, position);
                 if let Some(p) = pos.as_concrete() {
                     let low = p as u32;
-                    let high = low + (dst.size * 8) - 1;
-                    let result = val.extract(self.ctx, high, low);
+                    let dst_bits = dst.size.saturating_mul(8).max(1);
+                    let src_bits = val.bits().max(1);
+                    let result = if low >= src_bits {
+                        SymValue::unknown(dst_bits)
+                    } else {
+                        let high = low
+                            .saturating_add(dst_bits.saturating_sub(1))
+                            .min(src_bits.saturating_sub(1));
+                        let extracted = val.extract(self.ctx, high, low);
+                        if extracted.bits() < dst_bits {
+                            extracted.zero_extend(self.ctx, dst_bits)
+                        } else {
+                            extracted
+                        }
+                    };
                     self.write_var(state, dst, result);
                 } else {
                     // Symbolic position - return symbolic
