@@ -14,37 +14,14 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Pin radare2 git branch/tag — use 'master' for latest or a tag like '5.9.8'
-  R2_BRANCH: master
-
 jobs:
-  # ── Preflight: install deps + verify toolchain ─────────────────────
+  # ── Preflight: verify pre-installed toolchain ──────────────────────
+  # All deps (Rust, radare2, gcc, clang, z3) are pre-installed on the
+  # self-hosted runner.  See scripts/setup-runner.sh to bootstrap.
   preflight:
     name: Preflight
     runs-on: self-hosted
     steps:
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            build-essential gcc g++ make pkg-config \
-            clang libclang-dev \
-            libz3-dev \
-            curl git wget 2>/dev/null
-
-      - name: Install radare2 from git
-        run: |
-          if command -v r2 &>/dev/null; then
-            echo "radare2 already installed: $(r2 -v 2>&1 | head -1)"
-          else
-            echo "Building radare2 from git (branch: $R2_BRANCH)..."
-            git clone --depth=1 --branch "$R2_BRANCH" https://github.com/radareorg/radare2 /tmp/radare2
-            cd /tmp/radare2
-            sys/install.sh /usr
-            cd /
-            rm -rf /tmp/radare2
-          fi
-
       - name: Setup Rust PATH
         run: |
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
@@ -54,7 +31,7 @@ jobs:
             fi
           done
           if ! command -v cargo &>/dev/null; then
-            echo "::error::cargo not found. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0 --profile minimal"
+            echo "::error::cargo not found. See scripts/setup-runner.sh"
             exit 1
           fi
 
@@ -63,7 +40,6 @@ jobs:
           echo "rustc:      $(rustc --version)"
           echo "cargo:      $(cargo --version)"
           echo "gcc:        $(gcc --version | head -1)"
-          echo "clang:      $(clang --version | head -1)"
           echo "r2:         $(r2 -v 2>&1 | head -1)"
           echo "r_anal:     $(pkg-config --modversion r_anal 2>/dev/null || echo 'not found')"
 
