@@ -5,8 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::Direction;
+use petgraph::graph::{DiGraph, NodeIndex};
 use r2il::{R2ILBlock, R2ILOp};
 use serde::{Deserialize, Serialize};
 
@@ -300,9 +300,10 @@ impl CFG {
             BlockTerminator::Call { fallthrough, .. }
             | BlockTerminator::IndirectCall { fallthrough } => {
                 if let Some(ft) = fallthrough
-                    && let Some(&ft_idx) = self.addr_to_node.get(&ft) {
-                        self.graph.add_edge(node_idx, ft_idx, CFGEdge::Normal);
-                    }
+                    && let Some(&ft_idx) = self.addr_to_node.get(&ft)
+                {
+                    self.graph.add_edge(node_idx, ft_idx, CFGEdge::Normal);
+                }
             }
             BlockTerminator::Switch { ref cases, default } => {
                 // Add edges for each switch case
@@ -313,9 +314,10 @@ impl CFG {
                 }
                 // Add edge for default case
                 if let Some(def) = default
-                    && let Some(&def_idx) = self.addr_to_node.get(&def) {
-                        self.graph.add_edge(node_idx, def_idx, CFGEdge::Normal);
-                    }
+                    && let Some(&def_idx) = self.addr_to_node.get(&def)
+                {
+                    self.graph.add_edge(node_idx, def_idx, CFGEdge::Normal);
+                }
             }
             BlockTerminator::IndirectBranch | BlockTerminator::Return | BlockTerminator::None => {
                 // No edges to add

@@ -217,9 +217,9 @@ fn find_register_key<'ctx>(state: &SymState<'ctx>, base: &str) -> Option<String>
                 && best
                     .as_ref()
                     .is_none_or(|(best_version, _)| version > *best_version)
-                {
-                    best = Some((version, key.clone()));
-                }
+            {
+                best = Some((version, key.clone()));
+            }
         } else if key.eq_ignore_ascii_case(base) {
             return Some(key.clone());
         }
@@ -270,7 +270,8 @@ impl<'ctx> FunctionSummary<'ctx> for MemcpySummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let dst = call
-            .args.first()
+            .args
+            .first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let src = call
@@ -311,7 +312,8 @@ impl<'ctx> FunctionSummary<'ctx> for StrlenSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let arg = call
-            .args.first()
+            .args
+            .first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let mem_taint = if arg.as_concrete().is_some() {
@@ -349,7 +351,8 @@ impl<'ctx> FunctionSummary<'ctx> for StrcmpSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let a = call
-            .args.first()
+            .args
+            .first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let b = call
@@ -404,7 +407,8 @@ impl<'ctx> FunctionSummary<'ctx> for MemcmpSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let a = call
-            .args.first()
+            .args
+            .first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let b = call
@@ -468,7 +472,8 @@ impl<'ctx> FunctionSummary<'ctx> for MemsetSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let dst = call
-            .args.first()
+            .args
+            .first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let c = call
@@ -510,7 +515,8 @@ impl<'ctx> FunctionSummary<'ctx> for PutsSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let s = call
-            .args.first()
+            .args
+            .first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let mem_taint = if s.as_concrete().is_some() {
@@ -549,7 +555,8 @@ impl<'ctx> FunctionSummary<'ctx> for PrintfSummaryBasic {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let fmt = call
-            .args.first()
+            .args
+            .first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let mem_taint = if fmt.as_concrete().is_some() {
@@ -587,7 +594,8 @@ impl<'ctx> FunctionSummary<'ctx> for MallocSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let size = call
-            .args.first()
+            .args
+            .first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let taint = size.get_taint();
@@ -645,7 +653,8 @@ impl<'ctx> FunctionSummary<'ctx> for ExitSummary {
 
     fn execute(&self, _state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let code = call
-            .args.first()
+            .args
+            .first()
             .and_then(|val| val.as_concrete())
             .unwrap_or(0);
         SummaryEffect::Terminate(ExitStatus::Exit(code))

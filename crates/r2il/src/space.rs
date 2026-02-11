@@ -5,8 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Identifier for an address space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SpaceId {
     /// Main memory (RAM)
     #[default]
@@ -42,7 +41,6 @@ impl SpaceId {
         matches!(self, SpaceId::Unique)
     }
 }
-
 
 impl std::fmt::Display for SpaceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

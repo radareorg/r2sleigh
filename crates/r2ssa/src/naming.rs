@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use r2il::{select_register_name, ArchSpec, SpaceId, Varnode};
+use r2il::{ArchSpec, SpaceId, Varnode, select_register_name};
 
 pub type RegisterNameMap = HashMap<(u64, u32), String>;
 
@@ -30,9 +30,10 @@ pub fn varnode_to_name(vn: &Varnode, reg_names: Option<&RegisterNameMap>) -> Str
     match vn.space {
         SpaceId::Register => {
             if let Some(map) = reg_names
-                && let Some(name) = map.get(&(vn.offset, vn.size)) {
-                    return name.clone();
-                }
+                && let Some(name) = map.get(&(vn.offset, vn.size))
+            {
+                return name.clone();
+            }
             format!("reg:{:x}", vn.offset)
         }
         SpaceId::Unique => format!("tmp:{:x}", vn.offset),

@@ -611,10 +611,9 @@ pub fn op_to_esil_named(disasm: &Disassembler, op: &R2ILOp) -> String {
 }
 
 fn callother_userop_label(disasm: &Disassembler, userop: u32, include_name: bool) -> String {
-    if include_name
-        && let Some(name) = disasm.userop_name(userop) {
-            return format!("{}:{}", userop, name);
-        }
+    if include_name && let Some(name) = disasm.userop_name(userop) {
+        return format!("{}:{}", userop, name);
+    }
     userop.to_string()
 }
 

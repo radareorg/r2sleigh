@@ -189,21 +189,22 @@ impl VariableRecovery {
             // If this block has a return and we found a return register assignment
             if has_return
                 && let Some(ret_var) = last_ret_var
-                    && !self.vars.contains_key(&ret_var) {
-                        let name = self.make_unique_var_name("result".to_string());
-                        let ty = self.type_from_size(ret_var.size);
-                        self.vars.insert(
-                            ret_var.clone(),
-                            VarInfo {
-                                ssa_var: ret_var,
-                                name,
-                                ty,
-                                is_param: false,
-                                is_local: false,
-                                stack_offset: None,
-                            },
-                        );
-                    }
+                && !self.vars.contains_key(&ret_var)
+            {
+                let name = self.make_unique_var_name("result".to_string());
+                let ty = self.type_from_size(ret_var.size);
+                self.vars.insert(
+                    ret_var.clone(),
+                    VarInfo {
+                        ssa_var: ret_var,
+                        name,
+                        ty,
+                        is_param: false,
+                        is_local: false,
+                        stack_offset: None,
+                    },
+                );
+            }
         }
     }
 
@@ -474,21 +475,22 @@ impl VariableRecovery {
         for block in func.blocks() {
             for op in &block.ops {
                 if let Some(dst) = op.dst()
-                    && !self.vars.contains_key(dst) {
-                        let name = self.gen_var_name(dst);
-                        let ty = self.type_from_size(dst.size);
-                        self.vars.insert(
-                            dst.clone(),
-                            VarInfo {
-                                ssa_var: dst.clone(),
-                                name,
-                                ty,
-                                is_param: false,
-                                is_local: false,
-                                stack_offset: None,
-                            },
-                        );
-                    }
+                    && !self.vars.contains_key(dst)
+                {
+                    let name = self.gen_var_name(dst);
+                    let ty = self.type_from_size(dst.size);
+                    self.vars.insert(
+                        dst.clone(),
+                        VarInfo {
+                            ssa_var: dst.clone(),
+                            name,
+                            ty,
+                            is_param: false,
+                            is_local: false,
+                            stack_offset: None,
+                        },
+                    );
+                }
             }
         }
     }

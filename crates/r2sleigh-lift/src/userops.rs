@@ -158,9 +158,10 @@ pub fn userop_map_for_arch(arch: &str) -> HashMap<u32, String> {
 
     // Check cache first (quick path with short lock hold)
     if let Ok(guard) = cache.lock()
-        && let Some(found) = guard.get(&key) {
-            return found.clone();
-        }
+        && let Some(found) = guard.get(&key)
+    {
+        return found.clone();
+    }
 
     // Build outside lock - this may do file I/O which can be slow.
     // We don't want to block other threads waiting for the cache.

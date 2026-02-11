@@ -382,15 +382,16 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         worklist: &mut VecDeque<SSAVar>,
     ) {
         if let Some(block) = self.func.get_block(block_addr)
-            && let Some(phi) = block.phis.get(phi_idx) {
-                let dst_key = phi.dst.display_name();
-                let dst_taint = var_taints.entry(dst_key).or_default();
-                let old_size = dst_taint.len();
-                dst_taint.extend(current_taint.clone());
-                if dst_taint.len() > old_size {
-                    worklist.push_back(phi.dst.clone());
-                }
+            && let Some(phi) = block.phis.get(phi_idx)
+        {
+            let dst_key = phi.dst.display_name();
+            let dst_taint = var_taints.entry(dst_key).or_default();
+            let old_size = dst_taint.len();
+            dst_taint.extend(current_taint.clone());
+            if dst_taint.len() > old_size {
+                worklist.push_back(phi.dst.clone());
             }
+        }
     }
 
     /// Propagate taint through an operation.
@@ -403,39 +404,39 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         worklist: &mut VecDeque<SSAVar>,
     ) {
         if let Some(block) = self.func.get_block(block_addr)
-            && let Some(op) = block.ops.get(op_idx) {
-                // Check sanitizer
-                if self.policy.is_sanitizer(op) {
-                    return;
-                }
+            && let Some(op) = block.ops.get(op_idx)
+        {
+            // Check sanitizer
+            if self.policy.is_sanitizer(op) {
+                return;
+            }
 
-                // Propagate to destination
-                if let Some(dst) = op.dst() {
-                    // Collect all source taints for custom propagation
-                    let source_taints: Vec<&TaintSet> = op
-                        .sources()
-                        .iter()
-                        .filter_map(|src| var_taints.get(&src.display_name()))
-                        .collect();
+            // Propagate to destination
+            if let Some(dst) = op.dst() {
+                // Collect all source taints for custom propagation
+                let source_taints: Vec<&TaintSet> = op
+                    .sources()
+                    .iter()
+                    .filter_map(|src| var_taints.get(&src.display_name()))
+                    .collect();
 
-                    // Try custom propagation rule first
-                    let new_taint = if let Some(custom) = self.policy.propagate(op, &source_taints)
-                    {
-                        custom
-                    } else {
-                        // Default: union of incoming taint
-                        current_taint.clone()
-                    };
+                // Try custom propagation rule first
+                let new_taint = if let Some(custom) = self.policy.propagate(op, &source_taints) {
+                    custom
+                } else {
+                    // Default: union of incoming taint
+                    current_taint.clone()
+                };
 
-                    let dst_key = dst.display_name();
-                    let dst_taint = var_taints.entry(dst_key).or_default();
-                    let old_size = dst_taint.len();
-                    dst_taint.extend(new_taint);
-                    if dst_taint.len() > old_size {
-                        worklist.push_back(dst.clone());
-                    }
+                let dst_key = dst.display_name();
+                let dst_taint = var_taints.entry(dst_key).or_default();
+                let old_size = dst_taint.len();
+                dst_taint.extend(new_taint);
+                if dst_taint.len() > old_size {
+                    worklist.push_back(dst.clone());
                 }
             }
+        }
     }
 
     /// Find all sink hits.
@@ -449,9 +450,10 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                     for src in self.sink_sources_for_op(block, op_idx, op) {
                         let key = src.display_name();
                         if let Some(taint) = var_taints.get(&key)
-                            && !taint.is_empty() {
-                                tainted_vars.push((src, taint.clone()));
-                            }
+                            && !taint.is_empty()
+                        {
+                            tainted_vars.push((src, taint.clone()));
+                        }
                     }
                     if !tainted_vars.is_empty() {
                         sink_hits.push(SinkHit {

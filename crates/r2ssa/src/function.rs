@@ -9,12 +9,12 @@ use std::collections::HashMap;
 use r2il::{ArchSpec, R2ILBlock};
 use serde::{Deserialize, Serialize};
 
-use crate::cfg::{CFGEdge, CFG};
-use crate::defuse::{backward_slice_from_op, backward_slice_from_var, BackwardSlice, SliceOpRef};
+use crate::cfg::{CFG, CFGEdge};
+use crate::defuse::{BackwardSlice, SliceOpRef, backward_slice_from_op, backward_slice_from_var};
 use crate::domtree::DomTree;
 use crate::naming::build_register_name_map;
 use crate::op::SSAOp;
-use crate::phi::{collect_defs_from_cfg_with_names, PhiPlacement};
+use crate::phi::{PhiPlacement, collect_defs_from_cfg_with_names};
 use crate::rename::rename_function_with_names;
 use crate::var::SSAVar;
 

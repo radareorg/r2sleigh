@@ -813,38 +813,40 @@ fn apply_sccp_results(
 
         for (op_idx, op) in block.ops.iter().enumerate() {
             if let SSAOp::CBranch { cond, .. } = op
-                && let Some(value) = const_value(cond) {
-                    let take_true = value != 0;
-                    let (keep_target, dead_target) = if take_true {
-                        (*true_target, *false_target)
-                    } else {
-                        (*false_target, *true_target)
-                    };
-                    rewrites.push(BranchRewrite {
-                        block_addr: addr,
-                        op_idx,
-                        keep_target,
-                        dead_target,
-                        take_true,
-                    });
-                    break;
-                }
+                && let Some(value) = const_value(cond)
+            {
+                let take_true = value != 0;
+                let (keep_target, dead_target) = if take_true {
+                    (*true_target, *false_target)
+                } else {
+                    (*false_target, *true_target)
+                };
+                rewrites.push(BranchRewrite {
+                    block_addr: addr,
+                    op_idx,
+                    keep_target,
+                    dead_target,
+                    take_true,
+                });
+                break;
+            }
         }
     }
 
     for rw in rewrites {
         if let Some(block) = func.get_block_mut(rw.block_addr)
-            && let Some(op) = block.ops.get_mut(rw.op_idx) {
-                if rw.take_true {
-                    if let SSAOp::CBranch { target, .. } = op {
-                        *op = SSAOp::Branch {
-                            target: target.clone(),
-                        };
-                    }
-                } else {
-                    *op = SSAOp::Nop;
+            && let Some(op) = block.ops.get_mut(rw.op_idx)
+        {
+            if rw.take_true {
+                if let SSAOp::CBranch { target, .. } = op {
+                    *op = SSAOp::Branch {
+                        target: target.clone(),
+                    };
                 }
+            } else {
+                *op = SSAOp::Nop;
             }
+        }
 
         func.cfg_mut().remove_edge(rw.block_addr, rw.dead_target);
         func.cfg_mut().set_terminator(
@@ -928,11 +930,12 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         };
         for op in &mut block.ops {
             if let Some(new_op) = simplify_op(op)
-                && &new_op != op {
-                    *op = new_op;
-                    stats.ops_simplified += 1;
-                    changed = true;
-                }
+                && &new_op != op
+            {
+                *op = new_op;
+                stats.ops_simplified += 1;
+                changed = true;
+            }
         }
     }
 
@@ -1210,9 +1213,11 @@ fn build_copy_replacements(
 
         for op in &block.ops {
             if let SSAOp::Copy { dst, src } = op
-                && dst.size == src.size && dst != src {
-                    replacements.insert(VarKey::from_var(dst), src.clone());
-                }
+                && dst.size == src.size
+                && dst != src
+            {
+                replacements.insert(VarKey::from_var(dst), src.clone());
+            }
         }
     }
 

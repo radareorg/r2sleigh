@@ -186,15 +186,17 @@ impl<'ctx> SymMemory<'ctx> {
                 let write_end = wa.checked_add(*write_size as u64);
                 let read_end = concrete_addr.checked_add(size as u64);
                 if let (Some(write_end), Some(read_end)) = (write_end, read_end)
-                    && wa <= concrete_addr && write_end >= read_end {
-                        let offset = concrete_addr - wa;
-                        if offset == 0 && *write_size == size {
-                            return write_val.clone();
-                        }
-                        let low_bit = (offset * 8) as u32;
-                        let high_bit = low_bit + (size * 8) - 1;
-                        return write_val.extract(self.ctx, high_bit, low_bit);
+                    && wa <= concrete_addr
+                    && write_end >= read_end
+                {
+                    let offset = concrete_addr - wa;
+                    if offset == 0 && *write_size == size {
+                        return write_val.clone();
                     }
+                    let low_bit = (offset * 8) as u32;
+                    let high_bit = low_bit + (size * 8) - 1;
+                    return write_val.extract(self.ctx, high_bit, low_bit);
+                }
             }
         }
 

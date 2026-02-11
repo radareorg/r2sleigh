@@ -372,9 +372,10 @@ impl<'a> FoldingContext<'a> {
                     if let SSAOp::Branch { target } = op {
                         // Extract address from the target variable (e.g., "ram:401256_0")
                         if let Some(addr) = self.extract_branch_target_address(target)
-                            && addr == exit_addr {
-                                self.return_blocks.insert(block.addr);
-                            }
+                            && addr == exit_addr
+                        {
+                            self.return_blocks.insert(block.addr);
+                        }
                     }
                 }
             }
@@ -997,9 +998,10 @@ impl<'a> FoldingContext<'a> {
         // Eliminate explicit zeroing idioms when the value is never used
         // beyond setup/flag chains (e.g., eax = eax ^ eax).
         if let Some(expr) = self.definitions_map().get(&key)
-            && self.is_zeroing_expr(expr) {
-                return true;
-            }
+            && self.is_zeroing_expr(expr)
+        {
+            return true;
+        }
 
         // Keep other named registers alive (e.g., callee-saved like rbx, r12-r15)
         // as they might be meaningful outputs
@@ -1170,23 +1172,25 @@ impl<'a> FoldingContext<'a> {
 
         // Resolve ram:address references to known names
         if var.name.starts_with("ram:")
-            && let Some(addr) = extract_call_address(&var.name) {
-                if let Some(name) = self.lookup_function(addr) {
-                    return CExpr::Var(name.clone());
-                }
-                if let Some(s) = self.lookup_string(addr) {
-                    return CExpr::StringLit(s.clone());
-                }
-                if let Some(s) = self.lookup_symbol(addr) {
-                    return CExpr::Var(s.clone());
-                }
+            && let Some(addr) = extract_call_address(&var.name)
+        {
+            if let Some(name) = self.lookup_function(addr) {
+                return CExpr::Var(name.clone());
             }
+            if let Some(s) = self.lookup_string(addr) {
+                return CExpr::StringLit(s.clone());
+            }
+            if let Some(s) = self.lookup_symbol(addr) {
+                return CExpr::Var(s.clone());
+            }
+        }
 
         // Try to inline if appropriate
         if self.should_inline(&key)
-            && let Some(expr) = self.definitions_map().get(&key) {
-                return expr.clone();
-            }
+            && let Some(expr) = self.definitions_map().get(&key)
+        {
+            return expr.clone();
+        }
 
         // Otherwise return a variable reference
         CExpr::Var(self.var_name(var))
@@ -1322,14 +1326,15 @@ impl<'a> FoldingContext<'a> {
                 if let Some(inner) = self
                     .lookup_definition(name)
                     .or_else(|| self.formatted_defs_map().get(name).cloned())
-                    && let CExpr::Var(inner_name) = inner {
-                        if inner_name.starts_with("arg") {
-                            return CExpr::Var(inner_name);
-                        }
-                        if let Some(alias) = self.arg_alias_for_rendered_name(&inner_name) {
-                            return CExpr::Var(alias);
-                        }
+                    && let CExpr::Var(inner_name) = inner
+                {
+                    if inner_name.starts_with("arg") {
+                        return CExpr::Var(inner_name);
                     }
+                    if let Some(alias) = self.arg_alias_for_rendered_name(&inner_name) {
+                        return CExpr::Var(alias);
+                    }
+                }
 
                 if !self.should_inline_in_return(name, depth) || !visited.insert(name.clone()) {
                     return CExpr::Var(name.clone());
@@ -1499,17 +1504,18 @@ impl<'a> FoldingContext<'a> {
             SSAOp::Load { addr, .. } => {
                 // Try to resolve ram: address to a global symbol directly
                 if addr.name.starts_with("ram:")
-                    && let Some(address) = extract_call_address(&addr.name) {
-                        if let Some(sym) = self.lookup_symbol(address) {
-                            return CExpr::Var(sym.clone());
-                        }
-                        if let Some(name) = self.lookup_function(address) {
-                            return CExpr::Var(name.clone());
-                        }
-                        if let Some(s) = self.lookup_string(address) {
-                            return CExpr::StringLit(s.clone());
-                        }
+                    && let Some(address) = extract_call_address(&addr.name)
+                {
+                    if let Some(sym) = self.lookup_symbol(address) {
+                        return CExpr::Var(sym.clone());
                     }
+                    if let Some(name) = self.lookup_function(address) {
+                        return CExpr::Var(name.clone());
+                    }
+                    if let Some(s) = self.lookup_string(address) {
+                        return CExpr::StringLit(s.clone());
+                    }
+                }
                 if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
                     return CExpr::Var(stack_var);
                 }
@@ -2311,17 +2317,18 @@ impl<'a> FoldingContext<'a> {
                     }
                     _ => {
                         if let Some(dst) = op.dst()
-                            && self.is_return_register_name(&dst.name.to_lowercase()) {
-                                let mut visited = HashSet::new();
-                                let raw = self.op_to_expr(op);
-                                let expanded = self.expand_return_expr(&raw, 0, &mut visited);
-                                let final_expr = if self.is_predicate_like_expr(&expanded) {
-                                    self.simplify_condition_expr(expanded)
-                                } else {
-                                    expanded
-                                };
-                                last_ret_value = Some(final_expr);
-                            }
+                            && self.is_return_register_name(&dst.name.to_lowercase())
+                        {
+                            let mut visited = HashSet::new();
+                            let raw = self.op_to_expr(op);
+                            let expanded = self.expand_return_expr(&raw, 0, &mut visited);
+                            let final_expr = if self.is_predicate_like_expr(&expanded) {
+                                self.simplify_condition_expr(expanded)
+                            } else {
+                                expanded
+                            };
+                            last_ret_value = Some(final_expr);
+                        }
                     }
                 }
             }
@@ -2347,9 +2354,10 @@ impl<'a> FoldingContext<'a> {
             // Emit a single high-level return at the SSA Return terminator.
             if self.is_current_return_block()
                 && let Some(dst) = op.dst()
-                    && self.is_return_register_name(&dst.name.to_lowercase()) {
-                        continue;
-                    }
+                && self.is_return_register_name(&dst.name.to_lowercase())
+            {
+                continue;
+            }
 
             // Skip operations that produce dead values
             if let Some(dst) = op.dst() {
@@ -2698,14 +2706,15 @@ impl<'a> FoldingContext<'a> {
                 return CExpr::Var(name.clone());
             }
         } else if target.is_const()
-            && let Some(addr) = parse_const_value(&target.name) {
-                if let Some(name) = self.lookup_function(addr) {
-                    return CExpr::Var(name.clone());
-                }
-                if let Some(name) = self.lookup_symbol(addr) {
-                    return CExpr::Var(name.clone());
-                }
+            && let Some(addr) = parse_const_value(&target.name)
+        {
+            if let Some(name) = self.lookup_function(addr) {
+                return CExpr::Var(name.clone());
             }
+            if let Some(name) = self.lookup_symbol(addr) {
+                return CExpr::Var(name.clone());
+            }
+        }
         self.get_expr(target)
     }
 
@@ -2747,16 +2756,10 @@ impl<'a> FoldingContext<'a> {
                     if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                         CExpr::Var(stack_var)
                     } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
-                        self.ptr_subscript_expr(
-                            &ptr.base,
-                            &ptr.index,
-                            ptr.element_size,
-                            ptr.is_sub,
-                        )
+                        self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                         sub
-                    } else if let Some(member) =
-                        self.try_member_access_from_expr(addr, &addr_expr)
+                    } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr)
                     {
                         member
                     } else {
@@ -2788,16 +2791,10 @@ impl<'a> FoldingContext<'a> {
                     if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                         CExpr::Var(stack_var)
                     } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
-                        self.ptr_subscript_expr(
-                            &ptr.base,
-                            &ptr.index,
-                            ptr.element_size,
-                            ptr.is_sub,
-                        )
+                        self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                         sub
-                    } else if let Some(member) =
-                        self.try_member_access_from_expr(addr, &addr_expr)
+                    } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr)
                     {
                         member
                     } else {
@@ -3313,9 +3310,10 @@ impl<'a> FoldingContext<'a> {
                 right,
             } => {
                 if self.is_zero_expr(right.as_ref())
-                    && let Some(base) = self.strip_sub_zero(left.as_ref()) {
-                        return CExpr::binary(BinaryOp::Lt, base, CExpr::IntLit(0));
-                    }
+                    && let Some(base) = self.strip_sub_zero(left.as_ref())
+                {
+                    return CExpr::binary(BinaryOp::Lt, base, CExpr::IntLit(0));
+                }
                 CExpr::binary(BinaryOp::Lt, *left, *right)
             }
             CExpr::Var(name) => {
@@ -3498,14 +3496,15 @@ impl<'a> FoldingContext<'a> {
                 if let Some(inner) = self
                     .lookup_definition(name)
                     .or_else(|| self.formatted_defs_map().get(name).cloned())
-                    && let CExpr::Var(inner_name) = inner {
-                        if inner_name.starts_with("arg") {
-                            return CExpr::Var(inner_name);
-                        }
-                        if let Some(alias) = self.arg_alias_for_rendered_name(&inner_name) {
-                            return CExpr::Var(alias);
-                        }
+                    && let CExpr::Var(inner_name) = inner
+                {
+                    if inner_name.starts_with("arg") {
+                        return CExpr::Var(inner_name);
                     }
+                    if let Some(alias) = self.arg_alias_for_rendered_name(&inner_name) {
+                        return CExpr::Var(alias);
+                    }
+                }
                 if !self.should_expand_predicate_var(name) || !visited.insert(name.clone()) {
                     return CExpr::Var(name.clone());
                 }
@@ -3570,14 +3569,16 @@ impl<'a> FoldingContext<'a> {
 
                 // Try !ZF && (OF == SF) -> a > b (signed)
                 if let (Some(zf_name), true) = (self.extract_not_zf(left), self.is_of_eq_sf(right))
-                    && let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
-                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
-                    }
+                    && let Some((a, b)) = self.lookup_flag_origin(&zf_name)
+                {
+                    return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                }
                 // Try reversed: (OF == SF) && !ZF
                 if let (Some(zf_name), true) = (self.extract_not_zf(right), self.is_of_eq_sf(left))
-                    && let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
-                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
-                    }
+                    && let Some((a, b)) = self.lookup_flag_origin(&zf_name)
+                {
+                    return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                }
 
                 // Try !CF && !ZF -> a > b (unsigned, JA)
                 if let (Some(cf_name), Some(zf_name)) =
@@ -3643,14 +3644,16 @@ impl<'a> FoldingContext<'a> {
 
                 // Try ZF || (OF != SF) -> a <= b (signed, JLE)
                 if let (Some(zf_name), true) = (self.extract_zf(left), self.is_of_ne_sf(right))
-                    && let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
-                        return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
-                    }
+                    && let Some((a, b)) = self.lookup_flag_origin(&zf_name)
+                {
+                    return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
+                }
                 // Try reversed
                 if let (Some(zf_name), true) = (self.extract_zf(right), self.is_of_ne_sf(left))
-                    && let Some((a, b)) = self.lookup_flag_origin(&zf_name) {
-                        return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
-                    }
+                    && let Some((a, b)) = self.lookup_flag_origin(&zf_name)
+                {
+                    return Some(CExpr::binary(BinaryOp::Le, CExpr::Var(a), CExpr::Var(b)));
+                }
 
                 None
             }
@@ -3771,13 +3774,14 @@ impl<'a> FoldingContext<'a> {
                     }
                     // !CF means a >= b (unsigned, JAE)
                     if flag_lower.contains("cf")
-                        && let Some((left, right)) = self.lookup_flag_origin(flag_name) {
-                            return Some(CExpr::binary(
-                                BinaryOp::Ge,
-                                CExpr::Var(left),
-                                CExpr::Var(right),
-                            ));
-                        }
+                        && let Some((left, right)) = self.lookup_flag_origin(flag_name)
+                    {
+                        return Some(CExpr::binary(
+                            BinaryOp::Ge,
+                            CExpr::Var(left),
+                            CExpr::Var(right),
+                        ));
+                    }
                 }
 
                 // Try !(CF || ZF) -> a > b (unsigned, JA) - negation of JBE
@@ -3789,15 +3793,17 @@ impl<'a> FoldingContext<'a> {
                 {
                     if let (Some(cf_name), Some(_zf_name)) =
                         (self.extract_cf(or_left), self.extract_zf(or_right))
-                        && let Some((a, b)) = self.lookup_flag_origin(&cf_name) {
-                            return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
-                        }
+                        && let Some((a, b)) = self.lookup_flag_origin(&cf_name)
+                    {
+                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                    }
                     // Try reversed
                     if let (Some(cf_name), Some(_zf_name)) =
                         (self.extract_cf(or_right), self.extract_zf(or_left))
-                        && let Some((a, b)) = self.lookup_flag_origin(&cf_name) {
-                            return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
-                        }
+                        && let Some((a, b)) = self.lookup_flag_origin(&cf_name)
+                    {
+                        return Some(CExpr::binary(BinaryOp::Gt, CExpr::Var(a), CExpr::Var(b)));
+                    }
                 }
 
                 // Try to recurse into the operand and negate the result
@@ -3868,22 +3874,24 @@ impl<'a> FoldingContext<'a> {
             CExpr::Var(flag_name) => {
                 let flag_lower = flag_name.to_lowercase();
                 if flag_lower.contains("zf")
-                    && let Some((left, right)) = self.lookup_flag_origin(flag_name) {
-                        return Some(CExpr::binary(
-                            BinaryOp::Eq,
-                            CExpr::Var(left),
-                            CExpr::Var(right),
-                        ));
-                    }
+                    && let Some((left, right)) = self.lookup_flag_origin(flag_name)
+                {
+                    return Some(CExpr::binary(
+                        BinaryOp::Eq,
+                        CExpr::Var(left),
+                        CExpr::Var(right),
+                    ));
+                }
                 // CF directly means a < b (unsigned, JB)
                 if flag_lower.contains("cf")
-                    && let Some((left, right)) = self.lookup_flag_origin(flag_name) {
-                        return Some(CExpr::binary(
-                            BinaryOp::Lt,
-                            CExpr::Var(left),
-                            CExpr::Var(right),
-                        ));
-                    }
+                    && let Some((left, right)) = self.lookup_flag_origin(flag_name)
+                {
+                    return Some(CExpr::binary(
+                        BinaryOp::Lt,
+                        CExpr::Var(left),
+                        CExpr::Var(right),
+                    ));
+                }
                 None
             }
 
@@ -3968,9 +3976,10 @@ impl<'a> FoldingContext<'a> {
             if let Some(CExpr::Var(inner)) = self
                 .lookup_definition(name)
                 .or_else(|| self.formatted_defs_map().get(name).cloned())
-                && inner.to_lowercase().contains(flag) {
-                    return Some(inner);
-                }
+                && inner.to_lowercase().contains(flag)
+            {
+                return Some(inner);
+            }
         }
         None
     }
@@ -4284,13 +4293,14 @@ impl<'a> FoldingContext<'a> {
         }
 
         if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X"))
-            && let Ok(val) = u64::from_str_radix(hex, 16) {
-                return Some(if val > 0x7fffffff {
-                    CExpr::UIntLit(val)
-                } else {
-                    CExpr::IntLit(val as i64)
-                });
-            }
+            && let Ok(val) = u64::from_str_radix(hex, 16)
+        {
+            return Some(if val > 0x7fffffff {
+                CExpr::UIntLit(val)
+            } else {
+                CExpr::IntLit(val as i64)
+            });
+        }
 
         if let Ok(dec) = name.parse::<i64>() {
             return Some(CExpr::IntLit(dec));

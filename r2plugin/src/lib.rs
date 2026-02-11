@@ -294,10 +294,9 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
             if a2.is_none() {
                 a2 = Some(&reg.name);
             }
-        } else if (name_lower == "rcx" || name_lower == "a3")
-            && a3.is_none() {
-                a3 = Some(&reg.name);
-            }
+        } else if (name_lower == "rcx" || name_lower == "a3") && a3.is_none() {
+            a3 = Some(&reg.name);
+        }
 
         profile.push_str(&format!(
             "gpr\t{}\t.{}\t{}\t0\n",
@@ -520,20 +519,21 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
             if is_varnode {
                 let space = map.get("space").and_then(Value::as_str);
                 if let Some(space_str) = space
-                    && space_str.eq_ignore_ascii_case("register") {
-                        let offset = map.get("offset").and_then(Value::as_u64);
-                        let size = map.get("size").and_then(Value::as_u64);
-                        if let (Some(offset), Some(size)) = (offset, size) {
-                            let vn = r2il::Varnode {
-                                space: r2il::SpaceId::Register,
-                                offset,
-                                size: size as u32,
-                            };
-                            if let Some(name) = disasm.register_name(&vn) {
-                                map.insert("name".to_string(), Value::String(name));
-                            }
+                    && space_str.eq_ignore_ascii_case("register")
+                {
+                    let offset = map.get("offset").and_then(Value::as_u64);
+                    let size = map.get("size").and_then(Value::as_u64);
+                    if let (Some(offset), Some(size)) = (offset, size) {
+                        let vn = r2il::Varnode {
+                            space: r2il::SpaceId::Register,
+                            offset,
+                            size: size as u32,
+                        };
+                        if let Some(name) = disasm.register_name(&vn) {
+                            map.insert("name".to_string(), Value::String(name));
                         }
                     }
+                }
             }
 
             for value in map.values_mut() {
@@ -555,14 +555,15 @@ fn annotate_userop_names(value: &mut serde_json::Value, disasm: &Disassembler) {
     match value {
         Value::Object(map) => {
             if let Some(callother) = map.get_mut("CallOther")
-                && let Value::Object(call_map) = callother {
-                    let userop = call_map.get("userop").and_then(Value::as_u64);
-                    if let Some(userop) = userop
-                        && let Some(name) = disasm.userop_name(userop as u32) {
-                            call_map
-                                .insert("userop_name".to_string(), Value::String(name.to_string()));
-                        }
+                && let Value::Object(call_map) = callother
+            {
+                let userop = call_map.get("userop").and_then(Value::as_u64);
+                if let Some(userop) = userop
+                    && let Some(name) = disasm.userop_name(userop as u32)
+                {
+                    call_map.insert("userop_name".to_string(), Value::String(name.to_string()));
                 }
+            }
 
             for value in map.values_mut() {
                 annotate_userop_names(value, disasm);
@@ -1119,9 +1120,10 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
         // CallOther may have output
         R2ILOp::CallOther { output, .. } => {
             if let Some(out) = output
-                && out.is_register() {
-                    regs.push(out);
-                }
+                && out.is_register()
+            {
+                regs.push(out);
+            }
         }
 
         // Ops with dst field that write
@@ -1349,9 +1351,10 @@ fn varnode_to_json(vn: &Varnode, disasm: &Disassembler) -> Option<serde_json::Va
     });
 
     if vn.is_register()
-        && let Some(name) = disasm.register_name(vn) {
-            json["name"] = serde_json::Value::String(name);
-        }
+        && let Some(name) = disasm.register_name(vn)
+    {
+        json["name"] = serde_json::Value::String(name);
+    }
 
     Some(json)
 }
@@ -1463,22 +1466,25 @@ fn resolve_stack_addr_inner(
         R2ILOp::IntAdd { a, b, .. } => {
             if let Some((base, off)) =
                 resolve_stack_addr_inner(a, disasm, defs, ops, visited, depth + 1)
-                && let Some(c) = const_value(b) {
-                    return Some((base, off + c));
-                }
+                && let Some(c) = const_value(b)
+            {
+                return Some((base, off + c));
+            }
             if let Some((base, off)) =
                 resolve_stack_addr_inner(b, disasm, defs, ops, visited, depth + 1)
-                && let Some(c) = const_value(a) {
-                    return Some((base, off + c));
-                }
+                && let Some(c) = const_value(a)
+            {
+                return Some((base, off + c));
+            }
             None
         }
         R2ILOp::IntSub { a, b, .. } => {
             if let Some((base, off)) =
                 resolve_stack_addr_inner(a, disasm, defs, ops, visited, depth + 1)
-                && let Some(c) = const_value(b) {
-                    return Some((base, off - c));
-                }
+                && let Some(c) = const_value(b)
+            {
+                return Some((base, off - c));
+            }
             None
         }
         R2ILOp::PtrAdd {
@@ -1489,9 +1495,10 @@ fn resolve_stack_addr_inner(
         } => {
             if let Some((base_name, off)) =
                 resolve_stack_addr_inner(base, disasm, defs, ops, visited, depth + 1)
-                && let Some(c) = const_value(index) {
-                    return Some((base_name, off + c * (*element_size as i64)));
-                }
+                && let Some(c) = const_value(index)
+            {
+                return Some((base_name, off + c * (*element_size as i64)));
+            }
             None
         }
         R2ILOp::PtrSub {
@@ -1502,9 +1509,10 @@ fn resolve_stack_addr_inner(
         } => {
             if let Some((base_name, off)) =
                 resolve_stack_addr_inner(base, disasm, defs, ops, visited, depth + 1)
-                && let Some(c) = const_value(index) {
-                    return Some((base_name, off - c * (*element_size as i64)));
-                }
+                && let Some(c) = const_value(index)
+            {
+                return Some((base_name, off - c * (*element_size as i64)));
+            }
             None
         }
         _ => None,
@@ -2579,10 +2587,11 @@ pub extern "C" fn r2ssa_backward_slice_json(
                 // Check op destinations
                 for op in &block.ops {
                     if let Some(dst) = op.dst()
-                        && dst.display_name() == target_display_name {
-                            found = Some(dst.clone());
-                            break 'outer;
-                        }
+                        && dst.display_name() == target_display_name
+                    {
+                        found = Some(dst.clone());
+                        break 'outer;
+                    }
                 }
             }
         }
@@ -2609,9 +2618,10 @@ pub extern "C" fn r2ssa_backward_slice_json(
             } => {
                 let mut op_str = None;
                 if let Some(block) = ssa_func.get_block(*block_addr)
-                    && let Some(phi) = block.phis.get(*phi_idx) {
-                        op_str = Some(format!("{} = phi(...)", phi.dst.display_name()));
-                    }
+                    && let Some(phi) = block.phis.get(*phi_idx)
+                {
+                    op_str = Some(format!("{} = phi(...)", phi.dst.display_name()));
+                }
                 ops_json.push(SliceOpJson {
                     op_type: "phi".to_string(),
                     block: format!("0x{:x}", block_addr),
@@ -2622,9 +2632,10 @@ pub extern "C" fn r2ssa_backward_slice_json(
             r2ssa::SliceOpRef::Op { block_addr, op_idx } => {
                 let mut op_str = None;
                 if let Some(block) = ssa_func.get_block(*block_addr)
-                    && let Some(op) = block.ops.get(*op_idx) {
-                        op_str = Some(format!("{:?}", op));
-                    }
+                    && let Some(op) = block.ops.get(*op_idx)
+                {
+                    op_str = Some(format!("{:?}", op));
+                }
                 ops_json.push(SliceOpJson {
                     op_type: "op".to_string(),
                     block: format!("0x{:x}", block_addr),
@@ -3077,9 +3088,10 @@ fn install_core_summaries_for_function<'ctx>(
         }
         for op in &block.ops {
             if let R2ILOp::Call { target } = op
-                && let Some(addr) = extract_call_target(target) {
-                    targets.insert(addr);
-                }
+                && let Some(addr) = extract_call_target(target)
+            {
+                targets.insert(addr);
+            }
         }
     }
 
@@ -4647,12 +4659,10 @@ fn run_full_decompile_on_large_stack(
                     ("aarch64", _) | ("arm64", _) | ("ARM64", _) => {
                         r2dec::DecompilerConfig::aarch64()
                     }
-                    _ => {
-                        r2dec::DecompilerConfig {
-                            ptr_size: ptr_bits,
-                            ..r2dec::DecompilerConfig::default()
-                        }
-                    }
+                    _ => r2dec::DecompilerConfig {
+                        ptr_size: ptr_bits,
+                        ..r2dec::DecompilerConfig::default()
+                    },
                 }
             } else {
                 r2dec::DecompilerConfig::default()
@@ -4949,9 +4959,10 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
         let mut defs = Vec::new();
         for op in &block.ops {
             if let Some(dst) = op.dst()
-                && is_real_reg(&dst.name) {
-                    defs.push(dst.name.as_str());
-                }
+                && is_real_reg(&dst.name)
+            {
+                defs.push(dst.name.as_str());
+            }
         }
         defs.sort();
         defs.dedup();
@@ -5156,12 +5167,14 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                         }
                     }
                     // Also check if 'b' is the base register (commutative for add)
-                    else if (b_name == "rbp" || b_name == "rsp") && a_name.starts_with("const:")
-                        && let Some(raw_offset) = parse_const_value(&a.name) {
-                            let offset = raw_offset as i64;
-                            let dst_key = format!("{}_{}", dst.name.to_lowercase(), dst.version);
-                            stack_addr_temps.insert(dst_key, (b_name.clone(), offset));
-                        }
+                    else if (b_name == "rbp" || b_name == "rsp")
+                        && a_name.starts_with("const:")
+                        && let Some(raw_offset) = parse_const_value(&a.name)
+                    {
+                        let offset = raw_offset as i64;
+                        let dst_key = format!("{}_{}", dst.name.to_lowercase(), dst.version);
+                        stack_addr_temps.insert(dst_key, (b_name.clone(), offset));
+                    }
                 }
 
                 // Pattern 2: Detect Store/Load with a known stack address temp
@@ -5310,11 +5323,7 @@ fn parse_const_addr(name: &str) -> Option<u64> {
     //     * Small integer constants (loop bounds, flags, enum values)
     //     * Character literals ('/', 0x2f; ' ', 0x20; etc.)
     //     * Bitmasks (0x80, 0xff, 0x1000, etc.)
-    if addr >= 0x10000 {
-        Some(addr)
-    } else {
-        None
-    }
+    if addr >= 0x10000 { Some(addr) } else { None }
 }
 
 /// Get data references from SSA blocks.
@@ -5367,8 +5376,7 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
                 }
 
                 // IntAdd/IntSub with a const operand (e.g., base + offset)
-                r2ssa::SSAOp::IntAdd { a, b, .. }
-                | r2ssa::SSAOp::IntSub { a, b, .. } => {
+                r2ssa::SSAOp::IntAdd { a, b, .. } | r2ssa::SSAOp::IntSub { a, b, .. } => {
                     if let Some(addr) = parse_const_addr(&a.name) {
                         refs.push(DataRef {
                             from: block.addr,
@@ -5386,8 +5394,7 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
                 }
 
                 // Direct call/branch to known address
-                r2ssa::SSAOp::Call { target, .. }
-                | r2ssa::SSAOp::Branch { target } => {
+                r2ssa::SSAOp::Call { target, .. } | r2ssa::SSAOp::Branch { target } => {
                     if let Some(addr) = parse_const_addr(&target.name) {
                         refs.push(DataRef {
                             from: block.addr,
@@ -5398,8 +5405,7 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
                 }
 
                 // Indirect call/branch where the target is a known constant
-                r2ssa::SSAOp::CallInd { target, .. }
-                | r2ssa::SSAOp::BranchInd { target } => {
+                r2ssa::SSAOp::CallInd { target, .. } | r2ssa::SSAOp::BranchInd { target } => {
                     if let Some(addr) = parse_const_addr(&target.name) {
                         refs.push(DataRef {
                             from: block.addr,

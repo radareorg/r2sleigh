@@ -301,20 +301,21 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
             if is_varnode {
                 let space = map.get("space").and_then(Value::as_str);
                 if let Some(space_str) = space
-                    && space_str.eq_ignore_ascii_case("register") {
-                        let offset = map.get("offset").and_then(Value::as_u64);
-                        let size = map.get("size").and_then(Value::as_u64);
-                        if let (Some(offset), Some(size)) = (offset, size) {
-                            let vn = r2il::Varnode {
-                                space: r2il::SpaceId::Register,
-                                offset,
-                                size: size as u32,
-                            };
-                            if let Some(name) = disasm.register_name(&vn) {
-                                map.insert("name".to_string(), Value::String(name));
-                            }
+                    && space_str.eq_ignore_ascii_case("register")
+                {
+                    let offset = map.get("offset").and_then(Value::as_u64);
+                    let size = map.get("size").and_then(Value::as_u64);
+                    if let (Some(offset), Some(size)) = (offset, size) {
+                        let vn = r2il::Varnode {
+                            space: r2il::SpaceId::Register,
+                            offset,
+                            size: size as u32,
+                        };
+                        if let Some(name) = disasm.register_name(&vn) {
+                            map.insert("name".to_string(), Value::String(name));
                         }
                     }
+                }
             }
 
             for value in map.values_mut() {
@@ -337,14 +338,15 @@ fn annotate_userop_names(value: &mut serde_json::Value, disasm: &Disassembler) {
     match value {
         Value::Object(map) => {
             if let Some(callother) = map.get_mut("CallOther")
-                && let Value::Object(call_map) = callother {
-                    let userop = call_map.get("userop").and_then(Value::as_u64);
-                    if let Some(userop) = userop
-                        && let Some(name) = disasm.userop_name(userop as u32) {
-                            call_map
-                                .insert("userop_name".to_string(), Value::String(name.to_string()));
-                        }
+                && let Value::Object(call_map) = callother
+            {
+                let userop = call_map.get("userop").and_then(Value::as_u64);
+                if let Some(userop) = userop
+                    && let Some(name) = disasm.userop_name(userop as u32)
+                {
+                    call_map.insert("userop_name".to_string(), Value::String(name.to_string()));
                 }
+            }
 
             for value in map.values_mut() {
                 annotate_userop_names(value, disasm);

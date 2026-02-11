@@ -165,9 +165,10 @@ impl R2Api {
         let mut bytes = Vec::with_capacity(size);
         for i in (0..hex.len()).step_by(2) {
             if i + 2 <= hex.len()
-                && let Ok(byte) = u8::from_str_radix(&hex[i..i + 2], 16) {
-                    bytes.push(byte);
-                }
+                && let Ok(byte) = u8::from_str_radix(&hex[i..i + 2], 16)
+            {
+                bytes.push(byte);
+            }
         }
         Ok(bytes)
     }
