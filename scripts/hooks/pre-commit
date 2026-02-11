@@ -1,0 +1,44 @@
+#!/bin/bash
+# r2sleigh pre-commit hook
+# Runs cargo fmt (check) and clippy on staged Rust files.
+# Install with: ./scripts/install-hooks.sh
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No color
+
+# Only check if there are staged .rs files
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs' || true)
+if [ -z "$STAGED_RS" ]; then
+    exit 0
+fi
+
+echo -e "${YELLOW}[pre-commit]${NC} Checking staged Rust files..."
+
+# ── 1. cargo fmt ──────────────────────────────────────────────────────
+echo -n "  fmt...  "
+if ! cargo fmt --all -- --check 2>/dev/null; then
+    echo -e "${RED}FAILED${NC}"
+    echo ""
+    echo -e "${RED}Formatting issues found. Run:${NC}"
+    echo "  cargo fmt --all"
+    echo ""
+    exit 1
+fi
+echo -e "${GREEN}ok${NC}"
+
+# ── 2. cargo clippy (default features only — fast) ───────────────────
+echo -n "  clippy... "
+if ! cargo clippy --quiet --features x86 -- -D warnings 2>/dev/null; then
+    echo -e "${RED}FAILED${NC}"
+    echo ""
+    echo -e "${RED}Clippy warnings found. Fix them before committing.${NC}"
+    echo ""
+    exit 1
+fi
+echo -e "${GREEN}ok${NC}"
+
+echo -e "${GREEN}[pre-commit] All checks passed.${NC}"
