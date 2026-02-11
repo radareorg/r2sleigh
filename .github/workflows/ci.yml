@@ -22,11 +22,25 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust PATH
+      - name: Setup Rust
         run: |
+          # Try common cargo locations
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            [ -d "$p" ] && echo "$p" >> "$GITHUB_PATH"
+            if [ -d "$p" ]; then
+              echo "$p" >> "$GITHUB_PATH"
+              export PATH="$p:$PATH"
+            fi
           done
+          # Install Rust if still not found
+          if ! command -v cargo &>/dev/null; then
+            echo "::warning::cargo not found, installing via rustup..."
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            source "$HOME/.cargo/env"
+            rustup component add rustfmt clippy
+          fi
+          rustc --version
+          cargo --version
       - run: cargo fmt --all -- --check
 
   # ── Linting ─────────────────────────────────────────────────────────
@@ -39,11 +53,15 @@ jobs:
         features: [x86, arm, all-archs]
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust PATH
+      - name: Setup Rust
         run: |
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            [ -d "$p" ] && echo "$p" >> "$GITHUB_PATH"
+            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
           done
+          if ! command -v cargo &>/dev/null; then
+            source "$HOME/.cargo/env" 2>/dev/null || true
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - run: cargo clippy --features ${{ matrix.features }} -- -D warnings
 
   # ── Build ───────────────────────────────────────────────────────────
@@ -57,11 +75,15 @@ jobs:
         features: [x86, arm, all-archs]
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust PATH
+      - name: Setup Rust
         run: |
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            [ -d "$p" ] && echo "$p" >> "$GITHUB_PATH"
+            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
           done
+          if ! command -v cargo &>/dev/null; then
+            source "$HOME/.cargo/env" 2>/dev/null || true
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - name: Build workspace
         run: cargo build --features ${{ matrix.features }}
       - name: Build plugin
@@ -74,11 +96,15 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust PATH
+      - name: Setup Rust
         run: |
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            [ -d "$p" ] && echo "$p" >> "$GITHUB_PATH"
+            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
           done
+          if ! command -v cargo &>/dev/null; then
+            source "$HOME/.cargo/env" 2>/dev/null || true
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - run: cargo test --all-features
 
   # ── E2E tests ───────────────────────────────────────────────────────
@@ -88,11 +114,15 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust PATH
+      - name: Setup Rust
         run: |
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            [ -d "$p" ] && echo "$p" >> "$GITHUB_PATH"
+            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
           done
+          if ! command -v cargo &>/dev/null; then
+            source "$HOME/.cargo/env" 2>/dev/null || true
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
 
       - name: Build plugin (release)
         run: cargo build --release --features x86 -p r2sleigh-plugin
@@ -127,11 +157,15 @@ jobs:
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust PATH
+      - name: Setup Rust
         run: |
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            [ -d "$p" ] && echo "$p" >> "$GITHUB_PATH"
+            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
           done
+          if ! command -v cargo &>/dev/null; then
+            source "$HOME/.cargo/env" 2>/dev/null || true
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - name: Build release (all architectures)
         run: cargo build --release --features all-archs
       - name: Build plugin release
