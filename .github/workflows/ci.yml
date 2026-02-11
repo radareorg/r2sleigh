@@ -16,31 +16,38 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── Formatting ──────────────────────────────────────────────────────
-  fmt:
-    name: Rustfmt
+  # ── Setup check (shared prereq) ────────────────────────────────────
+  # Ensure Rust is available before running any other jobs.  The runner
+  # must have cargo pre-installed (see scripts/setup-runner.sh).
+  preflight:
+    name: Preflight
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust
+      - name: Detect Rust
         run: |
-          # Try common cargo locations
+          # Add common rustup install locations to PATH
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
             if [ -d "$p" ]; then
               echo "$p" >> "$GITHUB_PATH"
               export PATH="$p:$PATH"
             fi
           done
-          # Install Rust if still not found
           if ! command -v cargo &>/dev/null; then
-            echo "::warning::cargo not found, installing via rustup..."
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-            source "$HOME/.cargo/env"
-            rustup component add rustfmt clippy
+            echo "::error::cargo not found. Install Rust on the runner: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0 --profile minimal"
+            exit 1
           fi
-          rustc --version
-          cargo --version
+          echo "rustc: $(rustc --version)"
+          echo "cargo: $(cargo --version)"
+
+  # ── Formatting ──────────────────────────────────────────────────────
+  fmt:
+    name: Rustfmt
+    runs-on: self-hosted
+    needs: preflight
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
 
   # ── Linting ─────────────────────────────────────────────────────────
@@ -53,15 +60,8 @@ jobs:
         features: [x86, arm, all-archs]
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            source "$HOME/.cargo/env" 2>/dev/null || true
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
+      - name: Setup PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: cargo clippy --features ${{ matrix.features }} -- -D warnings
 
   # ── Build ───────────────────────────────────────────────────────────
@@ -75,15 +75,8 @@ jobs:
         features: [x86, arm, all-archs]
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            source "$HOME/.cargo/env" 2>/dev/null || true
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
+      - name: Setup PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build workspace
         run: cargo build --features ${{ matrix.features }}
       - name: Build plugin
@@ -96,15 +89,8 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            source "$HOME/.cargo/env" 2>/dev/null || true
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
+      - name: Setup PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: cargo test --all-features
 
   # ── E2E tests ───────────────────────────────────────────────────────
@@ -114,15 +100,8 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            source "$HOME/.cargo/env" 2>/dev/null || true
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
+      - name: Setup PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build plugin (release)
         run: cargo build --release --features x86 -p r2sleigh-plugin
@@ -157,15 +136,8 @@ jobs:
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Rust
-        run: |
-          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
-            if [ -d "$p" ]; then echo "$p" >> "$GITHUB_PATH"; fi
-          done
-          if ! command -v cargo &>/dev/null; then
-            source "$HOME/.cargo/env" 2>/dev/null || true
-            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          fi
+      - name: Setup PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build release (all architectures)
         run: cargo build --release --features all-archs
       - name: Build plugin release
