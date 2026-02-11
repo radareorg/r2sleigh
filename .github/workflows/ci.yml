@@ -16,16 +16,22 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── Setup check (shared prereq) ────────────────────────────────────
-  # Ensure Rust is available before running any other jobs.  The runner
-  # must have cargo pre-installed (see scripts/setup-runner.sh).
+  # ── Preflight: verify toolchain ────────────────────────────────────
   preflight:
     name: Preflight
     runs-on: self-hosted
     steps:
-      - name: Detect Rust
+      - name: Install system dependencies
         run: |
-          # Add common rustup install locations to PATH
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential gcc g++ make pkg-config \
+            clang libclang-dev \
+            libz3-dev \
+            curl git 2>/dev/null
+
+      - name: Setup Rust PATH
+        run: |
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
             if [ -d "$p" ]; then
               echo "$p" >> "$GITHUB_PATH"
@@ -33,11 +39,16 @@ jobs:
             fi
           done
           if ! command -v cargo &>/dev/null; then
-            echo "::error::cargo not found. Install Rust on the runner: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0 --profile minimal"
+            echo "::error::cargo not found. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0 --profile minimal"
             exit 1
           fi
-          echo "rustc: $(rustc --version)"
-          echo "cargo: $(cargo --version)"
+
+      - name: Print versions
+        run: |
+          echo "rustc:      $(rustc --version)"
+          echo "cargo:      $(cargo --version)"
+          echo "gcc:        $(gcc --version | head -1)"
+          echo "clang:      $(clang --version | head -1)"
 
   # ── Formatting ──────────────────────────────────────────────────────
   fmt:
@@ -52,7 +63,7 @@ jobs:
 
   # ── Linting ─────────────────────────────────────────────────────────
   clippy:
-    name: Clippy
+    name: Clippy (${{ matrix.features }})
     runs-on: self-hosted
     needs: fmt
     strategy:
@@ -62,6 +73,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Setup PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-clippy-${{ matrix.features }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            cargo-clippy-${{ matrix.features }}-
+            cargo-build-${{ matrix.features }}-
+
       - run: cargo clippy --features ${{ matrix.features }} -- -D warnings
 
   # ── Build ───────────────────────────────────────────────────────────
@@ -77,6 +101,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Setup PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-build-${{ matrix.features }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            cargo-build-${{ matrix.features }}-
+
       - name: Build workspace
         run: cargo build --features ${{ matrix.features }}
       - name: Build plugin
@@ -91,6 +127,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Setup PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            cargo-test-
+            cargo-build-all-archs-
+
       - run: cargo test --all-features
 
   # ── E2E tests ───────────────────────────────────────────────────────
@@ -102,6 +151,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: Setup PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-e2e-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            cargo-e2e-
+            cargo-build-x86-
 
       - name: Build plugin (release)
         run: cargo build --release --features x86 -p r2sleigh-plugin
@@ -138,6 +199,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Setup PATH
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-release-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: |
+            cargo-release-
+            cargo-build-all-archs-
+
       - name: Build release (all architectures)
         run: cargo build --release --features all-archs
       - name: Build plugin release
