@@ -256,17 +256,23 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
     /// Returns a `TaintResult` containing the taint state for all variables
     /// and any sink violations found.
     pub fn analyze(&self) -> TaintResult {
-        let mut var_taints: HashMap<String, TaintSet> = HashMap::new();
+        let mut var_taints: HashMap<SSAVar, TaintSet> = HashMap::new();
         let mut worklist: VecDeque<SSAVar> = VecDeque::new();
+        let use_map = self.build_use_map();
 
         // Phase 1: Initialize sources
         self.initialize_sources(&mut var_taints, &mut worklist);
 
         // Phase 2: Forward propagation via worklist
-        self.propagate(&mut var_taints, &mut worklist);
+        self.propagate(&use_map, &mut var_taints, &mut worklist);
 
         // Phase 3: Find sink hits
         let sink_hits = self.find_sink_hits(&var_taints);
+
+        let var_taints = var_taints
+            .into_iter()
+            .map(|(var, taint)| (var.display_name(), taint))
+            .collect();
 
         TaintResult {
             var_taints,
@@ -274,10 +280,32 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         }
     }
 
+    /// Build variable use index for fast taint propagation lookups.
+    fn build_use_map(&self) -> HashMap<SSAVar, Vec<(u64, UseLocation)>> {
+        let mut uses: HashMap<SSAVar, Vec<(u64, UseLocation)>> = HashMap::new();
+        for block in self.func.blocks() {
+            for (phi_idx, phi) in block.phis.iter().enumerate() {
+                for (src_idx, (_, src)) in phi.sources.iter().enumerate() {
+                    uses.entry(src.clone())
+                        .or_default()
+                        .push((block.addr, UseLocation::Phi { phi_idx, src_idx }));
+                }
+            }
+            for (op_idx, op) in block.ops.iter().enumerate() {
+                for (src_idx, src) in op.sources().iter().enumerate() {
+                    uses.entry((*src).clone())
+                        .or_default()
+                        .push((block.addr, UseLocation::Op { op_idx, src_idx }));
+                }
+            }
+        }
+        uses
+    }
+
     /// Initialize taint sources.
     fn initialize_sources(
         &self,
-        var_taints: &mut HashMap<String, TaintSet>,
+        var_taints: &mut HashMap<SSAVar, TaintSet>,
         worklist: &mut VecDeque<SSAVar>,
     ) {
         for block in self.func.blocks() {
@@ -302,12 +330,11 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         &self,
         var: &SSAVar,
         block_addr: u64,
-        var_taints: &mut HashMap<String, TaintSet>,
+        var_taints: &mut HashMap<SSAVar, TaintSet>,
         worklist: &mut VecDeque<SSAVar>,
     ) {
         if let Some(labels) = self.policy.is_source(var, block_addr) {
-            let key = var.display_name();
-            let taint = var_taints.entry(key).or_default();
+            let taint = var_taints.entry(var.clone()).or_default();
             let old_size = taint.len();
             taint.extend(labels);
             if taint.len() > old_size {
@@ -322,23 +349,22 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
     /// all labels are propagated even when a variable is reached via multiple paths.
     fn propagate(
         &self,
-        var_taints: &mut HashMap<String, TaintSet>,
+        use_map: &HashMap<SSAVar, Vec<(u64, UseLocation)>>,
+        var_taints: &mut HashMap<SSAVar, TaintSet>,
         worklist: &mut VecDeque<SSAVar>,
     ) {
         // Track the taint state we've already propagated for each variable.
         // This allows re-propagation when new labels are added.
-        let mut propagated: HashMap<String, TaintSet> = HashMap::new();
+        let mut propagated: HashMap<SSAVar, TaintSet> = HashMap::new();
 
         while let Some(var) = worklist.pop_front() {
-            let key = var.display_name();
-
-            let current_taint = match var_taints.get(&key) {
+            let current_taint = match var_taints.get(&var) {
                 Some(t) if !t.is_empty() => t.clone(),
                 _ => continue,
             };
 
             // Check if we have new labels to propagate
-            let already_propagated = propagated.entry(key.clone()).or_default();
+            let already_propagated = propagated.entry(var.clone()).or_default();
             let new_labels: TaintSet = current_taint
                 .difference(already_propagated)
                 .cloned()
@@ -351,21 +377,28 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
             // Mark these labels as propagated
             already_propagated.extend(new_labels.clone());
 
-            // Find all uses of this variable
-            let uses = self.func.find_uses(&var);
+            let Some(uses) = use_map.get(&var) else {
+                continue;
+            };
             for (block_addr, use_loc) in uses {
                 match use_loc {
                     UseLocation::Phi { phi_idx, .. } => {
                         self.propagate_to_phi(
-                            block_addr,
-                            phi_idx,
+                            *block_addr,
+                            *phi_idx,
                             &new_labels,
                             var_taints,
                             worklist,
                         );
                     }
                     UseLocation::Op { op_idx, .. } => {
-                        self.propagate_to_op(block_addr, op_idx, &new_labels, var_taints, worklist);
+                        self.propagate_to_op(
+                            *block_addr,
+                            *op_idx,
+                            &new_labels,
+                            var_taints,
+                            worklist,
+                        );
                     }
                 }
             }
@@ -378,14 +411,13 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         block_addr: u64,
         phi_idx: usize,
         current_taint: &TaintSet,
-        var_taints: &mut HashMap<String, TaintSet>,
+        var_taints: &mut HashMap<SSAVar, TaintSet>,
         worklist: &mut VecDeque<SSAVar>,
     ) {
         if let Some(block) = self.func.get_block(block_addr)
             && let Some(phi) = block.phis.get(phi_idx)
         {
-            let dst_key = phi.dst.display_name();
-            let dst_taint = var_taints.entry(dst_key).or_default();
+            let dst_taint = var_taints.entry(phi.dst.clone()).or_default();
             let old_size = dst_taint.len();
             dst_taint.extend(current_taint.clone());
             if dst_taint.len() > old_size {
@@ -400,7 +432,7 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         block_addr: u64,
         op_idx: usize,
         current_taint: &TaintSet,
-        var_taints: &mut HashMap<String, TaintSet>,
+        var_taints: &mut HashMap<SSAVar, TaintSet>,
         worklist: &mut VecDeque<SSAVar>,
     ) {
         if let Some(block) = self.func.get_block(block_addr)
@@ -416,8 +448,8 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                 // Collect all source taints for custom propagation
                 let source_taints: Vec<&TaintSet> = op
                     .sources()
-                    .iter()
-                    .filter_map(|src| var_taints.get(&src.display_name()))
+                    .into_iter()
+                    .filter_map(|src| var_taints.get(src))
                     .collect();
 
                 // Try custom propagation rule first
@@ -428,8 +460,7 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                     current_taint.clone()
                 };
 
-                let dst_key = dst.display_name();
-                let dst_taint = var_taints.entry(dst_key).or_default();
+                let dst_taint = var_taints.entry(dst.clone()).or_default();
                 let old_size = dst_taint.len();
                 dst_taint.extend(new_taint);
                 if dst_taint.len() > old_size {
@@ -440,7 +471,7 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
     }
 
     /// Find all sink hits.
-    fn find_sink_hits(&self, var_taints: &HashMap<String, TaintSet>) -> Vec<SinkHit> {
+    fn find_sink_hits(&self, var_taints: &HashMap<SSAVar, TaintSet>) -> Vec<SinkHit> {
         let mut sink_hits = Vec::new();
 
         for block in self.func.blocks() {
@@ -448,8 +479,7 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                 if self.policy.is_sink(op, block.addr) {
                     let mut tainted_vars = Vec::new();
                     for src in self.sink_sources_for_op(block, op_idx, op) {
-                        let key = src.display_name();
-                        if let Some(taint) = var_taints.get(&key)
+                        if let Some(taint) = var_taints.get(&src)
                             && !taint.is_empty()
                         {
                             tainted_vars.push((src, taint.clone()));
@@ -481,7 +511,7 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         }
 
         let mut seen = HashSet::new();
-        sink_sources.retain(|var| seen.insert(var.display_name()));
+        sink_sources.retain(|var| seen.insert(var.clone()));
         sink_sources
     }
 

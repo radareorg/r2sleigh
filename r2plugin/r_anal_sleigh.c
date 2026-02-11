@@ -61,6 +61,7 @@ extern char *r2ssa_defuse_function_json(const R2ILContext *ctx, const R2ILBlock 
 extern char *r2ssa_domtree_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2ssa_backward_slice_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, const char *var_name);
 extern char *r2taint_function_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
+extern char *r2taint_function_summary_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
 extern char *r2taint_sources_sinks_json(const char *json);
 
 /* Symbolic execution */
@@ -3442,7 +3443,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		clear_taint_function_artifacts (anal, core, fcn, &blocks);
 
 		if (taint_eligible) {
-			char *taint_json = r2taint_function_json (ctx,
+			char *taint_json = r2taint_function_summary_json (ctx,
 				(const R2ILBlock **)blocks.blocks, blocks.count);
 			if (taint_json && *taint_json) {
 				RJson *taint_root = r_json_parse (taint_json);
