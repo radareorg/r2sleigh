@@ -526,15 +526,14 @@ impl<'ctx> SymExecutor<'ctx> {
 
             Call { target } => {
                 let target_val = self.read_var(state, target);
-                if let Some(addr) = target_val.as_concrete() {
-                    if let Some(hook) = self.call_hooks.get(&addr) {
+                if let Some(addr) = target_val.as_concrete()
+                    && let Some(hook) = self.call_hooks.get(&addr) {
                         match hook(state)? {
                             CallHookResult::Fallthrough => {}
                             CallHookResult::Jump(new_pc) => state.pc = new_pc,
                             CallHookResult::Terminate(status) => state.terminate(status),
                         }
                     }
-                }
                 Ok(vec![])
             }
 
@@ -739,11 +738,10 @@ impl<'ctx> SymExecutor<'ctx> {
     fn read_var(&self, state: &SymState<'ctx>, var: &SSAVar) -> SymValue<'ctx> {
         if var.is_const() {
             // Parse constant value from name
-            if let Some(hex) = var.name.strip_prefix("const:") {
-                if let Ok(value) = u64::from_str_radix(hex, 16) {
+            if let Some(hex) = var.name.strip_prefix("const:")
+                && let Ok(value) = u64::from_str_radix(hex, 16) {
                     return SymValue::concrete(value, var.size * 8);
                 }
-            }
             SymValue::concrete(0, var.size * 8)
         } else if let Some(hex) = var.name.strip_prefix("ram:") {
             // Treat RAM addresses as concrete branch targets.

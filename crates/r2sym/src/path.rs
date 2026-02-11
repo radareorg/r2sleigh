@@ -236,11 +236,10 @@ impl<'ctx> PathExplorer<'ctx> {
             if solved.inputs.contains_key(name) {
                 continue;
             }
-            if name.starts_with("sym_") || value.is_symbolic() {
-                if let Some(concrete) = model.eval(value) {
+            if (name.starts_with("sym_") || value.is_symbolic())
+                && let Some(concrete) = model.eval(value) {
                     solved.inputs.insert(name.clone(), concrete);
                 }
-            }
         }
 
         // Extract tracked symbolic memory buffers.
@@ -270,17 +269,15 @@ impl<'ctx> PathExplorer<'ctx> {
         worklist.push_back(initial_state);
 
         while let Some(mut state) = self.next_state(&mut worklist) {
-            if self.config.merge_states {
-                if let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
+            if self.config.merge_states
+                && let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
                     state = state.merge_with(&other);
                 }
-            }
             // Check timeout
-            if let Some(timeout) = self.config.timeout {
-                if start_time.elapsed() > timeout {
+            if let Some(timeout) = self.config.timeout
+                && start_time.elapsed() > timeout {
                     break;
                 }
-            }
 
             // Check state limit
             if self.stats.states_explored >= self.config.max_states {
@@ -335,11 +332,10 @@ impl<'ctx> PathExplorer<'ctx> {
                     } else {
                         // Continue exploring this path
                         // Update PC to next block if not changed by control flow
-                        if state.pc == block_addr {
-                            if let Some(next) = self.fallthrough_target(func, block_addr) {
+                        if state.pc == block_addr
+                            && let Some(next) = self.fallthrough_target(func, block_addr) {
                                 state.pc = next;
                             }
-                        }
                         state.set_prev_pc(Some(block_addr));
                         worklist.push_back(state);
                     }
@@ -382,7 +378,7 @@ impl<'ctx> PathExplorer<'ctx> {
                     None
                 } else {
                     // Simple random: alternate between front and back
-                    if worklist.len() % 2 == 0 {
+                    if worklist.len().is_multiple_of(2) {
                         worklist.pop_front()
                     } else {
                         worklist.pop_back()
@@ -404,17 +400,15 @@ impl<'ctx> PathExplorer<'ctx> {
         worklist.push_back(initial_state);
 
         while let Some(mut state) = self.next_state(&mut worklist) {
-            if self.config.merge_states {
-                if let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
+            if self.config.merge_states
+                && let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
                     state = state.merge_with(&other);
                 }
-            }
             // Check timeout
-            if let Some(timeout) = self.config.timeout {
-                if start_time.elapsed() > timeout {
+            if let Some(timeout) = self.config.timeout
+                && start_time.elapsed() > timeout {
                     break;
                 }
-            }
 
             // Check if we reached the target
             if state.pc == target_addr {
@@ -454,11 +448,10 @@ impl<'ctx> PathExplorer<'ctx> {
                 }
 
                 if !state.is_terminated() {
-                    if state.pc == block_addr {
-                        if let Some(next) = self.fallthrough_target(func, block_addr) {
+                    if state.pc == block_addr
+                        && let Some(next) = self.fallthrough_target(func, block_addr) {
                             state.pc = next;
                         }
-                    }
                     state.set_prev_pc(Some(block_addr));
                     worklist.push_back(state);
                 }
@@ -481,16 +474,14 @@ impl<'ctx> PathExplorer<'ctx> {
         worklist.push_back(initial_state);
 
         while let Some(mut state) = self.next_state(&mut worklist) {
-            if self.config.merge_states {
-                if let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
+            if self.config.merge_states
+                && let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
                     state = state.merge_with(&other);
                 }
-            }
-            if let Some(timeout) = self.config.timeout {
-                if start_time.elapsed() > timeout {
+            if let Some(timeout) = self.config.timeout
+                && start_time.elapsed() > timeout {
                     break;
                 }
-            }
 
             if state.pc == target_addr {
                 let feasible = self.solver.is_sat(&state);
@@ -532,11 +523,10 @@ impl<'ctx> PathExplorer<'ctx> {
                     }
 
                     if !state.is_terminated() {
-                        if state.pc == block_addr {
-                            if let Some(next) = self.fallthrough_target(func, block_addr) {
+                        if state.pc == block_addr
+                            && let Some(next) = self.fallthrough_target(func, block_addr) {
                                 state.pc = next;
                             }
-                        }
                         state.set_prev_pc(Some(block_addr));
                         worklist.push_back(state);
                     }
@@ -564,17 +554,15 @@ impl<'ctx> PathExplorer<'ctx> {
         worklist.push_back(initial_state);
 
         while let Some(mut state) = self.next_state(&mut worklist) {
-            if self.config.merge_states {
-                if let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
+            if self.config.merge_states
+                && let Some(other) = take_merge_candidate(&mut worklist, state.pc) {
                     state = state.merge_with(&other);
                 }
-            }
             // Check timeout
-            if let Some(timeout) = self.config.timeout {
-                if start_time.elapsed() > timeout {
+            if let Some(timeout) = self.config.timeout
+                && start_time.elapsed() > timeout {
                     break;
                 }
-            }
 
             // Check if we hit an avoided address
             if avoid_set.contains(&state.pc) {
@@ -621,11 +609,10 @@ impl<'ctx> PathExplorer<'ctx> {
                 }
 
                 if !state.is_terminated() && !avoid_set.contains(&state.pc) {
-                    if state.pc == block_addr {
-                        if let Some(next) = self.fallthrough_target(func, block_addr) {
+                    if state.pc == block_addr
+                        && let Some(next) = self.fallthrough_target(func, block_addr) {
                             state.pc = next;
                         }
-                    }
                     state.set_prev_pc(Some(block_addr));
                     worklist.push_back(state);
                 }

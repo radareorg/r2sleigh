@@ -3271,9 +3271,18 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 			continue;
 		}
 
+		ut64 from_addr = (ut64)j_from->num.u_value;
+		ut64 to_addr = (ut64)j_to->num.u_value;
+
+		/* Skip intra-function refs: if the target is within the same
+		 * function, r2 already has these as code xrefs from the CFG. */
+		if (to_addr >= fcn->addr && to_addr < fcn->addr + r_anal_function_linear_size (fcn)) {
+			continue;
+		}
+
 		RAnalRef ref = {
-			.at = (ut64)j_from->num.u_value,
-			.addr = (ut64)j_to->num.u_value,
+			.at = from_addr,
+			.addr = to_addr,
 			.type = R_ANAL_REF_TYPE_DATA  /* default to data ref */
 		};
 
@@ -3293,7 +3302,13 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 				ref.type = R_ANAL_REF_TYPE_STRN;
 				break;
 			default:
-				ref.type = R_ANAL_REF_TYPE_DATA;
+				/* If the target is inside a known function, emit as
+				 * CODE ref (function pointer) rather than DATA. */
+				if (r_anal_get_fcn_in (anal, to_addr, 0)) {
+					ref.type = R_ANAL_REF_TYPE_CODE;
+				} else {
+					ref.type = R_ANAL_REF_TYPE_DATA;
+				}
 			}
 		}
 

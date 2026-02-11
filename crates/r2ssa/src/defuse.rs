@@ -4,10 +4,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::SSABlock;
 use crate::function::{DefLocation, SSAFunction};
 use crate::op::SSAOp;
 use crate::var::SSAVar;
+use crate::SSABlock;
 
 /// Information about where a variable is defined and used.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -141,7 +141,7 @@ pub fn def_use(block: &SSABlock) -> DefUseInfo {
     }
 
     // Identify inputs: variables that are used but not defined
-    for (var_name, _uses) in &info.uses {
+    for var_name in info.uses.keys() {
         if !info.definitions.contains_key(var_name) {
             info.inputs.insert(var_name.clone());
             // Also record that this variable has no definition
@@ -198,15 +198,14 @@ pub fn find_constants(block: &SSABlock) -> HashMap<String, u64> {
             // Check if source is a constant
             if src.is_const() {
                 // Parse the constant value from the name (e.g., "const:0x42")
-                if let Some(val_str) = src.name.strip_prefix("const:") {
-                    if let Ok(val) = if val_str.starts_with("0x") {
-                        u64::from_str_radix(&val_str[2..], 16)
+                if let Some(val_str) = src.name.strip_prefix("const:")
+                    && let Ok(val) = if let Some(hex) = val_str.strip_prefix("0x") {
+                        u64::from_str_radix(hex, 16)
                     } else {
                         val_str.parse()
                     } {
                         constants.insert(dst.display_name(), val);
                     }
-                }
             }
         }
     }
@@ -309,20 +308,18 @@ fn walk_backward(
                 if slice.add_op(SliceOpRef::Phi {
                     block_addr,
                     phi_idx,
-                }) {
-                    if let Some(block) = func.get_block(block_addr) {
-                        if let Some(phi) = block.phis.get(phi_idx) {
+                })
+                    && let Some(block) = func.get_block(block_addr)
+                        && let Some(phi) = block.phis.get(phi_idx) {
                             for (_, src) in &phi.sources {
                                 worklist.push_back(src.clone());
                             }
                         }
-                    }
-                }
             }
             DefLocation::Op(op_idx) => {
-                if slice.add_op(SliceOpRef::Op { block_addr, op_idx }) {
-                    if let Some(block) = func.get_block(block_addr) {
-                        if let Some(op) = block.ops.get(op_idx) {
+                if slice.add_op(SliceOpRef::Op { block_addr, op_idx })
+                    && let Some(block) = func.get_block(block_addr)
+                        && let Some(op) = block.ops.get(op_idx) {
                             for src in op.sources() {
                                 worklist.push_back(src.clone());
                             }
@@ -330,8 +327,6 @@ fn walk_backward(
                                 add_aliasing_stores(slice, worklist, stores, space.as_str(), addr);
                             }
                         }
-                    }
-                }
             }
         }
     }
@@ -362,8 +357,8 @@ pub fn backward_slice_from_op(func: &SSAFunction, sink: SliceOpRef) -> BackwardS
             block_addr,
             phi_idx,
         } => {
-            if let Some(block) = func.get_block(block_addr) {
-                if let Some(phi) = block.phis.get(phi_idx) {
+            if let Some(block) = func.get_block(block_addr)
+                && let Some(phi) = block.phis.get(phi_idx) {
                     slice.add_op(SliceOpRef::Phi {
                         block_addr,
                         phi_idx,
@@ -372,11 +367,10 @@ pub fn backward_slice_from_op(func: &SSAFunction, sink: SliceOpRef) -> BackwardS
                         worklist.push_back(src.clone());
                     }
                 }
-            }
         }
         SliceOpRef::Op { block_addr, op_idx } => {
-            if let Some(block) = func.get_block(block_addr) {
-                if let Some(op) = block.ops.get(op_idx) {
+            if let Some(block) = func.get_block(block_addr)
+                && let Some(op) = block.ops.get(op_idx) {
                     slice.add_op(SliceOpRef::Op { block_addr, op_idx });
                     for src in op.sources() {
                         worklist.push_back(src.clone());
@@ -391,7 +385,6 @@ pub fn backward_slice_from_op(func: &SSAFunction, sink: SliceOpRef) -> BackwardS
                         );
                     }
                 }
-            }
         }
     }
 

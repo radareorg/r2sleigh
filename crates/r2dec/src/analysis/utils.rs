@@ -48,9 +48,7 @@ pub(crate) fn parse_const_value(name: &str) -> Option<u64> {
     {
         u64::from_str_radix(hex, 16).ok()
     } else if val_str.chars().all(|c| c.is_ascii_hexdigit()) {
-        if val_str.chars().any(|c| c.is_ascii_alphabetic()) {
-            u64::from_str_radix(val_str, 16).ok()
-        } else if val_str.len() > 4 {
+        if val_str.chars().any(|c| c.is_ascii_alphabetic()) || val_str.len() > 4 {
             u64::from_str_radix(val_str, 16).ok()
         } else {
             val_str.parse().ok()
@@ -151,7 +149,7 @@ pub(crate) fn trace_ssa_var_to_source(
 
         if let Some(src_key) = copy_sources.get(&current_key) {
             if src_key.starts_with('*') {
-                return format!("var_{}", current_key.split('_').last().unwrap_or("0"));
+                return format!("var_{}", current_key.split('_').next_back().unwrap_or("0"));
             }
             current_key = src_key.clone();
             continue;

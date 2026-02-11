@@ -150,10 +150,11 @@ impl DefaultTaintPolicy {
 impl TaintPolicy for DefaultTaintPolicy {
     fn is_source(&self, var: &SSAVar, _block_addr: u64) -> Option<Vec<TaintLabel>> {
         // Version 0 variables that are registers (not const/temp) are inputs
-        if var.version == 0 && var.is_register() {
-            if self.sources.is_empty() || self.sources.contains(&var.name) {
-                return Some(vec![TaintLabel::new(format!("input:{}", var.name))]);
-            }
+        if var.version == 0
+            && var.is_register()
+            && (self.sources.is_empty() || self.sources.contains(&var.name))
+        {
+            return Some(vec![TaintLabel::new(format!("input:{}", var.name))]);
         }
         None
     }
@@ -380,8 +381,8 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         var_taints: &mut HashMap<String, TaintSet>,
         worklist: &mut VecDeque<SSAVar>,
     ) {
-        if let Some(block) = self.func.get_block(block_addr) {
-            if let Some(phi) = block.phis.get(phi_idx) {
+        if let Some(block) = self.func.get_block(block_addr)
+            && let Some(phi) = block.phis.get(phi_idx) {
                 let dst_key = phi.dst.display_name();
                 let dst_taint = var_taints.entry(dst_key).or_default();
                 let old_size = dst_taint.len();
@@ -390,7 +391,6 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                     worklist.push_back(phi.dst.clone());
                 }
             }
-        }
     }
 
     /// Propagate taint through an operation.
@@ -402,8 +402,8 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         var_taints: &mut HashMap<String, TaintSet>,
         worklist: &mut VecDeque<SSAVar>,
     ) {
-        if let Some(block) = self.func.get_block(block_addr) {
-            if let Some(op) = block.ops.get(op_idx) {
+        if let Some(block) = self.func.get_block(block_addr)
+            && let Some(op) = block.ops.get(op_idx) {
                 // Check sanitizer
                 if self.policy.is_sanitizer(op) {
                     return;
@@ -436,7 +436,6 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                     }
                 }
             }
-        }
     }
 
     /// Find all sink hits.
@@ -449,11 +448,10 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
                     let mut tainted_vars = Vec::new();
                     for src in self.sink_sources_for_op(block, op_idx, op) {
                         let key = src.display_name();
-                        if let Some(taint) = var_taints.get(&key) {
-                            if !taint.is_empty() {
+                        if let Some(taint) = var_taints.get(&key)
+                            && !taint.is_empty() {
                                 tainted_vars.push((src, taint.clone()));
                             }
-                        }
                     }
                     if !tainted_vars.is_empty() {
                         sink_hits.push(SinkHit {

@@ -335,9 +335,9 @@ impl<'ctx> SymState<'ctx> {
         if !is_pattern {
             let pat_bytes = pattern.as_bytes();
             let limit = std::cmp::min(bytes, pat_bytes.len());
-            for i in 0..limit {
+            for (i, &pat_byte) in pat_bytes.iter().enumerate().take(limit) {
                 let byte_bv = bv.extract((i as u32 + 1) * 8 - 1, (i as u32) * 8);
-                let expected = BV::from_u64(pat_bytes[i] as u64, 8);
+                let expected = BV::from_u64(pat_byte as u64, 8);
                 self.add_constraint(byte_bv.eq(&expected));
             }
             return;
@@ -564,26 +564,26 @@ fn bool_false() -> Bool {
     zero.eq(&one)
 }
 
-fn and_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {
+fn and_all(_ctx: &Context, values: &[Bool]) -> Bool {
     if values.is_empty() {
         return bool_true();
     }
     // Chain with bitwise AND
     let mut acc = values[0].clone();
     for val in &values[1..] {
-        acc = acc & val;
+        acc &= val;
     }
     acc
 }
 
-fn or_all<'ctx>(_ctx: &'ctx Context, values: &[Bool]) -> Bool {
+fn or_all(_ctx: &Context, values: &[Bool]) -> Bool {
     if values.is_empty() {
         return bool_false();
     }
     // Chain with bitwise OR
     let mut acc = values[0].clone();
     for val in &values[1..] {
-        acc = acc | val;
+        acc |= val;
     }
     acc
 }

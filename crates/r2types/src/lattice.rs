@@ -26,12 +26,12 @@ impl TypeLattice {
                 },
             ) => {
                 a_bits <= b_bits
-                    && match (a_sign, b_sign) {
+                    && matches!(
+                        (a_sign, b_sign),
                         (Signedness::Signed, Signedness::Signed)
-                        | (Signedness::Unsigned, Signedness::Unsigned)
-                        | (_, Signedness::Unknown) => true,
-                        _ => false,
-                    }
+                            | (Signedness::Unsigned, Signedness::Unsigned)
+                            | (_, Signedness::Unknown)
+                    )
             }
             (Type::Float { bits: a_bits }, Type::Float { bits: b_bits }) => a_bits <= b_bits,
             (Type::Ptr(a_inner), Type::Ptr(b_inner)) => Self::is_subtype(arena, *a_inner, *b_inner),

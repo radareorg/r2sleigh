@@ -213,14 +213,13 @@ fn find_register_key<'ctx>(state: &SymState<'ctx>, base: &str) -> Option<String>
     let mut best: Option<(u32, String)> = None;
     for key in state.registers().keys() {
         if let Some((prefix, version)) = split_version(key) {
-            if prefix.eq_ignore_ascii_case(base) {
-                if best
+            if prefix.eq_ignore_ascii_case(base)
+                && best
                     .as_ref()
-                    .map_or(true, |(best_version, _)| version > *best_version)
+                    .is_none_or(|(best_version, _)| version > *best_version)
                 {
                     best = Some((version, key.clone()));
                 }
-            }
         } else if key.eq_ignore_ascii_case(base) {
             return Some(key.clone());
         }
@@ -271,8 +270,7 @@ impl<'ctx> FunctionSummary<'ctx> for MemcpySummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let dst = call
-            .args
-            .get(0)
+            .args.first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let src = call
@@ -313,8 +311,7 @@ impl<'ctx> FunctionSummary<'ctx> for StrlenSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let arg = call
-            .args
-            .get(0)
+            .args.first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let mem_taint = if arg.as_concrete().is_some() {
@@ -331,6 +328,7 @@ impl<'ctx> FunctionSummary<'ctx> for StrlenSummary {
 }
 
 /// strcmp(a, b) summary.
+#[derive(Default)]
 pub struct StrcmpSummary;
 
 impl StrcmpSummary {
@@ -351,8 +349,7 @@ impl<'ctx> FunctionSummary<'ctx> for StrcmpSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let a = call
-            .args
-            .get(0)
+            .args.first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let b = call
@@ -407,8 +404,7 @@ impl<'ctx> FunctionSummary<'ctx> for MemcmpSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let a = call
-            .args
-            .get(0)
+            .args.first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let b = call
@@ -472,8 +468,7 @@ impl<'ctx> FunctionSummary<'ctx> for MemsetSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let dst = call
-            .args
-            .get(0)
+            .args.first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let c = call
@@ -515,8 +510,7 @@ impl<'ctx> FunctionSummary<'ctx> for PutsSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let s = call
-            .args
-            .get(0)
+            .args.first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let mem_taint = if s.as_concrete().is_some() {
@@ -555,8 +549,7 @@ impl<'ctx> FunctionSummary<'ctx> for PrintfSummaryBasic {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let fmt = call
-            .args
-            .get(0)
+            .args.first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let mem_taint = if fmt.as_concrete().is_some() {
@@ -573,6 +566,7 @@ impl<'ctx> FunctionSummary<'ctx> for PrintfSummaryBasic {
 }
 
 /// malloc(size) summary.
+#[derive(Default)]
 pub struct MallocSummary;
 
 impl MallocSummary {
@@ -593,8 +587,7 @@ impl<'ctx> FunctionSummary<'ctx> for MallocSummary {
 
     fn execute(&self, state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let size = call
-            .args
-            .get(0)
+            .args.first()
             .cloned()
             .unwrap_or_else(|| SymValue::unknown(call.arg_bits));
         let taint = size.get_taint();
@@ -606,6 +599,7 @@ impl<'ctx> FunctionSummary<'ctx> for MallocSummary {
 }
 
 /// free(ptr) summary.
+#[derive(Default)]
 pub struct FreeSummary;
 
 impl FreeSummary {
@@ -630,6 +624,7 @@ impl<'ctx> FunctionSummary<'ctx> for FreeSummary {
 }
 
 /// exit(code) summary.
+#[derive(Default)]
 pub struct ExitSummary;
 
 impl ExitSummary {
@@ -650,8 +645,7 @@ impl<'ctx> FunctionSummary<'ctx> for ExitSummary {
 
     fn execute(&self, _state: &mut SymState<'ctx>, call: &CallInfo<'ctx>) -> SummaryEffect<'ctx> {
         let code = call
-            .args
-            .get(0)
+            .args.first()
             .and_then(|val| val.as_concrete())
             .unwrap_or(0);
         SummaryEffect::Terminate(ExitStatus::Exit(code))
@@ -684,7 +678,7 @@ fn copy_bytes<'ctx>(
             let dst_old = state.mem_read(&dst_addr, 1);
             let idx_val = SymValue::concrete(offset, n.bits());
             let cond = idx_val.ult(ctx, n);
-            let cond_bool = cond.to_bv(ctx).eq(&BV::from_u64(1, 1));
+            let cond_bool = cond.to_bv(ctx).eq(BV::from_u64(1, 1));
             let taint = src_byte.get_taint() | dst_old.get_taint() | n.get_taint();
             let merged = SymValue::symbolic_tainted(
                 cond_bool.ite(&src_byte.to_bv(ctx), &dst_old.to_bv(ctx)),
@@ -726,7 +720,7 @@ fn set_bytes<'ctx>(
             let dst_old = state.mem_read(&dst_addr, 1);
             let idx_val = SymValue::concrete(offset, n.bits());
             let cond = idx_val.ult(ctx, n);
-            let cond_bool = cond.to_bv(ctx).eq(&BV::from_u64(1, 1));
+            let cond_bool = cond.to_bv(ctx).eq(BV::from_u64(1, 1));
             let taint = c_byte.get_taint() | dst_old.get_taint() | n.get_taint();
             let merged = SymValue::symbolic_tainted(
                 cond_bool.ite(&c_byte.to_bv(ctx), &dst_old.to_bv(ctx)),

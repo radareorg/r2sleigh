@@ -187,9 +187,9 @@ pub fn format_op(disasm: &Disassembler, op: &R2ILOp) -> String {
         } => {
             let out_str = output
                 .as_ref()
-                .map(|o| vn(o))
+                .map(&vn)
                 .unwrap_or_else(|| "none".to_string());
-            let in_str: Vec<String> = inputs.iter().map(|v| vn(v)).collect();
+            let in_str: Vec<String> = inputs.iter().map(&vn).collect();
             let userop_str = match disasm.userop_name(*userop) {
                 Some(name) => format!("{} ({})", userop, name),
                 None => userop.to_string(),
@@ -265,7 +265,7 @@ pub fn format_op(disasm: &Disassembler, op: &R2ILOp) -> String {
 
         // Analysis operations
         Multiequal { dst, inputs } => {
-            let in_str: Vec<String> = inputs.iter().map(|v| vn(v)).collect();
+            let in_str: Vec<String> = inputs.iter().map(&vn).collect();
             format!(
                 "Multiequal {{ dst: {}, inputs: [{}] }}",
                 vn(dst),
@@ -528,7 +528,7 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
 
         // Analysis operations (typically not in raw P-code from disassembly)
         Multiequal { dst, inputs } => {
-            let args: Vec<String> = inputs.iter().map(|v| vn(v)).collect();
+            let args: Vec<String> = inputs.iter().map(&vn).collect();
             format!("{},PHI,{},=", args.join(","), vn(dst))
         }
 
@@ -611,11 +611,10 @@ pub fn op_to_esil_named(disasm: &Disassembler, op: &R2ILOp) -> String {
 }
 
 fn callother_userop_label(disasm: &Disassembler, userop: u32, include_name: bool) -> String {
-    if include_name {
-        if let Some(name) = disasm.userop_name(userop) {
+    if include_name
+        && let Some(name) = disasm.userop_name(userop) {
             return format!("{}:{}", userop, name);
         }
-    }
     userop.to_string()
 }
 
@@ -627,7 +626,7 @@ fn format_callother_esil(
     include_name: bool,
 ) -> String {
     let vn = |v: &r2il::Varnode| disasm.format_varnode(v).to_lowercase();
-    let args: Vec<String> = inputs.iter().map(|v| vn(v)).collect();
+    let args: Vec<String> = inputs.iter().map(&vn).collect();
     let args_str = args.join(",");
     let userop_str = callother_userop_label(disasm, userop, include_name);
     match output {

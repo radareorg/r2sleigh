@@ -498,13 +498,7 @@ impl<'a> RegionAnalyzer<'a> {
         self.collect_reachable(false_target, &mut false_reachable, 10);
 
         // Find intersection
-        for &block in &true_reachable {
-            if false_reachable.contains(&block) {
-                return Some(block);
-            }
-        }
-
-        None
+        true_reachable.iter().find(|&&block| false_reachable.contains(&block)).copied()
     }
 
     fn collect_reachable(&self, start: u64, reachable: &mut HashSet<u64>, depth: usize) {
@@ -654,13 +648,11 @@ impl<'a> RegionAnalyzer<'a> {
                 }
             }
 
-            if outside {
-                if let Some(next_body) = inside {
-                    if next_body != header {
+            if outside
+                && let Some(next_body) = inside
+                    && next_body != header {
                         return Some((block, next_body));
                     }
-                }
-            }
         }
 
         None
@@ -1557,11 +1549,10 @@ impl WorkingGraph {
 
         // Try structured composition via topological ordering.
         let entry = start_block.and_then(|b| sub.node_for_block(b));
-        if let Some(entry_id) = entry {
-            if let Some(topo) = sub.topological_order() {
+        if let Some(entry_id) = entry
+            && let Some(topo) = sub.topological_order() {
                 return analyzer.analyze_post_collapse_iterative(entry_id, &sub, &topo);
             }
-        }
 
         // Fallback: flat sequence ordered by DFS.
         let mut ordered = Vec::new();

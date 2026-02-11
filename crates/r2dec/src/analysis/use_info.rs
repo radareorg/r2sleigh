@@ -428,7 +428,7 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                 };
 
                 let dst_base = dst_var.name.to_lowercase();
-                if env.arg_regs.iter().any(|r| *r == dst_base)
+                if env.arg_regs.contains(&dst_base)
                     && !found_regs.contains_key(&dst_base)
                 {
                     let dst_key = dst_var.display_name();

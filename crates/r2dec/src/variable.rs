@@ -125,7 +125,7 @@ impl VariableRecovery {
         for block in func.blocks() {
             for op in &block.ops {
                 if let Some(dst) = op.dst() {
-                    if self.vars.contains_key(&dst) {
+                    if self.vars.contains_key(dst) {
                         continue;
                     }
 
@@ -187,9 +187,9 @@ impl VariableRecovery {
             }
 
             // If this block has a return and we found a return register assignment
-            if has_return {
-                if let Some(ret_var) = last_ret_var {
-                    if !self.vars.contains_key(&ret_var) {
+            if has_return
+                && let Some(ret_var) = last_ret_var
+                    && !self.vars.contains_key(&ret_var) {
                         let name = self.make_unique_var_name("result".to_string());
                         let ty = self.type_from_size(ret_var.size);
                         self.vars.insert(
@@ -204,8 +204,6 @@ impl VariableRecovery {
                             },
                         );
                     }
-                }
-            }
         }
     }
 
@@ -475,9 +473,9 @@ impl VariableRecovery {
     fn name_remaining(&mut self, func: &SSAFunction) {
         for block in func.blocks() {
             for op in &block.ops {
-                if let Some(dst) = op.dst() {
-                    if !self.vars.contains_key(&dst) {
-                        let name = self.gen_var_name(&dst);
+                if let Some(dst) = op.dst()
+                    && !self.vars.contains_key(dst) {
+                        let name = self.gen_var_name(dst);
                         let ty = self.type_from_size(dst.size);
                         self.vars.insert(
                             dst.clone(),
@@ -491,7 +489,6 @@ impl VariableRecovery {
                             },
                         );
                     }
-                }
             }
         }
     }

@@ -9,7 +9,7 @@
 use clap::{Parser, Subcommand};
 use r2il::serialize;
 use r2sleigh_lift::{Lifter, create_arm_spec, create_x86_64_spec};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(feature = "sleigh-config")]
 use r2sleigh_lift::{Disassembler, format_op, op_to_esil_named, userop_map_for_arch};
@@ -122,7 +122,7 @@ fn main() {
     }
 }
 
-fn cmd_compile(input: &PathBuf, output: Option<&PathBuf>, _variant: &str) -> Result<(), String> {
+fn cmd_compile(input: &Path, output: Option<&PathBuf>, _variant: &str) -> Result<(), String> {
     println!("Compiling: {}", input.display());
 
     // Determine output path
@@ -180,7 +180,7 @@ fn cmd_compile(input: &PathBuf, output: Option<&PathBuf>, _variant: &str) -> Res
     Ok(())
 }
 
-fn cmd_info(input: &PathBuf, show_registers: bool, show_spaces: bool) -> Result<(), String> {
+fn cmd_info(input: &Path, show_registers: bool, show_spaces: bool) -> Result<(), String> {
     let spec = serialize::load(input).map_err(|e| e.to_string())?;
 
     println!("r2il File: {}", input.display());
@@ -197,7 +197,7 @@ fn cmd_info(input: &PathBuf, show_registers: bool, show_spaces: bool) -> Result<
     println!("User operations: {}", spec.userops.len());
     println!("Source files: {}", spec.source_files.len());
 
-    if show_spaces || (!show_registers && !show_spaces) {
+    if show_spaces || !show_registers {
         println!("\nAddress Spaces:");
         for space in &spec.spaces {
             println!(
@@ -300,8 +300,8 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
                 map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
             if is_varnode {
                 let space = map.get("space").and_then(Value::as_str);
-                if let Some(space_str) = space {
-                    if space_str.eq_ignore_ascii_case("register") {
+                if let Some(space_str) = space
+                    && space_str.eq_ignore_ascii_case("register") {
                         let offset = map.get("offset").and_then(Value::as_u64);
                         let size = map.get("size").and_then(Value::as_u64);
                         if let (Some(offset), Some(size)) = (offset, size) {
@@ -315,7 +315,6 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
                             }
                         }
                     }
-                }
             }
 
             for value in map.values_mut() {
@@ -337,17 +336,15 @@ fn annotate_userop_names(value: &mut serde_json::Value, disasm: &Disassembler) {
 
     match value {
         Value::Object(map) => {
-            if let Some(callother) = map.get_mut("CallOther") {
-                if let Value::Object(call_map) = callother {
+            if let Some(callother) = map.get_mut("CallOther")
+                && let Value::Object(call_map) = callother {
                     let userop = call_map.get("userop").and_then(Value::as_u64);
-                    if let Some(userop) = userop {
-                        if let Some(name) = disasm.userop_name(userop as u32) {
+                    if let Some(userop) = userop
+                        && let Some(name) = disasm.userop_name(userop as u32) {
                             call_map
                                 .insert("userop_name".to_string(), Value::String(name.to_string()));
                         }
-                    }
                 }
-            }
 
             for value in map.values_mut() {
                 annotate_userop_names(value, disasm);

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::cfg::CFG;
 use crate::domtree::DomTree;
-use crate::naming::{RegisterNameMap, varnode_to_name};
+use crate::naming::{varnode_to_name, RegisterNameMap};
 use crate::op::SSAOp;
 use crate::phi::PhiPlacement;
 use crate::var::SSAVar;
@@ -265,15 +265,14 @@ fn fill_phi_sources(
     let mut phi_idx = 0;
 
     for op in block_ops.iter_mut() {
-        if let SSAOp::Phi { sources, .. } = op {
-            if phi_idx < phis.len() {
+        if let SSAOp::Phi { sources, .. } = op
+            && phi_idx < phis.len() {
                 let phi = &phis[phi_idx];
                 if pred_idx < sources.len() {
                     sources[pred_idx] = ctx.read_var(&phi.var_name);
                 }
                 phi_idx += 1;
             }
-        }
     }
 }
 

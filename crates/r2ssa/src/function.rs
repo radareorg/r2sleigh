@@ -9,14 +9,17 @@ use std::collections::HashMap;
 use r2il::{ArchSpec, R2ILBlock};
 use serde::{Deserialize, Serialize};
 
-use crate::cfg::{CFG, CFGEdge};
-use crate::defuse::{BackwardSlice, SliceOpRef, backward_slice_from_op, backward_slice_from_var};
+use crate::cfg::{CFGEdge, CFG};
+use crate::defuse::{backward_slice_from_op, backward_slice_from_var, BackwardSlice, SliceOpRef};
 use crate::domtree::DomTree;
 use crate::naming::build_register_name_map;
 use crate::op::SSAOp;
-use crate::phi::{PhiPlacement, collect_defs_from_cfg_with_names};
+use crate::phi::{collect_defs_from_cfg_with_names, PhiPlacement};
 use crate::rename::rename_function_with_names;
 use crate::var::SSAVar;
+
+/// Switch case information: Vec of (case_value, target_address) pairs and optional default target.
+pub type SwitchInfo = (Vec<(u64, u64)>, Option<u64>);
 
 /// A function in SSA form.
 ///
@@ -237,7 +240,7 @@ impl SSAFunction {
 
     /// Get switch info for a block, if it's a switch terminator.
     /// Returns Some((cases, default)) where cases is Vec<(value, target)>.
-    pub fn switch_info(&self, addr: u64) -> Option<(Vec<(u64, u64)>, Option<u64>)> {
+    pub fn switch_info(&self, addr: u64) -> Option<SwitchInfo> {
         let block = self.cfg.get_block(addr)?;
         if let crate::cfg::BlockTerminator::Switch { cases, default } = &block.terminator {
             Some((cases.clone(), *default))

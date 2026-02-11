@@ -112,8 +112,8 @@ impl DomTree {
     /// Intersect two dominators (find common dominator).
     fn intersect(&self, mut b1: u64, mut b2: u64, rpo_idx: &HashMap<u64, usize>) -> u64 {
         while b1 != b2 {
-            let idx1 = rpo_idx.get(&b1).copied().unwrap_or(usize::MAX);
-            let idx2 = rpo_idx.get(&b2).copied().unwrap_or(usize::MAX);
+            let mut idx1 = rpo_idx.get(&b1).copied().unwrap_or(usize::MAX);
+            let mut idx2 = rpo_idx.get(&b2).copied().unwrap_or(usize::MAX);
 
             while idx1 > idx2 {
                 b1 = match self.idom.get(&b1) {
@@ -124,9 +124,10 @@ impl DomTree {
                 if new_idx1 >= idx1 {
                     break;
                 }
+                idx1 = new_idx1;
             }
 
-            let idx1 = rpo_idx.get(&b1).copied().unwrap_or(usize::MAX);
+            idx1 = rpo_idx.get(&b1).copied().unwrap_or(usize::MAX);
             while idx2 > idx1 {
                 b2 = match self.idom.get(&b2) {
                     Some(&idom) if idom != b2 => idom,
@@ -136,6 +137,7 @@ impl DomTree {
                 if new_idx2 >= idx2 {
                     break;
                 }
+                idx2 = new_idx2;
             }
 
             if b1 == b2 {

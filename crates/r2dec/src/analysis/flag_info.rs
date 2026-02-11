@@ -23,9 +23,7 @@ pub(crate) fn analyze(blocks: &[SSABlock], use_info: &UseInfo, _env: &PassEnv<'_
 
 fn format_compare_operand(var_name: &str) -> String {
     if let Some(val) = utils::parse_const_value(var_name) {
-        if val > 255 && val % 10 != 0 {
-            format!("0x{:x}", val)
-        } else if val > 0xffff {
+        if (val > 255 && val % 10 != 0) || val > 0xffff {
             format!("0x{:x}", val)
         } else {
             format!("{}", val)

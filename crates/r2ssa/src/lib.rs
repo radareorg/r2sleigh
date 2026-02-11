@@ -34,7 +34,7 @@ pub use cfg::{BasicBlock, BlockTerminator, CFG, CFGEdge};
 pub use defuse::{
     BackwardSlice, DefUseInfo, SliceOpRef, backward_slice_from_op, backward_slice_from_var, def_use,
 };
-pub use function::{PhiNode, SSABlock as FunctionSSABlock, SSAFunction};
+pub use function::{PhiNode, SSABlock as FunctionSSABlock, SSAFunction, SwitchInfo};
 pub use op::SSAOp;
 pub use optimize::{OptimizationConfig, OptimizationStats, optimize_function};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
