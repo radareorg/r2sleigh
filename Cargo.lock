@@ -1017,7 +1017,7 @@ dependencies = [
  "r2types",
  "serde",
  "sleigh-config",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1026,7 +1026,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1052,7 +1052,7 @@ dependencies = [
  "r2sleigh-lift",
  "serde_json",
  "sleigh-config",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1062,7 +1062,7 @@ dependencies = [
  "libsla",
  "r2il",
  "sleigh-config",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1090,7 +1090,7 @@ dependencies = [
  "r2sleigh-lift",
  "serde",
  "sleigh-config",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1103,7 +1103,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sleigh-config",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "z3",
 ]
 
@@ -1114,7 +1114,7 @@ dependencies = [
  "r2ssa",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
