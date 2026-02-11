@@ -8,11 +8,11 @@ use std::collections::{HashMap, HashSet};
 use r2ssa::SSAFunction;
 use r2types::TypeOracle;
 
+use crate::ExternalStackVar;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 use crate::expr::ExpressionBuilder;
 use crate::fold::FoldingContext;
 use crate::region::{Region, RegionAnalyzer};
-use crate::ExternalStackVar;
 
 /// Control flow structurer.
 ///

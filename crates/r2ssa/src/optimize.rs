@@ -137,14 +137,8 @@ impl LatticeValue {
 
 #[derive(Debug, Clone)]
 enum UseLocation {
-    Phi {
-        block_addr: u64,
-        phi_idx: usize,
-    },
-    Op {
-        block_addr: u64,
-        op_idx: usize,
-    },
+    Phi { block_addr: u64, phi_idx: usize },
+    Op { block_addr: u64, op_idx: usize },
 }
 
 impl VarKey {
@@ -863,8 +857,12 @@ fn apply_sccp_results(
         }
 
         func.cfg_mut().remove_edge(rw.block_addr, rw.dead_target);
-        func.cfg_mut()
-            .set_terminator(rw.block_addr, BlockTerminator::Branch { target: rw.keep_target });
+        func.cfg_mut().set_terminator(
+            rw.block_addr,
+            BlockTerminator::Branch {
+                target: rw.keep_target,
+            },
+        );
         func.remove_phi_source(rw.dead_target, rw.block_addr);
         stats.sccp_edges_pruned += 1;
         changed = true;
@@ -2029,23 +2027,21 @@ mod sccp_tests {
 
     #[test]
     fn sccp_simple_const() {
-        let func = raw_func(vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![
-                    R2ILOp::IntAdd {
-                        dst: make_reg(0, 8),
-                        a: make_const(5, 8),
-                        b: make_const(3, 8),
-                    },
-                    R2ILOp::Return {
-                        target: make_ram(0, 8),
-                    },
-                ],
-                switch_info: None,
-            },
-        ]);
+        let func = raw_func(vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntAdd {
+                    dst: make_reg(0, 8),
+                    a: make_const(5, 8),
+                    b: make_const(3, 8),
+                },
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+        }]);
 
         let (consts, _) = sccp(&func);
         assert!(
@@ -2124,23 +2120,21 @@ mod sccp_tests {
 
     #[test]
     fn sccp_params_stay_bottom() {
-        let func = raw_func(vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![
-                    R2ILOp::IntAdd {
-                        dst: make_reg(8, 8),
-                        a: make_reg(0, 8),
-                        b: make_const(1, 8),
-                    },
-                    R2ILOp::Return {
-                        target: make_ram(0, 8),
-                    },
-                ],
-                switch_info: None,
-            },
-        ]);
+        let func = raw_func(vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntAdd {
+                    dst: make_reg(8, 8),
+                    a: make_reg(0, 8),
+                    b: make_const(1, 8),
+                },
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+        }]);
 
         let (consts, _) = sccp(&func);
         assert!(
@@ -2151,23 +2145,21 @@ mod sccp_tests {
 
     #[test]
     fn sccp_load_stays_bottom() {
-        let func = raw_func(vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![
-                    R2ILOp::Load {
-                        dst: make_reg(8, 8),
-                        space: SpaceId::Ram,
-                        addr: make_reg(0, 8),
-                    },
-                    R2ILOp::Return {
-                        target: make_ram(0, 8),
-                    },
-                ],
-                switch_info: None,
-            },
-        ]);
+        let func = raw_func(vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::Load {
+                    dst: make_reg(8, 8),
+                    space: SpaceId::Ram,
+                    addr: make_reg(0, 8),
+                },
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+        }]);
 
         let (consts, _) = sccp(&func);
         assert!(
@@ -2178,23 +2170,21 @@ mod sccp_tests {
 
     #[test]
     fn sccp_noop_on_no_consts() {
-        let func = raw_func(vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![
-                    R2ILOp::IntAdd {
-                        dst: make_reg(8, 8),
-                        a: make_reg(0, 8),
-                        b: make_reg(16, 8),
-                    },
-                    R2ILOp::Return {
-                        target: make_ram(0, 8),
-                    },
-                ],
-                switch_info: None,
-            },
-        ]);
+        let func = raw_func(vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntAdd {
+                    dst: make_reg(8, 8),
+                    a: make_reg(0, 8),
+                    b: make_reg(16, 8),
+                },
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+        }]);
 
         let (consts, _) = sccp(&func);
         assert!(consts.is_empty(), "no constants should be discovered");
@@ -2254,7 +2244,10 @@ mod sccp_tests {
         let mut stats = OptimizationStats::default();
         let changed = apply_sccp_results(&mut func, &consts, &executable, &mut stats);
         assert!(changed);
-        assert!(func.get_block(0x1004).is_none(), "dead branch block should be removed");
+        assert!(
+            func.get_block(0x1004).is_none(),
+            "dead branch block should be removed"
+        );
         assert!(!func.cfg().has_edge(0x1000, 0x1004));
         assert!(stats.sccp_edges_pruned > 0);
         assert!(stats.sccp_blocks_removed > 0);

@@ -2233,12 +2233,11 @@ pub extern "C" fn r2ssa_function_opt_json(
         return ptr::null_mut();
     }
 
-    let mut ssa_func = match r2ssa::SSAFunction::from_blocks_raw(&r2il_blocks, unsafe {
-        (*ctx).arch.as_ref()
-    }) {
-        Some(f) => f,
-        None => return ptr::null_mut(),
-    };
+    let mut ssa_func =
+        match r2ssa::SSAFunction::from_blocks_raw(&r2il_blocks, unsafe { (*ctx).arch.as_ref() }) {
+            Some(f) => f,
+            None => return ptr::null_mut(),
+        };
 
     let stats = ssa_func.optimize(&r2ssa::OptimizationConfig::default());
     let function = build_ssa_function_json(&ssa_func);
@@ -4542,27 +4541,82 @@ pub extern "C" fn r2dec_function_with_context(
 
     // Collect all JSON context strings on the main thread (from C pointers),
     // then move everything into the large-stack thread for SSA + decompilation.
-    let func_names_str = if func_names_json.is_null() { "{}".to_string() }
-        else { unsafe { CStr::from_ptr(func_names_json).to_str().unwrap_or("{}").to_string() } };
-    let strings_str = if strings_json.is_null() { "{}".to_string() }
-        else { unsafe { CStr::from_ptr(strings_json).to_str().unwrap_or("{}").to_string() } };
-    let symbols_str = if symbols_json.is_null() { "{}".to_string() }
-        else { unsafe { CStr::from_ptr(symbols_json).to_str().unwrap_or("{}").to_string() } };
-    let signature_str = if signature_json.is_null() { "[]".to_string() }
-        else { unsafe { CStr::from_ptr(signature_json).to_str().unwrap_or("[]").to_string() } };
-    let stack_vars_str = if stack_vars_json.is_null() { "{}".to_string() }
-        else { unsafe { CStr::from_ptr(stack_vars_json).to_str().unwrap_or("{}").to_string() } };
-    let types_str = if types_json.is_null() { "{}".to_string() }
-        else { unsafe { CStr::from_ptr(types_json).to_str().unwrap_or("{}").to_string() } };
+    let func_names_str = if func_names_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(func_names_json)
+                .to_str()
+                .unwrap_or("{}")
+                .to_string()
+        }
+    };
+    let strings_str = if strings_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(strings_json)
+                .to_str()
+                .unwrap_or("{}")
+                .to_string()
+        }
+    };
+    let symbols_str = if symbols_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(symbols_json)
+                .to_str()
+                .unwrap_or("{}")
+                .to_string()
+        }
+    };
+    let signature_str = if signature_json.is_null() {
+        "[]".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(signature_json)
+                .to_str()
+                .unwrap_or("[]")
+                .to_string()
+        }
+    };
+    let stack_vars_str = if stack_vars_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(stack_vars_json)
+                .to_str()
+                .unwrap_or("{}")
+                .to_string()
+        }
+    };
+    let types_str = if types_json.is_null() {
+        "{}".to_string()
+    } else {
+        unsafe {
+            CStr::from_ptr(types_json)
+                .to_str()
+                .unwrap_or("{}")
+                .to_string()
+        }
+    };
 
     let arch_clone = ctx_ref.arch.clone();
 
     // Run SSA construction + decompilation on a dedicated thread with a large
     // stack to prevent stack overflow on complex O2-optimized CFGs.
     let output = run_full_decompile_on_large_stack(
-        r2il_blocks, func_name_str, arch_clone, ptr_bits,
-        func_names_str, strings_str, symbols_str, signature_str,
-        stack_vars_str, types_str,
+        r2il_blocks,
+        func_name_str,
+        arch_clone,
+        ptr_bits,
+        func_names_str,
+        strings_str,
+        symbols_str,
+        signature_str,
+        stack_vars_str,
+        types_str,
     );
 
     CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
@@ -4589,12 +4643,11 @@ fn run_full_decompile_on_large_stack(
         .stack_size(STACK_SIZE)
         .spawn(move || {
             // Build SSA function
-            let ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(
-                &r2il_blocks, arch.as_ref(),
-            ) {
-                Some(f) => f.with_name(&func_name_str),
-                None => return String::new(),
-            };
+            let ssa_func =
+                match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, arch.as_ref()) {
+                    Some(f) => f.with_name(&func_name_str),
+                    None => return String::new(),
+                };
 
             // Create decompiler with architecture-aware config
             let config = if let Some(arch) = &arch {
@@ -4604,7 +4657,9 @@ fn run_full_decompile_on_large_stack(
                         r2dec::DecompilerConfig::x86_64()
                     }
                     ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
-                    ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
+                    ("aarch64", _) | ("arm64", _) | ("ARM64", _) => {
+                        r2dec::DecompilerConfig::aarch64()
+                    }
                     _ => {
                         let mut cfg = r2dec::DecompilerConfig::default();
                         cfg.ptr_size = ptr_bits;

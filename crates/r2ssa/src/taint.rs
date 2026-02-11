@@ -529,11 +529,7 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
     }
 
     fn canonical_x86_64_arg_reg(name: &str) -> Option<&'static str> {
-        let base = name
-            .split('_')
-            .next()
-            .unwrap_or(name)
-            .to_ascii_lowercase();
+        let base = name.split('_').next().unwrap_or(name).to_ascii_lowercase();
         match base.as_str() {
             "rdi" | "edi" | "di" | "dil" => Some("rdi"),
             "rsi" | "esi" | "si" | "sil" => Some("rsi"),

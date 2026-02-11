@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
 use r2types::{
-    to_c_type_like, CTypeLike, Constraint, ConstraintSource, ExternalTypeDb, MemoryCapability,
-    ResolvedSignature, SignatureRegistry, Signedness, SolvedTypes, SolverConfig, TypeArena, TypeId,
-    TypeOracle, TypeSolver,
+    CTypeLike, Constraint, ConstraintSource, ExternalTypeDb, MemoryCapability, ResolvedSignature,
+    SignatureRegistry, Signedness, SolvedTypes, SolverConfig, TypeArena, TypeId, TypeOracle,
+    TypeSolver, to_c_type_like,
 };
 
 use crate::ast::CType;

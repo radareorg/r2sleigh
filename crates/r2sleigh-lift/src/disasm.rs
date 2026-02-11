@@ -7,7 +7,7 @@ use libsla::{
     Address, AddressSpace, AddressSpaceType, BoolOp, FloatOp, GhidraSleigh, InstructionLoader,
     IntOp, IntSign, OpCode, PcodeDisassembly, PcodeInstruction, PseudoOp, Sleigh, VarnodeData,
 };
-use r2il::{select_register_name, R2ILBlock, R2ILOp, SpaceId, Varnode};
+use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode, select_register_name};
 use std::collections::HashMap;
 
 use crate::translate::{self, PcodeSource};

@@ -613,7 +613,10 @@ impl<'a> RegionAnalyzer<'a> {
             }
             out.push(block);
             // Push successors in reverse order so the first successor is processed first.
-            let succs: Vec<u64> = self.func.successors(block).into_iter()
+            let succs: Vec<u64> = self
+                .func
+                .successors(block)
+                .into_iter()
                 .filter(|s| body.contains(s))
                 .collect();
             for s in succs.into_iter().rev() {
@@ -841,7 +844,8 @@ impl<'a> RegionAnalyzer<'a> {
         let topo = match graph.topological_order() {
             Some(order) => order,
             None => {
-                self.analysis_reason = Some("iterative region graph still cyclic after loop collapse".to_string());
+                self.analysis_reason =
+                    Some("iterative region graph still cyclic after loop collapse".to_string());
                 return None;
             }
         };
@@ -874,7 +878,10 @@ impl<'a> RegionAnalyzer<'a> {
         };
 
         // Reverse topological order: leaves are processed first.
-        let rev_topo: Vec<usize> = topo.iter().rev().copied()
+        let rev_topo: Vec<usize> = topo
+            .iter()
+            .rev()
+            .copied()
             .filter(|id| reachable.contains(id))
             .collect();
 
@@ -912,10 +919,13 @@ impl<'a> RegionAnalyzer<'a> {
                             blocks.extend(succs.iter().flat_map(|id| graph.node_blocks(*id)));
                             blocks.sort_unstable();
                             blocks.dedup();
-                            region_map.insert(node, Region::Irreducible {
-                                entry: graph.node_entry(node).unwrap_or(self.func.entry),
-                                blocks,
-                            });
+                            region_map.insert(
+                                node,
+                                Region::Irreducible {
+                                    entry: graph.node_entry(node).unwrap_or(self.func.entry),
+                                    blocks,
+                                },
+                            );
                             continue;
                         }
                     };
@@ -961,10 +971,13 @@ impl<'a> RegionAnalyzer<'a> {
                             blocks.extend(succs.iter().flat_map(|id| graph.node_blocks(*id)));
                             blocks.sort_unstable();
                             blocks.dedup();
-                            region_map.insert(node, Region::Irreducible {
-                                entry: graph.node_entry(node).unwrap_or(self.func.entry),
-                                blocks,
-                            });
+                            region_map.insert(
+                                node,
+                                Region::Irreducible {
+                                    entry: graph.node_entry(node).unwrap_or(self.func.entry),
+                                    blocks,
+                                },
+                            );
                             continue;
                         }
                     };
@@ -988,26 +1001,34 @@ impl<'a> RegionAnalyzer<'a> {
                             {
                                 continue;
                             }
-                            let case_region = region_map.remove(&target_node)
-                                .unwrap_or_else(|| graph.node_region(target_node)
-                                    .unwrap_or(Region::Block(target_block)));
+                            let case_region =
+                                region_map.remove(&target_node).unwrap_or_else(|| {
+                                    graph
+                                        .node_region(target_node)
+                                        .unwrap_or(Region::Block(target_block))
+                                });
                             cases.push((values.first().copied(), Box::new(case_region)));
                         }
                         let default_region = default
                             .and_then(|addr| graph.node_for_block(addr))
                             .filter(|node_id| Some(*node_id) != merge)
                             .map(|node_id| {
-                                let r = region_map.remove(&node_id)
-                                    .unwrap_or_else(|| graph.node_region(node_id)
-                                        .unwrap_or(Region::Block(default.unwrap_or(self.func.entry))));
+                                let r = region_map.remove(&node_id).unwrap_or_else(|| {
+                                    graph.node_region(node_id).unwrap_or(Region::Block(
+                                        default.unwrap_or(self.func.entry),
+                                    ))
+                                });
                                 Box::new(r)
                             });
-                        region_map.insert(node, Region::Switch {
-                            switch_block,
-                            cases,
-                            default: default_region,
-                            merge_block: merge.and_then(|id| graph.node_entry(id)),
-                        });
+                        region_map.insert(
+                            node,
+                            Region::Switch {
+                                switch_block,
+                                cases,
+                                default: default_region,
+                                merge_block: merge.and_then(|id| graph.node_entry(id)),
+                            },
+                        );
                         continue;
                     }
 
@@ -1015,9 +1036,11 @@ impl<'a> RegionAnalyzer<'a> {
                         if Some(*succ) == merge {
                             continue;
                         }
-                        let case_region = region_map.remove(succ)
-                            .unwrap_or_else(|| graph.node_region(*succ)
-                                .unwrap_or(Region::Block(graph.node_entry(*succ).unwrap_or(self.func.entry))));
+                        let case_region = region_map.remove(succ).unwrap_or_else(|| {
+                            graph.node_region(*succ).unwrap_or(Region::Block(
+                                graph.node_entry(*succ).unwrap_or(self.func.entry),
+                            ))
+                        });
                         cases.push((Some(idx as u64), Box::new(case_region)));
                     }
                     Region::Switch {
@@ -1032,10 +1055,12 @@ impl<'a> RegionAnalyzer<'a> {
         }
 
         // The entry node's composed region is the final result.
-        region_map.remove(&entry).unwrap_or_else(|| Region::Irreducible {
-            entry: self.func.entry,
-            blocks: self.func.block_addrs().to_vec(),
-        })
+        region_map
+            .remove(&entry)
+            .unwrap_or_else(|| Region::Irreducible {
+                entry: self.func.entry,
+                blocks: self.func.block_addrs().to_vec(),
+            })
     }
 
     /// Merge two regions into a sequence, flattening nested Sequences.
@@ -1104,7 +1129,9 @@ impl<'a> RegionAnalyzer<'a> {
         graph.collect_reachable_limited(true_target, &mut true_reachable, 10);
         let mut false_reachable = HashSet::new();
         graph.collect_reachable_limited(false_target, &mut false_reachable, 10);
-        true_reachable.into_iter().find(|id| false_reachable.contains(id))
+        true_reachable
+            .into_iter()
+            .find(|id| false_reachable.contains(id))
     }
 
     fn find_working_switch_merge(&self, targets: &[usize], graph: &WorkingGraph) -> Option<usize> {
@@ -1123,7 +1150,9 @@ impl<'a> RegionAnalyzer<'a> {
             .copied()
             .filter(|id| reachable_sets.iter().all(|s| s.contains(id)))
             .collect();
-        common.into_iter().min_by_key(|id| graph.node_entry(*id).unwrap_or(u64::MAX))
+        common
+            .into_iter()
+            .min_by_key(|id| graph.node_entry(*id).unwrap_or(u64::MAX))
     }
 }
 
@@ -1304,7 +1333,8 @@ impl WorkingGraph {
             internal_nodes.insert(*node_id);
         }
         if partial_overlap || !internal_nodes.contains(&header_node) {
-            analyzer.analysis_reason = Some("iterative loop collapse encountered partial overlap".to_string());
+            analyzer.analysis_reason =
+                Some("iterative loop collapse encountered partial overlap".to_string());
             return Err(());
         }
 
@@ -1347,16 +1377,18 @@ impl WorkingGraph {
                     continue;
                 }
                 // Already recorded as exit with same target — skip
-                if analyzer.loop_exits.get(block).is_some_and(|existing| *existing == succ) {
+                if analyzer
+                    .loop_exits
+                    .get(block)
+                    .is_some_and(|existing| *existing == succ)
+                {
                     continue;
                 }
 
                 // Determine whether this is a cross-nesting goto or a normal break.
                 // A goto targets a block that is inside a *sibling* or *unrelated*
                 // loop body (not our body, not an enclosing loop's body).
-                let is_cross_nesting = Self::is_cross_nesting_target(
-                    succ, header, body, all_loops,
-                );
+                let is_cross_nesting = Self::is_cross_nesting_target(succ, header, body, all_loops);
 
                 if is_cross_nesting {
                     analyzer.loop_gotos.insert(*block, succ);
@@ -1461,7 +1493,8 @@ impl WorkingGraph {
             let body_entry = succs.iter().find(|s| body.contains(s)).copied();
             let mut body_blocks = body.clone();
             body_blocks.remove(&header);
-            let loop_body = self.make_loop_body_region(analyzer, internal_nodes, &body_blocks, body_entry);
+            let loop_body =
+                self.make_loop_body_region(analyzer, internal_nodes, &body_blocks, body_entry);
             return Region::WhileLoop {
                 header,
                 body: Box::new(loop_body),
@@ -1474,7 +1507,12 @@ impl WorkingGraph {
             if header != guard_block && analyzer.func.successors(header).len() == 1 {
                 body_blocks.remove(&header);
             }
-            let loop_body = self.make_loop_body_region(analyzer, internal_nodes, &body_blocks, Some(body_entry));
+            let loop_body = self.make_loop_body_region(
+                analyzer,
+                internal_nodes,
+                &body_blocks,
+                Some(body_entry),
+            );
             return Region::WhileLoop {
                 header: guard_block,
                 body: Box::new(loop_body),
@@ -1583,12 +1621,26 @@ impl WorkingGraph {
                 }
             }
             // Filter edges to only include nodes within the subgraph.
-            let pred_set: HashSet<usize> = self.preds.get(&id)
-                .map(|p| p.iter().copied().filter(|pid| node_ids.contains(pid)).collect())
+            let pred_set: HashSet<usize> = self
+                .preds
+                .get(&id)
+                .map(|p| {
+                    p.iter()
+                        .copied()
+                        .filter(|pid| node_ids.contains(pid))
+                        .collect()
+                })
                 .unwrap_or_default();
             preds.insert(id, pred_set);
-            let succ_set: HashSet<usize> = self.succs.get(&id)
-                .map(|s| s.iter().copied().filter(|sid| node_ids.contains(sid)).collect())
+            let succ_set: HashSet<usize> = self
+                .succs
+                .get(&id)
+                .map(|s| {
+                    s.iter()
+                        .copied()
+                        .filter(|sid| node_ids.contains(sid))
+                        .collect()
+                })
                 .unwrap_or_default();
             succs.insert(id, succ_set);
         }
