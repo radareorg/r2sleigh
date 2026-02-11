@@ -1266,6 +1266,23 @@ mod decompilation {
         rhs == format!("{lhs} - 0")
     }
 
+    fn has_self_xor_assignment(line: &str) -> bool {
+        let trimmed = line.trim();
+        if !trimmed.ends_with(';') {
+            return false;
+        }
+        let Some((_, rhs)) = trimmed.split_once('=') else {
+            return false;
+        };
+        let rhs = rhs.trim().trim_end_matches(';').trim();
+        let Some((a, b)) = rhs.split_once('^') else {
+            return false;
+        };
+        let a = a.trim().trim_matches(|c| c == '(' || c == ')').trim();
+        let b = b.trim().trim_matches(|c| c == '(' || c == ')').trim();
+        !a.is_empty() && a == b
+    }
+
     #[test]
     fn decompilation_regression_guardrails_core_set() {
         setup();
@@ -1402,6 +1419,56 @@ mod decompilation {
             !normalized.contains("t2_2 = arg2;"),
             "Should prune dead temp copy assignment for arg2"
         );
+        assert!(
+            !normalized.contains("arg1 = edi;"),
+            "Should suppress entry argument identity assignment for arg1"
+        );
+        assert!(
+            !normalized.contains("arg2 = esi;"),
+            "Should suppress entry argument identity assignment for arg2"
+        );
+    }
+
+    #[test]
+    fn decompiles_check_secret_with_direct_hex_compare() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        assert!(
+            normalized.contains("0xdead"),
+            "check_secret should preserve the compared magic value as hex"
+        );
+        assert!(
+            !normalized.contains(" - 57005"),
+            "check_secret should not emit decimal subtraction compare scaffold"
+        );
+        assert!(
+            !normalized.contains(" - 0 == 0") && !normalized.contains(" - 0 != 0"),
+            "check_secret should rewrite subtraction-to-zero compares into direct compares"
+        );
+    }
+
+    #[test]
+    fn decompiles_entry0_without_self_xor_identity_residuals() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaa; s entry0; a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        assert!(
+            normalized.contains('{') && normalized.contains('}'),
+            "entry0 decompilation should include a function body"
+        );
+
+        for line in normalized.lines().filter(|line| line.contains('=') && line.contains('^')) {
+            assert!(
+                !has_self_xor_assignment(line),
+                "entry0 should not contain self-XOR assignment residue: {}",
+                line
+            );
+        }
     }
 
     fn is_predicate_line(line: &str) -> bool {

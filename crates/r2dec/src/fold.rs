@@ -663,6 +663,26 @@ impl<'a> FoldingContext<'a> {
         self.arg_alias_for_register_name(&lower)
     }
 
+    fn is_entry_arg_alias_copy(&self, dst: &SSAVar, src: &SSAVar) -> bool {
+        if src.version != 0 {
+            return false;
+        }
+        let Some(src_alias) = self.arg_alias_for_register_name(&src.name) else {
+            return false;
+        };
+        let dst_name = self.var_name(dst);
+        is_generic_arg_name(&dst_name) && dst_name.eq_ignore_ascii_case(&src_alias)
+    }
+
+    fn arg_alias_for_expr(&self, expr: &CExpr) -> Option<String> {
+        match expr {
+            CExpr::Var(name) => self.arg_alias_for_rendered_name(name),
+            CExpr::Paren(inner) => self.arg_alias_for_expr(inner),
+            CExpr::Cast { expr: inner, .. } => self.arg_alias_for_expr(inner),
+            _ => None,
+        }
+    }
+
     /// Check if an address expression is a stack access and return the variable name.
     pub fn simplify_stack_access(&self, addr_expr: &CExpr) -> Option<String> {
         match addr_expr {
@@ -1752,7 +1772,9 @@ impl<'a> FoldingContext<'a> {
                 }
             }
             BinaryOp::BitOr | BinaryOp::BitXor => {
-                if self.is_literal_zero_expr(&right) {
+                if op == BinaryOp::BitXor && left == right {
+                    CExpr::IntLit(0)
+                } else if self.is_literal_zero_expr(&right) {
                     left
                 } else if self.is_literal_zero_expr(&left) {
                     right
@@ -1803,6 +1825,13 @@ impl<'a> FoldingContext<'a> {
     fn assign_stmt(&self, lhs: CExpr, rhs: CExpr) -> Option<CStmt> {
         let lhs = self.rewrite_stack_expr(lhs);
         let rhs = self.rewrite_stack_expr(self.identity_simplify_expr(rhs));
+        if let CExpr::Var(lhs_name) = &lhs
+            && is_generic_arg_name(lhs_name)
+            && let Some(rhs_alias) = self.arg_alias_for_expr(&rhs)
+            && lhs_name.eq_ignore_ascii_case(&rhs_alias)
+        {
+            return None;
+        }
         if lhs == rhs {
             return None;
         }
@@ -2722,6 +2751,9 @@ impl<'a> FoldingContext<'a> {
     fn op_to_stmt(&self, op: &SSAOp) -> Option<CStmt> {
         match op {
             SSAOp::Copy { dst, src } => {
+                if self.is_entry_arg_alias_copy(dst, src) {
+                    return None;
+                }
                 let lhs = CExpr::Var(self.var_name(dst));
                 let rhs_base = self.get_expr(src);
                 let rhs = self.resolve_predicate_rhs_for_var(src, rhs_base);
@@ -3377,6 +3409,9 @@ impl<'a> FoldingContext<'a> {
             if let Some(base) = self.strip_test_self(&left) {
                 return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
             }
+            if let Some((base, value)) = self.strip_sub_const(&left) {
+                return CExpr::binary(cmp_op, base, self.normalize_sub_cmp_constant(value));
+            }
             if let Some(base) = self.strip_sub_zero(&left) {
                 return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
             }
@@ -3386,12 +3421,72 @@ impl<'a> FoldingContext<'a> {
             if let Some(base) = self.strip_test_self(&right) {
                 return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
             }
+            if let Some((base, value)) = self.strip_sub_const(&right) {
+                return CExpr::binary(cmp_op, base, self.normalize_sub_cmp_constant(value));
+            }
             if let Some(base) = self.strip_sub_zero(&right) {
                 return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
             }
         }
 
         CExpr::binary(cmp_op, left, right)
+    }
+
+    fn normalize_sub_cmp_constant(&self, value: CExpr) -> CExpr {
+        match value {
+            CExpr::IntLit(v) if v >= 0x100 => CExpr::Var(format!("0x{:x}", v as u64)),
+            CExpr::UIntLit(v) if v >= 0x100 => CExpr::Var(format!("0x{:x}", v)),
+            other => other,
+        }
+    }
+
+    fn const_expr_for_comparison(&self, expr: &CExpr) -> Option<CExpr> {
+        match expr {
+            CExpr::IntLit(_) | CExpr::UIntLit(_) => Some(expr.clone()),
+            CExpr::Paren(inner) => self.const_expr_for_comparison(inner),
+            CExpr::Cast { expr: inner, .. } => self.const_expr_for_comparison(inner),
+            CExpr::Var(name) => {
+                if let Some(val) = parse_const_value(name) {
+                    if val > 0x7fffffff {
+                        Some(CExpr::UIntLit(val))
+                    } else {
+                        Some(CExpr::IntLit(val as i64))
+                    }
+                } else if let Some(hex) =
+                    name.strip_prefix("0x").or_else(|| name.strip_prefix("0X"))
+                {
+                    u64::from_str_radix(hex, 16).ok().map(|val| {
+                        if val > 0x7fffffff {
+                            CExpr::UIntLit(val)
+                        } else {
+                            CExpr::IntLit(val as i64)
+                        }
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn strip_sub_const(&self, expr: &CExpr) -> Option<(CExpr, CExpr)> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => self
+                .const_expr_for_comparison(right)
+                .map(|value| (left.as_ref().clone(), value)),
+            CExpr::Paren(inner) => self.strip_sub_const(inner),
+            CExpr::Cast { expr: inner, .. } => self.strip_sub_const(inner),
+            CExpr::Var(name) => self
+                .lookup_definition(name)
+                .or_else(|| self.formatted_defs_map().get(name).cloned())
+                .and_then(|inner| self.strip_sub_const(&inner)),
+            _ => None,
+        }
     }
 
     fn strip_sub_zero(&self, expr: &CExpr) -> Option<CExpr> {
@@ -5193,6 +5288,52 @@ mod tests {
     }
 
     #[test]
+    fn test_simplify_predicate_rewrites_sub_const_cmp_zero() {
+        let ctx = FoldingContext::new(64);
+        let expr = CExpr::binary(
+            BinaryOp::Eq,
+            CExpr::binary(
+                BinaryOp::Sub,
+                CExpr::Var("x".to_string()),
+                CExpr::IntLit(0xdead),
+            ),
+            CExpr::IntLit(0),
+        );
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::Var("x".to_string()),
+                CExpr::Var("0xdead".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn test_simplify_predicate_rewrites_sub_all_ones_cmp_zero() {
+        let ctx = FoldingContext::new(64);
+        let expr = CExpr::binary(
+            BinaryOp::Eq,
+            CExpr::binary(
+                BinaryOp::Sub,
+                CExpr::Var("x".to_string()),
+                CExpr::UIntLit(0xffff_ffff),
+            ),
+            CExpr::IntLit(0),
+        );
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::Var("x".to_string()),
+                CExpr::Var("0xffffffff".to_string())
+            )
+        );
+    }
+
+    #[test]
     fn test_simplify_predicate_rewrites_ne_ge_zero_to_gt_zero() {
         let ctx = FoldingContext::new(64);
         let expr = CExpr::binary(
@@ -5253,6 +5394,18 @@ mod tests {
             Some(4),
         );
         assert_eq!(simplified, CExpr::Var("x".to_string()));
+    }
+
+    #[test]
+    fn test_identity_xor_self() {
+        let ctx = FoldingContext::new(64);
+        let simplified = ctx.identity_simplify_binary(
+            BinaryOp::BitXor,
+            CExpr::Var("x".to_string()),
+            CExpr::Var("x".to_string()),
+            Some(4),
+        );
+        assert_eq!(simplified, CExpr::IntLit(0));
     }
 
     #[test]
@@ -5548,6 +5701,32 @@ mod tests {
         assert!(
             !expr_contains_sub_zero_cmp_scaffold(&rhs),
             "Predicate copy helper output should not contain cmp-to-zero subtraction scaffold"
+        );
+    }
+
+    #[test]
+    fn test_copy_suppresses_entry_arg_alias_assignment() {
+        let ctx = FoldingContext::new(64);
+        let stmt = ctx.op_to_stmt(&SSAOp::Copy {
+            dst: make_var("arg1", 0, 4),
+            src: make_var("EDI", 0, 4),
+        });
+        assert!(
+            stmt.is_none(),
+            "arg1 = edi entry alias copy should be suppressed"
+        );
+    }
+
+    #[test]
+    fn test_assign_stmt_suppresses_entry_arg_alias_assignment() {
+        let ctx = FoldingContext::new(64);
+        let stmt = ctx.assign_stmt(
+            CExpr::Var("arg1".to_string()),
+            CExpr::Var("edi".to_string()),
+        );
+        assert!(
+            stmt.is_none(),
+            "arg1 = edi should be suppressed even after non-copy normalization paths"
         );
     }
 
