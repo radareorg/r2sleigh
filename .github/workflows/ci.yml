@@ -14,9 +14,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Pin radare2 version — update when upgrading r2 support
+  R2V: 6.0.8
 
 jobs:
-  # ── Preflight: verify toolchain ────────────────────────────────────
+  # ── Preflight: install deps + verify toolchain ─────────────────────
   preflight:
     name: Preflight
     runs-on: self-hosted
@@ -28,7 +30,20 @@ jobs:
             build-essential gcc g++ make pkg-config \
             clang libclang-dev \
             libz3-dev \
-            curl git 2>/dev/null
+            curl git wget 2>/dev/null
+
+      - name: Install radare2 (runtime + dev headers)
+        run: |
+          # Skip if already installed at the correct version
+          if r2 -v 2>/dev/null | grep -q "$R2V"; then
+            echo "radare2 $R2V already installed"
+          else
+            echo "Installing radare2 $R2V from GitHub releases..."
+            wget -q "https://github.com/radareorg/radare2/releases/download/${R2V}/radare2_${R2V}_amd64.deb"
+            wget -q "https://github.com/radareorg/radare2/releases/download/${R2V}/radare2-dev_${R2V}_amd64.deb"
+            sudo dpkg -i "radare2_${R2V}_amd64.deb" "radare2-dev_${R2V}_amd64.deb"
+            rm -f *.deb
+          fi
 
       - name: Setup Rust PATH
         run: |
@@ -49,6 +64,8 @@ jobs:
           echo "cargo:      $(cargo --version)"
           echo "gcc:        $(gcc --version | head -1)"
           echo "clang:      $(clang --version | head -1)"
+          echo "r2:         $(r2 -v 2>&1 | head -1)"
+          echo "pkg-config: $(pkg-config --modversion r_anal 2>/dev/null || echo 'r_anal not found')"
 
   # ── Formatting ──────────────────────────────────────────────────────
   fmt:
