@@ -14,8 +14,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Pin radare2 version — update when upgrading r2 support
-  R2V: 6.0.8
+  # Pin radare2 git branch/tag — use 'master' for latest or a tag like '5.9.8'
+  R2_BRANCH: master
 
 jobs:
   # ── Preflight: install deps + verify toolchain ─────────────────────
@@ -32,17 +32,17 @@ jobs:
             libz3-dev \
             curl git wget 2>/dev/null
 
-      - name: Install radare2 (runtime + dev headers)
+      - name: Install radare2 from git
         run: |
-          # Skip if already installed at the correct version
-          if r2 -v 2>/dev/null | grep -q "$R2V"; then
-            echo "radare2 $R2V already installed"
+          if command -v r2 &>/dev/null; then
+            echo "radare2 already installed: $(r2 -v 2>&1 | head -1)"
           else
-            echo "Installing radare2 $R2V from GitHub releases..."
-            wget -q "https://github.com/radareorg/radare2/releases/download/${R2V}/radare2_${R2V}_amd64.deb"
-            wget -q "https://github.com/radareorg/radare2/releases/download/${R2V}/radare2-dev_${R2V}_amd64.deb"
-            sudo dpkg -i "radare2_${R2V}_amd64.deb" "radare2-dev_${R2V}_amd64.deb"
-            rm -f *.deb
+            echo "Building radare2 from git (branch: $R2_BRANCH)..."
+            git clone --depth=1 --branch "$R2_BRANCH" https://github.com/radareorg/radare2 /tmp/radare2
+            cd /tmp/radare2
+            sys/install.sh /usr
+            cd /
+            rm -rf /tmp/radare2
           fi
 
       - name: Setup Rust PATH
@@ -65,7 +65,7 @@ jobs:
           echo "gcc:        $(gcc --version | head -1)"
           echo "clang:      $(clang --version | head -1)"
           echo "r2:         $(r2 -v 2>&1 | head -1)"
-          echo "pkg-config: $(pkg-config --modversion r_anal 2>/dev/null || echo 'r_anal not found')"
+          echo "r_anal:     $(pkg-config --modversion r_anal 2>/dev/null || echo 'not found')"
 
   # ── Formatting ──────────────────────────────────────────────────────
   fmt:
