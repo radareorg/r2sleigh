@@ -10,6 +10,14 @@ updates:
     labels:
       - "dependencies"
       - "rust"
+    ignore:
+      # Major version bumps with breaking changes — upgrade manually
+      - dependency-name: "bincode"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "thiserror"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "petgraph"
+        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"

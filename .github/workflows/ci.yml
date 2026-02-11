@@ -14,6 +14,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Self-hosted runner: rustup installs to ~/.cargo/bin which isn't in
+  # the default PATH for the GitHub Actions runner service.
+  PATH: /home/gh-runner/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 jobs:
   # ── Formatting ──────────────────────────────────────────────────────
