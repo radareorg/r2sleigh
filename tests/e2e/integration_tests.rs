@@ -1978,15 +1978,10 @@ mod deep_integration {
             !taint_line.trim_end().ends_with("labels="),
             "taint labels should not be empty"
         );
-        let calls = taint_line
-            .split("calls=")
-            .nth(1)
-            .and_then(|tail| tail.split_whitespace().next())
-            .and_then(|field| field.parse::<u64>().ok())
-            .unwrap_or(0);
+        let taint_line_lower = taint_line.to_ascii_lowercase();
         assert!(
-            calls > 0,
-            "post-analysis should count tainted call sinks for vuln_memcpy (calls>0)"
+            taint_line_lower.contains("calls=memcpy") || taint_line_lower.contains(",memcpy"),
+            "post-analysis should resolve tainted call sinks to function names (expected memcpy)"
         );
     }
 
@@ -2006,7 +2001,47 @@ mod deep_integration {
     }
 
     #[test]
-    fn aaaa_auto_taint_idempotent_comment_line() {
+    fn aaaa_auto_taint_writes_risk_comment_vuln_memcpy() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.vuln_memcpy",
+            "aaaa; s dbg.vuln_memcpy; CC.",
+        );
+        result.assert_ok();
+        let risk_line = result
+            .stdout
+            .lines()
+            .find(|line| line.contains("sla.taint.risk:"))
+            .unwrap_or("");
+        let risk_line_lower = risk_line.to_ascii_lowercase();
+        assert!(
+            risk_line.contains("CRITICAL"),
+            "vuln_memcpy should be classified as CRITICAL due to dangerous tainted call sinks"
+        );
+        assert!(
+            risk_line_lower.contains("calls=memcpy") || risk_line_lower.contains(",memcpy"),
+            "risk comment should include resolved dangerous call names (expected memcpy)"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_taint_writes_risk_flag_vuln_memcpy() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.vuln_memcpy",
+            "aaaa; f~sla.taint.risk.critical.fcn_4012c9",
+        );
+        result.assert_ok();
+        assert!(
+            result.contains("sla.taint.risk.critical.fcn_4012c9"),
+            "post-analysis should create CRITICAL function risk flag for vuln_memcpy"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_taint_idempotent_comment_lines() {
         setup();
         let result = r2_at_func(
             vuln_test_binary(),
@@ -2014,10 +2049,15 @@ mod deep_integration {
             "aaaa; aaaa; s dbg.vuln_memcpy; CC.",
         );
         result.assert_ok();
-        let count = result.stdout.matches("sla.taint:").count();
+        let taint_count = result.stdout.matches("sla.taint:").count();
+        let risk_count = result.stdout.matches("sla.taint.risk:").count();
         assert_eq!(
-            count, 1,
-            "taint comment should not duplicate across repeated aaaa"
+            taint_count, 1,
+            "taint summary comment should not duplicate across repeated aaaa"
+        );
+        assert_eq!(
+            risk_count, 1,
+            "risk summary comment should not duplicate across repeated aaaa"
         );
     }
 

@@ -6,6 +6,8 @@
 #include <r_util/r_json.h>
 #include <r_util/r_num.h>
 #include <r_util/r_str.h>
+#include <ctype.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -116,6 +118,8 @@ static SymStateCache sym_state_cache = {0};
 #define SLEIGH_BLOCK_MAX_BYTES 256
 #define SLEIGH_TAINT_MAX_BLOCKS 200
 #define SLEIGH_TAINT_LABEL_MAX 6
+#define SLEIGH_COMMENT_PREFIX_TAINT "sla.taint:"
+#define SLEIGH_COMMENT_PREFIX_TAINT_RISK "sla.taint.risk:"
 
 /* Helper to lift all basic blocks of a function */
 typedef struct {
@@ -728,6 +732,9 @@ typedef struct {
 	int hits;
 	int call_hits;
 	int store_hits;
+	char **call_names;
+	size_t ncall_names;
+	size_t call_name_cap;
 	char **labels;
 	size_t nlabels;
 	size_t label_cap;
@@ -916,6 +923,7 @@ static void taint_summary_map_free(TaintSummaryMap *map) {
 		return;
 	}
 	for (i = 0; i < map->count; i++) {
+		free_string_array (map->items[i].call_names, map->items[i].ncall_names);
 		free_string_array (map->items[i].labels, map->items[i].nlabels);
 	}
 	free (map->items);
@@ -951,6 +959,9 @@ static TaintBlockSummary *taint_summary_map_get_or_add(TaintSummaryMap *map, ut6
 	map->items[map->count].hits = 0;
 	map->items[map->count].call_hits = 0;
 	map->items[map->count].store_hits = 0;
+	map->items[map->count].call_names = NULL;
+	map->items[map->count].ncall_names = 0;
+	map->items[map->count].call_name_cap = 0;
 	map->items[map->count].labels = NULL;
 	map->items[map->count].nlabels = 0;
 	map->items[map->count].label_cap = 0;
@@ -962,6 +973,256 @@ static bool taint_summary_add_label(TaintBlockSummary *summary, const char *labe
 		return false;
 	}
 	return append_unique_string (&summary->labels, &summary->nlabels, &summary->label_cap, label);
+}
+
+static bool taint_summary_add_call_name(TaintBlockSummary *summary, const char *name) {
+	if (!summary) {
+		return false;
+	}
+	return append_unique_string (&summary->call_names, &summary->ncall_names, &summary->call_name_cap, name);
+}
+
+typedef enum {
+	TAINT_RISK_NONE = 0,
+	TAINT_RISK_LOW,
+	TAINT_RISK_MEDIUM,
+	TAINT_RISK_HIGH,
+	TAINT_RISK_CRITICAL,
+} TaintRiskLevel;
+
+static const char *taint_risk_level_name(TaintRiskLevel level) {
+	switch (level) {
+	case TAINT_RISK_CRITICAL:
+		return "CRITICAL";
+	case TAINT_RISK_HIGH:
+		return "HIGH";
+	case TAINT_RISK_MEDIUM:
+		return "MEDIUM";
+	case TAINT_RISK_LOW:
+		return "LOW";
+	case TAINT_RISK_NONE:
+	default:
+		return "NONE";
+	}
+}
+
+static const char *taint_risk_level_flag_name(TaintRiskLevel level) {
+	switch (level) {
+	case TAINT_RISK_CRITICAL:
+		return "critical";
+	case TAINT_RISK_HIGH:
+		return "high";
+	case TAINT_RISK_MEDIUM:
+		return "medium";
+	case TAINT_RISK_LOW:
+		return "low";
+	case TAINT_RISK_NONE:
+	default:
+		return "none";
+	}
+}
+
+static const char *dangerous_sinks[] = {
+	"memcpy",
+	"strcpy",
+	"strcat",
+	"gets",
+	"sprintf",
+	"snprintf",
+	"system",
+	"execve",
+	"execl",
+	"popen",
+	"read",
+	"recv",
+	"recvfrom",
+	"scanf",
+	"fscanf",
+};
+
+static int cmp_strings_lex(const void *a, const void *b) {
+	const char *sa = *(const char * const *)a;
+	const char *sb = *(const char * const *)b;
+	return strcmp (sa ? sa : "", sb ? sb : "");
+}
+
+static bool parse_ssa_target_addr(const char *src, ut64 *out) {
+	char buf[128];
+	const char *payload;
+	const char *end;
+	size_t len;
+	char *tail = NULL;
+	unsigned long long value;
+
+	if (!src || !out) {
+		return false;
+	}
+
+	if (r_str_startswith (src, "const:")) {
+		payload = src + 6;
+	} else if (r_str_startswith (src, "ram:")) {
+		payload = src + 4;
+	} else {
+		return false;
+	}
+
+	end = strchr (payload, '_');
+	len = end ? (size_t)(end - payload) : strlen (payload);
+	if (!len || len >= sizeof (buf)) {
+		return false;
+	}
+	memcpy (buf, payload, len);
+	buf[len] = '\0';
+
+	errno = 0;
+	value = strtoull (buf, &tail, 16);
+	if (errno != 0 || !tail || *tail != '\0') {
+		return false;
+	}
+
+	*out = (ut64)value;
+	return true;
+}
+
+static void trim_call_prefixes(char *name) {
+	static const char *prefixes[] = {"sym.imp.", "sym.", "dbg.", "imp.", "reloc."};
+	bool changed = true;
+	size_t i;
+
+	if (!name || !*name) {
+		return;
+	}
+
+	while (changed) {
+		changed = false;
+		for (i = 0; i < R_ARRAY_SIZE (prefixes); i++) {
+			size_t plen = strlen (prefixes[i]);
+			if (r_str_startswith (name, prefixes[i])) {
+				memmove (name, name + plen, strlen (name + plen) + 1);
+				changed = true;
+			}
+		}
+	}
+}
+
+static char *clean_call_name(const char *raw) {
+	char *name;
+	char *at;
+	size_t len;
+
+	if (!raw || !*raw) {
+		return NULL;
+	}
+
+	name = strdup (raw);
+	if (!name) {
+		return NULL;
+	}
+
+	trim_call_prefixes (name);
+
+	len = strlen (name);
+	while (len >= 4 && !strcmp (name + len - 4, "@plt")) {
+		name[len - 4] = '\0';
+		len -= 4;
+	}
+	while (len >= 4 && !strcmp (name + len - 4, ".plt")) {
+		name[len - 4] = '\0';
+		len -= 4;
+	}
+
+	at = strchr (name, '@');
+	if (at) {
+		*at = '\0';
+	}
+
+	trim_call_prefixes (name);
+
+	if (!*name) {
+		free (name);
+		return NULL;
+	}
+	return name;
+}
+
+static char *resolve_call_target_name(RCore *core, RAnal *anal, const RJson *hit_op) {
+	const RJson *j_sources;
+	const RJson *j_src;
+	ut64 addr = 0;
+	const char *raw_name = NULL;
+	char *cleaned = NULL;
+
+	if (!core || !anal || !hit_op || hit_op->type != R_JSON_OBJECT) {
+		return NULL;
+	}
+
+	j_sources = r_json_get (hit_op, "sources");
+	if (!j_sources || j_sources->type != R_JSON_ARRAY) {
+		return NULL;
+	}
+	j_src = j_sources->children.first;
+	if (!j_src || j_src->type != R_JSON_STRING || !j_src->str_value) {
+		return NULL;
+	}
+	if (!parse_ssa_target_addr (j_src->str_value, &addr)) {
+		return NULL;
+	}
+
+	if (core->flags) {
+		RFlagItem *flag = r_flag_get_at (core->flags, addr, false);
+		if (flag && flag->name && *flag->name) {
+			raw_name = flag->name;
+		}
+	}
+	if (!raw_name) {
+		RAnalFunction *target_fcn = r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
+		if (target_fcn && target_fcn->name && *target_fcn->name) {
+			raw_name = target_fcn->name;
+		}
+	}
+	if (!raw_name) {
+		return NULL;
+	}
+
+	cleaned = clean_call_name (raw_name);
+	return cleaned;
+}
+
+static bool is_dangerous_sink(const char *name) {
+	size_t i;
+
+	if (!name || !*name) {
+		return false;
+	}
+
+	for (i = 0; i < R_ARRAY_SIZE (dangerous_sinks); i++) {
+		if (!r_str_casecmp (name, dangerous_sinks[i])) {
+			return true;
+		}
+	}
+	if (!r_str_ncasecmp (name, "exec", 4)) {
+		return true;
+	}
+	return false;
+}
+
+static TaintRiskLevel classify_taint_risk(bool meaningful, bool has_dangerous_call, int call_hits, int store_hits) {
+	if (!meaningful) {
+		return TAINT_RISK_NONE;
+	}
+	if (has_dangerous_call) {
+		return TAINT_RISK_CRITICAL;
+	}
+	if (call_hits > 0 && store_hits > 0) {
+		return TAINT_RISK_HIGH;
+	}
+	if (call_hits > 0 || store_hits > 1) {
+		return TAINT_RISK_MEDIUM;
+	}
+	if (store_hits > 0) {
+		return TAINT_RISK_LOW;
+	}
+	return TAINT_RISK_NONE;
 }
 
 static void edge_set_init(EdgeSet *set) {
@@ -1114,9 +1375,33 @@ static int cmp_labels_interesting(const void *a, const void *b) {
 	return strcmp (la ? la : "", lb ? lb : "");
 }
 
-static bool is_sla_taint_line(const char *line, size_t len) {
-	const char *prefix = "sla.taint:";
-	size_t prefix_len = strlen (prefix);
+static bool line_has_prefix(const char *line, size_t len, const char *prefix) {
+	size_t prefix_len;
+
+	if (!line || !prefix) {
+		return false;
+	}
+
+	prefix_len = strlen (prefix);
+	if (len < prefix_len) {
+		return false;
+	}
+	return !strncmp (line, prefix, prefix_len);
+}
+
+static bool is_sla_managed_line(const char *line, size_t len) {
+	if (!line) {
+		return false;
+	}
+	while (len > 0 && (*line == ' ' || *line == '\t')) {
+		line++;
+		len--;
+	}
+	return line_has_prefix (line, len, SLEIGH_COMMENT_PREFIX_TAINT)
+		|| line_has_prefix (line, len, SLEIGH_COMMENT_PREFIX_TAINT_RISK);
+}
+
+static bool is_sla_line_with_prefix(const char *line, size_t len, const char *prefix) {
 
 	if (!line) {
 		return false;
@@ -1125,7 +1410,7 @@ static bool is_sla_taint_line(const char *line, size_t len) {
 		line++;
 		len--;
 	}
-	return len >= prefix_len && !strncmp (line, prefix, prefix_len);
+	return line_has_prefix (line, len, prefix);
 }
 
 static bool append_bytes(char **buf, size_t *len, size_t *cap, const char *src, size_t src_len) {
@@ -1152,7 +1437,7 @@ static bool append_bytes(char **buf, size_t *len, size_t *cap, const char *src, 
 	return true;
 }
 
-static char *strip_sla_taint_line(const char *existing_comment) {
+static char *strip_sla_lines(const char *existing_comment, const char *prefix, bool all_managed) {
 	const char *cursor;
 	char *out = NULL;
 	size_t out_len = 0;
@@ -1168,8 +1453,11 @@ static char *strip_sla_taint_line(const char *existing_comment) {
 		const char *line_start = cursor;
 		const char *line_end = strchr (cursor, '\n');
 		size_t line_len = line_end ? (size_t)(line_end - line_start) : strlen (line_start);
+		bool should_strip = all_managed
+			? is_sla_managed_line (line_start, line_len)
+			: is_sla_line_with_prefix (line_start, line_len, prefix);
 
-		if (!is_sla_taint_line (line_start, line_len)) {
+		if (!should_strip) {
 			if (!first) {
 				append_bytes (&out, &out_len, &out_cap, "\n", 1);
 			}
@@ -1189,41 +1477,41 @@ static char *strip_sla_taint_line(const char *existing_comment) {
 	return out;
 }
 
-static char *merge_sla_taint_line(const char *existing_comment, const char *taint_line) {
+static char *merge_sla_line(const char *existing_comment, const char *line_to_add, const char *prefix) {
 	char *cleaned;
 	char *merged;
 	size_t cleaned_len;
-	size_t taint_len;
+	size_t line_len;
 
-	if (!taint_line || !*taint_line) {
-		return strip_sla_taint_line (existing_comment);
+	if (!line_to_add || !*line_to_add) {
+		return strip_sla_lines (existing_comment, prefix, false);
 	}
 
-	cleaned = strip_sla_taint_line (existing_comment);
+	cleaned = strip_sla_lines (existing_comment, prefix, false);
 	if (!cleaned) {
 		return NULL;
 	}
 	if (!*cleaned) {
 		free (cleaned);
-		return strdup (taint_line);
+		return strdup (line_to_add);
 	}
 
 	cleaned_len = strlen (cleaned);
-	taint_len = strlen (taint_line);
-	merged = malloc (cleaned_len + 1 + taint_len + 1);
+	line_len = strlen (line_to_add);
+	merged = malloc (cleaned_len + 1 + line_len + 1);
 	if (!merged) {
 		free (cleaned);
 		return NULL;
 	}
 	memcpy (merged, cleaned, cleaned_len);
 	merged[cleaned_len] = '\n';
-	memcpy (merged + cleaned_len + 1, taint_line, taint_len);
-	merged[cleaned_len + 1 + taint_len] = '\0';
+	memcpy (merged + cleaned_len + 1, line_to_add, line_len);
+	merged[cleaned_len + 1 + line_len] = '\0';
 	free (cleaned);
 	return merged;
 }
 
-static void set_sla_taint_comment_line(RAnal *anal, ut64 addr, const char *taint_line) {
+static void set_sla_comment_line_with_prefix(RAnal *anal, ut64 addr, const char *line, const char *prefix) {
 	const char *existing;
 	char *updated;
 
@@ -1232,9 +1520,9 @@ static void set_sla_taint_comment_line(RAnal *anal, ut64 addr, const char *taint
 	}
 
 	existing = r_meta_get_string (anal, R_META_TYPE_COMMENT, addr);
-	updated = taint_line
-		? merge_sla_taint_line (existing, taint_line)
-		: strip_sla_taint_line (existing);
+	updated = line
+		? merge_sla_line (existing, line, prefix)
+		: strip_sla_lines (existing, prefix, false);
 	if (!updated) {
 		return;
 	}
@@ -1247,9 +1535,39 @@ static void set_sla_taint_comment_line(RAnal *anal, ut64 addr, const char *taint
 	free (updated);
 }
 
+static void clear_sla_managed_comment_lines(RAnal *anal, ut64 addr) {
+	const char *existing;
+	char *updated;
+
+	if (!anal) {
+		return;
+	}
+	existing = r_meta_get_string (anal, R_META_TYPE_COMMENT, addr);
+	updated = strip_sla_lines (existing, NULL, true);
+	if (!updated) {
+		return;
+	}
+
+	if (*updated) {
+		r_meta_set_string (anal, R_META_TYPE_COMMENT, addr, updated);
+	} else {
+		r_meta_del (anal, R_META_TYPE_COMMENT, addr, 1);
+	}
+	free (updated);
+}
+
+static void set_sla_taint_comment_line(RAnal *anal, ut64 addr, const char *taint_line) {
+	set_sla_comment_line_with_prefix (anal, addr, taint_line, SLEIGH_COMMENT_PREFIX_TAINT);
+}
+
+static void set_sla_taint_risk_comment_line(RAnal *anal, ut64 addr, const char *risk_line) {
+	set_sla_comment_line_with_prefix (anal, addr, risk_line, SLEIGH_COMMENT_PREFIX_TAINT_RISK);
+}
+
 static void clear_taint_function_artifacts(RAnal *anal, RCore *core, const RAnalFunction *fcn, const BlockArray *blocks) {
 	size_t i;
 	char glob[128];
+	char risk_glob[128];
 
 	if (!anal || !fcn || !blocks) {
 		return;
@@ -1258,11 +1576,14 @@ static void clear_taint_function_artifacts(RAnal *anal, RCore *core, const RAnal
 	if (core && core->flags) {
 		snprintf (glob, sizeof (glob), "sla.taint.fcn_%"PFMT64x".*", fcn->addr);
 		r_flag_unset_glob (core->flags, glob);
+		snprintf (risk_glob, sizeof (risk_glob), "sla.taint.risk.*.fcn_%"PFMT64x, fcn->addr);
+		r_flag_unset_glob (core->flags, risk_glob);
 	}
 
 	for (i = 0; i < blocks->count; i++) {
-		set_sla_taint_comment_line (anal, r2il_block_addr (blocks->blocks[i]), NULL);
+		clear_sla_managed_comment_lines (anal, r2il_block_addr (blocks->blocks[i]));
 	}
+	clear_sla_managed_comment_lines (anal, fcn->addr);
 }
 
 static bool has_xref(RAnal *anal, ut64 from, ut64 to, RAnalRefType type) {
@@ -1318,6 +1639,10 @@ static char *format_taint_summary_comment(TaintBlockSummary *summary) {
 	size_t i;
 	size_t label_limit;
 	int prefix_len;
+	int suffix_len;
+	char call_count_buf[32];
+	const char *call_field = NULL;
+	size_t call_field_len = 0;
 
 	if (!summary || !summary->labels || summary->nlabels == 0) {
 		return NULL;
@@ -1326,13 +1651,28 @@ static char *format_taint_summary_comment(TaintBlockSummary *summary) {
 	qsort (summary->labels, summary->nlabels, sizeof (char *), cmp_labels_interesting);
 	label_limit = R_MIN (summary->nlabels, (size_t)SLEIGH_TAINT_LABEL_MAX);
 
-	prefix_len = snprintf (NULL, 0, "sla.taint: hits=%d calls=%d stores=%d labels=",
-		summary->hits, summary->call_hits, summary->store_hits);
-	if (prefix_len < 0) {
+	if (summary->ncall_names > 0) {
+		qsort (summary->call_names, summary->ncall_names, sizeof (char *), cmp_strings_lex);
+		call_field_len = 0;
+		for (i = 0; i < summary->ncall_names; i++) {
+			call_field_len += strlen (summary->call_names[i]);
+			if (i > 0) {
+				call_field_len += 1;
+			}
+		}
+	} else {
+		snprintf (call_count_buf, sizeof (call_count_buf), "%d", summary->call_hits);
+		call_field = call_count_buf;
+		call_field_len = strlen (call_field);
+	}
+
+	prefix_len = snprintf (NULL, 0, "sla.taint: hits=%d calls=", summary->hits);
+	suffix_len = snprintf (NULL, 0, " stores=%d labels=", summary->store_hits);
+	if (prefix_len < 0 || suffix_len < 0) {
 		return NULL;
 	}
 
-	total_len = (size_t)prefix_len;
+	total_len = (size_t)prefix_len + call_field_len + (size_t)suffix_len;
 	for (i = 0; i < label_limit; i++) {
 		total_len += strlen (summary->labels[i]);
 		if (i > 0) {
@@ -1348,9 +1688,26 @@ static char *format_taint_summary_comment(TaintBlockSummary *summary) {
 		return NULL;
 	}
 
-	snprintf (comment, total_len + 1, "sla.taint: hits=%d calls=%d stores=%d labels=",
-		summary->hits, summary->call_hits, summary->store_hits);
+	snprintf (comment, total_len + 1, "sla.taint: hits=%d calls=", summary->hits);
 	cursor = comment + strlen (comment);
+	if (summary->ncall_names > 0) {
+		for (i = 0; i < summary->ncall_names; i++) {
+			if (i > 0) {
+				*cursor++ = ',';
+			}
+			{
+				size_t name_len = strlen (summary->call_names[i]);
+				memcpy (cursor, summary->call_names[i], name_len);
+				cursor += name_len;
+			}
+		}
+	} else {
+		size_t count_len = strlen (call_field);
+		memcpy (cursor, call_field, count_len);
+		cursor += count_len;
+	}
+	cursor += snprintf (cursor, total_len + 1 - (size_t)(cursor - comment),
+		" stores=%d labels=", summary->store_hits);
 
 	for (i = 0; i < label_limit; i++) {
 		if (i > 0) {
@@ -1364,6 +1721,113 @@ static char *format_taint_summary_comment(TaintBlockSummary *summary) {
 		memcpy (cursor, ",...", 4);
 		cursor += 4;
 	}
+	*cursor = '\0';
+	return comment;
+}
+
+static char *format_taint_risk_comment(
+	TaintRiskLevel level,
+	char **call_names,
+	size_t ncall_names,
+	int call_hits,
+	int store_hits,
+	char **labels,
+	size_t nlabels
+) {
+	char *comment;
+	char *cursor;
+	size_t total_len = 0;
+	size_t i;
+	size_t label_limit;
+	const char *level_name;
+	char call_count_buf[32];
+	const char *call_field = NULL;
+	size_t call_field_len = 0;
+
+	if (level == TAINT_RISK_NONE) {
+		return NULL;
+	}
+
+	level_name = taint_risk_level_name (level);
+	if (!level_name || !*level_name) {
+		return NULL;
+	}
+
+	if (ncall_names > 0) {
+		qsort (call_names, ncall_names, sizeof (char *), cmp_strings_lex);
+		for (i = 0; i < ncall_names; i++) {
+			call_field_len += strlen (call_names[i]);
+			if (i > 0) {
+				call_field_len += 1;
+			}
+		}
+	} else {
+		snprintf (call_count_buf, sizeof (call_count_buf), "%d", call_hits);
+		call_field = call_count_buf;
+		call_field_len = strlen (call_field);
+	}
+
+	if (!labels || nlabels == 0) {
+		return NULL;
+	}
+	qsort (labels, nlabels, sizeof (char *), cmp_labels_interesting);
+	label_limit = R_MIN (nlabels, (size_t)SLEIGH_TAINT_LABEL_MAX);
+
+	total_len += (size_t)snprintf (NULL, 0, "sla.taint.risk: %s (calls=", level_name);
+	total_len += call_field_len;
+	total_len += (size_t)snprintf (NULL, 0, " stores=%d labels=", store_hits);
+	for (i = 0; i < label_limit; i++) {
+		total_len += strlen (labels[i]);
+		if (i > 0) {
+			total_len += 1;
+		}
+	}
+	if (nlabels > label_limit) {
+		total_len += 4;
+	}
+	total_len += 1; /* ')' */
+
+	comment = calloc (1, total_len + 1);
+	if (!comment) {
+		return NULL;
+	}
+
+	snprintf (comment, total_len + 1, "sla.taint.risk: %s (calls=", level_name);
+	cursor = comment + strlen (comment);
+	if (ncall_names > 0) {
+		for (i = 0; i < ncall_names; i++) {
+			if (i > 0) {
+				*cursor++ = ',';
+			}
+			{
+				size_t name_len = strlen (call_names[i]);
+				memcpy (cursor, call_names[i], name_len);
+				cursor += name_len;
+			}
+		}
+	} else {
+		size_t count_len = strlen (call_field);
+		memcpy (cursor, call_field, count_len);
+		cursor += count_len;
+	}
+
+	cursor += snprintf (cursor, total_len + 1 - (size_t)(cursor - comment),
+		" stores=%d labels=", store_hits);
+	for (i = 0; i < label_limit; i++) {
+		if (i > 0) {
+			*cursor++ = ',';
+		}
+		{
+			size_t label_len = strlen (labels[i]);
+			memcpy (cursor, labels[i], label_len);
+			cursor += label_len;
+		}
+	}
+	if (nlabels > label_limit) {
+		memcpy (cursor, ",...", 4);
+		cursor += 4;
+	}
+	*cursor++ = ')';
 	*cursor = '\0';
 	return comment;
 }
@@ -2865,6 +3329,10 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int taint_fcns_eligible = 0;
 	int taint_fcns_skipped = 0;
 	int taint_sink_hits = 0;
+	int taint_risk_critical = 0;
+	int taint_risk_high = 0;
+	int taint_risk_medium = 0;
+	int taint_risk_low = 0;
 	int best_sink_rank = 1000;
 	ut64 best_sink_addr = 0;
 	char *best_sink_label = NULL;
@@ -3021,6 +3489,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 							size_t sink_label_cap = 0;
 							size_t li;
 							ut64 sink_block;
+							bool is_call_sink = false;
 							bool had_primary_sources = false;
 							bool added_nonself = false;
 
@@ -3042,6 +3511,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 									op_name = j_op_name->str_value;
 								}
 							}
+							is_call_sink = op_name && (!strcmp (op_name, "Call") || !strcmp (op_name, "CallInd"));
 
 							for (tv_item = j_tainted_vars->children.first; tv_item; tv_item = tv_item->next) {
 								const RJson *j_labels;
@@ -3068,11 +3538,18 @@ static bool sleigh_post_analysis(RAnal *anal) {
 							TaintBlockSummary *summary = taint_summary_map_get_or_add (&summaries, sink_block);
 							if (summary) {
 								summary->hits++;
-								if (op_name && (!strcmp (op_name, "Call") || !strcmp (op_name, "CallInd"))) {
+								if (is_call_sink) {
 									summary->call_hits++;
 								}
 								if (op_name && !strcmp (op_name, "Store")) {
 									summary->store_hits++;
+								}
+								if (is_call_sink && j_op && j_op->type == R_JSON_OBJECT) {
+									char *call_name = resolve_call_target_name (core, anal, j_op);
+									if (call_name) {
+										taint_summary_add_call_name (summary, call_name);
+										free (call_name);
+									}
 								}
 							}
 
@@ -3114,27 +3591,50 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					}
 
 					size_t si;
+					char **function_call_names = NULL;
+					size_t function_ncall_names = 0;
+					size_t function_call_name_cap = 0;
+					char **function_labels = NULL;
+					size_t function_nlabels = 0;
+					size_t function_label_cap = 0;
+					int function_call_hits = 0;
+					int function_store_hits = 0;
+					bool function_meaningful = false;
+					bool function_has_dangerous_call = false;
 					for (si = 0; si < summaries.count; si++) {
 						TaintBlockSummary *summary = &summaries.items[si];
 						char *comment = format_taint_summary_comment (summary);
-						if (!comment || !*comment) {
-							free (comment);
-							continue;
-						}
-						set_sla_taint_comment_line (anal, summary->addr, comment);
-						taint_comments++;
+						size_t li;
+						if (comment && *comment) {
+							set_sla_taint_comment_line (anal, summary->addr, comment);
+							taint_comments++;
 
-						if (core && core->flags) {
-							char flag_name[160];
-							snprintf (flag_name, sizeof (flag_name),
-								"sla.taint.fcn_%"PFMT64x".blk_%"PFMT64x, fcn->addr, summary->addr);
-							if (r_flag_set (core->flags, flag_name, summary->addr, 1)) {
-								taint_flags++;
+							if (core && core->flags) {
+								char flag_name[160];
+								snprintf (flag_name, sizeof (flag_name),
+									"sla.taint.fcn_%"PFMT64x".blk_%"PFMT64x, fcn->addr, summary->addr);
+								if (r_flag_set (core->flags, flag_name, summary->addr, 1)) {
+									taint_flags++;
+								}
 							}
 						}
 
 						if (summary->labels && summary->nlabels > 0) {
 							int rank = label_rank (summary->labels[0]);
+							function_meaningful = true;
+							function_call_hits += summary->call_hits;
+							function_store_hits += summary->store_hits;
+
+							for (li = 0; li < summary->nlabels; li++) {
+								append_unique_string (&function_labels, &function_nlabels, &function_label_cap, summary->labels[li]);
+							}
+							for (li = 0; li < summary->ncall_names; li++) {
+								append_unique_string (&function_call_names, &function_ncall_names, &function_call_name_cap, summary->call_names[li]);
+								if (is_dangerous_sink (summary->call_names[li])) {
+									function_has_dangerous_call = true;
+								}
+							}
+
 							if (rank < best_sink_rank) {
 								free (best_sink_label);
 								best_sink_label = strdup (summary->labels[0]);
@@ -3144,6 +3644,59 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						}
 						free (comment);
 					}
+					{
+						TaintRiskLevel risk_level = classify_taint_risk (
+							function_meaningful,
+							function_has_dangerous_call,
+							function_call_hits,
+							function_store_hits
+						);
+						char *risk_comment = format_taint_risk_comment (
+							risk_level,
+							function_call_names,
+							function_ncall_names,
+							function_call_hits,
+							function_store_hits,
+							function_labels,
+							function_nlabels
+						);
+
+						switch (risk_level) {
+						case TAINT_RISK_CRITICAL:
+							taint_risk_critical++;
+							break;
+						case TAINT_RISK_HIGH:
+							taint_risk_high++;
+							break;
+						case TAINT_RISK_MEDIUM:
+							taint_risk_medium++;
+							break;
+						case TAINT_RISK_LOW:
+							taint_risk_low++;
+							break;
+						case TAINT_RISK_NONE:
+						default:
+							break;
+						}
+
+						if (risk_comment && *risk_comment) {
+							set_sla_taint_risk_comment_line (anal, fcn->addr, risk_comment);
+							taint_comments++;
+						}
+						free (risk_comment);
+
+						if (risk_level != TAINT_RISK_NONE && core && core->flags) {
+							char risk_flag[192];
+							snprintf (risk_flag, sizeof (risk_flag),
+								"sla.taint.risk.%s.fcn_%"PFMT64x,
+								taint_risk_level_flag_name (risk_level), fcn->addr);
+							if (r_flag_set (core->flags, risk_flag, fcn->addr, 1)) {
+								taint_flags++;
+							}
+						}
+					}
+					free_string_array (function_call_names, function_ncall_names);
+					free_string_array (function_labels, function_nlabels);
 
 					edge_set_free (&seen_edges);
 					taint_summary_map_free (&summaries);
@@ -3161,6 +3714,8 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	R_LOG_INFO ("r2sleigh: post-analysis taint eligible=%d skipped=%d comments=%d flags=%d xrefs=%d sink_hits=%d parse_failures=%d",
 		taint_fcns_eligible, taint_fcns_skipped, taint_comments, taint_flags, taint_xrefs,
 		taint_sink_hits, taint_parse_failures);
+	R_LOG_INFO ("r2sleigh: post-analysis risk summary: critical=%d high=%d medium=%d low=%d",
+		taint_risk_critical, taint_risk_high, taint_risk_medium, taint_risk_low);
 	if (best_sink_label) {
 		R_LOG_INFO ("r2sleigh: post-analysis most interesting sink 0x%"PFMT64x" label=%s",
 			best_sink_addr, best_sink_label);
