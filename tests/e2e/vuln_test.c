@@ -324,6 +324,17 @@ int test_struct_offset_0x100(LargeOffsetStruct *obj, int v) {
     return obj->marker + 1;
 }
 
+// Test 30: SCCP should eliminate dead branch and dead sink store path
+int test_sccp_dead_branch(int x) {
+    int flag = 1;
+    if (flag) {
+        return x + 10;
+    } else {
+        global_tail = x * 100;
+        return global_tail;
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -558,6 +569,12 @@ int main(int argc, char *argv[]) {
             }
             break;
         }
+        case 30:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf("test_sccp_dead_branch(%d) = %d\n", x, test_sccp_dead_branch(x));
+            }
+            break;
         default:
             printf("Unknown test: %d\n", test);
             return 1;

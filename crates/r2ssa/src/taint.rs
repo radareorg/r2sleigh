@@ -757,7 +757,7 @@ mod tests {
             ],
         }];
 
-        let func = SSAFunction::from_blocks_with_arch(&blocks, Some(&arch))
+        let func = SSAFunction::from_blocks_raw(&blocks, Some(&arch))
             .expect("Failed to build SSA function");
         let policy = DefaultTaintPolicy::all_inputs().with_sink_stores(false);
         let analysis = TaintAnalysis::with_arch(&func, policy, Some(&arch));
@@ -802,7 +802,7 @@ mod tests {
             ],
         }];
 
-        let func = SSAFunction::from_blocks_with_arch(&blocks, Some(&arch))
+        let func = SSAFunction::from_blocks_raw(&blocks, Some(&arch))
             .expect("Failed to build SSA function");
         let policy = DefaultTaintPolicy::new()
             .with_source("rsi")

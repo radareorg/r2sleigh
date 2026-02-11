@@ -564,7 +564,7 @@ mod tests {
             },
         ];
 
-        let func = SSAFunction::from_blocks(&blocks).unwrap();
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).unwrap();
         let block = func.get_block(0x1004).unwrap();
         let dst = block.ops[0].dst().unwrap().clone();
 
@@ -604,7 +604,7 @@ mod tests {
             },
         ];
 
-        let func = SSAFunction::from_blocks(&blocks).unwrap();
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).unwrap();
         let block = func.get_block(0x2004).unwrap();
         let dst = block.ops[0].dst().unwrap().clone();
 

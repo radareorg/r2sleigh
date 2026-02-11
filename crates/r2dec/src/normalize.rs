@@ -141,7 +141,8 @@ mod tests {
             target: Varnode::register(0, 8),
         });
 
-        let func = SSAFunction::from_blocks(&[b0, b1, b2, b3]).expect("ssa function");
+        let func =
+            SSAFunction::from_blocks_raw_no_arch(&[b0, b1, b2, b3]).expect("ssa function");
         let with_phis = func.blocks().any(|b| !b.phis.is_empty());
         assert!(with_phis, "fixture should include phi nodes");
 

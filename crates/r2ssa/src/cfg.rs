@@ -443,6 +443,44 @@ impl CFG {
     pub fn has_edge(&self, from: u64, to: u64) -> bool {
         self.edge_type(from, to).is_some()
     }
+
+    /// Remove all edges from `from` to `to`.
+    pub fn remove_edge(&mut self, from: u64, to: u64) {
+        let Some(&from_idx) = self.addr_to_node.get(&from) else {
+            return;
+        };
+        let Some(&to_idx) = self.addr_to_node.get(&to) else {
+            return;
+        };
+
+        while let Some(edge) = self.graph.find_edge(from_idx, to_idx) {
+            self.graph.remove_edge(edge);
+        }
+    }
+
+    /// Remove a block node and all incident edges.
+    pub fn remove_block(&mut self, addr: u64) {
+        let Some(idx) = self.addr_to_node.remove(&addr) else {
+            return;
+        };
+        self.graph.remove_node(idx);
+        // petgraph may swap node indices during removal.
+        self.rebuild_addr_map();
+    }
+
+    /// Replace the terminator for a block.
+    pub fn set_terminator(&mut self, addr: u64, terminator: BlockTerminator) {
+        if let Some(block) = self.get_block_mut(addr) {
+            block.terminator = terminator;
+        }
+    }
+
+    fn rebuild_addr_map(&mut self) {
+        self.addr_to_node.clear();
+        for idx in self.graph.node_indices() {
+            self.addr_to_node.insert(self.graph[idx].addr, idx);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -643,5 +681,105 @@ mod tests {
         let cfg = CFG::from_blocks(&blocks).unwrap();
         let rpo = cfg.reverse_postorder();
         assert_eq!(rpo, vec![0x1000, 0x1004]);
+    }
+
+    #[test]
+    fn test_remove_edge() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+            },
+        ];
+
+        let mut cfg = CFG::from_blocks(&blocks).unwrap();
+        assert!(cfg.has_edge(0x1000, 0x1004));
+        cfg.remove_edge(0x1000, 0x1004);
+        assert!(!cfg.has_edge(0x1000, 0x1004));
+        assert!(cfg.has_edge(0x1000, 0x1008));
+    }
+
+    #[test]
+    fn test_remove_block_rebuilds_addr_map() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: make_const(0x1004, 8),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: make_const(0x1008, 8),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+            },
+        ];
+
+        let mut cfg = CFG::from_blocks(&blocks).unwrap();
+        cfg.remove_block(0x1004);
+        assert!(cfg.get_block(0x1004).is_none());
+        assert!(cfg.get_block(0x1000).is_some());
+        assert!(cfg.get_block(0x1008).is_some());
+    }
+
+    #[test]
+    fn test_set_terminator() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::Nop],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+            },
+        ];
+
+        let mut cfg = CFG::from_blocks(&blocks).unwrap();
+        cfg.set_terminator(0x1000, BlockTerminator::Branch { target: 0x1004 });
+        assert_eq!(
+            cfg.get_block(0x1000).map(|b| b.terminator.clone()),
+            Some(BlockTerminator::Branch { target: 0x1004 })
+        );
     }
 }

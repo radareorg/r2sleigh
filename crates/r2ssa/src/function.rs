@@ -62,18 +62,36 @@ pub struct PhiNode {
 
 impl SSAFunction {
     /// Build an SSA function from a sequence of r2il blocks.
-    ///
-    /// This performs the complete SSA construction:
-    /// 1. Build CFG from blocks
-    /// 2. Compute dominator tree
-    /// 3. Place phi nodes
-    /// 4. Rename variables
     pub fn from_blocks(blocks: &[R2ILBlock]) -> Option<Self> {
         Self::from_blocks_with_arch(blocks, None)
     }
 
-    /// Build an SSA function from a sequence of r2il blocks with an optional ArchSpec.
+    /// Build an SSA function from blocks with constructor-time SCCP enabled.
     pub fn from_blocks_with_arch(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+        let mut func = Self::from_blocks_raw(blocks, arch)?;
+        // Constructor path applies SCCP by default while keeping legacy SSA consumers stable.
+        let cfg = crate::optimize::OptimizationConfig {
+            max_iterations: 1,
+            enable_sccp: true,
+            enable_const_prop: false,
+            enable_inst_combine: false,
+            enable_copy_prop: false,
+            enable_cse: false,
+            enable_dce: false,
+            preserve_memory_reads: false,
+        };
+        func.optimize(&cfg);
+        Some(func)
+    }
+
+    /// Build an SSA function from blocks without running optimization passes.
+    ///
+    /// This performs raw SSA construction:
+    /// 1. Build CFG from blocks
+    /// 2. Compute dominator tree
+    /// 3. Place phi nodes
+    /// 4. Rename variables
+    pub fn from_blocks_raw(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
         if blocks.is_empty() {
             return None;
         }
@@ -149,6 +167,11 @@ impl SSAFunction {
         })
     }
 
+    /// Build raw SSA without architecture metadata.
+    pub fn from_blocks_raw_no_arch(blocks: &[R2ILBlock]) -> Option<Self> {
+        Self::from_blocks_raw(blocks, None)
+    }
+
     /// Set the function name.
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
@@ -192,6 +215,11 @@ impl SSAFunction {
         &self.cfg
     }
 
+    /// Get mutable access to the CFG.
+    pub fn cfg_mut(&mut self) -> &mut CFG {
+        &mut self.cfg
+    }
+
     /// Get the dominator tree.
     pub fn domtree(&self) -> &DomTree {
         &self.domtree
@@ -231,6 +259,30 @@ impl SSAFunction {
     /// Get the edge type between two blocks.
     pub fn edge_type(&self, from: u64, to: u64) -> Option<CFGEdge> {
         self.cfg.edge_type(from, to)
+    }
+
+    /// Remove a block from SSA and CFG.
+    pub fn remove_block(&mut self, addr: u64) {
+        self.blocks.remove(&addr);
+        self.block_order.retain(|&a| a != addr);
+        self.cfg.remove_block(addr);
+    }
+
+    /// Remove phi sources for a specific predecessor edge.
+    pub fn remove_phi_source(&mut self, block_addr: u64, pred_addr: u64) {
+        if let Some(block) = self.blocks.get_mut(&block_addr) {
+            for phi in &mut block.phis {
+                phi.sources.retain(|(pred, _)| *pred != pred_addr);
+            }
+        }
+    }
+
+    /// Recompute cached metadata after CFG mutation.
+    pub fn refresh_after_cfg_mutation(&mut self) {
+        self.blocks
+            .retain(|addr, _| self.cfg.get_block(*addr).is_some());
+        self.block_order = self.cfg.reverse_postorder();
+        self.domtree = DomTree::compute(&self.cfg);
     }
 
     /// Iterate over all SSA operations in the function.
@@ -528,7 +580,7 @@ mod tests {
             },
         ];
 
-        let func = SSAFunction::from_blocks(&blocks).unwrap();
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).unwrap();
         assert_eq!(func.entry, 0x1000);
         assert_eq!(func.num_blocks(), 2);
 
@@ -583,7 +635,7 @@ mod tests {
             },
         ];
 
-        let func = SSAFunction::from_blocks(&blocks).unwrap();
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).unwrap();
         assert_eq!(func.num_blocks(), 4);
 
         // Merge block should have a phi node
@@ -620,7 +672,7 @@ mod tests {
             },
         ];
 
-        let func = SSAFunction::from_blocks(&blocks).unwrap();
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).unwrap();
 
         // Find definition of reg:0 v1
         let var = SSAVar::new("reg:0", 1, 8);
@@ -657,7 +709,7 @@ mod tests {
             },
         ];
 
-        let func = SSAFunction::from_blocks(&blocks)
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks)
             .unwrap()
             .with_name("test_func");
 
@@ -665,5 +717,89 @@ mod tests {
         assert!(dump.contains("test_func"));
         assert!(dump.contains("0x1000"));
         assert!(dump.contains("0x1004"));
+    }
+
+    #[test]
+    fn test_from_blocks_default_runs_optimization() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+            },
+        ];
+
+        let func = SSAFunction::from_blocks(&blocks).expect("optimized SSA should build");
+        assert!(
+            func.num_blocks() < blocks.len(),
+            "optimized constructor should prune dead branch blocks via SCCP"
+        );
+    }
+
+    #[test]
+    fn test_refresh_after_cfg_mutation_recomputes_order_and_domtree() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: make_const(0x100c, 8),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: make_const(0x100c, 8),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x100c,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+            },
+        ];
+
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+        func.remove_block(0x1004);
+        func.refresh_after_cfg_mutation();
+
+        assert!(!func.block_addrs().contains(&0x1004));
+        assert!(func.get_block(0x1004).is_none());
+        assert_eq!(func.idom(0x1008), Some(0x1000));
     }
 }

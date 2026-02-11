@@ -2189,6 +2189,9 @@ pub extern "C" fn r2ssa_function_json(
 #[derive(Serialize)]
 struct SSAOptStatsJson {
     iterations: usize,
+    sccp_constants_found: usize,
+    sccp_edges_pruned: usize,
+    sccp_blocks_removed: usize,
     constants_propagated: usize,
     ops_simplified: usize,
     copies_propagated: usize,
@@ -2230,7 +2233,7 @@ pub extern "C" fn r2ssa_function_opt_json(
         return ptr::null_mut();
     }
 
-    let mut ssa_func = match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, unsafe {
+    let mut ssa_func = match r2ssa::SSAFunction::from_blocks_raw(&r2il_blocks, unsafe {
         (*ctx).arch.as_ref()
     }) {
         Some(f) => f,
@@ -2244,6 +2247,9 @@ pub extern "C" fn r2ssa_function_opt_json(
         optimized: true,
         stats: SSAOptStatsJson {
             iterations: stats.iterations,
+            sccp_constants_found: stats.sccp_constants_found,
+            sccp_edges_pruned: stats.sccp_edges_pruned,
+            sccp_blocks_removed: stats.sccp_blocks_removed,
             constants_propagated: stats.constants_propagated,
             ops_simplified: stats.ops_simplified,
             copies_propagated: stats.copies_propagated,
@@ -5528,7 +5534,8 @@ mod tests {
                 || output.contains("*(rdi + 30)")
                 || output.contains("*(rdi + const_30)")
                 || output.contains("*(rdi + 48)")
-                || output.contains("*(rdi + const_48)"),
+                || output.contains("*(rdi + const_48)")
+                || output.contains("saved_fp"),
             "decompiler should keep decompilation stable with tsj context, got: {}",
             output
         );

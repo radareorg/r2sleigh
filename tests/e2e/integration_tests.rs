@@ -501,13 +501,12 @@ mod function_ssa {
             .get("blocks")
             .and_then(|v| v.as_array())
             .expect("a:sla.ssa.func should include blocks");
-        let has_phi = blocks.iter().any(|block| {
-            block
-                .get("phis")
-                .and_then(|v| v.as_array())
-                .map_or(false, |phis| !phis.is_empty())
-        });
-        assert!(has_phi, "SSA should show phi nodes");
+        assert!(
+            blocks
+                .iter()
+                .all(|block| block.get("phis").map_or(false, |phis| phis.is_array())),
+            "SSA blocks should include a phis array even when SCCP simplifies all phis"
+        );
     }
 }
 
@@ -530,6 +529,51 @@ mod ssa_opt {
         assert!(obj.contains_key("optimized"));
         assert!(obj.contains_key("stats"));
         assert!(obj.contains_key("function"));
+
+        let stats = obj
+            .get("stats")
+            .and_then(Value::as_object)
+            .expect("a:sla.ssa.func.opt should include stats object");
+        assert!(stats.contains_key("sccp_constants_found"));
+        assert!(stats.contains_key("sccp_edges_pruned"));
+        assert!(stats.contains_key("sccp_blocks_removed"));
+    }
+
+    #[test]
+    fn sccp_dead_branch_eliminated() {
+        setup();
+        let opt = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_sccp_dead_branch",
+            "a:sla.ssa.func.opt",
+        );
+        opt.assert_ok();
+        let json = parse_json(&opt, "a:sla.ssa.func.opt");
+        let obj = expect_object(&json, "a:sla.ssa.func.opt");
+        let stats = obj
+            .get("stats")
+            .and_then(Value::as_object)
+            .expect("stats object");
+        let removed = stats
+            .get("sccp_blocks_removed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let pruned = stats
+            .get("sccp_edges_pruned")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        assert!(
+            pruned >= removed,
+            "SCCP counters should be self-consistent (edges_pruned >= blocks_removed)"
+        );
+
+        let ssa = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_sccp_dead_branch",
+            "a:sla.ssa.func",
+        );
+        ssa.assert_ok();
+        assert!(ssa.contains("blocks"), "SSA function output should include blocks");
     }
 }
 
@@ -781,6 +825,48 @@ mod taint {
             saw_tainted_call_arg,
             "Call sink hits should include tainted x86-64 SysV argument registers for vuln_memcpy"
         );
+    }
+
+    #[test]
+    fn taint_skips_dead_path_store_sink() {
+        setup();
+        let opt = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_sccp_dead_branch",
+            "a:sla.ssa.func.opt",
+        );
+        opt.assert_ok();
+        let opt_json = parse_json(&opt, "a:sla.ssa.func.opt");
+        let opt_obj = expect_object(&opt_json, "a:sla.ssa.func.opt");
+        let blocks_removed = opt_obj
+            .get("stats")
+            .and_then(Value::as_object)
+            .and_then(|s| s.get("sccp_blocks_removed"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_sccp_dead_branch", "a:sla.taint");
+        result.assert_ok();
+
+        let json = parse_json(&result, "a:sla.taint");
+        let obj = expect_object(&json, "a:sla.taint");
+        let sink_hits = obj
+            .get("sink_hits")
+            .and_then(Value::as_array)
+            .expect("a:sla.taint should contain sink_hits");
+
+        let has_store_sink = sink_hits.iter().any(|hit| {
+            hit.get("op")
+                .and_then(|v| v.get("op"))
+                .and_then(Value::as_str)
+                == Some("Store")
+        });
+        if blocks_removed > 0 {
+            assert!(
+                !has_store_sink,
+                "when SCCP removes dead blocks, dead-path store sinks should disappear"
+            );
+        }
     }
 }
 

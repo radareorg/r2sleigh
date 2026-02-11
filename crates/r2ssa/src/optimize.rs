@@ -4,14 +4,15 @@
 //! intended to simplify analysis and decompilation output.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{SSAFunction, SSAOp, SSAVar};
+use crate::{BlockTerminator, PhiNode, SSAFunction, SSAOp, SSAVar};
 
 /// Configuration for SSA optimization passes.
 #[derive(Debug, Clone)]
 pub struct OptimizationConfig {
     pub max_iterations: usize,
+    pub enable_sccp: bool,
     pub enable_const_prop: bool,
     pub enable_inst_combine: bool,
     pub enable_copy_prop: bool,
@@ -24,6 +25,7 @@ impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
             max_iterations: 4,
+            enable_sccp: true,
             enable_const_prop: true,
             enable_inst_combine: true,
             enable_copy_prop: true,
@@ -38,6 +40,9 @@ impl Default for OptimizationConfig {
 #[derive(Debug, Clone, Default)]
 pub struct OptimizationStats {
     pub iterations: usize,
+    pub sccp_constants_found: usize,
+    pub sccp_edges_pruned: usize,
+    pub sccp_blocks_removed: usize,
     pub constants_propagated: usize,
     pub ops_simplified: usize,
     pub copies_propagated: usize,
@@ -52,10 +57,15 @@ pub fn optimize_function(func: &mut SSAFunction, config: &OptimizationConfig) ->
     let mut stats = OptimizationStats::default();
     let max_iters = config.max_iterations.max(1);
 
+    if config.enable_sccp {
+        let (consts, executable_edges) = sccp(func);
+        apply_sccp_results(func, &consts, &executable_edges, &mut stats);
+    }
+
     for _ in 0..max_iters {
         let mut changed = false;
 
-        if config.enable_const_prop {
+        if config.enable_const_prop && !config.enable_sccp {
             let consts = compute_constants(func, max_iters);
             if replace_sources_with_constants(func, &consts, &mut stats) {
                 changed = true;
@@ -102,6 +112,41 @@ struct VarKey {
     size: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LatticeValue {
+    Top,
+    Const(u64),
+    Bottom,
+}
+
+impl LatticeValue {
+    fn meet(self, other: Self) -> Self {
+        match (self, other) {
+            (LatticeValue::Top, x) | (x, LatticeValue::Top) => x,
+            (LatticeValue::Bottom, _) | (_, LatticeValue::Bottom) => LatticeValue::Bottom,
+            (LatticeValue::Const(a), LatticeValue::Const(b)) => {
+                if a == b {
+                    LatticeValue::Const(a)
+                } else {
+                    LatticeValue::Bottom
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum UseLocation {
+    Phi {
+        block_addr: u64,
+        phi_idx: usize,
+    },
+    Op {
+        block_addr: u64,
+        op_idx: usize,
+    },
+}
+
 impl VarKey {
     fn from_var(var: &SSAVar) -> Self {
         Self {
@@ -126,6 +171,294 @@ impl PartialOrd for VarKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+fn build_use_map(func: &SSAFunction) -> HashMap<VarKey, Vec<UseLocation>> {
+    let mut uses = HashMap::new();
+    for &addr in func.block_addrs() {
+        let Some(block) = func.get_block(addr) else {
+            continue;
+        };
+
+        for (phi_idx, phi) in block.phis.iter().enumerate() {
+            for (_, src) in &phi.sources {
+                uses.entry(VarKey::from_var(src))
+                    .or_insert_with(Vec::new)
+                    .push(UseLocation::Phi {
+                        block_addr: addr,
+                        phi_idx,
+                    });
+            }
+        }
+
+        for (op_idx, op) in block.ops.iter().enumerate() {
+            for src in op.sources() {
+                uses.entry(VarKey::from_var(src))
+                    .or_insert_with(Vec::new)
+                    .push(UseLocation::Op {
+                        block_addr: addr,
+                        op_idx,
+                    });
+            }
+        }
+    }
+    uses
+}
+
+fn get_lattice_value(var: &SSAVar, lattice: &HashMap<VarKey, LatticeValue>) -> LatticeValue {
+    if let Some(val) = const_value(var) {
+        return LatticeValue::Const(val);
+    }
+    lattice
+        .get(&VarKey::from_var(var))
+        .copied()
+        .unwrap_or(LatticeValue::Top)
+}
+
+fn init_if_input(var: &SSAVar, lattice: &mut HashMap<VarKey, LatticeValue>) {
+    if var.version == 0 && !var.is_const() {
+        lattice
+            .entry(VarKey::from_var(var))
+            .or_insert(LatticeValue::Bottom);
+    }
+}
+
+fn update_lattice(
+    lattice: &mut HashMap<VarKey, LatticeValue>,
+    var: &SSAVar,
+    new_val: LatticeValue,
+) -> bool {
+    let key = VarKey::from_var(var);
+    let old_val = lattice.get(&key).copied().unwrap_or(LatticeValue::Top);
+    let merged = old_val.meet(new_val);
+    if merged != old_val {
+        lattice.insert(key, merged);
+        return true;
+    }
+    false
+}
+
+fn evaluate_op_sccp(op: &SSAOp, lattice: &HashMap<VarKey, LatticeValue>) -> LatticeValue {
+    if matches!(
+        op,
+        SSAOp::Load { .. }
+            | SSAOp::Store { .. }
+            | SSAOp::Call { .. }
+            | SSAOp::CallInd { .. }
+            | SSAOp::CallOther { .. }
+            | SSAOp::CpuId { .. }
+            | SSAOp::New { .. }
+    ) {
+        return LatticeValue::Bottom;
+    }
+
+    let mut has_top = false;
+    let mut temp_consts = HashMap::new();
+    for src in op.sources() {
+        match get_lattice_value(src, lattice) {
+            LatticeValue::Bottom => return LatticeValue::Bottom,
+            LatticeValue::Top => {
+                has_top = true;
+            }
+            LatticeValue::Const(c) => {
+                temp_consts.insert(VarKey::from_var(src), c);
+            }
+        }
+    }
+
+    if has_top {
+        return LatticeValue::Top;
+    }
+
+    match eval_const_op(op, &temp_consts) {
+        Some(c) => LatticeValue::Const(c),
+        None => LatticeValue::Bottom,
+    }
+}
+
+fn evaluate_phi_sccp(
+    phi: &PhiNode,
+    executable: &HashSet<(u64, u64)>,
+    lattice: &HashMap<VarKey, LatticeValue>,
+    block_addr: u64,
+) -> LatticeValue {
+    let mut value = LatticeValue::Top;
+    for (pred_addr, src) in &phi.sources {
+        if !executable.contains(&(*pred_addr, block_addr)) {
+            continue;
+        }
+        value = value.meet(get_lattice_value(src, lattice));
+    }
+    value
+}
+
+fn find_cbranch_condition(
+    func: &SSAFunction,
+    block_addr: u64,
+    lattice: &HashMap<VarKey, LatticeValue>,
+) -> LatticeValue {
+    let Some(block) = func.get_block(block_addr) else {
+        return LatticeValue::Bottom;
+    };
+    for op in block.ops.iter().rev() {
+        if let SSAOp::CBranch { cond, .. } = op {
+            return get_lattice_value(cond, lattice);
+        }
+    }
+    LatticeValue::Bottom
+}
+
+fn evaluate_terminator_sccp(
+    func: &SSAFunction,
+    block_addr: u64,
+    lattice: &HashMap<VarKey, LatticeValue>,
+    cfg_worklist: &mut VecDeque<(u64, u64)>,
+) {
+    let Some(cfg_block) = func.cfg().get_block(block_addr) else {
+        return;
+    };
+
+    match &cfg_block.terminator {
+        BlockTerminator::ConditionalBranch {
+            true_target,
+            false_target,
+        } => match find_cbranch_condition(func, block_addr, lattice) {
+            LatticeValue::Const(0) => cfg_worklist.push_back((block_addr, *false_target)),
+            LatticeValue::Const(_) => cfg_worklist.push_back((block_addr, *true_target)),
+            LatticeValue::Top | LatticeValue::Bottom => {
+                cfg_worklist.push_back((block_addr, *true_target));
+                cfg_worklist.push_back((block_addr, *false_target));
+            }
+        },
+        _ => {
+            for succ in func.successors(block_addr) {
+                cfg_worklist.push_back((block_addr, succ));
+            }
+        }
+    }
+}
+
+fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
+    let mut lattice = HashMap::new();
+    let mut executable = HashSet::new();
+    let mut block_visited = HashSet::new();
+    let mut cfg_worklist = VecDeque::new();
+    let mut ssa_worklist = VecDeque::new();
+    let use_map = build_use_map(func);
+
+    for block in func.blocks() {
+        for phi in &block.phis {
+            init_if_input(&phi.dst, &mut lattice);
+            for (_, src) in &phi.sources {
+                init_if_input(src, &mut lattice);
+            }
+        }
+        for op in &block.ops {
+            if let Some(dst) = op.dst() {
+                init_if_input(dst, &mut lattice);
+            }
+            for src in op.sources() {
+                init_if_input(src, &mut lattice);
+            }
+        }
+    }
+
+    cfg_worklist.push_back((u64::MAX, func.entry));
+
+    while !cfg_worklist.is_empty() || !ssa_worklist.is_empty() {
+        while let Some((from, to)) = cfg_worklist.pop_front() {
+            if !executable.insert((from, to)) {
+                continue;
+            }
+
+            let Some(block) = func.get_block(to) else {
+                continue;
+            };
+
+            for phi in &block.phis {
+                let new_val = evaluate_phi_sccp(phi, &executable, &lattice, to);
+                if update_lattice(&mut lattice, &phi.dst, new_val) {
+                    ssa_worklist.push_back(VarKey::from_var(&phi.dst));
+                }
+            }
+
+            if block_visited.insert(to) {
+                for op in &block.ops {
+                    if let Some(dst) = op.dst() {
+                        let new_val = evaluate_op_sccp(op, &lattice);
+                        if update_lattice(&mut lattice, dst, new_val) {
+                            ssa_worklist.push_back(VarKey::from_var(dst));
+                        }
+                    }
+                }
+                evaluate_terminator_sccp(func, to, &lattice, &mut cfg_worklist);
+            }
+        }
+
+        while let Some(var_key) = ssa_worklist.pop_front() {
+            let Some(use_locs) = use_map.get(&var_key) else {
+                continue;
+            };
+            for use_loc in use_locs {
+                match use_loc {
+                    UseLocation::Phi {
+                        block_addr,
+                        phi_idx,
+                    } => {
+                        if !block_visited.contains(block_addr) {
+                            continue;
+                        }
+                        let Some(block) = func.get_block(*block_addr) else {
+                            continue;
+                        };
+                        let Some(phi) = block.phis.get(*phi_idx) else {
+                            continue;
+                        };
+                        let new_val = evaluate_phi_sccp(phi, &executable, &lattice, *block_addr);
+                        if update_lattice(&mut lattice, &phi.dst, new_val) {
+                            ssa_worklist.push_back(VarKey::from_var(&phi.dst));
+                        }
+                    }
+                    UseLocation::Op { block_addr, op_idx } => {
+                        if !block_visited.contains(block_addr) {
+                            continue;
+                        }
+                        let Some(block) = func.get_block(*block_addr) else {
+                            continue;
+                        };
+                        let Some(op) = block.ops.get(*op_idx) else {
+                            continue;
+                        };
+
+                        if let Some(dst) = op.dst() {
+                            let new_val = evaluate_op_sccp(op, &lattice);
+                            if update_lattice(&mut lattice, dst, new_val) {
+                                ssa_worklist.push_back(VarKey::from_var(dst));
+                            }
+                        }
+
+                        if matches!(op, SSAOp::CBranch { .. }) {
+                            evaluate_terminator_sccp(
+                                func,
+                                *block_addr,
+                                &lattice,
+                                &mut cfg_worklist,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let consts = lattice
+        .iter()
+        .filter_map(|(k, v)| match v {
+            LatticeValue::Const(c) => Some((k.clone(), *c)),
+            LatticeValue::Top | LatticeValue::Bottom => None,
+        })
+        .collect();
+    (consts, executable)
 }
 
 fn const_value(var: &SSAVar) -> Option<u64> {
@@ -448,6 +781,138 @@ fn replace_sources_with_constants(
                 changed = true;
             }
         }
+    }
+
+    changed
+}
+
+fn apply_sccp_results(
+    func: &mut SSAFunction,
+    consts: &HashMap<VarKey, u64>,
+    executable_edges: &HashSet<(u64, u64)>,
+    stats: &mut OptimizationStats,
+) -> bool {
+    let mut changed = false;
+    let mut cfg_changed = false;
+
+    if replace_sources_with_constants(func, consts, stats) {
+        changed = true;
+    }
+    stats.sccp_constants_found = consts.len();
+
+    #[derive(Debug, Clone, Copy)]
+    struct BranchRewrite {
+        block_addr: u64,
+        op_idx: usize,
+        keep_target: u64,
+        dead_target: u64,
+        take_true: bool,
+    }
+
+    let mut rewrites = Vec::new();
+    for &addr in func.block_addrs() {
+        let Some(block) = func.get_block(addr) else {
+            continue;
+        };
+        let Some(cfg_block) = func.cfg().get_block(addr) else {
+            continue;
+        };
+        let BlockTerminator::ConditionalBranch {
+            true_target,
+            false_target,
+        } = &cfg_block.terminator
+        else {
+            continue;
+        };
+
+        for (op_idx, op) in block.ops.iter().enumerate() {
+            if let SSAOp::CBranch { cond, .. } = op {
+                if let Some(value) = const_value(cond) {
+                    let take_true = value != 0;
+                    let (keep_target, dead_target) = if take_true {
+                        (*true_target, *false_target)
+                    } else {
+                        (*false_target, *true_target)
+                    };
+                    rewrites.push(BranchRewrite {
+                        block_addr: addr,
+                        op_idx,
+                        keep_target,
+                        dead_target,
+                        take_true,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    for rw in rewrites {
+        if let Some(block) = func.get_block_mut(rw.block_addr) {
+            if let Some(op) = block.ops.get_mut(rw.op_idx) {
+                if rw.take_true {
+                    if let SSAOp::CBranch { target, .. } = op {
+                        *op = SSAOp::Branch {
+                            target: target.clone(),
+                        };
+                    }
+                } else {
+                    *op = SSAOp::Nop;
+                }
+            }
+        }
+
+        func.cfg_mut().remove_edge(rw.block_addr, rw.dead_target);
+        func.cfg_mut()
+            .set_terminator(rw.block_addr, BlockTerminator::Branch { target: rw.keep_target });
+        func.remove_phi_source(rw.dead_target, rw.block_addr);
+        stats.sccp_edges_pruned += 1;
+        changed = true;
+        cfg_changed = true;
+    }
+
+    let block_addrs = func.block_addrs().to_vec();
+    for addr in block_addrs {
+        let succs = func.successors(addr);
+        for succ in succs {
+            if !executable_edges.contains(&(addr, succ)) {
+                func.cfg_mut().remove_edge(addr, succ);
+                func.remove_phi_source(succ, addr);
+                stats.sccp_edges_pruned += 1;
+                changed = true;
+                cfg_changed = true;
+            }
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut queue = VecDeque::new();
+    queue.push_back(func.entry);
+    while let Some(addr) = queue.pop_front() {
+        if !reachable.insert(addr) {
+            continue;
+        }
+        for succ in func.successors(addr) {
+            queue.push_back(succ);
+        }
+    }
+
+    let all_addrs = func.block_addrs().to_vec();
+    for addr in all_addrs {
+        if !reachable.contains(&addr) {
+            let succs = func.successors(addr);
+            for succ in succs {
+                func.remove_phi_source(succ, addr);
+            }
+            func.remove_block(addr);
+            stats.sccp_blocks_removed += 1;
+            changed = true;
+            cfg_changed = true;
+        }
+    }
+
+    if cfg_changed {
+        func.refresh_after_cfg_mutation();
     }
 
     changed
@@ -1489,5 +1954,309 @@ where
         Nop => Nop,
         Unimplemented => Unimplemented,
         Breakpoint => Breakpoint,
+    }
+}
+
+#[cfg(test)]
+mod sccp_tests {
+    use super::*;
+    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+
+    fn make_const(val: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Const,
+            offset: val,
+            size,
+        }
+    }
+
+    fn make_reg(offset: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Register,
+            offset,
+            size,
+        }
+    }
+
+    fn make_ram(addr: u64, size: u32) -> Varnode {
+        Varnode {
+            space: SpaceId::Ram,
+            offset: addr,
+            size,
+        }
+    }
+
+    fn raw_func(blocks: Vec<R2ILBlock>) -> SSAFunction {
+        SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function should build")
+    }
+
+    #[test]
+    fn meet_top_top() {
+        assert_eq!(LatticeValue::Top.meet(LatticeValue::Top), LatticeValue::Top);
+    }
+
+    #[test]
+    fn meet_top_const() {
+        assert_eq!(
+            LatticeValue::Top.meet(LatticeValue::Const(5)),
+            LatticeValue::Const(5)
+        );
+    }
+
+    #[test]
+    fn meet_const_same() {
+        assert_eq!(
+            LatticeValue::Const(5).meet(LatticeValue::Const(5)),
+            LatticeValue::Const(5)
+        );
+    }
+
+    #[test]
+    fn meet_const_diff() {
+        assert_eq!(
+            LatticeValue::Const(5).meet(LatticeValue::Const(7)),
+            LatticeValue::Bottom
+        );
+    }
+
+    #[test]
+    fn meet_bottom_absorbs() {
+        assert_eq!(
+            LatticeValue::Bottom.meet(LatticeValue::Const(9)),
+            LatticeValue::Bottom
+        );
+    }
+
+    #[test]
+    fn sccp_simple_const() {
+        let func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::IntAdd {
+                        dst: make_reg(0, 8),
+                        a: make_const(5, 8),
+                        b: make_const(3, 8),
+                    },
+                    R2ILOp::Return {
+                        target: make_ram(0, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+        ]);
+
+        let (consts, _) = sccp(&func);
+        assert!(
+            consts.values().any(|v| *v == 8),
+            "SCCP should discover y = 8"
+        );
+    }
+
+    #[test]
+    fn sccp_phi_one_dead_edge() {
+        let func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(1, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(2, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x100c,
+                size: 4,
+                ops: vec![
+                    R2ILOp::IntAdd {
+                        dst: make_reg(8, 8),
+                        a: make_reg(0, 8),
+                        b: make_const(1, 8),
+                    },
+                    R2ILOp::Return {
+                        target: make_ram(0, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+        ]);
+
+        let (consts, executable) = sccp(&func);
+        assert!(
+            !executable.contains(&(0x1000, 0x1004)),
+            "false edge should be non-executable"
+        );
+        assert!(
+            consts.values().any(|v| *v == 2 || *v == 3),
+            "phi should resolve to live input constant on the executable edge"
+        );
+    }
+
+    #[test]
+    fn sccp_params_stay_bottom() {
+        let func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::IntAdd {
+                        dst: make_reg(8, 8),
+                        a: make_reg(0, 8),
+                        b: make_const(1, 8),
+                    },
+                    R2ILOp::Return {
+                        target: make_ram(0, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+        ]);
+
+        let (consts, _) = sccp(&func);
+        assert!(
+            !consts.keys().any(|k| k.name == "reg:8"),
+            "param-derived values should not be treated as constants"
+        );
+    }
+
+    #[test]
+    fn sccp_load_stays_bottom() {
+        let func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Load {
+                        dst: make_reg(8, 8),
+                        space: SpaceId::Ram,
+                        addr: make_reg(0, 8),
+                    },
+                    R2ILOp::Return {
+                        target: make_ram(0, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+        ]);
+
+        let (consts, _) = sccp(&func);
+        assert!(
+            !consts.keys().any(|k| k.name == "reg:8"),
+            "loads are conservative Bottom in SCCP"
+        );
+    }
+
+    #[test]
+    fn sccp_noop_on_no_consts() {
+        let func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::IntAdd {
+                        dst: make_reg(8, 8),
+                        a: make_reg(0, 8),
+                        b: make_reg(16, 8),
+                    },
+                    R2ILOp::Return {
+                        target: make_ram(0, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+        ]);
+
+        let (consts, _) = sccp(&func);
+        assert!(consts.is_empty(), "no constants should be discovered");
+    }
+
+    #[test]
+    fn sccp_apply_prunes_edges_and_blocks() {
+        let mut func = raw_func(vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(1, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(2, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x100c,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+            },
+        ]);
+
+        let (consts, executable) = sccp(&func);
+        let mut stats = OptimizationStats::default();
+        let changed = apply_sccp_results(&mut func, &consts, &executable, &mut stats);
+        assert!(changed);
+        assert!(func.get_block(0x1004).is_none(), "dead branch block should be removed");
+        assert!(!func.cfg().has_edge(0x1000, 0x1004));
+        assert!(stats.sccp_edges_pruned > 0);
+        assert!(stats.sccp_blocks_removed > 0);
     }
 }
