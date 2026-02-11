@@ -729,6 +729,59 @@ mod taint {
             expected
         );
     }
+
+    #[test]
+    fn taint_call_sink_reports_tainted_args_vuln_memcpy() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.vuln_memcpy", "a:sla.taint");
+        result.assert_ok();
+
+        let json = parse_json(&result, "a:sla.taint");
+        let obj = expect_object(&json, "a:sla.taint");
+        let sink_hits = obj
+            .get("sink_hits")
+            .and_then(|v| v.as_array())
+            .expect("a:sla.taint should contain sink_hits array");
+
+        let mut saw_tainted_call_arg = false;
+        for hit in sink_hits {
+            let hit_obj = expect_object(hit, "a:sla.taint sink_hit entry");
+            let op_name = hit_obj
+                .get("op")
+                .and_then(|v| v.get("op"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if op_name != "Call" && op_name != "CallInd" {
+                continue;
+            }
+
+            let Some(tainted_vars) = hit_obj.get("tainted_vars").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for tv in tainted_vars {
+                let Some(var_name) = tv.get("var").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let base = var_name
+                    .split('_')
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if matches!(base.as_str(), "rdi" | "rsi" | "rdx" | "rcx" | "r8" | "r9") {
+                    saw_tainted_call_arg = true;
+                    break;
+                }
+            }
+            if saw_tainted_call_arg {
+                break;
+            }
+        }
+
+        assert!(
+            saw_tainted_call_arg,
+            "Call sink hits should include tainted x86-64 SysV argument registers for vuln_memcpy"
+        );
+    }
 }
 
 // ============================================================================
@@ -1924,6 +1977,16 @@ mod deep_integration {
         assert!(
             !taint_line.trim_end().ends_with("labels="),
             "taint labels should not be empty"
+        );
+        let calls = taint_line
+            .split("calls=")
+            .nth(1)
+            .and_then(|tail| tail.split_whitespace().next())
+            .and_then(|field| field.parse::<u64>().ok())
+            .unwrap_or(0);
+        assert!(
+            calls > 0,
+            "post-analysis should count tainted call sinks for vuln_memcpy (calls>0)"
         );
     }
 

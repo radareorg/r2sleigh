@@ -3064,11 +3064,6 @@ static bool sleigh_post_analysis(RAnal *anal) {
 								}
 							}
 
-							if (sink_label_count == 0) {
-								free_string_array (sink_labels, sink_label_count);
-								continue;
-							}
-
 							taint_sink_hits++;
 							TaintBlockSummary *summary = taint_summary_map_get_or_add (&summaries, sink_block);
 							if (summary) {
@@ -3079,6 +3074,14 @@ static bool sleigh_post_analysis(RAnal *anal) {
 								if (op_name && !strcmp (op_name, "Store")) {
 									summary->store_hits++;
 								}
+							}
+
+							if (sink_label_count == 0) {
+								free_string_array (sink_labels, sink_label_count);
+								continue;
+							}
+
+							if (summary) {
 								for (li = 0; li < sink_label_count; li++) {
 									taint_summary_add_label (summary, sink_labels[li]);
 								}

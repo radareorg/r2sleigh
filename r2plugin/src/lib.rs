@@ -1883,7 +1883,7 @@ pub extern "C" fn r2taint_function_json(
         policy = policy.with_source(src.clone());
     }
 
-    let analysis = r2ssa::TaintAnalysis::new(&ssa_func, policy.clone());
+    let analysis = r2ssa::TaintAnalysis::with_arch(&ssa_func, policy.clone(), ctx.arch.as_ref());
     let result = analysis.analyze();
 
     // Collect sources
