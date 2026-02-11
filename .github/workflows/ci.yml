@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Formatting ──────────────────────────────────────────────────────
+  fmt:
+    name: Rustfmt
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all -- --check
+
+  # ── Linting ─────────────────────────────────────────────────────────
+  clippy:
+    name: Clippy
+    runs-on: self-hosted
+    needs: fmt
+    strategy:
+      matrix:
+        features: [x86, arm, all-archs]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo clippy --features ${{ matrix.features }} -- -D warnings
+
+  # ── Build ───────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.features }})
+    runs-on: self-hosted
+    needs: fmt
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [x86, arm, all-archs]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build workspace
+        run: cargo build --features ${{ matrix.features }}
+
+      - name: Build plugin
+        run: cargo build --features ${{ matrix.features }} -p r2sleigh-plugin
+
+  # ── Unit tests ──────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: self-hosted
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --all-features
+
+  # ── E2E tests ───────────────────────────────────────────────────────
+  e2e:
+    name: Integration Tests
+    runs-on: self-hosted
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build plugin (release for stable FFI behavior)
+      - name: Build plugin (release)
+        run: cargo build --release --features x86 -p r2sleigh-plugin
+
+      # Build + install the C shared libraries
+      - name: Build and install r2 plugin
+        run: make -C r2plugin RUST_FEATURES=x86 install
+
+      # Compile test binaries
+      - name: Compile test binaries
+        working-directory: tests/e2e
+        run: |
+          gcc -O0 -g -fno-stack-protector -no-pie -o vuln_test vuln_test.c
+          gcc -O0 -g -fno-stack-protector -no-pie -o stress_test stress_test.c
+          gcc -O2 -g -fno-stack-protector -no-pie -o stress_test_opt stress_test.c
+          # Compile other test binaries if sources exist
+          if [ -f test_func.c ]; then
+            gcc -O0 -g -o test_func test_func.c
+          fi
+          if [ -f sym_test.c ]; then
+            gcc -O0 -g -o sym_test sym_test.c
+          fi
+
+      # Run integration tests
+      - name: Run E2E tests
+        working-directory: tests/e2e
+        run: cargo test -- --test-threads=1
+        env:
+          RUST_BACKTRACE: 1
+          RUST_LOG: info
+
+  # ── Release build check ────────────────────────────────────────────
+  release:
+    name: Release Build
+    runs-on: self-hosted
+    needs: test
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release (all architectures)
+        run: cargo build --release --features all-archs
+      - name: Build plugin release
+        run: make -C r2plugin RUST_FEATURES=all-archs

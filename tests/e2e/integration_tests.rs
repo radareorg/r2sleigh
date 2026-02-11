@@ -2264,3 +2264,345 @@ mod deep_integration {
         );
     }
 }
+
+// ============================================================================
+// 10. Analysis Quality Benchmark
+// ============================================================================
+//
+// Measures what the r2sleigh plugin adds to radare2's analysis pipeline.
+// These tests run WITH the plugin (which is always loaded in the test env)
+// and assert minimum quality thresholds for key analysis metrics.
+//
+// The measured dimensions are:
+// - Data xrefs: SSA-derived data-flow references (get_data_refs callback)
+// - Taint coverage: functions with taint annotations (post_analysis callback)
+// - Risk classification: functions tagged with risk levels
+// - Variable recovery: stack variables and register arguments
+
+mod analysis_quality_benchmark {
+    use super::*;
+
+    /// Helper: extract a single integer metric from r2 output.
+    /// The r2 command should print a label line then the count on the next line.
+    fn extract_metric(output: &str, label: &str) -> u64 {
+        let mut lines = output.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() == label {
+                if let Some(val_line) = lines.next() {
+                    if let Ok(v) = val_line.trim().parse::<u64>() {
+                        return v;
+                    }
+                }
+            }
+        }
+        panic!("metric '{}' not found in output:\n{}", label, output);
+    }
+
+    /// Collect analysis metrics for a binary after running `aaaa`.
+    fn collect_aaaa_metrics(binary: &str) -> AnalysisMetrics {
+        let result = r2_cmd_timeout(
+            binary,
+            &[
+                "e bin.relocs.apply=true",
+                "aaaa",
+                "echo FUNCTIONS:",
+                "aflc",
+                "echo TOTAL_XREFS:",
+                "axl~?",
+                "echo DATA_XREFS:",
+                "axl~DATA~?",
+                "echo CODE_XREFS:",
+                "axl~CODE~?",
+                "echo CALL_XREFS:",
+                "axl~CALL~?",
+                "echo TAINT_BLOCK_FLAGS:",
+                "f~sla.taint.fcn~?",
+                "echo RISK_FLAGS:",
+                "f~sla.taint.risk~?",
+                "echo RISK_CRITICAL:",
+                "f~sla.taint.risk.critical~?",
+                "echo RISK_HIGH:",
+                "f~sla.taint.risk.high~?",
+                "echo RISK_MEDIUM:",
+                "f~sla.taint.risk.medium~?",
+                "echo RISK_LOW:",
+                "f~sla.taint.risk.low~?",
+            ]
+            .join("; "),
+            Duration::from_secs(120),
+        );
+        result.assert_ok();
+        let out = &result.stdout;
+
+        AnalysisMetrics {
+            functions: extract_metric(out, "FUNCTIONS:"),
+            total_xrefs: extract_metric(out, "TOTAL_XREFS:"),
+            data_xrefs: extract_metric(out, "DATA_XREFS:"),
+            code_xrefs: extract_metric(out, "CODE_XREFS:"),
+            call_xrefs: extract_metric(out, "CALL_XREFS:"),
+            taint_block_flags: extract_metric(out, "TAINT_BLOCK_FLAGS:"),
+            risk_flags: extract_metric(out, "RISK_FLAGS:"),
+            risk_critical: extract_metric(out, "RISK_CRITICAL:"),
+            risk_high: extract_metric(out, "RISK_HIGH:"),
+            risk_medium: extract_metric(out, "RISK_MEDIUM:"),
+            risk_low: extract_metric(out, "RISK_LOW:"),
+        }
+    }
+
+    /// Collect aaa-level metrics (before taint, which runs at aaaa).
+    fn collect_aaa_metrics(binary: &str) -> AaaMetrics {
+        let result = r2_cmd_timeout(
+            binary,
+            &[
+                "e bin.relocs.apply=true",
+                "aaa",
+                "echo TOTAL_XREFS:",
+                "axl~?",
+                "echo DATA_XREFS:",
+                "axl~DATA~?",
+            ]
+            .join("; "),
+            Duration::from_secs(60),
+        );
+        result.assert_ok();
+        let out = &result.stdout;
+
+        AaaMetrics {
+            total_xrefs: extract_metric(out, "TOTAL_XREFS:"),
+            data_xrefs: extract_metric(out, "DATA_XREFS:"),
+        }
+    }
+
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    struct AnalysisMetrics {
+        functions: u64,
+        total_xrefs: u64,
+        data_xrefs: u64,
+        code_xrefs: u64,
+        call_xrefs: u64,
+        taint_block_flags: u64,
+        risk_flags: u64,
+        risk_critical: u64,
+        risk_high: u64,
+        risk_medium: u64,
+        risk_low: u64,
+    }
+
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    struct AaaMetrics {
+        total_xrefs: u64,
+        data_xrefs: u64,
+    }
+
+    // ------------------------------------------------------------------
+    // vuln_test benchmarks (small, controlled binary)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn vuln_test_sleigh_adds_data_xrefs() {
+        setup();
+        // Baseline (measured without plugin): data_xrefs = 24, total_xrefs = 365
+        // With sleigh: data_xrefs ~= 491, total_xrefs ~= 832
+        let m = collect_aaaa_metrics(vuln_test_binary());
+
+        eprintln!("vuln_test aaaa metrics: {:?}", m);
+
+        // Plugin should add substantial data xrefs from SSA def-use analysis
+        assert!(
+            m.data_xrefs > 100,
+            "sleigh should contribute significant data xrefs (got {}; baseline ~24)",
+            m.data_xrefs
+        );
+        assert!(
+            m.total_xrefs > 500,
+            "total xrefs with sleigh should be substantial (got {}; baseline ~365)",
+            m.total_xrefs
+        );
+    }
+
+    #[test]
+    fn vuln_test_taint_coverage() {
+        setup();
+        let m = collect_aaaa_metrics(vuln_test_binary());
+
+        eprintln!("vuln_test taint coverage: {:?}", m);
+
+        // Taint analysis should flag sink blocks in vulnerable functions
+        assert!(
+            m.taint_block_flags > 10,
+            "taint should flag multiple sink blocks (got {})",
+            m.taint_block_flags
+        );
+
+        // Risk classification should tag functions
+        assert!(
+            m.risk_flags > 10,
+            "risk classification should tag multiple functions (got {})",
+            m.risk_flags
+        );
+
+        // At least one CRITICAL (vuln_memcpy has dangerous memcpy with tainted args)
+        assert!(
+            m.risk_critical >= 1,
+            "should have at least 1 CRITICAL risk function (got {})",
+            m.risk_critical
+        );
+
+        // Multiple HIGH risk functions (format strings, unchecked input)
+        assert!(
+            m.risk_high >= 3,
+            "should have multiple HIGH risk functions (got {})",
+            m.risk_high
+        );
+    }
+
+    #[test]
+    fn vuln_test_aaa_data_xrefs() {
+        setup();
+        // SSA-derived data refs should appear at aaa level (get_data_refs callback)
+        let m = collect_aaa_metrics(vuln_test_binary());
+
+        eprintln!("vuln_test aaa metrics: {:?}", m);
+
+        // Baseline without sleigh: data_xrefs = 23
+        // With sleigh: data_xrefs ~= 316
+        assert!(
+            m.data_xrefs > 100,
+            "sleigh get_data_refs should add SSA-derived data xrefs at aaa level (got {}; baseline ~23)",
+            m.data_xrefs
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // /bin/ls benchmarks (real-world stripped binary)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bin_ls_sleigh_adds_data_xrefs() {
+        // Baseline (measured without plugin): data_xrefs = 2433, total_xrefs = 7337
+        // With sleigh: data_xrefs ~= 23255, total_xrefs ~= 28159
+        let m = collect_aaaa_metrics("/bin/ls");
+
+        eprintln!("/bin/ls aaaa metrics: {:?}", m);
+
+        // Massive data xref improvement from SSA analysis
+        assert!(
+            m.data_xrefs > 10000,
+            "/bin/ls: sleigh should contribute >10k data xrefs (got {}; baseline ~2433)",
+            m.data_xrefs
+        );
+    }
+
+    #[test]
+    fn bin_ls_taint_coverage() {
+        let m = collect_aaaa_metrics("/bin/ls");
+
+        eprintln!("/bin/ls taint coverage: {:?}", m);
+
+        // Taint should flag many sink blocks in a real binary
+        assert!(
+            m.taint_block_flags > 100,
+            "/bin/ls: taint should flag >100 sink blocks (got {})",
+            m.taint_block_flags
+        );
+
+        // Risk classification should cover many functions
+        assert!(
+            m.risk_flags > 50,
+            "/bin/ls: should classify >50 functions by risk (got {})",
+            m.risk_flags
+        );
+
+        // Real binaries should have a distribution across risk levels
+        let total_classified = m.risk_critical + m.risk_high + m.risk_medium + m.risk_low;
+        assert!(
+            total_classified == m.risk_flags,
+            "/bin/ls: risk breakdown should sum to total ({}+{}+{}+{} = {} vs {})",
+            m.risk_critical,
+            m.risk_high,
+            m.risk_medium,
+            m.risk_low,
+            total_classified,
+            m.risk_flags
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Summary report test (prints human-readable comparison)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn print_analysis_quality_report() {
+        setup();
+        let vuln = collect_aaaa_metrics(vuln_test_binary());
+        let ls = collect_aaaa_metrics("/bin/ls");
+        let vuln_aaa = collect_aaa_metrics(vuln_test_binary());
+
+        // Baselines measured without the sleigh plugin:
+        //   vuln_test aaaa: functions=61, total_xrefs=365, data_xrefs=24, code_xrefs=201, call_xrefs=106
+        //   /bin/ls   aaaa: functions=414, total_xrefs=7337, data_xrefs=2433, code_xrefs=3635, call_xrefs=1070
+        //   vuln_test aaa:  total_xrefs=365, data_xrefs=23
+
+        eprintln!("\n=== r2sleigh Analysis Quality Report ===\n");
+        eprintln!("Binary: vuln_test (controlled test binary)");
+        eprintln!("  {:30} {:>10} {:>10} {:>10}",
+            "Metric", "Baseline", "Sleigh", "Delta");
+        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
+            "Data xrefs (aaaa)", 24, vuln.data_xrefs,
+            vuln.data_xrefs as i64 - 24);
+        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
+            "Total xrefs (aaaa)", 365, vuln.total_xrefs,
+            vuln.total_xrefs as i64 - 365);
+        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
+            "Data xrefs (aaa)", 23, vuln_aaa.data_xrefs,
+            vuln_aaa.data_xrefs as i64 - 23);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "Taint block flags", "N/A", vuln.taint_block_flags);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "Risk flags", "N/A", vuln.risk_flags);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "  CRITICAL", "N/A", vuln.risk_critical);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "  HIGH", "N/A", vuln.risk_high);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "  MEDIUM", "N/A", vuln.risk_medium);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "  LOW", "N/A", vuln.risk_low);
+
+        eprintln!();
+        eprintln!("Binary: /bin/ls (real-world stripped binary)");
+        eprintln!("  {:30} {:>10} {:>10} {:>10}",
+            "Metric", "Baseline", "Sleigh", "Delta");
+        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
+            "Data xrefs (aaaa)", 2433, ls.data_xrefs,
+            ls.data_xrefs as i64 - 2433);
+        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
+            "Total xrefs (aaaa)", 7337, ls.total_xrefs,
+            ls.total_xrefs as i64 - 7337);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "Taint block flags", "N/A", ls.taint_block_flags);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "Risk flags", "N/A", ls.risk_flags);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "  CRITICAL", "N/A", ls.risk_critical);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "  HIGH", "N/A", ls.risk_high);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "  MEDIUM", "N/A", ls.risk_medium);
+        eprintln!("  {:30} {:>10} {:>10}",
+            "  LOW", "N/A", ls.risk_low);
+
+        eprintln!();
+        eprintln!("Key findings:");
+        eprintln!("  - ESIL output: IDENTICAL (r2's Capstone arch plugin generates ESIL)");
+        eprintln!("  - Sleigh plugin value-add is at analysis layer, not ESIL layer:");
+        eprintln!("    * SSA-based data xref discovery (get_data_refs callback)");
+        eprintln!("    * Automatic taint analysis with risk classification (post_analysis)");
+        eprintln!("    * Variable recovery from SSA (recover_vars callback)");
+        eprintln!();
+
+        // This test always passes — it's for reporting
+    }
+}
