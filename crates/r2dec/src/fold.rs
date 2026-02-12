@@ -2288,6 +2288,22 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// Check if `expr` is a version-0 return register (e.g. `RAX_0`, `EAX_0`,
+    /// `XMM0_0`).  These appear in exit blocks when phi nodes merge uninitialized
+    /// entry values and should be replaced by the last meaningful computed value.
+    fn is_uninitialized_return_reg(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let lower = name.to_lowercase();
+                lower.ends_with("_0") && self.is_return_register_name(lower.trim_end_matches("_0"))
+            }
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.is_uninitialized_return_reg(inner)
+            }
+            _ => false,
+        }
+    }
+
     fn lookup_definition(&self, name: &str) -> Option<CExpr> {
         if let Some(expr) = self.definitions_map().get(name) {
             return Some(expr.clone());
@@ -2368,6 +2384,7 @@ impl<'a> FoldingContext<'a> {
                     let expr = match last_ret_value.clone() {
                         Some(last) if self.is_predicate_like_expr(&last) => last,
                         Some(last) if self.is_low_level_return_artifact(&target_expr) => last,
+                        Some(last) if self.is_uninitialized_return_reg(&target_expr) => last,
                         _ => target_expr,
                     };
                     stmts.push(CStmt::Return(Some(self.rewrite_stack_expr(expr))));
@@ -3229,7 +3246,10 @@ impl<'a> FoldingContext<'a> {
     /// Extract a condition expression from a branch operation.
     pub fn extract_condition(&self, op: &SSAOp) -> Option<CExpr> {
         match op {
-            SSAOp::CBranch { cond, .. } => Some(self.get_condition_expr(cond)),
+            SSAOp::CBranch { cond, .. } => {
+                let expr = self.get_condition_expr(cond);
+                Some(self.rewrite_stack_expr(expr))
+            }
             _ => None,
         }
     }
@@ -4445,7 +4465,7 @@ impl<'a> FoldingContext<'a> {
                             CExpr::Var(stack_var)
                         } else if matches!(
                             inner,
-                            CExpr::Var(_) | CExpr::Paren(_) | CExpr::Cast { .. }
+                            CExpr::Var(_) | CExpr::Paren(_) | CExpr::Cast { .. } | CExpr::Deref(_)
                         ) {
                             self.resolve_predicate_operand(&inner, depth + 1, visited)
                         } else {

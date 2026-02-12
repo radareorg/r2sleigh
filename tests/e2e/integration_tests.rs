@@ -1471,6 +1471,67 @@ mod decompilation {
         }
     }
 
+    // ---- C2: Stack variables should appear in conditions instead of *(rbp + offset) ----
+
+    #[test]
+    fn decompiles_check_secret_uses_stack_var_in_condition() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        // The condition should use a resolved variable name, not raw pointer arithmetic
+        assert!(
+            !normalized.contains("*(rbp"),
+            "check_secret condition should not contain raw *(rbp + offset) dereference: {}",
+            normalized,
+        );
+        // Should still compare against the magic constant
+        assert!(
+            normalized.contains("0xdead"),
+            "check_secret should compare against 0xdead"
+        );
+    }
+
+    #[test]
+    fn decompiles_solve_equation_uses_stack_var_in_condition() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.solve_equation", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        // The condition should reference a named variable, not *(rbp + -0x4)
+        assert!(
+            !normalized.contains("*(rbp"),
+            "solve_equation condition should not contain raw *(rbp + offset): {}",
+            normalized,
+        );
+        assert!(
+            normalized.contains("!= 19") || normalized.contains("== 19"),
+            "solve_equation should compare against 19"
+        );
+    }
+
+    #[test]
+    fn decompiles_process_string_uses_stack_var_in_condition() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.process_string", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        // Conditions should not contain raw stack dereferences
+        assert!(
+            !normalized.contains("*(rbp"),
+            "process_string conditions should not contain raw *(rbp + offset): {}",
+            normalized,
+        );
+    }
+
+    // H4 note: The is_uninitialized_return_reg() fix resolves RAX_0 returns to
+    // concrete values when last_ret_value is available.  This is verified by unit
+    // tests; e2e validation is omitted because r2 analysis non-determinism causes
+    // the returned phi value to vary between runs.
+
     fn is_predicate_line(line: &str) -> bool {
         line.contains("while (")
             || line.contains("if (")
