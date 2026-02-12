@@ -1,0 +1,64 @@
+radare2 Plugin
+==============
+
+Architecture
+------------
+
+The r2sleigh radare2 plugin consists of two layers:
+
+1. Rust cdylib (libr2sleigh_plugin.so) -- exports C-ABI functions
+2. C wrapper (r_anal_sleigh.c) -- implements RAnalPlugin/RArchPlugin
+
+Architecture Detection
+----------------------
+
+Reads anal.arch and anal.bits from radare2:
+- x86 + 64 bits -> x86-64
+- x86 + 32 bits -> x86
+- arm -> arm
+- mips -> mips
+
+Override with: a:sla.arch x86-64
+
+Plugin Callbacks
+----------------
+
+sleigh_op: Lifts instructions during aaa. Generates ESIL.
+sleigh_recover_vars: Provides SSA-derived variables for afva.
+sleigh_analyze_fcn: Per-function SSA analysis after af.
+sleigh_get_data_refs: Def-use xrefs after aar.
+sleigh_post_analysis: Auto-taint during aaaa.
+
+Command Reference
+-----------------
+
+Instruction-Level:
+- a:sla -- Status and help
+- a:sla.info -- Architecture info
+- a:sla.arch [name] -- Get/set architecture
+- a:sla.json -- R2IL ops as JSON
+- a:sla.regs -- Registers read/written
+- a:sla.mem -- Memory accesses
+- a:sla.vars -- All varnodes
+- a:sla.ssa -- SSA for instruction
+- a:sla.defuse -- Def-use analysis
+
+Function-Level:
+- a:sla.ssa.func -- Function SSA with phi nodes
+- a:sla.ssa.func.opt -- Optimized function SSA
+- a:sla.defuse.func -- Function-wide def-use
+- a:sla.dom -- Dominator tree
+- a:sla.cfg -- ASCII CFG
+- a:sla.cfg.json -- CFG as JSON
+- a:sla.taint -- Taint analysis
+- a:sla.sym -- Symbolic execution summary
+- a:sla.sym.paths -- Path exploration
+- a:sla.slice [var] -- Backward slice
+- a:sla.dec -- Decompile to C
+
+Both a:sla and a:sleigh prefixes work.
+
+Configuration
+-------------
+
+SLEIGH_TAINT_MAX_BLOCKS: Max blocks for auto-taint. Default 200.

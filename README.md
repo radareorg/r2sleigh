@@ -1,265 +1,120 @@
-# r2sleigh
+r2sleigh
+========
 
-A Sleigh-to-r2il compiler and radare2 analysis plugin.
-
-## Overview
-
-r2sleigh compiles Ghidra Sleigh processor specifications into a typed intermediate language (r2il) and provides a radare2 plugin for instruction lifting and ESIL generation.
-
-## Features
-
-- Pure Rust implementation (edition 2024) using `libsla` (Ghidra native bindings)
-- Strongly-typed intermediate language (r2il)
-- **SSA (Static Single Assignment)** transformation with def-use analysis
-- Compact binary serialization with `bincode`
-- CLI tool for compiling and testing Sleigh specs
-- **radare2 plugin** for analysis with ESIL output
-- Register name resolution for human-readable output
-- Multiple output formats: text, JSON, ESIL
-- Pre-compiled processor specs via `sleigh-config`
-
-## Project Structure
+Sleigh-to-r2il compiler and radare2 analysis plugin. Converts Ghidra P-code
+processor specifications into a typed intermediate language suitable for binary
+analysis, SSA transformation, decompilation, symbolic execution, and taint
+analysis.
 
 ```
-r2sleigh/
-├── crates/
-│   ├── r2il/              # Core IL definitions
-│   ├── r2sleigh-lift/     # Sleigh -> r2il translator + ESIL
-│   ├── r2sleigh-cli/      # CLI tool
-│   └── r2ssa/             # SSA transformation and analysis
-└── r2plugin/              # radare2 plugin (Rust cdylib + C wrapper)
-    ├── src/lib.rs         # Rust FFI exports
-    ├── r_anal_sleigh.c    # C RAnalPlugin wrapper
-    └── Makefile           # Plugin build system
+.sla (Ghidra) --> libsla --> P-code --> r2il --> ESIL (radare2)
+                                          |
+                                          +--> SSA (r2ssa) --> Taint / Symbolic (r2sym)
+                                          |
+                                          +--> Decompiler (r2dec) --> C code
+                                          |
+                                          +--> Type Inference (r2types)
 ```
 
-## Building
+Features
+--------
 
-### CLI Tool
+- Pure Rust (edition 2024) using `libsla` (Ghidra native bindings)
+- Strongly-typed intermediate language (r2il) with 60+ opcodes
+- SSA transformation with dominator tree, phi nodes, and optimization pipeline
+- Constraint-based type inference with struct/signature support
+- Decompiler producing C code with expression folding, control flow structuring,
+  for-loop/switch detection, string literals, and symbol resolution
+- Z3-backed symbolic execution with path exploration
+- SSA-based taint analysis with automatic radare2 integration
+- radare2 plugin with 20+ commands, automatic analysis hooks, and ESIL output
+- CLI tool for standalone Sleigh compilation and disassembly
+
+Quick Start
+-----------
+
+### Build the CLI
 
 ```bash
-# Build with x86 architecture support
 cargo build --release -p r2sleigh-cli --features x86
-
-# Build with ARM architecture support
-cargo build --release -p r2sleigh-cli --features arm
-
-# Build with all architectures
-cargo build --release -p r2sleigh-cli --features all-archs
 ```
 
-### radare2 Plugin
+### Build and install the radare2 plugin
 
 ```bash
 cd r2plugin
-
-# Build release (default: x86 support)
-make
-
-# Build with all architectures
-make RUST_FEATURES=all-archs
-
-# Build debug version
-make RUST_TARGET=debug
-```
-
-## Installation
-
-### Plugin Installation
-
-```bash
-# From the repo root
-cargo install-plugin
-
-# Or directly
-cd r2plugin
+make RUST_FEATURES=x86
 make install
 ```
 
-This installs:
-- `anal_sleigh.so` - The radare2 plugin
-- `libr2sleigh_plugin.so` - The Rust library
-
-To `~/.local/share/radare2/plugins/`
-
-### Uninstall
+### First commands
 
 ```bash
-cd r2plugin
-make uninstall
+# CLI: disassemble bytes
+r2sleigh disasm --arch x86-64 --bytes "4889e500000000000000000000000000"
+
+# Plugin: decompile a function
+r2 -qc 'aaa; s main; a:sla.dec' /bin/ls
+
+# Plugin: SSA form
+r2 -qc 'aaa; s main; a:sla.ssa' /bin/ls
+
+# Plugin: taint analysis
+r2 -qc 'aaa; s main; a:sla.taint' /bin/ls
 ```
 
-## Usage
-
-### CLI Tool
-
-```bash
-# Compile a Sleigh spec to r2il binary
-r2sleigh compile path/to/x86-64.slaspec -o x86-64.r2il
-
-# Disassemble bytes using pre-compiled SLA data
-r2sleigh disasm --arch x86-64 --bytes "4889e5"
-
-# Output in different formats
-r2sleigh disasm --arch x86-64 --bytes "4889e5" --format json
-r2sleigh disasm --arch x86-64 --bytes "4889e5" --format esil
-
-JSON output uses structured ops with register varnode names (field: `name`).
-
-Example JSON (truncated):
-```json
-{
-  "addr": "0x1000",
-  "size": 3,
-  "mnemonic": "mov rbp, rsp",
-  "ops": [
-    { "Copy": { "dst": { "space": "register", "offset": 32, "size": 8, "name": "RBP" }, "src": { "space": "register", "offset": 24, "size": 8, "name": "RSP" } } }
-  ]
-}
-```
-
-# Show architecture info
-r2sleigh info x86-64.r2il
-```
-
-### radare2 Plugin
-
-```bash
-# Use sleigh for analysis
-r2 -e anal.arch=sleigh /bin/ls
-
-# Or set interactively
-[0x00001000]> e anal.arch=sleigh
-```
-
-#### Disassembly with ESIL
-
-```bash
-# Show disassembly
-r2 -qc 'e anal.arch=sleigh; pd 5' /bin/ls
-
-# Show ESIL
-r2 -qc 'e anal.arch=sleigh; e asm.esil=true; pd 5' /bin/ls
-```
-
-#### Plugin Commands
-
-```
-a:sleigh        - Show r2sleigh status
-a:sleigh.info   - Show current architecture info
-a:sleigh.json   - Dump r2il ops as JSON for current instruction
-a:sleigh.regs   - Show registers read/written by instruction
-a:sleigh.mem    - Show memory accesses by instruction
-a:sleigh.vars   - Show all varnodes used by instruction
-a:sleigh.ssa    - Show SSA form of instruction
-a:sleigh.defuse - Show def-use analysis of instruction
-```
-
-Example:
-
-```bash
-$ r2 -qc 'a:sleigh.info' /bin/ls
-r2sleigh: loaded architecture 'x86-64'
-
-$ r2 -qc 's entry0+4; a:sleigh.ssa' /bin/ls
-[
-  {"op": "Copy", "dst": "cf_1", "sources": ["0x0_0"]},
-  {"op": "IntXor", "dst": "ebp_1", "sources": ["ebp_0", "ebp_0"]},
-  {"op": "IntZExt", "dst": "rbp_1", "sources": ["ebp_1"]},
-  ...
-]
-
-$ r2 -qc 's entry0+4; a:sleigh.defuse' /bin/ls
-{
-  "inputs": ["0x0_0", "ebp_0"],
-  "outputs": ["rbp_1", "cf_1", "zf_1", "sf_1", "pf_1", "of_1"],
-  "live": ["ebp_1", "tmp:0x2c200_1", "tmp:0x2c280_1", "tmp:0x2c300_1"]
-}
-```
-
-## Example Output
-
-### CLI
-
-```
-$ r2sleigh disasm --arch x86-64 --bytes "4889e500000000000000000000000000"
-0x1000  MOV RBP,RSP  (size=3)
-P-code (1 ops):
-  0: Copy { dst: RBP, src: RSP }
-```
-
-```
-$ r2sleigh disasm --arch x86-64 --bytes "31c00fa2c3ffffffffffffffffffffffff" --format esil
-# 0x1000: XOR EAX,EAX (size=2)
-eax,eax,^,eax,=
-# 0x1002: CPUID (size=2)
-eax,CALLOTHER(44:cpuid),tmp:0x40800,=
-```
-
-### radare2 Plugin
-
-```
-$ r2 -qc 'e anal.arch=sleigh; pd 3' /tmp/test.bin
-            0x00000000      55             push rbp
-            0x00000001      4889e5         mov rbp, rsp
-            0x00000004      c3             ret
-
-$ r2 -qc 'e anal.arch=sleigh; e asm.esil=true; pd 3' /tmp/test.bin
-            0x00000000      55             rbp,8,rsp,-,=[8],8,rsp,-=
-            0x00000001      4889e5         rsp,rbp,=
-            0x00000004      c3             rsp,[8],rip,=,8,rsp,+=
-```
-
-## Supported Architectures
+Supported Architectures
+-----------------------
 
 | Architecture | Feature Flag | Status |
-|--------------|--------------|--------|
-| x86-64       | `x86`        | ✓ Working |
-| x86 (32-bit) | `x86`        | ✓ Working |
-| ARM          | `arm`        | ✓ Available |
+|--------------|-------------|--------|
+| x86-64       | `x86`       | Working |
+| x86 (32-bit) | `x86`      | Working |
+| ARM          | `arm`       | Available |
+| MIPS         | `mips`      | Available |
 
-## Troubleshooting
+Project Structure
+-----------------
 
-### Plugin not loading
+| Crate | Purpose |
+|-------|---------|
+| `r2il` | Core IL types: `Varnode`, `SpaceId`, `R2ILOp`, `R2ILBlock` |
+| `r2sleigh-lift` | Sleigh/P-code to r2il translation, ESIL formatting |
+| `r2sleigh-cli` | CLI: compile, disasm, info commands |
+| `r2ssa` | SSA: CFG, dominator tree, phi nodes, optimization, taint |
+| `r2sym` | Symbolic execution: Z3 solver, path exploration |
+| `r2types` | Type inference: constraint solver, signatures, struct shapes |
+| `r2dec` | Decompiler: expression folding, structuring, codegen |
+| `r2plugin` | radare2 plugin: Rust cdylib + C wrapper |
 
-**Symptom**: `LA` doesn't show `sleigh` plugin
+Documentation
+-------------
 
-**Check**:
-```bash
-# Verify plugin files exist
-ls ~/.local/share/radare2/plugins/anal_sleigh.so
-ls ~/.local/share/radare2/plugins/libr2sleigh_plugin.so
+| Document | Description |
+|----------|-------------|
+| [BUILDING.md](BUILDING.md) | Build instructions, installation, troubleshooting |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute, code style, PR guidelines |
+| [DEVELOPERS.md](DEVELOPERS.md) | Architecture overview, module map, how to extend |
+| [ROADMAP.md](ROADMAP.md) | Planned features and priorities |
+| [doc/r2il.md](doc/r2il.md) | Intermediate language design |
+| [doc/ssa.md](doc/ssa.md) | SSA construction and optimization |
+| [doc/decompiler.md](doc/decompiler.md) | Decompiler pipeline |
+| [doc/esil.md](doc/esil.md) | ESIL generation |
+| [doc/taint.md](doc/taint.md) | Taint analysis |
+| [doc/symex.md](doc/symex.md) | Symbolic execution |
+| [doc/plugin.md](doc/plugin.md) | radare2 plugin and commands |
+| [doc/types.md](doc/types.md) | Type inference |
+| [doc/testing.md](doc/testing.md) | Testing strategy |
 
-# Check library dependencies
-ldd ~/.local/share/radare2/plugins/anal_sleigh.so
-```
+Requirements
+------------
 
-**Fix**: Ensure both `.so` files are in the plugins directory.
-
-### "unsupported architecture" error
-
-**Symptom**: Plugin loads but fails to analyze
-
-**Check**: The plugin was built with the required architecture feature.
-
-**Fix**: Rebuild with the needed feature:
-```bash
-cd r2plugin
-make RUST_FEATURES=all-archs
-make install
-```
-
-### Short instruction decode failures
-
-**Note**: The Sleigh disassembler requires at least 16 bytes of input for x86-64 (variable-length instructions). The plugin handles this automatically by padding, but if you see decode errors, ensure sufficient bytes are available.
-
-## Requirements
-
-- Rust 1.85+ (for edition 2024 support)
+- Rust 1.85+ (edition 2024)
 - radare2 (for plugin)
 - pkg-config (for plugin build)
-- For architecture features: `sleigh-config` with corresponding arch feature
+- Z3 (for symbolic execution, optional)
 
-## License
+License
+-------
 
 LGPL-3.0-only
