@@ -335,6 +335,71 @@ int test_sccp_dead_branch(int x) {
     }
 }
 
+// Test 31: Nested if-chain for short-circuit && reconstruction
+int test_short_circuit_chain(int a, int b) {
+    if (a) {
+        if (b) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Test 32: Else-terminator pattern for guard inversion
+int test_guard_inversion(int x) {
+    if (x > 5) {
+        global_tail = x + 1;
+    } else {
+        return -1;
+    }
+    return global_tail;
+}
+
+// Test 33: Nested if with side effects for short-circuit rewrite coverage
+void test_short_circuit_side_effect(int a, int b) {
+    if (a) {
+        if (b) {
+            global_tail = 1;
+        }
+    }
+}
+
+// Test 34: Void guard inversion pattern (else return)
+void test_guard_inversion_void(int x) {
+    if (x > 5) {
+        global_tail = x;
+    } else {
+        return;
+    }
+    global_counter = x;
+}
+
+// Test 35: Loop guard with else-break for condition inversion coverage
+int test_guard_inversion_loop(int x) {
+    int sum = 0;
+    while (x > 0) {
+        if (x & 1) {
+            sum += x;
+        } else {
+            break;
+        }
+        x--;
+    }
+    return sum;
+}
+
+// Test 36: Else-goto terminator pattern for guard inversion coverage
+int test_guard_inversion_goto(int x) {
+    if (x > 5) {
+        global_tail = x;
+    } else {
+        goto out;
+    }
+    global_counter = x;
+out:
+    return global_tail;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -573,6 +638,59 @@ int main(int argc, char *argv[]) {
             if (argc > 2) {
                 int x = atoi(argv[2]);
                 printf("test_sccp_dead_branch(%d) = %d\n", x, test_sccp_dead_branch(x));
+            }
+            break;
+        case 31:
+            if (argc > 3) {
+                int a = atoi(argv[2]);
+                int b = atoi(argv[3]);
+                printf(
+                    "test_short_circuit_chain(%d, %d) = %d\n",
+                    a,
+                    b,
+                    test_short_circuit_chain(a, b)
+                );
+            }
+            break;
+        case 32:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf("test_guard_inversion(%d) = %d\n", x, test_guard_inversion(x));
+            }
+            break;
+        case 33:
+            if (argc > 3) {
+                int a = atoi(argv[2]);
+                int b = atoi(argv[3]);
+                test_short_circuit_side_effect(a, b);
+                printf("test_short_circuit_side_effect(%d, %d) done\n", a, b);
+            }
+            break;
+        case 34:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                test_guard_inversion_void(x);
+                printf("test_guard_inversion_void(%d) done\n", x);
+            }
+            break;
+        case 35:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf(
+                    "test_guard_inversion_loop(%d) = %d\n",
+                    x,
+                    test_guard_inversion_loop(x)
+                );
+            }
+            break;
+        case 36:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf(
+                    "test_guard_inversion_goto(%d) = %d\n",
+                    x,
+                    test_guard_inversion_goto(x)
+                );
             }
             break;
         default:

@@ -570,12 +570,16 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 else_body,
             } => {
                 let then_body = Box::new(Self::cleanup_recurse(*then_body));
-                let else_body = else_body.map(|e| Box::new(Self::cleanup_recurse(*e)));
-                CStmt::If {
+                let else_body = else_body
+                    .map(|e| Box::new(Self::cleanup_recurse(*e)))
+                    .and_then(|e| (!matches!(*e, CStmt::Empty)).then_some(e));
+                let stmt = CStmt::If {
                     cond,
                     then_body,
                     else_body,
-                }
+                };
+                let stmt = Self::rewrite_if_short_circuit(stmt);
+                Self::rewrite_if_condition_inversion(stmt)
             }
             CStmt::While { cond, body } => {
                 let body = Self::strip_trailing_continue(Self::cleanup_recurse(*body));
@@ -623,6 +627,142 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 }
             }
             other => other,
+        }
+    }
+
+    fn rewrite_if_short_circuit(stmt: CStmt) -> CStmt {
+        let CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } = stmt
+        else {
+            return stmt;
+        };
+
+        let then_stmt = (*then_body).clone();
+        let else_stmt = else_body.as_ref().map(|b| (**b).clone());
+
+        // if (a) { if (b) { T } } -> if (a && b) { T }
+        if else_body.is_none()
+            && let CStmt::If {
+                cond: inner_cond,
+                then_body: inner_then,
+                else_body: None,
+            } = &then_stmt
+        {
+            return CStmt::If {
+                cond: CExpr::binary(BinaryOp::And, cond, inner_cond.clone()),
+                then_body: inner_then.clone(),
+                else_body: None,
+            };
+        }
+
+        // if (a) { T } else if (b) { T } -> if (a || b) { T }
+        if let Some(CStmt::If {
+            cond: right_cond,
+            then_body: right_then,
+            else_body: None,
+        }) = else_stmt.as_ref()
+            && then_stmt == **right_then
+        {
+            return CStmt::If {
+                cond: CExpr::binary(BinaryOp::Or, cond, right_cond.clone()),
+                then_body: Box::new(then_stmt),
+                else_body: None,
+            };
+        }
+
+        // if (a) { if (b) { T } else { E } } else { E } -> if (a && b) { T } else { E }
+        if let CStmt::If {
+            cond: inner_cond,
+            then_body: inner_then,
+            else_body: Some(inner_else),
+        } = &then_stmt
+            && let Some(outer_else) = else_stmt.as_ref()
+            && *outer_else == **inner_else
+        {
+            return CStmt::If {
+                cond: CExpr::binary(BinaryOp::And, cond, inner_cond.clone()),
+                then_body: inner_then.clone(),
+                else_body: Some(inner_else.clone()),
+            };
+        }
+
+        CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        }
+    }
+
+    fn rewrite_if_condition_inversion(stmt: CStmt) -> CStmt {
+        let CStmt::If {
+            cond,
+            then_body,
+            else_body: Some(else_body),
+        } = stmt
+        else {
+            return stmt;
+        };
+
+        let Some(terminator) = Self::single_terminator_stmt(else_body.as_ref()) else {
+            return CStmt::If {
+                cond,
+                then_body,
+                else_body: Some(else_body),
+            };
+        };
+
+        CStmt::Block(vec![
+            CStmt::If {
+                cond: Self::negate_condition(cond),
+                then_body: Box::new(terminator),
+                else_body: None,
+            },
+            *then_body,
+        ])
+    }
+
+    fn single_terminator_stmt(stmt: &CStmt) -> Option<CStmt> {
+        if Self::stmt_is_unconditional_terminator(stmt) {
+            return Some(stmt.clone());
+        }
+
+        if let CStmt::Block(stmts) = stmt
+            && stmts.len() == 1
+            && Self::stmt_is_unconditional_terminator(&stmts[0])
+        {
+            return Some(stmts[0].clone());
+        }
+
+        None
+    }
+
+    fn negate_condition(cond: CExpr) -> CExpr {
+        match cond {
+            CExpr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => *operand,
+            CExpr::Binary { op, left, right } => {
+                let negated = match op {
+                    BinaryOp::Eq => Some(BinaryOp::Ne),
+                    BinaryOp::Ne => Some(BinaryOp::Eq),
+                    BinaryOp::Lt => Some(BinaryOp::Ge),
+                    BinaryOp::Le => Some(BinaryOp::Gt),
+                    BinaryOp::Gt => Some(BinaryOp::Le),
+                    BinaryOp::Ge => Some(BinaryOp::Lt),
+                    _ => None,
+                };
+
+                if let Some(op) = negated {
+                    CExpr::Binary { op, left, right }
+                } else {
+                    CExpr::unary(UnaryOp::Not, CExpr::Binary { op, left, right })
+                }
+            }
+            other => CExpr::unary(UnaryOp::Not, other),
         }
     }
 
@@ -1247,5 +1387,109 @@ mod tests {
             };
             assert_eq!(update, update_expr);
         }
+    }
+
+    #[test]
+    fn rewrites_nested_if_without_else_to_short_circuit_and() {
+        let input = CStmt::if_stmt(
+            v("a"),
+            CStmt::if_stmt(v("b"), CStmt::ret(Some(CExpr::IntLit(1))), None),
+            None,
+        );
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert_eq!(
+            cleaned,
+            CStmt::if_stmt(
+                CExpr::binary(BinaryOp::And, v("a"), v("b")),
+                CStmt::ret(Some(CExpr::IntLit(1))),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn rewrites_if_else_if_same_body_to_short_circuit_or() {
+        let body = assign("x", CExpr::IntLit(1));
+        let input = CStmt::if_stmt(
+            v("a"),
+            body.clone(),
+            Some(CStmt::if_stmt(v("b"), body.clone(), None)),
+        );
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert_eq!(
+            cleaned,
+            CStmt::if_stmt(CExpr::binary(BinaryOp::Or, v("a"), v("b")), body, None)
+        );
+    }
+
+    #[test]
+    fn rewrites_shared_else_nested_if_to_short_circuit_and() {
+        let then_stmt = assign("x", CExpr::IntLit(1));
+        let else_stmt = assign("x", CExpr::IntLit(2));
+        let input = CStmt::if_stmt(
+            v("a"),
+            CStmt::if_stmt(v("b"), then_stmt.clone(), Some(else_stmt.clone())),
+            Some(else_stmt.clone()),
+        );
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert_eq!(
+            cleaned,
+            CStmt::if_stmt(
+                CExpr::binary(BinaryOp::And, v("a"), v("b")),
+                then_stmt,
+                Some(else_stmt)
+            )
+        );
+    }
+
+    #[test]
+    fn inverts_if_when_else_is_single_terminator() {
+        let input = CStmt::if_stmt(
+            CExpr::binary(BinaryOp::Lt, v("x"), v("limit")),
+            assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("x"))),
+            Some(CStmt::ret(Some(CExpr::IntLit(0)))),
+        );
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        let CStmt::Block(stmts) = cleaned else {
+            panic!("Expected condition inversion to emit block sequence");
+        };
+        assert_eq!(
+            stmts.len(),
+            2,
+            "Inversion should emit guard + then statement"
+        );
+        assert_eq!(
+            stmts[0],
+            CStmt::if_stmt(
+                CExpr::binary(BinaryOp::Ge, v("x"), v("limit")),
+                CStmt::ret(Some(CExpr::IntLit(0))),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn does_not_invert_if_when_else_is_not_terminator() {
+        let input = CStmt::if_stmt(
+            v("a"),
+            assign("x", CExpr::IntLit(1)),
+            Some(assign("x", v("b"))),
+        );
+        let cleaned = ControlFlowStructurer::cleanup(input.clone());
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn removes_empty_else_branch() {
+        let input = CStmt::if_stmt(v("a"), assign("x", CExpr::IntLit(1)), Some(CStmt::Empty));
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert_eq!(
+            cleaned,
+            CStmt::if_stmt(v("a"), assign("x", CExpr::IntLit(1)), None)
+        );
     }
 }

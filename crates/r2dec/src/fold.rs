@@ -3544,8 +3544,13 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn is_zero_expr(&self, expr: &CExpr) -> bool {
-        matches!(expr, CExpr::IntLit(0) | CExpr::UIntLit(0))
-            || matches!(expr, CExpr::Var(name) if name == "0" || name == "elf_header")
+        match expr {
+            CExpr::Paren(inner) => self.is_zero_expr(inner),
+            CExpr::Cast { expr: inner, .. } => self.is_zero_expr(inner),
+            CExpr::IntLit(0) | CExpr::UIntLit(0) => true,
+            CExpr::Var(name) => name == "0" || name == "elf_header",
+            _ => false,
+        }
     }
 
     fn is_predicate_like_expr(&self, expr: &CExpr) -> bool {
@@ -4084,14 +4089,14 @@ impl<'a> FoldingContext<'a> {
 
     fn extract_flag_name(&self, expr: &CExpr, flag: &str) -> Option<String> {
         if let CExpr::Var(name) = expr {
-            if name.to_lowercase().contains(flag) {
+            if is_specific_flag_name(name, flag) {
                 return Some(name.clone());
             }
 
             if let Some(CExpr::Var(inner)) = self
                 .lookup_definition(name)
                 .or_else(|| self.formatted_defs_map().get(name).cloned())
-                && inner.to_lowercase().contains(flag)
+                && is_specific_flag_name(&inner, flag)
             {
                 return Some(inner);
             }
@@ -4644,29 +4649,74 @@ impl<'a> FoldingContext<'a> {
 
     /// Look up the original comparison operands for a flag variable.
     fn lookup_flag_origin(&self, flag_name: &str) -> Option<(String, String)> {
-        let flag_lower = flag_name.to_lowercase();
+        let (flag_base, flag_version) = parse_flag_name(flag_name)?;
 
-        // Try exact match first (case-insensitive)
+        // Try exact match first (case-insensitive) including version.
         for (key, origin) in self.flag_origins_map() {
-            if key.to_lowercase() == flag_lower {
+            if let Some((key_base, key_version)) = parse_flag_name(key)
+                && key_base == flag_base
+                && key_version == flag_version
+            {
                 return Some(origin.clone());
             }
         }
 
-        // Try matching by base name (without version suffix)
-        // e.g., "zf_1" should match "ZF_1", "zf" should match "zf_1"
-        for (key, origin) in self.flag_origins_map() {
-            let key_lower = key.to_lowercase();
-            // Check if they share the same base (e.g., "zf" part)
-            let flag_base = flag_lower.split('_').next().unwrap_or(&flag_lower);
-            let key_base = key_lower.split('_').next().unwrap_or(&key_lower);
-            if flag_base == key_base {
-                return Some(origin.clone());
-            }
+        // Fallback by base-name only when there is exactly one candidate.
+        // This avoids picking an arbitrary origin for unsuffixed flags.
+        let candidates: Vec<(String, String)> = self
+            .flag_origins_map()
+            .iter()
+            .filter_map(|(key, origin)| {
+                let (key_base, _) = parse_flag_name(key)?;
+                if key_base == flag_base {
+                    Some(origin.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if candidates.len() == 1 {
+            return candidates.into_iter().next();
         }
 
         None
     }
+}
+
+fn parse_flag_name(name: &str) -> Option<(String, Option<String>)> {
+    let lower = name.to_ascii_lowercase();
+    if is_flag_base_name(&lower) {
+        return Some((lower, None));
+    }
+
+    let (base, suffix) = lower.split_once('_')?;
+    if is_flag_base_name(base) && !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return Some((base.to_string(), Some(suffix.to_string())));
+    }
+
+    None
+}
+
+fn is_specific_flag_name(name: &str, flag: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower == flag {
+        return true;
+    }
+
+    let Some((base, suffix)) = lower.split_once('_') else {
+        return false;
+    };
+
+    base == flag && !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_flag_base_name(name: &str) -> bool {
+    matches!(
+        name,
+        "cf" | "pf" | "af" | "zf" | "sf" | "of" | "df" | "tf" | "if" | "iopl" | "nt" | "rf" | "vm"
+    )
 }
 
 /// Check if a name is a CPU flag that should be eliminated when unused.
@@ -5773,6 +5823,46 @@ mod tests {
             simplified,
             CExpr::binary(BinaryOp::Gt, CExpr::Var("a".to_string()), CExpr::IntLit(0))
         );
+    }
+
+    #[test]
+    fn test_simplify_signed_gt_from_ne_and_of_eq_sf_with_casted_zero() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx.flag_info.flag_origins.insert(
+            "OF_1".to_string(),
+            ("a".to_string(), "const:0_0".to_string()),
+        );
+
+        let expr = CExpr::binary(
+            BinaryOp::And,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("a".to_string()), CExpr::IntLit(0)),
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::Var("of_1".to_string()),
+                CExpr::binary(
+                    BinaryOp::Lt,
+                    CExpr::cast(CType::Int(32), CExpr::Var("a".to_string())),
+                    CExpr::cast(CType::Int(32), CExpr::IntLit(0)),
+                ),
+            ),
+        );
+
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(BinaryOp::Gt, CExpr::Var("a".to_string()), CExpr::IntLit(0))
+        );
+    }
+
+    #[test]
+    fn test_extract_flag_name_requires_strict_token_match() {
+        let ctx = FoldingContext::new(64);
+        assert_eq!(
+            ctx.extract_of(&CExpr::Var("of_12".to_string())),
+            Some("of_12".to_string())
+        );
+        assert_eq!(ctx.extract_of(&CExpr::Var("offset_1".to_string())), None);
+        assert_eq!(ctx.extract_of(&CExpr::Var("proof".to_string())), None);
     }
 
     #[test]

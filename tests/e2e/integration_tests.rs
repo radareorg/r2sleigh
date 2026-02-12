@@ -1422,10 +1422,13 @@ mod decompilation {
         let has_direct_gt = return_line.contains("> 0");
         let has_ge_with_ne = return_line.contains(">= 0") && return_line.contains("!= 0");
         let has_signed_negative_check = return_line.contains("< 0");
-        let has_flag_style_fallback = return_line.contains("of_");
         assert!(
-            has_direct_gt || has_ge_with_ne || has_signed_negative_check || has_flag_style_fallback,
+            has_direct_gt || has_ge_with_ne || has_signed_negative_check,
             "Should preserve a signed relational predicate shape"
+        );
+        assert!(
+            !return_line.contains("of_"),
+            "Return predicate should not leak overflow-flag scaffolding"
         );
         assert!(
             return_line.contains("arg1")
@@ -1470,6 +1473,42 @@ mod decompilation {
         assert!(
             !normalized.contains("arg2 = esi;"),
             "Should suppress entry argument identity assignment for arg2"
+        );
+    }
+
+    #[test]
+    fn decompiles_short_circuit_and_chain() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_short_circuit_side_effect",
+            "a:sla.dec",
+        );
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        assert!(
+            normalized.contains("&&"),
+            "Nested if chain should be collapsed into short-circuit &&"
+        );
+    }
+
+    #[test]
+    fn decompiles_inverted_guard_condition() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_guard_inversion_goto", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        let if_line = find_line_containing(&normalized, "if (").expect("Should contain if condition");
+        assert!(
+            if_line.contains("<=")
+                || if_line.contains("!")
+                || if_line.contains("|| of !=")
+                || if_line.contains("|| of_"),
+            "Guard condition should remain in a comparable high-level form"
+        );
+        assert!(
+            normalized.contains("return"),
+            "Guard fixture should still emit a return in decompiled output"
         );
     }
 
