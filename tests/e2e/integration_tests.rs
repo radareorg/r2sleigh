@@ -1235,6 +1235,7 @@ mod merging {
 
 mod decompilation {
     use super::*;
+    use std::collections::{HashMap, HashSet};
 
     fn normalized_dec_output(raw: &str) -> String {
         raw.lines()
@@ -1281,6 +1282,49 @@ mod decompilation {
         let a = a.trim().trim_matches(|c| c == '(' || c == ')').trim();
         let b = b.trim().trim_matches(|c| c == '(' || c == ')').trim();
         !a.is_empty() && a == b
+    }
+
+    fn extract_identifiers(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut current = String::new();
+
+        for ch in text.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                current.push(ch);
+            } else if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+        }
+
+        if !current.is_empty() {
+            out.push(current);
+        }
+
+        out
+    }
+
+    fn is_semantic_name(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower.starts_with("local_")
+            || lower.starts_with("arg")
+            || lower.starts_with("field_")
+            || lower.starts_with("var_")
+            || lower.starts_with("sub_")
+            || lower.starts_with("str.")
+            || lower.starts_with("0x")
+            || lower.contains('.')
+    }
+
+    fn split_ssa_suffix(name: &str) -> Option<(&str, &str)> {
+        let (base, suffix) = name.rsplit_once('_')?;
+        if base.is_empty() || suffix.is_empty() {
+            return None;
+        }
+        if suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            Some((base, suffix))
+        } else {
+            None
+        }
     }
 
     #[test]
@@ -1427,6 +1471,51 @@ mod decompilation {
             !normalized.contains("arg2 = esi;"),
             "Should suppress entry argument identity assignment for arg2"
         );
+    }
+
+    #[test]
+    fn decompiles_without_singleton_ssa_suffixes() {
+        setup();
+        let funcs = [
+            "dbg.check_secret",
+            "dbg.solve_equation",
+            "dbg.test_boolxor",
+            "dbg.test_setlocale_wrapper",
+            "dbg.test_multi_use_temp",
+        ];
+
+        for func in funcs {
+            let result = r2_at_func(vuln_test_binary(), func, "a:sla.dec");
+            result.assert_ok();
+            let normalized = normalized_dec_output(&result.stdout);
+
+            let mut unsuffixed_bases = HashSet::new();
+            let mut versions_by_base: HashMap<String, HashSet<String>> = HashMap::new();
+
+            for ident in extract_identifiers(&normalized) {
+                if is_semantic_name(&ident) {
+                    continue;
+                }
+
+                if let Some((base, suffix)) = split_ssa_suffix(&ident) {
+                    versions_by_base
+                        .entry(base.to_ascii_lowercase())
+                        .or_default()
+                        .insert(suffix.to_string());
+                } else {
+                    unsuffixed_bases.insert(ident.to_ascii_lowercase());
+                }
+            }
+
+            for (base, versions) in versions_by_base {
+                assert!(
+                    versions.len() > 1 || unsuffixed_bases.contains(&base),
+                    "{} should not contain singleton suffixed SSA name for base '{}'",
+                    func,
+                    base
+                );
+            }
+        }
     }
 
     #[test]

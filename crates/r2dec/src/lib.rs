@@ -35,6 +35,7 @@ pub mod codegen;
 pub mod expr;
 pub mod fold;
 pub(crate) mod normalize;
+pub(crate) mod post_rename;
 pub mod region;
 pub mod structure;
 pub mod types;
@@ -53,6 +54,7 @@ use r2ssa::SSAFunction;
 use r2ssa::SSAOp;
 use r2types::ExternalTypeDb;
 use r2types::TypeOracle;
+use std::collections::HashSet;
 use types::FunctionType;
 
 fn is_generic_arg_name(name: &str) -> bool {
@@ -366,6 +368,7 @@ impl Decompiler {
         // Get set of variables that survive folding before structuring.
         let emitted_vars = structurer.emitted_var_names();
         let mut use_conservative_locals = false;
+        let mut is_linear_fallback = false;
 
         let folded_stmt = structurer.structure();
         let mut body_stmt = folded_stmt;
@@ -398,6 +401,7 @@ impl Decompiler {
                 let fallback_reason = format!("{}; {}", folded_reason, unfolded_reason);
 
                 use_conservative_locals = true;
+                is_linear_fallback = true;
                 if linear_stmts.is_empty() {
                     body_stmt = CStmt::Block(vec![CStmt::comment(format!(
                         "r2dec fallback: {} -> no statements recovered",
@@ -504,7 +508,7 @@ impl Decompiler {
         let body = self.stmt_to_vec(body_stmt);
         let inferred_ret_type = self.infer_return_type(func, &type_inference);
 
-        CFunction {
+        let mut c_function = CFunction {
             name: func_name,
             ret_type: self
                 .context
@@ -515,7 +519,22 @@ impl Decompiler {
             params,
             locals,
             body,
+        };
+
+        // Apply post-structuring suffix cleanup for folded/unfolded paths.
+        // Linear fallback intentionally keeps its raw expression-builder output.
+        if !is_linear_fallback {
+            let mut known_function_names = HashSet::new();
+            for name in self.context.function_names.values() {
+                known_function_names.insert(name.to_ascii_lowercase());
+            }
+            for name in self.context.known_function_signatures.keys() {
+                known_function_names.insert(name.to_ascii_lowercase());
+            }
+            post_rename::rewrite_function_identifiers(&mut c_function, &known_function_names);
         }
+
+        c_function
     }
 
     /// Convert a CStmt to a Vec<CStmt>.
