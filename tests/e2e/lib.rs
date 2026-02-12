@@ -91,7 +91,11 @@ impl R2Result {
 
     /// Assert the command succeeded (no crash, no panic)
     pub fn assert_ok(&self) {
-        assert!(!self.crashed, "Command crashed with exit code {:?}", self.exit_code);
+        assert!(
+            !self.crashed,
+            "Command crashed with exit code {:?}",
+            self.exit_code
+        );
         assert!(!self.panicked, "Command panicked: {}", self.stderr);
     }
 
@@ -113,8 +117,10 @@ pub fn r2_cmd_timeout(binary: &str, cmd: &str, timeout: Duration) -> R2Result {
         &format!("{}s", timeout.as_secs()),
         "r2",
         "-q",
-        "-e", "bin.relocs.apply=true",
-        "-c", cmd,
+        "-e",
+        "bin.relocs.apply=true",
+        "-c",
+        cmd,
         binary,
     ]);
 
@@ -132,12 +138,7 @@ pub fn r2_cmd_timeout(binary: &str, cmd: &str, timeout: Duration) -> R2Result {
 /// Run radare2 without a timeout wrapper and with extra environment variables.
 pub fn r2_cmd_with_env(binary: &str, cmd: &str, env: &[(&str, &str)]) -> R2Result {
     let mut command = Command::new("r2");
-    command.args([
-        "-q",
-        "-e", "bin.relocs.apply=true",
-        "-c", cmd,
-        binary,
-    ]);
+    command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
 
     if let Ok(home) = std::env::var("HOME") {
         let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
@@ -165,8 +166,10 @@ pub fn r2_cmd_timeout_with_env(
         &format!("{}s", timeout.as_secs()),
         "r2",
         "-q",
-        "-e", "bin.relocs.apply=true",
-        "-c", cmd,
+        "-e",
+        "bin.relocs.apply=true",
+        "-c",
+        cmd,
         binary,
     ]);
 
@@ -202,7 +205,7 @@ fn parse_output(output: Result<Output, std::io::Error>) -> R2Result {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let exit_code = out.status.code();
-            
+
             // Detect real crashes: signal termination (SIGSEGV, SIGABRT, etc.) or
             // timeout-wrapper exit codes (128+signal).  Do NOT treat a plain non-zero
             // exit code as a crash — r2 legitimately returns non-zero sometimes.
@@ -211,14 +214,20 @@ fn parse_output(output: Result<Output, std::io::Error>) -> R2Result {
                 || matches!(exit_code, Some(134) | Some(139) | Some(136) | Some(137));
             #[cfg(not(unix))]
             let crashed = matches!(exit_code, Some(134) | Some(139) | Some(136) | Some(137));
-            
+
             // Panic detection
-            let panicked = stdout.contains("panicked") 
+            let panicked = stdout.contains("panicked")
                 || stderr.contains("panicked")
                 || stdout.contains("core dumped")
                 || stderr.contains("core dumped");
 
-            R2Result { stdout, stderr, exit_code, crashed, panicked }
+            R2Result {
+                stdout,
+                stderr,
+                exit_code,
+                crashed,
+                panicked,
+            }
         }
         Err(e) => R2Result {
             stdout: String::new(),
@@ -226,7 +235,7 @@ fn parse_output(output: Result<Output, std::io::Error>) -> R2Result {
             exit_code: None,
             crashed: true,
             panicked: false,
-        }
+        },
     }
 }
 

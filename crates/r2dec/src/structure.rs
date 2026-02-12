@@ -569,6 +569,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 then_body,
                 else_body,
             } => {
+                let cond = Self::normalize_condition_addr_artifacts(cond);
                 let then_body = Box::new(Self::cleanup_recurse(*then_body));
                 let else_body = else_body
                     .map(|e| Box::new(Self::cleanup_recurse(*e)))
@@ -582,6 +583,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 Self::rewrite_if_condition_inversion(stmt)
             }
             CStmt::While { cond, body } => {
+                let cond = Self::normalize_condition_addr_artifacts(cond);
                 let body = Self::strip_trailing_continue(Self::cleanup_recurse(*body));
                 CStmt::While {
                     cond,
@@ -590,6 +592,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             }
             CStmt::DoWhile { body, cond } => {
                 let body = Self::strip_trailing_continue(Self::cleanup_recurse(*body));
+                let cond = Self::normalize_condition_addr_artifacts(cond);
                 // Fix C: do { if (c) break; rest } while(1) -> while(!c) { rest }
                 Self::try_convert_do_while_to_while(body, cond)
             }
@@ -599,6 +602,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 update,
                 body,
             } => {
+                let cond = cond.map(Self::normalize_condition_addr_artifacts);
                 let body = Self::strip_trailing_continue(Self::cleanup_recurse(*body));
                 CStmt::For {
                     init,
@@ -805,7 +809,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         };
 
         let cond_vars = Self::collect_expr_vars(&loop_cond);
-        let cond_reads_induction = cond_vars.contains(&induction_var);
+        let cond_reads_induction = Self::set_contains_loop_var(&cond_vars, &induction_var);
         let (update, body_without_update, update_links_cond) =
             Self::extract_loop_update(&induction_var, &cond_vars, loop_body)?;
 
@@ -885,13 +889,13 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             return None;
         }
 
-        let prev_stmt = if effective.len() >= 2 {
-            effective.get(effective.len() - 2)
+        let prev_stmts = if effective.len() >= 2 {
+            &effective[..effective.len() - 1]
         } else {
-            None
+            &[]
         };
         let (update, update_links_cond) =
-            Self::update_expr_from_stmt(var, cond_vars, prev_stmt, effective.last().unwrap())?;
+            Self::update_expr_from_stmt(var, cond_vars, prev_stmts, effective.last().unwrap())?;
         effective.pop();
         Some((update, Self::stmt_from_vec(effective), update_links_cond))
     }
@@ -907,7 +911,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     fn update_expr_from_stmt(
         var: &str,
         cond_vars: &HashSet<String>,
-        prev_stmt: Option<&CStmt>,
+        prev_stmts: &[CStmt],
         stmt: &CStmt,
     ) -> Option<(CExpr, bool)> {
         let CStmt::Expr(expr) = stmt else {
@@ -925,10 +929,10 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             CExpr::Binary { op, left, right } if matches!(left.as_ref(), CExpr::Var(_)) => {
                 if *op == BinaryOp::Assign {
                     let rhs_vars = Self::collect_expr_vars(right);
-                    let links_cond_direct = !rhs_vars.is_disjoint(cond_vars);
-                    let reads_induction = rhs_vars.contains(var);
+                    let links_cond_direct = Self::sets_overlap_loop_vars(&rhs_vars, cond_vars);
+                    let reads_induction = Self::set_contains_loop_var(&rhs_vars, var);
                     let links_cond_via_alias =
-                        Self::rhs_links_cond_via_alias(prev_stmt, &rhs_vars, cond_vars);
+                        Self::rhs_links_cond_via_alias(prev_stmts, &rhs_vars, cond_vars);
                     if reads_induction || links_cond_direct || links_cond_via_alias {
                         return Some((expr.clone(), links_cond_direct || links_cond_via_alias));
                     }
@@ -999,14 +1003,25 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     }
 
     fn rhs_links_cond_via_alias(
-        prev_stmt: Option<&CStmt>,
+        prev_stmts: &[CStmt],
         rhs_vars: &HashSet<String>,
         cond_vars: &HashSet<String>,
     ) -> bool {
-        let Some((def, prev_reads)) = prev_stmt.and_then(Self::stmt_def_and_reads) else {
-            return false;
-        };
-        rhs_vars.contains(&def) && !prev_reads.is_disjoint(cond_vars)
+        let mut tracked = rhs_vars.clone();
+        for stmt in prev_stmts.iter().rev().take(2) {
+            let Some((def, prev_reads)) = Self::stmt_def_and_reads(stmt) else {
+                continue;
+            };
+            if !Self::set_contains_loop_var(&tracked, &def) {
+                continue;
+            }
+            if Self::sets_overlap_loop_vars(&prev_reads, cond_vars) {
+                return true;
+            }
+            Self::set_remove_loop_var_aliases(&mut tracked, &def);
+            tracked.extend(prev_reads);
+        }
+        false
     }
 
     fn stmt_def_and_reads(stmt: &CStmt) -> Option<(String, HashSet<String>)> {
@@ -1030,10 +1045,110 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         vars
     }
 
-    fn collect_expr_vars_into(expr: &CExpr, out: &mut HashSet<String>) {
+    fn normalize_loop_expr_refs(expr: &CExpr) -> &CExpr {
         match expr {
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                Self::normalize_loop_expr_refs(inner)
+            }
+            CExpr::AddrOf(inner) => match inner.as_ref() {
+                CExpr::Deref(inner2) => Self::normalize_loop_expr_refs(inner2),
+                _ => expr,
+            },
+            CExpr::Deref(inner) => match inner.as_ref() {
+                CExpr::AddrOf(inner2) => Self::normalize_loop_expr_refs(inner2),
+                _ => expr,
+            },
+            _ => expr,
+        }
+    }
+
+    fn normalize_condition_addr_artifacts(expr: CExpr) -> CExpr {
+        match expr {
+            CExpr::Var(name) if name.starts_with('&') && name.len() > 1 => {
+                CExpr::Var(name.trim_start_matches('&').to_string())
+            }
+            CExpr::Unary { op, operand } => CExpr::Unary {
+                op,
+                operand: Box::new(Self::normalize_condition_addr_artifacts(*operand)),
+            },
+            CExpr::Binary { op, left, right } => CExpr::Binary {
+                op,
+                left: Box::new(Self::normalize_condition_addr_artifacts(*left)),
+                right: Box::new(Self::normalize_condition_addr_artifacts(*right)),
+            },
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => CExpr::Ternary {
+                cond: Box::new(Self::normalize_condition_addr_artifacts(*cond)),
+                then_expr: Box::new(Self::normalize_condition_addr_artifacts(*then_expr)),
+                else_expr: Box::new(Self::normalize_condition_addr_artifacts(*else_expr)),
+            },
+            CExpr::Cast { ty, expr } => CExpr::Cast {
+                ty,
+                expr: Box::new(Self::normalize_condition_addr_artifacts(*expr)),
+            },
+            CExpr::Call { func, args } => CExpr::Call {
+                func: Box::new(Self::normalize_condition_addr_artifacts(*func)),
+                args: args
+                    .into_iter()
+                    .map(Self::normalize_condition_addr_artifacts)
+                    .collect(),
+            },
+            CExpr::Subscript { base, index } => CExpr::Subscript {
+                base: Box::new(Self::normalize_condition_addr_artifacts(*base)),
+                index: Box::new(Self::normalize_condition_addr_artifacts(*index)),
+            },
+            CExpr::Member { base, member } => CExpr::Member {
+                base: Box::new(Self::normalize_condition_addr_artifacts(*base)),
+                member,
+            },
+            CExpr::PtrMember { base, member } => CExpr::PtrMember {
+                base: Box::new(Self::normalize_condition_addr_artifacts(*base)),
+                member,
+            },
+            CExpr::Sizeof(inner) => {
+                CExpr::Sizeof(Box::new(Self::normalize_condition_addr_artifacts(*inner)))
+            }
+            CExpr::AddrOf(inner) => {
+                let normalized = Self::normalize_condition_addr_artifacts(*inner);
+                match normalized {
+                    CExpr::Deref(inner2) => *inner2,
+                    CExpr::Var(name) => CExpr::Var(name),
+                    other => CExpr::AddrOf(Box::new(other)),
+                }
+            }
+            CExpr::Deref(inner) => {
+                let normalized = Self::normalize_condition_addr_artifacts(*inner);
+                match normalized {
+                    CExpr::AddrOf(inner2) => *inner2,
+                    other => CExpr::Deref(Box::new(other)),
+                }
+            }
+            CExpr::Comma(values) => CExpr::Comma(
+                values
+                    .into_iter()
+                    .map(Self::normalize_condition_addr_artifacts)
+                    .collect(),
+            ),
+            CExpr::Paren(inner) => {
+                CExpr::Paren(Box::new(Self::normalize_condition_addr_artifacts(*inner)))
+            }
+            other => other,
+        }
+    }
+
+    fn collect_expr_vars_into(expr: &CExpr, out: &mut HashSet<String>) {
+        match Self::normalize_loop_expr_refs(expr) {
             CExpr::Var(name) => {
-                out.insert(name.clone());
+                out.insert(name.trim_start_matches('&').to_string());
+            }
+            CExpr::AddrOf(inner) | CExpr::Deref(inner) => {
+                if let CExpr::Var(name) = Self::normalize_loop_expr_refs(inner) {
+                    out.insert(name.trim_start_matches('&').to_string());
+                }
+                Self::collect_expr_vars_into(inner, out);
             }
             CExpr::Unary { operand, .. } => Self::collect_expr_vars_into(operand, out),
             CExpr::Binary { left, right, .. } => {
@@ -1049,11 +1164,9 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 Self::collect_expr_vars_into(then_expr, out);
                 Self::collect_expr_vars_into(else_expr, out);
             }
-            CExpr::Cast { expr, .. }
-            | CExpr::Paren(expr)
-            | CExpr::Deref(expr)
-            | CExpr::AddrOf(expr)
-            | CExpr::Sizeof(expr) => Self::collect_expr_vars_into(expr, out),
+            CExpr::Cast { expr, .. } | CExpr::Paren(expr) | CExpr::Sizeof(expr) => {
+                Self::collect_expr_vars_into(expr, out)
+            }
             CExpr::Call { func, args } => {
                 Self::collect_expr_vars_into(func, out);
                 for arg in args {
@@ -1078,6 +1191,44 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             | CExpr::StringLit(_)
             | CExpr::CharLit(_)
             | CExpr::SizeofType(_) => {}
+        }
+    }
+
+    fn loop_var_base(name: &str) -> &str {
+        let name = name.trim_start_matches('&');
+        if let Some((base, suffix)) = name.rsplit_once('_')
+            && !base.is_empty()
+            && suffix.chars().all(|ch| ch.is_ascii_digit())
+        {
+            return base;
+        }
+        name
+    }
+
+    fn loop_var_equiv(a: &str, b: &str) -> bool {
+        if a.eq_ignore_ascii_case(b) {
+            return true;
+        }
+        Self::loop_var_base(a).eq_ignore_ascii_case(Self::loop_var_base(b))
+    }
+
+    fn set_contains_loop_var(vars: &HashSet<String>, target: &str) -> bool {
+        vars.iter().any(|name| Self::loop_var_equiv(name, target))
+    }
+
+    fn sets_overlap_loop_vars(a: &HashSet<String>, b: &HashSet<String>) -> bool {
+        a.iter()
+            .any(|name| b.iter().any(|other| Self::loop_var_equiv(name, other)))
+    }
+
+    fn set_remove_loop_var_aliases(vars: &mut HashSet<String>, target: &str) {
+        let to_remove: Vec<String> = vars
+            .iter()
+            .filter(|name| Self::loop_var_equiv(name, target))
+            .cloned()
+            .collect();
+        for name in to_remove {
+            vars.remove(&name);
         }
     }
 
@@ -1490,6 +1641,132 @@ mod tests {
         assert_eq!(
             cleaned,
             CStmt::if_stmt(v("a"), assign("x", CExpr::IntLit(1)), None)
+        );
+    }
+
+    #[test]
+    fn rewrites_while_to_for_when_condition_uses_addrof_induction_var() {
+        let input = CStmt::Block(vec![
+            assign("i", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::binary(BinaryOp::Lt, CExpr::AddrOf(Box::new(v("i"))), v("n")),
+                CStmt::Block(vec![
+                    assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("i"))),
+                    assign("i", CExpr::binary(BinaryOp::Add, v("i"), CExpr::IntLit(1))),
+                ]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert!(
+            matches!(cleaned, CStmt::For { .. }),
+            "Address-wrapped induction variable should still allow for-loop rewrite"
+        );
+    }
+
+    #[test]
+    fn normalizes_addrof_var_artifact_in_while_condition_without_rewrite() {
+        let input = CStmt::Block(vec![
+            assign("i", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::binary(BinaryOp::Lt, CExpr::AddrOf(Box::new(v("local"))), v("n")),
+                CStmt::Block(vec![assign(
+                    "sum",
+                    CExpr::binary(BinaryOp::Add, v("sum"), CExpr::IntLit(1)),
+                )]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        let CStmt::Block(stmts) = cleaned else {
+            panic!("Expected unmatched loop to remain a block");
+        };
+        let Some(CStmt::While { cond, .. }) = stmts.get(1) else {
+            panic!("Expected second statement to remain a while-loop");
+        };
+        match cond {
+            CExpr::Binary { left, .. } => {
+                assert!(
+                    matches!(left.as_ref(), CExpr::Var(name) if name == "local"),
+                    "Address-of local artifact should normalize to plain variable in condition"
+                );
+            }
+            other => panic!(
+                "Unexpected condition shape after normalization: {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn rewrites_while_to_for_with_two_step_alias_update_chain() {
+        let input = CStmt::Block(vec![
+            assign("i", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::binary(BinaryOp::Lt, v("i"), v("n")),
+                CStmt::Block(vec![
+                    assign("tmp1", v("i")),
+                    assign("tmp2", v("tmp1")),
+                    assign(
+                        "i",
+                        CExpr::binary(BinaryOp::Add, v("tmp2"), CExpr::IntLit(1)),
+                    ),
+                ]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert!(
+            matches!(cleaned, CStmt::For { .. }),
+            "Two-step alias chain should be enough to connect update with loop condition"
+        );
+    }
+
+    #[test]
+    fn does_not_rewrite_while_to_for_when_alias_chain_is_too_long() {
+        let input = CStmt::Block(vec![
+            assign("i", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::binary(BinaryOp::Lt, v("i"), v("n")),
+                CStmt::Block(vec![
+                    assign("tmp1", v("i")),
+                    assign("tmp2", v("tmp1")),
+                    assign("tmp3", v("tmp2")),
+                    assign(
+                        "i",
+                        CExpr::binary(BinaryOp::Add, v("tmp3"), CExpr::IntLit(1)),
+                    ),
+                ]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        let CStmt::Block(stmts) = cleaned else {
+            panic!("Expected long alias-chain loop to remain a block");
+        };
+        assert!(
+            matches!(stmts.get(1), Some(CStmt::While { .. })),
+            "Alias chain beyond bounded lookback should not rewrite to for-loop"
+        );
+    }
+
+    #[test]
+    fn rewrites_while_to_for_when_condition_uses_suffix_equivalent_var_name() {
+        let input = CStmt::Block(vec![
+            assign("local_4", CExpr::IntLit(0)),
+            CStmt::while_loop(
+                CExpr::binary(BinaryOp::Lt, CExpr::AddrOf(Box::new(v("local"))), v("n")),
+                CStmt::Block(vec![assign(
+                    "local_4",
+                    CExpr::binary(BinaryOp::Add, v("local_4"), CExpr::IntLit(1)),
+                )]),
+            ),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert!(
+            matches!(cleaned, CStmt::For { .. }),
+            "Suffix-equivalent loop vars (local/local_4) should be treated as matching"
         );
     }
 }

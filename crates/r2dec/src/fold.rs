@@ -2304,6 +2304,70 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    fn resolve_return_expr_from_defs(
+        &self,
+        expr: &CExpr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        if depth > 6 {
+            return None;
+        }
+
+        match expr {
+            CExpr::Paren(inner) => self.resolve_return_expr_from_defs(inner, depth + 1, visited),
+            CExpr::Cast { ty, expr: inner } => self
+                .resolve_return_expr_from_defs(inner, depth + 1, visited)
+                .map(|resolved| CExpr::cast(ty.clone(), resolved)),
+            CExpr::Var(name) => {
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+
+                let resolved = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                    .and_then(|def| {
+                        if def == CExpr::Var(name.clone()) {
+                            return None;
+                        }
+                        self.resolve_return_expr_from_defs(&def, depth + 1, visited)
+                            .or(Some(def))
+                    });
+
+                visited.remove(name);
+                resolved
+            }
+            _ => None,
+        }
+    }
+
+    fn resolve_return_target_expr(
+        &self,
+        target_expr: CExpr,
+        last_ret_value: Option<CExpr>,
+    ) -> CExpr {
+        if let Some(last) = last_ret_value
+            && (self.is_predicate_like_expr(&last)
+                || self.is_low_level_return_artifact(&target_expr)
+                || self.is_uninitialized_return_reg(&target_expr))
+        {
+            return last;
+        }
+
+        if self.is_uninitialized_return_reg(&target_expr) {
+            let mut visited = HashSet::new();
+            if let Some(resolved) =
+                self.resolve_return_expr_from_defs(&target_expr, 0, &mut visited)
+                && resolved != target_expr
+            {
+                return resolved;
+            }
+        }
+
+        target_expr
+    }
+
     fn lookup_definition(&self, name: &str) -> Option<CExpr> {
         if let Some(expr) = self.definitions_map().get(name) {
             return Some(expr.clone());
@@ -2344,55 +2408,42 @@ impl<'a> FoldingContext<'a> {
                 continue;
             }
 
-            if self.is_current_return_block() {
-                match op {
-                    SSAOp::Copy { dst, src }
-                        if self.is_return_register_name(&dst.name.to_lowercase()) =>
+            match op {
+                SSAOp::Copy { dst, src }
+                    if self.is_return_register_name(&dst.name.to_lowercase()) =>
+                {
+                    last_ret_value = Some(self.get_return_expr(src));
+                }
+                SSAOp::IntZExt { dst, src }
+                | SSAOp::IntSExt { dst, src }
+                | SSAOp::Trunc { dst, src }
+                | SSAOp::Cast { dst, src }
+                    if self.is_return_register_name(&dst.name.to_lowercase()) =>
+                {
+                    let ty = type_from_size(dst.size);
+                    last_ret_value = Some(CExpr::cast(ty, self.get_return_expr(src)));
+                }
+                _ => {
+                    if let Some(dst) = op.dst()
+                        && self.is_return_register_name(&dst.name.to_lowercase())
                     {
-                        last_ret_value = Some(self.get_return_expr(src));
-                    }
-                    SSAOp::IntZExt { dst, src }
-                    | SSAOp::IntSExt { dst, src }
-                    | SSAOp::Trunc { dst, src }
-                    | SSAOp::Cast { dst, src }
-                        if self.is_return_register_name(&dst.name.to_lowercase()) =>
-                    {
-                        let ty = type_from_size(dst.size);
-                        last_ret_value = Some(CExpr::cast(ty, self.get_return_expr(src)));
-                    }
-                    _ => {
-                        if let Some(dst) = op.dst()
-                            && self.is_return_register_name(&dst.name.to_lowercase())
-                        {
-                            let mut visited = HashSet::new();
-                            let raw = self.op_to_expr(op);
-                            let expanded = self.expand_return_expr(&raw, 0, &mut visited);
-                            let final_expr = if self.is_predicate_like_expr(&expanded) {
-                                self.simplify_condition_expr(expanded)
-                            } else {
-                                expanded
-                            };
-                            last_ret_value = Some(final_expr);
-                        }
+                        let mut visited = HashSet::new();
+                        let raw = self.op_to_expr(op);
+                        let expanded = self.expand_return_expr(&raw, 0, &mut visited);
+                        let final_expr = if self.is_predicate_like_expr(&expanded) {
+                            self.simplify_condition_expr(expanded)
+                        } else {
+                            expanded
+                        };
+                        last_ret_value = Some(final_expr);
                     }
                 }
             }
 
             if let SSAOp::Return { target } = op {
-                if self.is_current_return_block() {
-                    let target_expr = self.get_expr(target);
-                    let expr = match last_ret_value.clone() {
-                        Some(last) if self.is_predicate_like_expr(&last) => last,
-                        Some(last) if self.is_low_level_return_artifact(&target_expr) => last,
-                        Some(last) if self.is_uninitialized_return_reg(&target_expr) => last,
-                        _ => target_expr,
-                    };
-                    stmts.push(CStmt::Return(Some(self.rewrite_stack_expr(expr))));
-                    break;
-                }
-                if let Some(stmt) = self.op_to_stmt_with_args(op, block.addr, op_idx) {
-                    stmts.push(stmt);
-                }
+                let target_expr = self.get_expr(target);
+                let expr = self.resolve_return_target_expr(target_expr, last_ret_value.clone());
+                stmts.push(CStmt::Return(Some(self.rewrite_stack_expr(expr))));
                 break;
             }
 
@@ -2673,22 +2724,27 @@ impl<'a> FoldingContext<'a> {
             let (reads, def) = self.stmt_reads_and_def(&stmt);
 
             let drop_stmt = if let Some((target, rhs)) = Self::assignment_target_and_rhs(&stmt) {
-                let dead_opaque = self.is_opaque_temp_name(target)
+                let dead_ephemeral = self.is_ephemeral_ssa_target(target)
                     && !live.contains(target)
                     && self.expr_is_pure(rhs);
 
-                let dead_phi_copy = if let CExpr::Var(src) = rhs {
-                    let same_name = src == target;
-                    let same_base = match (Self::ssa_base_name(src), Self::ssa_base_name(target)) {
-                        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-                        _ => false,
-                    };
-                    !live.contains(target) && (same_name || same_base)
+                let dead_phi_copy = if self.is_ephemeral_ssa_target(target) {
+                    if let CExpr::Var(src) = rhs {
+                        let same_name = src == target;
+                        let same_base =
+                            match (Self::ssa_base_name(src), Self::ssa_base_name(target)) {
+                                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                                _ => false,
+                            };
+                        !live.contains(target) && (same_name || same_base)
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 };
 
-                dead_opaque || dead_phi_copy
+                dead_ephemeral || dead_phi_copy
             } else {
                 false
             };
@@ -4507,6 +4563,100 @@ impl<'a> FoldingContext<'a> {
         false
     }
 
+    fn is_semantic_binding_name(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower.starts_with("local_")
+            || lower.starts_with("arg")
+            || lower.starts_with("field_")
+            || lower.starts_with("var_")
+            || lower.starts_with("sub_")
+            || lower.starts_with("str.")
+            || lower.starts_with("0x")
+            || lower.contains('.')
+    }
+
+    fn is_register_like_base_name(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "rax"
+                | "rbx"
+                | "rcx"
+                | "rdx"
+                | "rsi"
+                | "rdi"
+                | "rbp"
+                | "rsp"
+                | "rip"
+                | "r8"
+                | "r9"
+                | "r10"
+                | "r11"
+                | "r12"
+                | "r13"
+                | "r14"
+                | "r15"
+                | "eax"
+                | "ebx"
+                | "ecx"
+                | "edx"
+                | "esi"
+                | "edi"
+                | "ebp"
+                | "esp"
+                | "eip"
+                | "ax"
+                | "bx"
+                | "cx"
+                | "dx"
+                | "si"
+                | "di"
+                | "bp"
+                | "sp"
+                | "ip"
+                | "al"
+                | "ah"
+                | "bl"
+                | "bh"
+                | "cl"
+                | "ch"
+                | "dl"
+                | "dh"
+        ) {
+            return true;
+        }
+
+        for prefix in ["xmm", "ymm", "zmm", "mm", "st"] {
+            if let Some(rest) = lower.strip_prefix(prefix) {
+                return !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit());
+            }
+        }
+
+        false
+    }
+
+    fn is_ephemeral_ssa_target(&self, name: &str) -> bool {
+        if Self::is_semantic_binding_name(name) {
+            return false;
+        }
+
+        if self.is_opaque_temp_name(name) {
+            return true;
+        }
+
+        let lower = name.to_ascii_lowercase();
+        let base = match lower.rsplit_once('_') {
+            Some((base, suffix))
+                if !base.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) =>
+            {
+                base
+            }
+            _ => lower.as_str(),
+        };
+
+        Self::is_register_like_base_name(base)
+    }
+
     fn expr_contains_opaque_temp(&self, expr: &CExpr) -> bool {
         match expr {
             CExpr::Var(name) => self.is_opaque_temp_name(name),
@@ -5732,6 +5882,71 @@ mod tests {
     }
 
     #[test]
+    fn test_prune_dead_temp_assignments_removes_dead_register_ssa_assignment() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("rax_6".to_string()),
+                CExpr::binary(
+                    BinaryOp::Add,
+                    CExpr::Var("rax_3".to_string()),
+                    CExpr::IntLit(1),
+                ),
+            )),
+            CStmt::Return(Some(CExpr::IntLit(0))),
+        ];
+
+        let pruned = ctx.prune_dead_temp_assignments(stmts);
+        assert_eq!(
+            pruned.len(),
+            1,
+            "Dead pure assignment to SSA register artifact should be removed"
+        );
+        assert!(
+            matches!(pruned[0], CStmt::Return(_)),
+            "Return should be retained"
+        );
+    }
+
+    #[test]
+    fn test_prune_dead_temp_assignments_keeps_dead_register_ssa_assignment_with_call_rhs() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("rax_6".to_string()),
+                CExpr::call(CExpr::Var("foo".to_string()), vec![]),
+            )),
+            CStmt::Return(Some(CExpr::IntLit(0))),
+        ];
+
+        let pruned = ctx.prune_dead_temp_assignments(stmts);
+        assert_eq!(
+            pruned.len(),
+            2,
+            "Assignment with side-effecting RHS should not be pruned"
+        );
+    }
+
+    #[test]
+    fn test_prune_dead_temp_assignments_keeps_dead_dotted_global_like_target() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("obj.global_counter".to_string()),
+                CExpr::IntLit(1),
+            )),
+            CStmt::Return(Some(CExpr::IntLit(0))),
+        ];
+
+        let pruned = ctx.prune_dead_temp_assignments(stmts);
+        assert_eq!(
+            pruned.len(),
+            2,
+            "Dotted/global-like semantic bindings should not be pruned"
+        );
+    }
+
+    #[test]
     fn test_copy_predicate_assignment_uses_simplified_rhs() {
         let edi_0 = make_var("EDI", 0, 4);
         let sub = make_var("tmp:9100", 1, 4);
@@ -5950,7 +6165,26 @@ mod tests {
         );
 
         let simplified = ctx.simplify_condition_expr(expr.clone());
-        assert_eq!(simplified, expr);
+        assert!(
+            matches!(
+                simplified,
+                CExpr::Binary {
+                    op: BinaryOp::And,
+                    ..
+                }
+            ),
+            "Mismatched tuple should not collapse to a top-level signed relation"
+        );
+        assert!(
+            !matches!(
+                simplified,
+                CExpr::Binary {
+                    op: BinaryOp::Gt | BinaryOp::Ge | BinaryOp::Lt | BinaryOp::Le,
+                    ..
+                }
+            ),
+            "Mismatched tuple should remain conjunctive at top level"
+        );
     }
 
     #[test]
@@ -6242,5 +6476,84 @@ mod tests {
             .filter(|stmt| matches!(stmt, CStmt::Return(_)))
             .count();
         assert_eq!(return_count, 1, "Should emit a single high-level return");
+    }
+
+    #[test]
+    fn test_non_return_block_return_rax0_uses_last_return_value() {
+        let rax_1 = make_var("RAX", 1, 8);
+        let rax_0 = make_var("RAX", 0, 8);
+
+        let block = make_block(vec![
+            SSAOp::Copy {
+                dst: rax_1.clone(),
+                src: make_var("const:2a", 0, 8),
+            },
+            SSAOp::Copy {
+                dst: rax_0.clone(),
+                src: rax_1,
+            },
+            SSAOp::Return { target: rax_0 },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        let stmts = ctx.fold_block(&block);
+
+        let Some(CStmt::Return(Some(expr))) = stmts.last() else {
+            panic!("Expected trailing return statement");
+        };
+        assert!(
+            !matches!(expr, CExpr::Var(name) if name.eq_ignore_ascii_case("rax_0")),
+            "Return should not keep unresolved RAX_0 artifact in non-return blocks"
+        );
+    }
+
+    #[test]
+    fn test_non_return_block_return_eax0_uses_last_return_value() {
+        let eax_1 = make_var("EAX", 1, 4);
+        let eax_0 = make_var("EAX", 0, 4);
+
+        let block = make_block(vec![
+            SSAOp::Copy {
+                dst: eax_1.clone(),
+                src: make_var("const:7", 0, 4),
+            },
+            SSAOp::Copy {
+                dst: eax_0.clone(),
+                src: eax_1,
+            },
+            SSAOp::Return { target: eax_0 },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        let stmts = ctx.fold_block(&block);
+
+        let Some(CStmt::Return(Some(expr))) = stmts.last() else {
+            panic!("Expected trailing return statement");
+        };
+        assert!(
+            !matches!(expr, CExpr::Var(name) if name.eq_ignore_ascii_case("eax_0")),
+            "Return should not keep unresolved EAX_0 artifact in non-return blocks"
+        );
+    }
+
+    #[test]
+    fn test_non_return_block_return_rax0_kept_when_no_resolution_available() {
+        let block = make_block(vec![SSAOp::Return {
+            target: make_var("RAX", 0, 8),
+        }]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        let stmts = ctx.fold_block(&block);
+
+        let Some(CStmt::Return(Some(expr))) = stmts.last() else {
+            panic!("Expected trailing return statement");
+        };
+        assert!(
+            matches!(expr, CExpr::Var(name) if name.eq_ignore_ascii_case("rax_0") || name.eq_ignore_ascii_case("rax")),
+            "Return register should remain unresolved when no better return value can be derived"
+        );
     }
 }

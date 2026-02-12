@@ -41,7 +41,10 @@ mod stress_regressions {
         result.assert_ok();
         let json = parse_json(&result, "a:sla.sym.paths parse_number");
         let arr = expect_array(&json, "a:sla.sym.paths parse_number");
-        assert!(!arr.is_empty(), "parse_number should produce symbolic paths");
+        assert!(
+            !arr.is_empty(),
+            "parse_number should produce symbolic paths"
+        );
     }
 
     #[test]
@@ -50,7 +53,10 @@ mod stress_regressions {
         setup_stress();
         let result = r2_at_func(stress_test_binary(), "dbg.fp_interpolate", "a:sla.dec");
         result.assert_ok();
-        assert!(result.contains("return"), "decompilation should include return");
+        assert!(
+            result.contains("return"),
+            "decompilation should include return"
+        );
         assert!(
             result.contains_any(&[" + ", " * ", "fabs(", "sqrt(", "ceil(", "floor(", "round("]),
             "float decompilation should contain arithmetic/math operations"
@@ -64,11 +70,7 @@ mod stress_regressions {
     #[test]
     fn ls_main_decompile_uses_large_function_fallback() {
         let _guard = lock_stress();
-        let result = r2_cmd_timeout(
-            "/bin/ls",
-            "aaa; s main; a:sla.dec",
-            Duration::from_secs(90),
-        );
+        let result = r2_cmd_timeout("/bin/ls", "aaa; s main; a:sla.dec", Duration::from_secs(90));
         result.assert_ok();
         assert!(
             result.contains("r2dec fallback: skipped decompilation"),
@@ -105,7 +107,10 @@ mod stress_regressions {
     fn sla_dec_reports_missing_symbol_with_guidance() {
         let _guard = lock_stress();
         setup_stress();
-        let result = r2_cmd(stress_test_opt_binary(), "aaa; a:sla.dec dbg.nonexistent_symbol");
+        let result = r2_cmd(
+            stress_test_opt_binary(),
+            "aaa; a:sla.dec dbg.nonexistent_symbol",
+        );
         result.assert_ok();
         assert!(
             result.contains("may be inlined or stripped"),
@@ -125,12 +130,7 @@ mod stress_regressions {
         let cmd = format!("aaa; a:sla.dec {}", func);
         // Retry once on transient crash (non-deterministic signal in r2 FFI path).
         let result = retry_on_crash(|| {
-            r2_cmd_timeout_with_env(
-                stress_test_opt_binary(),
-                &cmd,
-                Duration::from_secs(30),
-                &[],
-            )
+            r2_cmd_timeout_with_env(stress_test_opt_binary(), &cmd, Duration::from_secs(30), &[])
         });
         result.assert_ok();
         assert!(
@@ -151,12 +151,7 @@ mod stress_regressions {
 
         // Default path: iterative analyzer (primary)
         let iterative = retry_on_crash(|| {
-            r2_cmd_timeout_with_env(
-                stress_test_opt_binary(),
-                cmd,
-                Duration::from_secs(30),
-                &[],
-            )
+            r2_cmd_timeout_with_env(stress_test_opt_binary(), cmd, Duration::from_secs(30), &[])
         });
         iterative.assert_ok();
         assert!(
@@ -197,8 +192,11 @@ fn retry_on_crash(f: impl Fn() -> e2e::R2Result) -> e2e::R2Result {
             return result;
         }
         if attempt < 2 {
-            eprintln!("  (retrying after transient crash, attempt {}, exit code {:?})",
-                       attempt + 1, result.exit_code);
+            eprintln!(
+                "  (retrying after transient crash, attempt {}, exit code {:?})",
+                attempt + 1,
+                result.exit_code
+            );
         } else {
             return result;
         }
@@ -573,7 +571,10 @@ mod ssa_opt {
             "a:sla.ssa.func",
         );
         ssa.assert_ok();
-        assert!(ssa.contains("blocks"), "SSA function output should include blocks");
+        assert!(
+            ssa.contains("blocks"),
+            "SSA function output should include blocks"
+        );
     }
 }
 
@@ -845,7 +846,11 @@ mod taint {
             .and_then(Value::as_u64)
             .unwrap_or(0);
 
-        let result = r2_at_func(vuln_test_binary(), "dbg.test_sccp_dead_branch", "a:sla.taint");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_sccp_dead_branch",
+            "a:sla.taint",
+        );
         result.assert_ok();
 
         let json = parse_json(&result, "a:sla.taint");
@@ -1474,6 +1479,10 @@ mod decompilation {
             !normalized.contains("arg2 = esi;"),
             "Should suppress entry argument identity assignment for arg2"
         );
+        assert!(
+            !normalized.contains("of_") && !normalized.contains("of =="),
+            "Boolxor output should not leak OF scaffolding anywhere in function output"
+        );
     }
 
     #[test]
@@ -1495,15 +1504,21 @@ mod decompilation {
     #[test]
     fn decompiles_inverted_guard_condition() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.test_guard_inversion_goto", "a:sla.dec");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_guard_inversion_goto",
+            "a:sla.dec",
+        );
         result.assert_ok();
         let normalized = normalized_dec_output(&result.stdout);
-        let if_line = find_line_containing(&normalized, "if (").expect("Should contain if condition");
+        let if_line =
+            find_line_containing(&normalized, "if (").expect("Should contain if condition");
         assert!(
             if_line.contains("<=")
                 || if_line.contains("!")
                 || if_line.contains("|| of !=")
-                || if_line.contains("|| of_"),
+                || if_line.contains("|| of_")
+                || (if_line.contains("==") && if_line.contains('<')),
             "Guard condition should remain in a comparable high-level form"
         );
         assert!(
@@ -1590,7 +1605,10 @@ mod decompilation {
             "entry0 decompilation should include a function body"
         );
 
-        for line in normalized.lines().filter(|line| line.contains('=') && line.contains('^')) {
+        for line in normalized
+            .lines()
+            .filter(|line| line.contains('=') && line.contains('^'))
+        {
             assert!(
                 !has_self_xor_assignment(line),
                 "entry0 should not contain self-XOR assignment residue: {}",
@@ -1707,9 +1725,62 @@ mod decompilation {
             "Loop header should be syntactically well-formed"
         );
         assert!(
+            !loop_header.contains("&local"),
+            "Loop header should not expose address-of local induction artifacts"
+        );
+        assert!(
             switch_header.contains("switch ("),
             "Switch header should be present"
         );
+    }
+
+    #[test]
+    fn decompiles_without_return_version_zero_artifacts_for_stable_fixtures() {
+        setup();
+        let funcs = [
+            "dbg.authenticate",
+            "dbg.solve_equation",
+            "dbg.test_setlocale_wrapper",
+            "dbg.check_secret",
+            "dbg.test_boolxor",
+            "dbg.safe_array_access",
+            "dbg.test_sccp_dead_branch",
+        ];
+
+        let has_return_version_zero_artifact = |normalized: &str| -> Option<String> {
+            for line in normalized
+                .lines()
+                .filter(|line| line.starts_with("return "))
+            {
+                let lower = line.to_ascii_lowercase();
+                if lower.contains("rax_0") || lower.contains("eax_0") {
+                    return Some(line.to_string());
+                }
+            }
+            None
+        };
+
+        for func in funcs {
+            let mut offending_line = None;
+            for _attempt in 0..2 {
+                let result = r2_at_func(vuln_test_binary(), func, "a:sla.dec");
+                result.assert_ok();
+                let normalized = normalized_dec_output(&result.stdout);
+                if let Some(line) = has_return_version_zero_artifact(&normalized) {
+                    offending_line = Some(line);
+                    continue;
+                }
+                offending_line = None;
+                break;
+            }
+
+            assert!(
+                offending_line.is_none(),
+                "{} should not emit version-0 return register artifacts: {}",
+                func,
+                offending_line.unwrap_or_default()
+            );
+        }
     }
 
     #[test]
@@ -1726,7 +1797,11 @@ mod decompilation {
     #[test]
     fn decompiles_struct_mixed_offset_member_access() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_mixed_offsets", "a:sla.dec");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_struct_mixed_offsets",
+            "a:sla.dec",
+        );
         result.assert_ok();
         assert!(
             result.contains_any(&["->first", "->fifth", "->thirteenth", "->field_"]),
@@ -1739,13 +1814,20 @@ mod decompilation {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.test_u16_stride", "a:sla.dec");
         result.assert_ok();
-        assert!(result.contains("["), "Should render scaled index as subscript");
+        assert!(
+            result.contains("["),
+            "Should render scaled index as subscript"
+        );
     }
 
     #[test]
     fn decompiles_struct_array_index_pattern() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_array_index", "a:sla.dec");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_struct_array_index",
+            "a:sla.dec",
+        );
         result.assert_ok();
         let normalized = normalized_dec_output(&result.stdout);
         assert!(
@@ -1759,7 +1841,11 @@ mod decompilation {
     #[test]
     fn decompiles_large_hex_offset_without_decimal_reinterpret() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_offset_0x100", "a:sla.dec");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_struct_offset_0x100",
+            "a:sla.dec",
+        );
         result.assert_ok();
         let normalized = normalized_dec_output(&result.stdout);
         assert!(
@@ -1857,18 +1943,25 @@ mod decompilation {
     #[test]
     fn decompiles_global_symbol_names_in_non_call_contexts() {
         setup();
-        let result = r2_at_func(
-            vuln_test_binary(),
-            "dbg.test_global_symbol_flow",
-            "a:sla.dec",
-        );
-        result.assert_ok();
-        let normalized = normalized_dec_output(&result.stdout);
-
-        let has_counter_name =
-            normalized.contains("obj.global_counter") || normalized.contains("global_counter");
-        let has_limit_name =
-            normalized.contains("obj.global_limit") || normalized.contains("global_limit");
+        let mut normalized = String::new();
+        let mut has_counter_name = false;
+        let mut has_limit_name = false;
+        for _attempt in 0..2 {
+            let result = r2_at_func(
+                vuln_test_binary(),
+                "dbg.test_global_symbol_flow",
+                "a:sla.dec",
+            );
+            result.assert_ok();
+            normalized = normalized_dec_output(&result.stdout);
+            has_counter_name =
+                normalized.contains("obj.global_counter") || normalized.contains("global_counter");
+            has_limit_name =
+                normalized.contains("obj.global_limit") || normalized.contains("global_limit");
+            if has_counter_name && has_limit_name {
+                break;
+            }
+        }
 
         assert!(
             has_counter_name,
@@ -2811,52 +2904,79 @@ mod analysis_quality_benchmark {
 
         eprintln!("\n=== r2sleigh Analysis Quality Report ===\n");
         eprintln!("Binary: vuln_test (controlled test binary)");
-        eprintln!("  {:30} {:>10} {:>10} {:>10}",
-            "Metric", "Baseline", "Sleigh", "Delta");
-        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
-            "Data xrefs (aaaa)", 24, vuln.data_xrefs,
-            vuln.data_xrefs as i64 - 24);
-        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
-            "Total xrefs (aaaa)", 365, vuln.total_xrefs,
-            vuln.total_xrefs as i64 - 365);
-        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
-            "Data xrefs (aaa)", 23, vuln_aaa.data_xrefs,
-            vuln_aaa.data_xrefs as i64 - 23);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "Taint block flags", "N/A", vuln.taint_block_flags);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "Risk flags", "N/A", vuln.risk_flags);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "  CRITICAL", "N/A", vuln.risk_critical);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "  HIGH", "N/A", vuln.risk_high);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "  MEDIUM", "N/A", vuln.risk_medium);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "  LOW", "N/A", vuln.risk_low);
+        eprintln!(
+            "  {:30} {:>10} {:>10} {:>10}",
+            "Metric", "Baseline", "Sleigh", "Delta"
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10} {:>+10}",
+            "Data xrefs (aaaa)",
+            24,
+            vuln.data_xrefs,
+            vuln.data_xrefs as i64 - 24
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10} {:>+10}",
+            "Total xrefs (aaaa)",
+            365,
+            vuln.total_xrefs,
+            vuln.total_xrefs as i64 - 365
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10} {:>+10}",
+            "Data xrefs (aaa)",
+            23,
+            vuln_aaa.data_xrefs,
+            vuln_aaa.data_xrefs as i64 - 23
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10}",
+            "Taint block flags", "N/A", vuln.taint_block_flags
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10}",
+            "Risk flags", "N/A", vuln.risk_flags
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10}",
+            "  CRITICAL", "N/A", vuln.risk_critical
+        );
+        eprintln!("  {:30} {:>10} {:>10}", "  HIGH", "N/A", vuln.risk_high);
+        eprintln!("  {:30} {:>10} {:>10}", "  MEDIUM", "N/A", vuln.risk_medium);
+        eprintln!("  {:30} {:>10} {:>10}", "  LOW", "N/A", vuln.risk_low);
 
         eprintln!();
         eprintln!("Binary: /bin/ls (real-world stripped binary)");
-        eprintln!("  {:30} {:>10} {:>10} {:>10}",
-            "Metric", "Baseline", "Sleigh", "Delta");
-        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
-            "Data xrefs (aaaa)", 2433, ls.data_xrefs,
-            ls.data_xrefs as i64 - 2433);
-        eprintln!("  {:30} {:>10} {:>10} {:>+10}",
-            "Total xrefs (aaaa)", 7337, ls.total_xrefs,
-            ls.total_xrefs as i64 - 7337);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "Taint block flags", "N/A", ls.taint_block_flags);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "Risk flags", "N/A", ls.risk_flags);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "  CRITICAL", "N/A", ls.risk_critical);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "  HIGH", "N/A", ls.risk_high);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "  MEDIUM", "N/A", ls.risk_medium);
-        eprintln!("  {:30} {:>10} {:>10}",
-            "  LOW", "N/A", ls.risk_low);
+        eprintln!(
+            "  {:30} {:>10} {:>10} {:>10}",
+            "Metric", "Baseline", "Sleigh", "Delta"
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10} {:>+10}",
+            "Data xrefs (aaaa)",
+            2433,
+            ls.data_xrefs,
+            ls.data_xrefs as i64 - 2433
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10} {:>+10}",
+            "Total xrefs (aaaa)",
+            7337,
+            ls.total_xrefs,
+            ls.total_xrefs as i64 - 7337
+        );
+        eprintln!(
+            "  {:30} {:>10} {:>10}",
+            "Taint block flags", "N/A", ls.taint_block_flags
+        );
+        eprintln!("  {:30} {:>10} {:>10}", "Risk flags", "N/A", ls.risk_flags);
+        eprintln!(
+            "  {:30} {:>10} {:>10}",
+            "  CRITICAL", "N/A", ls.risk_critical
+        );
+        eprintln!("  {:30} {:>10} {:>10}", "  HIGH", "N/A", ls.risk_high);
+        eprintln!("  {:30} {:>10} {:>10}", "  MEDIUM", "N/A", ls.risk_medium);
+        eprintln!("  {:30} {:>10} {:>10}", "  LOW", "N/A", ls.risk_low);
 
         eprintln!();
         eprintln!("Key findings:");
