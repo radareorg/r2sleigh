@@ -4710,11 +4710,41 @@ fn run_full_decompile_on_large_stack(
         .stack_size(STACK_SIZE)
         .spawn(move || {
             // Build SSA function
-            let ssa_func =
-                match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, arch.as_ref()) {
+            let mut ssa_func =
+                match r2ssa::SSAFunction::from_blocks_raw(&r2il_blocks, arch.as_ref()) {
                     Some(f) => f.with_name(&func_name_str),
                     None => return String::new(),
                 };
+
+            // Decompiler-only SSA cleanup: keep this local to a:sla.dec and do not
+            // alter generic SSA command behavior.
+            //
+            // Copy-prop is intentionally gated by function size to avoid
+            // pathological latency on very large CFGs.
+            let dec_opt_cfg = if ssa_func.num_blocks() <= 96 {
+                r2ssa::OptimizationConfig {
+                    max_iterations: 1,
+                    enable_sccp: true,
+                    enable_const_prop: false,
+                    enable_inst_combine: false,
+                    enable_copy_prop: true,
+                    enable_cse: false,
+                    enable_dce: false,
+                    preserve_memory_reads: false,
+                }
+            } else {
+                r2ssa::OptimizationConfig {
+                    max_iterations: 1,
+                    enable_sccp: true,
+                    enable_const_prop: false,
+                    enable_inst_combine: false,
+                    enable_copy_prop: false,
+                    enable_cse: false,
+                    enable_dce: false,
+                    preserve_memory_reads: false,
+                }
+            };
+            let _ = ssa_func.optimize(&dec_opt_cfg);
 
             // Create decompiler with architecture-aware config
             let config = if let Some(arch) = &arch {

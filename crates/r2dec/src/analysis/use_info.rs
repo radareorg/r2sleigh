@@ -176,34 +176,334 @@ fn build_formatted_defs(scratch: &mut UseScratch) {
     }
 }
 
+fn ssa_key_parts(name: &str) -> Option<(&str, u32)> {
+    let (base, version) = name.rsplit_once('_')?;
+    let parsed = version.parse::<u32>().ok()?;
+    Some((base, parsed))
+}
+
+fn is_semantic_binding_base(base: &str) -> bool {
+    let lower = base.to_ascii_lowercase();
+    lower.starts_with("local_")
+        || lower.starts_with("arg")
+        || lower.starts_with("field_")
+        || lower.starts_with("var_")
+        || lower.starts_with("sub_")
+        || lower.starts_with("str.")
+        || lower.starts_with("0x")
+        || lower.contains('.')
+        || lower.starts_with("tmp:")
+        || lower.starts_with("const:")
+        || lower.starts_with("ram:")
+        || lower.starts_with("reg:")
+}
+
+fn is_decimal_suffix(name: &str, prefix: &str) -> bool {
+    let Some(rest) = name.strip_prefix(prefix) else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+fn is_x86_register_base(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "rax"
+            | "rbx"
+            | "rcx"
+            | "rdx"
+            | "rsi"
+            | "rdi"
+            | "rbp"
+            | "rsp"
+            | "rip"
+            | "eax"
+            | "ebx"
+            | "ecx"
+            | "edx"
+            | "esi"
+            | "edi"
+            | "ebp"
+            | "esp"
+            | "eip"
+            | "ax"
+            | "bx"
+            | "cx"
+            | "dx"
+            | "si"
+            | "di"
+            | "bp"
+            | "sp"
+            | "ip"
+            | "al"
+            | "bl"
+            | "cl"
+            | "dl"
+            | "ah"
+            | "bh"
+            | "ch"
+            | "dh"
+            | "cs"
+            | "ds"
+            | "es"
+            | "fs"
+            | "gs"
+            | "ss"
+            | "cf"
+            | "pf"
+            | "af"
+            | "zf"
+            | "sf"
+            | "of"
+            | "df"
+            | "tf"
+    ) {
+        return true;
+    }
+    is_decimal_suffix(&lower, "xmm")
+        || is_decimal_suffix(&lower, "ymm")
+        || is_decimal_suffix(&lower, "zmm")
+        || is_decimal_suffix(&lower, "mm")
+        || is_decimal_suffix(&lower, "k")
+        || is_decimal_suffix(&lower, "r")
+        || (lower.starts_with('r')
+            && lower.len() > 2
+            && lower[..lower.len() - 1]
+                .strip_prefix('r')
+                .map(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false)
+            && matches!(lower.chars().last(), Some('b' | 'w' | 'd')))
+}
+
+fn is_arm_like_register_base(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "sp" | "fp" | "lr" | "pc" | "cpsr" | "nzcv")
+        || is_decimal_suffix(&lower, "r")
+        || is_decimal_suffix(&lower, "x")
+        || is_decimal_suffix(&lower, "w")
+}
+
+fn is_mips_like_register_base(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "zero"
+            | "at"
+            | "gp"
+            | "sp"
+            | "fp"
+            | "ra"
+            | "hi"
+            | "lo"
+            | "pc"
+            | "status"
+            | "cause"
+            | "badvaddr"
+    ) {
+        return true;
+    }
+    is_decimal_suffix(&lower, "v")
+        || is_decimal_suffix(&lower, "a")
+        || is_decimal_suffix(&lower, "t")
+        || is_decimal_suffix(&lower, "s")
+        || is_decimal_suffix(&lower, "k")
+}
+
+fn is_register_candidate_base(base: &str, env: &PassEnv<'_>) -> bool {
+    if is_semantic_binding_base(base) {
+        return false;
+    }
+
+    let lower = base.to_ascii_lowercase();
+    if lower == env.sp_name || lower == env.fp_name {
+        return false;
+    }
+    if !lower.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+
+    if is_x86_register_base(base)
+        || is_arm_like_register_base(base)
+        || is_mips_like_register_base(base)
+    {
+        return true;
+    }
+
+    env.arg_regs
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case(base))
+}
+
+fn is_register_candidate_key(key: &str, env: &PassEnv<'_>) -> bool {
+    let Some((base, _)) = ssa_key_parts(key) else {
+        return false;
+    };
+    is_register_candidate_base(base, env)
+}
+
+fn is_register_candidate_var(var: &r2ssa::SSAVar, env: &PassEnv<'_>) -> bool {
+    is_register_candidate_base(&var.name, env)
+}
+
+fn parse_target_addr(target: &r2ssa::SSAVar) -> Option<u64> {
+    let raw = target.name.as_str();
+    let candidate = if let Some(rest) = raw.strip_prefix("ram:") {
+        rest
+    } else if let Some(rest) = raw.strip_prefix("const:") {
+        rest
+    } else if let Some(rest) = raw.strip_prefix("0x") {
+        return u64::from_str_radix(rest, 16).ok();
+    } else {
+        raw
+    };
+
+    if let Ok(v) = u64::from_str_radix(candidate, 16) {
+        return Some(v);
+    }
+    candidate.parse::<u64>().ok()
+}
+
+fn infer_successors(
+    block: &SSABlock,
+    idx: usize,
+    blocks: &[SSABlock],
+    block_set: &HashSet<u64>,
+) -> Vec<u64> {
+    let fallthrough = blocks.get(idx + 1).map(|b| b.addr);
+
+    let mut term = None;
+    for op in block.ops.iter().rev() {
+        if matches!(
+            op,
+            SSAOp::Return { .. }
+                | SSAOp::Branch { .. }
+                | SSAOp::CBranch { .. }
+                | SSAOp::BranchInd { .. }
+        ) {
+            term = Some(op);
+            break;
+        }
+    }
+
+    match term {
+        Some(SSAOp::Return { .. }) => Vec::new(),
+        Some(SSAOp::Branch { target }) => parse_target_addr(target)
+            .filter(|addr| block_set.contains(addr))
+            .into_iter()
+            .collect(),
+        Some(SSAOp::CBranch { target, .. }) => {
+            let mut out = Vec::new();
+            if let Some(addr) = parse_target_addr(target)
+                && block_set.contains(&addr)
+            {
+                out.push(addr);
+            }
+            if let Some(next) = fallthrough
+                && !out.contains(&next)
+            {
+                out.push(next);
+            }
+            out
+        }
+        Some(SSAOp::BranchInd { .. }) => fallthrough.into_iter().collect(),
+        _ => fallthrough.into_iter().collect(),
+    }
+}
+
+fn pair_key(a: &str, b: &str) -> (String, String) {
+    if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pair_interferes(
+    a: &str,
+    b: &str,
+    blocks: &[SSABlock],
+    live_in: &HashMap<u64, HashSet<String>>,
+    live_out: &HashMap<u64, HashSet<String>>,
+    phi_defs: &HashMap<u64, HashSet<String>>,
+    candidate_keys: &HashSet<String>,
+) -> bool {
+    for block in blocks {
+        if let Some(set) = live_in.get(&block.addr)
+            && set.contains(a)
+            && set.contains(b)
+        {
+            return true;
+        }
+
+        let mut live = live_out.get(&block.addr).cloned().unwrap_or_default();
+        if live.contains(a) && live.contains(b) {
+            return true;
+        }
+
+        for op in block.ops.iter().rev() {
+            if let Some(dst) = op.dst() {
+                let dst_key = dst.display_name();
+                if candidate_keys.contains(&dst_key) {
+                    if dst_key == a && live.contains(b) {
+                        return true;
+                    }
+                    if dst_key == b && live.contains(a) {
+                        return true;
+                    }
+                    live.remove(&dst_key);
+                }
+            }
+
+            for src in op.sources() {
+                let src_key = src.display_name();
+                if candidate_keys.contains(&src_key) {
+                    live.insert(src_key);
+                }
+            }
+
+            if live.contains(a) && live.contains(b) {
+                return true;
+            }
+        }
+
+        if let Some(defs) = phi_defs.get(&block.addr) {
+            if defs.contains(a) && live.contains(b) {
+                return true;
+            }
+            if defs.contains(b) && live.contains(a) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEnv<'_>) {
+    const MAX_INTERFERENCE_PAIRS: usize = 16_384;
+    const MAX_INTERFERENCE_WORK: usize = 512_000;
+
     let mut reg_versions: HashMap<String, Vec<(String, u32)>> = HashMap::new();
 
     for block in blocks {
         for op in &block.ops {
             if let Some(dst) = op.dst() {
-                if dst.name.starts_with("tmp:")
-                    || dst.name.starts_with("const:")
-                    || dst.name.starts_with("ram:")
-                    || dst.name.starts_with("reg:")
-                {
+                if !is_register_candidate_var(dst, env) {
                     continue;
                 }
-                let base = dst.name.to_lowercase();
+                let base = dst.name.to_ascii_lowercase();
                 reg_versions
                     .entry(base)
                     .or_default()
                     .push((dst.display_name(), dst.version));
             }
             for src in op.sources() {
-                if src.name.starts_with("tmp:")
-                    || src.name.starts_with("const:")
-                    || src.name.starts_with("ram:")
-                    || src.name.starts_with("reg:")
-                {
+                if !is_register_candidate_var(src, env) {
                     continue;
                 }
-                let base = src.name.to_lowercase();
+                let base = src.name.to_ascii_lowercase();
                 reg_versions
                     .entry(base)
                     .or_default()
@@ -211,24 +511,16 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
             }
         }
         for phi in &block.phis {
-            if !phi.dst.name.starts_with("tmp:")
-                && !phi.dst.name.starts_with("const:")
-                && !phi.dst.name.starts_with("ram:")
-                && !phi.dst.name.starts_with("reg:")
-            {
-                let base = phi.dst.name.to_lowercase();
+            if is_register_candidate_var(&phi.dst, env) {
+                let base = phi.dst.name.to_ascii_lowercase();
                 reg_versions
                     .entry(base)
                     .or_default()
                     .push((phi.dst.display_name(), phi.dst.version));
             }
             for (_, src) in &phi.sources {
-                if !src.name.starts_with("tmp:")
-                    && !src.name.starts_with("const:")
-                    && !src.name.starts_with("ram:")
-                    && !src.name.starts_with("reg:")
-                {
-                    let base = src.name.to_lowercase();
+                if is_register_candidate_var(src, env) {
+                    let base = src.name.to_ascii_lowercase();
                     reg_versions
                         .entry(base)
                         .or_default()
@@ -247,18 +539,49 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
         }
     }
 
+    // Keep interference-aware coalescing responsive on very large functions.
+    // If the estimated pair/block work is too large, skip this optional pass
+    // and leave original SSA naming intact.
+    let mut estimated_pairs = 0usize;
+    for versions in reg_versions.values() {
+        let mut seen = HashSet::new();
+        for (name, _) in versions {
+            seen.insert(name);
+        }
+        let n = seen.len();
+        if n > 1 {
+            estimated_pairs = estimated_pairs.saturating_add(n.saturating_mul(n - 1) / 2);
+        }
+    }
+    let estimated_work = estimated_pairs.saturating_mul(blocks.len());
+    if estimated_pairs > MAX_INTERFERENCE_PAIRS || estimated_work > MAX_INTERFERENCE_WORK {
+        return;
+    }
+
+    let mut key_to_base: HashMap<String, String> = HashMap::new();
+    for (base, versions) in &reg_versions {
+        for (name, _) in versions {
+            key_to_base.insert(name.clone(), base.clone());
+        }
+    }
+
     for block in blocks {
         for phi in &block.phis {
-            if phi.dst.name.starts_with("tmp:")
-                || phi.dst.name.starts_with("const:")
-                || phi.dst.name.starts_with("ram:")
-                || phi.dst.name.starts_with("reg:")
-            {
+            if !is_register_candidate_var(&phi.dst, env) {
                 continue;
             }
             let dst_key = phi.dst.display_name();
+            let Some(dst_base) = key_to_base.get(&dst_key).cloned() else {
+                continue;
+            };
             for (_, src) in &phi.sources {
+                if !is_register_candidate_var(src, env) {
+                    continue;
+                }
                 let src_key = src.display_name();
+                if key_to_base.get(&src_key) != Some(&dst_base) {
+                    continue;
+                }
                 let root_a = utils::uf_find(&mut uf_parent, &dst_key);
                 let root_b = utils::uf_find(&mut uf_parent, &src_key);
                 if root_a != root_b {
@@ -268,24 +591,106 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
         }
     }
 
-    let mut block_vars: HashMap<u64, HashSet<String>> = HashMap::new();
+    let block_set: HashSet<u64> = blocks.iter().map(|b| b.addr).collect();
+    let mut successors: HashMap<u64, Vec<u64>> = HashMap::new();
+    for (idx, block) in blocks.iter().enumerate() {
+        successors.insert(block.addr, infer_successors(block, idx, blocks, &block_set));
+    }
+
+    let mut phi_defs: HashMap<u64, HashSet<String>> = HashMap::new();
+    let mut edge_phi_uses: HashMap<(u64, u64), HashSet<String>> = HashMap::new();
+    let mut def_sets: HashMap<u64, HashSet<String>> = HashMap::new();
+    let mut use_sets: HashMap<u64, HashSet<String>> = HashMap::new();
+    let candidate_keys: HashSet<String> = key_to_base.keys().cloned().collect();
+
     for block in blocks {
-        let vars = block_vars.entry(block.addr).or_default();
-        for op in &block.ops {
-            if let Some(dst) = op.dst() {
-                vars.insert(dst.display_name());
+        let mut defs = HashSet::new();
+        let mut uses = HashSet::new();
+        let mut defined_so_far = HashSet::new();
+
+        for phi in &block.phis {
+            let dst_key = phi.dst.display_name();
+            if candidate_keys.contains(&dst_key) {
+                defs.insert(dst_key.clone());
+                defined_so_far.insert(dst_key.clone());
+                phi_defs.entry(block.addr).or_default().insert(dst_key);
             }
-            for src in op.sources() {
-                vars.insert(src.display_name());
+            for (pred, src) in &phi.sources {
+                let src_key = src.display_name();
+                if candidate_keys.contains(&src_key) {
+                    edge_phi_uses
+                        .entry((*pred, block.addr))
+                        .or_default()
+                        .insert(src_key);
+                }
             }
         }
-        for phi in &block.phis {
-            vars.insert(phi.dst.display_name());
-            for (_, src) in &phi.sources {
-                vars.insert(src.display_name());
+
+        for op in &block.ops {
+            for src in op.sources() {
+                let src_key = src.display_name();
+                if !candidate_keys.contains(&src_key) {
+                    continue;
+                }
+                if !defined_so_far.contains(&src_key) {
+                    uses.insert(src_key.clone());
+                }
+            }
+            if let Some(dst) = op.dst() {
+                let dst_key = dst.display_name();
+                if candidate_keys.contains(&dst_key) {
+                    defs.insert(dst_key.clone());
+                    defined_so_far.insert(dst_key);
+                }
+            }
+        }
+
+        def_sets.insert(block.addr, defs);
+        use_sets.insert(block.addr, uses);
+    }
+
+    let mut live_in: HashMap<u64, HashSet<String>> = HashMap::new();
+    let mut live_out: HashMap<u64, HashSet<String>> = HashMap::new();
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in blocks.iter().rev() {
+            let mut new_live_out = HashSet::new();
+            for succ in successors.get(&block.addr).into_iter().flatten() {
+                let mut succ_live_in = live_in.get(succ).cloned().unwrap_or_default();
+                if let Some(succ_phi_defs) = phi_defs.get(succ) {
+                    succ_live_in.retain(|name| !succ_phi_defs.contains(name));
+                }
+                new_live_out.extend(succ_live_in);
+                if let Some(phi_uses) = edge_phi_uses.get(&(block.addr, *succ)) {
+                    new_live_out.extend(phi_uses.iter().cloned());
+                }
+            }
+
+            let defs = def_sets.get(&block.addr).cloned().unwrap_or_default();
+            let mut new_live_in = use_sets.get(&block.addr).cloned().unwrap_or_default();
+            for name in &new_live_out {
+                if !defs.contains(name) {
+                    new_live_in.insert(name.clone());
+                }
+            }
+
+            let out_entry = live_out.entry(block.addr).or_default();
+            if *out_entry != new_live_out {
+                *out_entry = new_live_out;
+                changed = true;
+            }
+
+            let in_entry = live_in.entry(block.addr).or_default();
+            if *in_entry != new_live_in {
+                *in_entry = new_live_in;
+                changed = true;
             }
         }
     }
+
+    let mut interference_cache: HashMap<(String, String), bool> = HashMap::new();
 
     for (base, versions) in &reg_versions {
         if *base == env.sp_name || *base == env.fp_name {
@@ -304,74 +709,127 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
             groups.entry(root).or_default().push(ssa_name.clone());
         }
 
-        let mut group_idx = 0usize;
-        for members in groups.values() {
-            let has_conflict = block_vars.values().any(|vars| {
-                let mut count = 0;
-                for m in members {
-                    if vars.contains(m) {
-                        count += 1;
-                    }
-                }
-                count > 1
-            });
+        let version_by_name: HashMap<String, u32> = unique
+            .iter()
+            .map(|(name, ver)| (name.clone(), *ver))
+            .collect();
+        let mut alias_classes: Vec<Vec<String>> = Vec::new();
 
-            if !has_conflict {
-                let alias = if group_idx == 0 {
-                    base.clone()
-                } else {
-                    format!("{}_{}", base, group_idx + 1)
-                };
-                for m in members {
-                    scratch.info.var_aliases.insert(m.clone(), alias.clone());
-                }
-                group_idx += 1;
-            } else {
-                let alias = if group_idx == 0 {
-                    base.clone()
-                } else {
-                    format!("{}_{}", base, group_idx + 1)
-                };
-                for m in members {
-                    if let Some((_, v)) = unique.iter().find(|(n, _)| n == m)
-                        && *v == 0
-                    {
-                        scratch.info.var_aliases.insert(m.clone(), alias.clone());
+        for members in groups.values() {
+            let mut sorted_members = members.clone();
+            sorted_members
+                .sort_by_key(|name| version_by_name.get(name).copied().unwrap_or(u32::MAX));
+
+            let mut classes: Vec<Vec<String>> = Vec::new();
+            for member in sorted_members {
+                let mut placed = false;
+                for class in &mut classes {
+                    let mut interferes = false;
+                    for other in class.iter() {
+                        let key = pair_key(&member, other);
+                        let entry = interference_cache.entry(key.clone()).or_insert_with(|| {
+                            pair_interferes(
+                                &key.0,
+                                &key.1,
+                                blocks,
+                                &live_in,
+                                &live_out,
+                                &phi_defs,
+                                &candidate_keys,
+                            )
+                        });
+                        if *entry {
+                            interferes = true;
+                            break;
+                        }
+                    }
+                    if !interferes {
+                        class.push(member.clone());
+                        placed = true;
+                        break;
                     }
                 }
-                group_idx += 1;
+
+                if !placed {
+                    classes.push(vec![member]);
+                }
+            }
+            alias_classes.extend(classes);
+        }
+
+        let mut merged = true;
+        while merged {
+            merged = false;
+            'outer: for i in 0..alias_classes.len() {
+                for j in (i + 1)..alias_classes.len() {
+                    let mut has_interference = false;
+                    for a in &alias_classes[i] {
+                        for b in &alias_classes[j] {
+                            let key = pair_key(a, b);
+                            let entry =
+                                interference_cache.entry(key.clone()).or_insert_with(|| {
+                                    pair_interferes(
+                                        &key.0,
+                                        &key.1,
+                                        blocks,
+                                        &live_in,
+                                        &live_out,
+                                        &phi_defs,
+                                        &candidate_keys,
+                                    )
+                                });
+                            if *entry {
+                                has_interference = true;
+                                break;
+                            }
+                        }
+                        if has_interference {
+                            break;
+                        }
+                    }
+
+                    if !has_interference {
+                        let rhs = alias_classes.remove(j);
+                        alias_classes[i].extend(rhs);
+                        merged = true;
+                        break 'outer;
+                    }
+                }
             }
         }
 
-        let grouped: HashSet<&str> = groups
-            .values()
-            .flat_map(|v| v.iter().map(|s| s.as_str()))
-            .collect();
-        let ungrouped: Vec<&(String, u32)> = unique
-            .iter()
-            .filter(|(n, _)| {
-                !grouped.contains(n.as_str()) && !scratch.info.var_aliases.contains_key(n)
+        alias_classes.sort_by(|a, b| {
+            let a_has_zero = a.iter().any(|name| version_by_name.get(name) == Some(&0));
+            let b_has_zero = b.iter().any(|name| version_by_name.get(name) == Some(&0));
+            b_has_zero.cmp(&a_has_zero).then_with(|| {
+                let a_min = a
+                    .iter()
+                    .filter_map(|name| version_by_name.get(name))
+                    .copied()
+                    .min()
+                    .unwrap_or(u32::MAX);
+                let b_min = b
+                    .iter()
+                    .filter_map(|name| version_by_name.get(name))
+                    .copied()
+                    .min()
+                    .unwrap_or(u32::MAX);
+                a_min.cmp(&b_min)
             })
-            .collect();
-        if !ungrouped.is_empty() {
-            let ug_names: Vec<&str> = ungrouped.iter().map(|(n, _)| n.as_str()).collect();
-            let has_conflict = block_vars.values().any(|vars| {
-                let mut count = 0;
-                for n in &ug_names {
-                    if vars.contains(*n) {
-                        count += 1;
-                    }
-                }
-                count > 1
-            });
-            if !has_conflict {
-                let alias = if group_idx == 0 {
-                    base.clone()
-                } else {
-                    format!("{}_{}", base, group_idx + 1)
-                };
-                for (n, _) in &ungrouped {
-                    scratch.info.var_aliases.insert(n.clone(), alias.clone());
+        });
+
+        for (idx, class) in alias_classes.iter().enumerate() {
+            let alias = if idx == 0 {
+                base.clone()
+            } else {
+                format!("{}_{}", base, idx + 1)
+            };
+            for member in class {
+                if is_register_candidate_key(member, env) {
+                    scratch
+                        .info
+                        .var_aliases
+                        .insert(member.clone(), alias.clone());
                 }
             }
         }
@@ -478,5 +936,209 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2ssa::{PhiNode, SSAVar};
+
+    fn mk(name: &str, version: u32, size: u32) -> SSAVar {
+        SSAVar::new(name, version, size)
+    }
+
+    fn test_env() -> PassEnv<'static> {
+        PassEnv {
+            ptr_size: 64,
+            sp_name: "rsp".to_string(),
+            fp_name: "rbp".to_string(),
+            ret_reg_name: "rax".to_string(),
+            function_names: HashMap::new(),
+            strings: HashMap::new(),
+            symbols: HashMap::new(),
+            arg_regs: vec![
+                "rdi".to_string(),
+                "rsi".to_string(),
+                "rdx".to_string(),
+                "rcx".to_string(),
+                "r8".to_string(),
+                "r9".to_string(),
+            ],
+            caller_saved_regs: HashSet::new(),
+            type_hints: HashMap::new(),
+            type_oracle: None,
+        }
+    }
+
+    fn aliases_for(blocks: Vec<SSABlock>) -> HashMap<String, String> {
+        analyze(&blocks, &test_env()).var_aliases
+    }
+
+    #[test]
+    fn coalesces_non_interfering_register_versions_in_same_block() {
+        let edi_0 = mk("EDI", 0, 4);
+        let eax_1 = mk("EAX", 1, 4);
+        let eax_2 = mk("EAX", 2, 4);
+        let ecx_1 = mk("ECX", 1, 4);
+        let one = SSAVar::constant(1, 4);
+
+        let block = SSABlock {
+            addr: 0x1000,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::Copy {
+                    dst: eax_1.clone(),
+                    src: edi_0,
+                },
+                SSAOp::Copy {
+                    dst: eax_2.clone(),
+                    src: eax_1,
+                },
+                SSAOp::IntAdd {
+                    dst: ecx_1.clone(),
+                    a: eax_2,
+                    b: one,
+                },
+                SSAOp::Return { target: ecx_1 },
+            ],
+        };
+
+        let aliases = aliases_for(vec![block]);
+        assert_eq!(aliases.get("EAX_1"), Some(&"eax".to_string()));
+        assert_eq!(aliases.get("EAX_2"), Some(&"eax".to_string()));
+    }
+
+    #[test]
+    fn does_not_coalesce_interfering_register_versions() {
+        let edi_0 = mk("EDI", 0, 4);
+        let eax_1 = mk("EAX", 1, 4);
+        let eax_2 = mk("EAX", 2, 4);
+        let ecx_1 = mk("ECX", 1, 4);
+
+        let block = SSABlock {
+            addr: 0x1000,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::Copy {
+                    dst: eax_1.clone(),
+                    src: edi_0,
+                },
+                SSAOp::Copy {
+                    dst: eax_2.clone(),
+                    src: eax_1.clone(),
+                },
+                SSAOp::IntAdd {
+                    dst: ecx_1.clone(),
+                    a: eax_1,
+                    b: eax_2,
+                },
+                SSAOp::Return { target: ecx_1 },
+            ],
+        };
+
+        let aliases = aliases_for(vec![block]);
+        assert_ne!(aliases.get("EAX_1"), aliases.get("EAX_2"));
+    }
+
+    #[test]
+    fn coalesces_phi_connected_non_interfering_register_versions() {
+        let eax_1 = mk("EAX", 1, 4);
+        let eax_2 = mk("EAX", 2, 4);
+        let eax_3 = mk("EAX", 3, 4);
+        let edx_1 = mk("EDX", 1, 4);
+        let c1 = SSAVar::constant(1, 4);
+        let c2 = SSAVar::constant(2, 4);
+        let br_target = mk("ram:2000", 0, 8);
+
+        let b1 = SSABlock {
+            addr: 0x1000,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::Copy {
+                    dst: eax_1.clone(),
+                    src: c1,
+                },
+                SSAOp::Branch {
+                    target: br_target.clone(),
+                },
+            ],
+        };
+        let b2 = SSABlock {
+            addr: 0x1100,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::Copy {
+                    dst: eax_2.clone(),
+                    src: c2,
+                },
+                SSAOp::Branch { target: br_target },
+            ],
+        };
+        let b3 = SSABlock {
+            addr: 0x2000,
+            size: 4,
+            phis: vec![PhiNode {
+                dst: eax_3.clone(),
+                sources: vec![(0x1000, eax_1), (0x1100, eax_2)],
+            }],
+            ops: vec![
+                SSAOp::Copy {
+                    dst: edx_1.clone(),
+                    src: eax_3,
+                },
+                SSAOp::Return { target: edx_1 },
+            ],
+        };
+
+        let aliases = aliases_for(vec![b1, b2, b3]);
+        assert_eq!(aliases.get("EAX_1"), Some(&"eax".to_string()));
+        assert_eq!(aliases.get("EAX_2"), Some(&"eax".to_string()));
+        assert_eq!(aliases.get("EAX_3"), Some(&"eax".to_string()));
+    }
+
+    #[test]
+    fn excludes_sp_fp_and_semantic_names_from_coalescing() {
+        let rsp_0 = mk("RSP", 0, 8);
+        let rsp_1 = mk("RSP", 1, 8);
+        let local_4_0 = mk("local_4", 0, 8);
+        let local_4_1 = mk("local_4", 1, 8);
+        let rax_1 = mk("RAX", 1, 8);
+        let rax_2 = mk("RAX", 2, 8);
+        let one = SSAVar::constant(1, 8);
+
+        let block = SSABlock {
+            addr: 0x1000,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::Copy {
+                    dst: rsp_1.clone(),
+                    src: rsp_0,
+                },
+                SSAOp::Copy {
+                    dst: local_4_1.clone(),
+                    src: local_4_0,
+                },
+                SSAOp::Copy {
+                    dst: rax_1.clone(),
+                    src: one.clone(),
+                },
+                SSAOp::Copy {
+                    dst: rax_2.clone(),
+                    src: rax_1,
+                },
+                SSAOp::Return { target: rax_2 },
+            ],
+        };
+
+        let aliases = aliases_for(vec![block]);
+        assert!(!aliases.contains_key(&rsp_1.display_name()));
+        assert!(!aliases.contains_key(&local_4_1.display_name()));
+        assert_eq!(aliases.get("RAX_1"), Some(&"rax".to_string()));
     }
 }

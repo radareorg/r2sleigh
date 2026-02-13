@@ -1889,6 +1889,34 @@ mod decompilation {
             !normalized.contains("phi"),
             "Structured decompilation should avoid exposing phi artifacts"
         );
+
+        let is_copy_scaffold = |line: &str| {
+            let trimmed = line.trim().trim_end_matches(';').trim();
+            let Some((lhs, rhs)) = trimmed.split_once('=') else {
+                return false;
+            };
+            let lhs = lhs.trim();
+            let rhs = rhs.trim();
+            let rhs_is_var = rhs
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':');
+            let lhs_is_var = lhs
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':');
+            let rhs_has_ssa_suffix = rhs
+                .rsplit_once('_')
+                .map(|(_, ver)| !ver.is_empty() && ver.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false);
+            lhs_is_var && rhs_is_var && rhs_has_ssa_suffix
+        };
+
+        for line in normalized.lines().filter(|line| line.contains('=')) {
+            assert!(
+                !is_copy_scaffold(line),
+                "Join-path decompilation should not retain phi/copy scaffold assignments: {}",
+                line
+            );
+        }
     }
 
     #[test]
