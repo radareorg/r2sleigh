@@ -1656,6 +1656,14 @@ mod decompilation {
             normalized.contains("!= 19") || normalized.contains("== 19"),
             "solve_equation should compare against 19"
         );
+        assert!(
+            !normalized.contains("eax_2 = arg1;"),
+            "solve_equation should remove phi/copy residue assignment eax_2 = arg1"
+        );
+        assert!(
+            !normalized.contains("eax_3 = eax_2 + eax_2"),
+            "solve_equation should remove chained phi/copy residue assignment"
+        );
     }
 
     #[test]
@@ -1732,6 +1740,19 @@ mod decompilation {
             switch_header.contains("switch ("),
             "Switch header should be present"
         );
+        for line in normalized.lines() {
+            let compact = line.trim();
+            assert!(
+                !(compact.starts_with('t') && compact.ends_with("= sum;")),
+                "Loop output should not contain transient temp-to-sum alias scaffolding: {}",
+                compact
+            );
+            assert!(
+                !compact.contains("*t"),
+                "Loop output should avoid transient temp deref artifacts in hot paths: {}",
+                compact
+            );
+        }
     }
 
     #[test]

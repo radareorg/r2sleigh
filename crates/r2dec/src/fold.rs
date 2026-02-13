@@ -744,9 +744,46 @@ impl<'a> FoldingContext<'a> {
             .and_then(|offset| self.resolve_stack_var(offset))
     }
 
+    fn external_stack_name_for_offset(&self, offset: i64) -> Option<String> {
+        if let Some(var) = self.external_stack_vars.get(&offset)
+            && !var.name.is_empty()
+        {
+            return Some(var.name.clone());
+        }
+
+        for (ext_offset, var) in &self.external_stack_vars {
+            if var.name.is_empty() {
+                continue;
+            }
+            let base_lower = var.base.as_deref().unwrap_or_default().to_ascii_lowercase();
+            let is_frame_based = base_lower == self.fp_name || base_lower.ends_with(&self.fp_name);
+            if is_frame_based && -*ext_offset == offset {
+                return Some(var.name.clone());
+            }
+        }
+
+        None
+    }
+
+    fn canonicalize_stack_name(&self, name: &str) -> Option<String> {
+        let offset = if let Some(suffix) = name.strip_prefix("local_") {
+            i64::from_str_radix(suffix, 16).ok()
+        } else if let Some(suffix) = name.strip_prefix("arg_") {
+            i64::from_str_radix(suffix, 16).ok().map(|v| -v)
+        } else {
+            None
+        }?;
+
+        self.external_stack_name_for_offset(offset)
+    }
+
     /// Resolve a stack variable name by signed stack offset.
     pub fn resolve_stack_var(&self, offset: i64) -> Option<String> {
-        self.stack_vars_map().get(&offset).cloned()
+        self.stack_vars_map()
+            .get(&offset)
+            .cloned()
+            .map(|name| self.canonicalize_stack_name(&name).unwrap_or(name))
+            .or_else(|| self.external_stack_name_for_offset(offset))
     }
 
     fn rewrite_stack_expr(&self, expr: CExpr) -> CExpr {
@@ -1465,7 +1502,9 @@ impl<'a> FoldingContext<'a> {
         // Check if coalescing mapped this SSA name to a merged name
         let display = var.display_name();
         if let Some(alias) = self.var_aliases_map().get(&display) {
-            return alias.clone();
+            return self
+                .canonicalize_stack_name(alias)
+                .unwrap_or_else(|| alias.clone());
         }
 
         let base = if var.name.starts_with("reg:") {
@@ -2386,6 +2425,14 @@ impl<'a> FoldingContext<'a> {
                 return Some(expr.clone());
             }
         }
+        if let Some((ssa_name, _)) = self
+            .var_aliases_map()
+            .iter()
+            .find(|(_, alias)| alias.eq_ignore_ascii_case(name))
+            && let Some(expr) = self.definitions_map().get(ssa_name)
+        {
+            return Some(expr.clone());
+        }
         None
     }
 
@@ -2490,6 +2537,7 @@ impl<'a> FoldingContext<'a> {
             stmts.push(CStmt::Return(Some(self.rewrite_stack_expr(expr))));
         }
 
+        let stmts = self.propagate_ephemeral_copies(stmts);
         self.prune_dead_temp_assignments(stmts)
     }
 
@@ -2508,6 +2556,326 @@ impl<'a> FoldingContext<'a> {
         };
 
         Some((name.as_str(), right.as_ref()))
+    }
+
+    fn propagate_ephemeral_copies(&self, stmts: Vec<CStmt>) -> Vec<CStmt> {
+        let mut aliases: HashMap<String, CExpr> = HashMap::new();
+        let mut out = Vec::with_capacity(stmts.len());
+
+        for stmt in stmts {
+            let rewritten = self.rewrite_stmt_with_aliases(stmt, &aliases);
+            let (_, def) = self.stmt_reads_and_def(&rewritten);
+            if let Some(def_name) = def.as_deref() {
+                self.invalidate_aliases_for_def(&mut aliases, def_name);
+            }
+
+            if let Some((target, rhs)) = Self::assignment_target_and_rhs(&rewritten)
+                && self.is_ephemeral_ssa_target(target)
+                && self.expr_is_cheap_copy_rhs(rhs)
+            {
+                aliases.insert(target.to_string(), rhs.clone());
+            }
+
+            let clear_aliases = Self::stmt_clears_aliases(&rewritten);
+            out.push(rewritten);
+            if clear_aliases {
+                aliases.clear();
+            }
+        }
+
+        out
+    }
+
+    fn rewrite_stmt_with_aliases(&self, stmt: CStmt, aliases: &HashMap<String, CExpr>) -> CStmt {
+        match stmt {
+            CStmt::Expr(CExpr::Binary {
+                op: BinaryOp::Assign,
+                left,
+                right,
+            }) => {
+                let left = match *left {
+                    CExpr::Var(name) => CExpr::Var(name),
+                    other => {
+                        let mut visiting = HashSet::new();
+                        self.rewrite_expr_with_aliases(other, aliases, 0, &mut visiting)
+                    }
+                };
+                let mut visiting = HashSet::new();
+                let right = self.rewrite_expr_with_aliases(*right, aliases, 0, &mut visiting);
+                CStmt::Expr(CExpr::assign(left, right))
+            }
+            CStmt::Expr(expr) => {
+                let mut visiting = HashSet::new();
+                CStmt::Expr(self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting))
+            }
+            CStmt::Decl { ty, name, init } => CStmt::Decl {
+                ty,
+                name,
+                init: init.map(|expr| {
+                    let mut visiting = HashSet::new();
+                    self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting)
+                }),
+            },
+            CStmt::Block(stmts) => CStmt::Block(
+                stmts
+                    .into_iter()
+                    .map(|inner| self.rewrite_stmt_with_aliases(inner, aliases))
+                    .collect(),
+            ),
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let mut visiting = HashSet::new();
+                CStmt::If {
+                    cond: self.rewrite_expr_with_aliases(cond, aliases, 0, &mut visiting),
+                    then_body: Box::new(self.rewrite_stmt_with_aliases(*then_body, aliases)),
+                    else_body: else_body
+                        .map(|stmt| Box::new(self.rewrite_stmt_with_aliases(*stmt, aliases))),
+                }
+            }
+            CStmt::While { cond, body } => {
+                let mut visiting = HashSet::new();
+                CStmt::While {
+                    cond: self.rewrite_expr_with_aliases(cond, aliases, 0, &mut visiting),
+                    body: Box::new(self.rewrite_stmt_with_aliases(*body, aliases)),
+                }
+            }
+            CStmt::DoWhile { body, cond } => {
+                let mut visiting = HashSet::new();
+                CStmt::DoWhile {
+                    body: Box::new(self.rewrite_stmt_with_aliases(*body, aliases)),
+                    cond: self.rewrite_expr_with_aliases(cond, aliases, 0, &mut visiting),
+                }
+            }
+            CStmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => CStmt::For {
+                init: init.map(|stmt| Box::new(self.rewrite_stmt_with_aliases(*stmt, aliases))),
+                cond: cond.map(|expr| {
+                    let mut visiting = HashSet::new();
+                    self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting)
+                }),
+                update: update.map(|expr| {
+                    let mut visiting = HashSet::new();
+                    self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting)
+                }),
+                body: Box::new(self.rewrite_stmt_with_aliases(*body, aliases)),
+            },
+            CStmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                let mut visiting = HashSet::new();
+                CStmt::Switch {
+                    expr: self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting),
+                    cases: cases
+                        .into_iter()
+                        .map(|case| {
+                            let mut case_visiting = HashSet::new();
+                            crate::ast::SwitchCase {
+                                value: self.rewrite_expr_with_aliases(
+                                    case.value,
+                                    aliases,
+                                    0,
+                                    &mut case_visiting,
+                                ),
+                                body: case
+                                    .body
+                                    .into_iter()
+                                    .map(|stmt| self.rewrite_stmt_with_aliases(stmt, aliases))
+                                    .collect(),
+                            }
+                        })
+                        .collect(),
+                    default: default.map(|stmts| {
+                        stmts
+                            .into_iter()
+                            .map(|stmt| self.rewrite_stmt_with_aliases(stmt, aliases))
+                            .collect()
+                    }),
+                }
+            }
+            CStmt::Return(expr) => CStmt::Return(expr.map(|expr| {
+                let mut visiting = HashSet::new();
+                self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting)
+            })),
+            other => other,
+        }
+    }
+
+    fn rewrite_expr_with_aliases(
+        &self,
+        expr: CExpr,
+        aliases: &HashMap<String, CExpr>,
+        depth: u32,
+        visiting: &mut HashSet<String>,
+    ) -> CExpr {
+        if depth > 32 {
+            return expr;
+        }
+
+        match expr {
+            CExpr::Var(name) => {
+                let Some(alias) = aliases.get(&name).cloned() else {
+                    return CExpr::Var(name);
+                };
+
+                if !visiting.insert(name.clone()) {
+                    return CExpr::Var(name);
+                }
+
+                let rewritten = self.rewrite_expr_with_aliases(alias, aliases, depth + 1, visiting);
+                visiting.remove(&name);
+                rewritten
+            }
+            CExpr::Unary { op, operand } => CExpr::Unary {
+                op,
+                operand: Box::new(self.rewrite_expr_with_aliases(
+                    *operand,
+                    aliases,
+                    depth + 1,
+                    visiting,
+                )),
+            },
+            CExpr::Binary { op, left, right } => CExpr::Binary {
+                op,
+                left: Box::new(self.rewrite_expr_with_aliases(*left, aliases, depth + 1, visiting)),
+                right: Box::new(self.rewrite_expr_with_aliases(
+                    *right,
+                    aliases,
+                    depth + 1,
+                    visiting,
+                )),
+            },
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => CExpr::Ternary {
+                cond: Box::new(self.rewrite_expr_with_aliases(*cond, aliases, depth + 1, visiting)),
+                then_expr: Box::new(self.rewrite_expr_with_aliases(
+                    *then_expr,
+                    aliases,
+                    depth + 1,
+                    visiting,
+                )),
+                else_expr: Box::new(self.rewrite_expr_with_aliases(
+                    *else_expr,
+                    aliases,
+                    depth + 1,
+                    visiting,
+                )),
+            },
+            CExpr::Call { func, args } => CExpr::Call {
+                func: Box::new(self.rewrite_expr_with_aliases(*func, aliases, depth + 1, visiting)),
+                args: args
+                    .into_iter()
+                    .map(|arg| self.rewrite_expr_with_aliases(arg, aliases, depth + 1, visiting))
+                    .collect(),
+            },
+            CExpr::Cast { ty, expr } => CExpr::Cast {
+                ty,
+                expr: Box::new(self.rewrite_expr_with_aliases(*expr, aliases, depth + 1, visiting)),
+            },
+            CExpr::Paren(inner) => CExpr::Paren(Box::new(self.rewrite_expr_with_aliases(
+                *inner,
+                aliases,
+                depth + 1,
+                visiting,
+            ))),
+            CExpr::Deref(inner) => CExpr::Deref(Box::new(self.rewrite_expr_with_aliases(
+                *inner,
+                aliases,
+                depth + 1,
+                visiting,
+            ))),
+            CExpr::AddrOf(inner) => CExpr::AddrOf(Box::new(self.rewrite_expr_with_aliases(
+                *inner,
+                aliases,
+                depth + 1,
+                visiting,
+            ))),
+            CExpr::Subscript { base, index } => CExpr::Subscript {
+                base: Box::new(self.rewrite_expr_with_aliases(*base, aliases, depth + 1, visiting)),
+                index: Box::new(self.rewrite_expr_with_aliases(
+                    *index,
+                    aliases,
+                    depth + 1,
+                    visiting,
+                )),
+            },
+            CExpr::Member { base, member } => CExpr::Member {
+                base: Box::new(self.rewrite_expr_with_aliases(*base, aliases, depth + 1, visiting)),
+                member,
+            },
+            CExpr::PtrMember { base, member } => CExpr::PtrMember {
+                base: Box::new(self.rewrite_expr_with_aliases(*base, aliases, depth + 1, visiting)),
+                member,
+            },
+            CExpr::Sizeof(inner) => CExpr::Sizeof(Box::new(self.rewrite_expr_with_aliases(
+                *inner,
+                aliases,
+                depth + 1,
+                visiting,
+            ))),
+            CExpr::Comma(items) => CExpr::Comma(
+                items
+                    .into_iter()
+                    .map(|item| self.rewrite_expr_with_aliases(item, aliases, depth + 1, visiting))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    fn expr_is_cheap_copy_rhs(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(_)
+            | CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(_)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_) => true,
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.expr_is_cheap_copy_rhs(inner)
+            }
+            CExpr::Unary { operand, .. } => self.expr_is_cheap_copy_rhs(operand),
+            _ => false,
+        }
+    }
+
+    fn invalidate_aliases_for_def(&self, aliases: &mut HashMap<String, CExpr>, def_name: &str) {
+        aliases.remove(def_name);
+        aliases.retain(|_, expr| !self.expr_mentions_name(expr, def_name));
+    }
+
+    fn expr_mentions_name(&self, expr: &CExpr, name: &str) -> bool {
+        let mut reads = HashSet::new();
+        self.collect_expr_reads(expr, &mut reads);
+        reads.contains(name)
+    }
+
+    fn stmt_clears_aliases(stmt: &CStmt) -> bool {
+        matches!(
+            stmt,
+            CStmt::Label(_)
+                | CStmt::Goto(_)
+                | CStmt::Return(_)
+                | CStmt::Break
+                | CStmt::Continue
+                | CStmt::If { .. }
+                | CStmt::While { .. }
+                | CStmt::DoWhile { .. }
+                | CStmt::For { .. }
+                | CStmt::Switch { .. }
+                | CStmt::Block(_)
+        )
     }
 
     fn ssa_base_name(name: &str) -> Option<&str> {
@@ -3325,7 +3693,186 @@ impl<'a> FoldingContext<'a> {
             .get(&key)
             .cloned()
             .unwrap_or_else(|| CExpr::Var(self.var_name(var)));
+        let expr = self.rewrite_stack_expr(expr);
+        let expr = self.rewrite_condition_stack_aliases(expr);
         self.simplify_condition_expr(expr)
+    }
+
+    fn rewrite_condition_stack_aliases(&self, expr: CExpr) -> CExpr {
+        let mut visited = HashSet::new();
+        self.rewrite_condition_stack_aliases_inner(expr, 0, &mut visited)
+    }
+
+    fn rewrite_condition_stack_aliases_inner(
+        &self,
+        expr: CExpr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> CExpr {
+        if depth > 8 {
+            return expr;
+        }
+
+        match expr {
+            CExpr::Var(name) => self.rewrite_condition_stack_var(name, depth, visited),
+            CExpr::Unary { op, operand } => CExpr::Unary {
+                op,
+                operand: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *operand,
+                    depth + 1,
+                    visited,
+                )),
+            },
+            CExpr::Binary { op, left, right } => CExpr::Binary {
+                op,
+                left: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *left,
+                    depth + 1,
+                    visited,
+                )),
+                right: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *right,
+                    depth + 1,
+                    visited,
+                )),
+            },
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => CExpr::Ternary {
+                cond: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *cond,
+                    depth + 1,
+                    visited,
+                )),
+                then_expr: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *then_expr,
+                    depth + 1,
+                    visited,
+                )),
+                else_expr: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *else_expr,
+                    depth + 1,
+                    visited,
+                )),
+            },
+            CExpr::Call { func, args } => CExpr::Call {
+                func: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *func,
+                    depth + 1,
+                    visited,
+                )),
+                args: args
+                    .into_iter()
+                    .map(|arg| self.rewrite_condition_stack_aliases_inner(arg, depth + 1, visited))
+                    .collect(),
+            },
+            CExpr::Cast { ty, expr } => CExpr::Cast {
+                ty,
+                expr: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *expr,
+                    depth + 1,
+                    visited,
+                )),
+            },
+            CExpr::Paren(inner) => CExpr::Paren(Box::new(
+                self.rewrite_condition_stack_aliases_inner(*inner, depth + 1, visited),
+            )),
+            CExpr::Deref(inner) => CExpr::Deref(Box::new(
+                self.rewrite_condition_stack_aliases_inner(*inner, depth + 1, visited),
+            )),
+            CExpr::AddrOf(inner) => CExpr::AddrOf(Box::new(
+                self.rewrite_condition_stack_aliases_inner(*inner, depth + 1, visited),
+            )),
+            CExpr::Subscript { base, index } => CExpr::Subscript {
+                base: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *base,
+                    depth + 1,
+                    visited,
+                )),
+                index: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *index,
+                    depth + 1,
+                    visited,
+                )),
+            },
+            CExpr::Member { base, member } => CExpr::Member {
+                base: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *base,
+                    depth + 1,
+                    visited,
+                )),
+                member,
+            },
+            CExpr::PtrMember { base, member } => CExpr::PtrMember {
+                base: Box::new(self.rewrite_condition_stack_aliases_inner(
+                    *base,
+                    depth + 1,
+                    visited,
+                )),
+                member,
+            },
+            CExpr::Sizeof(inner) => CExpr::Sizeof(Box::new(
+                self.rewrite_condition_stack_aliases_inner(*inner, depth + 1, visited),
+            )),
+            CExpr::Comma(items) => CExpr::Comma(
+                items
+                    .into_iter()
+                    .map(|item| {
+                        self.rewrite_condition_stack_aliases_inner(item, depth + 1, visited)
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    fn rewrite_condition_stack_var(
+        &self,
+        name: String,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> CExpr {
+        if depth > 8 {
+            return CExpr::Var(name);
+        }
+
+        if self
+            .stack_vars_map()
+            .values()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&name))
+        {
+            return CExpr::Var(name);
+        }
+
+        if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&CExpr::Var(name.clone()), 0)
+            && !alias.eq_ignore_ascii_case(&name)
+        {
+            return CExpr::Var(alias);
+        }
+
+        if !visited.insert(name.clone()) {
+            return CExpr::Var(name);
+        }
+
+        let resolved = self
+            .lookup_definition(&name)
+            .or_else(|| self.formatted_defs_map().get(&name).cloned());
+
+        let rewritten = if let Some(expr) = resolved {
+            let expr = self.rewrite_condition_stack_aliases_inner(expr, depth + 1, visited);
+            if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&expr, 0) {
+                CExpr::Var(alias)
+            } else {
+                CExpr::Var(name.clone())
+            }
+        } else {
+            CExpr::Var(name.clone())
+        };
+
+        visited.remove(&name);
+        rewritten
     }
 
     fn simplify_condition_expr(&self, expr: CExpr) -> CExpr {
@@ -5815,6 +6362,165 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_stack_var_canonicalizes_local_name_using_external_offset_mirror() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx
+            .stack_info
+            .stack_vars
+            .insert(4, "local_4".to_string());
+        ctx.set_external_stack_vars(HashMap::from([(
+            -4,
+            ExternalStackVar {
+                name: "result".to_string(),
+                ty: None,
+                base: Some("RBP".to_string()),
+            },
+        )]));
+
+        assert_eq!(ctx.resolve_stack_var(4), Some("result".to_string()));
+    }
+
+    #[test]
+    fn test_var_name_canonicalizes_stack_alias_from_external_offset_mirror() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx
+            .use_info
+            .var_aliases
+            .insert("tmp:1_1".to_string(), "local_4".to_string());
+        ctx.set_external_stack_vars(HashMap::from([(
+            -4,
+            ExternalStackVar {
+                name: "result".to_string(),
+                ty: None,
+                base: Some("RBP".to_string()),
+            },
+        )]));
+
+        let rendered = ctx.var_name(&make_var("tmp:1", 1, 8));
+        assert_eq!(rendered, "result");
+    }
+
+    #[test]
+    fn test_condition_var_chain_resolves_stack_alias() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx
+            .stack_info
+            .stack_vars
+            .insert(-4, "value".to_string());
+        ctx.analysis_ctx.use_info.definitions.insert(
+            "tmp:cond_1".to_string(),
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::Var("result".to_string()),
+                CExpr::IntLit(19),
+            ),
+        );
+        ctx.analysis_ctx.use_info.definitions.insert(
+            "result".to_string(),
+            CExpr::Deref(Box::new(CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("rbp_1".to_string()),
+                CExpr::IntLit(-4),
+            ))),
+        );
+
+        let cond = ctx.get_condition_expr(&make_var("tmp:cond", 1, 1));
+        let mut reads = HashSet::new();
+        ctx.collect_expr_reads(&cond, &mut reads);
+        assert!(
+            reads.contains("value"),
+            "Condition should resolve var-chain stack alias into canonical stack name"
+        );
+        assert!(
+            !reads.contains("result"),
+            "Condition should not keep intermediate non-canonical alias"
+        );
+    }
+
+    #[test]
+    fn test_condition_var_chain_resolves_stack_alias_through_cast_paren() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx
+            .stack_info
+            .stack_vars
+            .insert(-4, "value".to_string());
+        ctx.analysis_ctx.use_info.definitions.insert(
+            "tmp:cond_1".to_string(),
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::Var("result".to_string()),
+                CExpr::IntLit(19),
+            ),
+        );
+        ctx.analysis_ctx.use_info.definitions.insert(
+            "result".to_string(),
+            CExpr::Paren(Box::new(CExpr::Cast {
+                ty: CType::ptr(CType::Int(32)),
+                expr: Box::new(CExpr::Deref(Box::new(CExpr::Paren(Box::new(
+                    CExpr::binary(
+                        BinaryOp::Add,
+                        CExpr::Var("rbp_1".to_string()),
+                        CExpr::IntLit(-4),
+                    ),
+                ))))),
+            })),
+        );
+
+        let cond = ctx.get_condition_expr(&make_var("tmp:cond", 1, 1));
+        let mut reads = HashSet::new();
+        ctx.collect_expr_reads(&cond, &mut reads);
+        assert!(
+            reads.contains("value"),
+            "Cast/paren wrapped condition chain should still resolve stack alias"
+        );
+    }
+
+    #[test]
+    fn test_condition_var_chain_non_stack_remains_unforced() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx.use_info.definitions.insert(
+            "tmp:cond_1".to_string(),
+            CExpr::binary(
+                BinaryOp::Eq,
+                CExpr::Var("result".to_string()),
+                CExpr::IntLit(19),
+            ),
+        );
+        ctx.analysis_ctx.use_info.definitions.insert(
+            "result".to_string(),
+            CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("arg1".to_string()),
+                CExpr::IntLit(1),
+            ),
+        );
+
+        let cond = ctx.get_condition_expr(&make_var("tmp:cond", 1, 1));
+        let mut reads = HashSet::new();
+        ctx.collect_expr_reads(&cond, &mut reads);
+        assert!(
+            reads.contains("result"),
+            "Non-stack var chains should not be force-rewritten"
+        );
+    }
+
+    #[test]
+    fn test_lookup_definition_resolves_formatted_temp_aliases() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.analysis_ctx
+            .use_info
+            .definitions
+            .insert("tmp:foo_2".to_string(), CExpr::Var("local_4".to_string()));
+        ctx.analysis_ctx
+            .use_info
+            .var_aliases
+            .insert("tmp:foo_2".to_string(), "t2".to_string());
+
+        let resolved = ctx.lookup_definition("t2");
+        assert_eq!(resolved, Some(CExpr::Var("local_4".to_string())));
+    }
+
+    #[test]
     fn test_sf_surrogate_cycle_is_guarded() {
         let mut ctx = FoldingContext::new(64);
         ctx.analysis_ctx
@@ -5943,6 +6649,150 @@ mod tests {
             pruned.len(),
             2,
             "Dotted/global-like semantic bindings should not be pruned"
+        );
+    }
+
+    #[test]
+    fn test_propagate_ephemeral_copies_rewrites_phi_copy_residue() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_2".to_string()),
+                CExpr::Var("arg1".to_string()),
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_3".to_string()),
+                CExpr::binary(
+                    BinaryOp::Add,
+                    CExpr::Var("eax_2".to_string()),
+                    CExpr::Var("eax_2".to_string()),
+                ),
+            )),
+            CStmt::Return(Some(CExpr::Var("eax_3".to_string()))),
+        ];
+
+        let propagated = ctx.propagate_ephemeral_copies(stmts);
+        let Some((_, rhs)) = FoldingContext::assignment_target_and_rhs(&propagated[1]) else {
+            panic!("expected assignment at propagated[1]");
+        };
+        let mut reads = HashSet::new();
+        ctx.collect_expr_reads(rhs, &mut reads);
+        assert!(
+            reads.contains("arg1") && !reads.contains("eax_2"),
+            "Copy-forward should substitute eax_2 uses with arg1"
+        );
+
+        let pruned = ctx.prune_dead_temp_assignments(propagated);
+        assert!(
+            !pruned.iter().any(|stmt| {
+                matches!(
+                    FoldingContext::assignment_target_and_rhs(stmt),
+                    Some((target, _)) if target == "eax_2"
+                )
+            }),
+            "Dead phi-copy assignment should be removed after propagation"
+        );
+    }
+
+    #[test]
+    fn test_propagate_ephemeral_copies_keeps_call_rhs_unsubstituted() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_2".to_string()),
+                CExpr::call(CExpr::Var("foo".to_string()), vec![]),
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_3".to_string()),
+                CExpr::binary(
+                    BinaryOp::Add,
+                    CExpr::Var("eax_2".to_string()),
+                    CExpr::IntLit(1),
+                ),
+            )),
+        ];
+
+        let propagated = ctx.propagate_ephemeral_copies(stmts);
+        let Some((_, rhs)) = FoldingContext::assignment_target_and_rhs(&propagated[1]) else {
+            panic!("expected assignment at propagated[1]");
+        };
+        let mut reads = HashSet::new();
+        ctx.collect_expr_reads(rhs, &mut reads);
+        assert!(
+            reads.contains("eax_2"),
+            "Call RHS should not be used for copy-forward substitution"
+        );
+    }
+
+    #[test]
+    fn test_propagate_ephemeral_copies_invalidates_alias_when_source_redefined() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_2".to_string()),
+                CExpr::Var("rdi_1".to_string()),
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("rdi_1".to_string()),
+                CExpr::IntLit(42),
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_3".to_string()),
+                CExpr::binary(
+                    BinaryOp::Add,
+                    CExpr::Var("eax_2".to_string()),
+                    CExpr::IntLit(1),
+                ),
+            )),
+        ];
+
+        let propagated = ctx.propagate_ephemeral_copies(stmts);
+        let Some((_, rhs)) = FoldingContext::assignment_target_and_rhs(&propagated[2]) else {
+            panic!("expected assignment at propagated[2]");
+        };
+        let mut reads = HashSet::new();
+        ctx.collect_expr_reads(rhs, &mut reads);
+        assert!(
+            reads.contains("eax_2"),
+            "Alias must be invalidated when its RHS source variable is reassigned"
+        );
+    }
+
+    #[test]
+    fn test_propagate_ephemeral_copies_tracks_cast_var_rhs() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_2".to_string()),
+                CExpr::Cast {
+                    ty: CType::Int(64),
+                    expr: Box::new(CExpr::Var("arg1".to_string())),
+                },
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_3".to_string()),
+                CExpr::binary(
+                    BinaryOp::Add,
+                    CExpr::Var("eax_2".to_string()),
+                    CExpr::IntLit(1),
+                ),
+            )),
+        ];
+
+        let propagated = ctx.propagate_ephemeral_copies(stmts);
+        let Some((_, rhs)) = FoldingContext::assignment_target_and_rhs(&propagated[1]) else {
+            panic!("expected assignment at propagated[1]");
+        };
+        assert!(
+            matches!(
+                rhs,
+                CExpr::Binary {
+                    left,
+                    right: _,
+                    op: BinaryOp::Add,
+                } if matches!(left.as_ref(), CExpr::Cast { expr, .. } if matches!(expr.as_ref(), CExpr::Var(name) if name == "arg1"))
+            ),
+            "Cast(Var(...)) should be propagated as a cheap copy RHS"
         );
     }
 

@@ -333,6 +333,9 @@ impl Decompiler {
         if let Some(signature) = &self.context.function_signature {
             var_recovery.set_external_signature(signature.clone());
         }
+        if !self.context.stack_vars.is_empty() {
+            var_recovery.set_external_stack_vars(self.context.stack_vars.clone());
+        }
         var_recovery.recover(func);
 
         // Infer types

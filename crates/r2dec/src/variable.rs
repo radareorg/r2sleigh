@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
 
-use crate::ExternalFunctionSignature;
 use crate::ast::CType;
+use crate::{ExternalFunctionSignature, ExternalStackVar};
 
 /// Variable information.
 #[derive(Debug, Clone)]
@@ -52,6 +52,8 @@ pub struct VariableRecovery {
     ret_reg: String,
     /// Optional external signature metadata.
     external_signature: Option<ExternalFunctionSignature>,
+    /// Optional external stack variables keyed by signed stack offset.
+    external_stack_vars: HashMap<i64, ExternalStackVar>,
 }
 
 impl VariableRecovery {
@@ -76,12 +78,44 @@ impl VariableRecovery {
             loop_var_idx: 0,
             ret_reg,
             external_signature: None,
+            external_stack_vars: HashMap::new(),
         }
     }
 
     /// Set an externally recovered function signature.
     pub fn set_external_signature(&mut self, signature: ExternalFunctionSignature) {
         self.external_signature = Some(signature);
+    }
+
+    /// Set externally recovered stack variable metadata.
+    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, ExternalStackVar>) {
+        self.external_stack_vars = stack_vars;
+    }
+
+    fn external_stack_name_for_offset(&self, offset: i64) -> Option<String> {
+        if let Some(var) = self.external_stack_vars.get(&offset)
+            && !var.name.is_empty()
+        {
+            return Some(var.name.clone());
+        }
+
+        // r2 external metadata may encode RBP locals as negative offsets while
+        // internal recovery tracks locals as positive deltas from frame base.
+        for (ext_offset, var) in &self.external_stack_vars {
+            if var.name.is_empty() {
+                continue;
+            }
+            let is_frame_based = var
+                .base
+                .as_deref()
+                .map(|base| base.eq_ignore_ascii_case("rbp") || base.eq_ignore_ascii_case("ebp"))
+                .unwrap_or(false);
+            if is_frame_based && -*ext_offset == offset {
+                return Some(var.name.clone());
+            }
+        }
+
+        None
     }
 
     /// Recover variables from an SSA function.
@@ -295,11 +329,15 @@ impl VariableRecovery {
 
     /// Generate a name for a stack variable.
     fn gen_stack_var_name(&mut self, offset: i64) -> String {
-        let base_name = if offset >= 0 {
-            format!("local_{:x}", offset)
-        } else {
-            format!("arg_{:x}", -offset)
-        };
+        let base_name = self
+            .external_stack_name_for_offset(offset)
+            .unwrap_or_else(|| {
+                if offset >= 0 {
+                    format!("local_{:x}", offset)
+                } else {
+                    format!("arg_{:x}", -offset)
+                }
+            });
 
         // Ensure uniqueness
         if !self.used_local_names.contains(&base_name) {
@@ -564,7 +602,7 @@ fn is_generic_arg_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExternalFunctionParam, ExternalFunctionSignature};
+    use crate::{ExternalFunctionParam, ExternalFunctionSignature, ExternalStackVar};
 
     #[test]
     fn test_gen_param_name() {
@@ -599,6 +637,82 @@ mod tests {
 
         let name = vr.gen_stack_var_name(-8);
         assert_eq!(name, "arg_8");
+    }
+
+    #[test]
+    fn test_external_stack_var_name_preferred() {
+        let mut vr = VariableRecovery::new("rsp", "rbp", 64);
+        vr.set_external_stack_vars(HashMap::from([(
+            8,
+            ExternalStackVar {
+                name: "user_input".to_string(),
+                ty: None,
+                base: Some("RBP".to_string()),
+            },
+        )]));
+
+        let name = vr.gen_stack_var_name(8);
+        assert_eq!(name, "user_input");
+    }
+
+    #[test]
+    fn test_external_stack_var_name_fallback_when_missing() {
+        let mut vr = VariableRecovery::new("rsp", "rbp", 64);
+        vr.set_external_stack_vars(HashMap::from([(
+            -0x10,
+            ExternalStackVar {
+                name: "buf".to_string(),
+                ty: None,
+                base: Some("RBP".to_string()),
+            },
+        )]));
+
+        let name = vr.gen_stack_var_name(8);
+        assert_eq!(name, "local_8");
+    }
+
+    #[test]
+    fn test_external_stack_var_name_collision_still_unique() {
+        let mut vr = VariableRecovery::new("rsp", "rbp", 64);
+        vr.set_external_stack_vars(HashMap::from([
+            (
+                8,
+                ExternalStackVar {
+                    name: "buf".to_string(),
+                    ty: None,
+                    base: Some("RBP".to_string()),
+                },
+            ),
+            (
+                16,
+                ExternalStackVar {
+                    name: "buf".to_string(),
+                    ty: None,
+                    base: Some("RBP".to_string()),
+                },
+            ),
+        ]));
+
+        let first = vr.gen_stack_var_name(8);
+        let second = vr.gen_stack_var_name(16);
+        assert_eq!(first, "buf");
+        assert_eq!(second, "buf_2");
+    }
+
+    #[test]
+    fn test_external_stack_var_name_prefers_mirrored_rbp_offset() {
+        let mut vr = VariableRecovery::new("rsp", "rbp", 64);
+        vr.set_external_stack_vars(HashMap::from([(
+            -4,
+            ExternalStackVar {
+                name: "result".to_string(),
+                ty: None,
+                base: Some("RBP".to_string()),
+            },
+        )]));
+
+        let name = vr.gen_stack_var_name(4);
+        assert_eq!(name, "result");
     }
 
     #[test]
