@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,19 +11,19 @@ pub enum Signedness {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StructField {
     pub name: Option<String>,
     pub ty: TypeId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct StructShape {
     pub name: Option<String>,
     pub fields: BTreeMap<u64, StructField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Type {
     Top,
     Bottom,
@@ -53,6 +53,7 @@ pub enum Type {
 #[derive(Debug, Clone)]
 pub struct TypeArena {
     types: Vec<Type>,
+    intern_index: HashMap<Type, TypeId>,
     top: TypeId,
     bottom: TypeId,
     bool_ty: TypeId,
@@ -62,6 +63,7 @@ impl Default for TypeArena {
     fn default() -> Self {
         let mut arena = Self {
             types: Vec::new(),
+            intern_index: HashMap::new(),
             top: 0,
             bottom: 0,
             bool_ty: 0,
@@ -87,11 +89,13 @@ impl TypeArena {
     }
 
     pub fn intern(&mut self, ty: Type) -> TypeId {
-        if let Some(idx) = self.types.iter().position(|existing| *existing == ty) {
+        if let Some(idx) = self.intern_index.get(&ty).copied() {
             return idx;
         }
-        self.types.push(ty);
-        self.types.len() - 1
+        let idx = self.types.len();
+        self.types.push(ty.clone());
+        self.intern_index.insert(ty, idx);
+        idx
     }
 
     pub fn int(&mut self, bits: u32, signedness: Signedness) -> TypeId {
@@ -205,6 +209,32 @@ impl TypeArena {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intern_reuses_existing_ids() {
+        let mut arena = TypeArena::default();
+        let i1 = arena.int(32, Signedness::Signed);
+        let i2 = arena.int(32, Signedness::Signed);
+        assert_eq!(i1, i2);
+
+        let p1 = arena.ptr(i1);
+        let p2 = arena.ptr(i2);
+        assert_eq!(p1, p2);
+
+        let a1 = arena.array(i1, Some(4), Some(32));
+        let a2 = arena.array(i2, Some(4), Some(32));
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn struct_with_field_reuses_identical_shapes() {
+        let mut arena = TypeArena::default();
+        let base = arena.struct_named("Reuse");
+        let i32_ty = arena.int(32, Signedness::Signed);
+        let s1 = arena.struct_with_field(base, 0, Some("first".to_string()), i32_ty);
+        let s2 = arena.struct_with_field(base, 0, Some("first".to_string()), i32_ty);
+        assert_eq!(s1, s2);
+    }
 
     #[test]
     fn struct_named_or_existing_prefers_existing_richer_shape() {

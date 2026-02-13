@@ -1941,6 +1941,33 @@ mod decompilation {
     }
 
     #[test]
+    fn decompiles_main_calls_with_resolved_types_and_symbols() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.main", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+
+        assert!(
+            ["int32_t", "int64_t", "char*", "int "]
+                .iter()
+                .any(|needle| normalized.contains(needle)),
+            "Main should include concrete C-like types"
+        );
+        assert!(
+            normalized.contains("sym.imp.printf(") || normalized.contains("sym.imp.puts("),
+            "Main should keep resolved known call names"
+        );
+        assert!(
+            !normalized.contains("const:"),
+            "Main should not expose raw const: symbols in decompiled call flow"
+        );
+        assert!(
+            !normalized.contains("ram:"),
+            "Main should not expose raw ram: symbols in decompiled call flow"
+        );
+    }
+
+    #[test]
     fn decompiles_main_printf_format_string_literal() {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.main", "a:sla.dec");
