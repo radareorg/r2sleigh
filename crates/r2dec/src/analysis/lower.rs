@@ -100,11 +100,11 @@ impl<'a> LowerCtx<'a> {
     pub(crate) fn op_to_expr(&self, op: &SSAOp) -> CExpr {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
-            SSAOp::Load { addr, .. } => {
+            SSAOp::Load { dst, addr, .. } => {
                 if let Some(ptr) = self.ptr_arith.get(&addr.display_name()) {
                     self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                 } else {
-                    CExpr::Deref(Box::new(self.get_expr(addr)))
+                    self.typed_deref_expr(addr, dst.size)
                 }
             }
             SSAOp::IntAdd { a, b, .. } => self.binary_expr(BinaryOp::Add, a, b),
@@ -399,6 +399,37 @@ impl<'a> LowerCtx<'a> {
             index: Box::new(index_expr),
         }
     }
+
+    fn typed_deref_expr(&self, addr: &SSAVar, elem_size: u32) -> CExpr {
+        let addr_expr = self.get_expr(addr);
+        let addr_ty = self.type_oracle.map(|oracle| oracle.type_of(addr));
+        let is_pointer_typed = if let (Some(oracle), Some(ty)) = (self.type_oracle, addr_ty) {
+            oracle.is_pointer(ty) || oracle.is_array(ty)
+        } else {
+            false
+        };
+
+        let casted = if is_pointer_typed || Self::looks_like_pointer_expr(&addr_expr) {
+            addr_expr
+        } else {
+            let elem_ty = uint_type_from_size(elem_size);
+            CExpr::cast(CType::ptr(elem_ty), addr_expr)
+        };
+        CExpr::Deref(Box::new(casted))
+    }
+
+    fn looks_like_pointer_expr(expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Cast { ty, .. } => matches!(ty, CType::Pointer(_)),
+            CExpr::Deref(_) | CExpr::Subscript { .. } | CExpr::PtrMember { .. } => true,
+            CExpr::Var(name) => {
+                let lower = name.to_ascii_lowercase();
+                lower.starts_with("arg") || lower.contains("ptr") || lower.contains("addr")
+            }
+            CExpr::Paren(inner) => Self::looks_like_pointer_expr(inner),
+            _ => false,
+        }
+    }
 }
 
 fn type_from_size(size: u32) -> CType {
@@ -565,6 +596,92 @@ mod tests {
         assert_eq!(
             ctx.get_expr(&var),
             CExpr::StringLit("Usage: %s <test_num> [args...]\\n".to_string())
+        );
+    }
+
+    #[test]
+    fn load_generic_deref_casts_non_pointer_like_address() {
+        let fn_map = HashMap::new();
+        let str_map = HashMap::new();
+        let sym_map = HashMap::new();
+        let definitions = HashMap::new();
+        let use_counts = HashMap::new();
+        let condition_vars = HashSet::new();
+        let pinned = HashSet::new();
+        let var_aliases = HashMap::new();
+        let ptr_arith = HashMap::new();
+        let ctx = make_ctx(
+            &definitions,
+            &use_counts,
+            &condition_vars,
+            &pinned,
+            &var_aliases,
+            &ptr_arith,
+            &fn_map,
+            &str_map,
+            &sym_map,
+        );
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst: SSAVar::new("tmp:5001", 1, 4),
+            space: "ram".to_string(),
+            addr: SSAVar::new("tmp:5000", 1, 8),
+        });
+        let CExpr::Deref(inner) = expr else {
+            panic!("expected dereference expression");
+        };
+        assert!(
+            matches!(
+                inner.as_ref(),
+                CExpr::Cast {
+                    ty: CType::Pointer(_),
+                    ..
+                }
+            ),
+            "generic lower path should cast non-pointer-like address expressions"
+        );
+    }
+
+    #[test]
+    fn load_generic_deref_avoids_cast_for_pointer_like_address() {
+        let fn_map = HashMap::new();
+        let str_map = HashMap::new();
+        let sym_map = HashMap::new();
+        let definitions = HashMap::new();
+        let use_counts = HashMap::new();
+        let condition_vars = HashSet::new();
+        let pinned = HashSet::new();
+        let var_aliases = HashMap::new();
+        let ptr_arith = HashMap::new();
+        let ctx = make_ctx(
+            &definitions,
+            &use_counts,
+            &condition_vars,
+            &pinned,
+            &var_aliases,
+            &ptr_arith,
+            &fn_map,
+            &str_map,
+            &sym_map,
+        );
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst: SSAVar::new("tmp:5101", 1, 4),
+            space: "ram".to_string(),
+            addr: SSAVar::new("arg1", 0, 8),
+        });
+        let CExpr::Deref(inner) = expr else {
+            panic!("expected dereference expression");
+        };
+        assert!(
+            !matches!(
+                inner.as_ref(),
+                CExpr::Cast {
+                    ty: CType::Pointer(_),
+                    ..
+                }
+            ),
+            "pointer-like address expressions should not be re-cast"
         );
     }
 }

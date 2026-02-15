@@ -289,27 +289,39 @@ impl Decompiler {
         }
     }
 
-    fn linearize_function_body(&self, func: &SSAFunction) -> Vec<CStmt> {
-        let mut builder = ExpressionBuilder::new(self.config.ptr_size);
+    fn linearize_function_body(
+        &self,
+        func: &SSAFunction,
+        type_hints: &std::collections::HashMap<String, CType>,
+        type_oracle: Option<&dyn TypeOracle>,
+    ) -> Vec<CStmt> {
+        let mut fold_ctx = FoldingContext::new(self.config.ptr_size);
         if !self.context.function_names.is_empty() {
-            builder.set_function_names(self.context.function_names.clone());
+            fold_ctx.set_function_names(self.context.function_names.clone());
         }
         if !self.context.strings.is_empty() {
-            builder.set_strings(self.context.strings.clone());
+            fold_ctx.set_strings(self.context.strings.clone());
         }
         if !self.context.symbols.is_empty() {
-            builder.set_symbols(self.context.symbols.clone());
+            fold_ctx.set_symbols(self.context.symbols.clone());
         }
+        if !self.context.stack_vars.is_empty() {
+            fold_ctx.set_external_stack_vars(self.context.stack_vars.clone());
+        }
+        if !type_hints.is_empty() {
+            fold_ctx.set_type_hints(type_hints.clone());
+        }
+        fold_ctx.set_type_oracle(type_oracle);
+
+        let blocks: Vec<_> = func.blocks().cloned().collect();
+        fold_ctx.analyze_blocks(&blocks);
+        fold_ctx.analyze_function_structure(func);
         let mut stmts = Vec::new();
 
-        for &addr in func.block_addrs() {
-            let Some(block) = func.get_block(addr) else {
-                continue;
-            };
-            for op in &block.ops {
-                if let Some(stmt) = builder.op_to_stmt(op)
-                    && !matches!(stmt, CStmt::Empty)
-                {
+        for block in &blocks {
+            fold_ctx.set_current_block(block.addr);
+            for stmt in fold_ctx.fold_block(block) {
+                if !matches!(stmt, CStmt::Empty) {
                     stmts.push(stmt);
                 }
             }
@@ -400,7 +412,7 @@ impl Decompiler {
                     .unwrap_or_else(|| "unfolded structuring produced empty output".to_string());
 
                 // Fallback 2: linear block emission
-                let mut linear_stmts = self.linearize_function_body(func);
+                let mut linear_stmts = self.linearize_function_body(func, &type_hints, type_oracle);
                 let fallback_reason = format!("{}; {}", folded_reason, unfolded_reason);
 
                 use_conservative_locals = true;

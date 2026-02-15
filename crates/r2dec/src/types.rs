@@ -12,6 +12,7 @@ use r2types::{
     TypeSolver, to_c_type_like,
 };
 
+use crate::analysis::utils::parse_const_offset;
 use crate::ast::CType;
 use crate::{ExternalFunctionSignature, ExternalStackVar};
 
@@ -115,11 +116,13 @@ impl TypeInference {
         let mut constraints = Vec::new();
 
         let defs = build_def_map(func);
+        let deref_consumers = collect_deref_consumers(func, &defs);
         let mut struct_hints: HashMap<SSAVar, String> = HashMap::new();
 
         self.emit_inferred_constraints(
             func,
             &defs,
+            &deref_consumers,
             &mut arena,
             &mut constraints,
             &mut struct_hints,
@@ -149,6 +152,7 @@ impl TypeInference {
         &self,
         func: &SSAFunction,
         defs: &HashMap<String, SSAOp>,
+        deref_consumers: &HashMap<String, u32>,
         arena: &mut TypeArena,
         constraints: &mut Vec<Constraint>,
         struct_hints: &mut HashMap<SSAVar, String>,
@@ -251,9 +255,38 @@ impl TypeInference {
                             }
                         }
                     }
-                    SSAOp::IntAdd { dst, a, b }
-                    | SSAOp::IntSub { dst, a, b }
-                    | SSAOp::IntMult { dst, a, b }
+                    SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
+                        if self.emit_ptr_arith_constraints_for_deref(
+                            dst,
+                            a,
+                            b,
+                            defs,
+                            deref_consumers,
+                            arena,
+                            constraints,
+                            struct_hints,
+                        ) {
+                            continue;
+                        }
+
+                        let ty = self.integer_type_id(dst.size, Signedness::Unknown, arena);
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: a.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: b.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::IntMult { dst, a, b }
                     | SSAOp::IntAnd { dst, a, b }
                     | SSAOp::IntOr { dst, a, b }
                     | SSAOp::IntXor { dst, a, b }
@@ -531,10 +564,159 @@ impl TypeInference {
                             source: ConstraintSource::Inferred,
                         });
                     }
+                    SSAOp::IntNot { dst, src } | SSAOp::IntNegate { dst, src } => {
+                        let ty = self.integer_type_id(dst.size, Signedness::Unknown, arena);
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::Subpiece { dst, src, .. } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: self.integer_type_id(dst.size, Signedness::Unknown, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: self.integer_type_id(src.size, Signedness::Unknown, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::IntCarry { dst, a, b }
+                    | SSAOp::IntSCarry { dst, a, b }
+                    | SSAOp::IntSBorrow { dst, a, b } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: arena.bool_ty(),
+                            source: ConstraintSource::Inferred,
+                        });
+                        let ty = self.integer_type_id(a.size, Signedness::Unknown, arena);
+                        constraints.push(Constraint::SetType {
+                            var: a.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: b.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::PopCount { dst, src } | SSAOp::Lzcount { dst, src } => {
+                        constraints.push(Constraint::SetType {
+                            var: dst.clone(),
+                            ty: self.integer_type_id(dst.size, Signedness::Unsigned, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                        constraints.push(Constraint::SetType {
+                            var: src.clone(),
+                            ty: self.integer_type_id(src.size, Signedness::Unknown, arena),
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::CBranch { cond, .. } => {
+                        constraints.push(Constraint::SetType {
+                            var: cond.clone(),
+                            ty: arena.bool_ty(),
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
+                    SSAOp::Return { target } => {
+                        let ty = self.integer_type_id(target.size, Signedness::Unknown, arena);
+                        constraints.push(Constraint::SetType {
+                            var: target.clone(),
+                            ty,
+                            source: ConstraintSource::Inferred,
+                        });
+                    }
                     _ => {}
                 }
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_ptr_arith_constraints_for_deref(
+        &self,
+        dst: &SSAVar,
+        a: &SSAVar,
+        b: &SSAVar,
+        defs: &HashMap<String, SSAOp>,
+        deref_consumers: &HashMap<String, u32>,
+        arena: &mut TypeArena,
+        constraints: &mut Vec<Constraint>,
+        struct_hints: &mut HashMap<SSAVar, String>,
+    ) -> bool {
+        let Some(elem_size) = deref_consumers.get(&dst.display_name()).copied() else {
+            return false;
+        };
+        let Some((base, offset, stride)) = self.detect_addr_pattern(dst, defs) else {
+            return false;
+        };
+
+        let elem_ty = self.integer_type_id(elem_size, Signedness::Unknown, arena);
+        let ptr_ty = arena.ptr(elem_ty);
+        constraints.push(Constraint::SetType {
+            var: dst.clone(),
+            ty: ptr_ty,
+            source: ConstraintSource::Inferred,
+        });
+        constraints.push(Constraint::SetType {
+            var: base.clone(),
+            ty: ptr_ty,
+            source: ConstraintSource::Inferred,
+        });
+
+        if offset != 0 {
+            let field_name = self.lookup_field_name(offset, struct_hints.get(&base));
+            constraints.push(Constraint::FieldAccess {
+                base_ptr: base.clone(),
+                offset,
+                field_ty: elem_ty,
+                field_name,
+                source: ConstraintSource::Inferred,
+            });
+        }
+
+        if let Some(element_size) = stride {
+            let arr_elem = self.integer_type_id(element_size, Signedness::Unknown, arena);
+            let arr_ty = arena.array(arr_elem, None, Some(element_size * 8));
+            let arr_ptr = arena.ptr(arr_ty);
+            constraints.push(Constraint::SetType {
+                var: base.clone(),
+                ty: arr_ptr,
+                source: ConstraintSource::Inferred,
+            });
+            constraints.push(Constraint::SetType {
+                var: dst.clone(),
+                ty: arr_ptr,
+                source: ConstraintSource::Inferred,
+            });
+        }
+
+        let index_var = if a.display_name() == base.display_name() {
+            Some(b)
+        } else if b.display_name() == base.display_name() {
+            Some(a)
+        } else {
+            None
+        };
+        if let Some(index_var) = index_var.filter(|v| !v.is_const()) {
+            constraints.push(Constraint::SetType {
+                var: index_var.clone(),
+                ty: self.integer_type_id(index_var.size, Signedness::Unknown, arena),
+                source: ConstraintSource::Inferred,
+            });
+        }
+
+        true
     }
 
     fn emit_external_function_constraints(
@@ -547,7 +729,7 @@ impl TypeInference {
         let Some(signature) = &self.external_signature else {
             return;
         };
-        if signature.params.is_empty() {
+        if signature.params.is_empty() && signature.ret_type.is_none() {
             return;
         }
 
@@ -596,6 +778,20 @@ impl TypeInference {
             });
             if let Some(name) = struct_name {
                 struct_hints.insert(var, name);
+            }
+        }
+
+        // If the external signature provides a return type, constrain return registers.
+        if let Some(ret_ty) = &signature.ret_type {
+            let (ty_id, _) = self.ctype_to_typeid(ret_ty, arena);
+            for ret_reg in &self.ret_regs {
+                if let Some(reg_var) = reg0_map.get(ret_reg).cloned() {
+                    constraints.push(Constraint::SetType {
+                        var: reg_var,
+                        ty: ty_id,
+                        source: ConstraintSource::External,
+                    });
+                }
             }
         }
     }
@@ -750,12 +946,12 @@ impl TypeInference {
             } => Some((base.clone(), 0, Some(*element_size))),
             SSAOp::IntAdd { a, b, .. } => {
                 if a.is_const()
-                    && let Some(offset) = parse_const_addr(&a.name)
+                    && let Some(offset) = parse_const_u64(a)
                 {
                     return Some((b.clone(), offset, None));
                 }
                 if b.is_const()
-                    && let Some(offset) = parse_const_addr(&b.name)
+                    && let Some(offset) = parse_const_u64(b)
                 {
                     return Some((a.clone(), offset, None));
                 }
@@ -770,7 +966,7 @@ impl TypeInference {
             }
             SSAOp::IntSub { a, b, .. } => {
                 if b.is_const()
-                    && let Some(offset) = parse_const_addr(&b.name)
+                    && let Some(offset) = parse_const_u64(b)
                 {
                     return Some((a.clone(), offset, None));
                 }
@@ -789,16 +985,16 @@ impl TypeInference {
         let mul = defs.get(&candidate.display_name())?;
         match mul {
             SSAOp::IntMult { a, b, .. } => {
-                if let Some(scale) = parse_const_addr(&a.name) {
+                if let Some(scale) = parse_const_u64(a) {
                     return Some((base.clone(), scale as u32));
                 }
-                if let Some(scale) = parse_const_addr(&b.name) {
+                if let Some(scale) = parse_const_u64(b) {
                     return Some((base.clone(), scale as u32));
                 }
                 None
             }
             SSAOp::IntLeft { b, .. } => {
-                let shift = parse_const_addr(&b.name)?;
+                let shift = parse_const_u64(b)?;
                 let scale = 1u32.checked_shl(shift as u32)?;
                 Some((base.clone(), scale))
             }
@@ -962,6 +1158,70 @@ fn build_def_map(func: &SSAFunction) -> HashMap<String, SSAOp> {
     defs
 }
 
+fn collect_deref_consumers(
+    func: &SSAFunction,
+    defs: &HashMap<String, SSAOp>,
+) -> HashMap<String, u32> {
+    let mut out = HashMap::new();
+    for block in func.blocks() {
+        for op in &block.ops {
+            let (addr, elem_size) = match op {
+                SSAOp::Load { dst, addr, .. } => (addr, dst.size),
+                SSAOp::Store { addr, val, .. } => (addr, val.size),
+                _ => continue,
+            };
+            mark_deref_chain(addr, elem_size, defs, &mut out, &mut HashSet::new());
+        }
+    }
+    out
+}
+
+fn mark_deref_chain(
+    addr: &SSAVar,
+    elem_size: u32,
+    defs: &HashMap<String, SSAOp>,
+    out: &mut HashMap<String, u32>,
+    visited: &mut HashSet<String>,
+) {
+    let key = addr.display_name();
+    out.entry(key.clone())
+        .and_modify(|size| *size = (*size).max(elem_size))
+        .or_insert(elem_size);
+
+    if !visited.insert(key.clone()) {
+        return;
+    }
+    let Some(def) = defs.get(&key) else {
+        return;
+    };
+
+    match def {
+        SSAOp::Copy { src, .. } | SSAOp::Cast { src, .. } | SSAOp::IntZExt { src, .. } => {
+            mark_deref_chain(src, elem_size, defs, out, visited);
+        }
+        SSAOp::IntSExt { src, .. } | SSAOp::Trunc { src, .. } => {
+            mark_deref_chain(src, elem_size, defs, out, visited);
+        }
+        SSAOp::IntAdd { a, b, .. } => {
+            if !a.is_const() {
+                mark_deref_chain(a, elem_size, defs, out, visited);
+            }
+            if !b.is_const() {
+                mark_deref_chain(b, elem_size, defs, out, visited);
+            }
+        }
+        SSAOp::IntSub { a, .. } => {
+            if !a.is_const() {
+                mark_deref_chain(a, elem_size, defs, out, visited);
+            }
+        }
+        SSAOp::PtrAdd { base, .. } | SSAOp::PtrSub { base, .. } => {
+            mark_deref_chain(base, elem_size, defs, out, visited);
+        }
+        _ => {}
+    }
+}
+
 fn collect_vars(func: &SSAFunction) -> Vec<SSAVar> {
     let mut seen = HashSet::new();
     let mut vars = Vec::new();
@@ -1014,6 +1274,10 @@ fn parse_const_addr(name: &str) -> Option<u64> {
     } else {
         None
     }
+}
+
+fn parse_const_u64(var: &SSAVar) -> Option<u64> {
+    parse_const_offset(var).and_then(|offset| u64::try_from(offset).ok())
 }
 
 fn collect_call_args(ops: &[SSAOp], call_idx: usize, arg_regs: &[String]) -> Vec<SSAVar> {
@@ -1106,6 +1370,53 @@ fn struct_name_from_type(arena: &TypeArena, ty: TypeId) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+    use r2types::Type;
+
+    fn ssa_from_ops(ops: Vec<R2ILOp>, arch: Option<&ArchSpec>) -> SSAFunction {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        for op in ops {
+            block.push(op);
+        }
+        if let Some(arch) = arch {
+            SSAFunction::from_blocks_with_arch(&[block], Some(arch)).expect("ssa function")
+        } else {
+            SSAFunction::from_blocks_raw_no_arch(&[block]).expect("ssa function")
+        }
+    }
+
+    fn emit_inferred_for_test(ti: &TypeInference, func: &SSAFunction) -> Vec<Constraint> {
+        let defs = build_def_map(func);
+        let deref_consumers = collect_deref_consumers(func, &defs);
+        let mut arena = TypeArena::default();
+        let mut constraints = Vec::new();
+        let mut struct_hints = HashMap::new();
+        ti.emit_inferred_constraints(
+            func,
+            &defs,
+            &deref_consumers,
+            &mut arena,
+            &mut constraints,
+            &mut struct_hints,
+        );
+        constraints
+    }
+
+    fn emit_call_sig_for_test(ti: &TypeInference, func: &SSAFunction) -> Vec<Constraint> {
+        let mut arena = TypeArena::default();
+        let mut constraints = Vec::new();
+        let mut struct_hints = HashMap::new();
+        ti.emit_call_signature_constraints(func, &mut arena, &mut constraints, &mut struct_hints);
+        constraints
+    }
+
+    fn test_arch_for_call_regs() -> ArchSpec {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.add_register(RegisterDef::new("RAX", 0x00, 8));
+        arch.add_register(RegisterDef::new("RDI", 0x10, 8));
+        arch.add_register(RegisterDef::new("RSI", 0x18, 8));
+        arch
+    }
 
     #[test]
     fn test_type_from_size() {
@@ -1124,5 +1435,412 @@ mod tests {
         assert_eq!(parse_const_addr("const:0d40"), Some(40));
         assert_eq!(parse_const_addr("ram:401000_0"), Some(0x401000));
         assert_eq!(parse_const_addr("RAX_1"), None);
+    }
+
+    #[test]
+    fn test_emit_inferred_constraints_copy_emits_equal() {
+        let ti = TypeInference::new(64);
+        let func = ssa_from_ops(
+            vec![R2ILOp::Copy {
+                dst: Varnode::unique(0x10, 4),
+                src: Varnode::unique(0x11, 4),
+            }],
+            None,
+        );
+        let constraints = emit_inferred_for_test(&ti, &func);
+        assert!(
+            constraints
+                .iter()
+                .any(|c| matches!(c, Constraint::Equal { .. })),
+            "copy op should emit equality constraint"
+        );
+    }
+
+    #[test]
+    fn test_emit_inferred_constraints_load_store_emit_has_capability() {
+        let ti = TypeInference::new(64);
+        let addr = Varnode::unique(0x20, 8);
+        let func = ssa_from_ops(
+            vec![
+                R2ILOp::Load {
+                    dst: Varnode::unique(0x21, 4),
+                    space: SpaceId::Ram,
+                    addr: addr.clone(),
+                },
+                R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr,
+                    val: Varnode::unique(0x22, 4),
+                },
+            ],
+            None,
+        );
+        let constraints = emit_inferred_for_test(&ti, &func);
+        let cap_count = constraints
+            .iter()
+            .filter(|c| matches!(c, Constraint::HasCapability { .. }))
+            .count();
+        assert_eq!(
+            cap_count, 2,
+            "load+store should emit two capability constraints"
+        );
+    }
+
+    #[test]
+    fn test_emit_call_signature_constraints_tracks_args_and_return_for_call() {
+        let arch = test_arch_for_call_regs();
+        let mut ti = TypeInference::new(64);
+        ti.set_function_names(HashMap::from([(0x401000, "test_target".to_string())]));
+        ti.add_function_type(
+            "test_target",
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::Int(64), CType::Int(64)],
+                variadic: false,
+            },
+        );
+
+        let func = ssa_from_ops(
+            vec![
+                R2ILOp::Copy {
+                    dst: Varnode::register(0x10, 8),
+                    src: Varnode::unique(0x30, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::register(0x18, 8),
+                    src: Varnode::unique(0x31, 8),
+                },
+                R2ILOp::Call {
+                    target: Varnode::constant(0x401000, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x32, 8),
+                    src: Varnode::register(0x00, 8),
+                },
+            ],
+            Some(&arch),
+        );
+
+        let constraints = emit_call_sig_for_test(&ti, &func);
+        let call_sig = constraints
+            .iter()
+            .find_map(|c| match c {
+                Constraint::CallSig {
+                    args, params, ret, ..
+                } => Some((args, params, ret)),
+                _ => None,
+            })
+            .expect("call should emit CallSig constraint");
+        assert_eq!(call_sig.0.len(), 2, "should recover two register arguments");
+        assert_eq!(
+            call_sig.1.len(),
+            2,
+            "signature should carry two parameter types"
+        );
+        assert!(call_sig.2.is_some(), "should recover return register flow");
+    }
+
+    #[test]
+    fn test_emit_call_signature_constraints_tracks_args_and_return_for_callind() {
+        let arch = test_arch_for_call_regs();
+        let mut ti = TypeInference::new(64);
+        ti.add_function_type(
+            "const:401000",
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::Int(64), CType::Int(64)],
+                variadic: false,
+            },
+        );
+
+        let func = ssa_from_ops(
+            vec![
+                R2ILOp::Copy {
+                    dst: Varnode::register(0x10, 8),
+                    src: Varnode::unique(0x40, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::register(0x18, 8),
+                    src: Varnode::unique(0x41, 8),
+                },
+                R2ILOp::CallInd {
+                    target: Varnode::constant(0x401000, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x42, 8),
+                    src: Varnode::register(0x00, 8),
+                },
+            ],
+            Some(&arch),
+        );
+
+        let constraints = emit_call_sig_for_test(&ti, &func);
+        let call_sig = constraints
+            .iter()
+            .find_map(|c| match c {
+                Constraint::CallSig {
+                    args, params, ret, ..
+                } => Some((args, params, ret)),
+                _ => None,
+            })
+            .expect("callind should emit CallSig constraint");
+        assert_eq!(call_sig.0.len(), 2, "should recover two register arguments");
+        assert_eq!(
+            call_sig.1.len(),
+            2,
+            "signature should carry two parameter types"
+        );
+        assert!(call_sig.2.is_some(), "should recover return register flow");
+    }
+
+    #[test]
+    fn test_parse_const_u64_uses_canonical_offset_rules() {
+        assert_eq!(
+            parse_const_u64(&SSAVar::new("const:100", 0, 8)),
+            Some(0x100)
+        );
+        assert_eq!(
+            parse_const_u64(&SSAVar::new("const:0d100", 0, 8)),
+            Some(100)
+        );
+        assert_eq!(
+            parse_const_u64(&SSAVar::new("const:ffffffffffffffb8", 0, 8)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_emit_ptr_arith_constraints_for_deref_keeps_pointer_shape() {
+        let ti = TypeInference::new(64);
+        let mut arena = TypeArena::default();
+        let mut constraints = Vec::new();
+        let mut struct_hints = HashMap::new();
+
+        let base = SSAVar::new("arg1", 0, 8);
+        let offset = SSAVar::new("const:30", 0, 8);
+        let dst = SSAVar::new("tmp:1000", 1, 8);
+        let op = SSAOp::IntAdd {
+            dst: dst.clone(),
+            a: base.clone(),
+            b: offset,
+        };
+        let mut defs = HashMap::new();
+        defs.insert(dst.display_name(), op);
+        let mut deref = HashMap::new();
+        deref.insert(dst.display_name(), 4);
+
+        let handled = ti.emit_ptr_arith_constraints_for_deref(
+            &dst,
+            &base,
+            &SSAVar::new("const:30", 0, 8),
+            &defs,
+            &deref,
+            &mut arena,
+            &mut constraints,
+            &mut struct_hints,
+        );
+        assert!(handled, "pointer-arithmetic deref case should be handled");
+
+        let mut saw_field = false;
+        let mut saw_dst_ptr = false;
+        let mut saw_base_ptr = false;
+        for c in &constraints {
+            match c {
+                Constraint::FieldAccess { offset, .. } => {
+                    if *offset == 0x30 {
+                        saw_field = true;
+                    }
+                }
+                Constraint::SetType { var, ty, .. } if var == &dst => {
+                    saw_dst_ptr = matches!(arena.get(*ty), Type::Ptr(_));
+                }
+                Constraint::SetType { var, ty, .. } if var == &base => {
+                    saw_base_ptr = matches!(arena.get(*ty), Type::Ptr(_));
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_field, "should emit FieldAccess for base+const deref");
+        assert!(saw_dst_ptr, "address temp should stay pointer-typed");
+        assert!(saw_base_ptr, "base should stay pointer-typed");
+    }
+
+    #[test]
+    fn test_detect_addr_pattern_uses_canonical_const_offsets() {
+        let ti = TypeInference::new(64);
+        let base = SSAVar::new("arg1", 0, 8);
+        let addr = SSAVar::new("tmp:2000", 1, 8);
+        let op = SSAOp::IntAdd {
+            dst: addr.clone(),
+            a: base.clone(),
+            b: SSAVar::new("const:100", 0, 8),
+        };
+        let mut defs = HashMap::new();
+        defs.insert(addr.display_name(), op);
+
+        let (detected_base, offset, stride) = ti
+            .detect_addr_pattern(&addr, &defs)
+            .expect("address pattern should be detected");
+        assert_eq!(detected_base, base);
+        assert_eq!(offset, 0x100);
+        assert_eq!(stride, None);
+    }
+
+    #[test]
+    fn test_collect_call_args_tracks_sysv_ordered_register_writes() {
+        let arg1 = SSAVar::new("arg1", 0, 8);
+        let arg2 = SSAVar::new("arg2", 0, 8);
+        let call_target = SSAVar::new("const:401000", 0, 8);
+        let ops = vec![
+            SSAOp::Copy {
+                dst: SSAVar::new("rdi", 1, 8),
+                src: arg1.clone(),
+            },
+            SSAOp::Copy {
+                dst: SSAVar::new("rsi", 1, 8),
+                src: arg2.clone(),
+            },
+            SSAOp::Call {
+                target: call_target,
+            },
+        ];
+        let regs = vec!["rdi".to_string(), "rsi".to_string(), "rdx".to_string()];
+        let args = collect_call_args(&ops, 2, &regs);
+        assert_eq!(args, vec![arg1, arg2]);
+    }
+
+    #[test]
+    fn test_collect_call_return_tracks_return_register_copy() {
+        let ret_tmp = SSAVar::new("tmp:ret", 1, 8);
+        let ops = vec![
+            SSAOp::Call {
+                target: SSAVar::new("const:401000", 0, 8),
+            },
+            SSAOp::Copy {
+                dst: ret_tmp.clone(),
+                src: SSAVar::new("rax", 1, 8),
+            },
+        ];
+        let ret_regs = vec!["rax".to_string(), "eax".to_string()];
+        let ret = collect_call_return(&ops, 0, &ret_regs);
+        assert_eq!(ret, Some(ret_tmp));
+    }
+
+    #[test]
+    fn test_emit_inferred_constraints_int_not_and_negate_emit_set_type() {
+        let ti = TypeInference::new(64);
+        let func = ssa_from_ops(
+            vec![
+                R2ILOp::IntNot {
+                    dst: Varnode::unique(0x50, 4),
+                    src: Varnode::unique(0x51, 4),
+                },
+                R2ILOp::IntNegate {
+                    dst: Varnode::unique(0x52, 4),
+                    src: Varnode::unique(0x53, 4),
+                },
+            ],
+            None,
+        );
+        let constraints = emit_inferred_for_test(&ti, &func);
+        let set_type_count = constraints
+            .iter()
+            .filter(|c| matches!(c, Constraint::SetType { .. }))
+            .count();
+        assert!(
+            set_type_count >= 4,
+            "IntNot + IntNegate should emit at least 4 SetType constraints (dst+src each), got {}",
+            set_type_count
+        );
+    }
+
+    #[test]
+    fn test_emit_inferred_constraints_carry_ops_emit_bool_dst() {
+        let ti = TypeInference::new(64);
+        let func = ssa_from_ops(
+            vec![R2ILOp::IntCarry {
+                dst: Varnode::unique(0x60, 1),
+                a: Varnode::unique(0x61, 4),
+                b: Varnode::unique(0x62, 4),
+            }],
+            None,
+        );
+        let constraints = emit_inferred_for_test(&ti, &func);
+        let has_bool = constraints.iter().any(|c| match c {
+            Constraint::SetType { ty, .. } => {
+                let mut arena = TypeArena::default();
+                let bool_id = arena.bool_ty();
+                *ty == bool_id
+            }
+            _ => false,
+        });
+        assert!(has_bool, "IntCarry should emit Bool type for dst");
+    }
+
+    #[test]
+    fn test_emit_inferred_constraints_cbranch_emits_bool_for_cond() {
+        let ti = TypeInference::new(64);
+        let cond = Varnode::unique(0x70, 1);
+        let target = Varnode::constant(0x2000, 8);
+        let func = ssa_from_ops(
+            vec![R2ILOp::CBranch {
+                target,
+                cond: cond.clone(),
+            }],
+            None,
+        );
+        let constraints = emit_inferred_for_test(&ti, &func);
+        let has_bool = constraints.iter().any(|c| match c {
+            Constraint::SetType { ty, .. } => {
+                let mut arena = TypeArena::default();
+                let bool_id = arena.bool_ty();
+                *ty == bool_id
+            }
+            _ => false,
+        });
+        assert!(
+            has_bool,
+            "CBranch should emit Bool type constraint for cond"
+        );
+    }
+
+    #[test]
+    fn test_emit_inferred_constraints_return_emits_integer_type() {
+        let ti = TypeInference::new(64);
+        let func = ssa_from_ops(
+            vec![R2ILOp::Return {
+                target: Varnode::register(0x00, 8),
+            }],
+            None,
+        );
+        let constraints = emit_inferred_for_test(&ti, &func);
+        let has_set = constraints
+            .iter()
+            .any(|c| matches!(c, Constraint::SetType { .. }));
+        assert!(has_set, "Return should emit SetType for target register");
+    }
+
+    #[test]
+    fn test_emit_inferred_constraints_subpiece_emits_types() {
+        let ti = TypeInference::new(64);
+        let func = ssa_from_ops(
+            vec![R2ILOp::Subpiece {
+                dst: Varnode::unique(0x80, 4),
+                src: Varnode::unique(0x81, 8),
+                offset: 0,
+            }],
+            None,
+        );
+        let constraints = emit_inferred_for_test(&ti, &func);
+        let set_type_count = constraints
+            .iter()
+            .filter(|c| matches!(c, Constraint::SetType { .. }))
+            .count();
+        assert!(
+            set_type_count >= 2,
+            "Subpiece should emit at least 2 SetType constraints (dst+src), got {}",
+            set_type_count
+        );
     }
 }

@@ -1363,8 +1363,8 @@ mod decompilation {
         let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.dec");
         result.assert_ok();
         assert!(
-            result.contains_any(&["int", "void"]),
-            "Should produce C types"
+            result.contains_any(&["int32_t", "int64_t", "uint32_t"]),
+            "Should produce concrete C types with explicit width (int32_t, int64_t, etc.)"
         );
     }
 
@@ -1831,6 +1831,25 @@ mod decompilation {
     }
 
     #[test]
+    fn decompiles_memory_access_without_redundant_pointer_cast_noise() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_field", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        assert!(
+            !normalized.contains("(int32_t*)(int32_t*)")
+                && !normalized.contains("(uint32_t*)(uint32_t*)")
+                && !normalized.contains("(int64_t*)(int64_t*)")
+                && !normalized.contains("(uint64_t*)(uint64_t*)"),
+            "Typed memory rendering should avoid redundant nested pointer casts"
+        );
+        assert!(
+            normalized.contains("->") || normalized.contains("*(") || normalized.contains("*arg"),
+            "Memory accesses should remain readable with member or pointer-deref rendering"
+        );
+    }
+
+    #[test]
     fn decompiles_non_four_byte_stride_as_subscript() {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.test_u16_stride", "a:sla.dec");
@@ -2013,6 +2032,52 @@ mod decompilation {
                 || (normalized.contains("sym.imp.puts(")
                     && normalized.contains("\"test_cpuid() = ok\"")),
             "Main should preserve puts call and keep the cpuid status string as a literal"
+        );
+    }
+
+    #[test]
+    fn decompiles_check_secret_uses_int32_param_type() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.dec");
+        result.assert_ok();
+        let first_line = result.stdout.lines().next().unwrap_or("");
+        assert!(
+            first_line.contains("int32_t"),
+            "check_secret should use int32_t in its signature, got: {}",
+            first_line
+        );
+    }
+
+    #[test]
+    fn decompiles_solve_equation_return_type_is_not_void() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.solve_equation", "a:sla.dec");
+        result.assert_ok();
+        let first_line = result.stdout.lines().next().unwrap_or("");
+        assert!(
+            !first_line.starts_with("void "),
+            "solve_equation should not have void return type, got: {}",
+            first_line
+        );
+        assert!(
+            first_line.contains("int32_t") || first_line.contains("int64_t"),
+            "solve_equation should have an integer return type, got: {}",
+            first_line
+        );
+    }
+
+    #[test]
+    fn decompiles_struct_field_with_typed_pointer_param() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_struct_field", "a:sla.dec");
+        result.assert_ok();
+        let first_line = result.stdout.lines().next().unwrap_or("");
+        assert!(
+            first_line.contains("int64_t") || first_line.contains("int32_t*")
+                || first_line.contains("DemoStruct*")
+                || first_line.contains("int32_t"),
+            "test_struct_field should have typed parameters, got: {}",
+            first_line
         );
     }
 

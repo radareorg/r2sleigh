@@ -1560,7 +1560,7 @@ impl<'a> FoldingContext<'a> {
     pub(crate) fn op_to_expr(&self, op: &SSAOp) -> CExpr {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
-            SSAOp::Load { addr, .. } => {
+            SSAOp::Load { dst, addr, .. } => {
                 // Try to resolve ram: address to a global symbol directly
                 if addr.name.starts_with("ram:")
                     && let Some(address) = extract_call_address(&addr.name)
@@ -1588,7 +1588,10 @@ impl<'a> FoldingContext<'a> {
                 } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr) {
                     member
                 } else {
-                    CExpr::Deref(Box::new(addr_expr))
+                    let elem_ty = self
+                        .type_hint_for_var(dst)
+                        .unwrap_or_else(|| type_from_size(dst.size));
+                    self.typed_deref_expr(addr, addr_expr, elem_ty)
                 }
             }
             SSAOp::IntAdd { a, b, .. } => self.binary_expr(BinaryOp::Add, a, b),
@@ -2135,6 +2138,47 @@ impl<'a> FoldingContext<'a> {
 
         let rendered = self.var_name(var);
         self.lookup_type_hint(&rendered).cloned()
+    }
+
+    fn expr_type_hint(&self, expr: &CExpr) -> Option<CType> {
+        match expr {
+            CExpr::Var(name) => self.lookup_type_hint(name).cloned(),
+            CExpr::Cast { ty, .. } => Some(ty.clone()),
+            CExpr::Paren(inner) => self.expr_type_hint(inner),
+            _ => None,
+        }
+    }
+
+    fn typed_deref_expr(&self, addr: &SSAVar, addr_expr: CExpr, elem_ty: CType) -> CExpr {
+        let ptr_ty = CType::ptr(elem_ty);
+        let casted = self.cast_addr_expr_to_ptr_if_needed(addr, addr_expr, &ptr_ty);
+        CExpr::Deref(Box::new(casted))
+    }
+
+    fn cast_addr_expr_to_ptr_if_needed(
+        &self,
+        addr: &SSAVar,
+        addr_expr: CExpr,
+        target_ptr_ty: &CType,
+    ) -> CExpr {
+        if let CExpr::Cast { ty, .. } = &addr_expr
+            && ty == target_ptr_ty
+        {
+            return addr_expr;
+        }
+
+        let source_ty = self
+            .expr_type_hint(&addr_expr)
+            .or_else(|| self.type_hint_for_var(addr));
+        if let Some(source_ty) = source_ty.as_ref() {
+            return self.cast_expr_if_needed(addr_expr, target_ptr_ty.clone(), Some(source_ty));
+        }
+
+        if self.looks_like_pointer(&addr_expr) {
+            return addr_expr;
+        }
+
+        CExpr::cast(target_ptr_ty.clone(), addr_expr)
     }
 
     fn int_meta(&self, ty: &CType) -> Option<(bool, u32)> {
@@ -3203,6 +3247,9 @@ impl<'a> FoldingContext<'a> {
             }
             SSAOp::Load { dst, addr, .. } => {
                 let lhs = CExpr::Var(self.var_name(dst));
+                let elem_ty = self
+                    .type_hint_for_var(dst)
+                    .unwrap_or_else(|| type_from_size(dst.size));
                 // Try to resolve ram: address to a global symbol name directly
                 let rhs = if addr.name.starts_with("ram:") {
                     if let Some(address) = extract_call_address(&addr.name) {
@@ -3214,11 +3261,11 @@ impl<'a> FoldingContext<'a> {
                             CExpr::StringLit(s.clone())
                         } else {
                             let addr_expr = self.get_expr(addr);
-                            CExpr::Deref(Box::new(addr_expr))
+                            self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                         }
                     } else {
                         let addr_expr = self.get_expr(addr);
-                        CExpr::Deref(Box::new(addr_expr))
+                        self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                     }
                 } else if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
                     CExpr::Var(stack_var)
@@ -3236,12 +3283,15 @@ impl<'a> FoldingContext<'a> {
                     {
                         member
                     } else {
-                        CExpr::Deref(Box::new(addr_expr))
+                        self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                     }
                 };
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Store { addr, val, .. } => {
+                let elem_ty = self
+                    .type_hint_for_var(val)
+                    .unwrap_or_else(|| type_from_size(val.size));
                 // Try to resolve ram: address to a global symbol name directly
                 let lhs = if addr.name.starts_with("ram:") {
                     if let Some(address) = extract_call_address(&addr.name) {
@@ -3249,11 +3299,11 @@ impl<'a> FoldingContext<'a> {
                             CExpr::Var(sym.clone())
                         } else {
                             let addr_expr = self.get_expr(addr);
-                            CExpr::Deref(Box::new(addr_expr))
+                            self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                         }
                     } else {
                         let addr_expr = self.get_expr(addr);
-                        CExpr::Deref(Box::new(addr_expr))
+                        self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                     }
                 } else if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
                     CExpr::Var(stack_var)
@@ -3271,7 +3321,7 @@ impl<'a> FoldingContext<'a> {
                     {
                         member
                     } else {
-                        CExpr::Deref(Box::new(addr_expr))
+                        self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                     }
                 };
                 let mut rhs = self.get_expr(val);
@@ -5902,6 +5952,100 @@ mod tests {
             panic!("expected pointer member access");
         };
         assert_eq!(member, "field_30");
+    }
+
+    #[test]
+    fn test_load_generic_deref_inserts_minimal_pointer_cast() {
+        let addr = make_var("tmp:9300", 1, 8);
+        let dst = make_var("tmp:9301", 1, 4);
+        let block = make_block(vec![SSAOp::Load {
+            dst: dst.clone(),
+            space: "ram".to_string(),
+            addr: addr.clone(),
+        }]);
+
+        let mut ctx = FoldingContext::new(64);
+        let mut hints = HashMap::new();
+        hints.insert(addr.display_name(), CType::Int(64));
+        hints.insert(dst.display_name(), CType::Int(32));
+        ctx.set_type_hints(hints);
+        ctx.analyze_block(&block);
+
+        let stmt = ctx
+            .op_to_stmt(&SSAOp::Load {
+                dst,
+                space: "ram".to_string(),
+                addr,
+            })
+            .expect("load should emit statement");
+        let CStmt::Expr(CExpr::Binary {
+            op: BinaryOp::Assign,
+            right,
+            ..
+        }) = stmt
+        else {
+            panic!("expected assignment expression");
+        };
+        let CExpr::Deref(inner) = right.as_ref() else {
+            panic!("expected dereference expression");
+        };
+        assert!(
+            matches!(
+                inner.as_ref(),
+                CExpr::Cast {
+                    ty: CType::Pointer(_),
+                    ..
+                }
+            ),
+            "generic deref should cast integer-ish address to typed pointer"
+        );
+    }
+
+    #[test]
+    fn test_load_generic_deref_avoids_redundant_pointer_cast() {
+        let addr = make_var("arg1", 0, 8);
+        let dst = make_var("tmp:9401", 1, 4);
+        let block = make_block(vec![SSAOp::Load {
+            dst: dst.clone(),
+            space: "ram".to_string(),
+            addr: addr.clone(),
+        }]);
+
+        let mut ctx = FoldingContext::new(64);
+        let mut hints = HashMap::new();
+        hints.insert(addr.display_name(), CType::ptr(CType::Int(32)));
+        hints.insert(dst.display_name(), CType::Int(32));
+        ctx.set_type_hints(hints);
+        ctx.analyze_block(&block);
+
+        let stmt = ctx
+            .op_to_stmt(&SSAOp::Load {
+                dst,
+                space: "ram".to_string(),
+                addr,
+            })
+            .expect("load should emit statement");
+        let CStmt::Expr(CExpr::Binary {
+            op: BinaryOp::Assign,
+            right,
+            ..
+        }) = stmt
+        else {
+            panic!("expected assignment expression");
+        };
+        let CExpr::Deref(inner) = right.as_ref() else {
+            panic!("expected dereference expression");
+        };
+        assert!(
+            !matches!(
+                inner.as_ref(),
+                CExpr::Cast {
+                    ty: CType::Pointer(_),
+                    ..
+                }
+            ),
+            "address already typed as pointer should not get an extra cast"
+        );
     }
 
     #[test]
