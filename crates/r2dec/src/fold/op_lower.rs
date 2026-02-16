@@ -22,24 +22,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use r2ssa::{FunctionSSABlock, SSAFunction, SSAOp, SSAVar};
-use r2types::{SignatureRegistry, TypeArena, TypeOracle};
+use r2ssa::{SSAFunction, SSAOp, SSAVar};
+use r2types::TypeArena;
+#[cfg(test)]
+use r2types::TypeOracle;
 
-use crate::ExternalStackVar;
 use crate::analysis;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
 use crate::types::FunctionType;
 
-// Type alias for clarity
-pub(crate) type SSABlock = FunctionSSABlock;
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct PtrArith {
-    pub(crate) base: SSAVar,
-    pub(crate) index: SSAVar,
-    pub(crate) element_size: u32,
-    pub(crate) is_sub: bool,
-}
+use super::context::{FoldingContext, PtrArith, SSABlock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompareContext {
@@ -60,58 +52,17 @@ struct CompareTuple {
 /// This handles cases like stack offsets: 0xffffffffffffffb8 represents -72.
 const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
 
-/// Tracks use counts and definitions for expression folding.
-pub struct FoldingContext<'a> {
-    /// Pointer size in bits (reserved for architecture-aware type sizing).
-    ptr_size: u32,
-    /// Function address to name mapping for resolving call targets.
-    function_names: HashMap<u64, String>,
-    /// String literals at addresses.
-    strings: HashMap<u64, String>,
-    /// Symbol/global variable names at addresses.
-    symbols: HashMap<u64, String>,
-    /// Whether to hide stack frame boilerplate (prologue/epilogue).
-    hide_stack_frame: bool,
-    /// Stack/frame pointer register names for detection.
-    sp_name: String,
-    fp_name: String,
-    /// Return register name ("rax" for 64-bit, "eax" for 32-bit).
-    ret_reg_name: String,
-    /// The function's exit block address (block containing SSAOp::Return).
-    exit_block: Option<u64>,
-    /// Blocks that branch directly to the exit block (these are "return" points).
-    return_blocks: HashSet<u64>,
-    /// Current block address being processed (for return detection).
-    current_block_addr: Option<u64>,
-    /// Optional userop name mappings for CallOther.
-    userop_names: HashMap<u32, String>,
-    /// Ordered argument registers for the calling convention (e.g., SysV x86-64).
-    arg_regs: Vec<String>,
-    /// Caller-saved registers that can be eliminated when unused.
-    caller_saved_regs: HashSet<String>,
-    /// Snapshot of explicit analysis passes.
-    analysis_ctx: analysis::AnalysisContext,
-    /// Stack variables recovered from external analysis metadata.
-    external_stack_vars: HashMap<i64, ExternalStackVar>,
-    /// Known function signatures from host analysis keyed by normalized name.
-    known_function_signatures: HashMap<String, FunctionType>,
-    /// Embedded signature registry fallback for common API arities.
-    signature_registry: SignatureRegistry,
-    /// Optional oracle for richer type-driven rendering.
-    type_oracle: Option<&'a dyn TypeOracle>,
-}
-
 impl<'a> FoldingContext<'a> {
     fn use_info(&self) -> &analysis::UseInfo {
-        &self.analysis_ctx.use_info
+        &self.state.analysis_ctx.use_info
     }
 
     fn flag_info(&self) -> &analysis::FlagInfo {
-        &self.analysis_ctx.flag_info
+        &self.state.analysis_ctx.flag_info
     }
 
     fn stack_info(&self) -> &analysis::StackInfo {
-        &self.analysis_ctx.stack_info
+        &self.state.analysis_ctx.stack_info
     }
 
     pub(crate) fn use_counts_map(&self) -> &HashMap<String, usize> {
@@ -159,94 +110,19 @@ impl<'a> FoldingContext<'a> {
     pub(crate) fn stack_vars_map(&self) -> &HashMap<i64, String> {
         &self.stack_info().stack_vars
     }
-    pub(crate) fn to_pass_env(&self) -> analysis::PassEnv<'a> {
+    pub(crate) fn to_pass_env(&self) -> analysis::PassEnv<'_> {
         analysis::PassEnv {
-            ptr_size: self.ptr_size,
-            sp_name: self.sp_name.clone(),
-            fp_name: self.fp_name.clone(),
-            ret_reg_name: self.ret_reg_name.clone(),
-            function_names: self.function_names.clone(),
-            strings: self.strings.clone(),
-            symbols: self.symbols.clone(),
-            arg_regs: self.arg_regs.clone(),
-            caller_saved_regs: self.caller_saved_regs.clone(),
-            type_hints: self.use_info().type_hints.clone(),
-            type_oracle: self.type_oracle,
-        }
-    }
-
-    /// Create a new folding context.
-    pub fn new(ptr_size: u32) -> Self {
-        let sp_name = if ptr_size == 64 {
-            "rsp".to_string()
-        } else {
-            "esp".to_string()
-        };
-        let fp_name = if ptr_size == 64 {
-            "rbp".to_string()
-        } else {
-            "ebp".to_string()
-        };
-        let ret_reg_name = if ptr_size == 64 {
-            "rax".to_string()
-        } else {
-            "eax".to_string()
-        };
-        let arg_regs = if ptr_size == 64 {
-            vec![
-                "rdi".to_string(),
-                "rsi".to_string(),
-                "rdx".to_string(),
-                "rcx".to_string(),
-                "r8".to_string(),
-                "r9".to_string(),
-            ]
-        } else {
-            vec![]
-        };
-        let caller_saved_regs = {
-            let mut s = HashSet::new();
-            if ptr_size == 64 {
-                for r in &["rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11"] {
-                    s.insert(r.to_string());
-                }
-            } else {
-                for r in &["eax", "ecx", "edx"] {
-                    s.insert(r.to_string());
-                }
-            }
-            s
-        };
-
-        Self {
-            ptr_size,
-            function_names: HashMap::new(),
-            strings: HashMap::new(),
-            symbols: HashMap::new(),
-            hide_stack_frame: true, // Default to hiding stack frame
-            // NOTE: Stack register names are currently x86-only.
-            // For ARM/MIPS support, these would need to be configurable:
-            // - ARM: sp, fp (or r13, r11)
-            // - MIPS: $sp, $fp ($29, $30)
-            // Use set_stack_regs() to override for other architectures.
-            sp_name,
-            fp_name,
-            ret_reg_name,
-            exit_block: None,
-            return_blocks: HashSet::new(),
-            current_block_addr: None,
-            userop_names: HashMap::new(),
-            arg_regs,
-            caller_saved_regs,
-            analysis_ctx: analysis::AnalysisContext {
-                use_info: analysis::UseInfo::default(),
-                flag_info: analysis::FlagInfo::default(),
-                stack_info: analysis::StackInfo::default(),
-            },
-            external_stack_vars: HashMap::new(),
-            known_function_signatures: HashMap::new(),
-            signature_registry: SignatureRegistry::from_embedded_json(),
-            type_oracle: None,
+            ptr_size: self.inputs.arch.ptr_size,
+            sp_name: &self.inputs.arch.sp_name,
+            fp_name: &self.inputs.arch.fp_name,
+            ret_reg_name: &self.inputs.arch.ret_reg_name,
+            function_names: self.inputs.function_names,
+            strings: self.inputs.strings,
+            symbols: self.inputs.symbols,
+            arg_regs: &self.inputs.arch.arg_regs,
+            caller_saved_regs: &self.inputs.arch.caller_saved_regs,
+            type_hints: &self.use_info().type_hints,
+            type_oracle: self.inputs.type_oracle,
         }
     }
 
@@ -255,34 +131,34 @@ impl<'a> FoldingContext<'a> {
         self.hide_stack_frame = hide;
     }
 
-    /// Set stack/frame pointer names for stack frame detection.
-    pub fn set_stack_regs(&mut self, sp_name: &str, fp_name: &str) {
-        self.sp_name = sp_name.to_string();
-        self.fp_name = fp_name.to_string();
-    }
-
-    /// Set the function name mapping for resolving call targets.
+    #[cfg(test)]
     pub fn set_function_names(&mut self, names: HashMap<u64, String>) {
-        self.function_names = names;
+        self.inputs.function_names = Box::leak(Box::new(names));
     }
 
-    /// Set the string literals mapping.
-    pub fn set_strings(&mut self, strings: HashMap<u64, String>) {
-        self.strings = strings;
-    }
-
-    /// Set calling convention argument registers (ordered).
-    pub fn set_arg_regs(&mut self, regs: Vec<String>) {
-        self.arg_regs = regs;
-    }
-
-    /// Set externally recovered known function signatures.
+    #[cfg(test)]
     pub fn set_known_function_signatures(&mut self, signatures: HashMap<String, FunctionType>) {
-        self.known_function_signatures.clear();
-        for (name, sig) in signatures {
-            self.known_function_signatures
-                .insert(normalize_callee_name(&name), sig);
-        }
+        let normalized = signatures
+            .into_iter()
+            .map(|(name, sig)| (normalize_callee_name(&name), sig))
+            .collect::<HashMap<_, _>>();
+        self.inputs.known_function_signatures = Box::leak(Box::new(normalized));
+    }
+
+    #[cfg(test)]
+    pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
+        self.inputs.type_hints = Box::leak(Box::new(hints.clone()));
+        self.state.analysis_ctx.use_info.type_hints = hints;
+    }
+
+    #[cfg(test)]
+    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, crate::ExternalStackVar>) {
+        self.inputs.external_stack_vars = Box::leak(Box::new(stack_vars));
+    }
+
+    #[cfg(test)]
+    pub fn set_type_oracle(&mut self, type_oracle: Option<&'a dyn TypeOracle>) {
+        self.inputs.type_oracle = type_oracle;
     }
 
     /// Collect the set of variable names that survive folding (not inlined, not dead,
@@ -332,29 +208,9 @@ impl<'a> FoldingContext<'a> {
         names
     }
 
-    /// Set the symbol/global variable names mapping.
-    pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
-        self.symbols = symbols;
-    }
-
     /// Set CallOther userop name mappings.
     pub fn set_userop_names(&mut self, names: HashMap<u32, String>) {
         self.userop_names = names;
-    }
-
-    /// Set inferred type hints keyed by rendered variable name.
-    pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
-        self.analysis_ctx.use_info.type_hints = hints;
-    }
-
-    /// Set externally recovered stack variables keyed by signed stack offset.
-    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, ExternalStackVar>) {
-        self.external_stack_vars = stack_vars;
-    }
-
-    /// Set optional type oracle for type-driven expression rendering.
-    pub fn set_type_oracle(&mut self, type_oracle: Option<&'a dyn TypeOracle>) {
-        self.type_oracle = type_oracle;
     }
 
     /// Analyze function structure to detect return patterns.
@@ -364,25 +220,25 @@ impl<'a> FoldingContext<'a> {
         for block in func.blocks() {
             for op in &block.ops {
                 if matches!(op, SSAOp::Return { .. }) {
-                    self.exit_block = Some(block.addr);
+                    self.state.exit_block = Some(block.addr);
                     break;
                 }
             }
-            if self.exit_block.is_some() {
+            if self.state.exit_block.is_some() {
                 break;
             }
         }
 
         // Find blocks that branch directly to the exit block
-        if let Some(exit_addr) = self.exit_block {
+        if let Some(exit_addr) = self.state.exit_block {
             // Treat the exit block itself as a return context.
-            self.return_blocks.insert(exit_addr);
+            self.state.return_blocks.insert(exit_addr);
 
             // Any CFG predecessor of the exit block is a return context,
             // including fallthrough paths that no longer carry phi metadata.
             for pred in func.predecessors(exit_addr) {
                 if pred != exit_addr {
-                    self.return_blocks.insert(pred);
+                    self.state.return_blocks.insert(pred);
                 }
             }
 
@@ -398,7 +254,7 @@ impl<'a> FoldingContext<'a> {
                         if let Some(addr) = self.extract_branch_target_address(target)
                             && addr == exit_addr
                         {
-                            self.return_blocks.insert(block.addr);
+                            self.state.return_blocks.insert(block.addr);
                         }
                     }
                 }
@@ -412,7 +268,7 @@ impl<'a> FoldingContext<'a> {
                     for (src_addr, _) in &phi.sources {
                         // src_addr is already u64
                         if *src_addr != exit_addr {
-                            self.return_blocks.insert(*src_addr);
+                            self.state.return_blocks.insert(*src_addr);
                         }
                     }
                 }
@@ -434,52 +290,27 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    /// Set the current block address being processed.
-    pub fn set_current_block(&mut self, addr: u64) {
-        self.current_block_addr = Some(addr);
-    }
-
     /// Check if the current block is a return block.
     fn is_current_return_block(&self) -> bool {
-        if let Some(addr) = self.current_block_addr {
-            return self.return_blocks.contains(&addr);
+        if let Some(addr) = self.current_block_addr.get() {
+            return self.state.return_blocks.contains(&addr);
         }
         false
     }
 
-    /// Return true when `name` identifies an architecture return register.
-    /// `name` is expected to be lowercase and without SSA suffix.
-    fn is_return_register_name(&self, name: &str) -> bool {
-        let name = name.to_lowercase();
-        let base = name.split('_').next().unwrap_or(&name);
-
-        if base == self.ret_reg_name {
-            return true;
-        }
-
-        if matches!(base, "xmm0" | "st0") {
-            return true;
-        }
-
-        match self.ptr_size {
-            8 => matches!(base, "rax" | "eax" | "ax" | "al"),
-            _ => matches!(base, "eax" | "ax" | "al"),
-        }
-    }
-
     /// Look up a function name by address.
     fn lookup_function(&self, addr: u64) -> Option<&String> {
-        self.function_names.get(&addr)
+        self.inputs.function_names.get(&addr)
     }
 
     /// Look up a string literal by address.
     fn lookup_string(&self, addr: u64) -> Option<&String> {
-        self.strings.get(&addr)
+        self.inputs.strings.get(&addr)
     }
 
     /// Look up a symbol by address.
     fn lookup_symbol(&self, addr: u64) -> Option<&String> {
-        self.symbols.get(&addr)
+        self.inputs.symbols.get(&addr)
     }
 
     /// Look up a userop name for CallOther.
@@ -501,12 +332,13 @@ impl<'a> FoldingContext<'a> {
         // 1) UseInfo
         // 2) FlagInfo + StackInfo
         // 3) Predicate simplification/statement emit consume analysis state
+        self.state.analysis_ctx.use_info.type_hints = self.inputs.type_hints.clone();
         let env = self.to_pass_env();
         let mut use_info = analysis::UseInfo::analyze(blocks, &env);
         let flag_info = analysis::FlagInfo::analyze(blocks, &use_info, &env);
         let mut stack_info = analysis::StackInfo::analyze(blocks, &use_info, &env);
 
-        for (offset, ext_var) in &self.external_stack_vars {
+        for (offset, ext_var) in self.inputs.external_stack_vars {
             if ext_var.name.is_empty() {
                 continue;
             }
@@ -535,7 +367,7 @@ impl<'a> FoldingContext<'a> {
                 );
             }
         }
-        self.analysis_ctx = analysis::AnalysisContext {
+        self.state.analysis_ctx = analysis::AnalysisContext {
             use_info,
             flag_info,
             stack_info,
@@ -560,7 +392,9 @@ impl<'a> FoldingContext<'a> {
         let name_lower = var.name.to_lowercase();
 
         // Direct fp/sp reference
-        if name_lower.contains(&self.fp_name) || name_lower.contains(&self.sp_name) {
+        if name_lower.contains(&self.inputs.arch.fp_name)
+            || name_lower.contains(&self.inputs.arch.sp_name)
+        {
             return Some(0);
         }
 
@@ -613,7 +447,9 @@ impl<'a> FoldingContext<'a> {
             }
             CExpr::Var(name) => {
                 let name_lower = name.to_lowercase();
-                if name_lower.contains(&self.fp_name) || name_lower.contains(&self.sp_name) {
+                if name_lower.contains(&self.inputs.arch.fp_name)
+                    || name_lower.contains(&self.inputs.arch.sp_name)
+                {
                     return Some(0);
                 }
                 self.lookup_definition(name)
@@ -627,7 +463,8 @@ impl<'a> FoldingContext<'a> {
         match expr {
             CExpr::Var(name) => {
                 let name_lower = name.to_lowercase();
-                name_lower.contains(&self.fp_name) || name_lower.contains(&self.sp_name)
+                name_lower.contains(&self.inputs.arch.fp_name)
+                    || name_lower.contains(&self.inputs.arch.sp_name)
             }
             CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } | CExpr::AddrOf(inner) => {
                 self.is_stack_base_expr(inner)
@@ -769,18 +606,19 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn external_stack_name_for_offset(&self, offset: i64) -> Option<String> {
-        if let Some(var) = self.external_stack_vars.get(&offset)
+        if let Some(var) = self.inputs.external_stack_vars.get(&offset)
             && !var.name.is_empty()
         {
             return Some(var.name.clone());
         }
 
-        for (ext_offset, var) in &self.external_stack_vars {
+        for (ext_offset, var) in self.inputs.external_stack_vars {
             if var.name.is_empty() {
                 continue;
             }
             let base_lower = var.base.as_deref().unwrap_or_default().to_ascii_lowercase();
-            let is_frame_based = base_lower == self.fp_name || base_lower.ends_with(&self.fp_name);
+            let is_frame_based = base_lower == self.inputs.arch.fp_name
+                || base_lower.ends_with(&self.inputs.arch.fp_name);
             if is_frame_based && -*ext_offset == offset {
                 return Some(var.name.clone());
             }
@@ -912,7 +750,6 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    /// Check if a variable should be inlined.
     fn should_inline(&self, var_name: &str) -> bool {
         let use_count = self.use_counts_map().get(var_name).copied().unwrap_or(0);
         if use_count == 0 || use_count > 3 {
@@ -951,15 +788,15 @@ impl<'a> FoldingContext<'a> {
         if let Some((base, _version)) = var_name.rsplit_once('_') {
             let base_lower = base.to_lowercase();
             // Don't inline return register assignments in return blocks
-            if base_lower == self.ret_reg_name && self.is_current_return_block() {
+            if base_lower == self.inputs.arch.ret_reg_name && self.is_current_return_block() {
                 return false;
             }
             // Don't inline stack/frame pointer versions - they're structural
-            if base_lower == self.sp_name || base_lower == self.fp_name {
+            if base_lower == self.inputs.arch.sp_name || base_lower == self.inputs.arch.fp_name {
                 return false;
             }
             // Inline calling-convention argument registers (consumed by call args)
-            if self.caller_saved_regs.contains(&base_lower) {
+            if self.inputs.arch.caller_saved_regs.contains(&base_lower) {
                 return true;
             }
             // Inline any register with a definition when it is single-use
@@ -1062,7 +899,7 @@ impl<'a> FoldingContext<'a> {
 
         // Caller-saved / calling-convention registers are dead if unused
         // (their values don't survive across calls anyway)
-        if self.caller_saved_regs.contains(&lower) {
+        if self.inputs.arch.caller_saved_regs.contains(&lower) {
             return true;
         }
 
@@ -1072,7 +909,7 @@ impl<'a> FoldingContext<'a> {
         }
 
         // Stack/frame pointer intermediate versions are dead if unused
-        if lower == self.sp_name || lower == self.fp_name {
+        if lower == self.inputs.arch.sp_name || lower == self.inputs.arch.fp_name {
             return true;
         }
 
@@ -1112,8 +949,8 @@ impl<'a> FoldingContext<'a> {
                 let addr_name = addr.name.to_lowercase();
                 let val_name = val.name.to_lowercase();
                 // Store of fp to stack (push fp)
-                if val_name.contains(&self.fp_name)
-                    && (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
+                if val_name.contains(&self.inputs.arch.fp_name)
+                    && (addr_name.contains(&self.inputs.arch.sp_name) || addr_name.contains("tmp:"))
                 {
                     return true;
                 }
@@ -1123,7 +960,7 @@ impl<'a> FoldingContext<'a> {
                 }
                 // Store constant to RSP-derived address (pre-call return address push)
                 if val.is_const()
-                    && (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
+                    && (addr_name.contains(&self.inputs.arch.sp_name) || addr_name.contains("tmp:"))
                 {
                     // Check if this constant was consumed by call-arg analysis
                     let val_key = val.display_name();
@@ -1134,7 +971,7 @@ impl<'a> FoldingContext<'a> {
                 // Store callee-saved register to stack (prologue push)
                 // The P-code often uses temps: Copy tmp:X = RBX; Store [RSP], tmp:X
                 // So we need to check both direct and indirect through temps.
-                if (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
+                if (addr_name.contains(&self.inputs.arch.sp_name) || addr_name.contains("tmp:"))
                     && !val.is_const()
                 {
                     // Direct: val is a callee-saved register
@@ -1156,7 +993,7 @@ impl<'a> FoldingContext<'a> {
                                 || src_lower.contains("r13")
                                 || src_lower.contains("r14")
                                 || src_lower.contains("r15")
-                                || src_lower.contains(&self.fp_name)
+                                || src_lower.contains(&self.inputs.arch.fp_name)
                             {
                                 return true;
                             }
@@ -1170,11 +1007,15 @@ impl<'a> FoldingContext<'a> {
                 let dst_name = dst.name.to_lowercase();
                 let src_name = src.name.to_lowercase();
                 // mov fp, sp (frame pointer setup)
-                if dst_name.contains(&self.fp_name) && src_name.contains(&self.sp_name) {
+                if dst_name.contains(&self.inputs.arch.fp_name)
+                    && src_name.contains(&self.inputs.arch.sp_name)
+                {
                     return true;
                 }
                 // mov sp, fp (frame pointer teardown)
-                if dst_name.contains(&self.sp_name) && src_name.contains(&self.fp_name) {
+                if dst_name.contains(&self.inputs.arch.sp_name)
+                    && src_name.contains(&self.inputs.arch.fp_name)
+                {
                     return true;
                 }
                 false
@@ -1184,8 +1025,8 @@ impl<'a> FoldingContext<'a> {
                 let dst_name = dst.name.to_lowercase();
                 let a_name = a.name.to_lowercase();
                 // sp = sp - const (stack allocation)
-                if dst_name.contains(&self.sp_name)
-                    && a_name.contains(&self.sp_name)
+                if dst_name.contains(&self.inputs.arch.sp_name)
+                    && a_name.contains(&self.inputs.arch.sp_name)
                     && b.is_const()
                 {
                     return true;
@@ -1197,15 +1038,15 @@ impl<'a> FoldingContext<'a> {
                 let dst_name = dst.name.to_lowercase();
                 let a_name = a.name.to_lowercase();
                 // sp = sp + const (stack deallocation)
-                if dst_name.contains(&self.sp_name)
-                    && a_name.contains(&self.sp_name)
+                if dst_name.contains(&self.inputs.arch.sp_name)
+                    && a_name.contains(&self.inputs.arch.sp_name)
                     && b.is_const()
                 {
                     return true;
                 }
                 // sp = fp + const (leave instruction equivalent)
-                if dst_name.contains(&self.sp_name)
-                    && a_name.contains(&self.fp_name)
+                if dst_name.contains(&self.inputs.arch.sp_name)
+                    && a_name.contains(&self.inputs.arch.fp_name)
                     && b.is_const()
                 {
                     return true;
@@ -1217,8 +1058,8 @@ impl<'a> FoldingContext<'a> {
                 let dst_name = dst.name.to_lowercase();
                 let addr_name = addr.name.to_lowercase();
                 // Load fp from stack (pop fp)
-                if dst_name.contains(&self.fp_name)
-                    && (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
+                if dst_name.contains(&self.inputs.arch.fp_name)
+                    && (addr_name.contains(&self.inputs.arch.sp_name) || addr_name.contains("tmp:"))
                 {
                     return true;
                 }
@@ -1227,7 +1068,7 @@ impl<'a> FoldingContext<'a> {
                     return true;
                 }
                 // Load callee-saved register from stack (epilogue pop)
-                if (addr_name.contains(&self.sp_name) || addr_name.contains("tmp:"))
+                if (addr_name.contains(&self.inputs.arch.sp_name) || addr_name.contains("tmp:"))
                     && (dst_name.contains("rbx")
                         || dst_name.contains("r12")
                         || dst_name.contains("r13")
@@ -1286,7 +1127,7 @@ impl<'a> FoldingContext<'a> {
         if lower.starts_with("const:") || lower.starts_with("tmp:") {
             return true;
         }
-        if self.is_return_register_name(&lower) {
+        if self.inputs.arch.is_return_register_name(&lower) {
             return true;
         }
 
@@ -1977,7 +1818,7 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn infer_subscript_elem_type(&self, base: &SSAVar, element_size: u32) -> CType {
-        if let Some(oracle) = self.type_oracle {
+        if let Some(oracle) = self.inputs.type_oracle {
             let base_ty = oracle.type_of(base);
             if (oracle.is_array(base_ty) || oracle.is_pointer(base_ty))
                 && let Some(hint) = self.type_hint_for_var(base)
@@ -2069,7 +1910,7 @@ impl<'a> FoldingContext<'a> {
         if offset < 0 {
             return None;
         }
-        let oracle = self.type_oracle?;
+        let oracle = self.inputs.type_oracle?;
         let offset = offset as u64;
 
         // Best-effort: prefer base pointer identities captured during analysis.
@@ -2131,7 +1972,8 @@ impl<'a> FoldingContext<'a> {
         match expr {
             CExpr::Var(name) => {
                 let lower = name.to_lowercase();
-                lower.contains(&self.sp_name) || lower.contains(&self.fp_name)
+                lower.contains(&self.inputs.arch.sp_name)
+                    || lower.contains(&self.inputs.arch.fp_name)
             }
             CExpr::Binary { left, right, .. } => {
                 self.is_stackish_expr(left) || self.is_stackish_expr(right)
@@ -2402,7 +2244,11 @@ impl<'a> FoldingContext<'a> {
         match expr {
             CExpr::Var(name) => {
                 let lower = name.to_lowercase();
-                lower.ends_with("_0") && self.is_return_register_name(lower.trim_end_matches("_0"))
+                lower.ends_with("_0")
+                    && self
+                        .inputs
+                        .arch
+                        .is_return_register_name(lower.trim_end_matches("_0"))
             }
             CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
                 self.is_uninitialized_return_reg(inner)
@@ -2513,7 +2359,8 @@ impl<'a> FoldingContext<'a> {
     }
 
     /// Convert a block to folded C statements.
-    pub fn fold_block(&self, block: &SSABlock) -> Vec<CStmt> {
+    pub fn fold_block(&self, block: &SSABlock, current_block_addr: u64) -> Vec<CStmt> {
+        self.current_block_addr.set(Some(current_block_addr));
         let mut stmts = Vec::new();
         let mut last_ret_value: Option<CExpr> = None;
 
@@ -2525,7 +2372,10 @@ impl<'a> FoldingContext<'a> {
 
             match op {
                 SSAOp::Copy { dst, src }
-                    if self.is_return_register_name(&dst.name.to_lowercase()) =>
+                    if self
+                        .inputs
+                        .arch
+                        .is_return_register_name(&dst.name.to_lowercase()) =>
                 {
                     last_ret_value = Some(self.get_return_expr(src));
                 }
@@ -2533,14 +2383,20 @@ impl<'a> FoldingContext<'a> {
                 | SSAOp::IntSExt { dst, src }
                 | SSAOp::Trunc { dst, src }
                 | SSAOp::Cast { dst, src }
-                    if self.is_return_register_name(&dst.name.to_lowercase()) =>
+                    if self
+                        .inputs
+                        .arch
+                        .is_return_register_name(&dst.name.to_lowercase()) =>
                 {
                     let ty = type_from_size(dst.size);
                     last_ret_value = Some(CExpr::cast(ty, self.get_return_expr(src)));
                 }
                 _ => {
                     if let Some(dst) = op.dst()
-                        && self.is_return_register_name(&dst.name.to_lowercase())
+                        && self
+                            .inputs
+                            .arch
+                            .is_return_register_name(&dst.name.to_lowercase())
                     {
                         let mut visited = HashSet::new();
                         let raw = self.op_to_expr(op);
@@ -2566,7 +2422,10 @@ impl<'a> FoldingContext<'a> {
             // Emit a single high-level return at the SSA Return terminator.
             if self.is_current_return_block()
                 && let Some(dst) = op.dst()
-                && self.is_return_register_name(&dst.name.to_lowercase())
+                && self
+                    .inputs
+                    .arch
+                    .is_return_register_name(&dst.name.to_lowercase())
             {
                 continue;
             }
@@ -2606,7 +2465,9 @@ impl<'a> FoldingContext<'a> {
         }
 
         let stmts = self.propagate_ephemeral_copies(stmts);
-        self.prune_dead_temp_assignments(stmts)
+        let out = self.prune_dead_temp_assignments(stmts);
+        self.current_block_addr.set(None);
+        out
     }
 
     fn assignment_target_and_rhs(stmt: &CStmt) -> Option<(&str, &CExpr)> {
@@ -3004,54 +2865,11 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn collect_expr_reads(&self, expr: &CExpr, out: &mut HashSet<String>) {
-        match expr {
-            CExpr::Var(name) => {
+        expr.visit(&mut |node| {
+            if let CExpr::Var(name) = node {
                 out.insert(name.clone());
             }
-            CExpr::Unary { operand, .. }
-            | CExpr::Paren(operand)
-            | CExpr::Deref(operand)
-            | CExpr::AddrOf(operand)
-            | CExpr::Sizeof(operand) => self.collect_expr_reads(operand, out),
-            CExpr::Binary { left, right, .. } => {
-                self.collect_expr_reads(left, out);
-                self.collect_expr_reads(right, out);
-            }
-            CExpr::Ternary {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                self.collect_expr_reads(cond, out);
-                self.collect_expr_reads(then_expr, out);
-                self.collect_expr_reads(else_expr, out);
-            }
-            CExpr::Cast { expr, .. } => self.collect_expr_reads(expr, out),
-            CExpr::Call { func, args } => {
-                self.collect_expr_reads(func, out);
-                for arg in args {
-                    self.collect_expr_reads(arg, out);
-                }
-            }
-            CExpr::Subscript { base, index } => {
-                self.collect_expr_reads(base, out);
-                self.collect_expr_reads(index, out);
-            }
-            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-                self.collect_expr_reads(base, out);
-            }
-            CExpr::Comma(items) => {
-                for item in items {
-                    self.collect_expr_reads(item, out);
-                }
-            }
-            CExpr::IntLit(_)
-            | CExpr::UIntLit(_)
-            | CExpr::FloatLit(_)
-            | CExpr::StringLit(_)
-            | CExpr::CharLit(_)
-            | CExpr::SizeofType(_) => {}
-        }
+        });
     }
 
     fn stmt_reads_and_def(&self, stmt: &CStmt) -> (HashSet<String>, Option<String>) {
@@ -3202,7 +3020,7 @@ impl<'a> FoldingContext<'a> {
 
     fn lookup_known_signature(&self, callee_name: &str) -> Option<&FunctionType> {
         let normalized = normalize_callee_name(callee_name);
-        self.known_function_signatures.get(&normalized)
+        self.inputs.known_function_signatures.get(&normalized)
     }
 
     fn extract_callee_name(expr: &CExpr) -> Option<&str> {
@@ -3229,7 +3047,7 @@ impl<'a> FoldingContext<'a> {
         for candidate in [name, normalized.as_str()] {
             if let Some(resolved) =
                 self.signature_registry
-                    .resolve(candidate, &mut arena, self.ptr_size)
+                    .resolve(candidate, &mut arena, self.inputs.arch.ptr_size)
             {
                 registry_arity = (!resolved.variadic).then_some(resolved.params.len());
                 break;
@@ -5332,56 +5150,25 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn expr_contains_opaque_temp(&self, expr: &CExpr) -> bool {
-        match expr {
-            CExpr::Var(name) => self.is_opaque_temp_name(name),
-            CExpr::Unary { operand, .. } => self.expr_contains_opaque_temp(operand),
-            CExpr::Binary { left, right, .. } => {
-                self.expr_contains_opaque_temp(left) || self.expr_contains_opaque_temp(right)
+        let mut found = false;
+        expr.visit(&mut |node| {
+            if let CExpr::Var(name) = node
+                && self.is_opaque_temp_name(name)
+            {
+                found = true;
             }
-            CExpr::Paren(inner) => self.expr_contains_opaque_temp(inner),
-            CExpr::Cast { expr: inner, .. } => self.expr_contains_opaque_temp(inner),
-            CExpr::Deref(inner) => self.expr_contains_opaque_temp(inner),
-            CExpr::AddrOf(inner) => self.expr_contains_opaque_temp(inner),
-            CExpr::Subscript { base, index } => {
-                self.expr_contains_opaque_temp(base) || self.expr_contains_opaque_temp(index)
-            }
-            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-                self.expr_contains_opaque_temp(base)
-            }
-            CExpr::Call { func, args } => {
-                self.expr_contains_opaque_temp(func)
-                    || args.iter().any(|arg| self.expr_contains_opaque_temp(arg))
-            }
-            _ => false,
-        }
+        });
+        found
     }
 
     fn expr_contains_unresolved_memory(&self, expr: &CExpr) -> bool {
-        match expr {
-            CExpr::Deref(_) => true,
-            CExpr::Unary { operand, .. } => self.expr_contains_unresolved_memory(operand),
-            CExpr::Binary { left, right, .. } => {
-                self.expr_contains_unresolved_memory(left)
-                    || self.expr_contains_unresolved_memory(right)
+        let mut found = false;
+        expr.visit(&mut |node| {
+            if matches!(node, CExpr::Deref(_)) {
+                found = true;
             }
-            CExpr::Paren(inner) => self.expr_contains_unresolved_memory(inner),
-            CExpr::Cast { expr: inner, .. } => self.expr_contains_unresolved_memory(inner),
-            CExpr::AddrOf(inner) => self.expr_contains_unresolved_memory(inner),
-            CExpr::Subscript { base, index } => {
-                self.expr_contains_unresolved_memory(base)
-                    || self.expr_contains_unresolved_memory(index)
-            }
-            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-                self.expr_contains_unresolved_memory(base)
-            }
-            CExpr::Call { func, args } => {
-                self.expr_contains_unresolved_memory(func)
-                    || args
-                        .iter()
-                        .any(|arg| self.expr_contains_unresolved_memory(arg))
-            }
-            _ => false,
-        }
+        });
+        found
     }
 
     fn is_sf_like_expr(&self, expr: &CExpr) -> bool {
@@ -5702,21 +5489,6 @@ fn uint_type_from_size(size: u32) -> CType {
     }
 }
 
-/// Fold expressions in a block, returning simplified C statements.
-pub fn fold_block(block: &SSABlock) -> Vec<CStmt> {
-    let mut ctx = FoldingContext::new(64);
-    ctx.analyze_block(block);
-    ctx.fold_block(block)
-}
-
-/// Fold expressions across multiple blocks.
-pub fn fold_blocks(blocks: &[SSABlock]) -> Vec<(u64, Vec<CStmt>)> {
-    let mut ctx = FoldingContext::new(64);
-    ctx.analyze_blocks(blocks);
-
-    blocks.iter().map(|b| (b.addr, ctx.fold_block(b))).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5864,7 +5636,7 @@ mod tests {
             },
         );
         ctx.set_known_function_signatures(sigs);
-        ctx.analysis_ctx.use_info.call_args.insert(
+        ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
             vec![
                 CExpr::Var("a".to_string()),
@@ -5906,7 +5678,7 @@ mod tests {
             },
         );
         ctx.set_known_function_signatures(sigs);
-        ctx.analysis_ctx.use_info.call_args.insert(
+        ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
             vec![
                 CExpr::Var("fmt".to_string()),
@@ -6097,7 +5869,9 @@ mod tests {
             },
         ]);
 
-        let stmts = fold_block(&block);
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        let stmts = ctx.fold_block(&block, block.addr);
 
         // RAX_1 is used only once (in the dead ZF_1 expression), so with stronger
         // inlining it gets inlined into the dead expression, which is then eliminated.
@@ -6731,7 +6505,8 @@ mod tests {
     #[test]
     fn test_resolve_stack_var_canonicalizes_local_name_using_external_offset_mirror() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .stack_info
             .stack_vars
             .insert(4, "local_4".to_string());
@@ -6750,7 +6525,8 @@ mod tests {
     #[test]
     fn test_var_name_canonicalizes_stack_alias_from_external_offset_mirror() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .use_info
             .var_aliases
             .insert("tmp:1_1".to_string(), "local_4".to_string());
@@ -6770,11 +6546,12 @@ mod tests {
     #[test]
     fn test_condition_var_chain_resolves_stack_alias() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .stack_info
             .stack_vars
             .insert(-4, "value".to_string());
-        ctx.analysis_ctx.use_info.definitions.insert(
+        ctx.state.analysis_ctx.use_info.definitions.insert(
             "tmp:cond_1".to_string(),
             CExpr::binary(
                 BinaryOp::Eq,
@@ -6782,7 +6559,7 @@ mod tests {
                 CExpr::IntLit(19),
             ),
         );
-        ctx.analysis_ctx.use_info.definitions.insert(
+        ctx.state.analysis_ctx.use_info.definitions.insert(
             "result".to_string(),
             CExpr::Deref(Box::new(CExpr::binary(
                 BinaryOp::Add,
@@ -6807,11 +6584,12 @@ mod tests {
     #[test]
     fn test_condition_var_chain_resolves_stack_alias_through_cast_paren() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .stack_info
             .stack_vars
             .insert(-4, "value".to_string());
-        ctx.analysis_ctx.use_info.definitions.insert(
+        ctx.state.analysis_ctx.use_info.definitions.insert(
             "tmp:cond_1".to_string(),
             CExpr::binary(
                 BinaryOp::Eq,
@@ -6819,7 +6597,7 @@ mod tests {
                 CExpr::IntLit(19),
             ),
         );
-        ctx.analysis_ctx.use_info.definitions.insert(
+        ctx.state.analysis_ctx.use_info.definitions.insert(
             "result".to_string(),
             CExpr::Paren(Box::new(CExpr::Cast {
                 ty: CType::ptr(CType::Int(32)),
@@ -6845,7 +6623,7 @@ mod tests {
     #[test]
     fn test_condition_var_chain_non_stack_remains_unforced() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx.use_info.definitions.insert(
+        ctx.state.analysis_ctx.use_info.definitions.insert(
             "tmp:cond_1".to_string(),
             CExpr::binary(
                 BinaryOp::Eq,
@@ -6853,7 +6631,7 @@ mod tests {
                 CExpr::IntLit(19),
             ),
         );
-        ctx.analysis_ctx.use_info.definitions.insert(
+        ctx.state.analysis_ctx.use_info.definitions.insert(
             "result".to_string(),
             CExpr::binary(
                 BinaryOp::Add,
@@ -6874,11 +6652,13 @@ mod tests {
     #[test]
     fn test_lookup_definition_resolves_formatted_temp_aliases() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .use_info
             .definitions
             .insert("tmp:foo_2".to_string(), CExpr::Var("local_4".to_string()));
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .use_info
             .var_aliases
             .insert("tmp:foo_2".to_string(), "t2".to_string());
@@ -6890,11 +6670,13 @@ mod tests {
     #[test]
     fn test_sf_surrogate_cycle_is_guarded() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .use_info
             .definitions
             .insert("sf_1".to_string(), CExpr::Var("sf_2".to_string()));
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .use_info
             .definitions
             .insert("sf_2".to_string(), CExpr::Var("sf_1".to_string()));
@@ -7235,7 +7017,7 @@ mod tests {
     #[test]
     fn test_simplify_signed_gt_from_ne_and_of_eq_sf() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx.flag_info.flag_origins.insert(
+        ctx.state.analysis_ctx.flag_info.flag_origins.insert(
             "OF_1".to_string(),
             ("a".to_string(), "const:0_0".to_string()),
         );
@@ -7260,7 +7042,7 @@ mod tests {
     #[test]
     fn test_simplify_signed_gt_from_ne_and_of_eq_sf_with_casted_zero() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx.flag_info.flag_origins.insert(
+        ctx.state.analysis_ctx.flag_info.flag_origins.insert(
             "OF_1".to_string(),
             ("a".to_string(), "const:0_0".to_string()),
         );
@@ -7300,7 +7082,8 @@ mod tests {
     #[test]
     fn test_simplify_signed_ge_from_of_eq_sf() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .flag_info
             .flag_origins
             .insert("OF_2".to_string(), ("a".to_string(), "b".to_string()));
@@ -7333,7 +7116,8 @@ mod tests {
     #[test]
     fn test_simplify_signed_lt_from_of_ne_sf() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .flag_info
             .flag_origins
             .insert("OF_3".to_string(), ("a".to_string(), "b".to_string()));
@@ -7366,7 +7150,8 @@ mod tests {
     #[test]
     fn test_signed_canonicalization_mismatch_does_not_collapse() {
         let mut ctx = FoldingContext::new(64);
-        ctx.analysis_ctx
+        ctx.state
+            .analysis_ctx
             .flag_info
             .flag_origins
             .insert("OF_4".to_string(), ("a".to_string(), "b".to_string()));
@@ -7600,7 +7385,7 @@ mod tests {
         let mut ctx = FoldingContext::new(64);
         ctx.analyze_function_structure(&func);
 
-        assert!(ctx.return_blocks.contains(&0x1000));
+        assert!(ctx.state.return_blocks.contains(&0x1000));
     }
 
     #[test]
@@ -7639,10 +7424,9 @@ mod tests {
 
         let mut ctx = FoldingContext::new(64);
         ctx.analyze_block(&block);
-        ctx.return_blocks.insert(block.addr);
-        ctx.set_current_block(block.addr);
+        ctx.state.return_blocks.insert(block.addr);
 
-        let stmts = ctx.fold_block(&block);
+        let stmts = ctx.fold_block(&block, block.addr);
         assert_eq!(
             stmts.len(),
             1,
@@ -7684,10 +7468,9 @@ mod tests {
 
         let mut ctx = FoldingContext::new(64);
         ctx.analyze_block(&block);
-        ctx.return_blocks.insert(block.addr);
-        ctx.set_current_block(block.addr);
+        ctx.state.return_blocks.insert(block.addr);
 
-        let stmts = ctx.fold_block(&block);
+        let stmts = ctx.fold_block(&block, block.addr);
         let return_count = stmts
             .iter()
             .filter(|stmt| matches!(stmt, CStmt::Return(_)))
@@ -7714,7 +7497,7 @@ mod tests {
 
         let mut ctx = FoldingContext::new(64);
         ctx.analyze_block(&block);
-        let stmts = ctx.fold_block(&block);
+        let stmts = ctx.fold_block(&block, block.addr);
 
         let Some(CStmt::Return(Some(expr))) = stmts.last() else {
             panic!("Expected trailing return statement");
@@ -7744,7 +7527,7 @@ mod tests {
 
         let mut ctx = FoldingContext::new(64);
         ctx.analyze_block(&block);
-        let stmts = ctx.fold_block(&block);
+        let stmts = ctx.fold_block(&block, block.addr);
 
         let Some(CStmt::Return(Some(expr))) = stmts.last() else {
             panic!("Expected trailing return statement");
@@ -7763,7 +7546,7 @@ mod tests {
 
         let mut ctx = FoldingContext::new(64);
         ctx.analyze_block(&block);
-        let stmts = ctx.fold_block(&block);
+        let stmts = ctx.fold_block(&block, block.addr);
 
         let Some(CStmt::Return(Some(expr))) = stmts.last() else {
             panic!("Expected trailing return statement");

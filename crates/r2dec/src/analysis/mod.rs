@@ -17,7 +17,7 @@ pub(crate) mod utils;
 pub(crate) use predicate::PredicateSimplifier;
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct AnalysisContext {
     pub(crate) use_info: UseInfo,
     pub(crate) flag_info: FlagInfo,
@@ -28,15 +28,15 @@ pub(crate) struct AnalysisContext {
 #[derive(Clone)]
 pub(crate) struct PassEnv<'a> {
     pub(crate) ptr_size: u32,
-    pub(crate) sp_name: String,
-    pub(crate) fp_name: String,
-    pub(crate) ret_reg_name: String,
-    pub(crate) function_names: HashMap<u64, String>,
-    pub(crate) strings: HashMap<u64, String>,
-    pub(crate) symbols: HashMap<u64, String>,
-    pub(crate) arg_regs: Vec<String>,
-    pub(crate) caller_saved_regs: HashSet<String>,
-    pub(crate) type_hints: HashMap<String, CType>,
+    pub(crate) sp_name: &'a str,
+    pub(crate) fp_name: &'a str,
+    pub(crate) ret_reg_name: &'a str,
+    pub(crate) function_names: &'a HashMap<u64, String>,
+    pub(crate) strings: &'a HashMap<u64, String>,
+    pub(crate) symbols: &'a HashMap<u64, String>,
+    pub(crate) arg_regs: &'a [String],
+    pub(crate) caller_saved_regs: &'a HashSet<String>,
+    pub(crate) type_hints: &'a HashMap<String, CType>,
     pub(crate) type_oracle: Option<&'a dyn TypeOracle>,
 }
 

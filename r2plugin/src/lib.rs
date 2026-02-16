@@ -4850,7 +4850,7 @@ pub extern "C" fn r2dec_block(ctx: *const R2ILContext, block: *const R2ILBlock) 
     let ptr_size = ctx_ref.arch.as_ref().map(|a| a.addr_size * 8).unwrap_or(64);
 
     // Build statements from SSA ops
-    let expr_builder = r2dec::ExpressionBuilder::new(ptr_size);
+    let expr_builder = r2dec::expr::ExpressionBuilder::new(ptr_size);
     let mut stmts = Vec::new();
 
     for op in &ssa_block.ops {
@@ -4893,7 +4893,7 @@ pub extern "C" fn r2dec_block_ast_json(
     let ssa_block = r2ssa::block::to_ssa(blk, disasm);
 
     // Build statements from SSA ops
-    let expr_builder = r2dec::ExpressionBuilder::new(64);
+    let expr_builder = r2dec::expr::ExpressionBuilder::new(64);
     let mut stmts: Vec<r2dec::CStmt> = Vec::new();
 
     for op in &ssa_block.ops {

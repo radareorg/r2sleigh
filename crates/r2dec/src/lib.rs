@@ -43,13 +43,13 @@ pub mod variable;
 
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::{CodeGenConfig, CodeGenerator, generate};
-pub use expr::ExpressionBuilder;
-pub use fold::{FoldingContext, fold_block, fold_blocks};
 pub use region::{Region, RegionAnalyzer};
 pub use structure::ControlFlowStructurer;
 pub use types::TypeInference;
 pub use variable::VariableRecovery;
 
+use crate::fold::FoldingContext;
+use crate::fold::context::{FoldArchConfig, FoldInputs};
 use r2ssa::SSAFunction;
 use r2ssa::SSAOp;
 use r2types::ExternalTypeDb;
@@ -63,6 +63,23 @@ fn is_generic_arg_name(name: &str) -> bool {
         .strip_prefix("arg")
         .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
         .unwrap_or(false)
+}
+
+fn normalize_callee_name(name: &str) -> String {
+    let mut out = name.trim().to_ascii_lowercase();
+    for prefix in ["sym.imp.", "sym.", "fcn."] {
+        if let Some(rest) = out.strip_prefix(prefix) {
+            out = rest.to_string();
+            break;
+        }
+    }
+    if let Some((base, ver)) = out.rsplit_once('_')
+        && !base.is_empty()
+        && ver.chars().all(|c| c.is_ascii_digit())
+    {
+        return base.to_string();
+    }
+    out
 }
 
 fn merge_params_with_external_signature(
@@ -279,30 +296,6 @@ impl Decompiler {
         codegen.generate_function(&c_func)
     }
 
-    fn configure_structurer<'o>(
-        &self,
-        structurer: &mut ControlFlowStructurer<'_, 'o>,
-        type_hints: &std::collections::HashMap<String, CType>,
-        type_oracle: Option<&'o dyn TypeOracle>,
-    ) {
-        if !self.context.function_names.is_empty() {
-            structurer.set_function_names(self.context.function_names.clone());
-        }
-        if !self.context.strings.is_empty() {
-            structurer.set_strings(self.context.strings.clone());
-        }
-        if !self.context.symbols.is_empty() {
-            structurer.set_symbols(self.context.symbols.clone());
-        }
-        if !self.context.stack_vars.is_empty() {
-            structurer.set_external_stack_vars(self.context.stack_vars.clone());
-        }
-        if !type_hints.is_empty() {
-            structurer.set_type_hints(type_hints.clone());
-        }
-        structurer.set_type_oracle(type_oracle);
-    }
-
     fn stmt_has_content(stmt: &CStmt) -> bool {
         match stmt {
             CStmt::Empty => false,
@@ -326,38 +319,13 @@ impl Decompiler {
     fn linearize_function_body(
         &self,
         func: &SSAFunction,
-        type_hints: &std::collections::HashMap<String, CType>,
-        type_oracle: Option<&dyn TypeOracle>,
+        fold_ctx: &FoldingContext<'_>,
     ) -> Vec<CStmt> {
-        let mut fold_ctx = FoldingContext::new(self.config.ptr_size);
-        if !self.context.function_names.is_empty() {
-            fold_ctx.set_function_names(self.context.function_names.clone());
-        }
-        if !self.context.strings.is_empty() {
-            fold_ctx.set_strings(self.context.strings.clone());
-        }
-        if !self.context.symbols.is_empty() {
-            fold_ctx.set_symbols(self.context.symbols.clone());
-        }
-        if !self.context.known_function_signatures.is_empty() {
-            fold_ctx.set_known_function_signatures(self.context.known_function_signatures.clone());
-        }
-        if !self.context.stack_vars.is_empty() {
-            fold_ctx.set_external_stack_vars(self.context.stack_vars.clone());
-        }
-        if !type_hints.is_empty() {
-            fold_ctx.set_type_hints(type_hints.clone());
-        }
-        fold_ctx.set_type_oracle(type_oracle);
-
         let blocks: Vec<_> = func.blocks().cloned().collect();
-        fold_ctx.analyze_blocks(&blocks);
-        fold_ctx.analyze_function_structure(func);
         let mut stmts = Vec::new();
 
         for block in &blocks {
-            fold_ctx.set_current_block(block.addr);
-            for stmt in fold_ctx.fold_block(block) {
+            for stmt in fold_ctx.fold_block(block, block.addr) {
                 if !matches!(stmt, CStmt::Empty) {
                     stmts.push(stmt);
                 }
@@ -413,9 +381,33 @@ impl Decompiler {
             .solved_types()
             .map(|solved| solved as &dyn TypeOracle);
 
+        let known_function_signatures = self
+            .context
+            .known_function_signatures
+            .iter()
+            .map(|(name, ty)| (normalize_callee_name(name), ty.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let mut fold_arch = FoldArchConfig::for_ptr_size(self.config.ptr_size);
+        fold_arch.sp_name = self.config.sp_name.clone();
+        fold_arch.fp_name = self.config.fp_name.clone();
+        let fold_inputs = FoldInputs {
+            arch: &fold_arch,
+            function_names: &self.context.function_names,
+            strings: &self.context.strings,
+            symbols: &self.context.symbols,
+            known_function_signatures: &known_function_signatures,
+            external_stack_vars: &self.context.stack_vars,
+            type_hints: &type_hints,
+            type_oracle,
+        };
+        let mut fold_ctx = FoldingContext::from_inputs(fold_inputs);
+        let fold_blocks: Vec<_> = func.blocks().cloned().collect();
+        fold_ctx.analyze_blocks(&fold_blocks);
+        fold_ctx.analyze_function_structure(func);
+
         // Structure control flow (primary path: folded)
-        let mut structurer = ControlFlowStructurer::new(func, self.config.ptr_size);
-        self.configure_structurer(&mut structurer, &type_hints, type_oracle);
+        let mut structurer = ControlFlowStructurer::new(func, &fold_ctx);
 
         // Get set of variables that survive folding before structuring.
         let emitted_vars = structurer.emitted_var_names();
@@ -432,8 +424,7 @@ impl Decompiler {
                 .unwrap_or_else(|| "folded structuring produced empty output".to_string());
 
             // Fallback 1: unfolded structuring
-            let mut unfolded = ControlFlowStructurer::new_unfolded(func, self.config.ptr_size);
-            self.configure_structurer(&mut unfolded, &type_hints, type_oracle);
+            let mut unfolded = ControlFlowStructurer::new_unfolded(func, &fold_ctx);
             let unfolded_stmt = unfolded.structure();
 
             if Self::stmt_has_content(&unfolded_stmt) {
@@ -449,7 +440,7 @@ impl Decompiler {
                     .unwrap_or_else(|| "unfolded structuring produced empty output".to_string());
 
                 // Fallback 2: linear block emission
-                let mut linear_stmts = self.linearize_function_body(func, &type_hints, type_oracle);
+                let mut linear_stmts = self.linearize_function_body(func, &fold_ctx);
                 let fallback_reason = format!("{}; {}", folded_reason, unfolded_reason);
 
                 use_conservative_locals = true;

@@ -29,3 +29,5 @@ r2plugin/*.dylib
 tests/e2e/test_func
 tests/e2e/sym_test
 tests/e2e/target/
+r2plugin/arch_sleigh.o
+r2plugin/r_anal_sleigh_arch.o

@@ -33,64 +33,8 @@ impl<'a, 'o> PredicateSimplifier<'a, 'o> {
     }
 
     fn reconstruct_condition_tree(&self, expr: CExpr) -> CExpr {
-        let rewritten = match expr {
-            CExpr::Unary { op, operand } => CExpr::Unary {
-                op,
-                operand: Box::new(self.reconstruct_condition_tree(*operand)),
-            },
-            CExpr::Binary { op, left, right } => CExpr::Binary {
-                op,
-                left: Box::new(self.reconstruct_condition_tree(*left)),
-                right: Box::new(self.reconstruct_condition_tree(*right)),
-            },
-            CExpr::Ternary {
-                cond,
-                then_expr,
-                else_expr,
-            } => CExpr::Ternary {
-                cond: Box::new(self.reconstruct_condition_tree(*cond)),
-                then_expr: Box::new(self.reconstruct_condition_tree(*then_expr)),
-                else_expr: Box::new(self.reconstruct_condition_tree(*else_expr)),
-            },
-            CExpr::Cast { ty, expr } => CExpr::Cast {
-                ty,
-                expr: Box::new(self.reconstruct_condition_tree(*expr)),
-            },
-            CExpr::Call { func, args } => CExpr::Call {
-                func: Box::new(self.reconstruct_condition_tree(*func)),
-                args: args
-                    .into_iter()
-                    .map(|arg| self.reconstruct_condition_tree(arg))
-                    .collect(),
-            },
-            CExpr::Subscript { base, index } => CExpr::Subscript {
-                base: Box::new(self.reconstruct_condition_tree(*base)),
-                index: Box::new(self.reconstruct_condition_tree(*index)),
-            },
-            CExpr::Member { base, member } => CExpr::Member {
-                base: Box::new(self.reconstruct_condition_tree(*base)),
-                member,
-            },
-            CExpr::PtrMember { base, member } => CExpr::PtrMember {
-                base: Box::new(self.reconstruct_condition_tree(*base)),
-                member,
-            },
-            CExpr::Sizeof(inner) => {
-                CExpr::Sizeof(Box::new(self.reconstruct_condition_tree(*inner)))
-            }
-            CExpr::AddrOf(inner) => {
-                CExpr::AddrOf(Box::new(self.reconstruct_condition_tree(*inner)))
-            }
-            CExpr::Deref(inner) => CExpr::Deref(Box::new(self.reconstruct_condition_tree(*inner))),
-            CExpr::Comma(items) => CExpr::Comma(
-                items
-                    .into_iter()
-                    .map(|item| self.reconstruct_condition_tree(item))
-                    .collect(),
-            ),
-            CExpr::Paren(inner) => CExpr::Paren(Box::new(self.reconstruct_condition_tree(*inner))),
-            other => other,
-        };
+        let mut recurse = |child: CExpr| self.reconstruct_condition_tree(child);
+        let rewritten = expr.map_children(&mut recurse);
 
         self.ctx
             .try_reconstruct_condition(&rewritten)
