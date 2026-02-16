@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use r2ssa::SSAFunction;
+use r2ssa::{CFGEdge, SSAFunction};
 
 /// A control flow region.
 #[derive(Debug, Clone)]
@@ -425,8 +425,13 @@ impl<'a> RegionAnalyzer<'a> {
                 }
             }
             2 => {
-                // Conditional - check for if-then-else pattern
-                self.analyze_conditional(entry, succs[0], succs[1])
+                // Conditional - prefer CFG edge polarity over successor order.
+                if let Some((true_target, false_target)) = self.resolve_conditional_targets(entry) {
+                    self.analyze_conditional(entry, true_target, false_target)
+                } else {
+                    // Fallback: preserve existing successor order when labels are unavailable.
+                    self.analyze_conditional(entry, succs[0], succs[1])
+                }
             }
             _ => {
                 // Multiple successors - likely a switch statement
@@ -502,6 +507,26 @@ impl<'a> RegionAnalyzer<'a> {
             .iter()
             .find(|&&block| false_reachable.contains(&block))
             .copied()
+    }
+
+    fn resolve_conditional_targets(&self, cond: u64) -> Option<(u64, u64)> {
+        let succs = self.func.successors(cond);
+        if succs.len() != 2 {
+            return None;
+        }
+
+        let mut true_target = None;
+        let mut false_target = None;
+
+        for succ in succs {
+            match self.func.edge_type(cond, succ) {
+                Some(CFGEdge::True) => true_target = Some(succ),
+                Some(CFGEdge::False) => false_target = Some(succ),
+                _ => {}
+            }
+        }
+
+        Some((true_target?, false_target?))
     }
 
     fn collect_reachable(&self, start: u64, reachable: &mut HashSet<u64>, depth: usize) {
@@ -925,14 +950,17 @@ impl<'a> RegionAnalyzer<'a> {
                             continue;
                         }
                     };
-                    let merge = self.find_working_merge_point(succs[0], succs[1], graph);
-                    let then_region = if Some(succs[0]) != merge {
-                        region_map.remove(&succs[0]).map(Box::new)
+                    let (true_succ, false_succ) = graph
+                        .conditional_succs(node)
+                        .unwrap_or((succs[0], succs[1]));
+                    let merge = self.find_working_merge_point(true_succ, false_succ, graph);
+                    let then_region = if Some(true_succ) != merge {
+                        region_map.remove(&true_succ).map(Box::new)
                     } else {
                         None
                     };
-                    let else_region = if Some(succs[1]) != merge {
-                        region_map.remove(&succs[1]).map(Box::new)
+                    let else_region = if Some(false_succ) != merge {
+                        region_map.remove(&false_succ).map(Box::new)
                     } else {
                         None
                     };
@@ -1171,6 +1199,7 @@ struct WorkingGraph {
     nodes: HashMap<usize, WorkingNode>,
     preds: HashMap<usize, HashSet<usize>>,
     succs: HashMap<usize, HashSet<usize>>,
+    edge_labels: HashMap<(usize, usize), CFGEdge>,
     block_to_node: HashMap<u64, usize>,
     next_id: usize,
 }
@@ -1180,6 +1209,7 @@ impl WorkingGraph {
         let mut nodes = HashMap::new();
         let mut preds: HashMap<usize, HashSet<usize>> = HashMap::new();
         let mut succs: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut edge_labels: HashMap<(usize, usize), CFGEdge> = HashMap::new();
         let mut block_to_node = HashMap::new();
 
         let mut blocks = func.block_addrs().to_vec();
@@ -1208,6 +1238,9 @@ impl WorkingGraph {
                 };
                 succs.entry(from).or_default().insert(to);
                 preds.entry(to).or_default().insert(from);
+                if let Some(edge_type) = func.edge_type(block, succ_block) {
+                    edge_labels.insert((from, to), edge_type);
+                }
             }
         }
 
@@ -1216,6 +1249,7 @@ impl WorkingGraph {
             nodes,
             preds,
             succs,
+            edge_labels,
             block_to_node,
         }
     }
@@ -1249,6 +1283,25 @@ impl WorkingGraph {
             .collect();
         out.sort_by_key(|id| self.node_entry(*id).unwrap_or(u64::MAX));
         out
+    }
+
+    fn conditional_succs(&self, node: usize) -> Option<(usize, usize)> {
+        let succs = self.sorted_succs(node);
+        if succs.len() != 2 {
+            return None;
+        }
+
+        let mut true_succ = None;
+        let mut false_succ = None;
+        for succ in succs {
+            match self.edge_labels.get(&(node, succ)) {
+                Some(CFGEdge::True) => true_succ = Some(succ),
+                Some(CFGEdge::False) => false_succ = Some(succ),
+                _ => {}
+            }
+        }
+
+        Some((true_succ?, false_succ?))
     }
 
     fn preds_len(&self, node: usize) -> usize {
@@ -1433,6 +1486,15 @@ impl WorkingGraph {
             }
         }
 
+        self.edge_labels
+            .retain(|(from, to), _| !internal_nodes.contains(from) && !internal_nodes.contains(to));
+        for pred in &external_preds {
+            self.edge_labels.remove(&(*pred, new_id));
+        }
+        for succ in &external_succs {
+            self.edge_labels.remove(&(new_id, *succ));
+        }
+
         for node_id in &internal_nodes {
             self.nodes.remove(node_id);
             self.preds.remove(node_id);
@@ -1607,6 +1669,7 @@ impl WorkingGraph {
         let mut nodes = HashMap::new();
         let mut preds: HashMap<usize, HashSet<usize>> = HashMap::new();
         let mut succs: HashMap<usize, HashSet<usize>> = HashMap::new();
+        let mut edge_labels: HashMap<(usize, usize), CFGEdge> = HashMap::new();
         let mut block_to_node = HashMap::new();
 
         for &id in node_ids {
@@ -1640,12 +1703,18 @@ impl WorkingGraph {
                 .unwrap_or_default();
             succs.insert(id, succ_set);
         }
+        for (&(from, to), edge) in &self.edge_labels {
+            if node_ids.contains(&from) && node_ids.contains(&to) {
+                edge_labels.insert((from, to), *edge);
+            }
+        }
 
         WorkingGraph {
             next_id: self.next_id,
             nodes,
             preds,
             succs,
+            edge_labels,
             block_to_node,
         }
     }
@@ -1710,6 +1779,124 @@ mod tests {
         assert!(
             analyzer.analysis_reason().is_some(),
             "recursive guard should set analysis reason"
+        );
+    }
+
+    fn build_diamond_cfg_with_reversed_address_order() -> SSAFunction {
+        // Conditional at 0x1000:
+        //   true  -> 0x2000
+        //   false -> 0x1004 (fallthrough, lower address than true target)
+        let mut b0 = R2ILBlock::new(0x1000, 4);
+        b0.push(R2ILOp::CBranch {
+            cond: Varnode::constant(1, 1),
+            target: Varnode::constant(0x2000, 8),
+        });
+
+        let mut b_false = R2ILBlock::new(0x1004, 4);
+        b_false.push(R2ILOp::Branch {
+            target: Varnode::constant(0x3000, 8),
+        });
+
+        let mut b_true = R2ILBlock::new(0x2000, 4);
+        b_true.push(R2ILOp::Branch {
+            target: Varnode::constant(0x3000, 8),
+        });
+
+        let mut b_merge = R2ILBlock::new(0x3000, 4);
+        b_merge.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+
+        SSAFunction::from_blocks_raw_no_arch(&[b0, b_false, b_true, b_merge]).expect("ssa function")
+    }
+
+    #[test]
+    fn recursive_conditional_targets_use_cfg_edge_polarity() {
+        let func = build_diamond_cfg_with_reversed_address_order();
+        let mut analyzer = RegionAnalyzer::new(&func);
+
+        assert_eq!(
+            analyzer.resolve_conditional_targets(0x1000),
+            Some((0x2000, 0x1004)),
+            "true/false targets should follow CFG edge labels, not successor ordering"
+        );
+
+        let region = analyzer.analyze_region_recursive(func.entry);
+        let Region::IfThenElse {
+            then_region,
+            else_region,
+            ..
+        } = region
+        else {
+            panic!("expected top-level IfThenElse region");
+        };
+
+        assert_eq!(
+            then_region.entry(),
+            0x2000,
+            "then branch should be true-target"
+        );
+        assert_eq!(
+            else_region.as_ref().map(|r| r.entry()),
+            Some(0x1004),
+            "else branch should be false-target"
+        );
+    }
+
+    #[test]
+    fn iterative_composition_uses_working_graph_edge_polarity() {
+        let func = build_diamond_cfg_with_reversed_address_order();
+        let analyzer = RegionAnalyzer::new(&func);
+        let graph = WorkingGraph::from_function(&func);
+
+        let entry_node = graph
+            .node_for_block(func.entry)
+            .expect("entry node should exist");
+        let sorted_succs = graph.sorted_succs(entry_node);
+        let sorted_entries: Vec<u64> = sorted_succs
+            .iter()
+            .map(|id| graph.node_entry(*id).expect("node entry"))
+            .collect();
+        assert_eq!(
+            sorted_entries,
+            vec![0x1004, 0x2000],
+            "sorted successor order should be address-based and opposite of true/false"
+        );
+
+        let (true_node, false_node) = graph
+            .conditional_succs(entry_node)
+            .expect("conditional edge labels should be available");
+        assert_eq!(
+            graph.node_entry(true_node),
+            Some(0x2000),
+            "true successor should be decoded from CFGEdge::True"
+        );
+        assert_eq!(
+            graph.node_entry(false_node),
+            Some(0x1004),
+            "false successor should be decoded from CFGEdge::False"
+        );
+
+        let topo = graph.topological_order().expect("graph should be acyclic");
+        let region = analyzer.analyze_post_collapse_iterative(entry_node, &graph, &topo);
+        let Region::IfThenElse {
+            then_region,
+            else_region,
+            ..
+        } = region
+        else {
+            panic!("expected top-level IfThenElse region");
+        };
+
+        assert_eq!(
+            then_region.entry(),
+            0x2000,
+            "then branch should be true-target"
+        );
+        assert_eq!(
+            else_region.as_ref().map(|r| r.entry()),
+            Some(0x1004),
+            "else branch should be false-target"
         );
     }
 

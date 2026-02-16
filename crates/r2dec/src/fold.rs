@@ -23,11 +23,12 @@
 use std::collections::{HashMap, HashSet};
 
 use r2ssa::{FunctionSSABlock, SSAFunction, SSAOp, SSAVar};
-use r2types::TypeOracle;
+use r2types::{SignatureRegistry, TypeArena, TypeOracle};
 
 use crate::ExternalStackVar;
 use crate::analysis;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
+use crate::types::FunctionType;
 
 // Type alias for clarity
 pub(crate) type SSABlock = FunctionSSABlock;
@@ -92,6 +93,10 @@ pub struct FoldingContext<'a> {
     analysis_ctx: analysis::AnalysisContext,
     /// Stack variables recovered from external analysis metadata.
     external_stack_vars: HashMap<i64, ExternalStackVar>,
+    /// Known function signatures from host analysis keyed by normalized name.
+    known_function_signatures: HashMap<String, FunctionType>,
+    /// Embedded signature registry fallback for common API arities.
+    signature_registry: SignatureRegistry,
     /// Optional oracle for richer type-driven rendering.
     type_oracle: Option<&'a dyn TypeOracle>,
 }
@@ -239,6 +244,8 @@ impl<'a> FoldingContext<'a> {
                 stack_info: analysis::StackInfo::default(),
             },
             external_stack_vars: HashMap::new(),
+            known_function_signatures: HashMap::new(),
+            signature_registry: SignatureRegistry::from_embedded_json(),
             type_oracle: None,
         }
     }
@@ -267,6 +274,15 @@ impl<'a> FoldingContext<'a> {
     /// Set calling convention argument registers (ordered).
     pub fn set_arg_regs(&mut self, regs: Vec<String>) {
         self.arg_regs = regs;
+    }
+
+    /// Set externally recovered known function signatures.
+    pub fn set_known_function_signatures(&mut self, signatures: HashMap<String, FunctionType>) {
+        self.known_function_signatures.clear();
+        for (name, sig) in signatures {
+            self.known_function_signatures
+                .insert(normalize_callee_name(&name), sig);
+        }
     }
 
     /// Collect the set of variable names that survive folding (not inlined, not dead,
@@ -361,6 +377,14 @@ impl<'a> FoldingContext<'a> {
         if let Some(exit_addr) = self.exit_block {
             // Treat the exit block itself as a return context.
             self.return_blocks.insert(exit_addr);
+
+            // Any CFG predecessor of the exit block is a return context,
+            // including fallthrough paths that no longer carry phi metadata.
+            for pred in func.predecessors(exit_addr) {
+                if pred != exit_addr {
+                    self.return_blocks.insert(pred);
+                }
+            }
 
             for block in func.blocks() {
                 // Skip the exit block itself
@@ -3176,12 +3200,56 @@ impl<'a> FoldingContext<'a> {
         kept_rev
     }
 
+    fn lookup_known_signature(&self, callee_name: &str) -> Option<&FunctionType> {
+        let normalized = normalize_callee_name(callee_name);
+        self.known_function_signatures.get(&normalized)
+    }
+
+    fn extract_callee_name(expr: &CExpr) -> Option<&str> {
+        match expr {
+            CExpr::Var(name) => Some(name.as_str()),
+            CExpr::Deref(inner) | CExpr::Paren(inner) | CExpr::AddrOf(inner) => {
+                Self::extract_callee_name(inner)
+            }
+            CExpr::Cast { expr: inner, .. } => Self::extract_callee_name(inner),
+            _ => None,
+        }
+    }
+
+    fn non_variadic_call_arity(&self, callee: &CExpr) -> Option<usize> {
+        let name = Self::extract_callee_name(callee)?;
+
+        let known_arity = self
+            .lookup_known_signature(name)
+            .and_then(|sig| (!sig.variadic).then_some(sig.params.len()));
+
+        let normalized = normalize_callee_name(name);
+        let mut arena = TypeArena::default();
+        let mut registry_arity = None;
+        for candidate in [name, normalized.as_str()] {
+            if let Some(resolved) =
+                self.signature_registry
+                    .resolve(candidate, &mut arena, self.ptr_size)
+            {
+                registry_arity = (!resolved.variadic).then_some(resolved.params.len());
+                break;
+            }
+        }
+
+        match (known_arity, registry_arity) {
+            (Some(known), Some(registry)) => Some(known.min(registry)),
+            (Some(known), None) => Some(known),
+            (None, Some(registry)) => Some(registry),
+            (None, None) => None,
+        }
+    }
+
     /// Convert an SSA operation to a C statement, with call argument context.
     fn op_to_stmt_with_args(&self, op: &SSAOp, block_addr: u64, op_idx: usize) -> Option<CStmt> {
         match op {
             SSAOp::Call { target } => {
                 let func_expr = self.resolve_call_target(target);
-                let args = self
+                let mut args: Vec<CExpr> = self
                     .call_args_map()
                     .get(&(block_addr, op_idx))
                     .cloned()
@@ -3189,13 +3257,19 @@ impl<'a> FoldingContext<'a> {
                     .into_iter()
                     .map(|arg| self.rewrite_stack_expr(arg))
                     .collect();
+                if let Some(max_arity) = self.non_variadic_call_arity(&func_expr) {
+                    args.truncate(max_arity);
+                }
                 let call = CExpr::call(func_expr, args);
                 Some(CStmt::Expr(call))
             }
             SSAOp::CallInd { target } => {
-                let target_expr = self.get_expr(target);
-                let func_expr = CExpr::Deref(Box::new(target_expr));
-                let args = self
+                let resolved_target = self.resolve_call_target(target);
+                let func_expr = match resolved_target {
+                    CExpr::Var(_) => resolved_target,
+                    other => CExpr::Deref(Box::new(other)),
+                };
+                let mut args: Vec<CExpr> = self
                     .call_args_map()
                     .get(&(block_addr, op_idx))
                     .cloned()
@@ -3203,6 +3277,9 @@ impl<'a> FoldingContext<'a> {
                     .into_iter()
                     .map(|arg| self.rewrite_stack_expr(arg))
                     .collect();
+                if let Some(max_arity) = self.non_variadic_call_arity(&func_expr) {
+                    args.truncate(max_arity);
+                }
                 let call = CExpr::call(func_expr, args);
                 Some(CStmt::Expr(call))
             }
@@ -5542,6 +5619,31 @@ fn is_generic_arg_name(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn normalize_callee_name(name: &str) -> String {
+    let mut normalized = name.trim().to_ascii_lowercase();
+
+    for prefix in ["sym.imp.", "sym.", "imp.", "dbg.", "fcn."] {
+        while let Some(rest) = normalized.strip_prefix(prefix) {
+            normalized = rest.to_string();
+        }
+    }
+    while let Some(rest) = normalized.strip_suffix("@plt") {
+        normalized = rest.to_string();
+    }
+    while let Some(rest) = normalized.strip_suffix(".plt") {
+        normalized = rest.to_string();
+    }
+    if let Some((base, suffix)) = normalized.rsplit_once('_')
+        && !base.is_empty()
+        && !suffix.is_empty()
+        && suffix.chars().all(|ch| ch.is_ascii_digit())
+    {
+        normalized = base.to_string();
+    }
+
+    normalized
+}
+
 /// Extract address from a call target name like "ram:401110_0" or "const:401110".
 fn extract_call_address(name: &str) -> Option<u64> {
     // Try ram:address_version format (e.g., "ram:401110_0")
@@ -5744,6 +5846,127 @@ mod tests {
         assert_eq!(parse_const_value("const:42"), Some(42));
         assert_eq!(parse_const_value("const:fffffffc"), Some(0xfffffffc));
         assert_eq!(parse_const_value("const:0x42_0"), Some(0x42));
+    }
+
+    #[test]
+    fn test_call_args_clamp_non_variadic_signature() {
+        let mut ctx = FoldingContext::new(64);
+        let mut names = HashMap::new();
+        names.insert(0x401000, "sym.imp.memcpy".to_string());
+        ctx.set_function_names(names);
+        let mut sigs = HashMap::new();
+        sigs.insert(
+            "sym.imp.memcpy".to_string(),
+            FunctionType {
+                return_type: CType::void_ptr(),
+                params: vec![CType::void_ptr(), CType::void_ptr(), CType::u64()],
+                variadic: false,
+            },
+        );
+        ctx.set_known_function_signatures(sigs);
+        ctx.analysis_ctx.use_info.call_args.insert(
+            (0x1000, 0),
+            vec![
+                CExpr::Var("a".to_string()),
+                CExpr::Var("b".to_string()),
+                CExpr::Var("c".to_string()),
+                CExpr::Var("d".to_string()),
+            ],
+        );
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:401000", 0, 8),
+                },
+                0x1000,
+                0,
+            )
+            .expect("call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected call expression");
+        };
+        assert_eq!(args.len(), 3, "non-variadic call should clamp to arity");
+    }
+
+    #[test]
+    fn test_call_args_do_not_clamp_variadic_signature() {
+        let mut ctx = FoldingContext::new(64);
+        let mut names = HashMap::new();
+        names.insert(0x401010, "sym.imp.printf".to_string());
+        ctx.set_function_names(names);
+        let mut sigs = HashMap::new();
+        sigs.insert(
+            "sym.imp.printf".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: true,
+            },
+        );
+        ctx.set_known_function_signatures(sigs);
+        ctx.analysis_ctx.use_info.call_args.insert(
+            (0x1000, 0),
+            vec![
+                CExpr::Var("fmt".to_string()),
+                CExpr::Var("x".to_string()),
+                CExpr::Var("y".to_string()),
+            ],
+        );
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:401010", 0, 8),
+                },
+                0x1000,
+                0,
+            )
+            .expect("call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected call expression");
+        };
+        assert_eq!(
+            args.len(),
+            3,
+            "variadic call should keep all discovered call arguments"
+        );
+    }
+
+    #[test]
+    fn test_registry_arity_resolution_handles_prefixed_and_ssa_suffixed_names() {
+        let ctx = FoldingContext::new(64);
+        assert_eq!(
+            ctx.non_variadic_call_arity(&CExpr::Var("sym.imp.strcmp".to_string())),
+            Some(2)
+        );
+        assert_eq!(
+            ctx.non_variadic_call_arity(&CExpr::Var("sym.imp.strcmp_0".to_string())),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn test_registry_arity_can_cap_broken_known_signature_arity() {
+        let mut ctx = FoldingContext::new(64);
+        let mut sigs = HashMap::new();
+        sigs.insert(
+            "sym.imp.strcmp".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::void_ptr(), CType::void_ptr(), CType::void_ptr()],
+                variadic: false,
+            },
+        );
+        ctx.set_known_function_signatures(sigs);
+
+        assert_eq!(
+            ctx.non_variadic_call_arity(&CExpr::Var("sym.imp.strcmp".to_string())),
+            Some(2),
+            "embedded registry should cap malformed known signature arity for common libc calls"
+        );
     }
 
     #[test]

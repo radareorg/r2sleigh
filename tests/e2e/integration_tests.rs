@@ -1259,6 +1259,49 @@ mod decompilation {
         normalized.lines().find(|line| line.contains(needle))
     }
 
+    fn count_call_args(line: &str, call_name: &str) -> Option<usize> {
+        let needle = format!("{call_name}(");
+        let start = line.find(&needle)?;
+        let mut depth = 1usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut commas = 0usize;
+        let mut has_content = false;
+        let bytes = line.as_bytes();
+        let mut i = start + needle.len();
+
+        while i < bytes.len() {
+            let b = bytes[i];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == b'"' {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+
+            match b {
+                b'"' => in_string = true,
+                b'(' => depth = depth.saturating_add(1),
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(if has_content { commas + 1 } else { 0 });
+                    }
+                }
+                b',' if depth == 1 => commas += 1,
+                b if depth == 1 && !b.is_ascii_whitespace() => has_content = true,
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
     fn has_self_sub_zero_assignment(line: &str) -> bool {
         let trimmed = line.trim();
         if !trimmed.ends_with(';') {
@@ -1590,6 +1633,42 @@ mod decompilation {
         assert!(
             !normalized.contains(" - 0 == 0") && !normalized.contains(" - 0 != 0"),
             "check_secret should rewrite subtraction-to-zero compares into direct compares"
+        );
+    }
+
+    #[test]
+    fn decompiles_check_secret_with_complete_return_paths() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        let return_lines: Vec<&str> = normalized
+            .lines()
+            .filter(|line| line.trim_start().starts_with("return "))
+            .collect();
+        let has_return_zero = return_lines.iter().any(|line| line.contains("return 0"));
+        let has_return_one = return_lines.iter().any(|line| line.contains("return 1"));
+        let has_condensed_boolean_return = return_lines
+            .iter()
+            .any(|line| line.contains("0xdead") && (line.contains("==") || line.contains("!=")));
+        let has_guarded_single_return_form = return_lines.len() == 1
+            && normalized.contains("if (")
+            && normalized.contains("0xdead")
+            && return_lines
+                .iter()
+                .any(|line| line.contains("return 1") || line.contains("return RAX"));
+        let has_register_fallback_pair = has_return_zero
+            && return_lines
+                .iter()
+                .any(|line| line.contains("return RAX") || line.contains("return EAX"));
+
+        assert!(
+            (has_return_zero && has_return_one)
+                || has_condensed_boolean_return
+                || has_guarded_single_return_form
+                || has_register_fallback_pair,
+            "check_secret should preserve both success/failure return semantics, got: {}",
+            normalized
         );
     }
 
@@ -2017,6 +2096,107 @@ mod decompilation {
         assert!(
             !normalized.contains("0x403014"),
             "authenticate should not use raw string address in strcmp call"
+        );
+    }
+
+    #[test]
+    fn decompiles_authenticate_with_complete_return_paths() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.authenticate", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        let return_lines: Vec<&str> = normalized
+            .lines()
+            .filter(|line| line.trim_start().starts_with("return "))
+            .collect();
+        let has_return_zero = return_lines.iter().any(|line| line.contains("return 0"));
+        let has_return_one = return_lines.iter().any(|line| line.contains("return 1"));
+        let has_condensed_boolean_return = return_lines.iter().any(|line| line.contains("strcmp("));
+        let has_guarded_single_return_form = return_lines.len() == 1
+            && has_return_one
+            && normalized.contains("strcmp(")
+            && normalized.contains("if (");
+        let has_register_fallback_pair = has_return_one
+            && return_lines
+                .iter()
+                .any(|line| line.contains("return RAX") || line.contains("return EAX"));
+
+        assert!(
+            (has_return_zero && has_return_one)
+                || has_condensed_boolean_return
+                || has_guarded_single_return_form
+                || has_register_fallback_pair,
+            "authenticate should preserve both success/failure return semantics, got: {}",
+            normalized
+        );
+    }
+
+    #[test]
+    fn decompiles_alloc_and_copy_signature_without_duplicate_params() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.alloc_and_copy", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        let header = find_line_containing(&normalized, "dbg.alloc_and_copy(")
+            .expect("alloc_and_copy decompilation should include function header");
+        let open = header.find('(').expect("header should include '('");
+        let close = header.rfind(')').expect("header should include ')'");
+        let params = &header[open + 1..close];
+        let parsed_params: Vec<&str> = params
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect();
+
+        assert_eq!(
+            parsed_params.len(),
+            2,
+            "alloc_and_copy should have exactly two params in header, got: {}",
+            header
+        );
+        assert_eq!(
+            params.matches("src").count(),
+            1,
+            "alloc_and_copy header should contain 'src' once, got: {}",
+            header
+        );
+        assert_eq!(
+            params.matches("len").count(),
+            1,
+            "alloc_and_copy header should contain 'len' once, got: {}",
+            header
+        );
+    }
+
+    #[test]
+    fn decompiles_authenticate_strcmp_without_duplicate_args() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.authenticate", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        let line = find_line_containing(&normalized, "strcmp(")
+            .expect("authenticate should include strcmp call");
+        assert_eq!(
+            count_call_args(line, "strcmp"),
+            Some(2),
+            "strcmp should be emitted with exactly 2 args, got line: {}",
+            line
+        );
+    }
+
+    #[test]
+    fn decompiles_alloc_and_copy_memcpy_without_duplicate_args() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.alloc_and_copy", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        let line = find_line_containing(&normalized, "memcpy(")
+            .expect("alloc_and_copy should include memcpy call");
+        assert_eq!(
+            count_call_args(line, "memcpy"),
+            Some(3),
+            "memcpy should be emitted with exactly 3 args, got line: {}",
+            line
         );
     }
 

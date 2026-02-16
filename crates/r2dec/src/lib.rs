@@ -65,6 +65,40 @@ fn is_generic_arg_name(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn merge_params_with_external_signature(
+    recovered_params: Vec<ast::CParam>,
+    signature: Option<&ExternalFunctionSignature>,
+) -> Vec<ast::CParam> {
+    let Some(signature) = signature else {
+        return recovered_params;
+    };
+
+    if signature.params.is_empty() {
+        return recovered_params;
+    }
+
+    (0..signature.params.len())
+        .map(|idx| {
+            let fallback_name = format!("arg{}", idx + 1);
+            let mut param = recovered_params.get(idx).cloned().unwrap_or(ast::CParam {
+                ty: CType::Int(32),
+                name: fallback_name,
+            });
+
+            if let Some(ext) = signature.params.get(idx) {
+                if !is_generic_arg_name(&ext.name) {
+                    param.name = ext.name.clone();
+                }
+                if let Some(ext_ty) = &ext.ty {
+                    param.ty = ext_ty.clone();
+                }
+            }
+
+            param
+        })
+        .collect()
+}
+
 /// Decompiler configuration.
 #[derive(Debug, Clone)]
 pub struct DecompilerConfig {
@@ -305,6 +339,9 @@ impl Decompiler {
         if !self.context.symbols.is_empty() {
             fold_ctx.set_symbols(self.context.symbols.clone());
         }
+        if !self.context.known_function_signatures.is_empty() {
+            fold_ctx.set_known_function_signatures(self.context.known_function_signatures.clone());
+        }
         if !self.context.stack_vars.is_empty() {
             fold_ctx.set_external_stack_vars(self.context.stack_vars.clone());
         }
@@ -465,35 +502,10 @@ impl Decompiler {
             ai.cmp(&bi).then_with(|| a.name.cmp(&b.name))
         });
 
-        let params: Vec<ast::CParam> = if let Some(signature) = &self.context.function_signature {
-            if signature.params.is_empty() {
-                recovered_params
-            } else {
-                let total = recovered_params.len().max(signature.params.len());
-                (0..total)
-                    .map(|idx| {
-                        let fallback_name = format!("arg{}", idx + 1);
-                        let mut param = recovered_params.get(idx).cloned().unwrap_or(ast::CParam {
-                            ty: CType::Int(32),
-                            name: fallback_name,
-                        });
-
-                        if let Some(ext) = signature.params.get(idx) {
-                            if !is_generic_arg_name(&ext.name) {
-                                param.name = ext.name.clone();
-                            }
-                            if let Some(ext_ty) = &ext.ty {
-                                param.ty = ext_ty.clone();
-                            }
-                        }
-
-                        param
-                    })
-                    .collect()
-            }
-        } else {
-            recovered_params
-        };
+        let params = merge_params_with_external_signature(
+            recovered_params,
+            self.context.function_signature.as_ref(),
+        );
 
         // Collect locals -- on fallback keep locals conservatively.
         let locals: Vec<ast::CLocal> = if use_conservative_locals {
@@ -636,5 +648,42 @@ mod tests {
         assert_eq!(config.ptr_size, 32);
         assert_eq!(config.sp_name, "sp");
         assert_eq!(config.fp_name, "fp");
+    }
+
+    #[test]
+    fn external_signature_arity_caps_function_header_params() {
+        let recovered = vec![
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg1".to_string(),
+            },
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg2".to_string(),
+            },
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg3".to_string(),
+            },
+        ];
+        let signature = ExternalFunctionSignature {
+            ret_type: Some(CType::Pointer(Box::new(CType::Int(8)))),
+            params: vec![
+                ExternalFunctionParam {
+                    name: "src".to_string(),
+                    ty: Some(CType::Pointer(Box::new(CType::Int(8)))),
+                },
+                ExternalFunctionParam {
+                    name: "len".to_string(),
+                    ty: Some(CType::UInt(64)),
+                },
+            ],
+        };
+
+        let params = merge_params_with_external_signature(recovered, Some(&signature));
+        assert_eq!(params.len(), 2, "external arity should be authoritative");
+        assert_eq!(params[0].name, "src");
+        assert_eq!(params[1].name, "len");
+        assert!(matches!(params[1].ty, CType::UInt(64)));
     }
 }
