@@ -400,6 +400,15 @@ out:
     return global_tail;
 }
 
+// Test 37: Trailing-return guard inversion with multi-statement then-body
+int test_guard_tail_return(int x) {
+    if (x > 5) {
+        global_tail = x + 10;
+        global_counter = x - 1;
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -690,6 +699,16 @@ int main(int argc, char *argv[]) {
                     "test_guard_inversion_goto(%d) = %d\n",
                     x,
                     test_guard_inversion_goto(x)
+                );
+            }
+            break;
+        case 37:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf(
+                    "test_guard_tail_return(%d) = %d\n",
+                    x,
+                    test_guard_tail_return(x)
                 );
             }
             break;

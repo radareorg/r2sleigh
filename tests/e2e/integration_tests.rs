@@ -1571,6 +1571,47 @@ mod decompilation {
     }
 
     #[test]
+    fn decompiles_trailing_return_as_guard_clause() {
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "dbg.test_guard_tail_return", "a:sla.dec");
+        result.assert_ok();
+        let normalized = normalized_dec_output(&result.stdout);
+        let lines: Vec<&str> = normalized.lines().collect();
+        let if_line = lines
+            .iter()
+            .find(|line| line.starts_with("if ("))
+            .expect("Should contain guard if condition");
+        assert!(
+            if_line.contains("<=")
+                || if_line.contains("!")
+                || if_line.contains("|| of !=")
+                || if_line.contains("|| of_")
+                || (if_line.contains("==") && if_line.contains('<')),
+            "Trailing-return rewrite should emit an inverted guard condition"
+        );
+        assert!(
+            !normalized.contains("} else {"),
+            "Trailing-return guard clause should not emit else block"
+        );
+        assert!(
+            normalized
+                .lines()
+                .any(|line| line.contains("global_tail") && line.contains('=')),
+            "Trailing-return fixture should still emit global_tail assignment"
+        );
+        assert!(
+            normalized
+                .lines()
+                .any(|line| line.contains("global_counter") && line.contains('=')),
+            "Trailing-return fixture should still emit global_counter assignment"
+        );
+        assert!(
+            normalized.lines().any(|line| line.starts_with("return ")),
+            "Trailing-return fixture should still emit a return statement"
+        );
+    }
+
+    #[test]
     fn decompiles_without_singleton_ssa_suffixes() {
         setup();
         let funcs = [

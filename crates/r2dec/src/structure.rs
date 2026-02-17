@@ -439,6 +439,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     .map(Self::cleanup_recurse)
                     .filter(|s| !matches!(s, CStmt::Empty))
                     .collect();
+                let cleaned = Self::rewrite_block_tail_guard_clauses(cleaned);
                 let rewritten = Self::rewrite_block_loops_to_for(cleaned);
                 if rewritten.is_empty() {
                     CStmt::Empty
@@ -594,22 +595,67 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             return stmt;
         };
 
-        let Some(terminator) = Self::single_terminator_stmt(else_body.as_ref()) else {
-            return CStmt::If {
-                cond,
-                then_body,
-                else_body: Some(else_body),
-            };
+        let then_terminator = Self::single_terminator_stmt(then_body.as_ref());
+        let else_terminator = Self::single_terminator_stmt(else_body.as_ref());
+        let (guard_cond, guard_terminator, hoisted_body) = match (then_terminator, else_terminator)
+        {
+            (Some(_), Some(_)) | (None, None) => {
+                return CStmt::If {
+                    cond,
+                    then_body,
+                    else_body: Some(else_body),
+                };
+            }
+            (None, Some(terminator)) => (Self::negate_condition(cond), terminator, *then_body),
+            (Some(terminator), None) => (cond, terminator, *else_body),
         };
 
-        CStmt::Block(vec![
-            CStmt::If {
-                cond: Self::negate_condition(cond),
-                then_body: Box::new(terminator),
-                else_body: None,
-            },
-            *then_body,
-        ])
+        let mut rewritten = vec![CStmt::If {
+            cond: guard_cond,
+            then_body: Box::new(guard_terminator),
+            else_body: None,
+        }];
+        Self::append_stmt_body_flat(&mut rewritten, hoisted_body);
+        CStmt::Block(rewritten)
+    }
+
+    fn append_stmt_body_flat(out: &mut Vec<CStmt>, stmt: CStmt) {
+        match stmt {
+            CStmt::Block(stmts) => out.extend(stmts),
+            CStmt::Empty => {}
+            other => out.push(other),
+        }
+    }
+
+    fn rewrite_block_tail_guard_clauses(stmts: Vec<CStmt>) -> Vec<CStmt> {
+        let mut rewritten = Vec::with_capacity(stmts.len());
+        let mut i = 0;
+        while i < stmts.len() {
+            if i + 1 < stmts.len()
+                && let CStmt::If {
+                    cond,
+                    then_body,
+                    else_body: None,
+                } = &stmts[i]
+                && let Some(terminator) = Self::single_terminator_stmt(&stmts[i + 1])
+                && Self::single_terminator_stmt(then_body.as_ref()).is_none()
+                && !matches!(then_body.as_ref(), CStmt::Empty)
+            {
+                rewritten.push(CStmt::If {
+                    cond: Self::negate_condition(cond.clone()),
+                    then_body: Box::new(terminator),
+                    else_body: None,
+                });
+                Self::append_stmt_body_flat(&mut rewritten, (**then_body).clone());
+                rewritten.push(stmts[i + 1].clone());
+                i += 2;
+                continue;
+            }
+
+            rewritten.push(stmts[i].clone());
+            i += 1;
+        }
+        rewritten
     }
 
     fn single_terminator_stmt(stmt: &CStmt) -> Option<CStmt> {
@@ -1481,6 +1527,116 @@ mod tests {
     }
 
     #[test]
+    fn inverts_if_else_terminator_and_flattens_then_block() {
+        let input = CStmt::if_stmt(
+            CExpr::binary(BinaryOp::Lt, v("x"), v("limit")),
+            CStmt::Block(vec![
+                assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("x"))),
+                assign("x", CExpr::binary(BinaryOp::Add, v("x"), CExpr::IntLit(1))),
+            ]),
+            Some(CStmt::ret(Some(CExpr::IntLit(0)))),
+        );
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert_eq!(
+            cleaned,
+            CStmt::Block(vec![
+                CStmt::if_stmt(
+                    CExpr::binary(BinaryOp::Ge, v("x"), v("limit")),
+                    CStmt::ret(Some(CExpr::IntLit(0))),
+                    None
+                ),
+                assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("x"))),
+                assign("x", CExpr::binary(BinaryOp::Add, v("x"), CExpr::IntLit(1))),
+            ])
+        );
+    }
+
+    #[test]
+    fn inverts_if_then_terminator_and_flattens_else_block() {
+        let input = CStmt::if_stmt(
+            v("is_error"),
+            CStmt::ret(Some(CExpr::IntLit(-1))),
+            Some(CStmt::Block(vec![
+                assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("x"))),
+                assign("x", CExpr::binary(BinaryOp::Add, v("x"), CExpr::IntLit(1))),
+            ])),
+        );
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert_eq!(
+            cleaned,
+            CStmt::Block(vec![
+                CStmt::if_stmt(v("is_error"), CStmt::ret(Some(CExpr::IntLit(-1))), None),
+                assign("sum", CExpr::binary(BinaryOp::Add, v("sum"), v("x"))),
+                assign("x", CExpr::binary(BinaryOp::Add, v("x"), CExpr::IntLit(1))),
+            ])
+        );
+    }
+
+    #[test]
+    fn rewrites_trailing_return_guard_and_flattens_then_block() {
+        let input = CStmt::Block(vec![
+            CStmt::if_stmt(
+                v("ready"),
+                CStmt::Block(vec![
+                    assign("x", CExpr::IntLit(1)),
+                    assign("y", CExpr::IntLit(2)),
+                ]),
+                None,
+            ),
+            CStmt::ret(Some(CExpr::IntLit(0))),
+        ]);
+
+        let cleaned = ControlFlowStructurer::cleanup(input);
+        assert_eq!(
+            cleaned,
+            CStmt::Block(vec![
+                CStmt::if_stmt(
+                    CExpr::unary(UnaryOp::Not, v("ready")),
+                    CStmt::ret(Some(CExpr::IntLit(0))),
+                    None
+                ),
+                assign("x", CExpr::IntLit(1)),
+                assign("y", CExpr::IntLit(2)),
+                CStmt::ret(Some(CExpr::IntLit(0))),
+            ])
+        );
+    }
+
+    #[test]
+    fn does_not_rewrite_trailing_guard_when_following_stmt_is_not_terminator() {
+        let input = CStmt::Block(vec![
+            CStmt::if_stmt(v("ready"), assign("x", CExpr::IntLit(1)), None),
+            assign("y", CExpr::IntLit(2)),
+        ]);
+        let cleaned = ControlFlowStructurer::cleanup(input.clone());
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn does_not_invert_if_when_both_branches_are_terminators() {
+        let input = CStmt::if_stmt(
+            v("a"),
+            CStmt::ret(Some(CExpr::IntLit(1))),
+            Some(CStmt::ret(Some(CExpr::IntLit(0)))),
+        );
+        let cleaned = ControlFlowStructurer::cleanup(input.clone());
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn does_not_invert_if_when_else_is_not_terminator() {
+        let input = CStmt::if_stmt(
+            v("a"),
+            assign("x", CExpr::IntLit(1)),
+            Some(assign("x", v("b"))),
+        );
+        let cleaned = ControlFlowStructurer::cleanup(input.clone());
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
     fn inverts_if_when_else_is_single_terminator() {
         let input = CStmt::if_stmt(
             CExpr::binary(BinaryOp::Lt, v("x"), v("limit")),
@@ -1493,11 +1649,6 @@ mod tests {
             panic!("Expected condition inversion to emit block sequence");
         };
         assert_eq!(
-            stmts.len(),
-            2,
-            "Inversion should emit guard + then statement"
-        );
-        assert_eq!(
             stmts[0],
             CStmt::if_stmt(
                 CExpr::binary(BinaryOp::Ge, v("x"), v("limit")),
@@ -1505,17 +1656,6 @@ mod tests {
                 None
             )
         );
-    }
-
-    #[test]
-    fn does_not_invert_if_when_else_is_not_terminator() {
-        let input = CStmt::if_stmt(
-            v("a"),
-            assign("x", CExpr::IntLit(1)),
-            Some(assign("x", v("b"))),
-        );
-        let cleaned = ControlFlowStructurer::cleanup(input.clone());
-        assert_eq!(cleaned, input);
     }
 
     #[test]
