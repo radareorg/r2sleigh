@@ -113,6 +113,8 @@ typedef struct {
 } SymStateCache;
 
 static SymStateCache sym_state_cache = {0};
+static bool sleigh_pdd_core_plugin_registered = false;
+static RCore *sleigh_pdd_core_plugin_core = NULL;
 
 /* Minimum bytes to pass to libsla (it reads ahead for variable-length instructions) */
 #define SLEIGH_MIN_BYTES 16
@@ -247,6 +249,126 @@ static const char *skip_cmd_spaces(const char *s) {
 		s++;
 	}
 	return s;
+}
+
+static bool sleigh_parse_pdd_alias(const char *input, const char **alias_name, const char **suffix) {
+	if (!input || !alias_name || !suffix) {
+		return false;
+	}
+	if (r_str_startswith (input, "pdd")) {
+		*alias_name = "pdd";
+		*suffix = input + 3;
+		return true;
+	}
+	if (r_str_startswith (input, "pdD")) {
+		*alias_name = "pdD";
+		*suffix = input + 3;
+		return true;
+	}
+	return false;
+}
+
+static bool sleigh_pdd_core_cmd(RCorePluginSession *cps, const char *input) {
+	const char *alias_name = NULL;
+	const char *suffix = NULL;
+	const char *target_arg = NULL;
+	char *anal_cmd = NULL;
+	char *res;
+	RCore *core;
+
+	if (!cps || !input) {
+		return false;
+	}
+	core = cps->core;
+	if (!core || !core->anal) {
+		return false;
+	}
+	if (!sleigh_parse_pdd_alias (input, &alias_name, &suffix)) {
+		return false;
+	}
+
+	if (*suffix == '\0') {
+		target_arg = NULL;
+	} else if (*suffix == '?') {
+		if (suffix[1] != '\0') {
+			return false;
+		}
+		if (core->cons) {
+			r_cons_println (core->cons, "| pdd [name|addr] - Alias for a:sla.dec [name|addr]");
+			r_cons_println (core->cons, "| pdD [name|addr] - Alias for a:sla.dec [name|addr]");
+		}
+		return true;
+	} else if (*suffix == ' ') {
+		suffix = skip_cmd_spaces (suffix);
+		if (!*suffix) {
+			target_arg = NULL;
+		} else if (*suffix == '?' && suffix[1] == '\0') {
+			if (core->cons) {
+				r_cons_println (core->cons, "| pdd [name|addr] - Alias for a:sla.dec [name|addr]");
+				r_cons_println (core->cons, "| pdD [name|addr] - Alias for a:sla.dec [name|addr]");
+			}
+			return true;
+		} else {
+			target_arg = suffix;
+		}
+	} else {
+		return false;
+	}
+
+	if (target_arg && *target_arg) {
+		anal_cmd = r_str_newf ("sla.dec %s", target_arg);
+	} else {
+		anal_cmd = strdup ("sla.dec");
+	}
+	if (!anal_cmd) {
+		R_LOG_ERROR ("r2sleigh: failed to allocate %s alias command", alias_name);
+		return false;
+	}
+
+	res = r_anal_cmd (core->anal, anal_cmd);
+	free (anal_cmd);
+	if (res) {
+		free (res);
+		return true;
+	}
+	return false;
+}
+
+static RCorePlugin r_core_plugin_sleigh_pdd = {
+	.meta = {
+		.name = "sleigh.pdd",
+		.desc = "r2sleigh transparent pdd/pdD alias",
+		.license = "LGPL3",
+		.author = "r2sleigh project",
+	},
+	.call = sleigh_pdd_core_cmd,
+};
+
+static void ensure_sleigh_pdd_core_plugin(RAnal *anal) {
+	RCore *core;
+
+	if (sleigh_pdd_core_plugin_registered || !anal) {
+		return;
+	}
+	core = anal->coreb.core;
+	if (!core || !core->rcmd) {
+		return;
+	}
+	if (r_core_plugin_add (core->rcmd, &r_core_plugin_sleigh_pdd)) {
+		sleigh_pdd_core_plugin_registered = true;
+		sleigh_pdd_core_plugin_core = core;
+	}
+}
+
+static void cleanup_sleigh_pdd_core_plugin(void) {
+	if (!sleigh_pdd_core_plugin_registered) {
+		return;
+	}
+	if (sleigh_pdd_core_plugin_core && sleigh_pdd_core_plugin_core->rcmd) {
+		(void)r_core_plugin_remove (sleigh_pdd_core_plugin_core->rcmd, &r_core_plugin_sleigh_pdd);
+	}
+	sleigh_pdd_core_plugin_registered = false;
+	sleigh_pdd_core_plugin_core = NULL;
 }
 
 static bool parse_sym_target_expr(RCore *core, const char *expr, ut64 *target) {
@@ -1957,6 +2079,7 @@ R2ILContext *get_context(RAnal *anal) {
 }
 
 int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int len, RAnalOpMask mask) {
+	ensure_sleigh_pdd_core_plugin (anal);
 	R_RETURN_VAL_IF_FAIL (anal && op && data, -1);
 
 	R2ILContext *ctx = get_context (anal);
@@ -2040,6 +2163,7 @@ static bool sleigh_init(RAnal *anal) {
 
 static bool sleigh_fini(RAnal *anal) {
 	(void)anal;
+	cleanup_sleigh_pdd_core_plugin ();
 	if (sleigh_ctx) {
 		r2il_free (sleigh_ctx);
 		sleigh_ctx = NULL;
@@ -2051,6 +2175,7 @@ static bool sleigh_fini(RAnal *anal) {
 }
 
 static char *sleigh_cmd(RAnal *anal, const char *cmd) {
+	ensure_sleigh_pdd_core_plugin (anal);
 	bool is_sla_ns = r_str_startswith (cmd, "sla");
 	bool is_sym_ns = r_str_startswith (cmd, "sym");
 	if (!is_sla_ns && !is_sym_ns) {
@@ -2082,6 +2207,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.sym.merge [on|off] - Toggle symbolic state merging");
 			r_cons_println (cons, "| a:sla.taint  - Taint analysis for current function");
 			r_cons_println (cons, "| a:sla.dec [name|addr] - Decompile function (current by default)");
+			r_cons_println (cons, "| pdd/pdD [name|addr] - Alias for a:sla.dec [name|addr]");
 			r_cons_println (cons, "| a:sla.cfg    - Show ASCII CFG for current function");
 			r_cons_println (cons, "| a:sla.cfg.json - Show CFG as JSON for current function");
 			r_cons_println (cons, "| a:sym.explore <target> - Explore symbolic paths reaching target");
@@ -3032,6 +3158,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 
 /* Called after function analysis completes */
 static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
+	ensure_sleigh_pdd_core_plugin (anal);
 	if (!fcn || !anal) {
 		return false;
 	}
@@ -3089,6 +3216,7 @@ static void var_prot_free(void *ptr) {
 
 /* Called during variable recovery (afva) */
 static RList *sleigh_recover_vars(RAnal *anal, RAnalFunction *fcn) {
+	ensure_sleigh_pdd_core_plugin (anal);
 	if (!fcn || !anal) {
 		return NULL;
 	}
@@ -3220,6 +3348,7 @@ static RList *sleigh_recover_vars(RAnal *anal, RAnalFunction *fcn) {
 
 /* Called during reference analysis (aar) */
 static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
+	ensure_sleigh_pdd_core_plugin (anal);
 	if (!fcn || !anal) {
 		return NULL;
 	}
@@ -3335,6 +3464,7 @@ static int sleigh_eligible(RAnal *anal) {
 
 /* Called at end of aaaa for global post-analysis passes */
 static bool sleigh_post_analysis(RAnal *anal) {
+	ensure_sleigh_pdd_core_plugin (anal);
 	R2ILContext *ctx = get_context (anal);
 	RCore *core;
 	int xrefs_added = 0;

@@ -1401,6 +1401,70 @@ mod decompilation {
     }
 
     #[test]
+    fn decompiles_via_pdd_alias_current_function() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaa; s dbg.check_secret; pdd");
+        result.assert_ok();
+        assert!(
+            result.contains("return"),
+            "pdd should forward to a:sla.dec and emit decompilation output"
+        );
+        assert!(
+            !result.contains("You need to install the plugin with r2pm -ci r2dec"),
+            "pdd alias should not fall back to radare2 install hint"
+        );
+        assert!(
+            !result.contains("Missing plugin for 'pdd'"),
+            "pdd alias should not hit missing-plugin fallback"
+        );
+    }
+
+    #[test]
+    fn decompiles_via_pd_d_alias_current_function() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaa; s dbg.check_secret; pdD");
+        result.assert_ok();
+        assert!(
+            result.contains("return"),
+            "pdD should forward to a:sla.dec and emit decompilation output"
+        );
+        assert!(
+            !result.contains("Invalid pd subcommand"),
+            "pdD alias should not hit default pd invalid-subcommand path"
+        );
+    }
+
+    #[test]
+    fn pdd_alias_forwards_target_argument() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaa; pdd dbg.solve_equation");
+        result.assert_ok();
+        assert!(
+            result.contains_any(&["solve_equation", "dbg.solve_equation"]),
+            "pdd <target> should decompile the requested function"
+        );
+        assert!(
+            result.contains("return"),
+            "pdd <target> should emit function decompilation output"
+        );
+    }
+
+    #[test]
+    fn pd_not_intercepted() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaa; s dbg.check_secret; pd 1");
+        result.assert_ok();
+        assert!(
+            result.contains_any(&["endbr64", "push ", "mov ", "cmp "]),
+            "pd should remain disassembly and not be routed to decompiler alias"
+        );
+        assert!(
+            !result.contains("r2dec fallback:"),
+            "pd output should not include decompiler fallback markers"
+        );
+    }
+
+    #[test]
     fn decompiles_to_c_types() {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.dec");
