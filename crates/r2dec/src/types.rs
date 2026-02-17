@@ -1769,7 +1769,7 @@ mod tests {
         let constraints = emit_inferred_for_test(&ti, &func);
         let has_bool = constraints.iter().any(|c| match c {
             Constraint::SetType { ty, .. } => {
-                let mut arena = TypeArena::default();
+                let arena = TypeArena::default();
                 let bool_id = arena.bool_ty();
                 *ty == bool_id
             }
@@ -1793,7 +1793,7 @@ mod tests {
         let constraints = emit_inferred_for_test(&ti, &func);
         let has_bool = constraints.iter().any(|c| match c {
             Constraint::SetType { ty, .. } => {
-                let mut arena = TypeArena::default();
+                let arena = TypeArena::default();
                 let bool_id = arena.bool_ty();
                 *ty == bool_id
             }

@@ -14,10 +14,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+
 jobs:
-  # ── Preflight: verify pre-installed toolchain ──────────────────────
-  # All deps (Rust, radare2, gcc, clang, z3) are pre-installed on the
-  # self-hosted runner.  See scripts/setup-runner.sh to bootstrap.
+  # ── Preflight: ensure toolchain is ready ────────────────────────────
   preflight:
     name: Preflight
     runs-on: self-hosted
@@ -34,6 +33,15 @@ jobs:
             echo "::error::cargo not found. See scripts/setup-runner.sh"
             exit 1
           fi
+
+      - name: Installing radare2 from git
+        run: |
+          if [ -d /tmp/radare2 ]; then
+            cd /tmp/radare2 && git fetch --depth=1 origin && git reset --hard origin/master
+          else
+            git clone --depth=1 https://github.com/radareorg/radare2 /tmp/radare2
+          fi
+          cd /tmp/radare2 && sys/install.sh
 
       - name: Print versions
         run: |
@@ -167,8 +175,8 @@ jobs:
         working-directory: tests/e2e
         run: |
           gcc -O0 -g -fno-stack-protector -no-pie -o vuln_test vuln_test.c
-          gcc -O0 -g -fno-stack-protector -no-pie -o stress_test stress_test.c
-          gcc -O2 -g -fno-stack-protector -no-pie -o stress_test_opt stress_test.c
+          gcc -O0 -g -fno-stack-protector -no-pie -o stress_test stress_test.c -lm
+          gcc -O2 -g -fno-stack-protector -no-pie -o stress_test_opt stress_test.c -lm
           if [ -f test_func.c ]; then
             gcc -O0 -g -o test_func test_func.c
           fi

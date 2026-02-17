@@ -410,6 +410,105 @@ impl CExpr {
             _ => 16, // Literals, variables, parenthesized
         }
     }
+
+    /// Apply a transformation to immediate child expressions.
+    pub fn map_children(self, f: &mut impl FnMut(CExpr) -> CExpr) -> Self {
+        match self {
+            Self::Unary { op, operand } => Self::Unary {
+                op,
+                operand: Box::new(f(*operand)),
+            },
+            Self::Binary { op, left, right } => Self::Binary {
+                op,
+                left: Box::new(f(*left)),
+                right: Box::new(f(*right)),
+            },
+            Self::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => Self::Ternary {
+                cond: Box::new(f(*cond)),
+                then_expr: Box::new(f(*then_expr)),
+                else_expr: Box::new(f(*else_expr)),
+            },
+            Self::Cast { ty, expr } => Self::Cast {
+                ty,
+                expr: Box::new(f(*expr)),
+            },
+            Self::Call { func, args } => Self::Call {
+                func: Box::new(f(*func)),
+                args: args.into_iter().map(f).collect(),
+            },
+            Self::Subscript { base, index } => Self::Subscript {
+                base: Box::new(f(*base)),
+                index: Box::new(f(*index)),
+            },
+            Self::Member { base, member } => Self::Member {
+                base: Box::new(f(*base)),
+                member,
+            },
+            Self::PtrMember { base, member } => Self::PtrMember {
+                base: Box::new(f(*base)),
+                member,
+            },
+            Self::Sizeof(inner) => Self::Sizeof(Box::new(f(*inner))),
+            Self::AddrOf(inner) => Self::AddrOf(Box::new(f(*inner))),
+            Self::Deref(inner) => Self::Deref(Box::new(f(*inner))),
+            Self::Comma(items) => Self::Comma(items.into_iter().map(f).collect()),
+            Self::Paren(inner) => Self::Paren(Box::new(f(*inner))),
+            leaf => leaf,
+        }
+    }
+
+    /// Visit this expression and all descendants in pre-order.
+    pub fn visit(&self, f: &mut impl FnMut(&CExpr)) {
+        f(self);
+        match self {
+            Self::Unary { operand, .. }
+            | Self::Cast { expr: operand, .. }
+            | Self::Sizeof(operand)
+            | Self::AddrOf(operand)
+            | Self::Deref(operand)
+            | Self::Paren(operand) => operand.visit(f),
+            Self::Binary { left, right, .. } => {
+                left.visit(f);
+                right.visit(f);
+            }
+            Self::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                cond.visit(f);
+                then_expr.visit(f);
+                else_expr.visit(f);
+            }
+            Self::Call { func, args } => {
+                func.visit(f);
+                for arg in args {
+                    arg.visit(f);
+                }
+            }
+            Self::Subscript { base, index } => {
+                base.visit(f);
+                index.visit(f);
+            }
+            Self::Member { base, .. } | Self::PtrMember { base, .. } => base.visit(f),
+            Self::Comma(items) => {
+                for item in items {
+                    item.visit(f);
+                }
+            }
+            Self::IntLit(_)
+            | Self::UIntLit(_)
+            | Self::FloatLit(_)
+            | Self::StringLit(_)
+            | Self::CharLit(_)
+            | Self::Var(_)
+            | Self::SizeofType(_) => {}
+        }
+    }
 }
 
 impl BinaryOp {
@@ -687,5 +786,37 @@ mod tests {
         } else {
             panic!("Expected If statement");
         }
+    }
+
+    #[test]
+    fn test_expr_visit_traverses_all_nodes() {
+        let expr = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::var("a"),
+            CExpr::call(CExpr::var("f"), vec![CExpr::int(1), CExpr::var("b")]),
+        );
+        let mut vars = Vec::new();
+        expr.visit(&mut |node| {
+            if let CExpr::Var(name) = node {
+                vars.push(name.clone());
+            }
+        });
+        assert!(vars.contains(&"a".to_string()));
+        assert!(vars.contains(&"f".to_string()));
+        assert!(vars.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_expr_map_children_updates_direct_children() {
+        let expr = CExpr::binary(BinaryOp::Add, CExpr::var("a"), CExpr::int(1));
+        let mut mapper = |child: CExpr| match child {
+            CExpr::Var(name) if name == "a" => CExpr::var("x"),
+            other => other,
+        };
+        let rewritten = expr.map_children(&mut mapper);
+        let CExpr::Binary { left, .. } = rewritten else {
+            panic!("expected binary expression");
+        };
+        assert_eq!(*left, CExpr::var("x"));
     }
 }

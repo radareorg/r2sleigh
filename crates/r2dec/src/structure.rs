@@ -6,11 +6,8 @@
 use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAFunction;
-use r2types::TypeOracle;
 
-use crate::ExternalStackVar;
-use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
-use crate::expr::ExpressionBuilder;
+use crate::ast::{BinaryOp, CExpr, CStmt, UnaryOp};
 use crate::fold::FoldingContext;
 use crate::region::{Region, RegionAnalyzer};
 
@@ -19,17 +16,14 @@ use crate::region::{Region, RegionAnalyzer};
 /// Converts a region tree into structured C statements.
 pub struct ControlFlowStructurer<'a, 'o> {
     func: &'a SSAFunction,
-    expr_builder: ExpressionBuilder,
     /// Folding context for expression optimization.
-    fold_ctx: Option<FoldingContext<'o>>,
+    fold_ctx: &'o FoldingContext<'o>,
     /// Labels for blocks that need gotos.
     labels: HashMap<u64, String>,
     /// Counter for generating unique labels.
     label_counter: usize,
     /// Region analyzer for detecting breaks/continues.
     region_analyzer: Option<RegionAnalyzer<'a>>,
-    /// Whether finalize_analysis has been called.
-    analysis_finalized: bool,
     /// Safety budget for recursive region structuring.
     safety_budget_remaining: usize,
     safety_budget_max: usize,
@@ -37,54 +31,32 @@ pub struct ControlFlowStructurer<'a, 'o> {
 }
 
 impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
-    /// Create a new structurer with the specified pointer size.
-    /// NOTE: Call set_function_names/set_strings/set_symbols before structure()
-    /// so that definitions are resolved with full context.
-    pub fn new(func: &'a SSAFunction, ptr_size: u32) -> Self {
-        let fold_ctx = FoldingContext::new(ptr_size);
+    /// Create a new structurer using a pre-analyzed folding context.
+    pub fn new(func: &'a SSAFunction, fold_ctx: &'o FoldingContext<'o>) -> Self {
         let region_analyzer = RegionAnalyzer::new(func);
         let safety_budget_max = Self::compute_safety_budget(func.num_blocks());
 
         Self {
             func,
-            expr_builder: ExpressionBuilder::new(ptr_size),
-            fold_ctx: Some(fold_ctx),
+            fold_ctx,
             labels: HashMap::new(),
             label_counter: 0,
             region_analyzer: Some(region_analyzer),
-            analysis_finalized: false,
             safety_budget_remaining: safety_budget_max,
             safety_budget_max,
             safety_reason: None,
         }
     }
 
-    /// Finalize initialization: analyze blocks after external context is set.
-    /// Must be called after set_function_names/set_strings/set_symbols.
-    /// Safe to call multiple times; only the first call performs analysis.
-    fn finalize_analysis(&mut self) {
-        if self.analysis_finalized {
-            return;
-        }
-        self.analysis_finalized = true;
-        if let Some(ref mut ctx) = self.fold_ctx {
-            let blocks: Vec<_> = self.func.blocks().cloned().collect();
-            ctx.analyze_blocks(&blocks);
-            ctx.analyze_function_structure(self.func);
-        }
-    }
-
     /// Create a structurer without expression folding (for comparison).
-    pub fn new_unfolded(func: &'a SSAFunction, ptr_size: u32) -> Self {
+    pub fn new_unfolded(func: &'a SSAFunction, fold_ctx: &'o FoldingContext<'o>) -> Self {
         let safety_budget_max = Self::compute_safety_budget(func.num_blocks());
         Self {
             func,
-            expr_builder: ExpressionBuilder::new(ptr_size),
-            fold_ctx: None,
+            fold_ctx,
             labels: HashMap::new(),
             label_counter: 0,
             region_analyzer: Some(RegionAnalyzer::new(func)),
-            analysis_finalized: true, // No folding context, nothing to finalize
             safety_budget_remaining: safety_budget_max,
             safety_budget_max,
             safety_reason: None,
@@ -120,67 +92,14 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         self.safety_reason.as_deref()
     }
 
-    /// Set function names for call target resolution.
-    pub fn set_function_names(&mut self, names: HashMap<u64, String>) {
-        if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_function_names(names.clone());
-        }
-        self.expr_builder.set_function_names(names);
-    }
-
-    /// Set string literals for constant address resolution.
-    pub fn set_strings(&mut self, strings: HashMap<u64, String>) {
-        if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_strings(strings.clone());
-        }
-        self.expr_builder.set_strings(strings);
-    }
-
-    /// Set symbol names for global variable resolution.
-    pub fn set_symbols(&mut self, symbols: HashMap<u64, String>) {
-        if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_symbols(symbols.clone());
-        }
-        self.expr_builder.set_symbols(symbols);
-    }
-
-    /// Set externally recovered stack variables keyed by signed stack offset.
-    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, ExternalStackVar>) {
-        if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_external_stack_vars(stack_vars);
-        }
-    }
-
-    /// Set inferred variable type hints for expression recovery.
-    pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
-        if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_type_hints(hints);
-        }
-    }
-
-    /// Set optional type oracle for type-driven expression recovery.
-    pub fn set_type_oracle(&mut self, type_oracle: Option<&'o dyn TypeOracle>) {
-        if let Some(ref mut ctx) = self.fold_ctx {
-            ctx.set_type_oracle(type_oracle);
-        }
-    }
-
     /// Get the set of variable names that survive folding (for filtering declarations).
-    pub fn emitted_var_names(&mut self) -> HashSet<String> {
-        // Ensure analysis is finalized before computing emitted vars
-        self.finalize_analysis();
-        if let Some(ref ctx) = self.fold_ctx {
-            let blocks: Vec<_> = self.func.blocks().cloned().collect();
-            ctx.emitted_var_names(&blocks)
-        } else {
-            HashSet::new()
-        }
+    pub fn emitted_var_names(&self) -> HashSet<String> {
+        let blocks: Vec<_> = self.func.blocks().cloned().collect();
+        self.fold_ctx.emitted_var_names(&blocks)
     }
 
     /// Structure the function's control flow.
     pub fn structure(&mut self) -> CStmt {
-        // Ensure analysis is finalized (idempotent)
-        self.finalize_analysis();
         self.reset_safety_budget();
         if self.region_analyzer.is_none() {
             self.region_analyzer = Some(RegionAnalyzer::new(self.func));
@@ -311,11 +230,9 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // Look for an indirect branch which typically has the switch variable
         // For now, return a generic switch variable
         // A more sophisticated implementation would trace the indirect branch target
-        if let Some(ref fold_ctx) = self.fold_ctx {
-            for op in &block.ops {
-                if let Some(expr) = fold_ctx.extract_switch_expr(op) {
-                    return expr;
-                }
+        for op in &block.ops {
+            if let Some(expr) = self.fold_ctx.extract_switch_expr(op) {
+                return expr;
             }
         }
 
@@ -337,19 +254,8 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
 
         // Convert operations to statements
-        if let Some(ref mut fold_ctx) = self.fold_ctx {
-            // Set current block address for return detection
-            fold_ctx.set_current_block(addr);
-            // Use folding context for optimized output
-            stmts.extend(fold_ctx.fold_block(block));
-        } else {
-            // Fall back to basic expression builder
-            for op in &block.ops {
-                if let Some(stmt) = self.expr_builder.op_to_stmt(op) {
-                    stmts.push(stmt);
-                }
-            }
-        }
+        // Use folding context for optimized output
+        stmts.extend(self.fold_ctx.fold_block(block, addr));
 
         // Check for break/continue at block end
         if let Some(ref analyzer) = self.region_analyzer {
@@ -422,16 +328,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
 
         // Convert operations to statements
-        if let Some(ref mut fold_ctx) = self.fold_ctx {
-            fold_ctx.set_current_block(addr);
-            stmts.extend(fold_ctx.fold_block(block));
-        } else {
-            for op in &block.ops {
-                if let Some(stmt) = self.expr_builder.op_to_stmt(op) {
-                    stmts.push(stmt);
-                }
-            }
-        }
+        stmts.extend(self.fold_ctx.fold_block(block, addr));
 
         // Check for break/continue at block end
         if let Some(ref analyzer) = self.region_analyzer {
@@ -467,16 +364,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             None => return Vec::new(),
         };
 
-        if let Some(ref mut fold_ctx) = self.fold_ctx {
-            fold_ctx.set_current_block(addr);
-            fold_ctx.fold_block(block)
-        } else {
-            block
-                .ops
-                .iter()
-                .filter_map(|op| self.expr_builder.op_to_stmt(op))
-                .collect()
-        }
+        self.fold_ctx.fold_block(block, addr)
     }
 
     /// Get the branch condition from a block.
@@ -488,11 +376,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
 
         // Look for a conditional branch in the block
         for op in &block.ops {
-            if let Some(ref fold_ctx) = self.fold_ctx {
-                if let Some(cond) = fold_ctx.extract_condition(op) {
-                    return cond;
-                }
-            } else if let Some(cond) = self.expr_builder.extract_condition(op) {
+            if let Some(cond) = self.fold_ctx.extract_condition(op) {
                 return cond;
             }
         }

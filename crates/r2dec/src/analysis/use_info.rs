@@ -55,8 +55,8 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
             let addr_key = utils::normalize_stack_address(
                 addr,
                 &scratch.info.definitions,
-                &env.fp_name,
-                &env.sp_name,
+                env.fp_name,
+                env.sp_name,
             );
             scratch
                 .info
@@ -68,8 +68,8 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
             let addr_key = utils::normalize_stack_address(
                 addr,
                 &scratch.info.definitions,
-                &env.fp_name,
-                &env.sp_name,
+                env.fp_name,
+                env.sp_name,
             );
             if let Some(stored_val) = scratch.info.memory_stores.get(&addr_key).cloned() {
                 scratch
@@ -155,9 +155,9 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
                     pinned: &scratch.info.pinned,
                     var_aliases: &scratch.info.var_aliases,
                     ptr_arith: &scratch.info.ptr_arith,
-                    function_names: &env.function_names,
-                    strings: &env.strings,
-                    symbols: &env.symbols,
+                    function_names: env.function_names,
+                    strings: env.strings,
+                    symbols: env.symbols,
                     type_oracle: env.type_oracle,
                 };
                 lower.op_to_expr(op)
@@ -867,9 +867,9 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                         pinned: &scratch.info.pinned,
                         var_aliases: &scratch.info.var_aliases,
                         ptr_arith: &scratch.info.ptr_arith,
-                        function_names: &env.function_names,
-                        strings: &env.strings,
-                        symbols: &env.symbols,
+                        function_names: env.function_names,
+                        strings: env.strings,
+                        symbols: env.symbols,
                         type_oracle: env.type_oracle,
                     };
                     match prev_op {
@@ -894,7 +894,7 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
 
             let mut args = Vec::new();
             let mut consumed_keys = Vec::new();
-            for reg in &env.arg_regs {
+            for reg in env.arg_regs {
                 if let Some((expr, dst_key)) = found_regs.remove(reg) {
                     args.push(expr);
                     consumed_keys.push(dst_key);
@@ -919,14 +919,14 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                 }
                 if let SSAOp::Store { addr, val, .. } = prev {
                     let addr_lower = addr.name.to_lowercase();
-                    if addr_lower.contains(&env.sp_name) && val.is_const() {
+                    if addr_lower.contains(env.sp_name) && val.is_const() {
                         scratch.info.consumed_by_call.insert(val.display_name());
                         scratch.info.consumed_by_call.insert(addr.display_name());
                         if j > 0 {
                             let prev2 = &ops[j - 1];
                             if let SSAOp::IntSub { dst, b, .. } = prev2 {
                                 let dst_lower = dst.name.to_lowercase();
-                                if dst_lower.contains(&env.sp_name) && b.is_const() {
+                                if dst_lower.contains(env.sp_name) && b.is_const() {
                                     scratch.info.consumed_by_call.insert(dst.display_name());
                                 }
                             }
@@ -942,37 +942,58 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::CType;
     use r2ssa::{PhiNode, SSAVar};
 
     fn mk(name: &str, version: u32, size: u32) -> SSAVar {
         SSAVar::new(name, version, size)
     }
 
-    fn test_env() -> PassEnv<'static> {
-        PassEnv {
-            ptr_size: 64,
-            sp_name: "rsp".to_string(),
-            fp_name: "rbp".to_string(),
-            ret_reg_name: "rax".to_string(),
-            function_names: HashMap::new(),
-            strings: HashMap::new(),
-            symbols: HashMap::new(),
-            arg_regs: vec![
-                "rdi".to_string(),
-                "rsi".to_string(),
-                "rdx".to_string(),
-                "rcx".to_string(),
-                "r8".to_string(),
-                "r9".to_string(),
-            ],
-            caller_saved_regs: HashSet::new(),
-            type_hints: HashMap::new(),
-            type_oracle: None,
+    #[derive(Default)]
+    struct TestEnvFixture {
+        function_names: HashMap<u64, String>,
+        strings: HashMap<u64, String>,
+        symbols: HashMap<u64, String>,
+        arg_regs: Vec<String>,
+        caller_saved_regs: HashSet<String>,
+        type_hints: HashMap<String, CType>,
+    }
+
+    impl TestEnvFixture {
+        fn new() -> Self {
+            Self {
+                arg_regs: vec![
+                    "rdi".to_string(),
+                    "rsi".to_string(),
+                    "rdx".to_string(),
+                    "rcx".to_string(),
+                    "r8".to_string(),
+                    "r9".to_string(),
+                ],
+                ..Self::default()
+            }
+        }
+
+        fn env(&self) -> PassEnv<'_> {
+            PassEnv {
+                ptr_size: 64,
+                sp_name: "rsp",
+                fp_name: "rbp",
+                ret_reg_name: "rax",
+                function_names: &self.function_names,
+                strings: &self.strings,
+                symbols: &self.symbols,
+                arg_regs: &self.arg_regs,
+                caller_saved_regs: &self.caller_saved_regs,
+                type_hints: &self.type_hints,
+                type_oracle: None,
+            }
         }
     }
 
     fn aliases_for(blocks: Vec<SSABlock>) -> HashMap<String, String> {
-        analyze(&blocks, &test_env()).var_aliases
+        let fixture = TestEnvFixture::new();
+        analyze(&blocks, &fixture.env()).var_aliases
     }
 
     #[test]

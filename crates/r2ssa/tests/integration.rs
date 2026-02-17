@@ -307,17 +307,17 @@ mod tests {
         use r2il::{R2ILBlock, R2ILOp, SpaceId};
 
         let blocks = vec![
-            // Entry: branch
+            // Entry: branch on a non-constant register so SCCP keeps both paths
             R2ILBlock {
                 addr: 0x1000,
                 size: 2,
                 switch_info: None,
                 ops: vec![R2ILOp::CBranch {
                     target: make_const(0x1010, 8), // jump to right
-                    cond: make_const(1, 1),
+                    cond: make_reg(RBX, 1),        // non-constant condition
                 }],
             },
-            // Left path: rax = rdi
+            // Left path (fallthrough): rax = rdi, then jump to merge
             R2ILBlock {
                 addr: 0x1002,
                 size: 3,
@@ -332,15 +332,20 @@ mod tests {
                     },
                 ],
             },
-            // Right path: rax = rsi
+            // Right path: rax = rsi, then jump to merge
             R2ILBlock {
                 addr: 0x1010,
                 size: 3,
                 switch_info: None,
-                ops: vec![R2ILOp::Copy {
-                    dst: make_reg(RAX, 8),
-                    src: make_reg(RSI, 8),
-                }],
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(RAX, 8),
+                        src: make_reg(RSI, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x1020, 8),
+                    },
+                ],
             },
             // Merge: store rax
             R2ILBlock {

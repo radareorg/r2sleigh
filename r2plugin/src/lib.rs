@@ -4850,14 +4850,7 @@ pub extern "C" fn r2dec_block(ctx: *const R2ILContext, block: *const R2ILBlock) 
     let ptr_size = ctx_ref.arch.as_ref().map(|a| a.addr_size * 8).unwrap_or(64);
 
     // Build statements from SSA ops
-    let expr_builder = r2dec::ExpressionBuilder::new(ptr_size);
-    let mut stmts = Vec::new();
-
-    for op in &ssa_block.ops {
-        if let Some(stmt) = expr_builder.op_to_stmt(op) {
-            stmts.push(stmt);
-        }
-    }
+    let stmts = r2dec::lower_ssa_ops_to_stmts(ptr_size, &ssa_block.ops);
 
     // Generate C code for statements
     let mut codegen = r2dec::CodeGenerator::new(r2dec::CodeGenConfig::default());
@@ -4893,14 +4886,7 @@ pub extern "C" fn r2dec_block_ast_json(
     let ssa_block = r2ssa::block::to_ssa(blk, disasm);
 
     // Build statements from SSA ops
-    let expr_builder = r2dec::ExpressionBuilder::new(64);
-    let mut stmts: Vec<r2dec::CStmt> = Vec::new();
-
-    for op in &ssa_block.ops {
-        if let Some(stmt) = expr_builder.op_to_stmt(op) {
-            stmts.push(stmt);
-        }
-    }
+    let stmts: Vec<r2dec::CStmt> = r2dec::lower_ssa_ops_to_stmts(64, &ssa_block.ops);
 
     match serde_json::to_string_pretty(&stmts) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),

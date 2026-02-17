@@ -32,8 +32,8 @@ fn analyze_stack_vars(
                     if let Some(offset) = utils::extract_stack_offset_from_var(
                         addr,
                         &use_info.definitions,
-                        &env.fp_name,
-                        &env.sp_name,
+                        env.fp_name,
+                        env.sp_name,
                     ) {
                         get_or_create_stack_var(scratch, offset);
                     }
@@ -42,8 +42,8 @@ fn analyze_stack_vars(
                     if let Some(offset) = utils::extract_stack_offset_from_var(
                         addr,
                         &use_info.definitions,
-                        &env.fp_name,
-                        &env.sp_name,
+                        env.fp_name,
+                        env.sp_name,
                     ) {
                         if let Some(arg_alias) = utils::arg_alias_for_store_source(
                             val,
@@ -57,7 +57,7 @@ fn analyze_stack_vars(
                 }
                 SSAOp::IntAdd { a, b, .. } => {
                     let a_lower = a.name.to_lowercase();
-                    if (a_lower.contains(&env.fp_name) || a_lower.contains(&env.sp_name))
+                    if (a_lower.contains(env.fp_name) || a_lower.contains(env.sp_name))
                         && let Some(offset) = utils::parse_const_offset(b)
                     {
                         get_or_create_stack_var(scratch, offset);
@@ -75,7 +75,7 @@ fn analyze_stack_vars(
             match op {
                 SSAOp::IntAdd { dst, a, b } => {
                     let a_lower = a.name.to_lowercase();
-                    if !(a_lower.contains(&env.fp_name) || a_lower.contains(&env.sp_name)) {
+                    if !(a_lower.contains(env.fp_name) || a_lower.contains(env.sp_name)) {
                         continue;
                     }
                     if let Some(offset) = utils::parse_const_offset(b)
@@ -182,9 +182,9 @@ fn stack_var_for_addr_var(
         pinned: &empty_names,
         var_aliases,
         ptr_arith: &empty_ptrs,
-        function_names: &env.function_names,
-        strings: &env.strings,
-        symbols: &env.symbols,
+        function_names: env.function_names,
+        strings: env.strings,
+        symbols: env.symbols,
         type_oracle: env.type_oracle,
     };
     let rendered = lower.var_name(addr);
@@ -199,7 +199,7 @@ fn stack_var_for_addr_var(
         return Some(alias);
     }
 
-    utils::extract_stack_offset_from_var(addr, definitions, &env.fp_name, &env.sp_name)
+    utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
         .and_then(|offset| stack_vars.get(&offset).cloned())
 }
 
@@ -215,8 +215,7 @@ fn resolve_stack_alias_from_addr_expr(
         return None;
     }
 
-    if let Some(alias) = utils::simplify_stack_access(expr, stack_vars, &env.fp_name, &env.sp_name)
-    {
+    if let Some(alias) = utils::simplify_stack_access(expr, stack_vars, env.fp_name, env.sp_name) {
         return Some(alias);
     }
 
