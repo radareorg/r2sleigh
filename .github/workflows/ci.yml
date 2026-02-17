@@ -37,7 +37,7 @@ jobs:
       - name: Installing radare2 from git
         run: |
           git clone --depth=1 https://github.com/radareorg/radare2 /tmp/radare2
-          cd /tmp/radare2 && sudo sys/install.sh /usr
+          cd /tmp/radare2 && sys/install.sh
           rm -rf /tmp/radare2
 
       - name: Print versions
