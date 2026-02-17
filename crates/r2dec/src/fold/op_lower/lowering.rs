@@ -1,5 +1,7 @@
+use super::*;
+
 impl<'a> FoldingContext<'a> {
-    fn lowered_from_stmt(stmt: CStmt) -> LoweredOp {
+    pub(super) fn lowered_from_stmt(stmt: CStmt) -> LoweredOp {
         match stmt {
             CStmt::Expr(CExpr::Binary {
                 op: BinaryOp::Assign,
@@ -17,7 +19,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn lowered_to_stmt(&self, lowered: LoweredOp) -> Option<CStmt> {
+    pub(super) fn lowered_to_stmt(&self, lowered: LoweredOp) -> Option<CStmt> {
         match lowered {
             LoweredOp::Assign { lhs, rhs } => self.assign_stmt(lhs, rhs),
             LoweredOp::Expr(expr) => Some(CStmt::Expr(expr)),
@@ -27,7 +29,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn lower_op(&self, op: &SSAOp, frame: &mut LowerFrame) -> LoweredOp {
+    pub(super) fn lower_op(&self, op: &SSAOp, frame: &mut LowerFrame) -> LoweredOp {
         match frame.mode {
             LowerMode::Expr => LoweredOp::Expr(self.op_to_expr_impl(op)),
             LowerMode::Stmt => {
@@ -96,9 +98,13 @@ impl<'a> FoldingContext<'a> {
     }
 
     /// Convert an SSA operation to a C statement, with call argument context.
-    fn op_to_stmt_with_args(&self, op: &SSAOp, block_addr: u64, op_idx: usize) -> Option<CStmt> {
+    pub(super) fn op_to_stmt_with_args(
+        &self,
+        op: &SSAOp,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> Option<CStmt> {
         let mut frame = LowerFrame::for_stmt(block_addr, op_idx, true);
         self.lowered_to_stmt(self.lower_op(op, &mut frame))
     }
-
 }

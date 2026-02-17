@@ -1,3 +1,5 @@
+use super::*;
+
 impl<'a> FoldingContext<'a> {
     fn should_inline_in_return(&self, var_name: &str, depth: u32) -> bool {
         if depth > MAX_RETURN_INLINE_DEPTH {
@@ -100,7 +102,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    pub(super) fn stack_alias_from_deref_expr(&self, expr: &CExpr) -> Option<String> {
+    pub(crate) fn stack_alias_from_deref_expr(&self, expr: &CExpr) -> Option<String> {
         match expr {
             CExpr::Deref(inner) => self.resolve_stack_alias_from_addr_expr(inner, 0),
             CExpr::Paren(inner) => self.stack_alias_from_deref_expr(inner),
@@ -109,7 +111,12 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn expand_return_expr(&self, expr: &CExpr, depth: u32, visited: &mut HashSet<String>) -> CExpr {
+    pub(super) fn expand_return_expr(
+        &self,
+        expr: &CExpr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> CExpr {
         if depth > MAX_RETURN_EXPR_DEPTH {
             return expr.clone();
         }
@@ -205,7 +212,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn get_return_expr(&self, var: &SSAVar) -> CExpr {
+    pub(super) fn get_return_expr(&self, var: &SSAVar) -> CExpr {
         if var.is_const() {
             return self.const_to_expr(var);
         }
@@ -273,7 +280,7 @@ impl<'a> FoldingContext<'a> {
     }
 
     /// Convert a constant variable to a C expression.
-    pub(super) fn const_to_expr(&self, var: &SSAVar) -> CExpr {
+    pub(crate) fn const_to_expr(&self, var: &SSAVar) -> CExpr {
         let val = parse_const_value(&var.name).unwrap_or(0);
 
         // Only resolve addresses that are plausibly code/data (not small literals)

@@ -1,3 +1,5 @@
+use super::*;
+
 impl<'a> FoldingContext<'a> {
     fn lookup_known_signature(&self, callee_name: &str) -> Option<&FunctionType> {
         let normalized = normalize_callee_name(callee_name);
@@ -15,7 +17,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn non_variadic_call_arity(&self, callee: &CExpr) -> Option<usize> {
+    pub(super) fn non_variadic_call_arity(&self, callee: &CExpr) -> Option<usize> {
         let name = Self::extract_callee_name(callee)?;
 
         let known_arity = self
@@ -43,8 +45,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-
-    fn resolve_call_target(&self, target: &SSAVar) -> CExpr {
+    pub(super) fn resolve_call_target(&self, target: &SSAVar) -> CExpr {
         if let Some(addr) = extract_call_address(&target.name) {
             if let Some(name) = self.lookup_function(addr) {
                 return CExpr::Var(name.clone());

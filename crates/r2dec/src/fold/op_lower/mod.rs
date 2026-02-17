@@ -39,6 +39,11 @@ use super::{
     MAX_SIMPLE_EXPR_DEPTH,
 };
 
+mod aliases;
+mod calls;
+mod lowering;
+mod returns;
+
 #[derive(Debug, Clone, PartialEq)]
 enum LoweredOp {
     Assign { lhs: CExpr, rhs: CExpr },
@@ -1921,11 +1926,6 @@ impl<'a> FoldingContext<'a> {
         self.assign_stmt(lhs, rhs)
     }
 }
-
-include!("returns.rs");
-include!("aliases.rs");
-include!("calls.rs");
-include!("lowering.rs");
 
 /// Parse a constant value from a name like "const:0x42" or "const:42".
 pub(crate) fn parse_const_value(name: &str) -> Option<u64> {

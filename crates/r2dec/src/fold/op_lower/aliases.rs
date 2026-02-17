@@ -1,5 +1,7 @@
+use super::*;
+
 impl<'a> FoldingContext<'a> {
-    fn assignment_target_and_rhs(stmt: &CStmt) -> Option<(&str, &CExpr)> {
+    pub(super) fn assignment_target_and_rhs(stmt: &CStmt) -> Option<(&str, &CExpr)> {
         let CStmt::Expr(CExpr::Binary {
             op: BinaryOp::Assign,
             left,
@@ -15,7 +17,7 @@ impl<'a> FoldingContext<'a> {
 
         Some((name.as_str(), right.as_ref()))
     }
-    fn propagate_ephemeral_copies(&self, stmts: Vec<CStmt>) -> Vec<CStmt> {
+    pub(super) fn propagate_ephemeral_copies(&self, stmts: Vec<CStmt>) -> Vec<CStmt> {
         let mut aliases: HashMap<String, CExpr> = HashMap::new();
         let mut out = Vec::with_capacity(stmts.len());
 
@@ -250,7 +252,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn expr_is_pure(&self, expr: &CExpr) -> bool {
+    pub(super) fn expr_is_pure(&self, expr: &CExpr) -> bool {
         let mut pure = true;
         expr.visit(&mut |node| {
             if !pure {
@@ -282,7 +284,7 @@ impl<'a> FoldingContext<'a> {
         pure
     }
 
-    fn collect_expr_reads(&self, expr: &CExpr, out: &mut HashSet<String>) {
+    pub(super) fn collect_expr_reads(&self, expr: &CExpr, out: &mut HashSet<String>) {
         expr.visit(&mut |node| {
             if let CExpr::Var(name) = node {
                 out.insert(name.clone());
@@ -388,7 +390,7 @@ impl<'a> FoldingContext<'a> {
         (reads, def)
     }
 
-    fn prune_dead_temp_assignments(&self, stmts: Vec<CStmt>) -> Vec<CStmt> {
+    pub(super) fn prune_dead_temp_assignments(&self, stmts: Vec<CStmt>) -> Vec<CStmt> {
         let mut live = HashSet::new();
         let mut kept_rev = Vec::with_capacity(stmts.len());
 
