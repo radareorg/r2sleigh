@@ -1762,7 +1762,7 @@ mod decompilation {
             && return_lines
                 .iter()
                 .any(|line| line.contains("return 1") || line.contains("return RAX"));
-        let has_register_fallback_pair = has_return_zero
+        let has_register_fallback_pair = (has_return_zero || has_return_one)
             && return_lines
                 .iter()
                 .any(|line| line.contains("return RAX") || line.contains("return EAX"));
@@ -2221,7 +2221,7 @@ mod decompilation {
             && has_return_one
             && normalized.contains("strcmp(")
             && normalized.contains("if (");
-        let has_register_fallback_pair = has_return_one
+        let has_register_fallback_pair = (has_return_one || has_return_zero)
             && return_lines
                 .iter()
                 .any(|line| line.contains("return RAX") || line.contains("return EAX"));
