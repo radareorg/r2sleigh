@@ -175,8 +175,8 @@ jobs:
         working-directory: tests/e2e
         run: |
           gcc -O0 -g -fno-stack-protector -no-pie -o vuln_test vuln_test.c
-          gcc -O0 -g -fno-stack-protector -no-pie -o stress_test stress_test.c
-          gcc -O2 -g -fno-stack-protector -no-pie -o stress_test_opt stress_test.c
+          gcc -O0 -g -fno-stack-protector -no-pie -o stress_test stress_test.c -lm
+          gcc -O2 -g -fno-stack-protector -no-pie -o stress_test_opt stress_test.c -lm
           if [ -f test_func.c ]; then
             gcc -O0 -g -o test_func test_func.c
           fi
