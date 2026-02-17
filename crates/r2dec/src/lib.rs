@@ -32,7 +32,6 @@ pub(crate) mod address;
 pub(crate) mod analysis;
 pub mod ast;
 pub mod codegen;
-pub mod expr;
 pub mod fold;
 pub(crate) mod normalize;
 pub(crate) mod post_rename;
@@ -43,6 +42,7 @@ pub mod variable;
 
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
 pub use codegen::{CodeGenConfig, CodeGenerator, generate};
+pub use fold::lower_ssa_ops_to_stmts;
 pub use region::{Region, RegionAnalyzer};
 pub use structure::ControlFlowStructurer;
 pub use types::TypeInference;

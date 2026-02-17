@@ -1,0 +1,438 @@
+impl<'a> FoldingContext<'a> {
+    fn assignment_target_and_rhs(stmt: &CStmt) -> Option<(&str, &CExpr)> {
+        let CStmt::Expr(CExpr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        }) = stmt
+        else {
+            return None;
+        };
+
+        let CExpr::Var(name) = left.as_ref() else {
+            return None;
+        };
+
+        Some((name.as_str(), right.as_ref()))
+    }
+    fn propagate_ephemeral_copies(&self, stmts: Vec<CStmt>) -> Vec<CStmt> {
+        let mut aliases: HashMap<String, CExpr> = HashMap::new();
+        let mut out = Vec::with_capacity(stmts.len());
+
+        for stmt in stmts {
+            let rewritten = self.rewrite_stmt_with_aliases(stmt, &aliases);
+            let (_, def) = self.stmt_reads_and_def(&rewritten);
+            if let Some(def_name) = def.as_deref() {
+                self.invalidate_aliases_for_def(&mut aliases, def_name);
+            }
+
+            if let Some((target, rhs)) = Self::assignment_target_and_rhs(&rewritten)
+                && self.is_ephemeral_ssa_target(target)
+                && self.expr_is_cheap_copy_rhs(rhs)
+            {
+                aliases.insert(target.to_string(), rhs.clone());
+            }
+
+            let clear_aliases = Self::stmt_clears_aliases(&rewritten);
+            out.push(rewritten);
+            if clear_aliases {
+                aliases.clear();
+            }
+        }
+
+        out
+    }
+
+    fn rewrite_stmt_with_aliases(&self, stmt: CStmt, aliases: &HashMap<String, CExpr>) -> CStmt {
+        match stmt {
+            CStmt::Expr(CExpr::Binary {
+                op: BinaryOp::Assign,
+                left,
+                right,
+            }) => {
+                let left = match *left {
+                    CExpr::Var(name) => CExpr::Var(name),
+                    other => {
+                        let mut visiting = HashSet::new();
+                        self.rewrite_expr_with_aliases(other, aliases, 0, &mut visiting)
+                    }
+                };
+                let mut visiting = HashSet::new();
+                let right = self.rewrite_expr_with_aliases(*right, aliases, 0, &mut visiting);
+                CStmt::Expr(CExpr::assign(left, right))
+            }
+            CStmt::Expr(expr) => {
+                let mut visiting = HashSet::new();
+                CStmt::Expr(self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting))
+            }
+            CStmt::Decl { ty, name, init } => CStmt::Decl {
+                ty,
+                name,
+                init: init.map(|expr| {
+                    let mut visiting = HashSet::new();
+                    self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting)
+                }),
+            },
+            CStmt::Block(stmts) => CStmt::Block(
+                stmts
+                    .into_iter()
+                    .map(|inner| self.rewrite_stmt_with_aliases(inner, aliases))
+                    .collect(),
+            ),
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let mut visiting = HashSet::new();
+                CStmt::If {
+                    cond: self.rewrite_expr_with_aliases(cond, aliases, 0, &mut visiting),
+                    then_body: Box::new(self.rewrite_stmt_with_aliases(*then_body, aliases)),
+                    else_body: else_body
+                        .map(|stmt| Box::new(self.rewrite_stmt_with_aliases(*stmt, aliases))),
+                }
+            }
+            CStmt::While { cond, body } => {
+                let mut visiting = HashSet::new();
+                CStmt::While {
+                    cond: self.rewrite_expr_with_aliases(cond, aliases, 0, &mut visiting),
+                    body: Box::new(self.rewrite_stmt_with_aliases(*body, aliases)),
+                }
+            }
+            CStmt::DoWhile { body, cond } => {
+                let mut visiting = HashSet::new();
+                CStmt::DoWhile {
+                    body: Box::new(self.rewrite_stmt_with_aliases(*body, aliases)),
+                    cond: self.rewrite_expr_with_aliases(cond, aliases, 0, &mut visiting),
+                }
+            }
+            CStmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => CStmt::For {
+                init: init.map(|stmt| Box::new(self.rewrite_stmt_with_aliases(*stmt, aliases))),
+                cond: cond.map(|expr| {
+                    let mut visiting = HashSet::new();
+                    self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting)
+                }),
+                update: update.map(|expr| {
+                    let mut visiting = HashSet::new();
+                    self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting)
+                }),
+                body: Box::new(self.rewrite_stmt_with_aliases(*body, aliases)),
+            },
+            CStmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                let mut visiting = HashSet::new();
+                CStmt::Switch {
+                    expr: self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting),
+                    cases: cases
+                        .into_iter()
+                        .map(|case| {
+                            let mut case_visiting = HashSet::new();
+                            crate::ast::SwitchCase {
+                                value: self.rewrite_expr_with_aliases(
+                                    case.value,
+                                    aliases,
+                                    0,
+                                    &mut case_visiting,
+                                ),
+                                body: case
+                                    .body
+                                    .into_iter()
+                                    .map(|stmt| self.rewrite_stmt_with_aliases(stmt, aliases))
+                                    .collect(),
+                            }
+                        })
+                        .collect(),
+                    default: default.map(|stmts| {
+                        stmts
+                            .into_iter()
+                            .map(|stmt| self.rewrite_stmt_with_aliases(stmt, aliases))
+                            .collect()
+                    }),
+                }
+            }
+            CStmt::Return(expr) => CStmt::Return(expr.map(|expr| {
+                let mut visiting = HashSet::new();
+                self.rewrite_expr_with_aliases(expr, aliases, 0, &mut visiting)
+            })),
+            other => other,
+        }
+    }
+
+    fn rewrite_expr_with_aliases(
+        &self,
+        expr: CExpr,
+        aliases: &HashMap<String, CExpr>,
+        depth: u32,
+        visiting: &mut HashSet<String>,
+    ) -> CExpr {
+        if depth > MAX_ALIAS_REWRITE_DEPTH {
+            return expr;
+        }
+
+        match expr {
+            CExpr::Var(name) => {
+                let Some(alias) = aliases.get(&name).cloned() else {
+                    return CExpr::Var(name);
+                };
+
+                if !visiting.insert(name.clone()) {
+                    return CExpr::Var(name);
+                }
+
+                let rewritten = self.rewrite_expr_with_aliases(alias, aliases, depth + 1, visiting);
+                visiting.remove(&name);
+                rewritten
+            }
+            other => other.map_children(&mut |child| {
+                self.rewrite_expr_with_aliases(child, aliases, depth + 1, visiting)
+            }),
+        }
+    }
+
+    fn expr_is_cheap_copy_rhs(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(_)
+            | CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(_)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_) => true,
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.expr_is_cheap_copy_rhs(inner)
+            }
+            CExpr::Unary { operand, .. } => self.expr_is_cheap_copy_rhs(operand),
+            _ => false,
+        }
+    }
+
+    fn invalidate_aliases_for_def(&self, aliases: &mut HashMap<String, CExpr>, def_name: &str) {
+        aliases.remove(def_name);
+        aliases.retain(|_, expr| !self.expr_mentions_name(expr, def_name));
+    }
+
+    fn expr_mentions_name(&self, expr: &CExpr, name: &str) -> bool {
+        let mut reads = HashSet::new();
+        self.collect_expr_reads(expr, &mut reads);
+        reads.contains(name)
+    }
+
+    fn stmt_clears_aliases(stmt: &CStmt) -> bool {
+        matches!(
+            stmt,
+            CStmt::Label(_)
+                | CStmt::Goto(_)
+                | CStmt::Return(_)
+                | CStmt::Break
+                | CStmt::Continue
+                | CStmt::If { .. }
+                | CStmt::While { .. }
+                | CStmt::DoWhile { .. }
+                | CStmt::For { .. }
+                | CStmt::Switch { .. }
+                | CStmt::Block(_)
+        )
+    }
+
+    fn ssa_base_name(name: &str) -> Option<&str> {
+        let (base, version) = name.rsplit_once('_')?;
+        if version.chars().all(|c| c.is_ascii_digit()) {
+            Some(base)
+        } else {
+            None
+        }
+    }
+
+    fn expr_is_pure(&self, expr: &CExpr) -> bool {
+        let mut pure = true;
+        expr.visit(&mut |node| {
+            if !pure {
+                return;
+            }
+            match node {
+                CExpr::Call { .. } => pure = false,
+                CExpr::Binary { op, .. } => {
+                    if matches!(
+                        op,
+                        BinaryOp::Assign
+                            | BinaryOp::AddAssign
+                            | BinaryOp::SubAssign
+                            | BinaryOp::MulAssign
+                            | BinaryOp::DivAssign
+                            | BinaryOp::ModAssign
+                            | BinaryOp::BitAndAssign
+                            | BinaryOp::BitOrAssign
+                            | BinaryOp::BitXorAssign
+                            | BinaryOp::ShlAssign
+                            | BinaryOp::ShrAssign
+                    ) {
+                        pure = false;
+                    }
+                }
+                _ => {}
+            }
+        });
+        pure
+    }
+
+    fn collect_expr_reads(&self, expr: &CExpr, out: &mut HashSet<String>) {
+        expr.visit(&mut |node| {
+            if let CExpr::Var(name) = node {
+                out.insert(name.clone());
+            }
+        });
+    }
+
+    fn stmt_reads_and_def(&self, stmt: &CStmt) -> (HashSet<String>, Option<String>) {
+        let mut reads = HashSet::new();
+        let mut def = None;
+
+        match stmt {
+            CStmt::Expr(CExpr::Binary {
+                op: BinaryOp::Assign,
+                left,
+                right,
+            }) => {
+                if let CExpr::Var(name) = left.as_ref() {
+                    def = Some(name.clone());
+                } else {
+                    self.collect_expr_reads(left, &mut reads);
+                }
+                self.collect_expr_reads(right, &mut reads);
+            }
+            CStmt::Expr(expr) => self.collect_expr_reads(expr, &mut reads),
+            CStmt::Decl { init, .. } => {
+                if let Some(expr) = init {
+                    self.collect_expr_reads(expr, &mut reads);
+                }
+            }
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                self.collect_expr_reads(cond, &mut reads);
+                let (then_reads, _) = self.stmt_reads_and_def(then_body);
+                reads.extend(then_reads);
+                if let Some(else_stmt) = else_body {
+                    let (else_reads, _) = self.stmt_reads_and_def(else_stmt);
+                    reads.extend(else_reads);
+                }
+            }
+            CStmt::While { cond, body } | CStmt::DoWhile { cond, body } => {
+                self.collect_expr_reads(cond, &mut reads);
+                let (body_reads, _) = self.stmt_reads_and_def(body);
+                reads.extend(body_reads);
+            }
+            CStmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                if let Some(init_stmt) = init {
+                    let (init_reads, _) = self.stmt_reads_and_def(init_stmt);
+                    reads.extend(init_reads);
+                }
+                if let Some(cond_expr) = cond {
+                    self.collect_expr_reads(cond_expr, &mut reads);
+                }
+                if let Some(update_expr) = update {
+                    self.collect_expr_reads(update_expr, &mut reads);
+                }
+                let (body_reads, _) = self.stmt_reads_and_def(body);
+                reads.extend(body_reads);
+            }
+            CStmt::Switch {
+                expr,
+                cases,
+                default,
+            } => {
+                self.collect_expr_reads(expr, &mut reads);
+                for case in cases {
+                    for stmt in &case.body {
+                        let (case_reads, _) = self.stmt_reads_and_def(stmt);
+                        reads.extend(case_reads);
+                    }
+                }
+                if let Some(default_stmts) = default {
+                    for stmt in default_stmts {
+                        let (default_reads, _) = self.stmt_reads_and_def(stmt);
+                        reads.extend(default_reads);
+                    }
+                }
+            }
+            CStmt::Return(Some(expr)) => self.collect_expr_reads(expr, &mut reads),
+            CStmt::Block(stmts) => {
+                for stmt in stmts {
+                    let (stmt_reads, _) = self.stmt_reads_and_def(stmt);
+                    reads.extend(stmt_reads);
+                }
+            }
+            CStmt::Label(_)
+            | CStmt::Goto(_)
+            | CStmt::Break
+            | CStmt::Continue
+            | CStmt::Return(None)
+            | CStmt::Comment(_)
+            | CStmt::Empty => {}
+        }
+
+        (reads, def)
+    }
+
+    fn prune_dead_temp_assignments(&self, stmts: Vec<CStmt>) -> Vec<CStmt> {
+        let mut live = HashSet::new();
+        let mut kept_rev = Vec::with_capacity(stmts.len());
+
+        for stmt in stmts.into_iter().rev() {
+            let (reads, def) = self.stmt_reads_and_def(&stmt);
+
+            let drop_stmt = if let Some((target, rhs)) = Self::assignment_target_and_rhs(&stmt) {
+                let dead_ephemeral = self.is_ephemeral_ssa_target(target)
+                    && !live.contains(target)
+                    && self.expr_is_pure(rhs);
+
+                let dead_phi_copy = if self.is_ephemeral_ssa_target(target) {
+                    if let CExpr::Var(src) = rhs {
+                        let same_name = src == target;
+                        let same_base =
+                            match (Self::ssa_base_name(src), Self::ssa_base_name(target)) {
+                                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                                _ => false,
+                            };
+                        !live.contains(target) && (same_name || same_base)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                dead_ephemeral || dead_phi_copy
+            } else {
+                false
+            };
+
+            if drop_stmt {
+                continue;
+            }
+
+            if let Some(def_name) = def {
+                live.remove(&def_name);
+            }
+            live.extend(reads);
+            kept_rev.push(stmt);
+        }
+
+        kept_rev.reverse();
+        kept_rev
+    }
+}
