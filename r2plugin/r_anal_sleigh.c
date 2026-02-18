@@ -3,6 +3,7 @@
 #include <r_anal.h>
 #include <r_core.h>
 #include <r_lib.h>
+#include <r_version.h>
 #include <r_util/r_json.h>
 #include <r_util/r_num.h>
 #include <r_util/r_str.h>
@@ -123,6 +124,8 @@ static RCore *sleigh_pdd_core_plugin_core = NULL;
 #define SLEIGH_BLOCK_MAX_BYTES 256
 #define SLEIGH_TAINT_MAX_BLOCKS 200
 #define SLEIGH_SIG_WRITEBACK_MAX_BLOCKS 200
+#define SLEIGH_SIG_MIN_CONFIDENCE 70
+#define SLEIGH_CC_MIN_CONFIDENCE 80
 #define SLEIGH_TAINT_LABEL_MAX 6
 #define SLEIGH_COMMENT_PREFIX_TAINT "sla.taint:"
 #define SLEIGH_COMMENT_PREFIX_TAINT_RISK "sla.taint.risk:"
@@ -3459,12 +3462,6 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 	return refs;
 }
 
-typedef struct {
-	bool has_amd64;
-	bool has_ms;
-	bool has_cdecl;
-} SigWritebackCcSet;
-
 static bool core_cmd_succeeds (RCore *core, const char *cmd) {
 	if (!core || !cmd || !*cmd) {
 		return false;
@@ -3475,37 +3472,6 @@ static bool core_cmd_succeeds (RCore *core, const char *cmd) {
 	return ok;
 }
 
-static SigWritebackCcSet load_available_calling_conventions (RCore *core) {
-	SigWritebackCcSet set = {0};
-	char *list = r_core_cmd_str (core, "afcl");
-	char *saveptr = NULL;
-	char *line;
-	if (!list || !*list) {
-		free (list);
-		return set;
-	}
-
-	for (line = strtok_r (list, "\n", &saveptr); line; line = strtok_r (NULL, "\n", &saveptr)) {
-		size_t len;
-		while (*line == ' ' || *line == '\t') {
-			line++;
-		}
-		len = strlen (line);
-		while (len > 0 && isspace ((unsigned char)line[len - 1])) {
-			line[--len] = '\0';
-		}
-		if (!strcmp (line, "amd64")) {
-			set.has_amd64 = true;
-		} else if (!strcmp (line, "ms")) {
-			set.has_ms = true;
-		} else if (!strcmp (line, "cdecl")) {
-			set.has_cdecl = true;
-		}
-	}
-	free (list);
-	return set;
-}
-
 static bool is_signature_writeback_arch_supported (const char *arch_name) {
 	return arch_name
 		&& (!strcmp (arch_name, "x86") || !strcmp (arch_name, "x86-64")
@@ -3513,20 +3479,244 @@ static bool is_signature_writeback_arch_supported (const char *arch_name) {
 		|| !strcmp (arch_name, "amd64"));
 }
 
-static bool is_callconv_available_for_writeback (const SigWritebackCcSet *set, const char *cc_name) {
-	if (!set || !cc_name || !*cc_name) {
+static const RJson *json_next_object (const RJson *item) {
+	const RJson *cur = item;
+	while (cur && cur->type != R_JSON_OBJECT) {
+		cur = cur->next;
+	}
+	return cur;
+}
+
+static char *normalize_compare_string (const char *s) {
+	size_t len;
+	char *out;
+	size_t i;
+	size_t j = 0;
+
+	if (!s) {
+		return strdup ("");
+	}
+	len = strlen (s);
+	out = malloc (len + 1);
+	if (!out) {
+		return strdup ("");
+	}
+	for (i = 0; i < len; i++) {
+		unsigned char ch = (unsigned char)s[i];
+		if (isspace (ch) || ch == ';') {
+			continue;
+		}
+		out[j++] = (char)tolower (ch);
+	}
+	out[j] = '\0';
+	return out;
+}
+
+static bool strings_match_normalized (const char *a, const char *b) {
+	char *na = normalize_compare_string (a);
+	char *nb = normalize_compare_string (b);
+	bool match;
+	if (!na || !nb) {
+		free (na);
+		free (nb);
 		return false;
 	}
-	if (!strcmp (cc_name, "amd64")) {
-		return set->has_amd64;
+	match = !strcmp (na, nb);
+	free (na);
+	free (nb);
+	return match;
+}
+
+static bool apply_inferred_signature (RAnal *anal, RCore *core, RAnalFunction *fcn, const char *signature) {
+	int rc;
+	char *sig_cmd;
+
+	if (!anal || !fcn || !signature || !*signature) {
+		return false;
 	}
-	if (!strcmp (cc_name, "ms")) {
-		return set->has_ms;
+	rc = r_anal_str_to_fcn (anal, fcn, signature);
+	if (rc > 0) {
+		return true;
 	}
-	if (!strcmp (cc_name, "cdecl")) {
-		return set->has_cdecl;
+	if (!core) {
+		return false;
 	}
+	sig_cmd = r_str_newf ("afs %s @ 0x%"PFMT64x, signature, fcn->addr);
+	if (!sig_cmd) {
+		return false;
+	}
+	if (core_cmd_succeeds (core, sig_cmd)) {
+		free (sig_cmd);
+		return true;
+	}
+	free (sig_cmd);
 	return false;
+}
+
+static bool apply_inferred_callconv (RAnal *anal, RCore *core, RAnalFunction *fcn, const char *cc_name) {
+	const char *pooled_cc = NULL;
+	char *cc_cmd;
+
+	if (!anal || !fcn || !cc_name || !*cc_name) {
+		return false;
+	}
+	if (r_anal_cc_exist (anal, cc_name)) {
+		pooled_cc = r_str_constpool_get (&anal->constpool, cc_name);
+		if (pooled_cc) {
+#if R2_VERSION_NUMBER >= 60000
+			fcn->callconv = pooled_cc;
+#else
+			fcn->cc = pooled_cc;
+#endif
+			return true;
+		}
+	}
+	if (!core) {
+		return false;
+	}
+	cc_cmd = r_str_newf ("afc %s @ 0x%"PFMT64x, cc_name, fcn->addr);
+	if (!cc_cmd) {
+		return false;
+	}
+	if (core_cmd_succeeds (core, cc_cmd)) {
+		free (cc_cmd);
+		return true;
+	}
+	free (cc_cmd);
+	return false;
+}
+
+static bool verify_practical_signature_consistency (
+	RCore *core,
+	const RJson *sig_root,
+	bool check_signature,
+	bool check_callconv,
+	bool *afij_signature_drift
+) {
+	bool ok = true;
+	char *afcfj_json = NULL;
+	RJson *afcfj_root = NULL;
+	const RJson *afcfj_item = NULL;
+	char *afij_json = NULL;
+	RJson *afij_root = NULL;
+	const RJson *afij_item = NULL;
+	const RJson *j_expected_signature;
+	const RJson *j_expected_ret;
+	const RJson *j_expected_params;
+	const RJson *j_expected_callconv;
+
+	if (afij_signature_drift) {
+		*afij_signature_drift = false;
+	}
+	if (!core || !sig_root || sig_root->type != R_JSON_OBJECT) {
+		return false;
+	}
+
+	j_expected_signature = r_json_get (sig_root, "signature");
+	j_expected_ret = r_json_get (sig_root, "ret_type");
+	j_expected_params = r_json_get (sig_root, "params");
+	j_expected_callconv = r_json_get (sig_root, "callconv");
+
+	if (check_signature) {
+		const RJson *j_actual_ret;
+		const RJson *j_actual_args;
+		const RJson *expected_param;
+		const RJson *actual_arg;
+
+		afcfj_json = r_core_cmd_str (core, "afcfj");
+		afcfj_root = afcfj_json ? r_json_parse (afcfj_json) : NULL;
+		if (!afcfj_root || afcfj_root->type != R_JSON_ARRAY) {
+			ok = false;
+		} else {
+			afcfj_item = json_next_object (afcfj_root->children.first);
+			if (!afcfj_item) {
+				ok = false;
+			}
+		}
+
+		if (ok) {
+			j_actual_ret = r_json_get (afcfj_item, "return");
+			j_actual_args = r_json_get (afcfj_item, "args");
+
+			if (!j_expected_ret || j_expected_ret->type != R_JSON_STRING
+					|| !j_actual_ret || j_actual_ret->type != R_JSON_STRING) {
+				ok = false;
+			} else if (!strings_match_normalized (j_expected_ret->str_value, j_actual_ret->str_value)) {
+				ok = false;
+			}
+
+			if (!j_expected_params || j_expected_params->type != R_JSON_ARRAY
+					|| !j_actual_args || j_actual_args->type != R_JSON_ARRAY) {
+				ok = false;
+			} else {
+				expected_param = json_next_object (j_expected_params->children.first);
+				actual_arg = json_next_object (j_actual_args->children.first);
+				while (expected_param && actual_arg) {
+					const RJson *j_expected_type = r_json_get (expected_param, "type");
+					const RJson *j_actual_type = r_json_get (actual_arg, "type");
+
+					if (!j_expected_type || j_expected_type->type != R_JSON_STRING
+							|| !j_actual_type || j_actual_type->type != R_JSON_STRING) {
+						ok = false;
+						break;
+					}
+					if (!strings_match_normalized (j_expected_type->str_value, j_actual_type->str_value)) {
+						ok = false;
+						break;
+					}
+					expected_param = json_next_object (expected_param->next);
+					actual_arg = json_next_object (actual_arg->next);
+				}
+				if (expected_param || actual_arg) {
+					ok = false;
+				}
+			}
+		}
+	}
+
+	if (check_signature || check_callconv) {
+		afij_json = r_core_cmd_str (core, "afij");
+		afij_root = afij_json ? r_json_parse (afij_json) : NULL;
+		if (!afij_root || afij_root->type != R_JSON_ARRAY) {
+			if (check_callconv) {
+				ok = false;
+			}
+		} else {
+			afij_item = json_next_object (afij_root->children.first);
+			if (!afij_item && check_callconv) {
+				ok = false;
+			}
+		}
+	}
+
+	if (check_callconv && afij_item) {
+		const RJson *j_afij_calltype = r_json_get (afij_item, "calltype");
+		if (j_expected_callconv && j_expected_callconv->type == R_JSON_STRING
+				&& j_expected_callconv->str_value && *j_expected_callconv->str_value) {
+			if (!j_afij_calltype || j_afij_calltype->type != R_JSON_STRING
+					|| !strings_match_normalized (j_expected_callconv->str_value, j_afij_calltype->str_value)) {
+				ok = false;
+			}
+		}
+	}
+
+	if (check_signature && afij_item && afij_signature_drift) {
+		const RJson *j_afij_sig = r_json_get (afij_item, "signature");
+		if (!j_expected_signature || j_expected_signature->type != R_JSON_STRING
+				|| !j_expected_signature->str_value || !*j_expected_signature->str_value) {
+			*afij_signature_drift = false;
+		} else if (!j_afij_sig || j_afij_sig->type != R_JSON_STRING) {
+			*afij_signature_drift = true;
+		} else if (!strings_match_normalized (j_expected_signature->str_value, j_afij_sig->str_value)) {
+			*afij_signature_drift = true;
+		}
+	}
+
+	r_json_free (afcfj_root);
+	r_json_free (afij_root);
+	free (afcfj_json);
+	free (afij_json);
+	return ok;
 }
 
 /* Eligibility/priority callback: score > 0 = eligible with priority, < 0 = ineligible */
@@ -3557,14 +3747,19 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int sig_fcns_skipped_size = 0;
 	int sig_parse_failures = 0;
 	int sig_cmd_failures = 0;
+	int sig_skipped_low_conf = 0;
+	int cc_skipped_low_conf = 0;
 	int sig_signatures_updated = 0;
 	int sig_cc_updated = 0;
+	int consistency_verified = 0;
+	int consistency_ok = 0;
+	int consistency_mismatch = 0;
+	int afij_signature_drift = 0;
 	int best_sink_rank = 1000;
 	ut64 best_sink_addr = 0;
 	char *best_sink_label = NULL;
 	const char *arch_name = NULL;
 	bool sig_arch_supported = false;
-	SigWritebackCcSet available_ccs = {0};
 
 	if (!ctx) {
 		return false;
@@ -3572,9 +3767,6 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	core = anal->coreb.core;
 	arch_name = r2il_arch_name (ctx);
 	sig_arch_supported = is_signature_writeback_arch_supported (arch_name);
-	if (core) {
-		available_ccs = load_available_calling_conventions (core);
-	}
 
 	int num_fcns = r_list_length (anal->fcns);
 	if (num_fcns == 0) {
@@ -3950,6 +4142,11 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			RJson *sig_root;
 			const RJson *j_signature;
 			const RJson *j_callconv;
+			const RJson *j_confidence;
+			int confidence = 0;
+			bool signature_applied = false;
+			bool cc_applied = false;
+			bool signature_drift = false;
 			sig_fcns_considered++;
 
 			sig_json = r2sleigh_infer_signature_cc_json (ctx,
@@ -3966,34 +4163,52 @@ static bool sleigh_post_analysis(RAnal *anal) {
 				} else {
 					j_signature = r_json_get (sig_root, "signature");
 					j_callconv = r_json_get (sig_root, "callconv");
+					j_confidence = r_json_get (sig_root, "confidence");
+					if (j_confidence && j_confidence->type == R_JSON_INTEGER) {
+						confidence = (int)j_confidence->num.u_value;
+					}
 
 					if (j_signature && j_signature->type == R_JSON_STRING
 							&& j_signature->str_value && *j_signature->str_value) {
-						char *sig_cmd = r_str_newf ("afs %s @ 0x%"PFMT64x, j_signature->str_value, fcn->addr);
-						if (core_cmd_succeeds (core, sig_cmd)) {
+						if (confidence < SLEIGH_SIG_MIN_CONFIDENCE) {
+							sig_skipped_low_conf++;
+						} else if (apply_inferred_signature (anal, core, fcn, j_signature->str_value)) {
 							sig_signatures_updated++;
+							signature_applied = true;
 						} else {
 							sig_cmd_failures++;
 							R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x,
 								fcn_name, fcn->addr);
 						}
-						free (sig_cmd);
 					} else {
 						sig_parse_failures++;
 					}
 
 					if (j_callconv && j_callconv->type == R_JSON_STRING
-							&& j_callconv->str_value && *j_callconv->str_value
-							&& is_callconv_available_for_writeback (&available_ccs, j_callconv->str_value)) {
-						char *cc_cmd = r_str_newf ("afc %s @ 0x%"PFMT64x, j_callconv->str_value, fcn->addr);
-						if (core_cmd_succeeds (core, cc_cmd)) {
+							&& j_callconv->str_value && *j_callconv->str_value) {
+						if (confidence < SLEIGH_CC_MIN_CONFIDENCE) {
+							cc_skipped_low_conf++;
+						} else if (apply_inferred_callconv (anal, core, fcn, j_callconv->str_value)) {
 							sig_cc_updated++;
+							cc_applied = true;
 						} else {
 							sig_cmd_failures++;
 							R_LOG_WARN ("r2sleigh: calling-convention write-back failed for %s @ 0x%"PFMT64x,
 								fcn_name, fcn->addr);
 						}
-						free (cc_cmd);
+					}
+
+					if (signature_applied || cc_applied) {
+						consistency_verified++;
+						if (verify_practical_signature_consistency (
+								core, sig_root, signature_applied, cc_applied, &signature_drift)) {
+							consistency_ok++;
+						} else {
+							consistency_mismatch++;
+						}
+						if (signature_drift) {
+							afij_signature_drift++;
+						}
 					}
 
 					r_json_free (sig_root);
@@ -4011,9 +4226,11 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		taint_sink_hits, taint_parse_failures);
 	R_LOG_INFO ("r2sleigh: post-analysis risk summary: critical=%d high=%d medium=%d low=%d",
 		taint_risk_critical, taint_risk_high, taint_risk_medium, taint_risk_low);
-	R_LOG_INFO ("r2sleigh: signature write-back considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d",
+	R_LOG_INFO ("r2sleigh: signature write-back considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d sig_low_conf_skips=%d cc_low_conf_skips=%d consistency_verified=%d consistency_ok=%d consistency_mismatch=%d afij_signature_drift=%d",
 		sig_fcns_considered, sig_fcns_skipped_arch, sig_fcns_skipped_size, sig_parse_failures,
-		sig_cmd_failures, sig_signatures_updated, sig_cc_updated);
+		sig_cmd_failures, sig_signatures_updated, sig_cc_updated, sig_skipped_low_conf,
+		cc_skipped_low_conf, consistency_verified, consistency_ok, consistency_mismatch,
+		afij_signature_drift);
 	if (best_sink_label) {
 		R_LOG_INFO ("r2sleigh: post-analysis most interesting sink 0x%"PFMT64x" label=%s",
 			best_sink_addr, best_sink_label);

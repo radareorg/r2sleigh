@@ -240,12 +240,19 @@ x86/x86-64 functions:
 
 1. Rust FFI `r2sleigh_infer_signature_cc_json()` builds SSA and infers
    signature + calling convention.
-2. C wrapper applies results with:
-   - `afs <signature> @ <addr>`
-   - `afc <cc> @ <addr>`
-3. Existing function names are preserved by using the current function name in
+2. C wrapper applies results with confidence gating:
+   - signature overwrite when confidence `>= 70`
+   - calling convention overwrite when confidence `>= 80`
+3. C write-back prefers direct `RAnal` APIs and falls back to commands:
+   - signature: `r_anal_str_to_fcn()` then `afs` fallback
+   - callconv: function callconv field (`r_str_constpool_get`) then `afc` fallback
+4. Practical consistency checks are performed post-writeback:
+   - `afcfj` return/arg structure should match inferred signature
+   - `afij.calltype` should match inferred call convention
+   - `afij.signature` drift is measured and logged (non-fatal)
+5. Existing function names are preserved by using the current function name in
    the generated signature.
-4. Large functions are skipped via `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS` to bound
+6. Large functions are skipped via `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS` to bound
    post-analysis cost.
 
 Per-Topic Documentation

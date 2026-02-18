@@ -3110,6 +3110,62 @@ mod deep_integration {
             "write-back should recover inferred integer return type"
         );
     }
+
+    #[test]
+    fn aaaa_signature_writeback_logs_confidence_skips() {
+        let result = r2_cmd("/bin/ls", "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("sig_low_conf_skips="),
+            "write-back summary should include signature confidence skip counter"
+        );
+        assert!(
+            result.contains("cc_low_conf_skips="),
+            "write-back summary should include callconv confidence skip counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_practical_consistency_metrics_present() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("consistency_verified="),
+            "write-back summary should include consistency verification count"
+        );
+        assert!(
+            result.contains("consistency_ok="),
+            "write-back summary should include consistency success count"
+        );
+        assert!(
+            result.contains("consistency_mismatch="),
+            "write-back summary should include consistency mismatch count"
+        );
+        assert!(
+            result.contains("afij_signature_drift="),
+            "write-back summary should include afij signature drift count"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_calltype_consistent_in_afij() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); afc ms; aaaa; afcfj; afij~calltype",
+        );
+        result.assert_ok();
+        assert!(
+            result.contains("\"return\":\"int"),
+            "afcfj should reflect inferred integer return after write-back"
+        );
+        assert!(
+            result.contains("\"calltype\":\"amd64\""),
+            "afij.calltype should match inferred calling convention after write-back"
+        );
+    }
 }
 
 // ============================================================================

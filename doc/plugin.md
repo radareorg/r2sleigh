@@ -63,6 +63,8 @@ Configuration
 
 SLEIGH_TAINT_MAX_BLOCKS: Max blocks for auto-taint. Default 200.
 SLEIGH_SIG_WRITEBACK_MAX_BLOCKS: Max blocks for automatic signature/CC write-back. Default 200.
+SLEIGH_SIG_MIN_CONFIDENCE: Minimum confidence for signature overwrite. Default 70.
+SLEIGH_CC_MIN_CONFIDENCE: Minimum confidence for calling convention overwrite. Default 80.
 
 Automatic Signature Write-Back (aaaa)
 -------------------------------------
@@ -71,7 +73,12 @@ During `aaaa`, the plugin also performs function signature + calling convention
 write-back for x86/x86-64 functions:
 
 - Builds SSA and infers return/parameter types.
-- Writes signature via `afs <signature> @ <addr>`.
-- Writes calling convention via `afc <cc> @ <addr>` when available.
+- Applies inferred signature via direct `RAnal` update first, with `afs` fallback.
+- Applies inferred calling convention via direct `RAnal` update first, with `afc` fallback.
+- Confidence-gated overwrite: signature `>= 70`, calling convention `>= 80`.
+- Practical consistency check:
+  - `afcfj` is validated against inferred return/args.
+  - `afij.calltype` is validated when CC write-back was applied.
+  - `afij.signature` drift is tracked and logged (best-effort, non-fatal).
 - Preserves existing function names (no rename during write-back).
 - Skips functions above `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS`.

@@ -4923,6 +4923,11 @@ struct InferredSignatureCcJson {
     confidence: u8,
 }
 
+#[cfg(test)]
+const SIG_WRITEBACK_CONFIDENCE_MIN: u8 = 70;
+#[cfg(test)]
+const CC_WRITEBACK_CONFIDENCE_MIN: u8 = 80;
+
 fn normalize_sig_arch_name(arch: Option<&ArchSpec>) -> Option<String> {
     let arch = arch?;
     let lower = arch.name.to_ascii_lowercase();
@@ -5037,7 +5042,7 @@ fn collect_version0_input_regs(
 fn infer_callconv_x86_64_from_counts(
     counts: &std::collections::HashMap<String, u32>,
 ) -> (&'static str, u8) {
-    let mut canonical = std::collections::HashMap::new();
+    let mut canonical = std::collections::BTreeMap::new();
     for (reg, count) in counts {
         if let Some(name) = canonical_x86_64_arg_reg(reg) {
             *canonical.entry(name).or_insert(0u32) += *count;
@@ -5100,6 +5105,21 @@ fn sanitize_inferred_param_type(
     }
 
     ty
+}
+
+fn compute_inference_confidence(
+    base_confidence: u8,
+    param_count: usize,
+    has_known_ret: bool,
+) -> u8 {
+    let mut confidence = base_confidence.min(100);
+    if param_count > 0 {
+        confidence = confidence.saturating_add(4).min(100);
+    }
+    if has_known_ret {
+        confidence = confidence.saturating_add(2).min(100);
+    }
+    confidence
 }
 
 fn normalize_inferred_param_name(
@@ -5252,13 +5272,11 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
         _ => (String::new(), 32),
     };
 
-    let mut confidence = base_confidence;
-    if !params.is_empty() {
-        confidence = confidence.saturating_add(4).min(100);
-    }
-    if !matches!(ret_type, r2dec::CType::Unknown) {
-        confidence = confidence.saturating_add(2).min(100);
-    }
+    let confidence = compute_inference_confidence(
+        base_confidence,
+        params.len(),
+        !matches!(ret_type, r2dec::CType::Unknown),
+    );
 
     let signature = format_afs_signature(&function_name, &ret_type_str, &params);
     let payload = InferredSignatureCcJson {
@@ -6200,6 +6218,44 @@ mod tests {
         let (cc, confidence) = infer_callconv_x86_64_from_counts(&counts);
         assert_eq!(cc, "ms");
         assert!(confidence >= 70);
+    }
+
+    #[test]
+    fn confidence_gate_low_case() {
+        let confidence = compute_inference_confidence(60, 0, false);
+        assert!(confidence < SIG_WRITEBACK_CONFIDENCE_MIN);
+        assert!(confidence < CC_WRITEBACK_CONFIDENCE_MIN);
+    }
+
+    #[test]
+    fn confidence_gate_mid_case() {
+        let confidence = compute_inference_confidence(72, 0, false);
+        assert!(confidence >= SIG_WRITEBACK_CONFIDENCE_MIN);
+        assert!(confidence < CC_WRITEBACK_CONFIDENCE_MIN);
+    }
+
+    #[test]
+    fn confidence_gate_high_case() {
+        let confidence = compute_inference_confidence(76, 1, true);
+        assert!(confidence >= SIG_WRITEBACK_CONFIDENCE_MIN);
+        assert!(confidence >= CC_WRITEBACK_CONFIDENCE_MIN);
+    }
+
+    #[test]
+    fn callconv_confidence_is_stable_for_same_register_histogram() {
+        let mut first = std::collections::HashMap::new();
+        first.insert("rdi".to_string(), 2);
+        first.insert("rsi".to_string(), 2);
+        first.insert("rdx".to_string(), 1);
+
+        let mut second = std::collections::HashMap::new();
+        second.insert("rdx".to_string(), 1);
+        second.insert("rsi".to_string(), 2);
+        second.insert("rdi".to_string(), 2);
+
+        let inferred_first = infer_callconv_x86_64_from_counts(&first);
+        let inferred_second = infer_callconv_x86_64_from_counts(&second);
+        assert_eq!(inferred_first, inferred_second);
     }
 }
 
