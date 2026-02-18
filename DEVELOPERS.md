@@ -243,9 +243,11 @@ x86/x86-64 functions:
 2. C wrapper applies results with confidence gating:
    - signature overwrite when confidence `>= 70`
    - calling convention overwrite when confidence `>= 80`
-3. C write-back prefers direct `RAnal` APIs and falls back to commands:
-   - signature: `r_anal_str_to_fcn()` then `afs` fallback
-   - callconv: function callconv field (`r_str_constpool_get`) then `afc` fallback
+3. C write-back is API-first but verified before success:
+   - signature: `r_anal_str_to_fcn()` + type DB verification (`r_type_func_*`),
+     then `afs` fallback only when API apply is unverified
+   - callconv: function callconv field (`r_str_constpool_get`) + function-state
+     verification, then `afc` fallback only when API apply is unverified
 4. Practical consistency checks are performed post-writeback:
    - `afcfj` return/arg structure should match inferred signature
    - `afij.calltype` should match inferred call convention
@@ -254,7 +256,7 @@ x86/x86-64 functions:
    the generated signature.
 6. Large functions are skipped via `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS` to bound
    post-analysis cost.
-7. After successful signature apply, direct caller propagation runs:
+7. After verified signature apply, direct caller propagation runs:
    - xref scope: direct `CALL/CODE/JUMP` refs only
    - caller-side reanalysis: type-match + `afva`
    - bounded by caps:
@@ -264,6 +266,13 @@ x86/x86-64 functions:
    - one caller function is updated at most once per run (global dedupe)
    - propagation is non-fatal and summarized in logs via `prop_*` counters and
      `sample_callees=`.
+8. Signature write-back summary also reports apply-path telemetry:
+   - signature: `sig_api_apply_ok`, `sig_api_verify_fail`,
+     `sig_cmd_fallback_attempted`, `sig_cmd_apply_ok`, `sig_cmd_apply_fail`
+   - callconv: `cc_api_apply_ok`, `cc_api_verify_fail`,
+     `cc_cmd_fallback_attempted`, `cc_cmd_apply_ok`, `cc_cmd_apply_fail`
+9. The stack assumes radare2 `>= 6.0`, including corrected
+   `r_anal_str_to_fcn()` return semantics (success only on parse/save success).
 
 Per-Topic Documentation
 -----------------------

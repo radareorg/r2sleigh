@@ -2681,6 +2681,14 @@ mod deep_integration {
             .map(str::to_string)
     }
 
+    fn find_signature_apply_path_summary(result: &e2e::R2Result) -> Option<String> {
+        let merged = format!("{}\n{}", result.stdout, result.stderr);
+        merged
+            .lines()
+            .find(|line| line.contains("r2sleigh: signature write-back apply-path"))
+            .map(str::to_string)
+    }
+
     /// Verify that `aaa` runs successfully with the plugin loaded
     #[test]
     fn aaa_succeeds_with_plugin() {
@@ -3147,6 +3155,78 @@ mod deep_integration {
         assert!(
             result.contains("cc_low_conf_skips="),
             "write-back summary should include callconv confidence skip counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_apply_path_metrics_present() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("sig_api_apply_ok="),
+            "write-back summary should include signature API apply counter"
+        );
+        assert!(
+            result.contains("sig_api_verify_fail="),
+            "write-back summary should include signature API verify-fail counter"
+        );
+        assert!(
+            result.contains("sig_cmd_fallback_attempted="),
+            "write-back summary should include signature fallback-attempt counter"
+        );
+        assert!(
+            result.contains("sig_cmd_apply_ok="),
+            "write-back summary should include signature fallback success counter"
+        );
+        assert!(
+            result.contains("sig_cmd_apply_fail="),
+            "write-back summary should include signature fallback failure counter"
+        );
+        assert!(
+            result.contains("cc_api_apply_ok="),
+            "write-back summary should include callconv API apply counter"
+        );
+        assert!(
+            result.contains("cc_api_verify_fail="),
+            "write-back summary should include callconv API verify-fail counter"
+        );
+        assert!(
+            result.contains("cc_cmd_fallback_attempted="),
+            "write-back summary should include callconv fallback-attempt counter"
+        );
+        assert!(
+            result.contains("cc_cmd_apply_ok="),
+            "write-back summary should include callconv fallback success counter"
+        );
+        assert!(
+            result.contains("cc_cmd_apply_fail="),
+            "write-back summary should include callconv fallback failure counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_api_path_nonzero() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); afc ms; aaaa",
+        );
+        result.assert_ok();
+        let summary = find_signature_apply_path_summary(&result)
+            .expect("signature write-back apply-path summary line should be present");
+        let sig_api_apply_ok = extract_summary_metric(&summary, "sig_api_apply_ok")
+            .expect("summary should include sig_api_apply_ok");
+        let cc_api_apply_ok = extract_summary_metric(&summary, "cc_api_apply_ok")
+            .expect("summary should include cc_api_apply_ok");
+        assert!(
+            sig_api_apply_ok > 0,
+            "signature API apply count should be non-zero in poisoned-signature scenario"
+        );
+        assert!(
+            cc_api_apply_ok > 0,
+            "callconv API apply count should be non-zero in poisoned-signature scenario"
         );
     }
 
