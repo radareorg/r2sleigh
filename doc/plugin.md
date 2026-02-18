@@ -27,7 +27,7 @@ sleigh_op: Lifts instructions during aaa. Generates ESIL.
 sleigh_recover_vars: Provides SSA-derived variables for afva.
 sleigh_analyze_fcn: Per-function SSA analysis after af.
 sleigh_get_data_refs: Def-use xrefs after aar.
-sleigh_post_analysis: Auto-taint during aaaa.
+sleigh_post_analysis: Auto-taint + signature/CC write-back during aaaa.
 
 Command Reference
 -----------------
@@ -62,3 +62,16 @@ Configuration
 -------------
 
 SLEIGH_TAINT_MAX_BLOCKS: Max blocks for auto-taint. Default 200.
+SLEIGH_SIG_WRITEBACK_MAX_BLOCKS: Max blocks for automatic signature/CC write-back. Default 200.
+
+Automatic Signature Write-Back (aaaa)
+-------------------------------------
+
+During `aaaa`, the plugin also performs function signature + calling convention
+write-back for x86/x86-64 functions:
+
+- Builds SSA and infers return/parameter types.
+- Writes signature via `afs <signature> @ <addr>`.
+- Writes calling convention via `afc <cc> @ <addr>` when available.
+- Preserves existing function names (no rename during write-back).
+- Skips functions above `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS`.

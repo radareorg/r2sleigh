@@ -3038,6 +3038,78 @@ mod deep_integration {
             "aaaa should still complete successfully after auto-taint integration"
         );
     }
+
+    #[test]
+    fn aaaa_signature_cc_writeback_overwrites_bad_manual_settings() {
+        setup();
+        let poisoned = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); afc ms; afcfj; afij~calltype",
+        );
+        poisoned.assert_ok();
+        assert!(
+            poisoned.contains("\"return\":\"void\""),
+            "poison step should set a void return signature"
+        );
+        assert!(
+            poisoned.contains("\"calltype\":\"ms\""),
+            "poison step should set ms callconv"
+        );
+
+        let repaired = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "aaaa; afcfj; afij~calltype",
+        );
+        repaired.assert_ok();
+        assert!(
+            !repaired.contains("\"return\":\"void\""),
+            "write-back should overwrite poisoned void return type"
+        );
+        assert!(
+            repaired.contains("\"return\":\"int"),
+            "write-back should recover an inferred integer return type"
+        );
+        assert!(
+            repaired.contains("\"calltype\":\"amd64\""),
+            "write-back should restore amd64 calling convention"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_preserves_function_name() {
+        let listing = r2_cmd("/bin/ls", "aaa; afl~fcn.");
+        listing.assert_ok();
+        let target = listing
+            .stdout
+            .lines()
+            .find_map(|line| {
+                line.split_whitespace()
+                    .last()
+                    .filter(|name| name.starts_with("fcn."))
+                    .map(|name| name.to_string())
+            })
+            .expect("expected at least one non-symbol fcn.* in /bin/ls");
+
+        let cmd = format!(
+            "aaa; s {target}; afn custom_sigkeep; s custom_sigkeep; afs void custom_sigkeep(void); aaaa; s custom_sigkeep; afij~name,signature; afcfj",
+        );
+        let result = r2_cmd("/bin/ls", &cmd);
+        result.assert_ok();
+        assert!(
+            result.contains("\"name\":\"custom_sigkeep\""),
+            "write-back must preserve existing function name"
+        );
+        assert!(
+            !result.contains("\"return\":\"void\""),
+            "write-back should update poisoned void signature"
+        );
+        assert!(
+            result.contains("\"return\":\"int"),
+            "write-back should recover inferred integer return type"
+        );
+    }
 }
 
 // ============================================================================

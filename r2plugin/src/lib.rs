@@ -4898,6 +4898,385 @@ pub extern "C" fn r2dec_block_ast_json(
 // radare2 Deep Integration FFI - Variable Recovery and Data Refs
 // ============================================================================
 
+#[derive(Debug, Clone)]
+struct InferredParam {
+    name: String,
+    ty: r2dec::CType,
+    arg_index: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct InferredParamJson {
+    name: String,
+    #[serde(rename = "type")]
+    param_type: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct InferredSignatureCcJson {
+    function_name: String,
+    signature: String,
+    ret_type: String,
+    params: Vec<InferredParamJson>,
+    callconv: String,
+    arch: String,
+    confidence: u8,
+}
+
+fn normalize_sig_arch_name(arch: Option<&ArchSpec>) -> Option<String> {
+    let arch = arch?;
+    let lower = arch.name.to_ascii_lowercase();
+    if matches!(lower.as_str(), "x86-64" | "x86_64" | "x64" | "amd64") {
+        return Some("x86-64".to_string());
+    }
+    if matches!(lower.as_str(), "x86" | "x86-32" | "i386" | "i686") {
+        return Some("x86".to_string());
+    }
+    Some(arch.name.clone())
+}
+
+fn decompiler_config_for_arch_name(arch_name: &str, ptr_bits: u32) -> r2dec::DecompilerConfig {
+    match (arch_name, ptr_bits) {
+        ("x86", 32) | ("x86-32", _) => r2dec::DecompilerConfig::x86(),
+        ("x86-64", _) | ("x86_64", _) | ("x64", _) | ("amd64", _) => {
+            r2dec::DecompilerConfig::x86_64()
+        }
+        ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
+        ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
+        _ => r2dec::DecompilerConfig {
+            ptr_size: ptr_bits,
+            ..r2dec::DecompilerConfig::default()
+        },
+    }
+}
+
+fn infer_signature_return_type(
+    func: &r2ssa::SSAFunction,
+    type_inference: &r2dec::TypeInference,
+) -> r2dec::CType {
+    let mut candidates = Vec::new();
+
+    for block in func.blocks() {
+        for op in &block.ops {
+            let r2ssa::SSAOp::Return { target } = op else {
+                continue;
+            };
+
+            let target_name = target.name.to_ascii_lowercase();
+            if target_name.starts_with("xmm0") || target_name.starts_with("st0") {
+                let bits = if target.size.saturating_mul(8) <= 32 {
+                    32
+                } else {
+                    64
+                };
+                candidates.push(r2dec::CType::Float(bits));
+                continue;
+            }
+
+            candidates.push(type_inference.get_type(target));
+        }
+    }
+
+    if candidates.is_empty() {
+        return r2dec::CType::Void;
+    }
+
+    let mut meaningful: Vec<r2dec::CType> = candidates
+        .into_iter()
+        .filter(|ty| !matches!(ty, r2dec::CType::Unknown))
+        .collect();
+    if meaningful.is_empty() {
+        return r2dec::CType::Int(32);
+    }
+    if meaningful.iter().all(|ty| ty == &meaningful[0]) {
+        return meaningful.remove(0);
+    }
+    if let Some(float_ty) = meaningful
+        .iter()
+        .find(|ty| matches!(ty, r2dec::CType::Float(_)))
+        .cloned()
+    {
+        return float_ty;
+    }
+    meaningful.remove(0)
+}
+
+fn canonical_x86_64_arg_reg(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "rdi" | "edi" | "di" | "dil" => Some("rdi"),
+        "rsi" | "esi" | "si" | "sil" => Some("rsi"),
+        "rdx" | "edx" | "dx" | "dl" | "dh" => Some("rdx"),
+        "rcx" | "ecx" | "cx" | "cl" | "ch" => Some("rcx"),
+        "r8" | "r8d" | "r8w" | "r8b" => Some("r8"),
+        "r9" | "r9d" | "r9w" | "r9b" => Some("r9"),
+        _ => None,
+    }
+}
+
+fn collect_version0_input_regs(
+    func: &r2ssa::SSAFunction,
+) -> std::collections::HashMap<String, u32> {
+    let mut counts = std::collections::HashMap::new();
+    for block in func.blocks() {
+        for op in &block.ops {
+            for src in op.sources() {
+                if src.version != 0 {
+                    continue;
+                }
+                if src.name.starts_with("tmp:") || src.name.starts_with("const:") {
+                    continue;
+                }
+                let key = src.name.to_ascii_lowercase();
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn infer_callconv_x86_64_from_counts(
+    counts: &std::collections::HashMap<String, u32>,
+) -> (&'static str, u8) {
+    let mut canonical = std::collections::HashMap::new();
+    for (reg, count) in counts {
+        if let Some(name) = canonical_x86_64_arg_reg(reg) {
+            *canonical.entry(name).or_insert(0u32) += *count;
+        }
+    }
+
+    let rdi = *canonical.get("rdi").unwrap_or(&0);
+    let rsi = *canonical.get("rsi").unwrap_or(&0);
+    let rcx = *canonical.get("rcx").unwrap_or(&0);
+    let rdx = *canonical.get("rdx").unwrap_or(&0);
+    let r8 = *canonical.get("r8").unwrap_or(&0);
+    let r9 = *canonical.get("r9").unwrap_or(&0);
+
+    let sysv_primary = rdi + rsi;
+    let sysv_total = rdi + rsi + rdx + rcx + r8 + r9;
+    let ms_total = rcx + rdx + r8 + r9;
+    let ms_regs_used = [rcx, rdx, r8, r9].iter().filter(|&&v| v > 0).count();
+    let ms_dominant = sysv_primary == 0
+        && rcx > 0
+        && ms_regs_used >= 2
+        && ms_total >= 3
+        && ms_total >= (rdi + rsi + rdx + 1);
+
+    if ms_dominant {
+        let confidence = if ms_total >= 3 { 90 } else { 76 };
+        ("ms", confidence)
+    } else {
+        let confidence = if sysv_primary > 0 {
+            92
+        } else if sysv_total > 0 {
+            76
+        } else {
+            60
+        };
+        ("amd64", confidence)
+    }
+}
+
+fn sanitize_inferred_param_type(
+    mut ty: r2dec::CType,
+    var_size_bytes: u32,
+    ptr_bits: u32,
+) -> r2dec::CType {
+    if matches!(ty, r2dec::CType::Void | r2dec::CType::Unknown) {
+        ty = match var_size_bytes {
+            1 => r2dec::CType::Int(8),
+            2 => r2dec::CType::Int(16),
+            4 => r2dec::CType::Int(32),
+            8 => r2dec::CType::Int(64),
+            _ => r2dec::CType::Unknown,
+        };
+    }
+
+    if matches!(ty, r2dec::CType::Void | r2dec::CType::Unknown) {
+        ty = if ptr_bits >= 64 {
+            r2dec::CType::Int(64)
+        } else {
+            r2dec::CType::Int(32)
+        };
+    }
+
+    ty
+}
+
+fn normalize_inferred_param_name(
+    raw_name: &str,
+    fallback_idx: usize,
+    used: &mut std::collections::HashSet<String>,
+) -> String {
+    let fallback = format!("arg{}", fallback_idx);
+    let clean = sanitize_c_identifier(raw_name).unwrap_or_else(|| fallback.clone());
+    let clean = if clean.is_empty() { fallback } else { clean };
+    uniquify_name(clean, used)
+}
+
+fn format_afs_signature(
+    function_name: &str,
+    ret_type: &str,
+    params: &[InferredParamJson],
+) -> String {
+    let params_str = if params.is_empty() {
+        "void".to_string()
+    } else {
+        params
+            .iter()
+            .map(|p| format!("{} {}", p.param_type, p.name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("{ret_type} {function_name} ({params_str})")
+}
+
+/// Infer function signature + calling convention for post-analysis write-back.
+///
+/// Returns JSON:
+/// {"function_name":"...","signature":"...","ret_type":"...","params":[...],"callconv":"...","arch":"...","confidence":N}
+///
+/// Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sleigh_infer_signature_cc_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    fcn_addr: u64,
+    fcn_name: *const c_char,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let ctx_ref = unsafe { &*ctx };
+    let Some(_disasm) = &ctx_ref.disasm else {
+        return ptr::null_mut();
+    };
+
+    let arch_name =
+        normalize_sig_arch_name(ctx_ref.arch.as_ref()).unwrap_or_else(|| "unknown".to_string());
+    let ptr_bits = ctx_ref.arch.as_ref().map(|a| a.addr_size * 8).unwrap_or(64);
+    let cfg = decompiler_config_for_arch_name(&arch_name, ptr_bits);
+
+    let name = if fcn_name.is_null() {
+        format!("fcn_{fcn_addr:x}")
+    } else {
+        unsafe { CStr::from_ptr(fcn_name).to_string_lossy().to_string() }
+    };
+    let function_name = if name.trim().is_empty() {
+        format!("fcn_{fcn_addr:x}")
+    } else {
+        name
+    };
+
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if blk_ptr.is_null() {
+            continue;
+        }
+        let blk = unsafe { &*blk_ptr };
+        r2il_blocks.push(blk.clone());
+    }
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    let ssa_func =
+        match r2ssa::SSAFunction::from_blocks_with_arch(&r2il_blocks, ctx_ref.arch.as_ref()) {
+            Some(f) => f.with_name(&function_name),
+            None => return ptr::null_mut(),
+        };
+
+    let mut var_recovery = r2dec::VariableRecovery::new(&cfg.sp_name, &cfg.fp_name, cfg.ptr_size);
+    var_recovery.recover(&ssa_func);
+
+    let mut type_inference = r2dec::TypeInference::new(cfg.ptr_size);
+    type_inference.infer_function(&ssa_func);
+
+    let mut inferred_params: Vec<InferredParam> = var_recovery
+        .parameters()
+        .into_iter()
+        .map(|v| {
+            let mut ty = type_inference.get_type(&v.ssa_var);
+            if matches!(ty, r2dec::CType::Void | r2dec::CType::Unknown) {
+                ty = type_inference.type_from_size(v.ssa_var.size);
+            }
+            ty = sanitize_inferred_param_type(ty, v.ssa_var.size, ptr_bits);
+            let arg_index = v
+                .name
+                .strip_prefix("arg")
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            InferredParam {
+                name: v.name.clone(),
+                ty,
+                arg_index,
+            }
+        })
+        .collect();
+
+    inferred_params.sort_by(|a, b| {
+        a.arg_index
+            .cmp(&b.arg_index)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let mut used_param_names = std::collections::HashSet::new();
+    let params: Vec<InferredParamJson> = inferred_params
+        .into_iter()
+        .enumerate()
+        .map(|(idx, p)| {
+            let fallback_idx = if p.arg_index == usize::MAX {
+                idx
+            } else {
+                p.arg_index
+            };
+            InferredParamJson {
+                name: normalize_inferred_param_name(&p.name, fallback_idx, &mut used_param_names),
+                param_type: p.ty.to_string(),
+            }
+        })
+        .collect();
+
+    let ret_type = infer_signature_return_type(&ssa_func, &type_inference);
+    let ret_type_str = ret_type.to_string();
+
+    let input_counts = collect_version0_input_regs(&ssa_func);
+    let (callconv, base_confidence) = match arch_name.as_str() {
+        "x86-64" => {
+            let (cc, confidence) = infer_callconv_x86_64_from_counts(&input_counts);
+            (cc.to_string(), confidence)
+        }
+        "x86" => ("cdecl".to_string(), 64),
+        _ => (String::new(), 32),
+    };
+
+    let mut confidence = base_confidence;
+    if !params.is_empty() {
+        confidence = confidence.saturating_add(4).min(100);
+    }
+    if !matches!(ret_type, r2dec::CType::Unknown) {
+        confidence = confidence.saturating_add(2).min(100);
+    }
+
+    let signature = format_afs_signature(&function_name, &ret_type_str, &params);
+    let payload = InferredSignatureCcJson {
+        function_name,
+        signature,
+        ret_type: ret_type_str,
+        params,
+        callconv,
+        arch: arch_name,
+        confidence,
+    };
+
+    match serde_json::to_string(&payload) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
 /// Analyze a function and build SSA representation.
 /// This is called after radare2 completes basic function analysis.
 /// Returns 1 on success, 0 on failure.
@@ -5766,6 +6145,61 @@ mod tests {
         assert!(is_generic_arg_name("arg0"));
         assert!(is_generic_arg_name("Arg12"));
         assert!(!is_generic_arg_name("user_input"));
+    }
+
+    #[test]
+    fn test_format_afs_signature() {
+        let params = vec![
+            InferredParamJson {
+                name: "a".to_string(),
+                param_type: "int32_t".to_string(),
+            },
+            InferredParamJson {
+                name: "b".to_string(),
+                param_type: "int64_t".to_string(),
+            },
+        ];
+        let sig = format_afs_signature("dbg.sum", "int32_t", &params);
+        assert_eq!(sig, "int32_t dbg.sum (int32_t a, int64_t b)");
+    }
+
+    #[test]
+    fn test_normalize_inferred_param_name_fallback_and_uniquify() {
+        let mut used = std::collections::HashSet::new();
+        let first = normalize_inferred_param_name("bad name", 0, &mut used);
+        let second = normalize_inferred_param_name("bad name", 1, &mut used);
+        let fallback = normalize_inferred_param_name("$$$", 2, &mut used);
+        assert_eq!(first, "bad_name");
+        assert_eq!(second, "bad_name_2");
+        assert_eq!(fallback, "arg2");
+    }
+
+    #[test]
+    fn test_sanitize_inferred_param_type_fallbacks_from_void() {
+        let ty = sanitize_inferred_param_type(r2dec::CType::Void, 0, 64);
+        assert_eq!(ty, r2dec::CType::Int(64));
+    }
+
+    #[test]
+    fn test_infer_callconv_x86_64_prefers_amd64_for_sysv_inputs() {
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("rdi".to_string(), 3);
+        counts.insert("rsi".to_string(), 2);
+        counts.insert("rdx".to_string(), 1);
+        let (cc, confidence) = infer_callconv_x86_64_from_counts(&counts);
+        assert_eq!(cc, "amd64");
+        assert!(confidence >= 80);
+    }
+
+    #[test]
+    fn test_infer_callconv_x86_64_prefers_ms_when_rcx_dominates() {
+        let mut counts = std::collections::HashMap::new();
+        counts.insert("rcx".to_string(), 3);
+        counts.insert("rdx".to_string(), 2);
+        counts.insert("r8".to_string(), 1);
+        let (cc, confidence) = infer_callconv_x86_64_from_counts(&counts);
+        assert_eq!(cc, "ms");
+        assert!(confidence >= 70);
     }
 }
 

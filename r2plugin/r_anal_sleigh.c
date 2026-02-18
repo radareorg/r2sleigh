@@ -93,6 +93,8 @@ extern int r2sleigh_analyze_fcn(const R2ILContext *ctx, const R2ILBlock **blocks
 extern char *r2sleigh_analyze_fcn_annotations(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
 extern char *r2sleigh_recover_vars(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
 extern char *r2sleigh_get_data_refs(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks, unsigned long long fcn_addr);
+extern char *r2sleigh_infer_signature_cc_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
+	unsigned long long fcn_addr, const char *fcn_name);
 /* Per-architecture context (lazy init)
  *
  * WARNING: These globals are NOT thread-safe. This plugin assumes
@@ -120,6 +122,7 @@ static RCore *sleigh_pdd_core_plugin_core = NULL;
 #define SLEIGH_MIN_BYTES 16
 #define SLEIGH_BLOCK_MAX_BYTES 256
 #define SLEIGH_TAINT_MAX_BLOCKS 200
+#define SLEIGH_SIG_WRITEBACK_MAX_BLOCKS 200
 #define SLEIGH_TAINT_LABEL_MAX 6
 #define SLEIGH_COMMENT_PREFIX_TAINT "sla.taint:"
 #define SLEIGH_COMMENT_PREFIX_TAINT_RISK "sla.taint.risk:"
@@ -3456,6 +3459,76 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 	return refs;
 }
 
+typedef struct {
+	bool has_amd64;
+	bool has_ms;
+	bool has_cdecl;
+} SigWritebackCcSet;
+
+static bool core_cmd_succeeds (RCore *core, const char *cmd) {
+	if (!core || !cmd || !*cmd) {
+		return false;
+	}
+	char *out = r_core_cmd_str (core, cmd);
+	bool ok = out && !strstr (out, "ERROR:");
+	free (out);
+	return ok;
+}
+
+static SigWritebackCcSet load_available_calling_conventions (RCore *core) {
+	SigWritebackCcSet set = {0};
+	char *list = r_core_cmd_str (core, "afcl");
+	char *saveptr = NULL;
+	char *line;
+	if (!list || !*list) {
+		free (list);
+		return set;
+	}
+
+	for (line = strtok_r (list, "\n", &saveptr); line; line = strtok_r (NULL, "\n", &saveptr)) {
+		size_t len;
+		while (*line == ' ' || *line == '\t') {
+			line++;
+		}
+		len = strlen (line);
+		while (len > 0 && isspace ((unsigned char)line[len - 1])) {
+			line[--len] = '\0';
+		}
+		if (!strcmp (line, "amd64")) {
+			set.has_amd64 = true;
+		} else if (!strcmp (line, "ms")) {
+			set.has_ms = true;
+		} else if (!strcmp (line, "cdecl")) {
+			set.has_cdecl = true;
+		}
+	}
+	free (list);
+	return set;
+}
+
+static bool is_signature_writeback_arch_supported (const char *arch_name) {
+	return arch_name
+		&& (!strcmp (arch_name, "x86") || !strcmp (arch_name, "x86-64")
+		|| !strcmp (arch_name, "x86_64") || !strcmp (arch_name, "x64")
+		|| !strcmp (arch_name, "amd64"));
+}
+
+static bool is_callconv_available_for_writeback (const SigWritebackCcSet *set, const char *cc_name) {
+	if (!set || !cc_name || !*cc_name) {
+		return false;
+	}
+	if (!strcmp (cc_name, "amd64")) {
+		return set->has_amd64;
+	}
+	if (!strcmp (cc_name, "ms")) {
+		return set->has_ms;
+	}
+	if (!strcmp (cc_name, "cdecl")) {
+		return set->has_cdecl;
+	}
+	return false;
+}
+
 /* Eligibility/priority callback: score > 0 = eligible with priority, < 0 = ineligible */
 static int sleigh_eligible(RAnal *anal) {
 	R2ILContext *ctx = get_context (anal);
@@ -3479,14 +3552,29 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int taint_risk_high = 0;
 	int taint_risk_medium = 0;
 	int taint_risk_low = 0;
+	int sig_fcns_considered = 0;
+	int sig_fcns_skipped_arch = 0;
+	int sig_fcns_skipped_size = 0;
+	int sig_parse_failures = 0;
+	int sig_cmd_failures = 0;
+	int sig_signatures_updated = 0;
+	int sig_cc_updated = 0;
 	int best_sink_rank = 1000;
 	ut64 best_sink_addr = 0;
 	char *best_sink_label = NULL;
+	const char *arch_name = NULL;
+	bool sig_arch_supported = false;
+	SigWritebackCcSet available_ccs = {0};
 
 	if (!ctx) {
 		return false;
 	}
 	core = anal->coreb.core;
+	arch_name = r2il_arch_name (ctx);
+	sig_arch_supported = is_signature_writeback_arch_supported (arch_name);
+	if (core) {
+		available_ccs = load_available_calling_conventions (core);
+	}
 
 	int num_fcns = r_list_length (anal->fcns);
 	if (num_fcns == 0) {
@@ -3853,6 +3941,67 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			r2il_string_free (taint_json);
 		}
 
+		if (!sig_arch_supported || !core) {
+			sig_fcns_skipped_arch++;
+		} else if (bb_count > SLEIGH_SIG_WRITEBACK_MAX_BLOCKS) {
+			sig_fcns_skipped_size++;
+		} else {
+			char *sig_json;
+			RJson *sig_root;
+			const RJson *j_signature;
+			const RJson *j_callconv;
+			sig_fcns_considered++;
+
+			sig_json = r2sleigh_infer_signature_cc_json (ctx,
+				(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, fcn->name);
+			if (!sig_json || !*sig_json) {
+				sig_parse_failures++;
+				r2il_string_free (sig_json);
+			} else {
+				sig_root = r_json_parse (sig_json);
+				if (!sig_root || sig_root->type != R_JSON_OBJECT) {
+					sig_parse_failures++;
+					r_json_free (sig_root);
+					r2il_string_free (sig_json);
+				} else {
+					j_signature = r_json_get (sig_root, "signature");
+					j_callconv = r_json_get (sig_root, "callconv");
+
+					if (j_signature && j_signature->type == R_JSON_STRING
+							&& j_signature->str_value && *j_signature->str_value) {
+						char *sig_cmd = r_str_newf ("afs %s @ 0x%"PFMT64x, j_signature->str_value, fcn->addr);
+						if (core_cmd_succeeds (core, sig_cmd)) {
+							sig_signatures_updated++;
+						} else {
+							sig_cmd_failures++;
+							R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x,
+								fcn_name, fcn->addr);
+						}
+						free (sig_cmd);
+					} else {
+						sig_parse_failures++;
+					}
+
+					if (j_callconv && j_callconv->type == R_JSON_STRING
+							&& j_callconv->str_value && *j_callconv->str_value
+							&& is_callconv_available_for_writeback (&available_ccs, j_callconv->str_value)) {
+						char *cc_cmd = r_str_newf ("afc %s @ 0x%"PFMT64x, j_callconv->str_value, fcn->addr);
+						if (core_cmd_succeeds (core, cc_cmd)) {
+							sig_cc_updated++;
+						} else {
+							sig_cmd_failures++;
+							R_LOG_WARN ("r2sleigh: calling-convention write-back failed for %s @ 0x%"PFMT64x,
+								fcn_name, fcn->addr);
+						}
+						free (cc_cmd);
+					}
+
+					r_json_free (sig_root);
+					r2il_string_free (sig_json);
+				}
+			}
+		}
+
 		block_array_free (&blocks);
 	}
 
@@ -3862,6 +4011,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		taint_sink_hits, taint_parse_failures);
 	R_LOG_INFO ("r2sleigh: post-analysis risk summary: critical=%d high=%d medium=%d low=%d",
 		taint_risk_critical, taint_risk_high, taint_risk_medium, taint_risk_low);
+	R_LOG_INFO ("r2sleigh: signature write-back considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d",
+		sig_fcns_considered, sig_fcns_skipped_arch, sig_fcns_skipped_size, sig_parse_failures,
+		sig_cmd_failures, sig_signatures_updated, sig_cc_updated);
 	if (best_sink_label) {
 		R_LOG_INFO ("r2sleigh: post-analysis most interesting sink 0x%"PFMT64x" label=%s",
 			best_sink_addr, best_sink_label);

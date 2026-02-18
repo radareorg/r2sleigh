@@ -233,6 +233,21 @@ Some code paths have hardcoded x86-64 assumptions (e.g., stack/frame pointer
 names in `fold.rs`, argument registers in `taint.rs`). These should be
 abstracted behind an ABI/calling-convention model in the future.
 
+### Post-Analysis Signature/CC Write-Back
+
+The plugin's `post_analysis` callback (`aaaa`) includes a write-back stage for
+x86/x86-64 functions:
+
+1. Rust FFI `r2sleigh_infer_signature_cc_json()` builds SSA and infers
+   signature + calling convention.
+2. C wrapper applies results with:
+   - `afs <signature> @ <addr>`
+   - `afc <cc> @ <addr>`
+3. Existing function names are preserved by using the current function name in
+   the generated signature.
+4. Large functions are skipped via `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS` to bound
+   post-analysis cost.
+
 Per-Topic Documentation
 -----------------------
 
