@@ -2673,6 +2673,14 @@ mod deep_integration {
             .map(str::to_string)
     }
 
+    fn find_signature_writeback_summary(result: &e2e::R2Result) -> Option<String> {
+        let merged = format!("{}\n{}", result.stdout, result.stderr);
+        merged
+            .lines()
+            .find(|line| line.contains("r2sleigh: signature write-back considered="))
+            .map(str::to_string)
+    }
+
     /// Verify that `aaa` runs successfully with the plugin loaded
     #[test]
     fn aaa_succeeds_with_plugin() {
@@ -3166,6 +3174,66 @@ mod deep_integration {
     }
 
     #[test]
+    fn aaaa_signature_writeback_consistency_reason_metrics_present() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("consistency_readback_fail="),
+            "write-back summary should include readback failure reason counter"
+        );
+        assert!(
+            result.contains("consistency_ret_mismatch="),
+            "write-back summary should include return-type mismatch reason counter"
+        );
+        assert!(
+            result.contains("consistency_argc_mismatch="),
+            "write-back summary should include argc mismatch reason counter"
+        );
+        assert!(
+            result.contains("consistency_argtype_mismatch="),
+            "write-back summary should include argument-type mismatch reason counter"
+        );
+        assert!(
+            result.contains("consistency_callconv_mismatch="),
+            "write-back summary should include callconv mismatch reason counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_consistency_improves_from_zero() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); aaaa",
+        );
+        result.assert_ok();
+        let summary = find_signature_writeback_summary(&result)
+            .expect("signature write-back summary line should be present");
+        let verified = extract_summary_metric(&summary, "consistency_verified")
+            .expect("summary should include consistency_verified");
+        let ok = extract_summary_metric(&summary, "consistency_ok")
+            .expect("summary should include consistency_ok");
+        let mismatch = extract_summary_metric(&summary, "consistency_mismatch")
+            .expect("summary should include consistency_mismatch");
+        assert!(
+            verified > 0,
+            "consistency verification should run on at least one function"
+        );
+        assert!(
+            ok > 0,
+            "consistency_ok should be greater than zero after PR3 (summary: {})",
+            summary
+        );
+        assert!(
+            mismatch < verified,
+            "consistency mismatches should be lower than verified count after PR3 (summary: {})",
+            summary
+        );
+    }
+
+    #[test]
     fn aaaa_signature_writeback_calltype_consistent_in_afij() {
         setup();
         let result = r2_at_func(
@@ -3242,6 +3310,29 @@ mod deep_integration {
         assert!(
             summary.contains("sample_callees=") && summary.contains("dbg.check_secret"),
             "sample_callees should include dbg.check_secret when it triggers propagation"
+        );
+    }
+
+    #[test]
+    fn aaaa_caller_propagation_updates_callers_nonzero() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); aaaa",
+        );
+        result.assert_ok();
+        let summary = find_caller_propagation_summary(&result)
+            .expect("caller propagation summary line should be present");
+        let updated = extract_summary_metric(&summary, "prop_callers_updated")
+            .expect("summary should include prop_callers_updated");
+        assert!(
+            updated > 0,
+            "caller propagation should update at least one direct caller"
+        );
+        assert!(
+            summary.contains("sample_callees=") && summary.contains("dbg.check_secret"),
+            "sample_callees should include dbg.check_secret for poisoned-signature scenario"
         );
     }
 }
