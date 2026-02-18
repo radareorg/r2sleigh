@@ -2656,6 +2656,23 @@ mod ffi {
 mod deep_integration {
     use super::*;
 
+    fn extract_summary_metric(line: &str, key: &str) -> Option<u64> {
+        let needle = format!("{key}=");
+        line.split_whitespace().find_map(|token| {
+            token
+                .strip_prefix(&needle)
+                .and_then(|value| value.trim_end_matches(',').parse::<u64>().ok())
+        })
+    }
+
+    fn find_caller_propagation_summary(result: &e2e::R2Result) -> Option<String> {
+        let merged = format!("{}\n{}", result.stdout, result.stderr);
+        merged
+            .lines()
+            .find(|line| line.contains("r2sleigh: caller propagation"))
+            .map(str::to_string)
+    }
+
     /// Verify that `aaa` runs successfully with the plugin loaded
     #[test]
     fn aaa_succeeds_with_plugin() {
@@ -3164,6 +3181,67 @@ mod deep_integration {
         assert!(
             result.contains("\"calltype\":\"amd64\""),
             "afij.calltype should match inferred calling convention after write-back"
+        );
+    }
+
+    #[test]
+    fn aaaa_caller_propagation_metrics_present() {
+        let result = r2_cmd("/bin/ls", "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("caller propagation"),
+            "post-analysis should emit caller propagation summary"
+        );
+        assert!(
+            result.contains("prop_callers_updated="),
+            "summary should include updated caller counter"
+        );
+        assert!(
+            result.contains("prop_callers_considered="),
+            "summary should include considered caller counter"
+        );
+        assert!(
+            result.contains("prop_afva_failures="),
+            "summary should include afva failure counter"
+        );
+        assert!(
+            result.contains("prop_type_match_failures="),
+            "summary should include type-match failure counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_caller_propagation_respects_caps() {
+        let result = r2_cmd("/bin/ls", "aaaa");
+        result.assert_ok();
+        let summary = find_caller_propagation_summary(&result)
+            .expect("caller propagation summary line should be present");
+        let callers_updated = extract_summary_metric(&summary, "prop_callers_updated")
+            .expect("summary should include prop_callers_updated");
+        assert!(
+            callers_updated <= 256,
+            "caller propagation should honor total caller cap (updated={})",
+            callers_updated
+        );
+    }
+
+    #[test]
+    fn aaaa_caller_propagation_includes_check_secret_callee() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); aaaa",
+        );
+        result.assert_ok();
+        let summary = find_caller_propagation_summary(&result)
+            .expect("caller propagation summary line should be present");
+        let triggered = extract_summary_metric(&summary, "prop_callees_triggered")
+            .expect("summary should include prop_callees_triggered");
+        assert!(triggered > 0, "at least one callee should trigger propagation");
+        assert!(
+            summary.contains("sample_callees=") && summary.contains("dbg.check_secret"),
+            "sample_callees should include dbg.check_secret when it triggers propagation"
         );
     }
 }

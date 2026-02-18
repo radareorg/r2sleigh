@@ -126,6 +126,10 @@ static RCore *sleigh_pdd_core_plugin_core = NULL;
 #define SLEIGH_SIG_WRITEBACK_MAX_BLOCKS 200
 #define SLEIGH_SIG_MIN_CONFIDENCE 70
 #define SLEIGH_CC_MIN_CONFIDENCE 80
+#define SLEIGH_CALLER_PROP_MAX_CALLEES 128
+#define SLEIGH_CALLER_PROP_MAX_CALLERS_PER_CALLEE 32
+#define SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL 256
+#define SLEIGH_CALLER_PROP_SAMPLE_MAX 5
 #define SLEIGH_TAINT_LABEL_MAX 6
 #define SLEIGH_COMMENT_PREFIX_TAINT "sla.taint:"
 #define SLEIGH_COMMENT_PREFIX_TAINT_RISK "sla.taint.risk:"
@@ -886,6 +890,25 @@ typedef struct {
 	size_t capacity;
 } EdgeSet;
 
+typedef struct {
+	ut64 *updated_callers;
+	size_t updated_callers_count;
+	size_t updated_callers_capacity;
+	char **sample_callees;
+	size_t sample_callees_count;
+	size_t sample_callees_capacity;
+	int prop_callees_triggered;
+	int prop_callees_skipped_cap;
+	int prop_callers_considered;
+	int prop_callers_updated;
+	int prop_callers_dedup_skipped;
+	int prop_callers_missing_fcn;
+	int prop_callers_per_callee_cap_skipped;
+	int prop_callers_total_cap_skipped;
+	int prop_type_match_failures;
+	int prop_afva_failures;
+} CallerPropagationState;
+
 static bool append_unique_ut64(ut64 **items, size_t *count, size_t *capacity, ut64 value) {
 	size_t i;
 	ut64 *next;
@@ -956,6 +979,32 @@ static void free_string_array(char **items, size_t count) {
 		free (items[i]);
 	}
 	free (items);
+}
+
+static void caller_propagation_state_init(CallerPropagationState *state) {
+	if (!state) {
+		return;
+	}
+	memset (state, 0, sizeof (*state));
+}
+
+static void caller_propagation_state_fini(CallerPropagationState *state) {
+	if (!state) {
+		return;
+	}
+	free (state->updated_callers);
+	free_string_array (state->sample_callees, state->sample_callees_count);
+	memset (state, 0, sizeof (*state));
+}
+
+static bool ut64_array_contains(const ut64 *items, size_t count, ut64 value) {
+	size_t i;
+	for (i = 0; i < count; i++) {
+		if (items[i] == value) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void taint_source_map_init(TaintSourceMap *map) {
@@ -3563,11 +3612,7 @@ static bool apply_inferred_callconv (RAnal *anal, RCore *core, RAnalFunction *fc
 	if (r_anal_cc_exist (anal, cc_name)) {
 		pooled_cc = r_str_constpool_get (&anal->constpool, cc_name);
 		if (pooled_cc) {
-#if R2_VERSION_NUMBER >= 60000
 			fcn->callconv = pooled_cc;
-#else
-			fcn->cc = pooled_cc;
-#endif
 			return true;
 		}
 	}
@@ -3584,6 +3629,165 @@ static bool apply_inferred_callconv (RAnal *anal, RCore *core, RAnalFunction *fc
 	}
 	free (cc_cmd);
 	return false;
+}
+
+static bool is_caller_propagation_ref_type (RAnalRefType type) {
+	RAnalRefType masked = R_ANAL_REF_TYPE_MASK (type);
+	return masked == R_ANAL_REF_TYPE_CALL
+		|| masked == R_ANAL_REF_TYPE_CODE
+		|| masked == R_ANAL_REF_TYPE_JUMP;
+}
+
+static bool run_caller_type_match (RAnal *anal, RAnalFunction *caller_fcn) {
+	if (!anal || !caller_fcn) {
+		return false;
+	}
+	r_anal_type_match (anal, caller_fcn);
+	return true;
+}
+
+static bool run_caller_afva (RCore *core, RAnalFunction *caller_fcn) {
+	if (!core || !caller_fcn) {
+		return false;
+	}
+	r_core_recover_vars (core, caller_fcn, false);
+	return true;
+}
+
+static void caller_propagation_record_sample(
+	CallerPropagationState *state,
+	const char *callee_name,
+	bool prioritize
+) {
+	size_t i;
+	size_t last;
+	char *dup;
+
+	if (!state || !callee_name || !*callee_name) {
+		return;
+	}
+	for (i = 0; i < state->sample_callees_count; i++) {
+		if (!strcmp (state->sample_callees[i], callee_name)) {
+			return;
+		}
+	}
+	if (state->sample_callees_count < SLEIGH_CALLER_PROP_SAMPLE_MAX) {
+		append_unique_string (&state->sample_callees, &state->sample_callees_count,
+			&state->sample_callees_capacity, callee_name);
+		return;
+	}
+	if (!prioritize || state->sample_callees_count == 0) {
+		return;
+	}
+	dup = strdup (callee_name);
+	if (!dup) {
+		return;
+	}
+	last = state->sample_callees_count - 1;
+	free (state->sample_callees[last]);
+	state->sample_callees[last] = dup;
+}
+
+static void propagate_signature_to_direct_callers(
+	RAnal *anal,
+	RCore *core,
+	ut64 callee_addr,
+	const char *callee_name,
+	CallerPropagationState *state,
+	bool prioritize_sample
+) {
+	RVecAnalRef *refs;
+	ut64 *callee_callers = NULL;
+	size_t callee_callers_count = 0;
+	size_t callee_callers_capacity = 0;
+	size_t i;
+	size_t len;
+	int callee_updates = 0;
+
+	if (!anal || !core || !state || !callee_addr) {
+		return;
+	}
+	if (state->prop_callees_triggered >= SLEIGH_CALLER_PROP_MAX_CALLEES) {
+		state->prop_callees_skipped_cap++;
+		return;
+	}
+	refs = r_anal_xrefs_get (anal, callee_addr);
+	if (!refs) {
+		return;
+	}
+
+	state->prop_callees_triggered++;
+	caller_propagation_record_sample (state, callee_name, prioritize_sample);
+
+	len = RVecAnalRef_length (refs);
+	for (i = 0; i < len; i++) {
+		RAnalRef *ref = RVecAnalRef_at (refs, i);
+		if (!ref || !ref->at || !is_caller_propagation_ref_type (ref->type)) {
+			continue;
+		}
+		append_unique_ut64 (&callee_callers, &callee_callers_count, &callee_callers_capacity, ref->at);
+	}
+
+	for (i = 0; i < callee_callers_count; i++) {
+		ut64 caller_site = callee_callers[i];
+		RAnalFunction *caller_fcn;
+		ut64 caller_addr;
+
+		state->prop_callers_considered++;
+		caller_fcn = r_anal_get_fcn_in (anal, caller_site, 0);
+		if (!caller_fcn) {
+			state->prop_callers_missing_fcn++;
+			continue;
+		}
+		caller_addr = caller_fcn->addr;
+		if (ut64_array_contains (state->updated_callers, state->updated_callers_count, caller_addr)) {
+			state->prop_callers_dedup_skipped++;
+			continue;
+		}
+		if (callee_updates >= SLEIGH_CALLER_PROP_MAX_CALLERS_PER_CALLEE) {
+			state->prop_callers_per_callee_cap_skipped++;
+			continue;
+		}
+		if (state->prop_callers_updated >= SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL) {
+			state->prop_callers_total_cap_skipped++;
+			continue;
+		}
+		if (!append_unique_ut64 (&state->updated_callers, &state->updated_callers_count,
+				&state->updated_callers_capacity, caller_addr)) {
+			state->prop_callers_total_cap_skipped++;
+			continue;
+		}
+		if (!run_caller_type_match (anal, caller_fcn)) {
+			state->prop_type_match_failures++;
+		}
+		if (!run_caller_afva (core, caller_fcn)) {
+			state->prop_afva_failures++;
+		}
+		state->prop_callers_updated++;
+		callee_updates++;
+	}
+
+	free (callee_callers);
+}
+
+static char *format_sample_callees(char **sample_callees, size_t sample_count) {
+	RStrBuf sb;
+	char *out;
+	size_t i;
+
+	if (!sample_callees || sample_count == 0) {
+		return strdup ("-");
+	}
+	r_strbuf_init (&sb);
+	for (i = 0; i < sample_count; i++) {
+		if (i > 0) {
+			r_strbuf_append (&sb, ",");
+		}
+		r_strbuf_append (&sb, sample_callees[i]);
+	}
+	out = strdup (R_STRBUF_SAFEGET (&sb));
+	r_strbuf_fini (&sb);
+	return out ? out : strdup ("-");
 }
 
 static bool verify_practical_signature_consistency (
@@ -3755,9 +3959,12 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int consistency_ok = 0;
 	int consistency_mismatch = 0;
 	int afij_signature_drift = 0;
+	CallerPropagationState prop_state;
 	int best_sink_rank = 1000;
 	ut64 best_sink_addr = 0;
+	ut64 focus_callee_addr = 0;
 	char *best_sink_label = NULL;
+	char *sample_callees = NULL;
 	const char *arch_name = NULL;
 	bool sig_arch_supported = false;
 
@@ -3767,11 +3974,18 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	core = anal->coreb.core;
 	arch_name = r2il_arch_name (ctx);
 	sig_arch_supported = is_signature_writeback_arch_supported (arch_name);
+	if (core) {
+		RAnalFunction *focus_fcn = r_anal_get_fcn_in (anal, core->addr, 0);
+		if (focus_fcn) {
+			focus_callee_addr = focus_fcn->addr;
+		}
+	}
 
 	int num_fcns = r_list_length (anal->fcns);
 	if (num_fcns == 0) {
 		return true;
 	}
+	caller_propagation_state_init (&prop_state);
 
 	R_LOG_INFO ("r2sleigh: post-analysis xref pass over %d functions", num_fcns);
 
@@ -4168,21 +4382,23 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						confidence = (int)j_confidence->num.u_value;
 					}
 
-					if (j_signature && j_signature->type == R_JSON_STRING
-							&& j_signature->str_value && *j_signature->str_value) {
-						if (confidence < SLEIGH_SIG_MIN_CONFIDENCE) {
-							sig_skipped_low_conf++;
-						} else if (apply_inferred_signature (anal, core, fcn, j_signature->str_value)) {
-							sig_signatures_updated++;
-							signature_applied = true;
+						if (j_signature && j_signature->type == R_JSON_STRING
+								&& j_signature->str_value && *j_signature->str_value) {
+							if (confidence < SLEIGH_SIG_MIN_CONFIDENCE) {
+								sig_skipped_low_conf++;
+							} else if (apply_inferred_signature (anal, core, fcn, j_signature->str_value)) {
+								sig_signatures_updated++;
+								signature_applied = true;
+								propagate_signature_to_direct_callers (anal, core, fcn->addr, fcn_name,
+									&prop_state, focus_callee_addr && fcn->addr == focus_callee_addr);
+							} else {
+								sig_cmd_failures++;
+								R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x,
+									fcn_name, fcn->addr);
+							}
 						} else {
-							sig_cmd_failures++;
-							R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x,
-								fcn_name, fcn->addr);
+							sig_parse_failures++;
 						}
-					} else {
-						sig_parse_failures++;
-					}
 
 					if (j_callconv && j_callconv->type == R_JSON_STRING
 							&& j_callconv->str_value && *j_callconv->str_value) {
@@ -4231,6 +4447,16 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		sig_cmd_failures, sig_signatures_updated, sig_cc_updated, sig_skipped_low_conf,
 		cc_skipped_low_conf, consistency_verified, consistency_ok, consistency_mismatch,
 		afij_signature_drift);
+	sample_callees = format_sample_callees (prop_state.sample_callees, prop_state.sample_callees_count);
+	R_LOG_INFO ("r2sleigh: caller propagation prop_callees_triggered=%d prop_callees_skipped_cap=%d prop_callers_considered=%d prop_callers_updated=%d prop_callers_dedup_skipped=%d prop_callers_missing_fcn=%d prop_callers_per_callee_cap_skipped=%d prop_callers_total_cap_skipped=%d prop_type_match_failures=%d prop_afva_failures=%d sample_callees=%s",
+		prop_state.prop_callees_triggered, prop_state.prop_callees_skipped_cap,
+		prop_state.prop_callers_considered, prop_state.prop_callers_updated,
+		prop_state.prop_callers_dedup_skipped, prop_state.prop_callers_missing_fcn,
+		prop_state.prop_callers_per_callee_cap_skipped, prop_state.prop_callers_total_cap_skipped,
+		prop_state.prop_type_match_failures, prop_state.prop_afva_failures,
+		sample_callees ? sample_callees : "-");
+	free (sample_callees);
+	caller_propagation_state_fini (&prop_state);
 	if (best_sink_label) {
 		R_LOG_INFO ("r2sleigh: post-analysis most interesting sink 0x%"PFMT64x" label=%s",
 			best_sink_addr, best_sink_label);

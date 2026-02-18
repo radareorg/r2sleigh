@@ -254,6 +254,16 @@ x86/x86-64 functions:
    the generated signature.
 6. Large functions are skipped via `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS` to bound
    post-analysis cost.
+7. After successful signature apply, direct caller propagation runs:
+   - xref scope: direct `CALL/CODE/JUMP` refs only
+   - caller-side reanalysis: type-match + `afva`
+   - bounded by caps:
+     - `SLEIGH_CALLER_PROP_MAX_CALLEES` (128/run)
+     - `SLEIGH_CALLER_PROP_MAX_CALLERS_PER_CALLEE` (32/callee)
+     - `SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL` (256/run)
+   - one caller function is updated at most once per run (global dedupe)
+   - propagation is non-fatal and summarized in logs via `prop_*` counters and
+     `sample_callees=`.
 
 Per-Topic Documentation
 -----------------------

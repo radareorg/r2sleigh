@@ -65,6 +65,9 @@ SLEIGH_TAINT_MAX_BLOCKS: Max blocks for auto-taint. Default 200.
 SLEIGH_SIG_WRITEBACK_MAX_BLOCKS: Max blocks for automatic signature/CC write-back. Default 200.
 SLEIGH_SIG_MIN_CONFIDENCE: Minimum confidence for signature overwrite. Default 70.
 SLEIGH_CC_MIN_CONFIDENCE: Minimum confidence for calling convention overwrite. Default 80.
+SLEIGH_CALLER_PROP_MAX_CALLEES: Max propagated callees per `aaaa` run. Default 128.
+SLEIGH_CALLER_PROP_MAX_CALLERS_PER_CALLEE: Max direct callers reanalyzed per callee. Default 32.
+SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL: Max caller reanalysis updates per `aaaa` run. Default 256.
 
 Automatic Signature Write-Back (aaaa)
 -------------------------------------
@@ -80,5 +83,13 @@ write-back for x86/x86-64 functions:
   - `afcfj` is validated against inferred return/args.
   - `afij.calltype` is validated when CC write-back was applied.
   - `afij.signature` drift is tracked and logged (best-effort, non-fatal).
+- After successful signature apply, direct caller xrefs are propagated in a
+  targeted pass:
+  - xref scope: direct `CALL/CODE/JUMP` refs only.
+  - caller reanalysis: type-match + `afva` var recovery.
+  - bounded by callee/per-callee/total caller caps (non-fatal when exceeded).
+  - each caller function is updated at most once per `aaaa` run.
+- Propagation metrics are logged in summary (`prop_*`) with
+  `sample_callees=` trace for up to 5 triggered callees.
 - Preserves existing function names (no rename during write-back).
 - Skips functions above `SLEIGH_SIG_WRITEBACK_MAX_BLOCKS`.
