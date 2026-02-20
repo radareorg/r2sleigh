@@ -936,6 +936,7 @@ mod tests {
                     target: make_const(0x1008, 8),
                     cond: make_const(1, 1),
                 }],
+                op_metadata: std::collections::BTreeMap::new(),
                 switch_info: None,
             },
             R2ILBlock {
@@ -950,6 +951,7 @@ mod tests {
                         target: make_const(0x100c, 8),
                     },
                 ],
+                op_metadata: std::collections::BTreeMap::new(),
                 switch_info: None,
             },
             R2ILBlock {
@@ -964,6 +966,7 @@ mod tests {
                         target: make_const(0x100c, 8),
                     },
                 ],
+                op_metadata: std::collections::BTreeMap::new(),
                 switch_info: None,
             },
             R2ILBlock {
@@ -974,6 +977,7 @@ mod tests {
                     a: make_reg(0, 8),
                     b: make_const(3, 8),
                 }],
+                op_metadata: std::collections::BTreeMap::new(),
                 switch_info: None,
             },
         ];

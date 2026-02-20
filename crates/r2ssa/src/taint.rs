@@ -854,6 +854,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1000,
                 size: 4,
+                op_metadata: std::collections::BTreeMap::new(),
                 switch_info: None,
                 ops: vec![R2ILOp::CBranch {
                     cond: make_const(1, 1),
@@ -863,6 +864,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1004,
                 size: 4,
+                op_metadata: std::collections::BTreeMap::new(),
                 switch_info: None,
                 ops: vec![
                     R2ILOp::Copy {
@@ -877,6 +879,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x1008,
                 size: 4,
+                op_metadata: std::collections::BTreeMap::new(),
                 switch_info: None,
                 ops: vec![
                     R2ILOp::Copy {
@@ -891,6 +894,7 @@ mod tests {
             R2ILBlock {
                 addr: 0x100c,
                 size: 4,
+                op_metadata: std::collections::BTreeMap::new(),
                 switch_info: None,
                 ops: vec![R2ILOp::Store {
                     space: SpaceId::Ram,
@@ -907,8 +911,7 @@ mod tests {
             "fixture must include a merge phi for reg:0"
         );
 
-        let policy = DefaultTaintPolicy::new()
-            .with_source("reg:8")
+        let policy = DefaultTaintPolicy::all_inputs()
             .with_sink_calls(false)
             .with_sink_stores(true);
         let analysis = TaintAnalysis::new(&func, policy);

@@ -466,7 +466,6 @@ impl SSAOp {
             | New { src, .. }
             | Cast { src, .. } => f(src),
 
-<<<<<<< HEAD
             Load { addr, .. } | LoadLinked { addr, .. } => f(addr),
 
             Store { addr, val, .. } | StoreConditional { addr, val, .. } => {
