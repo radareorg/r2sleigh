@@ -778,6 +778,41 @@ mod taint {
     }
 
     #[test]
+    fn taint_and_slice_structured_output_on_phi_ssa_function() {
+        setup();
+        let ssa = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.ssa.func");
+        ssa.assert_ok();
+        let ssa_json = parse_json(&ssa, "a:sla.ssa.func");
+        let ssa_obj = expect_object(&ssa_json, "a:sla.ssa.func");
+        let ssa_blocks = ssa_obj
+            .get("blocks")
+            .and_then(Value::as_array)
+            .expect("a:sla.ssa.func should include blocks");
+        assert!(
+            ssa_blocks
+                .iter()
+                .all(|block| block.get("phis").map_or(false, Value::is_array)),
+            "SSA function output should expose per-block phis arrays"
+        );
+
+        let taint = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.taint");
+        taint.assert_ok();
+        let taint_json = parse_json(&taint, "a:sla.taint");
+        let taint_obj = expect_object(&taint_json, "a:sla.taint");
+        assert!(taint_obj.contains_key("sources"));
+        assert!(taint_obj.contains_key("sink_hits"));
+        assert!(taint_obj.contains_key("tainted_vars"));
+
+        let slice = r2_at_func(vuln_test_binary(), "dbg.check_secret", "a:sla.slice ZF_1");
+        slice.assert_ok();
+        let slice_json = parse_json(&slice, "a:sla.slice");
+        let slice_obj = expect_object(&slice_json, "a:sla.slice");
+        assert!(slice_obj.contains_key("sink_var"));
+        assert!(slice_obj.contains_key("ops"));
+        assert!(slice_obj.contains_key("blocks"));
+    }
+
+    #[test]
     fn taint_call_sink_reports_tainted_args_vuln_memcpy() {
         setup();
         let result = r2_at_func(vuln_test_binary(), "dbg.vuln_memcpy", "a:sla.taint");

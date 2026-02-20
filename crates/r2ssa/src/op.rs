@@ -433,11 +433,15 @@ impl SSAOp {
         }
     }
 
-    /// Get all source variables used by this operation.
-    pub fn sources(&self) -> Vec<&SSAVar> {
+    /// Visit all source variables used by this operation in operand order.
+    pub fn for_each_source<'a, F: FnMut(&'a SSAVar)>(&'a self, mut f: F) {
         use SSAOp::*;
         match self {
-            Phi { sources, .. } => sources.iter().collect(),
+            Phi { sources, .. } => {
+                for src in sources {
+                    f(src);
+                }
+            }
 
             Copy { src, .. }
             | IntNegate { src, .. }
@@ -460,24 +464,39 @@ impl SSAOp {
             | FloatFloat { src, .. }
             | Trunc { src, .. }
             | New { src, .. }
-            | Cast { src, .. } => vec![src],
+            | Cast { src, .. } => f(src),
 
-            Load { addr, .. } | LoadLinked { addr, .. } => vec![addr],
+<<<<<<< HEAD
+            Load { addr, .. } | LoadLinked { addr, .. } => f(addr),
 
-            Store { addr, val, .. } | StoreConditional { addr, val, .. } => vec![addr, val],
+            Store { addr, val, .. } | StoreConditional { addr, val, .. } => {
+                f(addr);
+                f(val);
+            }
 
             AtomicCAS {
                 addr,
                 expected,
                 replacement,
                 ..
-            } => vec![addr, expected, replacement],
+            } => {
+                f(addr);
+                f(expected);
+                f(replacement);
+            }
 
-            LoadGuarded { addr, guard, .. } => vec![addr, guard],
+            LoadGuarded { addr, guard, .. } => {
+                f(addr);
+                f(guard);
+            }
 
             StoreGuarded {
                 addr, val, guard, ..
-            } => vec![addr, val, guard],
+            } => {
+                f(addr);
+                f(val);
+                f(guard);
+            }
 
             IntAdd { a, b, .. }
             | IntSub { a, b, .. }
@@ -511,39 +530,70 @@ impl SSAOp {
             | FloatEqual { a, b, .. }
             | FloatNotEqual { a, b, .. }
             | FloatLess { a, b, .. }
-            | FloatLessEqual { a, b, .. } => vec![a, b],
+            | FloatLessEqual { a, b, .. } => {
+                f(a);
+                f(b);
+            }
 
-            Piece { hi, lo, .. } => vec![hi, lo],
+            Piece { hi, lo, .. } => {
+                f(hi);
+                f(lo);
+            }
 
-            Extract { src, position, .. } => vec![src, position],
+            Extract { src, position, .. } => {
+                f(src);
+                f(position);
+            }
 
             Insert {
                 src,
                 value,
                 position,
                 ..
-            } => vec![src, value, position],
+            } => {
+                f(src);
+                f(value);
+                f(position);
+            }
 
-            PtrAdd { base, index, .. } | PtrSub { base, index, .. } => vec![base, index],
+            PtrAdd { base, index, .. } | PtrSub { base, index, .. } => {
+                f(base);
+                f(index);
+            }
 
             SegmentOp {
                 segment, offset, ..
-            } => vec![segment, offset],
+            } => {
+                f(segment);
+                f(offset);
+            }
 
             Branch { target }
             | BranchInd { target }
             | Call { target }
             | CallInd { target }
-            | Return { target } => {
-                vec![target]
+            | Return { target } => f(target),
+
+            CBranch { target, cond } => {
+                f(target);
+                f(cond);
             }
 
-            CBranch { target, cond } => vec![target, cond],
+            CallOther { inputs, .. } => {
+                for input in inputs {
+                    f(input);
+                }
+            }
 
-            CallOther { inputs, .. } => inputs.iter().collect(),
-
-            Fence { .. } | Nop | Unimplemented | Breakpoint | CpuId { .. } => vec![],
+            Fence { .. } | Nop | Unimplemented | Breakpoint | CpuId { .. } => {}
         }
+    }
+
+    /// Get all source variables used by this operation.
+    pub fn sources(&self) -> Vec<&SSAVar> {
+        let mut sources = Vec::new();
+        self.for_each_source(|src| sources.push(src));
+        sources
     }
 
     /// Returns true if this operation is a control flow operation.
@@ -867,5 +917,41 @@ mod tests {
             val: SSAVar::new("RAX", 1, 8),
         };
         assert_eq!(format!("{}", store), "STORE [ram]RSP_0 = RAX_1");
+    }
+
+    #[test]
+    fn test_for_each_source_matches_sources() {
+        let ops = vec![
+            SSAOp::Phi {
+                dst: SSAVar::new("RAX", 2, 8),
+                sources: vec![SSAVar::new("RAX", 0, 8), SSAVar::new("RAX", 1, 8)],
+            },
+            SSAOp::IntAdd {
+                dst: SSAVar::new("RCX", 1, 8),
+                a: SSAVar::new("RAX", 1, 8),
+                b: SSAVar::new("RBX", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: SSAVar::new("RSP", 0, 8),
+                val: SSAVar::new("RAX", 1, 8),
+            },
+            SSAOp::CallOther {
+                output: None,
+                userop: 1,
+                inputs: vec![SSAVar::new("RDI", 0, 8), SSAVar::new("RSI", 0, 8)],
+            },
+        ];
+
+        for op in &ops {
+            let from_sources: Vec<String> = op.sources().iter().map(|v| v.display_name()).collect();
+            let mut from_visitor = Vec::new();
+            op.for_each_source(|v| from_visitor.push(v.display_name()));
+            assert_eq!(
+                from_sources, from_visitor,
+                "for_each_source must preserve order and membership for {:?}",
+                op
+            );
+        }
     }
 }
