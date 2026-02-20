@@ -178,6 +178,26 @@ impl DecompilerConfig {
             ..Default::default()
         }
     }
+
+    /// Create a configuration for RISC-V RV32.
+    pub fn riscv32() -> Self {
+        Self {
+            ptr_size: 32,
+            sp_name: "sp".to_string(),
+            fp_name: "s0".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a configuration for RISC-V RV64.
+    pub fn riscv64() -> Self {
+        Self {
+            ptr_size: 64,
+            sp_name: "sp".to_string(),
+            fp_name: "s0".to_string(),
+            ..Default::default()
+        }
+    }
 }
 
 /// External information for decompilation (function names, strings, symbols).
@@ -639,6 +659,22 @@ mod tests {
         assert_eq!(config.ptr_size, 32);
         assert_eq!(config.sp_name, "sp");
         assert_eq!(config.fp_name, "fp");
+    }
+
+    #[test]
+    fn test_decompiler_config_riscv32() {
+        let config = DecompilerConfig::riscv32();
+        assert_eq!(config.ptr_size, 32);
+        assert_eq!(config.sp_name, "sp");
+        assert_eq!(config.fp_name, "s0");
+    }
+
+    #[test]
+    fn test_decompiler_config_riscv64() {
+        let config = DecompilerConfig::riscv64();
+        assert_eq!(config.ptr_size, 64);
+        assert_eq!(config.sp_name, "sp");
+        assert_eq!(config.fp_name, "s0");
     }
 
     #[test]

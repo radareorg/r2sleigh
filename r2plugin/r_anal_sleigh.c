@@ -2040,9 +2040,15 @@ R2ILContext *get_context(RAnal *anal) {
 		sleigh_arch_str = (bits == 64) ? "x86-64" : "x86";
 	} else if (!strcmp (arch, "arm")) {
 		sleigh_arch_str = "arm";
+	} else if (!strcmp (arch, "riscv")) {
+		sleigh_arch_str = (bits >= 64) ? "riscv64" : "riscv32";
+	} else if (!strcmp (arch, "riscv32") || !strcmp (arch, "rv32")) {
+		sleigh_arch_str = "riscv32";
+	} else if (!strcmp (arch, "riscv64") || !strcmp (arch, "rv64")) {
+		sleigh_arch_str = "riscv64";
 	} else if (!strcmp (arch, "mips")) {
-        /* Simple heuristic for MIPS (assuming default is 32be/le) */
-        /* Note: This is partial, better use manual override for complex variants */
+	        /* Simple heuristic for MIPS (assuming default is 32be/le) */
+	        /* Note: This is partial, better use manual override for complex variants */
 		sleigh_arch_str = "mips"; /* Placeholder - mapped often to general mips */
 	} else {
 		return NULL; /* unsupported arch */

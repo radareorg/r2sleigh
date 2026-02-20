@@ -11,6 +11,8 @@ fn arch_to_slaspec(arch: &str) -> Option<(&'static str, &'static str)> {
         "x86-64" | "x86_64" | "x64" | "amd64" => Some(("x86", "x86-64.slaspec")),
         "x86" | "x86-32" | "i386" | "i686" => Some(("x86", "x86.slaspec")),
         "arm" | "arm32" | "arm-le" => Some(("ARM", "ARM8_le.slaspec")),
+        "riscv64" | "rv64" | "rv64gc" => Some(("RISCV", "riscv.lp64d.slaspec")),
+        "riscv32" | "rv32" | "rv32gc" => Some(("RISCV", "riscv.ilp32d.slaspec")),
         _ => None,
     }
 }

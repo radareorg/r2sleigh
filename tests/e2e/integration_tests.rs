@@ -3121,6 +3121,171 @@ mod ffi {
             r2il_free(ctx);
         }
     }
+
+    #[test]
+    fn riscv64_lift_and_validate_success() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_validate: libloading::Symbol<
+                unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
+            > = lib.get(b"r2il_block_validate").unwrap();
+            let r2il_is_loaded: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_void) -> i32,
+            > = lib.get(b"r2il_is_loaded").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+
+            let arch = CString::new("riscv64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            if ctx.is_null() {
+                eprintln!("Skipping: plugin built without riscv64 support");
+                return;
+            }
+            assert_eq!(r2il_is_loaded(ctx), 1, "riscv64 context should load");
+
+            let mut bytes = vec![0x13u8, 0x05, 0x05, 0x00]; // addi a0, a0, 0
+            bytes.resize(16, 0x00);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift riscv64 instruction");
+            assert_eq!(
+                r2il_block_validate(ctx, block),
+                1,
+                "riscv64 block should pass validation"
+            );
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn riscv64_export_paths_esil_ssa_defuse_dec_nonnull() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_to_esil: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+            > = lib.get(b"r2il_block_to_esil").unwrap();
+            let r2il_block_to_ssa_json: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+            > = lib.get(b"r2il_block_to_ssa_json").unwrap();
+            let r2il_block_defuse_json: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+            > = lib.get(b"r2il_block_defuse_json").unwrap();
+            let r2dec_block: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+            > = lib.get(b"r2dec_block").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+
+            let arch = CString::new("riscv64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            if ctx.is_null() {
+                eprintln!("Skipping: plugin built without riscv64 support");
+                return;
+            }
+
+            let mut bytes = vec![0x13u8, 0x05, 0x05, 0x00]; // addi a0, a0, 0
+            bytes.resize(16, 0x00);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift riscv64 instruction");
+
+            let esil = r2il_block_to_esil(ctx, block);
+            assert!(!esil.is_null(), "ESIL export should not be null");
+            r2il_string_free(esil);
+
+            let ssa = r2il_block_to_ssa_json(ctx, block);
+            assert!(!ssa.is_null(), "SSA JSON export should not be null");
+            r2il_string_free(ssa);
+
+            let defuse = r2il_block_defuse_json(ctx, block);
+            assert!(!defuse.is_null(), "Def-use JSON export should not be null");
+            r2il_string_free(defuse);
+
+            let dec = r2dec_block(ctx, block);
+            assert!(!dec.is_null(), "Decompiler export should not be null");
+            r2il_string_free(dec);
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn riscv32_lift_and_validate_success() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_validate: libloading::Symbol<
+                unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
+            > = lib.get(b"r2il_block_validate").unwrap();
+            let r2il_is_loaded: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_void) -> i32,
+            > = lib.get(b"r2il_is_loaded").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+
+            let arch = CString::new("riscv32").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            if ctx.is_null() {
+                eprintln!("Skipping: plugin built without riscv32 support");
+                return;
+            }
+            assert_eq!(r2il_is_loaded(ctx), 1, "riscv32 context should load");
+
+            let mut bytes = vec![0x13u8, 0x05, 0x05, 0x00]; // addi a0, a0, 0
+            bytes.resize(16, 0x00);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift riscv32 instruction");
+            assert_eq!(
+                r2il_block_validate(ctx, block),
+                1,
+                "riscv32 block should pass validation"
+            );
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
 }
 
 // ============================================================================

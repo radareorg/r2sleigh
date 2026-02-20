@@ -2795,15 +2795,51 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
             let (spec, dis) = apply_userop_map(spec, dis, "arm");
             Ok((spec, dis))
         }
+        #[cfg(feature = "riscv")]
+        "riscv64" | "rv64" | "rv64gc" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_riscv::SLA_RISCV_LP64D,
+                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                "riscv64",
+            )
+            .map_err(|e| e.to_string())?;
+            let dis = Disassembler::from_sla(
+                sleigh_config::processor_riscv::SLA_RISCV_LP64D,
+                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                "riscv64",
+            )
+            .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "riscv64");
+            Ok((spec, dis))
+        }
+        #[cfg(feature = "riscv")]
+        "riscv32" | "rv32" | "rv32gc" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
+                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                "riscv32",
+            )
+            .map_err(|e| e.to_string())?;
+            let dis = Disassembler::from_sla(
+                sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
+                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                "riscv32",
+            )
+            .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "riscv32");
+            Ok((spec, dis))
+        }
         _ => {
             let mut supported = vec![];
             #[cfg(feature = "x86")]
             supported.extend(["x86-64", "x86"]);
             #[cfg(feature = "arm")]
             supported.push("arm");
+            #[cfg(feature = "riscv")]
+            supported.extend(["riscv64", "riscv32"]);
 
             if supported.is_empty() {
-                Err("No architectures enabled; build with feature x86 or arm".to_string())
+                Err("No architectures enabled; build with feature x86, arm, or riscv".to_string())
             } else {
                 Err(format!(
                     "Unknown architecture '{}'. Supported: {}",
@@ -2847,6 +2883,12 @@ fn merge_states_enabled() -> bool {
     MERGE_STATES.load(Ordering::Relaxed)
 }
 
+fn arch_has_register(arch: &ArchSpec, name: &str) -> bool {
+    arch.registers
+        .iter()
+        .any(|reg| reg.name.eq_ignore_ascii_case(name))
+}
+
 fn seed_symbolic_state<'ctx>(
     state: &mut r2sym::SymState<'ctx>,
     func: &r2ssa::SSAFunction,
@@ -2857,6 +2899,7 @@ fn seed_symbolic_state<'ctx>(
     };
 
     let arch_name = arch.name.to_ascii_lowercase();
+    let looks_riscv = arch_name.contains("riscv") || arch_name.starts_with("rv");
     let (arg_regs, stack_regs, stack_value) = if arch_name == "x86-64"
         || arch_name == "x86_64"
         || (arch_name == "x86" && arch.addr_size == 8)
@@ -2873,6 +2916,26 @@ fn seed_symbolic_state<'ctx>(
         (
             ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI"].as_slice(),
             ["ESP", "EBP"].as_slice(),
+            0x7fff_0000u64,
+        )
+    } else if looks_riscv && (arch.addr_size == 8 || arch_name.contains("64")) {
+        (
+            [
+                "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "X10", "X11", "X12", "X13", "X14",
+                "X15", "X16", "X17",
+            ]
+            .as_slice(),
+            ["SP", "S0", "FP", "X2", "X8"].as_slice(),
+            0x7fff_ffff_0000u64,
+        )
+    } else if looks_riscv {
+        (
+            [
+                "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "X10", "X11", "X12", "X13", "X14",
+                "X15", "X16", "X17",
+            ]
+            .as_slice(),
+            ["SP", "S0", "FP", "X2", "X8"].as_slice(),
             0x7fff_0000u64,
         )
     } else {
@@ -3064,14 +3127,38 @@ struct SymHookStats {
     duplicates: usize,
 }
 
-fn supports_x86_64_sysv(arch: Option<&ArchSpec>) -> bool {
-    let Some(arch) = arch else {
-        return false;
-    };
-    if arch.addr_size != 8 {
-        return false;
+fn callconv_for_arch(arch: Option<&ArchSpec>) -> Option<r2sym::CallConv> {
+    let arch = arch?;
+
+    let arch_name = arch.name.to_ascii_lowercase();
+    if arch.addr_size == 8 && arch_name.contains("x86") {
+        return Some(r2sym::CallConv::x86_64_sysv());
     }
-    arch.name.to_ascii_lowercase().contains("x86")
+
+    if arch_name.contains("riscv") || arch_name.starts_with("rv") {
+        const RISCV_ARG_ABI: [&str; 8] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+        const RISCV_ARG_NUMERIC: [&str; 8] =
+            ["x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17"];
+        let use_abi_names = arch_has_register(arch, "a0");
+        let is_64 = arch.addr_size == 8 || arch_name.contains("64");
+        let bits = if is_64 { 64 } else { 32 };
+        if use_abi_names {
+            return Some(r2sym::CallConv::new(
+                RISCV_ARG_ABI.to_vec(),
+                "a0",
+                bits,
+                bits,
+            ));
+        }
+        return Some(r2sym::CallConv::new(
+            RISCV_ARG_NUMERIC.to_vec(),
+            "x10",
+            bits,
+            bits,
+        ));
+    }
+
+    None
 }
 
 fn normalize_sim_name(name: &str) -> Option<&'static str> {
@@ -3152,9 +3239,9 @@ fn install_core_summaries_for_function<'ctx>(
     arch: Option<&ArchSpec>,
 ) -> SymHookStats {
     let mut stats = SymHookStats::default();
-    if !supports_x86_64_sysv(arch) {
+    let Some(callconv) = callconv_for_arch(arch) else {
         return stats;
-    }
+    };
 
     let mut targets = BTreeSet::new();
     for block in func.cfg().blocks() {
@@ -3175,7 +3262,7 @@ fn install_core_summaries_for_function<'ctx>(
     }
 
     let names = sym_symbol_map().lock().ok();
-    let registry = r2sym::SummaryRegistry::with_core(r2sym::CallConv::x86_64_sysv());
+    let registry = r2sym::SummaryRegistry::with_core(callconv);
     let mut seen: HashSet<(u64, &'static str)> = HashSet::new();
 
     for target in targets {
@@ -4104,6 +4191,10 @@ pub extern "C" fn r2dec_function(
             }
             ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
             ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
+            ("riscv32", _) | ("rv32", _) | ("rv32gc", _) => r2dec::DecompilerConfig::riscv32(),
+            ("riscv64", _) | ("rv64", _) | ("rv64gc", _) => r2dec::DecompilerConfig::riscv64(),
+            ("riscv", _) if ptr_bits == 32 => r2dec::DecompilerConfig::riscv32(),
+            ("riscv", _) => r2dec::DecompilerConfig::riscv64(),
             _ => {
                 // Use default but set ptr_size based on addr_size
                 r2dec::DecompilerConfig {
@@ -4764,6 +4855,14 @@ fn run_full_decompile_on_large_stack(
                     ("aarch64", _) | ("arm64", _) | ("ARM64", _) => {
                         r2dec::DecompilerConfig::aarch64()
                     }
+                    ("riscv32", _) | ("rv32", _) | ("rv32gc", _) => {
+                        r2dec::DecompilerConfig::riscv32()
+                    }
+                    ("riscv64", _) | ("rv64", _) | ("rv64gc", _) => {
+                        r2dec::DecompilerConfig::riscv64()
+                    }
+                    ("riscv", _) if ptr_bits == 32 => r2dec::DecompilerConfig::riscv32(),
+                    ("riscv", _) => r2dec::DecompilerConfig::riscv64(),
                     _ => r2dec::DecompilerConfig {
                         ptr_size: ptr_bits,
                         ..r2dec::DecompilerConfig::default()
@@ -5118,7 +5217,7 @@ pub extern "C" fn r2sleigh_recover_vars(
     }
 
     // Recover variables from SSA analysis
-    let vars = recover_vars_from_ssa(&ssa_blocks);
+    let vars = recover_vars_from_ssa(&ssa_blocks, ctx_ref.arch.as_ref());
 
     // Serialize to JSON
     match serde_json::to_string(&vars) {
@@ -5196,31 +5295,58 @@ struct DataRef {
     ref_type: String,
 }
 
-/// Recover variables from SSA blocks
-///
-/// Strategy:
-/// 1. Detect register arguments (RDI_0, RSI_0, etc. = version 0 inputs)
-/// 2. Detect stack variables by finding IntAdd/IntSub patterns:
-///    - IntAdd { dst: temp, a: RBP, b: const(-offset) } → [RBP-offset] = local var
-///    - IntAdd { dst: temp, a: RSP, b: const(+offset) } → [RSP+offset] = local var
-///    - Positive RBP offsets or return address area = arguments
-fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
+const X86_ARG_REGS: &[(&str, &[&str])] = &[
+    ("rdi", &["rdi", "edi", "di", "dil"]),
+    ("rsi", &["rsi", "esi", "si", "sil"]),
+    ("rdx", &["rdx", "edx", "dx", "dl", "dh"]),
+    ("rcx", &["rcx", "ecx", "cx", "cl", "ch"]),
+    ("r8", &["r8", "r8d", "r8w", "r8b"]),
+    ("r9", &["r9", "r9d", "r9w", "r9b"]),
+];
+const RISCV_ARG_REGS: &[(&str, &[&str])] = &[
+    ("a0", &["a0", "x10"]),
+    ("a1", &["a1", "x11"]),
+    ("a2", &["a2", "x12"]),
+    ("a3", &["a3", "x13"]),
+    ("a4", &["a4", "x14"]),
+    ("a5", &["a5", "x15"]),
+    ("a6", &["a6", "x16"]),
+    ("a7", &["a7", "x17"]),
+];
+const X86_STACK_BASES: &[&str] = &["rbp", "rsp", "ebp", "esp"];
+const X86_FRAME_BASES: &[&str] = &["rbp", "ebp"];
+const RISCV_STACK_BASES: &[&str] = &["sp", "s0", "fp", "x2", "x8"];
+const RISCV_FRAME_BASES: &[&str] = &["s0", "fp", "x8"];
+const GENERIC_STACK_BASES: &[&str] = &["sp", "fp", "bp", "s0", "x2", "x8", "rbp", "rsp"];
+const GENERIC_FRAME_BASES: &[&str] = &["fp", "bp", "s0", "x8", "rbp"];
+
+type ArgAliasMap = &'static [(&'static str, &'static [&'static str])];
+type BaseRegList = &'static [&'static str];
+
+fn recover_vars_arch_profile(arch: Option<&ArchSpec>) -> (ArgAliasMap, BaseRegList, BaseRegList) {
+    let Some(arch) = arch else {
+        return (&[], GENERIC_STACK_BASES, GENERIC_FRAME_BASES);
+    };
+
+    let arch_name = arch.name.to_ascii_lowercase();
+    if arch_name.contains("x86") {
+        return (X86_ARG_REGS, X86_STACK_BASES, X86_FRAME_BASES);
+    }
+    if arch_name.contains("riscv") || arch_name.starts_with("rv") {
+        return (RISCV_ARG_REGS, RISCV_STACK_BASES, RISCV_FRAME_BASES);
+    }
+
+    (&[], GENERIC_STACK_BASES, GENERIC_FRAME_BASES)
+}
+
+/// Recover variables from SSA blocks using architecture-specific lightweight heuristics.
+fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock], arch: Option<&ArchSpec>) -> Vec<VarProt> {
     use std::collections::{HashMap, HashSet};
 
     let mut vars = Vec::new();
     let mut seen_offsets: HashSet<i64> = HashSet::new();
     let mut seen_arg_regs: HashSet<String> = HashSet::new();
-
-    // x86-64 calling convention argument registers (including 32-bit aliases)
-    // Format: (canonical_name, [lowercase_aliases])
-    let arg_regs: &[(&str, &[&str])] = &[
-        ("rdi", &["rdi", "edi", "di", "dil"]),
-        ("rsi", &["rsi", "esi", "si", "sil"]),
-        ("rdx", &["rdx", "edx", "dx", "dl", "dh"]),
-        ("rcx", &["rcx", "ecx", "cx", "cl", "ch"]),
-        ("r8", &["r8", "r8d", "r8w", "r8b"]),
-        ("r9", &["r9", "r9d", "r9w", "r9b"]),
-    ];
+    let (arg_regs, stack_bases, frame_bases) = recover_vars_arch_profile(arch);
 
     // Track temp variables that are stack addresses: temp_name -> (base_reg, offset)
     let mut stack_addr_temps: HashMap<String, (String, i64)> = HashMap::new();
@@ -5234,8 +5360,8 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                     let a_name = a.name.to_lowercase();
                     let b_name = b.name.to_lowercase();
 
-                    // Check if 'a' is RBP or RSP and 'b' is a constant
-                    let is_a_base = a_name == "rbp" || a_name == "rsp";
+                    // Check if 'a' is stack/frame base and 'b' is a constant
+                    let is_a_base = stack_bases.contains(&a_name.as_str());
                     let is_b_const = b_name.starts_with("const:");
 
                     if is_a_base && is_b_const {
@@ -5255,7 +5381,7 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                         }
                     }
                     // Also check if 'b' is the base register (commutative for add)
-                    else if (b_name == "rbp" || b_name == "rsp")
+                    else if stack_bases.contains(&b_name.as_str())
                         && a_name.starts_with("const:")
                         && let Some(raw_offset) = parse_const_value(&a.name)
                     {
@@ -5269,13 +5395,27 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                 r2ssa::SSAOp::Store { addr, val, .. } => {
                     let addr_key = format!("{}_{}", addr.name.to_lowercase(), addr.version);
                     if let Some((base_reg, offset)) = stack_addr_temps.get(&addr_key) {
-                        add_stack_var(&mut vars, &mut seen_offsets, base_reg, *offset, val.size);
+                        add_stack_var(
+                            &mut vars,
+                            &mut seen_offsets,
+                            base_reg,
+                            frame_bases,
+                            *offset,
+                            val.size,
+                        );
                     }
                 }
                 r2ssa::SSAOp::Load { dst, addr, .. } => {
                     let addr_key = format!("{}_{}", addr.name.to_lowercase(), addr.version);
                     if let Some((base_reg, offset)) = stack_addr_temps.get(&addr_key) {
-                        add_stack_var(&mut vars, &mut seen_offsets, base_reg, *offset, dst.size);
+                        add_stack_var(
+                            &mut vars,
+                            &mut seen_offsets,
+                            base_reg,
+                            frame_bases,
+                            *offset,
+                            dst.size,
+                        );
                     }
                 }
 
@@ -5318,6 +5458,7 @@ fn add_stack_var(
     vars: &mut Vec<VarProt>,
     seen_offsets: &mut HashSet<i64>,
     base_reg: &str,
+    frame_bases: &[&str],
     offset: i64,
     size: u32,
 ) {
@@ -5329,11 +5470,11 @@ fn add_stack_var(
     // Determine if this is an argument or local variable
     // For RBP-relative: negative offset = local, positive = saved regs/return/args
     // For RSP-relative: depends on stack frame layout
-    let is_rbp = base_reg == "rbp";
-    let is_arg = if is_rbp {
-        offset > 0 // Above RBP = return addr, saved RBP, then args
+    let is_frame_base = frame_bases.contains(&base_reg);
+    let is_arg = if is_frame_base {
+        offset > 0 // Above frame base = return addr/saved fp, then args
     } else {
-        false // RSP-relative accesses are typically locals
+        false // SP-relative accesses are typically locals
     };
 
     let var_name = if is_arg && offset > 8 {
@@ -5343,7 +5484,7 @@ fn add_stack_var(
         format!("var_{:x}h", offset.unsigned_abs())
     };
 
-    let kind = if is_rbp { "b" } else { "s" }; // bp-relative or sp-relative
+    let kind = if is_frame_base { "b" } else { "s" }; // frame-relative or stack-relative
 
     vars.push(VarProt {
         name: var_name,
@@ -6055,6 +6196,62 @@ mod integration_tests {
         std::fs::write("/tmp/sleigh_profile.dr", profile).expect("Unable to write profile");
 
         r2il_string_free(profile_ptr);
+        r2il_free(ctx_ptr);
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn create_disassembler_for_arch_riscv64() {
+        let (spec, disasm) = create_disassembler_for_arch("riscv64").expect("riscv64 disassembler");
+        assert_eq!(spec.name, "riscv64");
+        assert!(spec.addr_size > 0);
+        assert_eq!(spec.instruction_endianness, r2il::Endianness::Little);
+        assert_eq!(spec.memory_endianness, r2il::Endianness::Little);
+        assert_eq!(
+            disasm.userop_name(0),
+            userop_map_for_arch("riscv64").get(&0).map(String::as_str)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn create_disassembler_for_arch_riscv32() {
+        let (spec, disasm) = create_disassembler_for_arch("riscv32").expect("riscv32 disassembler");
+        assert_eq!(spec.name, "riscv32");
+        assert!(spec.addr_size > 0);
+        assert_eq!(spec.instruction_endianness, r2il::Endianness::Little);
+        assert_eq!(spec.memory_endianness, r2il::Endianness::Little);
+        assert_eq!(
+            disasm.userop_name(0),
+            userop_map_for_arch("riscv32").get(&0).map(String::as_str)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn r2il_arch_init_riscv64_loaded() {
+        let arch_cstr = CString::new("riscv64").unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(
+            r2il_is_loaded(ctx_ptr),
+            1,
+            "riscv64 context should be loaded"
+        );
+        r2il_free(ctx_ptr);
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn r2il_arch_init_riscv32_loaded() {
+        let arch_cstr = CString::new("riscv32").unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(
+            r2il_is_loaded(ctx_ptr),
+            1,
+            "riscv32 context should be loaded"
+        );
         r2il_free(ctx_ptr);
     }
 }

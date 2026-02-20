@@ -247,6 +247,45 @@ pub fn create_arm_spec() -> ArchSpec {
     ctx.finish()
 }
 
+fn create_riscv_spec(name: &str, addr_size: u32) -> ArchSpec {
+    let mut ctx = LiftContext::new(name);
+    ctx.set_big_endian(false);
+    ctx.set_addr_size(addr_size);
+
+    // Add standard address spaces
+    ctx.add_space("ram", addr_size, true);
+    ctx.add_space("register", 4, false);
+    ctx.add_space("unique", 4, false);
+
+    let reg_size = addr_size;
+    let base = 0x2000u64;
+    let stride = u64::from(addr_size);
+    let integer_regs = [
+        "zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2", "s0", "s1", "a0", "a1", "a2", "a3", "a4",
+        "a5", "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4",
+        "t5", "t6",
+    ];
+    for (idx, reg) in integer_regs.iter().enumerate() {
+        ctx.add_register(reg, base + (idx as u64 * stride), reg_size);
+    }
+
+    // Common aliases used by downstream analysis.
+    ctx.add_sub_register("fp", base + 8 * stride, reg_size, "s0");
+    ctx.add_register("pc", 0x1000, reg_size);
+
+    ctx.finish()
+}
+
+/// Create a basic RISC-V RV64 architecture specification for testing.
+pub fn create_riscv64_spec() -> ArchSpec {
+    create_riscv_spec("riscv64", 8)
+}
+
+/// Create a basic RISC-V RV32 architecture specification for testing.
+pub fn create_riscv32_spec() -> ArchSpec {
+    create_riscv_spec("riscv32", 4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +322,32 @@ mod tests {
 
         // Check some registers exist
         assert!(spec.get_register("r0").is_some());
+        assert!(spec.get_register("sp").is_some());
+        assert!(spec.get_register("pc").is_some());
+    }
+
+    #[test]
+    fn test_riscv64_spec() {
+        let spec = create_riscv64_spec();
+        assert_eq!(spec.name, "riscv64");
+        assert!(!spec.big_endian);
+        assert_eq!(spec.instruction_endianness, Endianness::Little);
+        assert_eq!(spec.memory_endianness, Endianness::Little);
+        assert_eq!(spec.addr_size, 8);
+        assert!(spec.get_register("a0").is_some());
+        assert!(spec.get_register("sp").is_some());
+        assert!(spec.get_register("pc").is_some());
+    }
+
+    #[test]
+    fn test_riscv32_spec() {
+        let spec = create_riscv32_spec();
+        assert_eq!(spec.name, "riscv32");
+        assert!(!spec.big_endian);
+        assert_eq!(spec.instruction_endianness, Endianness::Little);
+        assert_eq!(spec.memory_endianness, Endianness::Little);
+        assert_eq!(spec.addr_size, 4);
+        assert!(spec.get_register("a0").is_some());
         assert!(spec.get_register("sp").is_some());
         assert!(spec.get_register("pc").is_some());
     }

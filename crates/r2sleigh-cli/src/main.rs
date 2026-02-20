@@ -8,7 +8,9 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use r2il::{serialize, validate_archspec};
-use r2sleigh_lift::{Lifter, create_arm_spec, create_x86_64_spec};
+use r2sleigh_lift::{
+    Lifter, create_arm_spec, create_riscv32_spec, create_riscv64_spec, create_x86_64_spec,
+};
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "sleigh-config")]
@@ -59,7 +61,7 @@ enum Commands {
 
     /// Generate a test architecture specification
     TestArch {
-        /// Architecture name (x86-64, arm)
+        /// Architecture name (x86-64, arm, riscv64, riscv32)
         arch: String,
 
         /// Output r2il binary file
@@ -223,11 +225,21 @@ fn cmd_compile(input: &Path, output: Option<&PathBuf>, _variant: &str) -> Result
     // Create spec based on architecture detection
     // Note: For raw .slaspec files, use sleigh-compiler to compile first.
     // This command works best with pre-built specs.
-    let spec = if arch_name.contains("x86") || arch_name.contains("ia") || arch_name.contains("64")
+    let arch_name_lower = arch_name.to_lowercase();
+    let spec = if arch_name_lower.contains("riscv64") || arch_name_lower.contains("rv64") {
+        println!("  Detected RISC-V RV64 architecture");
+        create_riscv64_spec()
+    } else if arch_name_lower.contains("riscv32") || arch_name_lower.contains("rv32") {
+        println!("  Detected RISC-V RV32 architecture");
+        create_riscv32_spec()
+    } else if arch_name_lower.contains("x86")
+        || arch_name_lower.contains("ia")
+        || arch_name_lower.contains("amd64")
+        || arch_name_lower.contains("x64")
     {
         println!("  Detected x86-64 architecture");
         create_x86_64_spec()
-    } else if arch_name.to_lowercase().contains("arm") {
+    } else if arch_name_lower.contains("arm") {
         println!("  Detected ARM architecture");
         create_arm_spec()
     } else {
@@ -353,9 +365,17 @@ fn cmd_test_arch(arch: &str, output: Option<&PathBuf>) -> Result<(), String> {
             println!("Generating ARM test specification...");
             create_arm_spec()
         }
+        "riscv64" | "rv64" | "rv64gc" => {
+            println!("Generating RISC-V RV64 test specification...");
+            create_riscv64_spec()
+        }
+        "riscv32" | "rv32" | "rv32gc" => {
+            println!("Generating RISC-V RV32 test specification...");
+            create_riscv32_spec()
+        }
         _ => {
             return Err(format!(
-                "Unknown architecture: {}. Supported: x86-64, arm",
+                "Unknown architecture: {}. Supported: x86-64, arm, riscv64, riscv32",
                 arch
             ));
         }
@@ -388,7 +408,7 @@ fn cmd_version() -> Result<(), String> {
     #[cfg(feature = "sleigh-config")]
     println!("Disasm support: enabled");
     #[cfg(not(feature = "sleigh-config"))]
-    println!("Disasm support: disabled (build with --features x86 to enable)");
+    println!("Disasm support: disabled (build with --features x86, arm, or riscv to enable)");
 
     Ok(())
 }
@@ -654,16 +674,52 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
             disasm.set_userop_map(userop_map_for_arch("arm"));
             Ok((disasm, spec))
         }
+        #[cfg(feature = "riscv")]
+        "riscv64" | "rv64" | "rv64gc" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_riscv::SLA_RISCV_LP64D,
+                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                "riscv64",
+            )
+            .map_err(|e| e.to_string())?;
+            let mut disasm = Disassembler::from_sla(
+                sleigh_config::processor_riscv::SLA_RISCV_LP64D,
+                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                "riscv64",
+            )
+            .map_err(|e| e.to_string())?;
+            disasm.set_userop_map(userop_map_for_arch("riscv64"));
+            Ok((disasm, spec))
+        }
+        #[cfg(feature = "riscv")]
+        "riscv32" | "rv32" | "rv32gc" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
+                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                "riscv32",
+            )
+            .map_err(|e| e.to_string())?;
+            let mut disasm = Disassembler::from_sla(
+                sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
+                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                "riscv32",
+            )
+            .map_err(|e| e.to_string())?;
+            disasm.set_userop_map(userop_map_for_arch("riscv32"));
+            Ok((disasm, spec))
+        }
         _ => {
             let mut supported: Vec<&str> = vec![];
             #[cfg(feature = "x86")]
             supported.extend(["x86-64", "x86"]);
             #[cfg(feature = "arm")]
             supported.push("arm");
+            #[cfg(feature = "riscv")]
+            supported.extend(["riscv64", "riscv32"]);
 
             if supported.is_empty() {
                 Err(
-                    "No architectures enabled. Build with --features x86 or --features arm"
+                    "No architectures enabled. Build with --features x86, arm, or riscv"
                         .to_string(),
                 )
             } else {
@@ -922,5 +978,117 @@ mod tests {
             spec.spaces.iter().any(|space| space.endianness.is_some()),
             "extracted spaces should carry explicit endianness overrides"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn disasm_riscv64_json_success() {
+        let out = run_action_output(
+            "riscv64",
+            "13050500000000000000000000000000",
+            "0x1000",
+            InstructionAction::Lift,
+            ExportFormat::Json,
+        )
+        .expect("run output");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(
+            parsed
+                .get("ops")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ops| !ops.is_empty()),
+            "riscv64 lift json must contain ops"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn run_riscv64_lift_json_success() {
+        let out = run_action_output(
+            "riscv64",
+            "13050500000000000000000000000000",
+            "0x1000",
+            InstructionAction::Lift,
+            ExportFormat::Json,
+        )
+        .expect("run output");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(
+            parsed
+                .get("ops")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ops| !ops.is_empty()),
+            "riscv64 lift json must contain ops"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn run_riscv64_ssa_text_success() {
+        let out = run_action_output(
+            "riscv64",
+            "13050500000000000000000000000000",
+            "0x1000",
+            InstructionAction::Ssa,
+            ExportFormat::Text,
+        )
+        .expect("run output");
+        assert!(
+            out.contains("dst="),
+            "riscv64 ssa text output should contain destination annotations"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn run_riscv64_defuse_json_success() {
+        let out = run_action_output(
+            "riscv64",
+            "13050500000000000000000000000000",
+            "0x1000",
+            InstructionAction::Defuse,
+            ExportFormat::Json,
+        )
+        .expect("run output");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(parsed.get("inputs").is_some(), "defuse must include inputs");
+        assert!(
+            parsed.get("outputs").is_some(),
+            "defuse must include outputs"
+        );
+        assert!(parsed.get("live").is_some(), "defuse must include live");
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn run_riscv64_dec_c_like_success() {
+        let out = run_action_output(
+            "riscv64",
+            "13050500000000000000000000000000",
+            "0x1000",
+            InstructionAction::Dec,
+            ExportFormat::CLike,
+        )
+        .expect("run output");
+        assert!(
+            !out.contains("unsupported action/format combination"),
+            "riscv64 c_like path should be reachable"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn test_arch_riscv64_generates_valid_spec() {
+        let spec = create_riscv64_spec();
+        validate_archspec(&spec).expect("riscv64 spec should validate");
+        assert_eq!(spec.addr_size, 8);
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn test_arch_riscv32_generates_valid_spec() {
+        let spec = create_riscv32_spec();
+        validate_archspec(&spec).expect("riscv32 spec should validate");
+        assert_eq!(spec.addr_size, 4);
     }
 }

@@ -22,3 +22,4 @@ sleigh-config = { workspace = true, features = ["x86"] }
 default = []
 x86 = ["sleigh-config/x86"]
 arm = ["sleigh-config/ARM"]
+riscv = ["sleigh-config/RISCV"]
