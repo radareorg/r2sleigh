@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 r2il = { path = "../crates/r2il" }
 r2sleigh-lift = { path = "../crates/r2sleigh-lift" }
+r2sleigh-export = { path = "../crates/r2sleigh-export" }
 r2ssa = { path = "../crates/r2ssa" }
 r2sym = { path = "../crates/r2sym" }
 r2types = { path = "../crates/r2types" }
@@ -27,4 +28,5 @@ optional = true
 default = ["x86"]
 x86 = ["sleigh-config/x86"]
 arm = ["sleigh-config/ARM"]
-all-archs = ["x86", "arm"]
+riscv = ["sleigh-config/RISCV"]
+all-archs = ["x86", "arm", "riscv"]

@@ -1500,6 +1500,12 @@ fn op_has_side_effects(op: &SSAOp, preserve_memory_reads: bool) -> bool {
     if op.is_control_flow() || op.is_memory_write() {
         return true;
     }
+    if matches!(
+        op,
+        SSAOp::Fence { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+    ) {
+        return true;
+    }
     if preserve_memory_reads && op.is_memory_read() {
         return true;
     }
@@ -1610,6 +1616,74 @@ where
             space: space.clone(),
             addr: map(addr),
             val: map(val),
+        },
+        Fence { ordering } => Fence {
+            ordering: *ordering,
+        },
+        LoadLinked {
+            dst,
+            space,
+            addr,
+            ordering,
+        } => LoadLinked {
+            dst: dst.clone(),
+            space: space.clone(),
+            addr: map(addr),
+            ordering: *ordering,
+        },
+        StoreConditional {
+            result,
+            space,
+            addr,
+            val,
+            ordering,
+        } => StoreConditional {
+            result: result.clone(),
+            space: space.clone(),
+            addr: map(addr),
+            val: map(val),
+            ordering: *ordering,
+        },
+        AtomicCAS {
+            dst,
+            space,
+            addr,
+            expected,
+            replacement,
+            ordering,
+        } => AtomicCAS {
+            dst: dst.clone(),
+            space: space.clone(),
+            addr: map(addr),
+            expected: map(expected),
+            replacement: map(replacement),
+            ordering: *ordering,
+        },
+        LoadGuarded {
+            dst,
+            space,
+            addr,
+            guard,
+            ordering,
+        } => LoadGuarded {
+            dst: dst.clone(),
+            space: space.clone(),
+            addr: map(addr),
+            guard: map(guard),
+            ordering: *ordering,
+        },
+        StoreGuarded {
+            space,
+            addr,
+            val,
+            guard,
+            ordering,
+        } => StoreGuarded {
+            space: space.clone(),
+            addr: map(addr),
+            val: map(val),
+            guard: map(guard),
+            ordering: *ordering,
         },
         IntAdd { dst, a, b } => IntAdd {
             dst: dst.clone(),
@@ -1958,6 +2032,7 @@ mod sccp_tests {
             space: SpaceId::Const,
             offset: val,
             size,
+            meta: None,
         }
     }
 
@@ -1966,6 +2041,7 @@ mod sccp_tests {
             space: SpaceId::Register,
             offset,
             size,
+            meta: None,
         }
     }
 
@@ -1974,6 +2050,7 @@ mod sccp_tests {
             space: SpaceId::Ram,
             offset: addr,
             size,
+            meta: None,
         }
     }
 
@@ -2034,6 +2111,7 @@ mod sccp_tests {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         }]);
 
         let (consts, _) = sccp(&func);
@@ -2054,6 +2132,7 @@ mod sccp_tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -2068,6 +2147,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -2082,6 +2162,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -2097,6 +2178,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ]);
 
@@ -2127,6 +2209,7 @@ mod sccp_tests {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         }]);
 
         let (consts, _) = sccp(&func);
@@ -2152,6 +2235,7 @@ mod sccp_tests {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         }]);
 
         let (consts, _) = sccp(&func);
@@ -2177,6 +2261,7 @@ mod sccp_tests {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         }]);
 
         let (consts, _) = sccp(&func);
@@ -2194,6 +2279,7 @@ mod sccp_tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -2208,6 +2294,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -2222,6 +2309,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -2230,6 +2318,7 @@ mod sccp_tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ]);
 

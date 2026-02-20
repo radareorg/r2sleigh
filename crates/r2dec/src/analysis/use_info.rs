@@ -310,6 +310,24 @@ fn is_mips_like_register_base(name: &str) -> bool {
         || is_decimal_suffix(&lower, "k")
 }
 
+fn is_riscv_like_register_base(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "zero" | "ra" | "sp" | "gp" | "tp" | "fp" | "pc"
+    ) {
+        return true;
+    }
+    is_decimal_suffix(&lower, "x")
+        || is_decimal_suffix(&lower, "t")
+        || is_decimal_suffix(&lower, "s")
+        || is_decimal_suffix(&lower, "a")
+        || is_decimal_suffix(&lower, "ft")
+        || is_decimal_suffix(&lower, "fs")
+        || is_decimal_suffix(&lower, "fa")
+        || is_decimal_suffix(&lower, "v")
+}
+
 fn is_register_candidate_base(base: &str, env: &PassEnv<'_>) -> bool {
     if is_semantic_binding_base(base) {
         return false;
@@ -326,6 +344,7 @@ fn is_register_candidate_base(base: &str, env: &PassEnv<'_>) -> bool {
     if is_x86_register_base(base)
         || is_arm_like_register_base(base)
         || is_mips_like_register_base(base)
+        || is_riscv_like_register_base(base)
     {
         return true;
     }

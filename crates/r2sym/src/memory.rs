@@ -429,12 +429,12 @@ mod tests {
 
         let idx = SymValue::new_symbolic(&ctx, "idx", 64);
         let addr_bv = idx.to_bv(&ctx);
-        let eq1 = addr_bv.eq(&BV::from_u64(0x1000, 64));
-        let eq2 = addr_bv.eq(&BV::from_u64(0x2000, 64));
+        let eq1 = addr_bv.eq(BV::from_u64(0x1000, 64));
+        let eq2 = addr_bv.eq(BV::from_u64(0x2000, 64));
         let constraint = eq1.clone() | eq2.clone();
 
         let value = SymValue::concrete(0xCAFEBABE, 32);
-        mem.write_with_constraints(&idx, &value, 4, &[constraint.clone()]);
+        mem.write_with_constraints(&idx, &value, 4, std::slice::from_ref(&constraint));
 
         let read_val = mem.read_with_constraints(&idx, 4, &[constraint]);
         assert!(read_val.is_symbolic());

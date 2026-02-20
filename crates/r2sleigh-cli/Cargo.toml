@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 r2il = { path = "../r2il" }
 r2sleigh-lift = { path = "../r2sleigh-lift" }
+r2sleigh-export = { path = "../r2sleigh-export" }
 clap.workspace = true
 thiserror.workspace = true
 hex = "0.4"
@@ -23,7 +24,8 @@ default = []
 x86 = ["sleigh-config/x86"]
 arm = ["sleigh-config/ARM"]
 mips = ["sleigh-config/MIPS"]
-all-archs = ["x86", "arm", "mips"]
+riscv = ["sleigh-config/RISCV"]
+all-archs = ["x86", "arm", "mips", "riscv"]
 
 [dependencies.sleigh-config]
 version = "1.0"

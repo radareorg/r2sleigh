@@ -3,7 +3,7 @@
 //! This module provides the context needed to translate Sleigh specifications
 //! into r2il, including register mappings and address space configuration.
 
-use r2il::{AddressSpace, ArchSpec, RegisterDef, SpaceId};
+use r2il::{AddressSpace, ArchSpec, Endianness, RegisterDef, SpaceId};
 use std::collections::HashMap;
 
 /// Context for translating a specific architecture.
@@ -87,7 +87,17 @@ impl LiftContext {
 
     /// Set the endianness.
     pub fn set_big_endian(&mut self, big_endian: bool) {
-        self.arch.big_endian = big_endian;
+        self.arch.set_legacy_big_endian(big_endian);
+    }
+
+    /// Set instruction endianness.
+    pub fn set_instruction_endianness(&mut self, endianness: Endianness) {
+        self.arch.set_instruction_endianness(endianness);
+    }
+
+    /// Set memory endianness.
+    pub fn set_memory_endianness(&mut self, endianness: Endianness) {
+        self.arch.set_memory_endianness(endianness);
     }
 
     /// Set the address size.
@@ -102,6 +112,17 @@ impl LiftContext {
 
     /// Add an address space from Sleigh.
     pub fn add_space(&mut self, name: &str, addr_size: u32, is_default: bool) -> SpaceId {
+        self.add_space_with_endianness(name, addr_size, is_default, None)
+    }
+
+    /// Add an address space with optional endianness override.
+    pub fn add_space_with_endianness(
+        &mut self,
+        name: &str,
+        addr_size: u32,
+        is_default: bool,
+        endianness: Option<Endianness>,
+    ) -> SpaceId {
         // Check if it's a standard space
         if let Some(&space_id) = self.space_map.get(name) {
             // Update the existing space definition
@@ -111,6 +132,12 @@ impl LiftContext {
                 addr_size,
                 word_size: 1,
                 is_default,
+                endianness,
+                memory_class: None,
+                permissions: None,
+                valid_ranges: Vec::new(),
+                bank_id: None,
+                segment_id: None,
             };
             self.arch.add_space(space);
             return space_id;
@@ -126,6 +153,12 @@ impl LiftContext {
             addr_size,
             word_size: 1,
             is_default,
+            endianness,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         };
         self.arch.add_space(space);
         self.space_map.insert(name.into(), space_id);
@@ -212,5 +245,14 @@ mod tests {
         assert_eq!(arch.registers.len(), 2);
         assert_eq!(arch.get_register_offset("RAX"), Some(0));
         assert_eq!(arch.get_register_offset("EAX"), Some(0));
+    }
+
+    #[test]
+    fn legacy_set_big_endian_sets_both_v2_fields() {
+        let mut ctx = LiftContext::new("test");
+        ctx.set_big_endian(true);
+        assert_eq!(ctx.arch.instruction_endianness, Endianness::Big);
+        assert_eq!(ctx.arch.memory_endianness, Endianness::Big);
+        assert!(ctx.arch.big_endian);
     }
 }

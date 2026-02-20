@@ -11,8 +11,11 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use r2il::serialize::UserOpDef;
-use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize};
-use r2sleigh_lift::{Disassembler, build_arch_spec, op_to_esil, userop_map_for_arch};
+use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize, validate_block_full};
+use r2sleigh_export::{
+    ExportFormat, InstructionAction, InstructionExportInput, export_instruction, op_json_named,
+};
+use r2sleigh_lift::{Disassembler, build_arch_spec, userop_map_for_arch};
 use r2ssa::TaintPolicy;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -69,6 +72,28 @@ impl R2ILContext {
             error: CString::new(msg).ok(),
         }
     }
+
+    fn set_error(&mut self, msg: impl AsRef<str>) {
+        self.error = CString::new(msg.as_ref()).ok();
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
+    }
+}
+
+fn validate_block_in_context(ctx: &mut R2ILContext, block: &R2ILBlock) -> Result<(), String> {
+    let Some(arch) = ctx.arch.as_ref() else {
+        let msg = "missing arch context for semantic validation".to_string();
+        ctx.set_error(&msg);
+        return Err(msg);
+    };
+
+    validate_block_full(block, arch).map_err(|e| {
+        let msg = format!("Invalid lifted block: {}", e);
+        ctx.set_error(&msg);
+        msg
+    })
 }
 
 /// Load an r2il file and return a context handle.
@@ -199,13 +224,7 @@ pub extern "C" fn r2il_is_big_endian(ctx: *const R2ILContext) -> i32 {
 
     unsafe {
         match &(*ctx).arch {
-            Some(arch) => {
-                if arch.big_endian {
-                    1
-                } else {
-                    0
-                }
-            }
+            Some(arch) => i32::from(arch.memory_endianness.to_legacy_big_endian()),
             None => 0,
         }
     }
@@ -366,9 +385,15 @@ pub extern "C" fn r2il_lift(
 
     let slice = unsafe { slice::from_raw_parts(bytes, len) };
     match disasm.lift(slice, addr) {
-        Ok(block) => Box::into_raw(Box::new(block)),
+        Ok(block) => {
+            if validate_block_in_context(ctx_ref, &block).is_err() {
+                return ptr::null_mut();
+            }
+            ctx_ref.clear_error();
+            Box::into_raw(Box::new(block))
+        }
         Err(e) => {
-            ctx_ref.error = CString::new(e.to_string()).ok();
+            ctx_ref.set_error(e.to_string());
             ptr::null_mut()
         }
     }
@@ -407,9 +432,15 @@ pub extern "C" fn r2il_lift_block(
     let size = (block_size as usize).min(len);
 
     match disasm.lift_block(slice, addr, size) {
-        Ok(block) => Box::into_raw(Box::new(block)),
+        Ok(block) => {
+            if validate_block_in_context(ctx_ref, &block).is_err() {
+                return ptr::null_mut();
+            }
+            ctx_ref.clear_error();
+            Box::into_raw(Box::new(block))
+        }
         Err(e) => {
-            ctx_ref.error = CString::new(e.to_string()).ok();
+            ctx_ref.set_error(e.to_string());
             ptr::null_mut()
         }
     }
@@ -479,6 +510,36 @@ pub extern "C" fn r2il_block_set_switch_info(
     block.set_switch_info(switch_info);
 }
 
+/// Validate a lifted block against full (structural + semantic) r2il invariants.
+///
+/// Returns 1 when valid, 0 on invalid input or validation failure.
+/// On validation failure, the context error string is updated.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_validate(ctx: *mut R2ILContext, block: *const R2ILBlock) -> i32 {
+    if ctx.is_null() || block.is_null() {
+        return 0;
+    }
+
+    let ctx_ref = unsafe { &mut *ctx };
+    let block_ref = unsafe { &*block };
+
+    let Some(arch) = ctx_ref.arch.as_ref() else {
+        ctx_ref.set_error("missing arch context for semantic validation");
+        return 0;
+    };
+
+    match validate_block_full(block_ref, arch) {
+        Ok(()) => {
+            ctx_ref.clear_error();
+            1
+        }
+        Err(e) => {
+            ctx_ref.set_error(format!("Invalid block: {}", e));
+            0
+        }
+    }
+}
+
 /// Get the number of operations in a block.
 #[unsafe(no_mangle)]
 pub extern "C" fn r2il_block_op_count(block: *const R2ILBlock) -> usize {
@@ -505,84 +566,28 @@ pub extern "C" fn r2il_block_to_esil(
     };
 
     let blk = unsafe { &*block };
-    let parts: Vec<String> = blk.ops.iter().map(|op| op_to_esil(disasm, op)).collect();
-    CString::new(parts.join(";")).map_or(ptr::null_mut(), |s| s.into_raw())
-}
-
-fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler) {
-    use serde_json::Value;
-
-    match value {
-        Value::Object(map) => {
-            let is_varnode =
-                map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
-            if is_varnode {
-                let space = map.get("space").and_then(Value::as_str);
-                if let Some(space_str) = space
-                    && space_str.eq_ignore_ascii_case("register")
-                {
-                    let offset = map.get("offset").and_then(Value::as_u64);
-                    let size = map.get("size").and_then(Value::as_u64);
-                    if let (Some(offset), Some(size)) = (offset, size) {
-                        let vn = r2il::Varnode {
-                            space: r2il::SpaceId::Register,
-                            offset,
-                            size: size as u32,
-                        };
-                        if let Some(name) = disasm.register_name(&vn) {
-                            map.insert("name".to_string(), Value::String(name));
-                        }
-                    }
-                }
-            }
-
-            for value in map.values_mut() {
-                annotate_register_names(value, disasm);
-            }
+    let input = InstructionExportInput {
+        disasm,
+        arch: match ctx_ref.arch.as_ref() {
+            Some(a) => a,
+            None => return ptr::null_mut(),
+        },
+        block: blk,
+        addr: blk.addr,
+        mnemonic: "",
+        native_size: blk.size as usize,
+    };
+    match export_instruction(&input, InstructionAction::Lift, ExportFormat::Esil) {
+        Ok(esil_lines) => {
+            let joined = esil_lines
+                .lines()
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(";");
+            CString::new(joined).map_or(ptr::null_mut(), |s| s.into_raw())
         }
-        Value::Array(items) => {
-            for item in items.iter_mut() {
-                annotate_register_names(item, disasm);
-            }
-        }
-        _ => {}
+        Err(_) => ptr::null_mut(),
     }
-}
-
-fn annotate_userop_names(value: &mut serde_json::Value, disasm: &Disassembler) {
-    use serde_json::Value;
-
-    match value {
-        Value::Object(map) => {
-            if let Some(callother) = map.get_mut("CallOther")
-                && let Value::Object(call_map) = callother
-            {
-                let userop = call_map.get("userop").and_then(Value::as_u64);
-                if let Some(userop) = userop
-                    && let Some(name) = disasm.userop_name(userop as u32)
-                {
-                    call_map.insert("userop_name".to_string(), Value::String(name.to_string()));
-                }
-            }
-
-            for value in map.values_mut() {
-                annotate_userop_names(value, disasm);
-            }
-        }
-        Value::Array(items) => {
-            for item in items.iter_mut() {
-                annotate_userop_names(item, disasm);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn op_json_with_registers(op: &R2ILOp, disasm: &Disassembler) -> Option<String> {
-    let mut value = serde_json::to_value(op).ok()?;
-    annotate_register_names(&mut value, disasm);
-    annotate_userop_names(&mut value, disasm);
-    serde_json::to_string(&value).ok()
 }
 
 /// Get a JSON representation of an operation in a block.
@@ -625,9 +630,9 @@ pub extern "C" fn r2il_block_op_json_named(
         return ptr::null_mut();
     }
 
-    match op_json_with_registers(&blk.ops[index], disasm) {
-        Some(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        None => ptr::null_mut(),
+    match op_json_named(disasm, &blk.ops[index]) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
     }
 }
 
@@ -739,8 +744,13 @@ pub extern "C" fn r2il_block_type(block: *const R2ILBlock) -> u32 {
     // Second pass: memory operations
     for op in &blk.ops {
         match op {
-            R2ILOp::Store { .. } => return R2AnalOpType::STORE,
-            R2ILOp::Load { .. } => return R2AnalOpType::LOAD,
+            R2ILOp::Store { .. }
+            | R2ILOp::StoreConditional { .. }
+            | R2ILOp::StoreGuarded { .. }
+            | R2ILOp::AtomicCAS { .. } => return R2AnalOpType::STORE,
+            R2ILOp::Load { .. } | R2ILOp::LoadLinked { .. } | R2ILOp::LoadGuarded { .. } => {
+                return R2AnalOpType::LOAD;
+            }
             _ => {}
         }
     }
@@ -854,12 +864,62 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
                 regs.push(addr);
             }
         }
+        R2ILOp::LoadLinked { addr, .. } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+        }
         R2ILOp::Store { addr, val, .. } => {
             if addr.is_register() {
                 regs.push(addr);
             }
             if val.is_register() {
                 regs.push(val);
+            }
+        }
+        R2ILOp::StoreConditional { addr, val, .. } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if val.is_register() {
+                regs.push(val);
+            }
+        }
+        R2ILOp::AtomicCAS {
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if expected.is_register() {
+                regs.push(expected);
+            }
+            if replacement.is_register() {
+                regs.push(replacement);
+            }
+        }
+        R2ILOp::LoadGuarded { addr, guard, .. } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if guard.is_register() {
+                regs.push(guard);
+            }
+        }
+        R2ILOp::StoreGuarded {
+            addr, val, guard, ..
+        } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if val.is_register() {
+                regs.push(val);
+            }
+            if guard.is_register() {
+                regs.push(guard);
             }
         }
 
@@ -1035,7 +1095,11 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
         }
 
         // Ops with no register reads
-        R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint | R2ILOp::CpuId { .. } => {}
+        R2ILOp::Fence { .. }
+        | R2ILOp::Nop
+        | R2ILOp::Unimplemented
+        | R2ILOp::Breakpoint
+        | R2ILOp::CpuId { .. } => {}
     }
 
     regs
@@ -1049,6 +1113,9 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
         // All ops with dst field write to dst
         R2ILOp::Copy { dst, .. }
         | R2ILOp::Load { dst, .. }
+        | R2ILOp::LoadLinked { dst, .. }
+        | R2ILOp::AtomicCAS { dst, .. }
+        | R2ILOp::LoadGuarded { dst, .. }
         | R2ILOp::IntAdd { dst, .. }
         | R2ILOp::IntSub { dst, .. }
         | R2ILOp::IntMult { dst, .. }
@@ -1108,6 +1175,14 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
 
         // Store doesn't have a register dst
         R2ILOp::Store { .. } => {}
+        R2ILOp::StoreConditional { result, .. } => {
+            if let Some(out) = result
+                && out.is_register()
+            {
+                regs.push(out);
+            }
+        }
+        R2ILOp::StoreGuarded { .. } => {}
 
         // Control flow ops don't write registers directly
         R2ILOp::Branch { .. }
@@ -1144,7 +1219,7 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
         }
 
         // Ops with no register writes
-        R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint => {}
+        R2ILOp::Fence { .. } | R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint => {}
     }
 
     regs
@@ -1205,13 +1280,78 @@ pub extern "C" fn r2il_block_mem_access(
     let defs = build_stack_defs(&blk.ops);
     let mut accesses = Vec::new();
 
-    for op in &blk.ops {
+    let apply_additive_fields = |access: &mut serde_json::Value,
+                                 op_index: usize,
+                                 space_id: Option<r2il::SpaceId>,
+                                 ordering: Option<r2il::MemoryOrdering>,
+                                 atomic_kind: Option<r2il::AtomicKind>,
+                                 guarded: bool| {
+        if guarded {
+            access["guarded"] = serde_json::Value::Bool(true);
+        }
+        if let Some(ord) = ordering.or_else(|| {
+            blk.op_metadata
+                .get(&op_index)
+                .and_then(|m| m.memory_ordering)
+        }) {
+            access["ordering"] = serde_json::to_value(ord).unwrap_or(serde_json::Value::Null);
+        }
+        if let Some(kind) =
+            atomic_kind.or_else(|| blk.op_metadata.get(&op_index).and_then(|m| m.atomic_kind))
+        {
+            access["atomic_kind"] = serde_json::to_value(kind).unwrap_or(serde_json::Value::Null);
+        }
+        if let Some(meta) = blk.op_metadata.get(&op_index) {
+            if let Some(perms) = meta.permissions {
+                access["permissions"] =
+                    serde_json::to_value(perms).unwrap_or(serde_json::Value::Null);
+            }
+            if let Some(range) = meta.valid_range {
+                access["range"] = serde_json::to_value(range).unwrap_or(serde_json::Value::Null);
+            }
+            if let Some(bank_id) = &meta.bank_id {
+                access["bank_id"] = serde_json::Value::String(bank_id.clone());
+            }
+            if let Some(segment_id) = &meta.segment_id {
+                access["segment_id"] = serde_json::Value::String(segment_id.clone());
+            }
+        }
+
+        if let Some(space_id) = space_id
+            && let Some(arch) = ctx_ref.arch.as_ref()
+            && let Some(space) = arch.spaces.iter().find(|s| s.id == space_id)
+        {
+            if let Some(memory_class) = space.memory_class {
+                access["memory_class"] =
+                    serde_json::to_value(memory_class).unwrap_or(serde_json::Value::Null);
+            }
+            if access.get("permissions").is_none()
+                && let Some(perms) = space.permissions
+            {
+                access["permissions"] =
+                    serde_json::to_value(perms).unwrap_or(serde_json::Value::Null);
+            }
+            if access.get("range").is_none()
+                && let Some(range) = space.valid_ranges.first()
+            {
+                access["range"] = serde_json::to_value(range).unwrap_or(serde_json::Value::Null);
+            }
+            if access.get("bank_id").is_none()
+                && let Some(bank_id) = &space.bank_id
+            {
+                access["bank_id"] = serde_json::Value::String(bank_id.clone());
+            }
+            if access.get("segment_id").is_none()
+                && let Some(segment_id) = &space.segment_id
+            {
+                access["segment_id"] = serde_json::Value::String(segment_id.clone());
+            }
+        }
+    };
+
+    for (op_index, op) in blk.ops.iter().enumerate() {
         match op {
-            R2ILOp::Load {
-                dst,
-                space: _,
-                addr,
-            } => {
+            R2ILOp::Load { dst, space, addr } => {
                 let mut access = serde_json::json!({
                     "type": "load",
                     "size": dst.size,
@@ -1229,13 +1369,36 @@ pub extern "C" fn r2il_block_mem_access(
                     access["stack_base"] = serde_json::Value::String(base);
                 }
 
+                apply_additive_fields(&mut access, op_index, Some(*space), None, None, false);
                 accesses.push(access);
             }
-            R2ILOp::Store {
-                space: _,
+            R2ILOp::LoadLinked {
+                dst,
+                space,
                 addr,
-                val,
+                ordering,
             } => {
+                let mut access = serde_json::json!({
+                    "type": "load_linked",
+                    "size": dst.size,
+                    "write": false,
+                    "addr": disasm.format_varnode(addr),
+                });
+
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    Some(r2il::AtomicKind::LoadLinked),
+                    false,
+                );
+                accesses.push(access);
+            }
+            R2ILOp::Store { space, addr, val } => {
                 let mut access = serde_json::json!({
                     "type": "store",
                     "size": val.size,
@@ -1256,6 +1419,138 @@ pub extern "C" fn r2il_block_mem_access(
                     access["stack_base"] = serde_json::Value::String(base);
                 }
 
+                apply_additive_fields(&mut access, op_index, Some(*space), None, None, false);
+                accesses.push(access);
+            }
+            R2ILOp::StoreConditional {
+                result,
+                space,
+                addr,
+                val,
+                ordering,
+            } => {
+                let mut access = serde_json::json!({
+                    "type": "store_conditional",
+                    "size": val.size,
+                    "write": true,
+                    "addr": disasm.format_varnode(addr),
+                });
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(val, disasm) {
+                    access["value"] = value;
+                }
+                if let Some(dst) = result
+                    && let Some(result_json) = varnode_to_json(dst, disasm)
+                {
+                    access["result"] = result_json;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    Some(r2il::AtomicKind::StoreConditional),
+                    false,
+                );
+                accesses.push(access);
+            }
+            R2ILOp::AtomicCAS {
+                dst,
+                space,
+                addr,
+                expected,
+                replacement,
+                ordering,
+            } => {
+                let mut access = serde_json::json!({
+                    "type": "atomic_cas",
+                    "size": dst.size,
+                    "write": true,
+                    "addr": disasm.format_varnode(addr),
+                });
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(expected, disasm) {
+                    access["expected"] = value;
+                }
+                if let Some(value) = varnode_to_json(replacement, disasm) {
+                    access["replacement"] = value;
+                }
+                if let Some(value) = varnode_to_json(dst, disasm) {
+                    access["result"] = value;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    Some(r2il::AtomicKind::CompareExchange),
+                    false,
+                );
+                accesses.push(access);
+            }
+            R2ILOp::LoadGuarded {
+                dst,
+                space,
+                addr,
+                guard,
+                ordering,
+            } => {
+                let mut access = serde_json::json!({
+                    "type": "load_guarded",
+                    "size": dst.size,
+                    "write": false,
+                    "addr": disasm.format_varnode(addr),
+                });
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(guard, disasm) {
+                    access["guard"] = value;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    None,
+                    true,
+                );
+                accesses.push(access);
+            }
+            R2ILOp::StoreGuarded {
+                space,
+                addr,
+                val,
+                guard,
+                ordering,
+            } => {
+                let mut access = serde_json::json!({
+                    "type": "store_guarded",
+                    "size": val.size,
+                    "write": true,
+                    "addr": disasm.format_varnode(addr),
+                });
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(val, disasm) {
+                    access["value"] = value;
+                }
+                if let Some(value) = varnode_to_json(guard, disasm) {
+                    access["guard"] = value;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    None,
+                    true,
+                );
                 accesses.push(access);
             }
             _ => {}
@@ -1324,6 +1619,7 @@ pub extern "C" fn r2il_block_varnodes(
                 space: space_str,
                 offset: vn.offset,
                 size: vn.size,
+                meta: vn.meta.clone(),
             });
         }
     }
@@ -1354,6 +1650,9 @@ fn varnode_to_json(vn: &Varnode, disasm: &Disassembler) -> Option<serde_json::Va
         && let Some(name) = disasm.register_name(vn)
     {
         json["name"] = serde_json::Value::String(name);
+    }
+    if let Some(meta) = vn.meta.as_ref() {
+        json["meta"] = serde_json::to_value(meta).ok()?;
     }
 
     Some(json)
@@ -1561,6 +1860,8 @@ struct VarnodeInfo {
     space: String,
     offset: u64,
     size: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<r2il::VarnodeMetadata>,
 }
 
 /// Helper: collect all varnodes from an operation.
@@ -1589,12 +1890,81 @@ fn op_all_varnodes(op: &R2ILOp) -> Vec<&Varnode> {
                 vns.push(addr);
             }
         }
+        R2ILOp::LoadLinked { dst, addr, .. } => {
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+        }
         R2ILOp::Store { addr, val, .. } => {
             if !addr.is_register() {
                 vns.push(addr);
             }
             if !val.is_register() {
                 vns.push(val);
+            }
+        }
+        R2ILOp::StoreConditional {
+            result, addr, val, ..
+        } => {
+            if let Some(out) = result
+                && !out.is_register()
+            {
+                vns.push(out);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !val.is_register() {
+                vns.push(val);
+            }
+        }
+        R2ILOp::AtomicCAS {
+            dst,
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !expected.is_register() {
+                vns.push(expected);
+            }
+            if !replacement.is_register() {
+                vns.push(replacement);
+            }
+        }
+        R2ILOp::LoadGuarded {
+            dst, addr, guard, ..
+        } => {
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !guard.is_register() {
+                vns.push(guard);
+            }
+        }
+        R2ILOp::StoreGuarded {
+            addr, val, guard, ..
+        } => {
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !val.is_register() {
+                vns.push(val);
+            }
+            if !guard.is_register() {
+                vns.push(guard);
             }
         }
         // For binary ops, get non-register operands
@@ -1642,6 +2012,12 @@ fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
         Copy { .. } => "Copy",
         Load { .. } => "Load",
         Store { .. } => "Store",
+        Fence { .. } => "Fence",
+        LoadLinked { .. } => "LoadLinked",
+        StoreConditional { .. } => "StoreConditional",
+        AtomicCAS { .. } => "AtomicCAS",
+        LoadGuarded { .. } => "LoadGuarded",
+        StoreGuarded { .. } => "StoreGuarded",
         IntAdd { .. } => "IntAdd",
         IntSub { .. } => "IntSub",
         IntMult { .. } => "IntMult",
@@ -2079,25 +2455,22 @@ pub extern "C" fn r2il_block_to_ssa_json(
     };
 
     let blk = unsafe { &*block };
+    let input = InstructionExportInput {
+        disasm,
+        arch: match ctx_ref.arch.as_ref() {
+            Some(a) => a,
+            None => return ptr::null_mut(),
+        },
+        block: blk,
+        addr: blk.addr,
+        mnemonic: "",
+        native_size: blk.size as usize,
+    };
 
-    // Convert to SSA
-    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
-
-    // Convert ops to JSON-serializable format
-    let ops_info: Vec<SSAOpInfo> = ssa_block.ops.iter().map(ssa_op_to_info).collect();
-
-    match serde_json::to_string_pretty(&ops_info) {
+    match export_instruction(&input, InstructionAction::Ssa, ExportFormat::Json) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
     }
-}
-
-/// Def-use analysis info for JSON output.
-#[derive(Serialize)]
-struct DefUseInfoJson {
-    inputs: Vec<String>,
-    outputs: Vec<String>,
-    live: Vec<String>,
 }
 
 /// Get def-use analysis for block as JSON.
@@ -2118,20 +2491,19 @@ pub extern "C" fn r2il_block_defuse_json(
     };
 
     let blk = unsafe { &*block };
-
-    // Convert to SSA
-    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
-
-    // Compute def-use chains
-    let info = r2ssa::def_use(&ssa_block);
-
-    let json_info = DefUseInfoJson {
-        inputs: info.inputs.iter().cloned().collect(),
-        outputs: info.outputs.iter().cloned().collect(),
-        live: info.live.iter().cloned().collect(),
+    let input = InstructionExportInput {
+        disasm,
+        arch: match ctx_ref.arch.as_ref() {
+            Some(a) => a,
+            None => return ptr::null_mut(),
+        },
+        block: blk,
+        addr: blk.addr,
+        mnemonic: "",
+        native_size: blk.size as usize,
     };
 
-    match serde_json::to_string_pretty(&json_info) {
+    match export_instruction(&input, InstructionAction::Defuse, ExportFormat::Json) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
     }
@@ -2788,15 +3160,51 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
             let (spec, dis) = apply_userop_map(spec, dis, "arm");
             Ok((spec, dis))
         }
+        #[cfg(feature = "riscv")]
+        "riscv64" | "rv64" | "rv64gc" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_riscv::SLA_RISCV_LP64D,
+                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                "riscv64",
+            )
+            .map_err(|e| e.to_string())?;
+            let dis = Disassembler::from_sla(
+                sleigh_config::processor_riscv::SLA_RISCV_LP64D,
+                sleigh_config::processor_riscv::PSPEC_RV64GC,
+                "riscv64",
+            )
+            .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "riscv64");
+            Ok((spec, dis))
+        }
+        #[cfg(feature = "riscv")]
+        "riscv32" | "rv32" | "rv32gc" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
+                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                "riscv32",
+            )
+            .map_err(|e| e.to_string())?;
+            let dis = Disassembler::from_sla(
+                sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
+                sleigh_config::processor_riscv::PSPEC_RV32GC,
+                "riscv32",
+            )
+            .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "riscv32");
+            Ok((spec, dis))
+        }
         _ => {
             let mut supported = vec![];
             #[cfg(feature = "x86")]
             supported.extend(["x86-64", "x86"]);
             #[cfg(feature = "arm")]
             supported.push("arm");
+            #[cfg(feature = "riscv")]
+            supported.extend(["riscv64", "riscv32"]);
 
             if supported.is_empty() {
-                Err("No architectures enabled; build with feature x86 or arm".to_string())
+                Err("No architectures enabled; build with feature x86, arm, or riscv".to_string())
             } else {
                 Err(format!(
                     "Unknown architecture '{}'. Supported: {}",
@@ -2840,6 +3248,12 @@ fn merge_states_enabled() -> bool {
     MERGE_STATES.load(Ordering::Relaxed)
 }
 
+fn arch_has_register(arch: &ArchSpec, name: &str) -> bool {
+    arch.registers
+        .iter()
+        .any(|reg| reg.name.eq_ignore_ascii_case(name))
+}
+
 fn seed_symbolic_state<'ctx>(
     state: &mut r2sym::SymState<'ctx>,
     func: &r2ssa::SSAFunction,
@@ -2850,6 +3264,7 @@ fn seed_symbolic_state<'ctx>(
     };
 
     let arch_name = arch.name.to_ascii_lowercase();
+    let looks_riscv = arch_name.contains("riscv") || arch_name.starts_with("rv");
     let (arg_regs, stack_regs, stack_value) = if arch_name == "x86-64"
         || arch_name == "x86_64"
         || (arch_name == "x86" && arch.addr_size == 8)
@@ -2866,6 +3281,26 @@ fn seed_symbolic_state<'ctx>(
         (
             ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI"].as_slice(),
             ["ESP", "EBP"].as_slice(),
+            0x7fff_0000u64,
+        )
+    } else if looks_riscv && (arch.addr_size == 8 || arch_name.contains("64")) {
+        (
+            [
+                "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "X10", "X11", "X12", "X13", "X14",
+                "X15", "X16", "X17",
+            ]
+            .as_slice(),
+            ["SP", "S0", "FP", "X2", "X8"].as_slice(),
+            0x7fff_ffff_0000u64,
+        )
+    } else if looks_riscv {
+        (
+            [
+                "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "X10", "X11", "X12", "X13", "X14",
+                "X15", "X16", "X17",
+            ]
+            .as_slice(),
+            ["SP", "S0", "FP", "X2", "X8"].as_slice(),
             0x7fff_0000u64,
         )
     } else {
@@ -3057,14 +3492,38 @@ struct SymHookStats {
     duplicates: usize,
 }
 
-fn supports_x86_64_sysv(arch: Option<&ArchSpec>) -> bool {
-    let Some(arch) = arch else {
-        return false;
-    };
-    if arch.addr_size != 8 {
-        return false;
+fn callconv_for_arch(arch: Option<&ArchSpec>) -> Option<r2sym::CallConv> {
+    let arch = arch?;
+
+    let arch_name = arch.name.to_ascii_lowercase();
+    if arch.addr_size == 8 && arch_name.contains("x86") {
+        return Some(r2sym::CallConv::x86_64_sysv());
     }
-    arch.name.to_ascii_lowercase().contains("x86")
+
+    if arch_name.contains("riscv") || arch_name.starts_with("rv") {
+        const RISCV_ARG_ABI: [&str; 8] = ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"];
+        const RISCV_ARG_NUMERIC: [&str; 8] =
+            ["x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17"];
+        let use_abi_names = arch_has_register(arch, "a0");
+        let is_64 = arch.addr_size == 8 || arch_name.contains("64");
+        let bits = if is_64 { 64 } else { 32 };
+        if use_abi_names {
+            return Some(r2sym::CallConv::new(
+                RISCV_ARG_ABI.to_vec(),
+                "a0",
+                bits,
+                bits,
+            ));
+        }
+        return Some(r2sym::CallConv::new(
+            RISCV_ARG_NUMERIC.to_vec(),
+            "x10",
+            bits,
+            bits,
+        ));
+    }
+
+    None
 }
 
 fn normalize_sim_name(name: &str) -> Option<&'static str> {
@@ -3145,9 +3604,9 @@ fn install_core_summaries_for_function<'ctx>(
     arch: Option<&ArchSpec>,
 ) -> SymHookStats {
     let mut stats = SymHookStats::default();
-    if !supports_x86_64_sysv(arch) {
+    let Some(callconv) = callconv_for_arch(arch) else {
         return stats;
-    }
+    };
 
     let mut targets = BTreeSet::new();
     for block in func.cfg().blocks() {
@@ -3168,7 +3627,7 @@ fn install_core_summaries_for_function<'ctx>(
     }
 
     let names = sym_symbol_map().lock().ok();
-    let registry = r2sym::SummaryRegistry::with_core(r2sym::CallConv::x86_64_sysv());
+    let registry = r2sym::SummaryRegistry::with_core(callconv);
     let mut seen: HashSet<(u64, &'static str)> = HashSet::new();
 
     for target in targets {
@@ -4097,6 +4556,10 @@ pub extern "C" fn r2dec_function(
             }
             ("arm", _) | ("ARM", _) if ptr_bits == 32 => r2dec::DecompilerConfig::arm(),
             ("aarch64", _) | ("arm64", _) | ("ARM64", _) => r2dec::DecompilerConfig::aarch64(),
+            ("riscv32", _) | ("rv32", _) | ("rv32gc", _) => r2dec::DecompilerConfig::riscv32(),
+            ("riscv64", _) | ("rv64", _) | ("rv64gc", _) => r2dec::DecompilerConfig::riscv64(),
+            ("riscv", _) if ptr_bits == 32 => r2dec::DecompilerConfig::riscv32(),
+            ("riscv", _) => r2dec::DecompilerConfig::riscv64(),
             _ => {
                 // Use default but set ptr_size based on addr_size
                 r2dec::DecompilerConfig {
@@ -4757,6 +5220,14 @@ fn run_full_decompile_on_large_stack(
                     ("aarch64", _) | ("arm64", _) | ("ARM64", _) => {
                         r2dec::DecompilerConfig::aarch64()
                     }
+                    ("riscv32", _) | ("rv32", _) | ("rv32gc", _) => {
+                        r2dec::DecompilerConfig::riscv32()
+                    }
+                    ("riscv64", _) | ("rv64", _) | ("rv64gc", _) => {
+                        r2dec::DecompilerConfig::riscv64()
+                    }
+                    ("riscv", _) if ptr_bits == 32 => r2dec::DecompilerConfig::riscv32(),
+                    ("riscv", _) => r2dec::DecompilerConfig::riscv64(),
                     _ => r2dec::DecompilerConfig {
                         ptr_size: ptr_bits,
                         ..r2dec::DecompilerConfig::default()
@@ -4842,25 +5313,22 @@ pub extern "C" fn r2dec_block(ctx: *const R2ILContext, block: *const R2ILBlock) 
     };
 
     let blk = unsafe { &*block };
+    let input = InstructionExportInput {
+        disasm,
+        arch: match ctx_ref.arch.as_ref() {
+            Some(a) => a,
+            None => return ptr::null_mut(),
+        },
+        block: blk,
+        addr: blk.addr,
+        mnemonic: "",
+        native_size: blk.size as usize,
+    };
 
-    // Convert to SSA
-    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
-
-    // Get pointer size from architecture
-    let ptr_size = ctx_ref.arch.as_ref().map(|a| a.addr_size * 8).unwrap_or(64);
-
-    // Build statements from SSA ops
-    let stmts = r2dec::lower_ssa_ops_to_stmts(ptr_size, &ssa_block.ops);
-
-    // Generate C code for statements
-    let mut codegen = r2dec::CodeGenerator::new(r2dec::CodeGenConfig::default());
-    let mut output = String::new();
-    for stmt in &stmts {
-        output.push_str(&codegen.generate_stmt(stmt));
-        output.push('\n');
+    match export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike) {
+        Ok(output) => CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
     }
-
-    CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
 /// Get the C AST for a block as JSON.
@@ -5511,7 +5979,7 @@ pub extern "C" fn r2sleigh_recover_vars(
     }
 
     // Recover variables from SSA analysis
-    let vars = recover_vars_from_ssa(&ssa_blocks);
+    let vars = recover_vars_from_ssa(&ssa_blocks, ctx_ref.arch.as_ref());
 
     // Serialize to JSON
     match serde_json::to_string(&vars) {
@@ -5589,31 +6057,58 @@ struct DataRef {
     ref_type: String,
 }
 
-/// Recover variables from SSA blocks
-///
-/// Strategy:
-/// 1. Detect register arguments (RDI_0, RSI_0, etc. = version 0 inputs)
-/// 2. Detect stack variables by finding IntAdd/IntSub patterns:
-///    - IntAdd { dst: temp, a: RBP, b: const(-offset) } → [RBP-offset] = local var
-///    - IntAdd { dst: temp, a: RSP, b: const(+offset) } → [RSP+offset] = local var
-///    - Positive RBP offsets or return address area = arguments
-fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
+const X86_ARG_REGS: &[(&str, &[&str])] = &[
+    ("rdi", &["rdi", "edi", "di", "dil"]),
+    ("rsi", &["rsi", "esi", "si", "sil"]),
+    ("rdx", &["rdx", "edx", "dx", "dl", "dh"]),
+    ("rcx", &["rcx", "ecx", "cx", "cl", "ch"]),
+    ("r8", &["r8", "r8d", "r8w", "r8b"]),
+    ("r9", &["r9", "r9d", "r9w", "r9b"]),
+];
+const RISCV_ARG_REGS: &[(&str, &[&str])] = &[
+    ("a0", &["a0", "x10"]),
+    ("a1", &["a1", "x11"]),
+    ("a2", &["a2", "x12"]),
+    ("a3", &["a3", "x13"]),
+    ("a4", &["a4", "x14"]),
+    ("a5", &["a5", "x15"]),
+    ("a6", &["a6", "x16"]),
+    ("a7", &["a7", "x17"]),
+];
+const X86_STACK_BASES: &[&str] = &["rbp", "rsp", "ebp", "esp"];
+const X86_FRAME_BASES: &[&str] = &["rbp", "ebp"];
+const RISCV_STACK_BASES: &[&str] = &["sp", "s0", "fp", "x2", "x8"];
+const RISCV_FRAME_BASES: &[&str] = &["s0", "fp", "x8"];
+const GENERIC_STACK_BASES: &[&str] = &["sp", "fp", "bp", "s0", "x2", "x8", "rbp", "rsp"];
+const GENERIC_FRAME_BASES: &[&str] = &["fp", "bp", "s0", "x8", "rbp"];
+
+type ArgAliasMap = &'static [(&'static str, &'static [&'static str])];
+type BaseRegList = &'static [&'static str];
+
+fn recover_vars_arch_profile(arch: Option<&ArchSpec>) -> (ArgAliasMap, BaseRegList, BaseRegList) {
+    let Some(arch) = arch else {
+        return (&[], GENERIC_STACK_BASES, GENERIC_FRAME_BASES);
+    };
+
+    let arch_name = arch.name.to_ascii_lowercase();
+    if arch_name.contains("x86") {
+        return (X86_ARG_REGS, X86_STACK_BASES, X86_FRAME_BASES);
+    }
+    if arch_name.contains("riscv") || arch_name.starts_with("rv") {
+        return (RISCV_ARG_REGS, RISCV_STACK_BASES, RISCV_FRAME_BASES);
+    }
+
+    (&[], GENERIC_STACK_BASES, GENERIC_FRAME_BASES)
+}
+
+/// Recover variables from SSA blocks using architecture-specific lightweight heuristics.
+fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock], arch: Option<&ArchSpec>) -> Vec<VarProt> {
     use std::collections::{HashMap, HashSet};
 
     let mut vars = Vec::new();
     let mut seen_offsets: HashSet<i64> = HashSet::new();
     let mut seen_arg_regs: HashSet<String> = HashSet::new();
-
-    // x86-64 calling convention argument registers (including 32-bit aliases)
-    // Format: (canonical_name, [lowercase_aliases])
-    let arg_regs: &[(&str, &[&str])] = &[
-        ("rdi", &["rdi", "edi", "di", "dil"]),
-        ("rsi", &["rsi", "esi", "si", "sil"]),
-        ("rdx", &["rdx", "edx", "dx", "dl", "dh"]),
-        ("rcx", &["rcx", "ecx", "cx", "cl", "ch"]),
-        ("r8", &["r8", "r8d", "r8w", "r8b"]),
-        ("r9", &["r9", "r9d", "r9w", "r9b"]),
-    ];
+    let (arg_regs, stack_bases, frame_bases) = recover_vars_arch_profile(arch);
 
     // Track temp variables that are stack addresses: temp_name -> (base_reg, offset)
     let mut stack_addr_temps: HashMap<String, (String, i64)> = HashMap::new();
@@ -5627,8 +6122,8 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                     let a_name = a.name.to_lowercase();
                     let b_name = b.name.to_lowercase();
 
-                    // Check if 'a' is RBP or RSP and 'b' is a constant
-                    let is_a_base = a_name == "rbp" || a_name == "rsp";
+                    // Check if 'a' is stack/frame base and 'b' is a constant
+                    let is_a_base = stack_bases.contains(&a_name.as_str());
                     let is_b_const = b_name.starts_with("const:");
 
                     if is_a_base && is_b_const {
@@ -5648,7 +6143,7 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                         }
                     }
                     // Also check if 'b' is the base register (commutative for add)
-                    else if (b_name == "rbp" || b_name == "rsp")
+                    else if stack_bases.contains(&b_name.as_str())
                         && a_name.starts_with("const:")
                         && let Some(raw_offset) = parse_const_value(&a.name)
                     {
@@ -5662,13 +6157,27 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<VarProt> {
                 r2ssa::SSAOp::Store { addr, val, .. } => {
                     let addr_key = format!("{}_{}", addr.name.to_lowercase(), addr.version);
                     if let Some((base_reg, offset)) = stack_addr_temps.get(&addr_key) {
-                        add_stack_var(&mut vars, &mut seen_offsets, base_reg, *offset, val.size);
+                        add_stack_var(
+                            &mut vars,
+                            &mut seen_offsets,
+                            base_reg,
+                            frame_bases,
+                            *offset,
+                            val.size,
+                        );
                     }
                 }
                 r2ssa::SSAOp::Load { dst, addr, .. } => {
                     let addr_key = format!("{}_{}", addr.name.to_lowercase(), addr.version);
                     if let Some((base_reg, offset)) = stack_addr_temps.get(&addr_key) {
-                        add_stack_var(&mut vars, &mut seen_offsets, base_reg, *offset, dst.size);
+                        add_stack_var(
+                            &mut vars,
+                            &mut seen_offsets,
+                            base_reg,
+                            frame_bases,
+                            *offset,
+                            dst.size,
+                        );
                     }
                 }
 
@@ -5711,6 +6220,7 @@ fn add_stack_var(
     vars: &mut Vec<VarProt>,
     seen_offsets: &mut HashSet<i64>,
     base_reg: &str,
+    frame_bases: &[&str],
     offset: i64,
     size: u32,
 ) {
@@ -5722,11 +6232,11 @@ fn add_stack_var(
     // Determine if this is an argument or local variable
     // For RBP-relative: negative offset = local, positive = saved regs/return/args
     // For RSP-relative: depends on stack frame layout
-    let is_rbp = base_reg == "rbp";
-    let is_arg = if is_rbp {
-        offset > 0 // Above RBP = return addr, saved RBP, then args
+    let is_frame_base = frame_bases.contains(&base_reg);
+    let is_arg = if is_frame_base {
+        offset > 0 // Above frame base = return addr/saved fp, then args
     } else {
-        false // RSP-relative accesses are typically locals
+        false // SP-relative accesses are typically locals
     };
 
     let var_name = if is_arg && offset > 8 {
@@ -5736,7 +6246,7 @@ fn add_stack_var(
         format!("var_{:x}h", offset.unsigned_abs())
     };
 
-    let kind = if is_rbp { "b" } else { "s" }; // bp-relative or sp-relative
+    let kind = if is_frame_base { "b" } else { "s" }; // frame-relative or stack-relative
 
     vars.push(VarProt {
         name: var_name,
@@ -5922,7 +6432,37 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::ffi::{CStr, CString};
+
+    #[cfg(feature = "x86")]
+    unsafe fn c_string_to_owned(ptr: *mut c_char) -> String {
+        let out = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        r2il_string_free(ptr);
+        out
+    }
+
+    #[cfg(feature = "x86")]
+    fn export_from_context(
+        ctx_ref: &R2ILContext,
+        block: &R2ILBlock,
+        action: InstructionAction,
+        format: ExportFormat,
+    ) -> String {
+        let disasm = ctx_ref.disasm.as_ref().expect("disassembler");
+        let arch = ctx_ref.arch.as_ref().expect("arch spec");
+        let input = InstructionExportInput {
+            disasm,
+            arch,
+            block,
+            addr: block.addr,
+            mnemonic: "",
+            native_size: block.size as usize,
+        };
+        export_instruction(&input, action, format).expect("export")
+    }
 
     #[test]
     fn test_context_lifecycle_from_file() {
@@ -5972,12 +6512,192 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "x86")]
+    fn op_json_named_matches_exporter_output_shape() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let block_ref = unsafe { &*block };
+        let ctx_ref = unsafe { &*ctx };
+        let op_index = 0usize;
+        let expected_json = op_json_named(
+            ctx_ref.disasm.as_ref().expect("disassembler"),
+            &block_ref.ops[op_index],
+        )
+        .expect("exporter op json");
+
+        let json_ptr = r2il_block_op_json_named(ctx, block, op_index);
+        assert!(!json_ptr.is_null());
+        let ffi_json = unsafe { c_string_to_owned(json_ptr) };
+
+        let expected_val: Value =
+            serde_json::from_str(&expected_json).expect("expected json value");
+        let ffi_val: Value = serde_json::from_str(&ffi_json).expect("ffi json value");
+        assert_eq!(ffi_val, expected_val);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn block_to_esil_matches_exporter() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let ffi_ptr = r2il_block_to_esil(ctx, block);
+        assert!(!ffi_ptr.is_null());
+        let ffi_esil = unsafe { c_string_to_owned(ffi_ptr) };
+
+        let ctx_ref = unsafe { &*ctx };
+        let block_ref = unsafe { &*block };
+        let expected = export_from_context(
+            ctx_ref,
+            block_ref,
+            InstructionAction::Lift,
+            ExportFormat::Esil,
+        );
+        let expected_joined = expected
+            .lines()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(";");
+        assert_eq!(ffi_esil, expected_joined);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn block_to_ssa_json_matches_exporter() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let ffi_ptr = r2il_block_to_ssa_json(ctx, block);
+        assert!(!ffi_ptr.is_null());
+        let ffi_json = unsafe { c_string_to_owned(ffi_ptr) };
+
+        let ctx_ref = unsafe { &*ctx };
+        let block_ref = unsafe { &*block };
+        let expected = export_from_context(
+            ctx_ref,
+            block_ref,
+            InstructionAction::Ssa,
+            ExportFormat::Json,
+        );
+
+        let ffi_val: Value = serde_json::from_str(&ffi_json).expect("ffi json");
+        let expected_val: Value = serde_json::from_str(&expected).expect("expected json");
+        assert_eq!(ffi_val, expected_val);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn block_defuse_json_matches_exporter() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let ffi_ptr = r2il_block_defuse_json(ctx, block);
+        assert!(!ffi_ptr.is_null());
+        let ffi_json = unsafe { c_string_to_owned(ffi_ptr) };
+
+        let ctx_ref = unsafe { &*ctx };
+        let block_ref = unsafe { &*block };
+        let expected = export_from_context(
+            ctx_ref,
+            block_ref,
+            InstructionAction::Defuse,
+            ExportFormat::Json,
+        );
+
+        let ffi_val: Value = serde_json::from_str(&ffi_json).expect("ffi json");
+        let expected_val: Value = serde_json::from_str(&expected).expect("expected json");
+        assert_eq!(ffi_val, expected_val);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn r2dec_block_c_like_matches_exporter_path() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let ffi_ptr = r2dec_block(ctx, block);
+        assert!(!ffi_ptr.is_null());
+        let ffi_c_like = unsafe { c_string_to_owned(ffi_ptr) };
+
+        let ctx_ref = unsafe { &*ctx };
+        let block_ref = unsafe { &*block };
+        let expected = export_from_context(
+            ctx_ref,
+            block_ref,
+            InstructionAction::Dec,
+            ExportFormat::CLike,
+        );
+        assert_eq!(ffi_c_like, expected);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
     fn test_null_handling() {
         assert!(r2il_load(ptr::null()).is_null());
         assert_eq!(r2il_is_loaded(ptr::null()), 0);
         assert!(r2il_arch_name(ptr::null()).is_null());
         r2il_free(ptr::null_mut());
         r2il_block_free(ptr::null_mut());
+    }
+
+    #[test]
+    fn is_big_endian_uses_memory_endianness_shim() {
+        let mut arch = ArchSpec::new("shim");
+        arch.set_memory_endianness(r2il::Endianness::Big);
+        let ctx = Box::into_raw(Box::new(R2ILContext::with_arch(arch)));
+        assert_eq!(r2il_is_big_endian(ctx), 1);
+        r2il_free(ctx);
+
+        let mut arch = ArchSpec::new("shim2");
+        arch.set_memory_endianness(r2il::Endianness::Mixed);
+        let ctx = Box::into_raw(Box::new(R2ILContext::with_arch(arch)));
+        assert_eq!(r2il_is_big_endian(ctx), 0);
+        r2il_free(ctx);
     }
 
     #[test]
@@ -6142,8 +6862,8 @@ mod tests {
         let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
 
         r2il_string_free(out);
-        r2il_block_free(block_load as *mut R2ILBlock);
-        r2il_block_free(block_ret as *mut R2ILBlock);
+        r2il_block_free(block_load);
+        r2il_block_free(block_ret);
         r2il_free(ctx);
 
         assert!(
@@ -6155,6 +6875,45 @@ mod tests {
                 || output.contains("saved_fp"),
             "decompiler should keep decompilation stable with tsj context, got: {}",
             output
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn test_varnode_to_json_includes_meta_when_set() {
+        let (_, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
+        let meta = r2il::VarnodeMetadata {
+            scalar_kind: Some(r2il::ScalarKind::UnsignedInt),
+            pointer_hint: Some(r2il::PointerHint::PointerLike),
+            ..Default::default()
+        };
+        let vn = r2il::Varnode::register(0, 8).with_meta(meta);
+
+        let value = varnode_to_json(&vn, &disasm).expect("varnode json");
+        let meta_json = value
+            .get("meta")
+            .and_then(Value::as_object)
+            .expect("meta object");
+        assert_eq!(
+            meta_json.get("scalar_kind").and_then(Value::as_str),
+            Some("unsigned_int")
+        );
+        assert_eq!(
+            meta_json.get("pointer_hint").and_then(Value::as_str),
+            Some("pointer_like")
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn test_varnode_to_json_omits_meta_when_unset() {
+        let (_, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
+        let vn = r2il::Varnode::register(0, 8);
+
+        let value = varnode_to_json(&vn, &disasm).expect("varnode json");
+        assert!(
+            value.get("meta").is_none(),
+            "meta should be omitted when not set"
         );
     }
 
@@ -6292,6 +7051,62 @@ mod integration_tests {
         std::fs::write("/tmp/sleigh_profile.dr", profile).expect("Unable to write profile");
 
         r2il_string_free(profile_ptr);
+        r2il_free(ctx_ptr);
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn create_disassembler_for_arch_riscv64() {
+        let (spec, disasm) = create_disassembler_for_arch("riscv64").expect("riscv64 disassembler");
+        assert_eq!(spec.name, "riscv64");
+        assert!(spec.addr_size > 0);
+        assert_eq!(spec.instruction_endianness, r2il::Endianness::Little);
+        assert_eq!(spec.memory_endianness, r2il::Endianness::Little);
+        assert_eq!(
+            disasm.userop_name(0),
+            userop_map_for_arch("riscv64").get(&0).map(String::as_str)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn create_disassembler_for_arch_riscv32() {
+        let (spec, disasm) = create_disassembler_for_arch("riscv32").expect("riscv32 disassembler");
+        assert_eq!(spec.name, "riscv32");
+        assert!(spec.addr_size > 0);
+        assert_eq!(spec.instruction_endianness, r2il::Endianness::Little);
+        assert_eq!(spec.memory_endianness, r2il::Endianness::Little);
+        assert_eq!(
+            disasm.userop_name(0),
+            userop_map_for_arch("riscv32").get(&0).map(String::as_str)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn r2il_arch_init_riscv64_loaded() {
+        let arch_cstr = CString::new("riscv64").unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(
+            r2il_is_loaded(ctx_ptr),
+            1,
+            "riscv64 context should be loaded"
+        );
+        r2il_free(ctx_ptr);
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn r2il_arch_init_riscv32_loaded() {
+        let arch_cstr = CString::new("riscv32").unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(
+            r2il_is_loaded(ctx_ptr),
+            1,
+            "riscv32 context should be loaded"
+        );
         r2il_free(ctx_ptr);
     }
 }

@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::var::SSAVar;
+use r2il::MemoryOrdering;
 
 /// An SSA operation representing a single semantic action with versioned variables.
 ///
@@ -34,6 +35,54 @@ pub enum SSAOp {
         space: String,
         addr: SSAVar,
         val: SSAVar,
+    },
+
+    /// Memory fence/barrier.
+    Fence { ordering: MemoryOrdering },
+
+    /// Load-linked from memory.
+    LoadLinked {
+        dst: SSAVar,
+        space: String,
+        addr: SSAVar,
+        ordering: MemoryOrdering,
+    },
+
+    /// Store-conditional to memory.
+    StoreConditional {
+        result: Option<SSAVar>,
+        space: String,
+        addr: SSAVar,
+        val: SSAVar,
+        ordering: MemoryOrdering,
+    },
+
+    /// Atomic compare-and-swap.
+    AtomicCAS {
+        dst: SSAVar,
+        space: String,
+        addr: SSAVar,
+        expected: SSAVar,
+        replacement: SSAVar,
+        ordering: MemoryOrdering,
+    },
+
+    /// Guarded memory load.
+    LoadGuarded {
+        dst: SSAVar,
+        space: String,
+        addr: SSAVar,
+        guard: SSAVar,
+        ordering: MemoryOrdering,
+    },
+
+    /// Guarded memory store.
+    StoreGuarded {
+        space: String,
+        addr: SSAVar,
+        val: SSAVar,
+        guard: SSAVar,
+        ordering: MemoryOrdering,
     },
 
     // ========== Integer Arithmetic ==========
@@ -302,6 +351,9 @@ impl SSAOp {
             Phi { dst, .. }
             | Copy { dst, .. }
             | Load { dst, .. }
+            | LoadLinked { dst, .. }
+            | AtomicCAS { dst, .. }
+            | LoadGuarded { dst, .. }
             | IntAdd { dst, .. }
             | IntSub { dst, .. }
             | IntMult { dst, .. }
@@ -364,9 +416,11 @@ impl SSAOp {
             | Extract { dst, .. }
             | Insert { dst, .. } => Some(dst),
 
-            CallOther { output, .. } => output.as_ref(),
+            CallOther { output, .. } | StoreConditional { result: output, .. } => output.as_ref(),
 
             Store { .. }
+            | Fence { .. }
+            | StoreGuarded { .. }
             | Branch { .. }
             | CBranch { .. }
             | BranchInd { .. }
@@ -408,9 +462,22 @@ impl SSAOp {
             | New { src, .. }
             | Cast { src, .. } => vec![src],
 
-            Load { addr, .. } => vec![addr],
+            Load { addr, .. } | LoadLinked { addr, .. } => vec![addr],
 
-            Store { addr, val, .. } => vec![addr, val],
+            Store { addr, val, .. } | StoreConditional { addr, val, .. } => vec![addr, val],
+
+            AtomicCAS {
+                addr,
+                expected,
+                replacement,
+                ..
+            } => vec![addr, expected, replacement],
+
+            LoadGuarded { addr, guard, .. } => vec![addr, guard],
+
+            StoreGuarded {
+                addr, val, guard, ..
+            } => vec![addr, val, guard],
 
             IntAdd { a, b, .. }
             | IntSub { a, b, .. }
@@ -475,7 +542,7 @@ impl SSAOp {
 
             CallOther { inputs, .. } => inputs.iter().collect(),
 
-            Nop | Unimplemented | Breakpoint | CpuId { .. } => vec![],
+            Fence { .. } | Nop | Unimplemented | Breakpoint | CpuId { .. } => vec![],
         }
     }
 
@@ -494,12 +561,24 @@ impl SSAOp {
 
     /// Returns true if this operation reads from memory.
     pub fn is_memory_read(&self) -> bool {
-        matches!(self, SSAOp::Load { .. })
+        matches!(
+            self,
+            SSAOp::Load { .. }
+                | SSAOp::LoadLinked { .. }
+                | SSAOp::LoadGuarded { .. }
+                | SSAOp::AtomicCAS { .. }
+        )
     }
 
     /// Returns true if this operation writes to memory.
     pub fn is_memory_write(&self) -> bool {
-        matches!(self, SSAOp::Store { .. })
+        matches!(
+            self,
+            SSAOp::Store { .. }
+                | SSAOp::StoreConditional { .. }
+                | SSAOp::StoreGuarded { .. }
+                | SSAOp::AtomicCAS { .. }
+        )
     }
 
     /// Returns true if this is a phi node.
@@ -524,6 +603,67 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
             SSAOp::Load { dst, space, addr } => write!(f, "{} = LOAD [{}]{}", dst, space, addr),
             SSAOp::Store { space, addr, val } => write!(f, "STORE [{}]{} = {}", space, addr, val),
+            SSAOp::Fence { ordering } => write!(f, "FENCE({:?})", ordering),
+            SSAOp::LoadLinked {
+                dst,
+                space,
+                addr,
+                ordering,
+            } => write!(
+                f,
+                "{} = LOAD_LINKED({:?}) [{}]{}",
+                dst, ordering, space, addr
+            ),
+            SSAOp::StoreConditional {
+                result,
+                space,
+                addr,
+                val,
+                ordering,
+            } => {
+                if let Some(out) = result {
+                    write!(f, "{} = ", out)?;
+                }
+                write!(
+                    f,
+                    "STORE_CONDITIONAL({:?}) [{}]{} = {}",
+                    ordering, space, addr, val
+                )
+            }
+            SSAOp::AtomicCAS {
+                dst,
+                space,
+                addr,
+                expected,
+                replacement,
+                ordering,
+            } => write!(
+                f,
+                "{} = ATOMIC_CAS({:?}) [{}]{}, {}, {}",
+                dst, ordering, space, addr, expected, replacement
+            ),
+            SSAOp::LoadGuarded {
+                dst,
+                space,
+                addr,
+                guard,
+                ordering,
+            } => write!(
+                f,
+                "{} = LOAD_GUARDED({:?}) [{}]{}, guard={}",
+                dst, ordering, space, addr, guard
+            ),
+            SSAOp::StoreGuarded {
+                space,
+                addr,
+                val,
+                guard,
+                ordering,
+            } => write!(
+                f,
+                "STORE_GUARDED({:?}) [{}]{} = {}, guard={}",
+                ordering, space, addr, val, guard
+            ),
             SSAOp::IntAdd { dst, a, b } => write!(f, "{} = {} + {}", dst, a, b),
             SSAOp::IntSub { dst, a, b } => write!(f, "{} = {} - {}", dst, a, b),
             SSAOp::IntMult { dst, a, b } => write!(f, "{} = {} * {}", dst, a, b),

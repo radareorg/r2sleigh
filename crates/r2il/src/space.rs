@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{Endianness, MemoryClass, MemoryPermissions, MemoryRange};
+
 /// Identifier for an address space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SpaceId {
@@ -67,6 +69,24 @@ pub struct AddressSpace {
     pub word_size: u32,
     /// Whether this is the default code space
     pub is_default: bool,
+    /// Optional endianness override for this space.
+    #[serde(default)]
+    pub endianness: Option<Endianness>,
+    /// Optional memory classification for this space.
+    #[serde(default)]
+    pub memory_class: Option<MemoryClass>,
+    /// Optional permissions applicable to this space.
+    #[serde(default)]
+    pub permissions: Option<MemoryPermissions>,
+    /// Optional set of valid address ranges in this space.
+    #[serde(default)]
+    pub valid_ranges: Vec<MemoryRange>,
+    /// Optional memory bank identifier.
+    #[serde(default)]
+    pub bank_id: Option<String>,
+    /// Optional segment identifier.
+    #[serde(default)]
+    pub segment_id: Option<String>,
 }
 
 impl AddressSpace {
@@ -78,6 +98,12 @@ impl AddressSpace {
             addr_size,
             word_size: 1,
             is_default: false,
+            endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 
@@ -89,6 +115,12 @@ impl AddressSpace {
             addr_size,
             word_size: 1,
             is_default: true,
+            endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 
@@ -100,6 +132,12 @@ impl AddressSpace {
             addr_size: 4,
             word_size: 1,
             is_default: false,
+            endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 
@@ -111,6 +149,12 @@ impl AddressSpace {
             addr_size: 4,
             word_size: 1,
             is_default: false,
+            endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 
@@ -122,6 +166,32 @@ impl AddressSpace {
             addr_size: 8,
             word_size: 1,
             is_default: false,
+            endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AddressSpace, SpaceId};
+    use crate::Endianness;
+
+    #[test]
+    fn address_space_optional_endianness_serde() {
+        let space = AddressSpace::new(SpaceId::Ram, "ram", 8);
+        let json = serde_json::to_string(&space).expect("serialize");
+        assert!(json.contains("\"endianness\":null"));
+
+        let mut be_space = AddressSpace::new(SpaceId::Ram, "ram_be", 8);
+        be_space.endianness = Some(Endianness::Big);
+        let json_be = serde_json::to_string(&be_space).expect("serialize");
+        assert!(json_be.contains("endianness"));
+        let roundtrip: AddressSpace = serde_json::from_str(&json_be).expect("deserialize");
+        assert_eq!(roundtrip.endianness, Some(Endianness::Big));
     }
 }

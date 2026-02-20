@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/r2il",
     "crates/r2sleigh-lift",
+    "crates/r2sleigh-export",
     "crates/r2sleigh-cli",
     "crates/r2ssa",
     "crates/r2sym",

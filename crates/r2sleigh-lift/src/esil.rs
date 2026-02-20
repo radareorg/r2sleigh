@@ -32,6 +32,91 @@ pub fn format_op(disasm: &Disassembler, op: &R2ILOp) -> String {
                 vn(val)
             )
         }
+        Fence { ordering } => format!("Fence {{ ordering: {:?} }}", ordering),
+        LoadLinked {
+            dst,
+            space,
+            addr,
+            ordering,
+        } => {
+            format!(
+                "LoadLinked {{ dst: {}, space: {:?}, addr: {}, ordering: {:?} }}",
+                vn(dst),
+                space,
+                vn(addr),
+                ordering
+            )
+        }
+        StoreConditional {
+            result,
+            space,
+            addr,
+            val,
+            ordering,
+        } => {
+            let result_str = result
+                .as_ref()
+                .map(&vn)
+                .unwrap_or_else(|| "none".to_string());
+            format!(
+                "StoreConditional {{ result: {}, space: {:?}, addr: {}, val: {}, ordering: {:?} }}",
+                result_str,
+                space,
+                vn(addr),
+                vn(val),
+                ordering
+            )
+        }
+        AtomicCAS {
+            dst,
+            space,
+            addr,
+            expected,
+            replacement,
+            ordering,
+        } => {
+            format!(
+                "AtomicCAS {{ dst: {}, space: {:?}, addr: {}, expected: {}, replacement: {}, ordering: {:?} }}",
+                vn(dst),
+                space,
+                vn(addr),
+                vn(expected),
+                vn(replacement),
+                ordering
+            )
+        }
+        LoadGuarded {
+            dst,
+            space,
+            addr,
+            guard,
+            ordering,
+        } => {
+            format!(
+                "LoadGuarded {{ dst: {}, space: {:?}, addr: {}, guard: {}, ordering: {:?} }}",
+                vn(dst),
+                space,
+                vn(addr),
+                vn(guard),
+                ordering
+            )
+        }
+        StoreGuarded {
+            space,
+            addr,
+            val,
+            guard,
+            ordering,
+        } => {
+            format!(
+                "StoreGuarded {{ space: {:?}, addr: {}, val: {}, guard: {}, ordering: {:?} }}",
+                space,
+                vn(addr),
+                vn(val),
+                vn(guard),
+                ordering
+            )
+        }
 
         // Integer arithmetic
         IntAdd { dst, a, b } => {
@@ -393,6 +478,54 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
         Store { addr, val, .. } => {
             let sz = size_suffix(val.size);
             format!("{},{},={}", vn(val), vn(addr), sz)
+        }
+        Fence { .. } => String::new(),
+        LoadLinked { dst, addr, .. } => {
+            let sz = size_suffix(dst.size);
+            format!("{},{},{},=", vn(addr), sz, vn(dst))
+        }
+        StoreConditional {
+            result, addr, val, ..
+        } => {
+            let sz = size_suffix(val.size);
+            // Baseline LL/SC modeling: we only encode the success path in ESIL.
+            // SC success is architecturally reported as 0 (non-zero means failure).
+            match result {
+                Some(dst) => format!("{},{},={},0,{},=", vn(val), vn(addr), sz, vn(dst)),
+                None => format!("{},{},={}", vn(val), vn(addr), sz),
+            }
+        }
+        AtomicCAS {
+            dst,
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            let sz = size_suffix(dst.size);
+            format!(
+                "{},{},{},={},{},==,?{{,{},{}={},}}",
+                vn(addr),
+                sz,
+                vn(dst),
+                vn(dst),
+                vn(expected),
+                vn(replacement),
+                vn(addr),
+                sz
+            )
+        }
+        LoadGuarded {
+            dst, addr, guard, ..
+        } => {
+            let sz = size_suffix(dst.size);
+            format!("{},?{{,{},{},{},=,}}", vn(guard), vn(addr), sz, vn(dst))
+        }
+        StoreGuarded {
+            addr, val, guard, ..
+        } => {
+            let sz = size_suffix(val.size);
+            format!("{},?{{,{},{},={},}}", vn(guard), vn(val), vn(addr), sz)
         }
 
         // ========== Integer Arithmetic ==========

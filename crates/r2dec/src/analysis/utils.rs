@@ -160,32 +160,6 @@ pub(crate) fn trace_ssa_var_to_source(
     format_traced_name(&current_key, var_aliases)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use r2ssa::SSAVar;
-
-    #[test]
-    fn parse_const_value_keeps_existing_general_behavior() {
-        assert_eq!(parse_const_value("const:100"), Some(100));
-        assert_eq!(parse_const_value("const:0x100"), Some(0x100));
-    }
-
-    #[test]
-    fn parse_const_offset_handles_negative_wrapped_values() {
-        let wrapped = SSAVar::new("const:ffffffffffffffb8", 0, 8);
-        assert_eq!(parse_const_offset(&wrapped), Some(-72));
-    }
-
-    #[test]
-    fn parse_const_offset_prefers_hex_for_plain_offsets() {
-        let plain = SSAVar::new("const:100", 0, 8);
-        assert_eq!(parse_const_offset(&plain), Some(0x100));
-        let explicit_dec = SSAVar::new("const:0d100", 0, 8);
-        assert_eq!(parse_const_offset(&explicit_dec), Some(100));
-    }
-}
-
 pub(crate) fn expr_to_offset(expr: &CExpr) -> Option<i64> {
     match expr {
         CExpr::IntLit(v) => Some(*v),
@@ -406,4 +380,30 @@ pub(crate) fn arg_alias_for_store_source(
 
     let traced = trace_ssa_var_to_source(src, copy_sources, var_aliases);
     arg_alias_for_register_name(&traced)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2ssa::SSAVar;
+
+    #[test]
+    fn parse_const_value_keeps_existing_general_behavior() {
+        assert_eq!(parse_const_value("const:100"), Some(100));
+        assert_eq!(parse_const_value("const:0x100"), Some(0x100));
+    }
+
+    #[test]
+    fn parse_const_offset_handles_negative_wrapped_values() {
+        let wrapped = SSAVar::new("const:ffffffffffffffb8", 0, 8);
+        assert_eq!(parse_const_offset(&wrapped), Some(-72));
+    }
+
+    #[test]
+    fn parse_const_offset_prefers_hex_for_plain_offsets() {
+        let plain = SSAVar::new("const:100", 0, 8);
+        assert_eq!(parse_const_offset(&plain), Some(0x100));
+        let explicit_dec = SSAVar::new("const:0d100", 0, 8);
+        assert_eq!(parse_const_offset(&explicit_dec), Some(100));
+    }
 }

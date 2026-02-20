@@ -10,6 +10,7 @@
 #include <r_util/r_type.h>
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +29,7 @@ extern const char *r2il_error(const R2ILContext *ctx);
 extern R2ILBlock *r2il_lift(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr);
 extern R2ILBlock *r2il_lift_block(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr, unsigned int block_size);
 extern void r2il_block_free(R2ILBlock *block);
+extern int r2il_block_validate(R2ILContext *ctx, const R2ILBlock *block);
 extern void r2il_block_set_switch_info(R2ILBlock *block, unsigned long long switch_addr,
     unsigned long long min_val, unsigned long long max_val, unsigned long long default_target,
     const unsigned long long *case_values, const unsigned long long *case_targets, size_t num_cases);
@@ -2070,15 +2072,37 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 						RListIter *case_iter;
 						RAnalCaseOp *case_op;
 						size_t i = 0;
+						unsigned long long observed_min = ULLONG_MAX;
+						unsigned long long observed_max = 0;
 						r_list_foreach (bb->switch_op->cases, case_iter, case_op) {
 							case_values[i] = case_op->value;
 							case_targets[i] = case_op->jump;
+							observed_min = R_MIN (observed_min, case_op->value);
+							observed_max = R_MAX (observed_max, case_op->value);
 							i++;
 						}
+
+						unsigned long long min_val = bb->switch_op->min_val;
+						unsigned long long max_val = bb->switch_op->max_val;
+						int range_invalid = min_val > max_val;
+						if (!range_invalid) {
+							for (size_t case_idx = 0; case_idx < num_cases; case_idx++) {
+								const unsigned long long value = case_values[case_idx];
+								if (value < min_val || value > max_val) {
+									range_invalid = 1;
+									break;
+								}
+							}
+						}
+						if (range_invalid) {
+							min_val = observed_min;
+							max_val = observed_max;
+						}
+
 						r2il_block_set_switch_info (block,
 							bb->switch_op->addr,
-							bb->switch_op->min_val,
-							bb->switch_op->max_val,
+							min_val,
+							max_val,
 							bb->switch_op->def_val,
 							case_values, case_targets, num_cases);
 					}
@@ -2086,9 +2110,20 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 					free (case_targets);
 				}
 			}
+
+			if (!r2il_block_validate (ctx, block)) {
+				const char *err = r2il_error (ctx);
+				if (err && *err) {
+					R_LOG_ERROR ("r2sleigh: invalid block at 0x%"PFMT64x": %s", bb->addr, err);
+				} else {
+					R_LOG_ERROR ("r2sleigh: invalid block at 0x%"PFMT64x, bb->addr);
+				}
+				r2il_block_free (block);
+				continue;
+			}
 			block_array_push (out, block);
 		}
-	}
+		}
 
 	return out->count > 0;
 }
@@ -2105,9 +2140,15 @@ R2ILContext *get_context(RAnal *anal) {
 		sleigh_arch_str = (bits == 64) ? "x86-64" : "x86";
 	} else if (!strcmp (arch, "arm")) {
 		sleigh_arch_str = "arm";
+	} else if (!strcmp (arch, "riscv")) {
+		sleigh_arch_str = (bits >= 64) ? "riscv64" : "riscv32";
+	} else if (!strcmp (arch, "riscv32") || !strcmp (arch, "rv32")) {
+		sleigh_arch_str = "riscv32";
+	} else if (!strcmp (arch, "riscv64") || !strcmp (arch, "rv64")) {
+		sleigh_arch_str = "riscv64";
 	} else if (!strcmp (arch, "mips")) {
-        /* Simple heuristic for MIPS (assuming default is 32be/le) */
-        /* Note: This is partial, better use manual override for complex variants */
+	        /* Simple heuristic for MIPS (assuming default is 32be/le) */
+	        /* Note: This is partial, better use manual override for complex variants */
 		sleigh_arch_str = "mips"; /* Placeholder - mapped often to general mips */
 	} else {
 		return NULL; /* unsupported arch */

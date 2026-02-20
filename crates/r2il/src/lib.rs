@@ -26,17 +26,31 @@
 //! block.push(R2ILOp::Copy { dst: eax, src: imm });
 //! ```
 
+pub mod endianness;
+pub mod memory;
+pub mod metadata;
 pub mod opcode;
 pub mod regname;
 pub mod serialize;
 pub mod space;
+pub mod validate;
 pub mod varnode;
 
 // Re-export main types at crate root
+pub use endianness::Endianness;
+pub use memory::{AtomicKind, MemoryOrdering, MemoryPermissions, MemoryRange};
+pub use metadata::{
+    FloatEncodingHint, MemoryClass, OpMetadata, PointerHint, ScalarKind, StorageClass,
+    VarnodeMetadata,
+};
 pub use opcode::{R2ILBlock, R2ILOp, SwitchCase, SwitchInfo};
 pub use regname::select_register_name;
 pub use serialize::{ArchSpec, RegisterDef};
 pub use space::{AddressSpace, SpaceId};
+pub use validate::{
+    ValidationError, ValidationIssue, validate_archspec, validate_block, validate_block_full,
+    validate_block_semantic, validate_op, validate_op_semantic,
+};
 pub use varnode::Varnode;
 
 /// Crate version for binary format compatibility checks.
@@ -46,4 +60,4 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAGIC: &[u8; 4] = b"R2IL";
 
 /// Current binary format version.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 3;

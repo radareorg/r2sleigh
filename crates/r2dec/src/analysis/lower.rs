@@ -462,6 +462,7 @@ fn is_hex_name(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_ctx<'a>(
         definitions: &'a HashMap<String, CExpr>,
         use_counts: &'a HashMap<String, usize>,

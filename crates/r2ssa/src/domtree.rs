@@ -305,6 +305,7 @@ mod tests {
             space: SpaceId::Const,
             offset: val,
             size,
+            meta: None,
         }
     }
 
@@ -313,6 +314,7 @@ mod tests {
             space: SpaceId::Ram,
             offset: addr,
             size,
+            meta: None,
         }
     }
 
@@ -325,12 +327,14 @@ mod tests {
                 size: 4,
                 ops: vec![R2ILOp::Nop],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
                 size: 4,
                 ops: vec![R2ILOp::Nop],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -339,6 +343,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -379,6 +384,7 @@ mod tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -387,12 +393,14 @@ mod tests {
                     target: make_const(0x100c, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
                 size: 4,
                 ops: vec![R2ILOp::Nop],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -401,6 +409,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -436,6 +445,7 @@ mod tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -444,12 +454,14 @@ mod tests {
                     target: make_const(0x100c, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
                 size: 4,
                 ops: vec![R2ILOp::Nop],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -458,6 +470,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -478,12 +491,14 @@ mod tests {
                 size: 4,
                 ops: vec![R2ILOp::Nop],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
                 size: 4,
                 ops: vec![R2ILOp::Nop],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -492,6 +507,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 

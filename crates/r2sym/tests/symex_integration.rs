@@ -20,6 +20,7 @@ fn make_reg(offset: u64, size: u32) -> Varnode {
         space: SpaceId::Register,
         offset,
         size,
+        meta: None,
     }
 }
 
@@ -28,6 +29,7 @@ fn make_const(val: u64, size: u32) -> Varnode {
         space: SpaceId::Const,
         offset: val,
         size,
+        meta: None,
     }
 }
 
@@ -59,6 +61,7 @@ fn test_symbolic_execution_linear_block() {
             },
         ],
         switch_info: None,
+        op_metadata: Default::default(),
     }];
 
     let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
@@ -100,6 +103,7 @@ fn test_symbolic_execution_with_symbolic_input() {
             },
         ],
         switch_info: None,
+        op_metadata: Default::default(),
     }];
 
     let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
@@ -146,6 +150,7 @@ fn test_symbolic_execution_conditional_branch() {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         },
         R2ILBlock {
             addr: 0x1004,
@@ -158,6 +163,7 @@ fn test_symbolic_execution_conditional_branch() {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         },
         R2ILBlock {
             addr: 0x1010,
@@ -170,6 +176,7 @@ fn test_symbolic_execution_conditional_branch() {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         },
     ];
 
@@ -226,6 +233,7 @@ fn test_find_paths_to_collects_multiple_matches() {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         },
         R2ILBlock {
             addr: 0x1004,
@@ -234,6 +242,7 @@ fn test_find_paths_to_collects_multiple_matches() {
                 target: make_const(0x1010, 8),
             }],
             switch_info: None,
+            op_metadata: Default::default(),
         },
         R2ILBlock {
             addr: 0x1010,
@@ -243,6 +252,7 @@ fn test_find_paths_to_collects_multiple_matches() {
                 src: make_const(1, 8),
             }],
             switch_info: None,
+            op_metadata: Default::default(),
         },
     ];
 
@@ -270,6 +280,7 @@ fn test_find_paths_to_unreachable_returns_empty() {
             src: make_const(1, 8),
         }],
         switch_info: None,
+        op_metadata: Default::default(),
     }];
 
     let func = SSAFunction::from_blocks(&blocks).expect("Failed to build SSA function");
@@ -302,6 +313,7 @@ fn test_find_paths_to_honors_limits() {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         },
         R2ILBlock {
             addr: 0x1010,
@@ -311,6 +323,7 @@ fn test_find_paths_to_honors_limits() {
                 src: make_const(1, 8),
             }],
             switch_info: None,
+            op_metadata: Default::default(),
         },
     ];
 
