@@ -2656,6 +2656,39 @@ mod ffi {
 mod deep_integration {
     use super::*;
 
+    fn extract_summary_metric(line: &str, key: &str) -> Option<u64> {
+        let needle = format!("{key}=");
+        line.split_whitespace().find_map(|token| {
+            token
+                .strip_prefix(&needle)
+                .and_then(|value| value.trim_end_matches(',').parse::<u64>().ok())
+        })
+    }
+
+    fn find_caller_propagation_summary(result: &e2e::R2Result) -> Option<String> {
+        let merged = format!("{}\n{}", result.stdout, result.stderr);
+        merged
+            .lines()
+            .find(|line| line.contains("r2sleigh: caller propagation"))
+            .map(str::to_string)
+    }
+
+    fn find_signature_writeback_summary(result: &e2e::R2Result) -> Option<String> {
+        let merged = format!("{}\n{}", result.stdout, result.stderr);
+        merged
+            .lines()
+            .find(|line| line.contains("r2sleigh: signature write-back considered="))
+            .map(str::to_string)
+    }
+
+    fn find_signature_apply_path_summary(result: &e2e::R2Result) -> Option<String> {
+        let merged = format!("{}\n{}", result.stdout, result.stderr);
+        merged
+            .lines()
+            .find(|line| line.contains("r2sleigh: signature write-back apply-path"))
+            .map(str::to_string)
+    }
+
     /// Verify that `aaa` runs successfully with the plugin loaded
     #[test]
     fn aaa_succeeds_with_plugin() {
@@ -3036,6 +3069,350 @@ mod deep_integration {
         assert!(
             !result.contains("ERROR"),
             "aaaa should still complete successfully after auto-taint integration"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_cc_writeback_overwrites_bad_manual_settings() {
+        setup();
+        let poisoned = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); afc ms; afcfj; afij~calltype",
+        );
+        poisoned.assert_ok();
+        assert!(
+            poisoned.contains("\"return\":\"void\""),
+            "poison step should set a void return signature"
+        );
+        assert!(
+            poisoned.contains("\"calltype\":\"ms\""),
+            "poison step should set ms callconv"
+        );
+
+        let repaired = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "aaaa; afcfj; afij~calltype",
+        );
+        repaired.assert_ok();
+        assert!(
+            !repaired.contains("\"return\":\"void\""),
+            "write-back should overwrite poisoned void return type"
+        );
+        assert!(
+            repaired.contains("\"return\":\"int"),
+            "write-back should recover an inferred integer return type"
+        );
+        assert!(
+            repaired.contains("\"calltype\":\"amd64\""),
+            "write-back should restore amd64 calling convention"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_preserves_function_name() {
+        let listing = r2_cmd("/bin/ls", "aaa; afl~fcn.");
+        listing.assert_ok();
+        let target = listing
+            .stdout
+            .lines()
+            .find_map(|line| {
+                line.split_whitespace()
+                    .last()
+                    .filter(|name| name.starts_with("fcn."))
+                    .map(|name| name.to_string())
+            })
+            .expect("expected at least one non-symbol fcn.* in /bin/ls");
+
+        let cmd = format!(
+            "aaa; s {target}; afn custom_sigkeep; s custom_sigkeep; afs void custom_sigkeep(void); aaaa; s custom_sigkeep; afij~name,signature; afcfj",
+        );
+        let result = r2_cmd("/bin/ls", &cmd);
+        result.assert_ok();
+        assert!(
+            result.contains("\"name\":\"custom_sigkeep\""),
+            "write-back must preserve existing function name"
+        );
+        assert!(
+            !result.contains("\"return\":\"void\""),
+            "write-back should update poisoned void signature"
+        );
+        assert!(
+            result.contains("\"return\":\"int"),
+            "write-back should recover inferred integer return type"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_logs_confidence_skips() {
+        let result = r2_cmd("/bin/ls", "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("sig_low_conf_skips="),
+            "write-back summary should include signature confidence skip counter"
+        );
+        assert!(
+            result.contains("cc_low_conf_skips="),
+            "write-back summary should include callconv confidence skip counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_apply_path_metrics_present() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("sig_api_apply_ok="),
+            "write-back summary should include signature API apply counter"
+        );
+        assert!(
+            result.contains("sig_api_verify_fail="),
+            "write-back summary should include signature API verify-fail counter"
+        );
+        assert!(
+            result.contains("sig_cmd_fallback_attempted="),
+            "write-back summary should include signature fallback-attempt counter"
+        );
+        assert!(
+            result.contains("sig_cmd_apply_ok="),
+            "write-back summary should include signature fallback success counter"
+        );
+        assert!(
+            result.contains("sig_cmd_apply_fail="),
+            "write-back summary should include signature fallback failure counter"
+        );
+        assert!(
+            result.contains("cc_api_apply_ok="),
+            "write-back summary should include callconv API apply counter"
+        );
+        assert!(
+            result.contains("cc_api_verify_fail="),
+            "write-back summary should include callconv API verify-fail counter"
+        );
+        assert!(
+            result.contains("cc_cmd_fallback_attempted="),
+            "write-back summary should include callconv fallback-attempt counter"
+        );
+        assert!(
+            result.contains("cc_cmd_apply_ok="),
+            "write-back summary should include callconv fallback success counter"
+        );
+        assert!(
+            result.contains("cc_cmd_apply_fail="),
+            "write-back summary should include callconv fallback failure counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_api_path_nonzero() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); afc ms; aaaa",
+        );
+        result.assert_ok();
+        let summary = find_signature_apply_path_summary(&result)
+            .expect("signature write-back apply-path summary line should be present");
+        let sig_api_apply_ok = extract_summary_metric(&summary, "sig_api_apply_ok")
+            .expect("summary should include sig_api_apply_ok");
+        let cc_api_apply_ok = extract_summary_metric(&summary, "cc_api_apply_ok")
+            .expect("summary should include cc_api_apply_ok");
+        assert!(
+            sig_api_apply_ok > 0,
+            "signature API apply count should be non-zero in poisoned-signature scenario"
+        );
+        assert!(
+            cc_api_apply_ok > 0,
+            "callconv API apply count should be non-zero in poisoned-signature scenario"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_practical_consistency_metrics_present() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("consistency_verified="),
+            "write-back summary should include consistency verification count"
+        );
+        assert!(
+            result.contains("consistency_ok="),
+            "write-back summary should include consistency success count"
+        );
+        assert!(
+            result.contains("consistency_mismatch="),
+            "write-back summary should include consistency mismatch count"
+        );
+        assert!(
+            result.contains("afij_signature_drift="),
+            "write-back summary should include afij signature drift count"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_consistency_reason_metrics_present() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("consistency_readback_fail="),
+            "write-back summary should include readback failure reason counter"
+        );
+        assert!(
+            result.contains("consistency_ret_mismatch="),
+            "write-back summary should include return-type mismatch reason counter"
+        );
+        assert!(
+            result.contains("consistency_argc_mismatch="),
+            "write-back summary should include argc mismatch reason counter"
+        );
+        assert!(
+            result.contains("consistency_argtype_mismatch="),
+            "write-back summary should include argument-type mismatch reason counter"
+        );
+        assert!(
+            result.contains("consistency_callconv_mismatch="),
+            "write-back summary should include callconv mismatch reason counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_consistency_improves_from_zero() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); aaaa",
+        );
+        result.assert_ok();
+        let summary = find_signature_writeback_summary(&result)
+            .expect("signature write-back summary line should be present");
+        let verified = extract_summary_metric(&summary, "consistency_verified")
+            .expect("summary should include consistency_verified");
+        let ok = extract_summary_metric(&summary, "consistency_ok")
+            .expect("summary should include consistency_ok");
+        let mismatch = extract_summary_metric(&summary, "consistency_mismatch")
+            .expect("summary should include consistency_mismatch");
+        assert!(
+            verified > 0,
+            "consistency verification should run on at least one function"
+        );
+        assert!(
+            ok > 0,
+            "consistency_ok should be greater than zero after PR3 (summary: {})",
+            summary
+        );
+        assert!(
+            mismatch < verified,
+            "consistency mismatches should be lower than verified count after PR3 (summary: {})",
+            summary
+        );
+    }
+
+    #[test]
+    fn aaaa_signature_writeback_calltype_consistent_in_afij() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); afc ms; aaaa; afcfj; afij~calltype",
+        );
+        result.assert_ok();
+        assert!(
+            result.contains("\"return\":\"int"),
+            "afcfj should reflect inferred integer return after write-back"
+        );
+        assert!(
+            result.contains("\"calltype\":\"amd64\""),
+            "afij.calltype should match inferred calling convention after write-back"
+        );
+    }
+
+    #[test]
+    fn aaaa_caller_propagation_metrics_present() {
+        let result = r2_cmd("/bin/ls", "aaaa");
+        result.assert_ok();
+        assert!(
+            result.contains("caller propagation"),
+            "post-analysis should emit caller propagation summary"
+        );
+        assert!(
+            result.contains("prop_callers_updated="),
+            "summary should include updated caller counter"
+        );
+        assert!(
+            result.contains("prop_callers_considered="),
+            "summary should include considered caller counter"
+        );
+        assert!(
+            result.contains("prop_afva_failures="),
+            "summary should include afva failure counter"
+        );
+        assert!(
+            result.contains("prop_type_match_failures="),
+            "summary should include type-match failure counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_caller_propagation_respects_caps() {
+        let result = r2_cmd("/bin/ls", "aaaa");
+        result.assert_ok();
+        let summary = find_caller_propagation_summary(&result)
+            .expect("caller propagation summary line should be present");
+        let callers_updated = extract_summary_metric(&summary, "prop_callers_updated")
+            .expect("summary should include prop_callers_updated");
+        assert!(
+            callers_updated <= 256,
+            "caller propagation should honor total caller cap (updated={})",
+            callers_updated
+        );
+    }
+
+    #[test]
+    fn aaaa_caller_propagation_includes_check_secret_callee() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); aaaa",
+        );
+        result.assert_ok();
+        let summary = find_caller_propagation_summary(&result)
+            .expect("caller propagation summary line should be present");
+        let triggered = extract_summary_metric(&summary, "prop_callees_triggered")
+            .expect("summary should include prop_callees_triggered");
+        assert!(triggered > 0, "at least one callee should trigger propagation");
+        assert!(
+            summary.contains("sample_callees=") && summary.contains("dbg.check_secret"),
+            "sample_callees should include dbg.check_secret when it triggers propagation"
+        );
+    }
+
+    #[test]
+    fn aaaa_caller_propagation_updates_callers_nonzero() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "afs void dbg.check_secret(void); aaaa",
+        );
+        result.assert_ok();
+        let summary = find_caller_propagation_summary(&result)
+            .expect("caller propagation summary line should be present");
+        let updated = extract_summary_metric(&summary, "prop_callers_updated")
+            .expect("summary should include prop_callers_updated");
+        assert!(
+            updated > 0,
+            "caller propagation should update at least one direct caller"
+        );
+        assert!(
+            summary.contains("sample_callees=") && summary.contains("dbg.check_secret"),
+            "sample_callees should include dbg.check_secret for poisoned-signature scenario"
         );
     }
 }

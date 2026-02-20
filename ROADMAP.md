@@ -28,6 +28,46 @@ Supported architectures: x86, x86-64, ARM, MIPS.
 Planned Features
 ----------------
 
+### 2026 Priority Reset (Maintainer Feedback, Execution Order)
+
+This section defines the actual implementation order for upcoming work.
+Phase numbering below remains as thematic grouping, but delivery priority is:
+`P0 (Now) -> P1 (Next) -> P2 (Later)`.
+
+| Priority | Theme | Why now | Concrete deliverables |
+|---|---|---|---|
+| P0 | **R2IL Foundation Hardening** | Avoid design debt before adding major features | Keep core IL minimal, add optional metadata (`storage_class`, pointer/type hints, memory attributes, richer endianness model), document semantics and compatibility rules |
+| P0 | **Unified Output + One-Liner UX** | Fast iteration for developers and easier maintainer review | Single export pipeline for C-like / r2-command-like / JSON outputs, plus CLI one-liners to run lift/SSA/defuse/dec actions directly |
+| P0 | **RISC-V Support** | Higher ecosystem value than MIPS for new users | Add riscv feature flag, disassembler wiring, register profile/calling convention integration, plugin + e2e coverage |
+| P1 | **Memory Semantics Extensions (VEX-inspired, scoped)** | Improves analysis fidelity without overhauling IL | Add `MemoryOrdering` + atomic/fence/guarded ops where liftable; compare behavior with VEX and document differences |
+| P1 | **Float/Vector + Encoding Path** | Needed for correctness on modern binaries | Integrate r2 float encoding model, add float/vector metadata and staged SIMD support |
+| P1 | **Hardware/Memory Topology Modeling** | Needed for firmware and embedded workflows | MMIO/IO port classification, const/permission/range attributes, segmented/banked memory policy and tests |
+| P2 | **VM Architecture Perspective** | Valuable long-term but high scope | Prototype Dalvik/VM support as separate lifter module, validate whether core IL needs extension |
+| P2 | **Advanced Execution Models** | Niche/high-complexity | VLIW parallel group representation and deeper scheduling semantics |
+
+#### Maintainer Points -> Priority Mapping
+
+| Maintainer point | Priority | Decision |
+|---|---|---|
+| Multiple address spaces + TLS | P0 | Keep `SpaceId` stable; represent TLS via optional storage metadata first |
+| RISC-V over MIPS | P0 | Promote RISC-V to immediate architecture milestone |
+| VM archs (Dalvik/JVM) | P2 | Explore in separate lifter crate, avoid premature core IL changes |
+| FPU/vector + any float encoding | P1 | Stage through metadata + encoding integration, then expand op support |
+| Atomic ops / guards / VEX comparison | P1 | Add scoped memory-ordering features with explicit doc comparison |
+| MMIO + IO ports | P1 | Add memory-class metadata and explicit IO semantics where available |
+| Complex endianness modes | P0 | Replace binary endianness assumptions with richer enum/override model |
+| VLIW parallel execution | P2 | Model as block-level parallel groups first |
+| Pointer as attribute, not base type | P0 | Treat pointer-ness as semantic metadata/type hint |
+| Const attrs (permissions, valid ranges) | P1 | Add optional memory attribute model |
+| Memory banks / segmented memory | P1 | Keep `SegmentOp`; add policy/docs/tests for banks/segments |
+| Switch as operation | P2 | Keep `switch_info` for now; revisit after SSA/CFG simplification pass |
+
+#### Near-Term Milestones (Next 3)
+
+1. **Milestone A (P0)**: R2IL metadata foundation + docs + compatibility tests.
+2. **Milestone B (P0)**: Unified export formats + CLI one-liners for lift/ssa/defuse/dec.
+3. **Milestone C (P0)**: End-to-end RISC-V support with plugin and e2e coverage.
+
 ### Phase 1 — Seamless r2 Integration (make the seams invisible)
 
 The user should never feel they are using a separate tool. r2sleigh must
@@ -99,7 +139,7 @@ assessment integrated directly into the reversing workflow.
 | # | Feature | Description | Effort | Impact |
 |---|---------|-------------|--------|--------|
 | 6.1 | **ABI/calling-convention model** | Abstract architecture-specific assumptions (arg registers, stack direction, alignment) into a data model. Currently hardcoded for SysV x86-64 in `variable.rs`, `types.rs`, `taint.rs`. | Medium | High |
-| 6.2 | **RISC-V support** | Add RISC-V Sleigh spec + register profile + calling convention. | Medium | Medium |
+| 6.2 | **RISC-V support** | Add RISC-V Sleigh spec + register profile + calling convention. **Execution priority: P0 (Milestone C).** | Medium | Medium |
 | 6.3 | **AArch64 / ARM64 support** | Full ARM64 support with AAPCS64 calling convention. | Medium | Medium |
 | 6.4 | **PPC / AVR / SPARC** | Additional architecture support with per-arch test fixtures. | Medium | Low |
 | 6.5 | **Register naming policy** | Normalize register names, resolve overlapping aliases (RAX vs EAX vs AX vs AL). Use canonical names in decompiled output. | Low | Medium |
