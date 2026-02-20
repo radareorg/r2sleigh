@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Endianness;
+
 /// Storage classification hint for a varnode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +84,8 @@ pub struct VarnodeMetadata {
     pub pointer_hint: Option<PointerHint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub float_encoding: Option<FloatEncodingHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endianness: Option<Endianness>,
 }
 
 /// Optional metadata hints attached to an operation.
@@ -89,4 +93,37 @@ pub struct VarnodeMetadata {
 pub struct OpMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_class: Option<MemoryClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endianness: Option<Endianness>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpMetadata, VarnodeMetadata};
+    use crate::Endianness;
+
+    #[test]
+    fn varnode_metadata_endianness_serde_omits_when_none() {
+        let meta = VarnodeMetadata::default();
+        let json = serde_json::to_string(&meta).expect("serialize");
+        assert!(!json.contains("endianness"));
+    }
+
+    #[test]
+    fn op_metadata_endianness_serde_omits_when_none() {
+        let meta = OpMetadata::default();
+        let json = serde_json::to_string(&meta).expect("serialize");
+        assert!(!json.contains("endianness"));
+    }
+
+    #[test]
+    fn metadata_endianness_roundtrip_when_present() {
+        let meta = VarnodeMetadata {
+            endianness: Some(Endianness::Big),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let decoded: VarnodeMetadata = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.endianness, Some(Endianness::Big));
+    }
 }

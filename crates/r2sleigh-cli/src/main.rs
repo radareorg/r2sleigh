@@ -268,14 +268,15 @@ fn cmd_compile(input: &Path, output: Option<&PathBuf>, _variant: &str) -> Result
 fn cmd_info(input: &Path, show_registers: bool, show_spaces: bool) -> Result<(), String> {
     let spec = serialize::load(input).map_err(|e| e.to_string())?;
     validate_archspec(&spec).map_err(|e| format!("Invalid architecture specification: {}", e))?;
+    let (instruction_endianness, memory_endianness, legacy_endianness) =
+        endianness_info_lines(&spec);
 
     println!("r2il File: {}", input.display());
     println!("Architecture: {}", spec.name);
     println!("Variant: {}", spec.variant);
-    println!(
-        "Endianness: {}",
-        if spec.big_endian { "big" } else { "little" }
-    );
+    println!("{}", instruction_endianness);
+    println!("{}", memory_endianness);
+    println!("{}", legacy_endianness);
     println!("Address size: {} bytes", spec.addr_size);
     println!("Alignment: {}", spec.alignment);
     println!("Registers: {}", spec.registers.len());
@@ -326,6 +327,20 @@ fn cmd_info(input: &Path, show_registers: bool, show_spaces: bool) -> Result<(),
     }
 
     Ok(())
+}
+
+fn endianness_info_lines(spec: &r2il::ArchSpec) -> (String, String, String) {
+    let instruction = format!("Instruction endianness: {:?}", spec.instruction_endianness);
+    let memory = format!("Memory endianness: {:?}", spec.memory_endianness);
+    let legacy = format!(
+        "Endianness (legacy): {}",
+        if spec.memory_endianness.to_legacy_big_endian() {
+            "big"
+        } else {
+            "little"
+        }
+    );
+    (instruction, memory, legacy)
 }
 
 fn cmd_test_arch(arch: &str, output: Option<&PathBuf>) -> Result<(), String> {
@@ -753,6 +768,7 @@ mod tests {
             },
             Some(r2il::OpMetadata {
                 memory_class: Some(r2il::MemoryClass::Stack),
+                endianness: None,
             }),
         );
 
@@ -882,6 +898,29 @@ mod tests {
                 && err.contains("format=esil"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn info_lines_include_instruction_and_memory_endianness() {
+        let mut spec = r2il::ArchSpec::new("test");
+        spec.set_instruction_endianness(r2il::Endianness::Big);
+        spec.set_memory_endianness(r2il::Endianness::Little);
+        let (instruction, memory, legacy) = endianness_info_lines(&spec);
+        assert!(instruction.contains("Instruction endianness: Big"));
+        assert!(memory.contains("Memory endianness: Little"));
+        assert!(legacy.contains("Endianness (legacy): little"));
+    }
+
+    #[test]
+    fn extracted_spec_sets_v2_endianness_and_space_overrides() {
+        let (_, spec) = get_disassembler_with_spec("x86-64").expect("disassembler");
+        assert_eq!(spec.instruction_endianness, r2il::Endianness::Little);
+        assert_eq!(spec.memory_endianness, r2il::Endianness::Little);
+        assert!(!spec.big_endian);
+        assert!(
+            spec.spaces.iter().any(|space| space.endianness.is_some()),
+            "extracted spaces should carry explicit endianness overrides"
         );
     }
 }

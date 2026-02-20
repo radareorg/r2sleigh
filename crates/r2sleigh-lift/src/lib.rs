@@ -38,6 +38,7 @@ pub use disasm::Disassembler;
 pub use esil::{format_op, op_to_esil, op_to_esil_named};
 pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
 use r2il::ArchSpec;
+use r2il::Endianness;
 pub use sleigh::{SleighInfo, build_arch_spec, extract_arch_spec, get_sleigh_info};
 pub use userops::userop_map_for_arch;
 
@@ -120,6 +121,18 @@ impl Lifter {
     /// Set the endianness.
     pub fn set_big_endian(&mut self, big_endian: bool) -> &mut Self {
         self.ctx.set_big_endian(big_endian);
+        self
+    }
+
+    /// Set instruction endianness.
+    pub fn set_instruction_endianness(&mut self, endianness: Endianness) -> &mut Self {
+        self.ctx.set_instruction_endianness(endianness);
+        self
+    }
+
+    /// Set memory endianness.
+    pub fn set_memory_endianness(&mut self, endianness: Endianness) -> &mut Self {
+        self.ctx.set_memory_endianness(endianness);
         self
     }
 
@@ -249,6 +262,8 @@ mod tests {
         let spec = create_x86_64_spec();
         assert_eq!(spec.name, "x86-64");
         assert!(!spec.big_endian);
+        assert_eq!(spec.instruction_endianness, Endianness::Little);
+        assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 8);
 
         // Check some registers exist
@@ -262,6 +277,8 @@ mod tests {
         let spec = create_arm_spec();
         assert_eq!(spec.name, "ARM");
         assert!(!spec.big_endian);
+        assert_eq!(spec.instruction_endianness, Endianness::Little);
+        assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 4);
 
         // Check some registers exist

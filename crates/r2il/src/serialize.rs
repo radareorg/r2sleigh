@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::opcode::R2ILOp;
 use crate::space::AddressSpace;
-use crate::{FORMAT_VERSION, MAGIC};
+use crate::{Endianness, FORMAT_VERSION, MAGIC};
 
 /// Errors that can occur during serialization/deserialization.
 #[derive(Debug, Error)]
@@ -97,8 +97,18 @@ pub struct ArchSpec {
     /// Processor variant (e.g., "default", "thumb")
     pub variant: String,
 
-    /// Endianness: true for big-endian, false for little-endian
+    /// Legacy endianness shim for compatibility.
+    ///
+    /// Deprecated: prefer `instruction_endianness` / `memory_endianness`.
     pub big_endian: bool,
+
+    /// Endianness for instruction encoding/fetch semantics.
+    #[serde(default)]
+    pub instruction_endianness: Endianness,
+
+    /// Endianness for memory load/store semantics.
+    #[serde(default)]
+    pub memory_endianness: Endianness,
 
     /// Address size in bytes (4 for 32-bit, 8 for 64-bit)
     pub addr_size: u32,
@@ -129,6 +139,8 @@ impl ArchSpec {
             name: name.into(),
             variant: "default".into(),
             big_endian: false,
+            instruction_endianness: Endianness::Little,
+            memory_endianness: Endianness::Little,
             addr_size: 8,
             alignment: 1,
             spaces: Vec::new(),
@@ -137,6 +149,31 @@ impl ArchSpec {
             userops: Vec::new(),
             source_files: Vec::new(),
         }
+    }
+
+    /// Set instruction endianness and update legacy shim fields.
+    pub fn set_instruction_endianness(&mut self, endianness: Endianness) {
+        self.instruction_endianness = endianness;
+        self.sync_legacy_big_endian();
+    }
+
+    /// Set memory endianness and update legacy shim fields.
+    pub fn set_memory_endianness(&mut self, endianness: Endianness) {
+        self.memory_endianness = endianness;
+        self.sync_legacy_big_endian();
+    }
+
+    /// Set legacy endianness and propagate it to v2 endianness fields.
+    pub fn set_legacy_big_endian(&mut self, big_endian: bool) {
+        self.big_endian = big_endian;
+        let v2 = Endianness::from_big_endian(big_endian);
+        self.instruction_endianness = v2;
+        self.memory_endianness = v2;
+    }
+
+    /// Synchronize legacy bool shim from v2 memory endianness.
+    pub fn sync_legacy_big_endian(&mut self) {
+        self.big_endian = self.memory_endianness.to_legacy_big_endian();
     }
 
     /// Add a register definition.
@@ -158,6 +195,43 @@ impl ArchSpec {
     /// Look up a register offset by name.
     pub fn get_register_offset(&self, name: &str) -> Option<u64> {
         self.register_map.get(name).copied()
+    }
+}
+
+/// Legacy v1 architecture specification used only for deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ArchSpecV1 {
+    name: String,
+    variant: String,
+    big_endian: bool,
+    addr_size: u32,
+    alignment: u32,
+    spaces: Vec<AddressSpace>,
+    registers: Vec<RegisterDef>,
+    register_map: HashMap<String, u64>,
+    userops: Vec<UserOpDef>,
+    source_files: Vec<String>,
+}
+
+impl From<ArchSpecV1> for ArchSpec {
+    fn from(value: ArchSpecV1) -> Self {
+        let endian = Endianness::from_big_endian(value.big_endian);
+        let mut arch = ArchSpec {
+            name: value.name,
+            variant: value.variant,
+            big_endian: value.big_endian,
+            instruction_endianness: endian,
+            memory_endianness: endian,
+            addr_size: value.addr_size,
+            alignment: value.alignment,
+            spaces: value.spaces,
+            registers: value.registers,
+            register_map: value.register_map,
+            userops: value.userops,
+            source_files: value.source_files,
+        };
+        arch.sync_legacy_big_endian();
+        arch
     }
 }
 
@@ -217,17 +291,10 @@ pub fn load(path: &Path) -> Result<ArchSpec> {
     reader.read_exact(&mut header_bytes)?;
     let header: FileHeader = bincode::deserialize(&header_bytes)?;
 
-    // Check version
-    if header.version != FORMAT_VERSION {
-        return Err(SerializeError::UnsupportedVersion(header.version));
-    }
-
     // Read the rest as architecture spec
     let mut arch_bytes = Vec::new();
     reader.read_to_end(&mut arch_bytes)?;
-    let arch: ArchSpec = bincode::deserialize(&arch_bytes)?;
-
-    Ok(arch)
+    deserialize_archspec_bytes(header.version, &arch_bytes)
 }
 
 /// Save to bytes (for testing or embedding).
@@ -275,25 +342,51 @@ pub fn from_bytes(bytes: &[u8]) -> Result<ArchSpec> {
     // Deserialize header
     let header: FileHeader = bincode::deserialize(&bytes[8..8 + header_len])?;
 
-    // Check version
-    if header.version != FORMAT_VERSION {
-        return Err(SerializeError::UnsupportedVersion(header.version));
+    deserialize_archspec_bytes(header.version, &bytes[8 + header_len..])
+}
+
+fn deserialize_archspec_bytes(version: u32, bytes: &[u8]) -> Result<ArchSpec> {
+    match version {
+        1 => {
+            let legacy: ArchSpecV1 = bincode::deserialize(bytes)?;
+            Ok(legacy.into())
+        }
+        FORMAT_VERSION => {
+            let mut arch: ArchSpec = bincode::deserialize(bytes)?;
+            arch.sync_legacy_big_endian();
+            Ok(arch)
+        }
+        other => Err(SerializeError::UnsupportedVersion(other)),
     }
-
-    // Deserialize architecture spec
-    let arch: ArchSpec = bincode::deserialize(&bytes[8 + header_len..])?;
-
-    Ok(arch)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn encode_v1_bytes(arch: &ArchSpecV1) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+
+        let header = FileHeader {
+            version: 1,
+            arch_name: arch.name.clone(),
+        };
+        let header_bytes = bincode::serialize(&header).expect("serialize header");
+        let header_len = header_bytes.len() as u32;
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+
+        let arch_bytes = bincode::serialize(arch).expect("serialize arch v1");
+        bytes.extend_from_slice(&arch_bytes);
+        bytes
+    }
+
     #[test]
     fn test_roundtrip() {
         let mut arch = ArchSpec::new("test-arch");
-        arch.big_endian = false;
+        arch.set_memory_endianness(Endianness::Little);
+        arch.set_instruction_endianness(Endianness::Little);
         arch.addr_size = 8;
 
         arch.add_register(RegisterDef::new("RAX", 0, 8));
@@ -307,6 +400,8 @@ mod tests {
         let loaded = from_bytes(&bytes).unwrap();
 
         assert_eq!(loaded.name, "test-arch");
+        assert_eq!(loaded.instruction_endianness, Endianness::Little);
+        assert_eq!(loaded.memory_endianness, Endianness::Little);
         assert!(!loaded.big_endian);
         assert_eq!(loaded.addr_size, 8);
         assert_eq!(loaded.registers.len(), 2);
@@ -318,5 +413,68 @@ mod tests {
         let bytes = b"XXXX0000";
         let result = from_bytes(bytes);
         assert!(matches!(result, Err(SerializeError::InvalidMagic)));
+    }
+
+    #[test]
+    fn archspec_defaults_use_little_endianness_v2() {
+        let arch = ArchSpec::new("default");
+        assert_eq!(arch.instruction_endianness, Endianness::Little);
+        assert_eq!(arch.memory_endianness, Endianness::Little);
+        assert!(!arch.big_endian);
+    }
+
+    #[test]
+    fn v2_roundtrip_preserves_instruction_and_memory_endianness() {
+        let mut arch = ArchSpec::new("mixed-scope");
+        arch.set_instruction_endianness(Endianness::Big);
+        arch.set_memory_endianness(Endianness::Little);
+
+        let bytes = to_bytes(&arch).expect("serialize");
+        let loaded = from_bytes(&bytes).expect("deserialize");
+        assert_eq!(loaded.instruction_endianness, Endianness::Big);
+        assert_eq!(loaded.memory_endianness, Endianness::Little);
+        assert!(!loaded.big_endian);
+    }
+
+    #[test]
+    fn legacy_bool_syncs_from_new_fields() {
+        let mut arch = ArchSpec::new("shim");
+        arch.set_memory_endianness(Endianness::Big);
+        assert!(arch.big_endian);
+        arch.set_memory_endianness(Endianness::Custom);
+        assert!(!arch.big_endian);
+        arch.set_legacy_big_endian(true);
+        assert_eq!(arch.instruction_endianness, Endianness::Big);
+        assert_eq!(arch.memory_endianness, Endianness::Big);
+    }
+
+    #[test]
+    fn v1_file_loads_and_upgrades_to_v2_fields() {
+        let legacy = ArchSpecV1 {
+            name: "legacy".to_string(),
+            variant: "default".to_string(),
+            big_endian: true,
+            addr_size: 8,
+            alignment: 1,
+            spaces: vec![AddressSpace::ram(8), AddressSpace::register()],
+            registers: vec![RegisterDef::new("RAX", 0, 8)],
+            register_map: HashMap::from([(String::from("RAX"), 0)]),
+            userops: vec![UserOpDef {
+                index: 0,
+                name: "u0".to_string(),
+            }],
+            source_files: vec!["legacy.slaspec".to_string()],
+        };
+
+        let bytes = encode_v1_bytes(&legacy);
+        let loaded = from_bytes(&bytes).expect("load v1");
+        assert_eq!(loaded.name, "legacy");
+        assert_eq!(loaded.instruction_endianness, Endianness::Big);
+        assert_eq!(loaded.memory_endianness, Endianness::Big);
+        assert!(loaded.big_endian);
+        assert!(
+            loaded.spaces.iter().all(|space| space.endianness.is_none()),
+            "v1 upgrade should not synthesize per-space override"
+        );
     }
 }

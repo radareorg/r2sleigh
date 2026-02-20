@@ -4,7 +4,7 @@
 //! loaded Sleigh specifications using `libsla`.
 
 use libsla::{GhidraSleigh, Sleigh};
-use r2il::ArchSpec;
+use r2il::{ArchSpec, Endianness};
 
 use crate::LiftError;
 use crate::context::LiftContext;
@@ -46,8 +46,9 @@ pub fn extract_arch_spec(sleigh: &GhidraSleigh, arch_name: &str) -> ArchSpec {
     for space in sleigh.address_spaces() {
         let is_default = space.name == default_space.name;
         let addr_size = space.word_size as u32;
+        let space_endianness = Endianness::from_big_endian(space.big_endian);
 
-        ctx.add_space(&space.name, addr_size, is_default);
+        ctx.add_space_with_endianness(&space.name, addr_size, is_default, Some(space_endianness));
 
         // Set the architecture's address size from the default code space
         if is_default {
@@ -56,7 +57,8 @@ pub fn extract_arch_spec(sleigh: &GhidraSleigh, arch_name: &str) -> ArchSpec {
 
         // Determine endianness from the default space
         if is_default {
-            ctx.set_big_endian(space.big_endian);
+            ctx.set_instruction_endianness(space_endianness);
+            ctx.set_memory_endianness(space_endianness);
         }
     }
 

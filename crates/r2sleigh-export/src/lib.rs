@@ -485,6 +485,7 @@ mod tests {
             },
             Some(OpMetadata {
                 memory_class: Some(MemoryClass::Stack),
+                endianness: None,
             }),
         );
         let input = InstructionExportInput {

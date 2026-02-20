@@ -224,13 +224,7 @@ pub extern "C" fn r2il_is_big_endian(ctx: *const R2ILContext) -> i32 {
 
     unsafe {
         match &(*ctx).arch {
-            Some(arch) => {
-                if arch.big_endian {
-                    1
-                } else {
-                    0
-                }
-            }
+            Some(arch) => i32::from(arch.memory_endianness.to_legacy_big_endian()),
             None => 0,
         }
     }
@@ -5786,6 +5780,21 @@ mod tests {
         assert!(r2il_arch_name(ptr::null()).is_null());
         r2il_free(ptr::null_mut());
         r2il_block_free(ptr::null_mut());
+    }
+
+    #[test]
+    fn is_big_endian_uses_memory_endianness_shim() {
+        let mut arch = ArchSpec::new("shim");
+        arch.set_memory_endianness(r2il::Endianness::Big);
+        let ctx = Box::into_raw(Box::new(R2ILContext::with_arch(arch)));
+        assert_eq!(r2il_is_big_endian(ctx), 1);
+        r2il_free(ctx);
+
+        let mut arch = ArchSpec::new("shim2");
+        arch.set_memory_endianness(r2il::Endianness::Mixed);
+        let ctx = Box::into_raw(Box::new(R2ILContext::with_arch(arch)));
+        assert_eq!(r2il_is_big_endian(ctx), 0);
+        r2il_free(ctx);
     }
 
     #[test]
