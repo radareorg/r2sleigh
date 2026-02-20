@@ -6,7 +6,9 @@
 //!   r2sleigh test-arch <arch>
 //!   r2sleigh disasm --arch x86-64 --bytes "554889e5"
 
-use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(feature = "sleigh-config")]
+use clap::ValueEnum;
+use clap::{Parser, Subcommand};
 use r2il::{serialize, validate_archspec};
 use r2sleigh_lift::{
     Lifter, create_arm_spec, create_riscv32_spec, create_riscv64_spec, create_x86_64_spec,
@@ -825,6 +827,12 @@ mod tests {
             Some(r2il::OpMetadata {
                 memory_class: Some(r2il::MemoryClass::Stack),
                 endianness: None,
+                memory_ordering: None,
+                permissions: None,
+                valid_range: None,
+                bank_id: None,
+                segment_id: None,
+                atomic_kind: None,
             }),
         );
 

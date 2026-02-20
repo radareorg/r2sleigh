@@ -1500,6 +1500,12 @@ fn op_has_side_effects(op: &SSAOp, preserve_memory_reads: bool) -> bool {
     if op.is_control_flow() || op.is_memory_write() {
         return true;
     }
+    if matches!(
+        op,
+        SSAOp::Fence { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+    ) {
+        return true;
+    }
     if preserve_memory_reads && op.is_memory_read() {
         return true;
     }
@@ -1610,6 +1616,74 @@ where
             space: space.clone(),
             addr: map(addr),
             val: map(val),
+        },
+        Fence { ordering } => Fence {
+            ordering: *ordering,
+        },
+        LoadLinked {
+            dst,
+            space,
+            addr,
+            ordering,
+        } => LoadLinked {
+            dst: dst.clone(),
+            space: space.clone(),
+            addr: map(addr),
+            ordering: *ordering,
+        },
+        StoreConditional {
+            result,
+            space,
+            addr,
+            val,
+            ordering,
+        } => StoreConditional {
+            result: result.clone(),
+            space: space.clone(),
+            addr: map(addr),
+            val: map(val),
+            ordering: *ordering,
+        },
+        AtomicCAS {
+            dst,
+            space,
+            addr,
+            expected,
+            replacement,
+            ordering,
+        } => AtomicCAS {
+            dst: dst.clone(),
+            space: space.clone(),
+            addr: map(addr),
+            expected: map(expected),
+            replacement: map(replacement),
+            ordering: *ordering,
+        },
+        LoadGuarded {
+            dst,
+            space,
+            addr,
+            guard,
+            ordering,
+        } => LoadGuarded {
+            dst: dst.clone(),
+            space: space.clone(),
+            addr: map(addr),
+            guard: map(guard),
+            ordering: *ordering,
+        },
+        StoreGuarded {
+            space,
+            addr,
+            val,
+            guard,
+            ordering,
+        } => StoreGuarded {
+            space: space.clone(),
+            addr: map(addr),
+            val: map(val),
+            guard: map(guard),
+            ordering: *ordering,
         },
         IntAdd { dst, a, b } => IntAdd {
             dst: dst.clone(),

@@ -89,6 +89,130 @@ impl<'ctx> SymExecutor<'ctx> {
                 state.mem_write(&addr_val, &value, size);
                 Ok(vec![])
             }
+            Fence { .. } => Ok(vec![]),
+            LoadLinked {
+                dst,
+                addr,
+                space: _,
+                ordering: _,
+            } => {
+                let addr_val = self.read_var(state, addr);
+                let size = dst.size;
+                let value = state.mem_read(&addr_val, size);
+                self.write_var(state, dst, value);
+                Ok(vec![])
+            }
+            StoreConditional {
+                result,
+                addr,
+                val,
+                space: _,
+                ordering: _,
+            } => {
+                let addr_val = self.read_var(state, addr);
+                let value = self.read_var(state, val);
+                let size = val.size;
+                state.mem_write(&addr_val, &value, size);
+                if let Some(dst) = result {
+                    let bits = dst.size.saturating_mul(8).max(1);
+                    let status = if addr_val.as_concrete().is_some() {
+                        SymValue::concrete(0, bits)
+                    } else {
+                        SymValue::new_symbolic(self.ctx, "store_conditional", bits)
+                    };
+                    self.write_var(state, dst, status);
+                }
+                Ok(vec![])
+            }
+            AtomicCAS {
+                dst,
+                addr,
+                expected,
+                replacement,
+                space: _,
+                ordering: _,
+            } => {
+                let addr_val = self.read_var(state, addr);
+                let expected_val = self.read_var(state, expected);
+                let replacement_val = self.read_var(state, replacement);
+                let old_val = state.mem_read(&addr_val, dst.size);
+                let cond = old_val.eq(self.ctx, &expected_val);
+                let new_val = if let Some(v) = cond.as_concrete() {
+                    if v != 0 {
+                        replacement_val.clone()
+                    } else {
+                        old_val.clone()
+                    }
+                } else {
+                    let cond_bv = cond.to_bv(self.ctx);
+                    let zero = BV::from_i64(0, cond.bits());
+                    let cond_bool = cond_bv.eq(&zero).not();
+                    let old_bv = old_val.to_bv(self.ctx);
+                    let repl_bv = replacement_val.to_bv(self.ctx);
+                    let merged = cond_bool.ite(&repl_bv, &old_bv);
+                    SymValue::symbolic(merged, old_val.bits())
+                };
+                state.mem_write(&addr_val, &new_val, dst.size);
+                self.write_var(state, dst, old_val);
+                Ok(vec![])
+            }
+            LoadGuarded {
+                dst,
+                addr,
+                guard,
+                space: _,
+                ordering: _,
+            } => {
+                let addr_val = self.read_var(state, addr);
+                let guard_val = self.read_var(state, guard);
+                let loaded = state.mem_read(&addr_val, dst.size);
+                let result = if let Some(g) = guard_val.as_concrete() {
+                    if g != 0 {
+                        loaded
+                    } else {
+                        SymValue::unknown(dst.size.saturating_mul(8))
+                    }
+                } else {
+                    let cond_bv = guard_val.to_bv(self.ctx);
+                    let zero = BV::from_i64(0, guard_val.bits());
+                    let cond_bool = cond_bv.eq(&zero).not();
+                    let loaded_bv = loaded.to_bv(self.ctx);
+                    let fallback = SymValue::unknown(dst.size.saturating_mul(8));
+                    let fallback_bv = fallback.to_bv(self.ctx);
+                    let merged = cond_bool.ite(&loaded_bv, &fallback_bv);
+                    SymValue::symbolic(merged, loaded.bits())
+                };
+                self.write_var(state, dst, result);
+                Ok(vec![])
+            }
+            StoreGuarded {
+                addr,
+                val,
+                guard,
+                space: _,
+                ordering: _,
+            } => {
+                let addr_val = self.read_var(state, addr);
+                let value = self.read_var(state, val);
+                let guard_val = self.read_var(state, guard);
+                let size = val.size;
+                if let Some(g) = guard_val.as_concrete() {
+                    if g != 0 {
+                        state.mem_write(&addr_val, &value, size);
+                    }
+                } else {
+                    let old_val = state.mem_read(&addr_val, size);
+                    let cond_bv = guard_val.to_bv(self.ctx);
+                    let zero = BV::from_i64(0, guard_val.bits());
+                    let cond_bool = cond_bv.eq(&zero).not();
+                    let old_bv = old_val.to_bv(self.ctx);
+                    let new_bv = value.to_bv(self.ctx);
+                    let merged = cond_bool.ite(&new_bv, &old_bv);
+                    let merged_val = SymValue::symbolic(merged, old_val.bits());
+                    state.mem_write(&addr_val, &merged_val, size);
+                }
+                Ok(vec![])
+            }
 
             // ==================== Integer Arithmetic ====================
             IntAdd { dst, a, b } => {

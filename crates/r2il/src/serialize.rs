@@ -11,7 +11,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::opcode::R2ILOp;
-use crate::space::AddressSpace;
+use crate::space::{AddressSpace, SpaceId};
 use crate::{Endianness, FORMAT_VERSION, MAGIC};
 
 /// Errors that can occur during serialization/deserialization.
@@ -198,6 +198,61 @@ impl ArchSpec {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AddressSpaceV1 {
+    id: SpaceId,
+    name: String,
+    addr_size: u32,
+    word_size: u32,
+    is_default: bool,
+}
+
+impl From<AddressSpaceV1> for AddressSpace {
+    fn from(value: AddressSpaceV1) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            addr_size: value.addr_size,
+            word_size: value.word_size,
+            is_default: value.is_default,
+            endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AddressSpaceV2 {
+    id: SpaceId,
+    name: String,
+    addr_size: u32,
+    word_size: u32,
+    is_default: bool,
+    endianness: Option<Endianness>,
+}
+
+impl From<AddressSpaceV2> for AddressSpace {
+    fn from(value: AddressSpaceV2) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            addr_size: value.addr_size,
+            word_size: value.word_size,
+            is_default: value.is_default,
+            endianness: value.endianness,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
+        }
+    }
+}
+
 /// Legacy v1 architecture specification used only for deserialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ArchSpecV1 {
@@ -206,7 +261,7 @@ struct ArchSpecV1 {
     big_endian: bool,
     addr_size: u32,
     alignment: u32,
-    spaces: Vec<AddressSpace>,
+    spaces: Vec<AddressSpaceV1>,
     registers: Vec<RegisterDef>,
     register_map: HashMap<String, u64>,
     userops: Vec<UserOpDef>,
@@ -224,7 +279,45 @@ impl From<ArchSpecV1> for ArchSpec {
             memory_endianness: endian,
             addr_size: value.addr_size,
             alignment: value.alignment,
-            spaces: value.spaces,
+            spaces: value.spaces.into_iter().map(Into::into).collect(),
+            registers: value.registers,
+            register_map: value.register_map,
+            userops: value.userops,
+            source_files: value.source_files,
+        };
+        arch.sync_legacy_big_endian();
+        arch
+    }
+}
+
+/// Legacy v2 architecture specification used only for deserialization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ArchSpecV2 {
+    name: String,
+    variant: String,
+    big_endian: bool,
+    instruction_endianness: Endianness,
+    memory_endianness: Endianness,
+    addr_size: u32,
+    alignment: u32,
+    spaces: Vec<AddressSpaceV2>,
+    registers: Vec<RegisterDef>,
+    register_map: HashMap<String, u64>,
+    userops: Vec<UserOpDef>,
+    source_files: Vec<String>,
+}
+
+impl From<ArchSpecV2> for ArchSpec {
+    fn from(value: ArchSpecV2) -> Self {
+        let mut arch = ArchSpec {
+            name: value.name,
+            variant: value.variant,
+            big_endian: value.big_endian,
+            instruction_endianness: value.instruction_endianness,
+            memory_endianness: value.memory_endianness,
+            addr_size: value.addr_size,
+            alignment: value.alignment,
+            spaces: value.spaces.into_iter().map(Into::into).collect(),
             registers: value.registers,
             register_map: value.register_map,
             userops: value.userops,
@@ -351,6 +444,10 @@ fn deserialize_archspec_bytes(version: u32, bytes: &[u8]) -> Result<ArchSpec> {
             let legacy: ArchSpecV1 = bincode::deserialize(bytes)?;
             Ok(legacy.into())
         }
+        2 => {
+            let legacy: ArchSpecV2 = bincode::deserialize(bytes)?;
+            Ok(legacy.into())
+        }
         FORMAT_VERSION => {
             let mut arch: ArchSpec = bincode::deserialize(bytes)?;
             arch.sync_legacy_big_endian();
@@ -378,6 +475,24 @@ mod tests {
         bytes.extend_from_slice(&header_bytes);
 
         let arch_bytes = bincode::serialize(arch).expect("serialize arch v1");
+        bytes.extend_from_slice(&arch_bytes);
+        bytes
+    }
+
+    fn encode_v2_bytes(arch: &ArchSpecV2) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+
+        let header = FileHeader {
+            version: 2,
+            arch_name: arch.name.clone(),
+        };
+        let header_bytes = bincode::serialize(&header).expect("serialize header");
+        let header_len = header_bytes.len() as u32;
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+
+        let arch_bytes = bincode::serialize(arch).expect("serialize arch v2");
         bytes.extend_from_slice(&arch_bytes);
         bytes
     }
@@ -416,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn archspec_defaults_use_little_endianness_v2() {
+    fn archspec_defaults_use_little_endianness_v3() {
         let arch = ArchSpec::new("default");
         assert_eq!(arch.instruction_endianness, Endianness::Little);
         assert_eq!(arch.memory_endianness, Endianness::Little);
@@ -424,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_roundtrip_preserves_instruction_and_memory_endianness() {
+    fn v3_roundtrip_preserves_instruction_and_memory_endianness() {
         let mut arch = ArchSpec::new("mixed-scope");
         arch.set_instruction_endianness(Endianness::Big);
         arch.set_memory_endianness(Endianness::Little);
@@ -449,14 +564,29 @@ mod tests {
     }
 
     #[test]
-    fn v1_file_loads_and_upgrades_to_v2_fields() {
+    fn v1_file_loads_and_upgrades_to_v3_fields() {
         let legacy = ArchSpecV1 {
             name: "legacy".to_string(),
             variant: "default".to_string(),
             big_endian: true,
             addr_size: 8,
             alignment: 1,
-            spaces: vec![AddressSpace::ram(8), AddressSpace::register()],
+            spaces: vec![
+                AddressSpaceV1 {
+                    id: SpaceId::Ram,
+                    name: "ram".to_string(),
+                    addr_size: 8,
+                    word_size: 1,
+                    is_default: true,
+                },
+                AddressSpaceV1 {
+                    id: SpaceId::Register,
+                    name: "register".to_string(),
+                    addr_size: 4,
+                    word_size: 1,
+                    is_default: false,
+                },
+            ],
             registers: vec![RegisterDef::new("RAX", 0, 8)],
             register_map: HashMap::from([(String::from("RAX"), 0)]),
             userops: vec![UserOpDef {
@@ -476,5 +606,51 @@ mod tests {
             loaded.spaces.iter().all(|space| space.endianness.is_none()),
             "v1 upgrade should not synthesize per-space override"
         );
+        assert!(
+            loaded
+                .spaces
+                .iter()
+                .all(|space| space.permissions.is_none())
+        );
+        assert!(
+            loaded
+                .spaces
+                .iter()
+                .all(|space| space.valid_ranges.is_empty())
+        );
+    }
+
+    #[test]
+    fn v2_file_loads_and_upgrades_to_v3_fields() {
+        let legacy = ArchSpecV2 {
+            name: "legacy-v2".to_string(),
+            variant: "default".to_string(),
+            big_endian: false,
+            instruction_endianness: Endianness::Big,
+            memory_endianness: Endianness::Little,
+            addr_size: 8,
+            alignment: 1,
+            spaces: vec![AddressSpaceV2 {
+                id: SpaceId::Ram,
+                name: "ram".to_string(),
+                addr_size: 8,
+                word_size: 1,
+                is_default: true,
+                endianness: Some(Endianness::Big),
+            }],
+            registers: vec![RegisterDef::new("RAX", 0, 8)],
+            register_map: HashMap::from([(String::from("RAX"), 0)]),
+            userops: Vec::new(),
+            source_files: Vec::new(),
+        };
+
+        let bytes = encode_v2_bytes(&legacy);
+        let loaded = from_bytes(&bytes).expect("load v2");
+        assert_eq!(loaded.name, "legacy-v2");
+        assert_eq!(loaded.instruction_endianness, Endianness::Big);
+        assert_eq!(loaded.memory_endianness, Endianness::Little);
+        assert_eq!(loaded.spaces[0].endianness, Some(Endianness::Big));
+        assert_eq!(loaded.spaces[0].memory_class, None);
+        assert!(loaded.spaces[0].valid_ranges.is_empty());
     }
 }

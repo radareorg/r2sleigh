@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::memory::MemoryOrdering;
 use crate::metadata::OpMetadata;
 use crate::space::SpaceId;
 use crate::varnode::Varnode;
@@ -39,6 +40,54 @@ pub enum R2ILOp {
         space: SpaceId,
         addr: Varnode,
         val: Varnode,
+    },
+
+    /// Memory fence/barrier with ordering semantics.
+    Fence { ordering: MemoryOrdering },
+
+    /// Linked load from memory: dst = LL(*[space]addr).
+    LoadLinked {
+        dst: Varnode,
+        space: SpaceId,
+        addr: Varnode,
+        ordering: MemoryOrdering,
+    },
+
+    /// Conditional store to memory; optional result receives success status.
+    StoreConditional {
+        result: Option<Varnode>,
+        space: SpaceId,
+        addr: Varnode,
+        val: Varnode,
+        ordering: MemoryOrdering,
+    },
+
+    /// Atomic compare and exchange: dst = CAS(*addr, expected, replacement).
+    AtomicCAS {
+        dst: Varnode,
+        space: SpaceId,
+        addr: Varnode,
+        expected: Varnode,
+        replacement: Varnode,
+        ordering: MemoryOrdering,
+    },
+
+    /// Guarded load from memory: if guard then load.
+    LoadGuarded {
+        dst: Varnode,
+        space: SpaceId,
+        addr: Varnode,
+        guard: Varnode,
+        ordering: MemoryOrdering,
+    },
+
+    /// Guarded store to memory: if guard then store.
+    StoreGuarded {
+        space: SpaceId,
+        addr: Varnode,
+        val: Varnode,
+        guard: Varnode,
+        ordering: MemoryOrdering,
     },
 
     // ========== Integer Arithmetic ==========
@@ -461,12 +510,24 @@ impl R2ILOp {
 
     /// Returns true if this operation reads from memory.
     pub fn is_memory_read(&self) -> bool {
-        matches!(self, R2ILOp::Load { .. })
+        matches!(
+            self,
+            R2ILOp::Load { .. }
+                | R2ILOp::LoadLinked { .. }
+                | R2ILOp::LoadGuarded { .. }
+                | R2ILOp::AtomicCAS { .. }
+        )
     }
 
     /// Returns true if this operation writes to memory.
     pub fn is_memory_write(&self) -> bool {
-        matches!(self, R2ILOp::Store { .. })
+        matches!(
+            self,
+            R2ILOp::Store { .. }
+                | R2ILOp::StoreConditional { .. }
+                | R2ILOp::StoreGuarded { .. }
+                | R2ILOp::AtomicCAS { .. }
+        )
     }
 
     /// Returns the output varnode if this operation has one.
@@ -474,6 +535,9 @@ impl R2ILOp {
         match self {
             R2ILOp::Copy { dst, .. }
             | R2ILOp::Load { dst, .. }
+            | R2ILOp::LoadLinked { dst, .. }
+            | R2ILOp::LoadGuarded { dst, .. }
+            | R2ILOp::AtomicCAS { dst, .. }
             | R2ILOp::IntAdd { dst, .. }
             | R2ILOp::IntSub { dst, .. }
             | R2ILOp::IntMult { dst, .. }
@@ -537,6 +601,7 @@ impl R2ILOp {
             | R2ILOp::Cast { dst, .. }
             | R2ILOp::Extract { dst, .. }
             | R2ILOp::Insert { dst, .. } => Some(dst),
+            R2ILOp::StoreConditional { result, .. } => result.as_ref(),
             R2ILOp::CallOther { output, .. } => output.as_ref(),
             _ => None,
         }
@@ -547,6 +612,9 @@ impl R2ILOp {
         match self {
             R2ILOp::Copy { dst, .. }
             | R2ILOp::Load { dst, .. }
+            | R2ILOp::LoadLinked { dst, .. }
+            | R2ILOp::LoadGuarded { dst, .. }
+            | R2ILOp::AtomicCAS { dst, .. }
             | R2ILOp::IntAdd { dst, .. }
             | R2ILOp::IntSub { dst, .. }
             | R2ILOp::IntMult { dst, .. }
@@ -610,6 +678,7 @@ impl R2ILOp {
             | R2ILOp::Cast { dst, .. }
             | R2ILOp::Extract { dst, .. }
             | R2ILOp::Insert { dst, .. } => Some(dst),
+            R2ILOp::StoreConditional { result, .. } => result.as_mut(),
             R2ILOp::CallOther { output, .. } => output.as_mut(),
             _ => None,
         }
@@ -625,6 +694,19 @@ impl R2ILOp {
             R2ILOp::Copy { src, .. } => vec![src],
             R2ILOp::Load { addr, .. } => vec![addr],
             R2ILOp::Store { addr, val, .. } => vec![addr, val],
+            R2ILOp::Fence { .. } => vec![],
+            R2ILOp::LoadLinked { addr, .. } => vec![addr],
+            R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
+            R2ILOp::AtomicCAS {
+                addr,
+                expected,
+                replacement,
+                ..
+            } => vec![addr, expected, replacement],
+            R2ILOp::LoadGuarded { addr, guard, .. } => vec![addr, guard],
+            R2ILOp::StoreGuarded {
+                addr, val, guard, ..
+            } => vec![addr, val, guard],
 
             // Binary integer operations
             R2ILOp::IntAdd { a, b, .. }
@@ -730,6 +812,19 @@ impl R2ILOp {
             R2ILOp::Copy { src, .. } => vec![src],
             R2ILOp::Load { addr, .. } => vec![addr],
             R2ILOp::Store { addr, val, .. } => vec![addr, val],
+            R2ILOp::Fence { .. } => vec![],
+            R2ILOp::LoadLinked { addr, .. } => vec![addr],
+            R2ILOp::StoreConditional { addr, val, .. } => vec![addr, val],
+            R2ILOp::AtomicCAS {
+                addr,
+                expected,
+                replacement,
+                ..
+            } => vec![addr, expected, replacement],
+            R2ILOp::LoadGuarded { addr, guard, .. } => vec![addr, guard],
+            R2ILOp::StoreGuarded {
+                addr, val, guard, ..
+            } => vec![addr, val, guard],
 
             // Binary integer operations
             R2ILOp::IntAdd { a, b, .. }
@@ -837,6 +932,75 @@ impl std::fmt::Display for R2ILOp {
             }
             R2ILOp::Store { space, addr, val } => {
                 write!(f, "STORE [{}]{} = {}", space, addr, val)
+            }
+            R2ILOp::Fence { ordering } => write!(f, "FENCE({ordering:?})"),
+            R2ILOp::LoadLinked {
+                dst,
+                space,
+                addr,
+                ordering,
+            } => {
+                write!(
+                    f,
+                    "{} = LOAD_LINKED [{}]{} ({ordering:?})",
+                    dst, space, addr
+                )
+            }
+            R2ILOp::StoreConditional {
+                result,
+                space,
+                addr,
+                val,
+                ordering,
+            } => {
+                if let Some(out) = result {
+                    write!(f, "{} = ", out)?;
+                }
+                write!(
+                    f,
+                    "STORE_CONDITIONAL [{}]{} = {} ({ordering:?})",
+                    space, addr, val
+                )
+            }
+            R2ILOp::AtomicCAS {
+                dst,
+                space,
+                addr,
+                expected,
+                replacement,
+                ordering,
+            } => {
+                write!(
+                    f,
+                    "{} = ATOMIC_CAS [{}]{}, {}, {} ({ordering:?})",
+                    dst, space, addr, expected, replacement
+                )
+            }
+            R2ILOp::LoadGuarded {
+                dst,
+                space,
+                addr,
+                guard,
+                ordering,
+            } => {
+                write!(
+                    f,
+                    "{} = LOAD_GUARDED [{}]{}, {} ({ordering:?})",
+                    dst, space, addr, guard
+                )
+            }
+            R2ILOp::StoreGuarded {
+                space,
+                addr,
+                val,
+                guard,
+                ordering,
+            } => {
+                write!(
+                    f,
+                    "STORE_GUARDED [{}]{} = {} if {} ({ordering:?})",
+                    space, addr, val, guard
+                )
             }
 
             // Integer arithmetic

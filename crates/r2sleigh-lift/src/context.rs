@@ -133,6 +133,11 @@ impl LiftContext {
                 word_size: 1,
                 is_default,
                 endianness,
+                memory_class: None,
+                permissions: None,
+                valid_ranges: Vec::new(),
+                bank_id: None,
+                segment_id: None,
             };
             self.arch.add_space(space);
             return space_id;
@@ -149,6 +154,11 @@ impl LiftContext {
             word_size: 1,
             is_default,
             endianness,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         };
         self.arch.add_space(space);
         self.space_map.insert(name.into(), space_id);

@@ -27,6 +27,7 @@
 //! ```
 
 pub mod endianness;
+pub mod memory;
 pub mod metadata;
 pub mod opcode;
 pub mod regname;
@@ -37,6 +38,7 @@ pub mod varnode;
 
 // Re-export main types at crate root
 pub use endianness::Endianness;
+pub use memory::{AtomicKind, MemoryOrdering, MemoryPermissions, MemoryRange};
 pub use metadata::{
     FloatEncodingHint, MemoryClass, OpMetadata, PointerHint, ScalarKind, StorageClass,
     VarnodeMetadata,
@@ -58,4 +60,4 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAGIC: &[u8; 4] = b"R2IL";
 
 /// Current binary format version.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;

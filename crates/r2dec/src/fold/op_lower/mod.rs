@@ -1604,6 +1604,106 @@ impl<'a> FoldingContext<'a> {
                 }
                 self.assign_stmt(lhs, rhs)
             }
+            SSAOp::Fence { ordering } => Some(CStmt::Expr(CExpr::call(
+                CExpr::Var("memory_fence".to_string()),
+                vec![CExpr::StringLit(memory_ordering_name(ordering).to_string())],
+            ))),
+            SSAOp::LoadLinked {
+                dst,
+                space,
+                addr,
+                ordering,
+            } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let call = CExpr::call(
+                    CExpr::Var("load_linked".to_string()),
+                    vec![
+                        CExpr::StringLit(space.clone()),
+                        self.get_expr(addr),
+                        CExpr::StringLit(memory_ordering_name(ordering).to_string()),
+                    ],
+                );
+                Some(CStmt::Expr(CExpr::assign(lhs, call)))
+            }
+            SSAOp::StoreConditional {
+                result,
+                space,
+                addr,
+                val,
+                ordering,
+            } => {
+                let call = CExpr::call(
+                    CExpr::Var("store_conditional".to_string()),
+                    vec![
+                        CExpr::StringLit(space.clone()),
+                        self.get_expr(addr),
+                        self.get_expr(val),
+                        CExpr::StringLit(memory_ordering_name(ordering).to_string()),
+                    ],
+                );
+                if let Some(dst) = result {
+                    let lhs = CExpr::Var(self.var_name(dst));
+                    Some(CStmt::Expr(CExpr::assign(lhs, call)))
+                } else {
+                    Some(CStmt::Expr(call))
+                }
+            }
+            SSAOp::AtomicCAS {
+                dst,
+                space,
+                addr,
+                expected,
+                replacement,
+                ordering,
+            } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let call = CExpr::call(
+                    CExpr::Var("atomic_cas".to_string()),
+                    vec![
+                        CExpr::StringLit(space.clone()),
+                        self.get_expr(addr),
+                        self.get_expr(expected),
+                        self.get_expr(replacement),
+                        CExpr::StringLit(memory_ordering_name(ordering).to_string()),
+                    ],
+                );
+                Some(CStmt::Expr(CExpr::assign(lhs, call)))
+            }
+            SSAOp::LoadGuarded {
+                dst,
+                space,
+                addr,
+                guard,
+                ordering,
+            } => {
+                let lhs = CExpr::Var(self.var_name(dst));
+                let call = CExpr::call(
+                    CExpr::Var("load_guarded".to_string()),
+                    vec![
+                        CExpr::StringLit(space.clone()),
+                        self.get_expr(addr),
+                        self.get_expr(guard),
+                        CExpr::StringLit(memory_ordering_name(ordering).to_string()),
+                    ],
+                );
+                Some(CStmt::Expr(CExpr::assign(lhs, call)))
+            }
+            SSAOp::StoreGuarded {
+                space,
+                addr,
+                val,
+                guard,
+                ordering,
+            } => Some(CStmt::Expr(CExpr::call(
+                CExpr::Var("store_guarded".to_string()),
+                vec![
+                    CExpr::StringLit(space.clone()),
+                    self.get_expr(addr),
+                    self.get_expr(val),
+                    self.get_expr(guard),
+                    CExpr::StringLit(memory_ordering_name(ordering).to_string()),
+                ],
+            ))),
             SSAOp::IntAdd { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Add),
             SSAOp::IntSub { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Sub),
             SSAOp::IntMult { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Mul),
@@ -2049,6 +2149,17 @@ fn uint_type_from_size(size: u32) -> CType {
         4 => CType::UInt(32),
         8 => CType::UInt(64),
         _ => CType::UInt(size.saturating_mul(8)),
+    }
+}
+
+fn memory_ordering_name(ordering: &r2il::MemoryOrdering) -> &'static str {
+    match ordering {
+        r2il::MemoryOrdering::Relaxed => "relaxed",
+        r2il::MemoryOrdering::Acquire => "acquire",
+        r2il::MemoryOrdering::Release => "release",
+        r2il::MemoryOrdering::AcqRel => "acq_rel",
+        r2il::MemoryOrdering::SeqCst => "seq_cst",
+        r2il::MemoryOrdering::Unknown => "unknown",
     }
 }
 

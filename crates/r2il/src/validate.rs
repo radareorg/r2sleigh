@@ -136,6 +136,36 @@ pub fn validate_archspec(arch: &ArchSpec) -> Result<(), ValidationError> {
                 format!("duplicate space name '{}'", space.name),
             ));
         }
+        if let Some(bank_id) = &space.bank_id
+            && bank_id.trim().is_empty()
+        {
+            issues.push(ValidationIssue::new(
+                "arch.space.bank_id.empty",
+                format!("arch.spaces[{i}].bank_id"),
+                "bank_id must not be empty when present",
+            ));
+        }
+        if let Some(segment_id) = &space.segment_id
+            && segment_id.trim().is_empty()
+        {
+            issues.push(ValidationIssue::new(
+                "arch.space.segment_id.empty",
+                format!("arch.spaces[{i}].segment_id"),
+                "segment_id must not be empty when present",
+            ));
+        }
+        for (range_index, range) in space.valid_ranges.iter().enumerate() {
+            if range.start >= range.end {
+                issues.push(ValidationIssue::new(
+                    "arch.space.range.invalid",
+                    format!("arch.spaces[{i}].valid_ranges[{range_index}]"),
+                    format!(
+                        "invalid half-open range [{:#x}, {:#x}) (start must be < end)",
+                        range.start, range.end
+                    ),
+                ));
+            }
+        }
     }
 
     let mut seen_reg_names = HashSet::new();
@@ -244,11 +274,46 @@ pub fn validate_op(op: &R2ILOp, op_index: usize) -> Result<(), ValidationError> 
                 "load space must not be const",
             ));
         }
+        R2ILOp::LoadLinked { space, .. } if *space == SpaceId::Const => {
+            issues.push(ValidationIssue::new(
+                "op.load_linked.space_const",
+                format!("block.ops[{op_index}].space"),
+                "load-linked space must not be const",
+            ));
+        }
         R2ILOp::Store { space, .. } if *space == SpaceId::Const => {
             issues.push(ValidationIssue::new(
                 "op.store.space_const",
                 format!("block.ops[{op_index}].space"),
                 "store space must not be const",
+            ));
+        }
+        R2ILOp::StoreConditional { space, .. } if *space == SpaceId::Const => {
+            issues.push(ValidationIssue::new(
+                "op.store_conditional.space_const",
+                format!("block.ops[{op_index}].space"),
+                "store-conditional space must not be const",
+            ));
+        }
+        R2ILOp::AtomicCAS { space, .. } if *space == SpaceId::Const => {
+            issues.push(ValidationIssue::new(
+                "op.atomic_cas.space_const",
+                format!("block.ops[{op_index}].space"),
+                "atomic CAS space must not be const",
+            ));
+        }
+        R2ILOp::LoadGuarded { space, .. } if *space == SpaceId::Const => {
+            issues.push(ValidationIssue::new(
+                "op.load_guarded.space_const",
+                format!("block.ops[{op_index}].space"),
+                "guarded load space must not be const",
+            ));
+        }
+        R2ILOp::StoreGuarded { space, .. } if *space == SpaceId::Const => {
+            issues.push(ValidationIssue::new(
+                "op.store_guarded.space_const",
+                format!("block.ops[{op_index}].space"),
+                "guarded store space must not be const",
             ));
         }
         R2ILOp::PtrAdd { element_size, .. } if *element_size == 0 => {
@@ -310,7 +375,7 @@ pub fn validate_block(block: &R2ILBlock) -> Result<(), ValidationError> {
         }
     }
 
-    for idx in block.op_metadata.keys() {
+    for (idx, meta) in &block.op_metadata {
         if *idx >= block.ops.len() {
             issues.push(ValidationIssue::new(
                 "block.op_metadata.index_oob",
@@ -319,6 +384,36 @@ pub fn validate_block(block: &R2ILBlock) -> Result<(), ValidationError> {
                     "op metadata index {} is out of bounds for {} op(s)",
                     idx,
                     block.ops.len()
+                ),
+            ));
+        }
+        if let Some(bank_id) = &meta.bank_id
+            && bank_id.trim().is_empty()
+        {
+            issues.push(ValidationIssue::new(
+                "block.op_metadata.bank_id.empty",
+                format!("block.op_metadata[{idx}].bank_id"),
+                "op metadata bank_id must not be empty when present",
+            ));
+        }
+        if let Some(segment_id) = &meta.segment_id
+            && segment_id.trim().is_empty()
+        {
+            issues.push(ValidationIssue::new(
+                "block.op_metadata.segment_id.empty",
+                format!("block.op_metadata[{idx}].segment_id"),
+                "op metadata segment_id must not be empty when present",
+            ));
+        }
+        if let Some(range) = meta.valid_range
+            && range.start >= range.end
+        {
+            issues.push(ValidationIssue::new(
+                "block.op_metadata.range.invalid",
+                format!("block.op_metadata[{idx}].valid_range"),
+                format!(
+                    "invalid half-open range [{:#x}, {:#x}) (start must be < end)",
+                    range.start, range.end
                 ),
             ));
         }
@@ -594,8 +689,49 @@ pub fn validate_op_semantic(
                 expected,
                 arch_expected,
             );
+            check_const_memory_access(
+                &mut issues,
+                arch,
+                op_index,
+                *space,
+                addr,
+                1,
+                true,
+                false,
+                "op.load.range",
+                "op.load.permission",
+            );
         }
-        R2ILOp::Store { space, addr, .. } => {
+        R2ILOp::LoadLinked {
+            dst, space, addr, ..
+        } => {
+            let arch_expected = effective_arch_addr_size(arch);
+            let expected = addr_space_size(*space, arch);
+            check_size_addr_width(
+                &mut issues,
+                "op.load_linked.addr_width_mismatch",
+                op_index,
+                "addr.size",
+                addr.size,
+                expected,
+                arch_expected,
+            );
+            check_const_memory_access(
+                &mut issues,
+                arch,
+                op_index,
+                *space,
+                addr,
+                dst.size,
+                true,
+                false,
+                "op.load_linked.range",
+                "op.load_linked.permission",
+            );
+        }
+        R2ILOp::Store {
+            space, addr, val, ..
+        } => {
             let arch_expected = effective_arch_addr_size(arch);
             let expected = addr_space_size(*space, arch);
             check_size_addr_width(
@@ -606,6 +742,186 @@ pub fn validate_op_semantic(
                 addr.size,
                 expected,
                 arch_expected,
+            );
+            check_const_memory_access(
+                &mut issues,
+                arch,
+                op_index,
+                *space,
+                addr,
+                val.size,
+                false,
+                true,
+                "op.store.range",
+                "op.store.permission",
+            );
+        }
+        R2ILOp::StoreConditional {
+            result,
+            space,
+            addr,
+            val,
+            ..
+        } => {
+            let arch_expected = effective_arch_addr_size(arch);
+            let expected = addr_space_size(*space, arch);
+            check_size_addr_width(
+                &mut issues,
+                "op.store_conditional.addr_width_mismatch",
+                op_index,
+                "addr.size",
+                addr.size,
+                expected,
+                arch_expected,
+            );
+            if let Some(result) = result
+                && result.size == 0
+            {
+                issues.push(ValidationIssue::new(
+                    "op.store_conditional.result_size_zero",
+                    format!("block.ops[{op_index}].result.size"),
+                    "store-conditional result size must be > 0 when present",
+                ));
+            }
+            check_const_memory_access(
+                &mut issues,
+                arch,
+                op_index,
+                *space,
+                addr,
+                val.size,
+                false,
+                true,
+                "op.store_conditional.range",
+                "op.store_conditional.permission",
+            );
+        }
+        R2ILOp::AtomicCAS {
+            dst,
+            space,
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            check_size_eq(
+                &mut issues,
+                "op.atomic_cas.width",
+                op_index,
+                "dst.size",
+                dst.size,
+                "expected.size",
+                expected.size,
+            );
+            check_size_eq(
+                &mut issues,
+                "op.atomic_cas.width",
+                op_index,
+                "dst.size",
+                dst.size,
+                "replacement.size",
+                replacement.size,
+            );
+            let arch_expected = effective_arch_addr_size(arch);
+            let expected_addr = addr_space_size(*space, arch);
+            check_size_addr_width(
+                &mut issues,
+                "op.atomic_cas.addr_width_mismatch",
+                op_index,
+                "addr.size",
+                addr.size,
+                expected_addr,
+                arch_expected,
+            );
+            check_const_memory_access(
+                &mut issues,
+                arch,
+                op_index,
+                *space,
+                addr,
+                dst.size,
+                true,
+                true,
+                "op.atomic_cas.range",
+                "op.atomic_cas.permission",
+            );
+        }
+        R2ILOp::LoadGuarded {
+            dst,
+            space,
+            addr,
+            guard,
+            ..
+        } => {
+            check_size_const(
+                &mut issues,
+                "op.load_guarded.guard_size",
+                op_index,
+                "guard.size",
+                guard.size,
+                1,
+            );
+            let arch_expected = effective_arch_addr_size(arch);
+            let expected = addr_space_size(*space, arch);
+            check_size_addr_width(
+                &mut issues,
+                "op.load_guarded.addr_width_mismatch",
+                op_index,
+                "addr.size",
+                addr.size,
+                expected,
+                arch_expected,
+            );
+            check_const_memory_access(
+                &mut issues,
+                arch,
+                op_index,
+                *space,
+                addr,
+                dst.size,
+                true,
+                false,
+                "op.load_guarded.range",
+                "op.load_guarded.permission",
+            );
+        }
+        R2ILOp::StoreGuarded {
+            space,
+            addr,
+            val,
+            guard,
+            ..
+        } => {
+            check_size_const(
+                &mut issues,
+                "op.store_guarded.guard_size",
+                op_index,
+                "guard.size",
+                guard.size,
+                1,
+            );
+            let arch_expected = effective_arch_addr_size(arch);
+            let expected = addr_space_size(*space, arch);
+            check_size_addr_width(
+                &mut issues,
+                "op.store_guarded.addr_width_mismatch",
+                op_index,
+                "addr.size",
+                addr.size,
+                expected,
+                arch_expected,
+            );
+            check_const_memory_access(
+                &mut issues,
+                arch,
+                op_index,
+                *space,
+                addr,
+                val.size,
+                false,
+                true,
+                "op.store_guarded.range",
+                "op.store_guarded.permission",
             );
         }
 
@@ -748,6 +1064,39 @@ fn validate_varnode(
             "output/destination varnode must not be const space",
         ));
     }
+
+    if let Some(meta) = &vn.meta {
+        if let Some(bank_id) = &meta.bank_id
+            && bank_id.trim().is_empty()
+        {
+            issues.push(ValidationIssue::new(
+                "varnode.meta.bank_id.empty",
+                format!("{path}.meta.bank_id"),
+                "metadata bank_id must not be empty when present",
+            ));
+        }
+        if let Some(segment_id) = &meta.segment_id
+            && segment_id.trim().is_empty()
+        {
+            issues.push(ValidationIssue::new(
+                "varnode.meta.segment_id.empty",
+                format!("{path}.meta.segment_id"),
+                "metadata segment_id must not be empty when present",
+            ));
+        }
+        if let Some(range) = meta.valid_range
+            && range.start >= range.end
+        {
+            issues.push(ValidationIssue::new(
+                "varnode.meta.range.invalid",
+                format!("{path}.meta.valid_range"),
+                format!(
+                    "invalid half-open range [{:#x}, {:#x}) (start must be < end)",
+                    range.start, range.end
+                ),
+            ));
+        }
+    }
 }
 
 fn addr_space_size(space: SpaceId, arch: &ArchSpec) -> u32 {
@@ -833,6 +1182,67 @@ fn semantic_op_name(op: &R2ILOp) -> &'static str {
         R2ILOp::BoolOr { .. } => "boolor",
         R2ILOp::BoolXor { .. } => "boolxor",
         _ => "op",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_const_memory_access(
+    issues: &mut Vec<ValidationIssue>,
+    arch: &ArchSpec,
+    op_index: usize,
+    space_id: SpaceId,
+    addr: &Varnode,
+    access_size: u32,
+    needs_read: bool,
+    needs_write: bool,
+    range_code: &'static str,
+    permission_code: &'static str,
+) {
+    if addr.space != SpaceId::Const {
+        return;
+    }
+
+    let Some(space) = arch.spaces.iter().find(|s| s.id == space_id) else {
+        return;
+    };
+
+    if !space.valid_ranges.is_empty()
+        && !space
+            .valid_ranges
+            .iter()
+            .any(|range| range.contains_interval(addr.offset, access_size))
+    {
+        issues.push(ValidationIssue::new(
+            range_code,
+            format!("block.ops[{op_index}].addr"),
+            format!(
+                "const address {:#x} size {} is outside configured ranges for space '{}'",
+                addr.offset, access_size, space.name
+            ),
+        ));
+    }
+
+    if let Some(perms) = space.permissions {
+        if needs_read && !perms.read {
+            issues.push(ValidationIssue::new(
+                permission_code,
+                format!("block.ops[{op_index}].space"),
+                format!(
+                    "space '{}' denies read access for const-address memory operation",
+                    space.name
+                ),
+            ));
+        }
+        if needs_write && !perms.write {
+            issues.push(ValidationIssue::new(
+                permission_code,
+                format!("block.ops[{op_index}].space"),
+                format!(
+                    "space '{}' denies write access for const-address memory operation",
+                    space.name
+                ),
+            ));
+        }
     }
 }
 
@@ -1445,6 +1855,105 @@ mod tests {
         });
         let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
         assert!(err.issues.len() >= 3);
+    }
+
+    #[test]
+    fn arch_space_invalid_range_fails() {
+        let mut arch = valid_archspec();
+        arch.spaces[0].valid_ranges.push(crate::MemoryRange {
+            start: 0x2000,
+            end: 0x2000,
+        });
+        let err = validate_archspec(&arch).expect_err("arch should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "arch.space.range.invalid")
+        );
+    }
+
+    #[test]
+    fn memory_semantic_guard_and_width_checks_fail() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::AtomicCAS {
+            dst: Varnode::register(0, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::register(8, 4),
+            expected: Varnode::register(16, 4),
+            replacement: Varnode::register(24, 8),
+            ordering: crate::MemoryOrdering::Relaxed,
+        });
+        block.push(R2ILOp::LoadGuarded {
+            dst: Varnode::register(0, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::register(8, 8),
+            guard: Varnode::register(16, 8),
+            ordering: crate::MemoryOrdering::Relaxed,
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(err.issues.iter().any(|i| i.code == "op.atomic_cas.width"));
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.atomic_cas.addr_width_mismatch")
+        );
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.load_guarded.guard_size")
+        );
+    }
+
+    #[test]
+    fn const_address_range_and_permission_checks() {
+        let mut arch = valid_archspec();
+        arch.spaces[0].valid_ranges.push(crate::MemoryRange {
+            start: 0x1000,
+            end: 0x1008,
+        });
+        arch.spaces[0].permissions = Some(crate::MemoryPermissions {
+            read: true,
+            write: false,
+            execute: false,
+        });
+
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x1004, 8),
+            val: Varnode::register(0, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(8, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x2000, 8),
+        });
+
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(err.issues.iter().any(|i| i.code == "op.store.permission"));
+        assert!(err.issues.iter().any(|i| i.code == "op.load.range"));
+    }
+
+    #[test]
+    fn symbolic_memory_address_skips_range_permission_enforcement() {
+        let mut arch = valid_archspec();
+        arch.spaces[0].valid_ranges.push(crate::MemoryRange {
+            start: 0x1000,
+            end: 0x1010,
+        });
+        arch.spaces[0].permissions = Some(crate::MemoryPermissions {
+            read: false,
+            write: false,
+            execute: false,
+        });
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(0, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::register(8, 8),
+        });
+        assert!(validate_block_semantic(&block, &arch).is_ok());
     }
 
     #[test]

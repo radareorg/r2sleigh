@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Endianness;
+use crate::{Endianness, MemoryClass, MemoryPermissions, MemoryRange};
 
 /// Identifier for an address space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -72,6 +72,21 @@ pub struct AddressSpace {
     /// Optional endianness override for this space.
     #[serde(default)]
     pub endianness: Option<Endianness>,
+    /// Optional memory classification for this space.
+    #[serde(default)]
+    pub memory_class: Option<MemoryClass>,
+    /// Optional permissions applicable to this space.
+    #[serde(default)]
+    pub permissions: Option<MemoryPermissions>,
+    /// Optional set of valid address ranges in this space.
+    #[serde(default)]
+    pub valid_ranges: Vec<MemoryRange>,
+    /// Optional memory bank identifier.
+    #[serde(default)]
+    pub bank_id: Option<String>,
+    /// Optional segment identifier.
+    #[serde(default)]
+    pub segment_id: Option<String>,
 }
 
 impl AddressSpace {
@@ -84,6 +99,11 @@ impl AddressSpace {
             word_size: 1,
             is_default: false,
             endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 
@@ -96,6 +116,11 @@ impl AddressSpace {
             word_size: 1,
             is_default: true,
             endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 
@@ -108,6 +133,11 @@ impl AddressSpace {
             word_size: 1,
             is_default: false,
             endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 
@@ -120,6 +150,11 @@ impl AddressSpace {
             word_size: 1,
             is_default: false,
             endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 
@@ -132,6 +167,11 @@ impl AddressSpace {
             word_size: 1,
             is_default: false,
             endianness: None,
+            memory_class: None,
+            permissions: None,
+            valid_ranges: Vec::new(),
+            bank_id: None,
+            segment_id: None,
         }
     }
 }

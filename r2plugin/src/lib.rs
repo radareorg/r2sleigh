@@ -744,8 +744,13 @@ pub extern "C" fn r2il_block_type(block: *const R2ILBlock) -> u32 {
     // Second pass: memory operations
     for op in &blk.ops {
         match op {
-            R2ILOp::Store { .. } => return R2AnalOpType::STORE,
-            R2ILOp::Load { .. } => return R2AnalOpType::LOAD,
+            R2ILOp::Store { .. }
+            | R2ILOp::StoreConditional { .. }
+            | R2ILOp::StoreGuarded { .. }
+            | R2ILOp::AtomicCAS { .. } => return R2AnalOpType::STORE,
+            R2ILOp::Load { .. } | R2ILOp::LoadLinked { .. } | R2ILOp::LoadGuarded { .. } => {
+                return R2AnalOpType::LOAD;
+            }
             _ => {}
         }
     }
@@ -859,12 +864,62 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
                 regs.push(addr);
             }
         }
+        R2ILOp::LoadLinked { addr, .. } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+        }
         R2ILOp::Store { addr, val, .. } => {
             if addr.is_register() {
                 regs.push(addr);
             }
             if val.is_register() {
                 regs.push(val);
+            }
+        }
+        R2ILOp::StoreConditional { addr, val, .. } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if val.is_register() {
+                regs.push(val);
+            }
+        }
+        R2ILOp::AtomicCAS {
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if expected.is_register() {
+                regs.push(expected);
+            }
+            if replacement.is_register() {
+                regs.push(replacement);
+            }
+        }
+        R2ILOp::LoadGuarded { addr, guard, .. } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if guard.is_register() {
+                regs.push(guard);
+            }
+        }
+        R2ILOp::StoreGuarded {
+            addr, val, guard, ..
+        } => {
+            if addr.is_register() {
+                regs.push(addr);
+            }
+            if val.is_register() {
+                regs.push(val);
+            }
+            if guard.is_register() {
+                regs.push(guard);
             }
         }
 
@@ -1040,7 +1095,11 @@ fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
         }
 
         // Ops with no register reads
-        R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint | R2ILOp::CpuId { .. } => {}
+        R2ILOp::Fence { .. }
+        | R2ILOp::Nop
+        | R2ILOp::Unimplemented
+        | R2ILOp::Breakpoint
+        | R2ILOp::CpuId { .. } => {}
     }
 
     regs
@@ -1054,6 +1113,9 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
         // All ops with dst field write to dst
         R2ILOp::Copy { dst, .. }
         | R2ILOp::Load { dst, .. }
+        | R2ILOp::LoadLinked { dst, .. }
+        | R2ILOp::AtomicCAS { dst, .. }
+        | R2ILOp::LoadGuarded { dst, .. }
         | R2ILOp::IntAdd { dst, .. }
         | R2ILOp::IntSub { dst, .. }
         | R2ILOp::IntMult { dst, .. }
@@ -1113,6 +1175,14 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
 
         // Store doesn't have a register dst
         R2ILOp::Store { .. } => {}
+        R2ILOp::StoreConditional { result, .. } => {
+            if let Some(out) = result
+                && out.is_register()
+            {
+                regs.push(out);
+            }
+        }
+        R2ILOp::StoreGuarded { .. } => {}
 
         // Control flow ops don't write registers directly
         R2ILOp::Branch { .. }
@@ -1149,7 +1219,7 @@ fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
         }
 
         // Ops with no register writes
-        R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint => {}
+        R2ILOp::Fence { .. } | R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint => {}
     }
 
     regs
@@ -1210,13 +1280,78 @@ pub extern "C" fn r2il_block_mem_access(
     let defs = build_stack_defs(&blk.ops);
     let mut accesses = Vec::new();
 
-    for op in &blk.ops {
+    let apply_additive_fields = |access: &mut serde_json::Value,
+                                 op_index: usize,
+                                 space_id: Option<r2il::SpaceId>,
+                                 ordering: Option<r2il::MemoryOrdering>,
+                                 atomic_kind: Option<r2il::AtomicKind>,
+                                 guarded: bool| {
+        if guarded {
+            access["guarded"] = serde_json::Value::Bool(true);
+        }
+        if let Some(ord) = ordering.or_else(|| {
+            blk.op_metadata
+                .get(&op_index)
+                .and_then(|m| m.memory_ordering)
+        }) {
+            access["ordering"] = serde_json::to_value(ord).unwrap_or(serde_json::Value::Null);
+        }
+        if let Some(kind) =
+            atomic_kind.or_else(|| blk.op_metadata.get(&op_index).and_then(|m| m.atomic_kind))
+        {
+            access["atomic_kind"] = serde_json::to_value(kind).unwrap_or(serde_json::Value::Null);
+        }
+        if let Some(meta) = blk.op_metadata.get(&op_index) {
+            if let Some(perms) = meta.permissions {
+                access["permissions"] =
+                    serde_json::to_value(perms).unwrap_or(serde_json::Value::Null);
+            }
+            if let Some(range) = meta.valid_range {
+                access["range"] = serde_json::to_value(range).unwrap_or(serde_json::Value::Null);
+            }
+            if let Some(bank_id) = &meta.bank_id {
+                access["bank_id"] = serde_json::Value::String(bank_id.clone());
+            }
+            if let Some(segment_id) = &meta.segment_id {
+                access["segment_id"] = serde_json::Value::String(segment_id.clone());
+            }
+        }
+
+        if let Some(space_id) = space_id
+            && let Some(arch) = ctx_ref.arch.as_ref()
+            && let Some(space) = arch.spaces.iter().find(|s| s.id == space_id)
+        {
+            if let Some(memory_class) = space.memory_class {
+                access["memory_class"] =
+                    serde_json::to_value(memory_class).unwrap_or(serde_json::Value::Null);
+            }
+            if access.get("permissions").is_none()
+                && let Some(perms) = space.permissions
+            {
+                access["permissions"] =
+                    serde_json::to_value(perms).unwrap_or(serde_json::Value::Null);
+            }
+            if access.get("range").is_none()
+                && let Some(range) = space.valid_ranges.first()
+            {
+                access["range"] = serde_json::to_value(range).unwrap_or(serde_json::Value::Null);
+            }
+            if access.get("bank_id").is_none()
+                && let Some(bank_id) = &space.bank_id
+            {
+                access["bank_id"] = serde_json::Value::String(bank_id.clone());
+            }
+            if access.get("segment_id").is_none()
+                && let Some(segment_id) = &space.segment_id
+            {
+                access["segment_id"] = serde_json::Value::String(segment_id.clone());
+            }
+        }
+    };
+
+    for (op_index, op) in blk.ops.iter().enumerate() {
         match op {
-            R2ILOp::Load {
-                dst,
-                space: _,
-                addr,
-            } => {
+            R2ILOp::Load { dst, space, addr } => {
                 let mut access = serde_json::json!({
                     "type": "load",
                     "size": dst.size,
@@ -1234,13 +1369,36 @@ pub extern "C" fn r2il_block_mem_access(
                     access["stack_base"] = serde_json::Value::String(base);
                 }
 
+                apply_additive_fields(&mut access, op_index, Some(*space), None, None, false);
                 accesses.push(access);
             }
-            R2ILOp::Store {
-                space: _,
+            R2ILOp::LoadLinked {
+                dst,
+                space,
                 addr,
-                val,
+                ordering,
             } => {
+                let mut access = serde_json::json!({
+                    "type": "load_linked",
+                    "size": dst.size,
+                    "write": false,
+                    "addr": disasm.format_varnode(addr),
+                });
+
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    Some(r2il::AtomicKind::LoadLinked),
+                    false,
+                );
+                accesses.push(access);
+            }
+            R2ILOp::Store { space, addr, val } => {
                 let mut access = serde_json::json!({
                     "type": "store",
                     "size": val.size,
@@ -1261,6 +1419,138 @@ pub extern "C" fn r2il_block_mem_access(
                     access["stack_base"] = serde_json::Value::String(base);
                 }
 
+                apply_additive_fields(&mut access, op_index, Some(*space), None, None, false);
+                accesses.push(access);
+            }
+            R2ILOp::StoreConditional {
+                result,
+                space,
+                addr,
+                val,
+                ordering,
+            } => {
+                let mut access = serde_json::json!({
+                    "type": "store_conditional",
+                    "size": val.size,
+                    "write": true,
+                    "addr": disasm.format_varnode(addr),
+                });
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(val, disasm) {
+                    access["value"] = value;
+                }
+                if let Some(dst) = result
+                    && let Some(result_json) = varnode_to_json(dst, disasm)
+                {
+                    access["result"] = result_json;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    Some(r2il::AtomicKind::StoreConditional),
+                    false,
+                );
+                accesses.push(access);
+            }
+            R2ILOp::AtomicCAS {
+                dst,
+                space,
+                addr,
+                expected,
+                replacement,
+                ordering,
+            } => {
+                let mut access = serde_json::json!({
+                    "type": "atomic_cas",
+                    "size": dst.size,
+                    "write": true,
+                    "addr": disasm.format_varnode(addr),
+                });
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(expected, disasm) {
+                    access["expected"] = value;
+                }
+                if let Some(value) = varnode_to_json(replacement, disasm) {
+                    access["replacement"] = value;
+                }
+                if let Some(value) = varnode_to_json(dst, disasm) {
+                    access["result"] = value;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    Some(r2il::AtomicKind::CompareExchange),
+                    false,
+                );
+                accesses.push(access);
+            }
+            R2ILOp::LoadGuarded {
+                dst,
+                space,
+                addr,
+                guard,
+                ordering,
+            } => {
+                let mut access = serde_json::json!({
+                    "type": "load_guarded",
+                    "size": dst.size,
+                    "write": false,
+                    "addr": disasm.format_varnode(addr),
+                });
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(guard, disasm) {
+                    access["guard"] = value;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    None,
+                    true,
+                );
+                accesses.push(access);
+            }
+            R2ILOp::StoreGuarded {
+                space,
+                addr,
+                val,
+                guard,
+                ordering,
+            } => {
+                let mut access = serde_json::json!({
+                    "type": "store_guarded",
+                    "size": val.size,
+                    "write": true,
+                    "addr": disasm.format_varnode(addr),
+                });
+                if let Some(detail) = varnode_to_json(addr, disasm) {
+                    access["addr_detail"] = detail;
+                }
+                if let Some(value) = varnode_to_json(val, disasm) {
+                    access["value"] = value;
+                }
+                if let Some(value) = varnode_to_json(guard, disasm) {
+                    access["guard"] = value;
+                }
+                apply_additive_fields(
+                    &mut access,
+                    op_index,
+                    Some(*space),
+                    Some(*ordering),
+                    None,
+                    true,
+                );
                 accesses.push(access);
             }
             _ => {}
@@ -1600,12 +1890,81 @@ fn op_all_varnodes(op: &R2ILOp) -> Vec<&Varnode> {
                 vns.push(addr);
             }
         }
+        R2ILOp::LoadLinked { dst, addr, .. } => {
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+        }
         R2ILOp::Store { addr, val, .. } => {
             if !addr.is_register() {
                 vns.push(addr);
             }
             if !val.is_register() {
                 vns.push(val);
+            }
+        }
+        R2ILOp::StoreConditional {
+            result, addr, val, ..
+        } => {
+            if let Some(out) = result
+                && !out.is_register()
+            {
+                vns.push(out);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !val.is_register() {
+                vns.push(val);
+            }
+        }
+        R2ILOp::AtomicCAS {
+            dst,
+            addr,
+            expected,
+            replacement,
+            ..
+        } => {
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !expected.is_register() {
+                vns.push(expected);
+            }
+            if !replacement.is_register() {
+                vns.push(replacement);
+            }
+        }
+        R2ILOp::LoadGuarded {
+            dst, addr, guard, ..
+        } => {
+            if !dst.is_register() {
+                vns.push(dst);
+            }
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !guard.is_register() {
+                vns.push(guard);
+            }
+        }
+        R2ILOp::StoreGuarded {
+            addr, val, guard, ..
+        } => {
+            if !addr.is_register() {
+                vns.push(addr);
+            }
+            if !val.is_register() {
+                vns.push(val);
+            }
+            if !guard.is_register() {
+                vns.push(guard);
             }
         }
         // For binary ops, get non-register operands
@@ -1653,6 +2012,12 @@ fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
         Copy { .. } => "Copy",
         Load { .. } => "Load",
         Store { .. } => "Store",
+        Fence { .. } => "Fence",
+        LoadLinked { .. } => "LoadLinked",
+        StoreConditional { .. } => "StoreConditional",
+        AtomicCAS { .. } => "AtomicCAS",
+        LoadGuarded { .. } => "LoadGuarded",
+        StoreGuarded { .. } => "StoreGuarded",
         IntAdd { .. } => "IntAdd",
         IntSub { .. } => "IntSub",
         IntMult { .. } => "IntMult",

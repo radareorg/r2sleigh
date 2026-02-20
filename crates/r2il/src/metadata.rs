@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Endianness;
+use crate::{AtomicKind, Endianness, MemoryOrdering, MemoryPermissions, MemoryRange};
 
 /// Storage classification hint for a varnode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -86,6 +86,14 @@ pub struct VarnodeMetadata {
     pub float_encoding: Option<FloatEncodingHint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endianness: Option<Endianness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<MemoryPermissions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_range: Option<MemoryRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bank_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<String>,
 }
 
 /// Optional metadata hints attached to an operation.
@@ -95,6 +103,18 @@ pub struct OpMetadata {
     pub memory_class: Option<MemoryClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endianness: Option<Endianness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_ordering: Option<MemoryOrdering>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<MemoryPermissions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_range: Option<MemoryRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bank_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub atomic_kind: Option<AtomicKind>,
 }
 
 #[cfg(test)]

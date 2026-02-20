@@ -486,6 +486,12 @@ mod tests {
             Some(OpMetadata {
                 memory_class: Some(MemoryClass::Stack),
                 endianness: None,
+                memory_ordering: None,
+                permissions: None,
+                valid_range: None,
+                bank_id: None,
+                segment_id: None,
+                atomic_kind: None,
             }),
         );
         let input = InstructionExportInput {

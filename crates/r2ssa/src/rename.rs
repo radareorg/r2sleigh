@@ -319,6 +319,110 @@ fn rename_op(
                 space: format!("{:?}", space),
             }
         }
+        Fence { ordering } => SSAOp::Fence {
+            ordering: *ordering,
+        },
+        LoadLinked {
+            dst,
+            addr,
+            space,
+            ordering,
+        } => {
+            let addr_ssa = read_varnode(addr, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
+            let dst_ssa = ctx.write_var(&dst_name);
+            defined_vars.push(dst_name);
+            SSAOp::LoadLinked {
+                dst: dst_ssa,
+                addr: addr_ssa,
+                space: format!("{:?}", space),
+                ordering: *ordering,
+            }
+        }
+        StoreConditional {
+            result,
+            addr,
+            val,
+            space,
+            ordering,
+        } => {
+            let addr_ssa = read_varnode(addr, ctx, reg_names);
+            let val_ssa = read_varnode(val, ctx, reg_names);
+            let result_ssa = result.as_ref().map(|r| {
+                let name = varnode_to_name(r, reg_names);
+                let ssa = ctx.write_var(&name);
+                defined_vars.push(name);
+                ssa
+            });
+            SSAOp::StoreConditional {
+                result: result_ssa,
+                addr: addr_ssa,
+                val: val_ssa,
+                space: format!("{:?}", space),
+                ordering: *ordering,
+            }
+        }
+        AtomicCAS {
+            dst,
+            addr,
+            expected,
+            replacement,
+            space,
+            ordering,
+        } => {
+            let addr_ssa = read_varnode(addr, ctx, reg_names);
+            let expected_ssa = read_varnode(expected, ctx, reg_names);
+            let replacement_ssa = read_varnode(replacement, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
+            let dst_ssa = ctx.write_var(&dst_name);
+            defined_vars.push(dst_name);
+            SSAOp::AtomicCAS {
+                dst: dst_ssa,
+                space: format!("{:?}", space),
+                addr: addr_ssa,
+                expected: expected_ssa,
+                replacement: replacement_ssa,
+                ordering: *ordering,
+            }
+        }
+        LoadGuarded {
+            dst,
+            addr,
+            guard,
+            space,
+            ordering,
+        } => {
+            let addr_ssa = read_varnode(addr, ctx, reg_names);
+            let guard_ssa = read_varnode(guard, ctx, reg_names);
+            let dst_name = varnode_to_name(dst, reg_names);
+            let dst_ssa = ctx.write_var(&dst_name);
+            defined_vars.push(dst_name);
+            SSAOp::LoadGuarded {
+                dst: dst_ssa,
+                addr: addr_ssa,
+                guard: guard_ssa,
+                space: format!("{:?}", space),
+                ordering: *ordering,
+            }
+        }
+        StoreGuarded {
+            addr,
+            val,
+            guard,
+            space,
+            ordering,
+        } => {
+            let addr_ssa = read_varnode(addr, ctx, reg_names);
+            let val_ssa = read_varnode(val, ctx, reg_names);
+            let guard_ssa = read_varnode(guard, ctx, reg_names);
+            SSAOp::StoreGuarded {
+                space: format!("{:?}", space),
+                addr: addr_ssa,
+                val: val_ssa,
+                guard: guard_ssa,
+                ordering: *ordering,
+            }
+        }
 
         Branch { target } => {
             let target_ssa = read_varnode(target, ctx, reg_names);
