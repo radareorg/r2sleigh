@@ -9,6 +9,8 @@ use e2e::{
 };
 use rstest::rstest;
 use serde_json::Value;
+use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
 // ============================================================================
@@ -2504,6 +2506,132 @@ mod decompilation {
         assert!(
             !normalized.contains("rbp_1 + -0x40"),
             "Recovered variable sites should not expose raw rbp stack offsets"
+        );
+    }
+}
+
+// ============================================================================
+// PR4 CLI Run + Export Regression Tests
+// ============================================================================
+
+mod cli_run {
+    use super::*;
+
+    fn workspace_manifest_path() -> &'static str {
+        if Path::new("crates/r2sleigh-cli").exists() {
+            "Cargo.toml"
+        } else if Path::new("../../crates/r2sleigh-cli").exists() {
+            "../../Cargo.toml"
+        } else {
+            panic!("unable to locate workspace Cargo.toml for CLI tests");
+        }
+    }
+
+    fn run_cli(args: &[&str]) -> (String, String, bool) {
+        let output = Command::new("cargo")
+            .args([
+                "run",
+                "-q",
+                "--manifest-path",
+                workspace_manifest_path(),
+                "-p",
+                "r2sleigh-cli",
+                "--features",
+                "x86",
+                "--",
+            ])
+            .args(args)
+            .output()
+            .expect("execute r2sleigh cli");
+        (
+            String::from_utf8_lossy(&output.stdout).to_string(),
+            String::from_utf8_lossy(&output.stderr).to_string(),
+            output.status.success(),
+        )
+    }
+
+    #[test]
+    fn cli_run_lift_json_outputs_valid_json() {
+        let (stdout, stderr, ok) = run_cli(&[
+            "run",
+            "--arch",
+            "x86-64",
+            "--bytes",
+            "31c00000000000000000000000000000",
+            "--action",
+            "lift",
+            "--format",
+            "json",
+        ]);
+        assert!(ok, "cli run should succeed: {}", stderr);
+        let parsed: Value = serde_json::from_str(stdout.trim()).expect("valid json");
+        assert!(
+            parsed
+                .get("ops")
+                .and_then(Value::as_array)
+                .is_some_and(|ops| !ops.is_empty()),
+            "lift json output should contain non-empty ops"
+        );
+    }
+
+    #[test]
+    fn cli_run_lift_r2cmd_contains_sidecar_and_ae() {
+        let (stdout, stderr, ok) = run_cli(&[
+            "run",
+            "--arch",
+            "x86-64",
+            "--bytes",
+            "31c00000000000000000000000000000",
+            "--action",
+            "lift",
+            "--format",
+            "r2cmd",
+        ]);
+        assert!(ok, "cli run should succeed: {}", stderr);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(
+            lines.first().is_some_and(|line| line.starts_with("# ")),
+            "r2cmd output must start with sidecar JSON comment"
+        );
+        assert!(
+            lines.get(1).is_some_and(|line| line.starts_with("ae ")),
+            "r2cmd output must include ae replay line"
+        );
+    }
+
+    #[test]
+    fn cli_run_dec_c_like_outputs_c_like() {
+        let (stdout, stderr, ok) = run_cli(&[
+            "run",
+            "--arch",
+            "x86-64",
+            "--bytes",
+            "31c00000000000000000000000000000",
+            "--action",
+            "dec",
+            "--format",
+            "c_like",
+        ]);
+        assert!(ok, "cli run should succeed: {}", stderr);
+        assert!(
+            !stdout.trim().is_empty(),
+            "dec c_like output should be non-empty"
+        );
+    }
+
+    #[test]
+    fn plugin_sla_json_still_valid_after_refactor() {
+        if !Path::new("target/release/libr2sleigh_plugin.so").exists() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+        setup();
+        let result = r2_at_func(vuln_test_binary(), "main", "a:sla.json");
+        result.assert_ok();
+        let parsed: Value = serde_json::from_str(result.stdout.trim()).expect("valid JSON");
+        assert!(
+            parsed.is_array(),
+            "a:sla.json should stay valid JSON array output"
         );
     }
 }

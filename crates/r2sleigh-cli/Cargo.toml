@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 r2il = { path = "../r2il" }
 r2sleigh-lift = { path = "../r2sleigh-lift" }
+r2sleigh-export = { path = "../r2sleigh-export" }
 clap.workspace = true
 thiserror.workspace = true
 hex = "0.4"

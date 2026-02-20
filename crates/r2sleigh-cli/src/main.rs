@@ -6,17 +6,17 @@
 //!   r2sleigh test-arch <arch>
 //!   r2sleigh disasm --arch x86-64 --bytes "554889e5"
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use r2il::{serialize, validate_archspec};
 use r2sleigh_lift::{Lifter, create_arm_spec, create_x86_64_spec};
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "sleigh-config")]
-use r2il::validate_block_full;
-#[cfg(feature = "sleigh-config")]
-use r2sleigh_lift::{
-    Disassembler, build_arch_spec, format_op, op_to_esil_named, userop_map_for_arch,
+use r2sleigh_export::{
+    ExportFormat, InstructionAction, InstructionExportInput, export_instruction,
 };
+#[cfg(feature = "sleigh-config")]
+use r2sleigh_lift::{Disassembler, build_arch_spec, userop_map_for_arch};
 
 /// r2sleigh - Sleigh to r2il compiler for radare2
 #[derive(Parser)]
@@ -85,10 +85,80 @@ enum Commands {
         #[arg(long, default_value = "0x1000")]
         addr: String,
 
-        /// Output format: text, json, or esil
+        /// Output format: text, json, esil, or r2cmd
         #[arg(short, long, default_value = "text")]
         format: String,
     },
+
+    /// Run a one-liner analysis action on one lifted instruction
+    #[cfg(feature = "sleigh-config")]
+    Run {
+        /// Architecture (e.g., x86-64, ARM)
+        #[arg(short, long)]
+        arch: String,
+
+        /// Hex-encoded instruction bytes
+        #[arg(short, long)]
+        bytes: String,
+
+        /// Base address for disassembly
+        #[arg(long, default_value = "0x1000")]
+        addr: String,
+
+        /// Action: lift, ssa, defuse, dec
+        #[arg(long, value_enum)]
+        action: RunActionArg,
+
+        /// Output format for the selected action
+        #[arg(short, long, value_enum)]
+        format: RunFormatArg,
+    },
+}
+
+#[cfg(feature = "sleigh-config")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RunActionArg {
+    Lift,
+    Ssa,
+    Defuse,
+    Dec,
+}
+
+#[cfg(feature = "sleigh-config")]
+impl From<RunActionArg> for InstructionAction {
+    fn from(value: RunActionArg) -> Self {
+        match value {
+            RunActionArg::Lift => InstructionAction::Lift,
+            RunActionArg::Ssa => InstructionAction::Ssa,
+            RunActionArg::Defuse => InstructionAction::Defuse,
+            RunActionArg::Dec => InstructionAction::Dec,
+        }
+    }
+}
+
+#[cfg(feature = "sleigh-config")]
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RunFormatArg {
+    Json,
+    Text,
+    Esil,
+    #[value(name = "c_like")]
+    CLike,
+    #[value(name = "r2cmd")]
+    R2Cmd,
+}
+
+#[cfg(feature = "sleigh-config")]
+impl From<RunFormatArg> for ExportFormat {
+    fn from(value: RunFormatArg) -> Self {
+        match value {
+            RunFormatArg::Json => ExportFormat::Json,
+            RunFormatArg::Text => ExportFormat::Text,
+            RunFormatArg::Esil => ExportFormat::Esil,
+            RunFormatArg::CLike => ExportFormat::CLike,
+            RunFormatArg::R2Cmd => ExportFormat::R2Cmd,
+        }
+    }
 }
 
 fn main() {
@@ -118,6 +188,15 @@ fn main() {
             addr,
             format,
         } => cmd_disasm(&arch, &bytes, &addr, &format),
+
+        #[cfg(feature = "sleigh-config")]
+        Commands::Run {
+            arch,
+            bytes,
+            addr,
+            action,
+            format,
+        } => cmd_run(&arch, &bytes, &addr, action.into(), format.into()),
     };
 
     if let Err(e) = result {
@@ -300,106 +379,65 @@ fn cmd_version() -> Result<(), String> {
 }
 
 #[cfg(feature = "sleigh-config")]
-fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler) {
-    use serde_json::Value;
-
-    match value {
-        Value::Object(map) => {
-            let is_varnode =
-                map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
-            if is_varnode {
-                let space = map.get("space").and_then(Value::as_str);
-                if let Some(space_str) = space
-                    && space_str.eq_ignore_ascii_case("register")
-                {
-                    let offset = map.get("offset").and_then(Value::as_u64);
-                    let size = map.get("size").and_then(Value::as_u64);
-                    if let (Some(offset), Some(size)) = (offset, size) {
-                        let vn = r2il::Varnode {
-                            space: r2il::SpaceId::Register,
-                            offset,
-                            size: size as u32,
-                            meta: None,
-                        };
-                        if let Some(name) = disasm.register_name(&vn) {
-                            map.insert("name".to_string(), Value::String(name));
-                        }
-                    }
-                }
-            }
-
-            for value in map.values_mut() {
-                annotate_register_names(value, disasm);
-            }
-        }
-        Value::Array(items) => {
-            for item in items.iter_mut() {
-                annotate_register_names(item, disasm);
-            }
-        }
-        _ => {}
+fn parse_addr(addr_str: &str) -> Result<u64, String> {
+    if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
+        u64::from_str_radix(&addr_str[2..], 16).map_err(|e| format!("Invalid address: {}", e))
+    } else {
+        addr_str
+            .parse::<u64>()
+            .map_err(|e| format!("Invalid address: {}", e))
     }
 }
 
 #[cfg(feature = "sleigh-config")]
-fn annotate_userop_names(value: &mut serde_json::Value, disasm: &Disassembler) {
-    use serde_json::Value;
-
-    match value {
-        Value::Object(map) => {
-            if let Some(callother) = map.get_mut("CallOther")
-                && let Value::Object(call_map) = callother
-            {
-                let userop = call_map.get("userop").and_then(Value::as_u64);
-                if let Some(userop) = userop
-                    && let Some(name) = disasm.userop_name(userop as u32)
-                {
-                    call_map.insert("userop_name".to_string(), Value::String(name.to_string()));
-                }
-            }
-
-            for value in map.values_mut() {
-                annotate_userop_names(value, disasm);
-            }
-        }
-        Value::Array(items) => {
-            for item in items.iter_mut() {
-                annotate_userop_names(item, disasm);
-            }
-        }
-        _ => {}
+fn parse_hex_bytes(bytes_hex: &str) -> Result<Vec<u8>, String> {
+    let bytes = hex::decode(bytes_hex.replace(" ", "").replace("0x", ""))
+        .map_err(|e| format!("Invalid hex bytes: {}", e))?;
+    if bytes.is_empty() {
+        return Err("No bytes provided".to_string());
     }
+    Ok(bytes)
+}
+
+#[cfg(feature = "sleigh-config")]
+fn make_instruction_input<'a>(
+    disasm: &'a Disassembler,
+    arch_spec: &'a r2il::ArchSpec,
+    block: &'a r2il::R2ILBlock,
+    addr: u64,
+    mnemonic: &'a str,
+    size: usize,
+) -> InstructionExportInput<'a> {
+    InstructionExportInput {
+        disasm,
+        arch: arch_spec,
+        block,
+        addr,
+        mnemonic,
+        native_size: size,
+    }
+}
+
+#[cfg(feature = "sleigh-config")]
+fn export_single_instruction(
+    input: &InstructionExportInput<'_>,
+    action: InstructionAction,
+    format: ExportFormat,
+) -> Result<String, String> {
+    export_instruction(input, action, format).map_err(|e| e.to_string())
 }
 
 #[cfg(feature = "sleigh-config")]
 fn build_disasm_json(
     disasm: &Disassembler,
+    arch_spec: &r2il::ArchSpec,
     block: &r2il::R2ILBlock,
     mnemonic: &str,
     size: usize,
 ) -> Result<serde_json::Value, String> {
-    let mut ops = Vec::new();
-    for op in &block.ops {
-        let mut value =
-            serde_json::to_value(op).map_err(|e| format!("Failed to serialize op: {}", e))?;
-        annotate_register_names(&mut value, disasm);
-        annotate_userop_names(&mut value, disasm);
-        ops.push(value);
-    }
-
-    let mut out = serde_json::json!({
-        "addr": format!("0x{:x}", block.addr),
-        "size": size,
-        "mnemonic": mnemonic,
-        "ops": ops,
-    });
-    if !block.op_metadata.is_empty() {
-        let op_meta = serde_json::to_value(&block.op_metadata)
-            .map_err(|e| format!("Failed to serialize op metadata: {}", e))?;
-        out["op_metadata"] = op_meta;
-    }
-
-    Ok(out)
+    let input = make_instruction_input(disasm, arch_spec, block, block.addr, mnemonic, size);
+    let output = export_single_instruction(&input, InstructionAction::Lift, ExportFormat::Json)?;
+    serde_json::from_str(&output).map_err(|e| format!("Failed to parse exporter JSON: {}", e))
 }
 
 #[cfg(feature = "sleigh-config")]
@@ -433,19 +471,21 @@ fn render_esil_lines(
             Ok(result) => result,
             Err(_) => break,
         };
-        validate_lifted_block(&block, arch_spec, instr_addr)?;
-
         let instr_size = block.size as usize;
         if instr_size == 0 {
             break;
         }
 
+        let input =
+            make_instruction_input(disasm, arch_spec, &block, instr_addr, &mnemonic, instr_size);
+        let exported =
+            export_single_instruction(&input, InstructionAction::Lift, ExportFormat::Esil)?;
         lines.push(format!(
             "# 0x{:x}: {} (size={})",
             instr_addr, mnemonic, instr_size
         ));
-        for op in &block.ops {
-            lines.push(op_to_esil_named(disasm, op));
+        if !exported.is_empty() {
+            lines.extend(exported.lines().map(ToString::to_string));
         }
 
         offset += instr_size;
@@ -455,33 +495,9 @@ fn render_esil_lines(
 }
 
 #[cfg(feature = "sleigh-config")]
-fn validate_lifted_block(
-    block: &r2il::R2ILBlock,
-    arch_spec: &r2il::ArchSpec,
-    addr: u64,
-) -> Result<(), String> {
-    validate_block_full(block, arch_spec)
-        .map_err(|e| format!("Invalid lifted block at 0x{addr:x}: {}", e))
-}
-
-#[cfg(feature = "sleigh-config")]
 fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Result<(), String> {
-    // Parse the address
-    let addr = if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
-        u64::from_str_radix(&addr_str[2..], 16).map_err(|e| format!("Invalid address: {}", e))?
-    } else {
-        addr_str
-            .parse::<u64>()
-            .map_err(|e| format!("Invalid address: {}", e))?
-    };
-
-    // Parse hex bytes
-    let bytes = hex::decode(bytes_hex.replace(" ", "").replace("0x", ""))
-        .map_err(|e| format!("Invalid hex bytes: {}", e))?;
-
-    if bytes.is_empty() {
-        return Err("No bytes provided".to_string());
-    }
+    let addr = parse_addr(addr_str)?;
+    let bytes = parse_hex_bytes(bytes_hex)?;
 
     // Get the disassembler for the requested architecture
     let (disasm, arch_spec) = get_disassembler_with_spec(arch)?;
@@ -490,7 +506,6 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
     let block = disasm
         .lift(&bytes, addr)
         .map_err(|e| format!("Lift failed: {}", e))?;
-    validate_lifted_block(&block, &arch_spec, addr)?;
 
     // Also get the native disassembly for display
     let (mnemonic, size) = disasm
@@ -499,7 +514,7 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
 
     match format {
         "json" => {
-            let json = build_disasm_json(&disasm, &block, &mnemonic, size)?;
+            let json = build_disasm_json(&disasm, &arch_spec, &block, &mnemonic, size)?;
             let output = serde_json::to_string_pretty(&json)
                 .map_err(|e| format!("Failed to render JSON: {}", e))?;
             println!("{}", output);
@@ -510,17 +525,56 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
                 println!("{}", line);
             }
         }
+        "r2cmd" => {
+            let input = make_instruction_input(&disasm, &arch_spec, &block, addr, &mnemonic, size);
+            let output =
+                export_single_instruction(&input, InstructionAction::Lift, ExportFormat::R2Cmd)?;
+            println!("{}", output);
+        }
         _ => {
-            // Text format (default)
-            println!("0x{:x}  {}  (size={})", addr, mnemonic, size);
-            println!("P-code ({} ops):", block.ops.len());
-            for (i, op) in block.ops.iter().enumerate() {
-                println!("  {}: {}", i, format_op(&disasm, op));
-            }
+            let input = make_instruction_input(&disasm, &arch_spec, &block, addr, &mnemonic, size);
+            let output =
+                export_single_instruction(&input, InstructionAction::Lift, ExportFormat::Text)?;
+            println!("{}", output);
         }
     }
 
     Ok(())
+}
+
+#[cfg(feature = "sleigh-config")]
+fn cmd_run(
+    arch: &str,
+    bytes_hex: &str,
+    addr_str: &str,
+    action: InstructionAction,
+    format: ExportFormat,
+) -> Result<(), String> {
+    let output = run_action_output(arch, bytes_hex, addr_str, action, format)?;
+    println!("{}", output);
+    Ok(())
+}
+
+#[cfg(feature = "sleigh-config")]
+fn run_action_output(
+    arch: &str,
+    bytes_hex: &str,
+    addr_str: &str,
+    action: InstructionAction,
+    format: ExportFormat,
+) -> Result<String, String> {
+    let addr = parse_addr(addr_str)?;
+    let bytes = parse_hex_bytes(bytes_hex)?;
+    let (disasm, arch_spec) = get_disassembler_with_spec(arch)?;
+    let block = disasm
+        .lift(&bytes, addr)
+        .map_err(|e| format!("Lift failed: {}", e))?;
+    let (mnemonic, size) = disasm
+        .disasm_native(&bytes, addr)
+        .map_err(|e| format!("Native disasm failed: {}", e))?;
+
+    let input = make_instruction_input(&disasm, &arch_spec, &block, addr, &mnemonic, size);
+    export_single_instruction(&input, action, format)
 }
 
 #[cfg(feature = "sleigh-config")]
@@ -638,11 +692,11 @@ mod tests {
 
     #[test]
     fn disasm_json_includes_named_registers() {
-        let disasm = get_disassembler("x86-64").expect("disassembler");
+        let (disasm, arch_spec) = get_disassembler_with_spec("x86-64").expect("disassembler");
         let bytes = hex::decode("4889e500000000000000000000000000").expect("bytes");
         let block = disasm.lift(&bytes, 0x1000).expect("lift");
         let (mnemonic, size) = disasm.disasm_native(&bytes, 0x1000).expect("disasm");
-        let json = build_disasm_json(&disasm, &block, &mnemonic, size).expect("json");
+        let json = build_disasm_json(&disasm, &arch_spec, &block, &mnemonic, size).expect("json");
         let ops = json
             .get("ops")
             .and_then(serde_json::Value::as_array)
@@ -669,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_lifted_block_reports_semantic_failure() {
+    fn exporter_path_reports_semantic_failure() {
         let arch = r2il::ArchSpec::new("test");
         let mut block = r2il::R2ILBlock::new(0x1000, 1);
         block.push(r2il::R2ILOp::Copy {
@@ -677,10 +731,12 @@ mod tests {
             src: r2il::Varnode::register(8, 4),
         });
 
-        let err = validate_lifted_block(&block, &arch, 0x1000).expect_err("must fail");
+        let (disasm, _) = get_disassembler_with_spec("x86-64").expect("disassembler");
+        let input = make_instruction_input(&disasm, &arch, &block, 0x1000, "copy", 1);
+        let err = export_single_instruction(&input, InstructionAction::Lift, ExportFormat::Json)
+            .expect_err("must fail");
         assert!(
-            err.contains("Invalid lifted block at 0x1000")
-                && err.contains("op.copy.width_mismatch"),
+            err.contains("validation failed") && err.contains("op.copy.width_mismatch"),
             "expected semantic validation failure, got: {}",
             err
         );
@@ -688,7 +744,7 @@ mod tests {
 
     #[test]
     fn disasm_json_includes_op_metadata_when_present() {
-        let disasm = get_disassembler("x86-64").expect("disassembler");
+        let (disasm, arch_spec) = get_disassembler_with_spec("x86-64").expect("disassembler");
         let mut block = r2il::R2ILBlock::new(0x1000, 1);
         block.push_with_metadata(
             r2il::R2ILOp::Copy {
@@ -700,7 +756,7 @@ mod tests {
             }),
         );
 
-        let json = build_disasm_json(&disasm, &block, "mov", 1).expect("json");
+        let json = build_disasm_json(&disasm, &arch_spec, &block, "mov", 1).expect("json");
         let op_meta = json
             .get("op_metadata")
             .and_then(serde_json::Value::as_object)
@@ -712,6 +768,120 @@ mod tests {
         assert_eq!(
             idx0.get("memory_class").and_then(serde_json::Value::as_str),
             Some("stack")
+        );
+    }
+
+    #[test]
+    fn run_lift_json_success() {
+        let out = run_action_output(
+            "x86-64",
+            "31c00000000000000000000000000000",
+            "0x1000",
+            InstructionAction::Lift,
+            ExportFormat::Json,
+        )
+        .expect("run output");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(
+            parsed
+                .get("ops")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ops| !ops.is_empty()),
+            "lift json must contain ops"
+        );
+    }
+
+    #[test]
+    fn run_lift_r2cmd_success() {
+        let out = run_action_output(
+            "x86-64",
+            "31c00000000000000000000000000000",
+            "0x1000",
+            InstructionAction::Lift,
+            ExportFormat::R2Cmd,
+        )
+        .expect("run output");
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines.first().is_some_and(|l| l.starts_with("# ")),
+            "r2cmd must start with sidecar line"
+        );
+        assert!(
+            lines.get(1).is_some_and(|l| l.starts_with("ae ")),
+            "r2cmd must include ae replay line"
+        );
+    }
+
+    #[test]
+    fn run_ssa_text_success() {
+        let out = run_action_output(
+            "x86-64",
+            "31c00000000000000000000000000000",
+            "0x1000",
+            InstructionAction::Ssa,
+            ExportFormat::Text,
+        )
+        .expect("run output");
+        assert!(
+            out.contains("dst="),
+            "ssa text output should contain destination annotations"
+        );
+    }
+
+    #[test]
+    fn run_defuse_json_success() {
+        let out = run_action_output(
+            "x86-64",
+            "31c00000000000000000000000000000",
+            "0x1000",
+            InstructionAction::Defuse,
+            ExportFormat::Json,
+        )
+        .expect("run output");
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert!(
+            parsed.get("inputs").is_some(),
+            "defuse JSON should include inputs"
+        );
+        assert!(
+            parsed.get("outputs").is_some(),
+            "defuse JSON should include outputs"
+        );
+        assert!(
+            parsed.get("live").is_some(),
+            "defuse JSON should include live"
+        );
+    }
+
+    #[test]
+    fn run_dec_c_like_success() {
+        let out = run_action_output(
+            "x86-64",
+            "31c00000000000000000000000000000",
+            "0x1000",
+            InstructionAction::Dec,
+            ExportFormat::CLike,
+        )
+        .expect("run output");
+        assert!(!out.trim().is_empty(), "c_like output should be non-empty");
+    }
+
+    #[test]
+    fn run_invalid_combo_errors_cleanly() {
+        let err = run_action_output(
+            "x86-64",
+            "31c00000000000000000000000000000",
+            "0x1000",
+            InstructionAction::Ssa,
+            ExportFormat::Esil,
+        )
+        .expect_err("unsupported combo should fail");
+        assert!(
+            err.contains("unsupported action/format combination")
+                && err.contains("action=ssa")
+                && err.contains("format=esil"),
+            "unexpected error: {}",
+            err
         );
     }
 }

@@ -12,7 +12,10 @@
 
 use r2il::serialize::UserOpDef;
 use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize, validate_block_full};
-use r2sleigh_lift::{Disassembler, build_arch_spec, op_to_esil, userop_map_for_arch};
+use r2sleigh_export::{
+    ExportFormat, InstructionAction, InstructionExportInput, export_instruction, op_json_named,
+};
+use r2sleigh_lift::{Disassembler, build_arch_spec, userop_map_for_arch};
 use r2ssa::TaintPolicy;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -569,85 +572,28 @@ pub extern "C" fn r2il_block_to_esil(
     };
 
     let blk = unsafe { &*block };
-    let parts: Vec<String> = blk.ops.iter().map(|op| op_to_esil(disasm, op)).collect();
-    CString::new(parts.join(";")).map_or(ptr::null_mut(), |s| s.into_raw())
-}
-
-fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler) {
-    use serde_json::Value;
-
-    match value {
-        Value::Object(map) => {
-            let is_varnode =
-                map.contains_key("space") && map.contains_key("offset") && map.contains_key("size");
-            if is_varnode {
-                let space = map.get("space").and_then(Value::as_str);
-                if let Some(space_str) = space
-                    && space_str.eq_ignore_ascii_case("register")
-                {
-                    let offset = map.get("offset").and_then(Value::as_u64);
-                    let size = map.get("size").and_then(Value::as_u64);
-                    if let (Some(offset), Some(size)) = (offset, size) {
-                        let vn = r2il::Varnode {
-                            space: r2il::SpaceId::Register,
-                            offset,
-                            size: size as u32,
-                            meta: None,
-                        };
-                        if let Some(name) = disasm.register_name(&vn) {
-                            map.insert("name".to_string(), Value::String(name));
-                        }
-                    }
-                }
-            }
-
-            for value in map.values_mut() {
-                annotate_register_names(value, disasm);
-            }
+    let input = InstructionExportInput {
+        disasm,
+        arch: match ctx_ref.arch.as_ref() {
+            Some(a) => a,
+            None => return ptr::null_mut(),
+        },
+        block: blk,
+        addr: blk.addr,
+        mnemonic: "",
+        native_size: blk.size as usize,
+    };
+    match export_instruction(&input, InstructionAction::Lift, ExportFormat::Esil) {
+        Ok(esil_lines) => {
+            let joined = esil_lines
+                .lines()
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join(";");
+            CString::new(joined).map_or(ptr::null_mut(), |s| s.into_raw())
         }
-        Value::Array(items) => {
-            for item in items.iter_mut() {
-                annotate_register_names(item, disasm);
-            }
-        }
-        _ => {}
+        Err(_) => ptr::null_mut(),
     }
-}
-
-fn annotate_userop_names(value: &mut serde_json::Value, disasm: &Disassembler) {
-    use serde_json::Value;
-
-    match value {
-        Value::Object(map) => {
-            if let Some(callother) = map.get_mut("CallOther")
-                && let Value::Object(call_map) = callother
-            {
-                let userop = call_map.get("userop").and_then(Value::as_u64);
-                if let Some(userop) = userop
-                    && let Some(name) = disasm.userop_name(userop as u32)
-                {
-                    call_map.insert("userop_name".to_string(), Value::String(name.to_string()));
-                }
-            }
-
-            for value in map.values_mut() {
-                annotate_userop_names(value, disasm);
-            }
-        }
-        Value::Array(items) => {
-            for item in items.iter_mut() {
-                annotate_userop_names(item, disasm);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn op_json_with_registers(op: &R2ILOp, disasm: &Disassembler) -> Option<String> {
-    let mut value = serde_json::to_value(op).ok()?;
-    annotate_register_names(&mut value, disasm);
-    annotate_userop_names(&mut value, disasm);
-    serde_json::to_string(&value).ok()
 }
 
 /// Get a JSON representation of an operation in a block.
@@ -690,9 +636,9 @@ pub extern "C" fn r2il_block_op_json_named(
         return ptr::null_mut();
     }
 
-    match op_json_with_registers(&blk.ops[index], disasm) {
-        Some(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        None => ptr::null_mut(),
+    match op_json_named(disasm, &blk.ops[index]) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
     }
 }
 
@@ -2150,25 +2096,22 @@ pub extern "C" fn r2il_block_to_ssa_json(
     };
 
     let blk = unsafe { &*block };
+    let input = InstructionExportInput {
+        disasm,
+        arch: match ctx_ref.arch.as_ref() {
+            Some(a) => a,
+            None => return ptr::null_mut(),
+        },
+        block: blk,
+        addr: blk.addr,
+        mnemonic: "",
+        native_size: blk.size as usize,
+    };
 
-    // Convert to SSA
-    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
-
-    // Convert ops to JSON-serializable format
-    let ops_info: Vec<SSAOpInfo> = ssa_block.ops.iter().map(ssa_op_to_info).collect();
-
-    match serde_json::to_string_pretty(&ops_info) {
+    match export_instruction(&input, InstructionAction::Ssa, ExportFormat::Json) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
     }
-}
-
-/// Def-use analysis info for JSON output.
-#[derive(Serialize)]
-struct DefUseInfoJson {
-    inputs: Vec<String>,
-    outputs: Vec<String>,
-    live: Vec<String>,
 }
 
 /// Get def-use analysis for block as JSON.
@@ -2189,20 +2132,19 @@ pub extern "C" fn r2il_block_defuse_json(
     };
 
     let blk = unsafe { &*block };
-
-    // Convert to SSA
-    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
-
-    // Compute def-use chains
-    let info = r2ssa::def_use(&ssa_block);
-
-    let json_info = DefUseInfoJson {
-        inputs: info.inputs.iter().cloned().collect(),
-        outputs: info.outputs.iter().cloned().collect(),
-        live: info.live.iter().cloned().collect(),
+    let input = InstructionExportInput {
+        disasm,
+        arch: match ctx_ref.arch.as_ref() {
+            Some(a) => a,
+            None => return ptr::null_mut(),
+        },
+        block: blk,
+        addr: blk.addr,
+        mnemonic: "",
+        native_size: blk.size as usize,
     };
 
-    match serde_json::to_string_pretty(&json_info) {
+    match export_instruction(&input, InstructionAction::Defuse, ExportFormat::Json) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
     }
@@ -4913,25 +4855,22 @@ pub extern "C" fn r2dec_block(ctx: *const R2ILContext, block: *const R2ILBlock) 
     };
 
     let blk = unsafe { &*block };
+    let input = InstructionExportInput {
+        disasm,
+        arch: match ctx_ref.arch.as_ref() {
+            Some(a) => a,
+            None => return ptr::null_mut(),
+        },
+        block: blk,
+        addr: blk.addr,
+        mnemonic: "",
+        native_size: blk.size as usize,
+    };
 
-    // Convert to SSA
-    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
-
-    // Get pointer size from architecture
-    let ptr_size = ctx_ref.arch.as_ref().map(|a| a.addr_size * 8).unwrap_or(64);
-
-    // Build statements from SSA ops
-    let stmts = r2dec::lower_ssa_ops_to_stmts(ptr_size, &ssa_block.ops);
-
-    // Generate C code for statements
-    let mut codegen = r2dec::CodeGenerator::new(r2dec::CodeGenConfig::default());
-    let mut output = String::new();
-    for stmt in &stmts {
-        output.push_str(&codegen.generate_stmt(stmt));
-        output.push('\n');
+    match export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike) {
+        Ok(output) => CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
     }
-
-    CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
 /// Get the C AST for a block as JSON.
@@ -5599,6 +5538,35 @@ mod tests {
     use serde_json::Value;
     use std::ffi::{CStr, CString};
 
+    #[cfg(feature = "x86")]
+    unsafe fn c_string_to_owned(ptr: *mut c_char) -> String {
+        let out = unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        r2il_string_free(ptr);
+        out
+    }
+
+    #[cfg(feature = "x86")]
+    fn export_from_context(
+        ctx_ref: &R2ILContext,
+        block: &R2ILBlock,
+        action: InstructionAction,
+        format: ExportFormat,
+    ) -> String {
+        let disasm = ctx_ref.disasm.as_ref().expect("disassembler");
+        let arch = ctx_ref.arch.as_ref().expect("arch spec");
+        let input = InstructionExportInput {
+            disasm,
+            arch,
+            block,
+            addr: block.addr,
+            mnemonic: "",
+            native_size: block.size as usize,
+        };
+        export_instruction(&input, action, format).expect("export")
+    }
+
     #[test]
     fn test_context_lifecycle_from_file() {
         let spec = r2sleigh_lift::create_x86_64_spec();
@@ -5642,6 +5610,171 @@ mod tests {
         assert!(esil.contains("eax"));
 
         unsafe { drop(CString::from_raw(esil_ptr as *mut c_char)) };
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn op_json_named_matches_exporter_output_shape() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let block_ref = unsafe { &*block };
+        let ctx_ref = unsafe { &*ctx };
+        let op_index = 0usize;
+        let expected_json = op_json_named(
+            ctx_ref.disasm.as_ref().expect("disassembler"),
+            &block_ref.ops[op_index],
+        )
+        .expect("exporter op json");
+
+        let json_ptr = r2il_block_op_json_named(ctx, block, op_index);
+        assert!(!json_ptr.is_null());
+        let ffi_json = unsafe { c_string_to_owned(json_ptr) };
+
+        let expected_val: Value =
+            serde_json::from_str(&expected_json).expect("expected json value");
+        let ffi_val: Value = serde_json::from_str(&ffi_json).expect("ffi json value");
+        assert_eq!(ffi_val, expected_val);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn block_to_esil_matches_exporter() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let ffi_ptr = r2il_block_to_esil(ctx, block);
+        assert!(!ffi_ptr.is_null());
+        let ffi_esil = unsafe { c_string_to_owned(ffi_ptr) };
+
+        let ctx_ref = unsafe { &*ctx };
+        let block_ref = unsafe { &*block };
+        let expected = export_from_context(
+            ctx_ref,
+            block_ref,
+            InstructionAction::Lift,
+            ExportFormat::Esil,
+        );
+        let expected_joined = expected
+            .lines()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(";");
+        assert_eq!(ffi_esil, expected_joined);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn block_to_ssa_json_matches_exporter() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let ffi_ptr = r2il_block_to_ssa_json(ctx, block);
+        assert!(!ffi_ptr.is_null());
+        let ffi_json = unsafe { c_string_to_owned(ffi_ptr) };
+
+        let ctx_ref = unsafe { &*ctx };
+        let block_ref = unsafe { &*block };
+        let expected = export_from_context(
+            ctx_ref,
+            block_ref,
+            InstructionAction::Ssa,
+            ExportFormat::Json,
+        );
+
+        let ffi_val: Value = serde_json::from_str(&ffi_json).expect("ffi json");
+        let expected_val: Value = serde_json::from_str(&expected).expect("expected json");
+        assert_eq!(ffi_val, expected_val);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn block_defuse_json_matches_exporter() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let ffi_ptr = r2il_block_defuse_json(ctx, block);
+        assert!(!ffi_ptr.is_null());
+        let ffi_json = unsafe { c_string_to_owned(ffi_ptr) };
+
+        let ctx_ref = unsafe { &*ctx };
+        let block_ref = unsafe { &*block };
+        let expected = export_from_context(
+            ctx_ref,
+            block_ref,
+            InstructionAction::Defuse,
+            ExportFormat::Json,
+        );
+
+        let ffi_val: Value = serde_json::from_str(&ffi_json).expect("ffi json");
+        let expected_val: Value = serde_json::from_str(&expected).expect("expected json");
+        assert_eq!(ffi_val, expected_val);
+
+        r2il_block_free(block);
+        r2il_free(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn r2dec_block_c_like_matches_exporter_path() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        let mut bytes = vec![0x31, 0xC0];
+        bytes.resize(16, 0);
+        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!block.is_null());
+
+        let ffi_ptr = r2dec_block(ctx, block);
+        assert!(!ffi_ptr.is_null());
+        let ffi_c_like = unsafe { c_string_to_owned(ffi_ptr) };
+
+        let ctx_ref = unsafe { &*ctx };
+        let block_ref = unsafe { &*block };
+        let expected = export_from_context(
+            ctx_ref,
+            block_ref,
+            InstructionAction::Dec,
+            ExportFormat::CLike,
+        );
+        assert_eq!(ffi_c_like, expected);
+
         r2il_block_free(block);
         r2il_free(ctx);
     }

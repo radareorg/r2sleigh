@@ -1050,7 +1050,23 @@ dependencies = [
  "clap",
  "hex",
  "r2il",
+ "r2sleigh-export",
  "r2sleigh-lift",
+ "serde_json",
+ "sleigh-config",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "r2sleigh-export"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "r2dec",
+ "r2il",
+ "r2sleigh-lift",
+ "r2ssa",
+ "serde",
  "serde_json",
  "sleigh-config",
  "thiserror 1.0.69",
@@ -1072,6 +1088,7 @@ version = "0.1.0"
 dependencies = [
  "r2dec",
  "r2il",
+ "r2sleigh-export",
  "r2sleigh-lift",
  "r2ssa",
  "r2sym",
