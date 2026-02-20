@@ -431,6 +431,10 @@ mod tests {
     use super::*;
     use r2il::{MemoryClass, OpMetadata, ScalarKind, VarnodeMetadata};
     use r2sleigh_lift::{build_arch_spec, userop_map_for_arch};
+    use std::collections::BTreeMap;
+
+    const X86_BYTES_MINIMAL: &str = "4889c000000000000000000000000000";
+    const X86_BYTES_DEC: &str = "48ffc000000000000000000000000000";
 
     fn x86_disasm_and_spec() -> (Disassembler, ArchSpec) {
         let spec = build_arch_spec(
@@ -468,6 +472,101 @@ mod tests {
             mnemonic,
             native_size,
         }
+    }
+
+    fn canonicalize_json(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut sorted = BTreeMap::new();
+                for (k, v) in map {
+                    sorted.insert(k.clone(), canonicalize_json(v));
+                }
+                let mut out = serde_json::Map::new();
+                for (k, v) in sorted {
+                    out.insert(k, v);
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
+            _ => value.clone(),
+        }
+    }
+
+    fn normalize_json_output(output: &str) -> String {
+        let parsed: Value = serde_json::from_str(output.trim()).expect("json");
+        canonicalize_json(&parsed).to_string()
+    }
+
+    fn normalize_text_output(output: &str) -> String {
+        let text = output.replace("\r\n", "\n");
+        let mut lines: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    fn normalize_c_like_output(output: &str) -> String {
+        let text = output.replace("\r\n", "\n");
+        let mut lines = Vec::new();
+        let mut prev_blank = false;
+        for raw_line in text.lines() {
+            let line = raw_line.trim_end();
+            let blank = line.is_empty();
+            if blank && prev_blank {
+                continue;
+            }
+            lines.push(line.to_string());
+            prev_blank = blank;
+        }
+        while lines.first().is_some_and(|l| l.is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    fn normalize_r2cmd_output(output: &str) -> String {
+        let text = output.replace("\r\n", "\n");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(!lines.is_empty(), "r2cmd output must not be empty");
+        assert_eq!(lines.len() % 2, 0, "r2cmd output must be line-paired");
+        let mut normalized = Vec::new();
+        for (idx, line) in lines.iter().enumerate() {
+            let line = line.trim_end();
+            if idx % 2 == 0 {
+                assert!(line.starts_with("# "), "expected sidecar at index {}", idx);
+                let sidecar: Value =
+                    serde_json::from_str(line.trim_start_matches("# ")).expect("sidecar json");
+                normalized.push(format!("# {}", canonicalize_json(&sidecar)));
+            } else {
+                assert!(line.starts_with("ae "), "expected ae line at index {}", idx);
+                normalized.push(line.to_string());
+            }
+        }
+        normalized.join("\n")
+    }
+
+    fn assert_export_deterministic(
+        bytes_hex: &str,
+        action: InstructionAction,
+        format: ExportFormat,
+        normalizer: fn(&str) -> String,
+    ) -> String {
+        let input1 = lift_input(bytes_hex, 0x1000);
+        let out1 = export_instruction(&input1, action, format).expect("first export");
+        let input2 = lift_input(bytes_hex, 0x1000);
+        let out2 = export_instruction(&input2, action, format).expect("second export");
+        let norm1 = normalizer(&out1);
+        let norm2 = normalizer(&out2);
+        assert_eq!(
+            norm1, norm2,
+            "non-deterministic export for action={}, format={}",
+            action, format
+        );
+        norm1
     }
 
     #[test]
@@ -517,7 +616,7 @@ mod tests {
 
     #[test]
     fn lift_r2cmd_emits_comment_then_ae_per_op() {
-        let input = lift_input("31c00000000000000000000000000000", 0x1000);
+        let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
         let out = export_instruction(&input, InstructionAction::Lift, ExportFormat::R2Cmd)
             .expect("lift r2cmd");
         let lines: Vec<&str> = out.lines().collect();
@@ -534,7 +633,7 @@ mod tests {
 
     #[test]
     fn ssa_json_is_valid_and_nonempty() {
-        let input = lift_input("31c00000000000000000000000000000", 0x1000);
+        let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
         let out = export_instruction(&input, InstructionAction::Ssa, ExportFormat::Json)
             .expect("ssa json");
         let parsed: Value = serde_json::from_str(&out).expect("json");
@@ -544,7 +643,7 @@ mod tests {
 
     #[test]
     fn defuse_json_contains_inputs_outputs_live() {
-        let input = lift_input("31c00000000000000000000000000000", 0x1000);
+        let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
         let out = export_instruction(&input, InstructionAction::Defuse, ExportFormat::Json)
             .expect("defuse json");
         let parsed: Value = serde_json::from_str(&out).expect("json");
@@ -555,7 +654,7 @@ mod tests {
 
     #[test]
     fn dec_c_like_nonempty_for_simple_block() {
-        let input = lift_input("31c00000000000000000000000000000", 0x1000);
+        let input = lift_input(X86_BYTES_DEC, 0x1000);
         let out = export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike)
             .expect("dec c-like");
         assert!(!out.trim().is_empty(), "expected non-empty c-like output");
@@ -563,7 +662,7 @@ mod tests {
 
     #[test]
     fn unsupported_combo_returns_error() {
-        let input = lift_input("31c00000000000000000000000000000", 0x1000);
+        let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
         let err = export_instruction(&input, InstructionAction::Ssa, ExportFormat::Esil)
             .expect_err("unsupported combo must fail");
         assert!(
@@ -598,5 +697,143 @@ mod tests {
             "unexpected error kind: {}",
             err
         );
+    }
+
+    #[test]
+    fn deterministic_matrix_for_supported_pairs() {
+        for format in [
+            ExportFormat::Json,
+            ExportFormat::Text,
+            ExportFormat::Esil,
+            ExportFormat::R2Cmd,
+        ] {
+            let normalized = assert_export_deterministic(
+                X86_BYTES_MINIMAL,
+                InstructionAction::Lift,
+                format,
+                match format {
+                    ExportFormat::Json => normalize_json_output,
+                    ExportFormat::Text | ExportFormat::Esil => normalize_text_output,
+                    ExportFormat::R2Cmd => normalize_r2cmd_output,
+                    ExportFormat::CLike => unreachable!("not in lift matrix"),
+                },
+            );
+            assert!(
+                !normalized.trim().is_empty(),
+                "lift output should be non-empty"
+            );
+        }
+
+        for format in [ExportFormat::Json, ExportFormat::Text] {
+            let normalized = assert_export_deterministic(
+                X86_BYTES_MINIMAL,
+                InstructionAction::Ssa,
+                format,
+                match format {
+                    ExportFormat::Json => normalize_json_output,
+                    ExportFormat::Text => normalize_text_output,
+                    _ => unreachable!("ssa supports json/text"),
+                },
+            );
+            assert!(
+                !normalized.trim().is_empty(),
+                "ssa output should be non-empty"
+            );
+        }
+
+        for format in [ExportFormat::Json, ExportFormat::Text] {
+            let normalized = assert_export_deterministic(
+                X86_BYTES_MINIMAL,
+                InstructionAction::Defuse,
+                format,
+                match format {
+                    ExportFormat::Json => normalize_json_output,
+                    ExportFormat::Text => normalize_text_output,
+                    _ => unreachable!("defuse supports json/text"),
+                },
+            );
+            assert!(
+                !normalized.trim().is_empty(),
+                "defuse output should be non-empty"
+            );
+        }
+
+        for format in [ExportFormat::CLike, ExportFormat::Json, ExportFormat::Text] {
+            let normalized = assert_export_deterministic(
+                X86_BYTES_DEC,
+                InstructionAction::Dec,
+                format,
+                match format {
+                    ExportFormat::CLike => normalize_c_like_output,
+                    ExportFormat::Json => normalize_json_output,
+                    ExportFormat::Text => normalize_text_output,
+                    _ => unreachable!("dec supports c_like/json/text"),
+                },
+            );
+            assert!(
+                !normalized.trim().is_empty(),
+                "dec output should be non-empty"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_fixture_expected_literals_stay_stable() {
+        let lift_text = assert_export_deterministic(
+            X86_BYTES_MINIMAL,
+            InstructionAction::Lift,
+            ExportFormat::Text,
+            normalize_text_output,
+        );
+        assert_eq!(
+            lift_text,
+            "0x1000  MOV RAX,RAX  (size=3)\nP-code (1 ops):\n  0: Copy { dst: RAX, src: RAX }"
+        );
+
+        let lift_esil = assert_export_deterministic(
+            X86_BYTES_MINIMAL,
+            InstructionAction::Lift,
+            ExportFormat::Esil,
+            normalize_text_output,
+        );
+        assert_eq!(lift_esil, "rax,rax,=");
+
+        let lift_r2cmd = assert_export_deterministic(
+            X86_BYTES_MINIMAL,
+            InstructionAction::Lift,
+            ExportFormat::R2Cmd,
+            normalize_r2cmd_output,
+        );
+        assert_eq!(
+            lift_r2cmd,
+            "# {\"op\":\"Copy\",\"op_index\":0,\"op_json\":{\"Copy\":{\"dst\":{\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"},\"src\":{\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"}}}}\nae rax,rax,="
+        );
+
+        let ssa_text = assert_export_deterministic(
+            X86_BYTES_MINIMAL,
+            InstructionAction::Ssa,
+            ExportFormat::Text,
+            normalize_text_output,
+        );
+        assert_eq!(ssa_text, "0: Copy dst=RAX_1 src=[RAX_1]");
+
+        let defuse_json = assert_export_deterministic(
+            X86_BYTES_MINIMAL,
+            InstructionAction::Defuse,
+            ExportFormat::Json,
+            normalize_json_output,
+        );
+        assert_eq!(
+            defuse_json,
+            "{\"inputs\":[],\"live\":[\"RAX_1\"],\"outputs\":[]}"
+        );
+
+        let dec_json = assert_export_deterministic(
+            X86_BYTES_MINIMAL,
+            InstructionAction::Dec,
+            ExportFormat::Json,
+            normalize_json_output,
+        );
+        assert_eq!(dec_json, "[]");
     }
 }

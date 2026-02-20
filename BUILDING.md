@@ -130,6 +130,20 @@ cargo test
 
 See [doc/testing.md](doc/testing.md) for the full testing guide.
 
+Conformance / Compatibility Gate Commands
+-----------------------------------------
+
+Run the PR8 hardening gate with:
+
+```bash
+cargo test -p r2il
+cargo test -p r2sleigh-export --features x86
+cargo test -p r2sleigh-cli --features x86,arm,riscv
+cargo test -p r2sleigh-plugin --features x86,arm,riscv
+cd tests/e2e && cargo test --test integration ffi::
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
 R2IL Format Compatibility
 -------------------------
 

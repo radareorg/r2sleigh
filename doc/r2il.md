@@ -528,6 +528,19 @@ serialization formats are:
 The plugin command `a:sla.json` outputs the R2ILBlock for the current
 instruction as JSON.
 
+Compatibility Guarantees
+------------------------
+
+1. Reader compatibility is guaranteed for `.r2il` format versions `v1`, `v2`, and `v3`.
+2. Writer compatibility target is always `v3`.
+3. Legacy `v1`/`v2` artifacts are upgraded in memory on load.
+4. Instruction exporter action/format compatibility is strict:
+   - `lift`: `json`, `text`, `esil`, `r2cmd`
+   - `ssa`: `json`, `text`
+   - `defuse`: `json`, `text`
+   - `dec`: `c_like`, `json`, `text`
+5. Unsupported action/format pairs return explicit errors.
+
 Versioning policy:
 
 1. Current writer target is `FORMAT_VERSION = 3`.

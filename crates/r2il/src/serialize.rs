@@ -497,6 +497,22 @@ mod tests {
         bytes
     }
 
+    fn header_version_from_bytes(bytes: &[u8]) -> u32 {
+        assert!(
+            bytes.len() >= 8,
+            "serialized bytes must include magic + header length"
+        );
+        assert_eq!(&bytes[..4], MAGIC, "magic mismatch");
+        let header_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        assert!(
+            bytes.len() >= 8 + header_len,
+            "serialized bytes too short for header"
+        );
+        let header: FileHeader =
+            bincode::deserialize(&bytes[8..8 + header_len]).expect("deserialize header");
+        header.version
+    }
+
     #[test]
     fn test_roundtrip() {
         let mut arch = ArchSpec::new("test-arch");
@@ -521,6 +537,7 @@ mod tests {
         assert_eq!(loaded.addr_size, 8);
         assert_eq!(loaded.registers.len(), 2);
         assert_eq!(loaded.spaces.len(), 2);
+        assert_eq!(header_version_from_bytes(&bytes), FORMAT_VERSION);
     }
 
     #[test]
@@ -549,6 +566,36 @@ mod tests {
         assert_eq!(loaded.instruction_endianness, Endianness::Big);
         assert_eq!(loaded.memory_endianness, Endianness::Little);
         assert!(!loaded.big_endian);
+        assert_eq!(header_version_from_bytes(&bytes), FORMAT_VERSION);
+    }
+
+    #[test]
+    fn v3_roundtrip_preserves_topology_fields() {
+        let mut arch = ArchSpec::new("topology-v3");
+        let mut ram = AddressSpace::ram(8);
+        ram.memory_class = Some(crate::MemoryClass::Mmio);
+        ram.permissions = Some(crate::MemoryPermissions {
+            read: true,
+            write: true,
+            execute: false,
+        });
+        ram.valid_ranges.push(crate::MemoryRange {
+            start: 0x1000,
+            end: 0x2000,
+        });
+        ram.bank_id = Some("bank0".to_string());
+        ram.segment_id = Some("seg0".to_string());
+        arch.add_space(ram.clone());
+
+        let bytes = to_bytes(&arch).expect("serialize");
+        let loaded = from_bytes(&bytes).expect("deserialize");
+        assert_eq!(header_version_from_bytes(&bytes), FORMAT_VERSION);
+        assert_eq!(loaded.spaces.len(), 1);
+        assert_eq!(loaded.spaces[0].memory_class, ram.memory_class);
+        assert_eq!(loaded.spaces[0].permissions, ram.permissions);
+        assert_eq!(loaded.spaces[0].valid_ranges, ram.valid_ranges);
+        assert_eq!(loaded.spaces[0].bank_id, ram.bank_id);
+        assert_eq!(loaded.spaces[0].segment_id, ram.segment_id);
     }
 
     #[test]
@@ -618,6 +665,13 @@ mod tests {
                 .iter()
                 .all(|space| space.valid_ranges.is_empty())
         );
+
+        let reserialized = to_bytes(&loaded).expect("reserialize upgraded v1");
+        assert_eq!(
+            header_version_from_bytes(&reserialized),
+            FORMAT_VERSION,
+            "upgraded v1 save must emit v3"
+        );
     }
 
     #[test]
@@ -652,5 +706,41 @@ mod tests {
         assert_eq!(loaded.spaces[0].endianness, Some(Endianness::Big));
         assert_eq!(loaded.spaces[0].memory_class, None);
         assert!(loaded.spaces[0].valid_ranges.is_empty());
+
+        let reserialized = to_bytes(&loaded).expect("reserialize upgraded v2");
+        assert_eq!(
+            header_version_from_bytes(&reserialized),
+            FORMAT_VERSION,
+            "upgraded v2 save must emit v3"
+        );
+    }
+
+    #[test]
+    fn save_writes_current_format_header_version() {
+        let arch = ArchSpec::new("header-version");
+        let bytes = to_bytes(&arch).expect("serialize");
+        assert_eq!(header_version_from_bytes(&bytes), FORMAT_VERSION);
+    }
+
+    #[test]
+    fn unsupported_future_version_rejected() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        let header = FileHeader {
+            version: FORMAT_VERSION + 1,
+            arch_name: "future".to_string(),
+        };
+        let header_bytes = bincode::serialize(&header).expect("serialize header");
+        let header_len = header_bytes.len() as u32;
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+        // No payload needed: version gate runs before payload decode.
+
+        let err = from_bytes(&bytes).expect_err("future version should be rejected");
+        assert!(
+            matches!(err, SerializeError::UnsupportedVersion(v) if v == FORMAT_VERSION + 1),
+            "unexpected error: {}",
+            err
+        );
     }
 }

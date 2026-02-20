@@ -2643,7 +2643,8 @@ mod cli_run {
 mod ffi {
     use r2il::R2ILOp;
     use serde_json::Value;
-    use std::ffi::{CStr, CString};
+    use std::collections::BTreeMap;
+    use std::ffi::{CStr, CString, c_void};
     use std::os::raw::c_char;
     use std::path::Path;
 
@@ -2651,6 +2652,225 @@ mod ffi {
 
     fn require_plugin() -> bool {
         Path::new(PLUGIN_PATH).exists()
+    }
+
+    const X86_BYTES_BASE: &[u8] = &[0x48, 0x89, 0xc0]; // mov rax, rax
+    const X86_BYTES_DEC: &[u8] = &[0x48, 0xff, 0xc0]; // inc rax
+    const ARM_BYTES_BASE: &[u8] = &[0x01, 0x00, 0xa0, 0xe3]; // mov r0, r1 style fixture
+    const RISCV_BYTES_BASE: &[u8] = &[0x13, 0x05, 0x15, 0x00]; // addi a0,a0,1
+
+    fn padded_bytes(bytes: &[u8]) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        out.resize(16, 0x00);
+        out
+    }
+
+    fn canonicalize_json(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut sorted = BTreeMap::new();
+                for (k, v) in map {
+                    sorted.insert(k.clone(), canonicalize_json(v));
+                }
+                let mut out = serde_json::Map::new();
+                for (k, v) in sorted {
+                    out.insert(k, v);
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(items.iter().map(canonicalize_json).collect()),
+            _ => value.clone(),
+        }
+    }
+
+    fn normalize_json_output(output: &str) -> String {
+        let parsed: Value = serde_json::from_str(output.trim()).expect("valid json");
+        canonicalize_json(&parsed).to_string()
+    }
+
+    fn normalize_text_output(output: &str) -> String {
+        let text = output.replace("\r\n", "\n");
+        let mut lines: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    struct FfiExports {
+        esil: String,
+        ssa_json: String,
+        defuse_json: String,
+        dec: String,
+    }
+
+    fn export_once_for_arch(arch: &str, base_bytes: &[u8], dec_bytes: &[u8]) -> Option<FfiExports> {
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(*mut c_void, *const u8, usize, u64) -> *mut c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_validate: libloading::Symbol<
+                unsafe extern "C" fn(*mut c_void, *const c_void) -> i32,
+            > = lib.get(b"r2il_block_validate").unwrap();
+            let r2il_block_to_esil: libloading::Symbol<
+                unsafe extern "C" fn(*const c_void, *const c_void) -> *mut c_char,
+            > = lib.get(b"r2il_block_to_esil").unwrap();
+            let r2il_block_to_ssa_json: libloading::Symbol<
+                unsafe extern "C" fn(*const c_void, *const c_void) -> *mut c_char,
+            > = lib.get(b"r2il_block_to_ssa_json").unwrap();
+            let r2il_block_defuse_json: libloading::Symbol<
+                unsafe extern "C" fn(*const c_void, *const c_void) -> *mut c_char,
+            > = lib.get(b"r2il_block_defuse_json").unwrap();
+            let r2dec_block: libloading::Symbol<
+                unsafe extern "C" fn(*const c_void, *const c_void) -> *mut c_char,
+            > = lib.get(b"r2dec_block").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+
+            let arch_c = CString::new(arch).expect("valid arch");
+            let ctx = r2il_arch_init(arch_c.as_ptr());
+            if ctx.is_null() {
+                eprintln!(
+                    "Skipping {} parity conformance: architecture not built in plugin",
+                    arch
+                );
+                return None;
+            }
+
+            let base = padded_bytes(base_bytes);
+            let block = r2il_lift(ctx, base.as_ptr(), base.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift base fixture for {}", arch);
+            assert_eq!(
+                r2il_block_validate(ctx, block),
+                1,
+                "Lifted base block should validate for {}",
+                arch
+            );
+
+            let esil_ptr = r2il_block_to_esil(ctx, block);
+            assert!(
+                !esil_ptr.is_null(),
+                "esil export should not be null for {}",
+                arch
+            );
+            let esil = CStr::from_ptr(esil_ptr).to_string_lossy().into_owned();
+            r2il_string_free(esil_ptr);
+
+            let ssa_ptr = r2il_block_to_ssa_json(ctx, block);
+            assert!(
+                !ssa_ptr.is_null(),
+                "ssa json export should not be null for {}",
+                arch
+            );
+            let ssa_json = CStr::from_ptr(ssa_ptr).to_string_lossy().into_owned();
+            r2il_string_free(ssa_ptr);
+
+            let defuse_ptr = r2il_block_defuse_json(ctx, block);
+            assert!(
+                !defuse_ptr.is_null(),
+                "defuse json export should not be null for {}",
+                arch
+            );
+            let defuse_json = CStr::from_ptr(defuse_ptr).to_string_lossy().into_owned();
+            r2il_string_free(defuse_ptr);
+
+            r2il_block_free(block);
+
+            let dec_input = padded_bytes(dec_bytes);
+            let dec_block = r2il_lift(ctx, dec_input.as_ptr(), dec_input.len(), 0x1000);
+            assert!(
+                !dec_block.is_null(),
+                "Failed to lift dec fixture for {}",
+                arch
+            );
+            assert_eq!(
+                r2il_block_validate(ctx, dec_block),
+                1,
+                "Lifted dec block should validate for {}",
+                arch
+            );
+            let dec_ptr = r2dec_block(ctx, dec_block);
+            assert!(
+                !dec_ptr.is_null(),
+                "dec export should not be null for {}",
+                arch
+            );
+            let dec = CStr::from_ptr(dec_ptr).to_string_lossy().into_owned();
+            r2il_string_free(dec_ptr);
+            r2il_block_free(dec_block);
+
+            r2il_free(ctx);
+
+            let ssa_parsed: Value = serde_json::from_str(&ssa_json).expect("valid ssa json");
+            assert!(
+                ssa_parsed.as_array().is_some(),
+                "ssa json must be an array for {}",
+                arch
+            );
+            let defuse_parsed: Value =
+                serde_json::from_str(&defuse_json).expect("valid defuse json");
+            assert!(
+                defuse_parsed.get("inputs").is_some(),
+                "defuse inputs missing"
+            );
+            assert!(
+                defuse_parsed.get("outputs").is_some(),
+                "defuse outputs missing"
+            );
+            assert!(defuse_parsed.get("live").is_some(), "defuse live missing");
+
+            Some(FfiExports {
+                esil,
+                ssa_json,
+                defuse_json,
+                dec,
+            })
+        }
+    }
+
+    fn assert_ffi_deterministic_for_arch(arch: &str, base_bytes: &[u8], dec_bytes: &[u8]) {
+        let first = match export_once_for_arch(arch, base_bytes, dec_bytes) {
+            Some(v) => v,
+            None => return,
+        };
+        let second = match export_once_for_arch(arch, base_bytes, dec_bytes) {
+            Some(v) => v,
+            None => return,
+        };
+
+        let first_esil = normalize_text_output(&first.esil);
+        let second_esil = normalize_text_output(&second.esil);
+        assert_eq!(first_esil, second_esil, "esil mismatch for {}", arch);
+        assert!(
+            !first_esil.trim().is_empty(),
+            "esil must be non-empty for {}",
+            arch
+        );
+
+        let first_ssa = normalize_json_output(&first.ssa_json);
+        let second_ssa = normalize_json_output(&second.ssa_json);
+        assert_eq!(first_ssa, second_ssa, "ssa mismatch for {}", arch);
+
+        let first_defuse = normalize_json_output(&first.defuse_json);
+        let second_defuse = normalize_json_output(&second.defuse_json);
+        assert_eq!(first_defuse, second_defuse, "defuse mismatch for {}", arch);
+
+        let first_dec = normalize_text_output(&first.dec);
+        let second_dec = normalize_text_output(&second.dec);
+        assert_eq!(first_dec, second_dec, "dec mismatch for {}", arch);
+        assert!(
+            !first_dec.trim().is_empty(),
+            "dec must be non-empty for {}",
+            arch
+        );
     }
 
     fn contains_unsigned_int_meta(value: &Value) -> bool {
@@ -3277,14 +3497,20 @@ mod ffi {
             assert!(first.get("size").is_some(), "legacy size key missing");
             assert!(first.get("write").is_some(), "legacy write key missing");
 
-            assert_eq!(first.get("ordering").and_then(Value::as_str), Some("acq_rel"));
+            assert_eq!(
+                first.get("ordering").and_then(Value::as_str),
+                Some("acq_rel")
+            );
             assert_eq!(
                 first.get("atomic_kind").and_then(Value::as_str),
                 Some("read_modify_write")
             );
             assert_eq!(first.get("guarded").and_then(Value::as_bool), None);
             assert_eq!(first.get("bank_id").and_then(Value::as_str), Some("bank0"));
-            assert_eq!(first.get("segment_id").and_then(Value::as_str), Some("seg0"));
+            assert_eq!(
+                first.get("segment_id").and_then(Value::as_str),
+                Some("seg0")
+            );
             assert_eq!(
                 first.get("memory_class").and_then(Value::as_str),
                 Some("stack")
@@ -3308,7 +3534,12 @@ mod ffi {
                 unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_arch_init").unwrap();
             let r2il_lift: libloading::Symbol<
-                unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64) -> *mut std::ffi::c_void,
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_lift").unwrap();
             let r2il_block_validate: libloading::Symbol<
                 unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
@@ -3357,19 +3588,36 @@ mod ffi {
                 unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_arch_init").unwrap();
             let r2il_lift: libloading::Symbol<
-                unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64) -> *mut std::ffi::c_void,
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_lift").unwrap();
             let r2il_block_to_esil: libloading::Symbol<
-                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> *mut c_char,
             > = lib.get(b"r2il_block_to_esil").unwrap();
             let r2il_block_to_ssa_json: libloading::Symbol<
-                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> *mut c_char,
             > = lib.get(b"r2il_block_to_ssa_json").unwrap();
             let r2il_block_defuse_json: libloading::Symbol<
-                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> *mut c_char,
             > = lib.get(b"r2il_block_defuse_json").unwrap();
             let r2dec_block: libloading::Symbol<
-                unsafe extern "C" fn(*const std::ffi::c_void, *const std::ffi::c_void) -> *mut c_char,
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> *mut c_char,
             > = lib.get(b"r2dec_block").unwrap();
             let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
                 lib.get(b"r2il_free").unwrap();
@@ -3424,7 +3672,12 @@ mod ffi {
                 unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_arch_init").unwrap();
             let r2il_lift: libloading::Symbol<
-                unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize, u64) -> *mut std::ffi::c_void,
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
             > = lib.get(b"r2il_lift").unwrap();
             let r2il_block_validate: libloading::Symbol<
                 unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
@@ -3458,6 +3711,42 @@ mod ffi {
             r2il_block_free(block);
             r2il_free(ctx);
         }
+    }
+
+    #[test]
+    fn ffi_parity_conformance_x86_deterministic() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+        assert_ffi_deterministic_for_arch("x86-64", X86_BYTES_BASE, X86_BYTES_DEC);
+    }
+
+    #[test]
+    fn ffi_parity_conformance_arm_deterministic() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+        assert_ffi_deterministic_for_arch("arm", ARM_BYTES_BASE, ARM_BYTES_BASE);
+    }
+
+    #[test]
+    fn ffi_parity_conformance_riscv64_deterministic() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+        assert_ffi_deterministic_for_arch("riscv64", RISCV_BYTES_BASE, RISCV_BYTES_BASE);
+    }
+
+    #[test]
+    fn ffi_parity_conformance_riscv32_deterministic() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+        assert_ffi_deterministic_for_arch("riscv32", RISCV_BYTES_BASE, RISCV_BYTES_BASE);
     }
 }
 

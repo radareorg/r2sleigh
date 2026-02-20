@@ -738,6 +738,273 @@ fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpe
 #[cfg(all(test, feature = "sleigh-config", feature = "x86"))]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    const X86_BYTES_MINIMAL: &str = "4889c000000000000000000000000000";
+    const X86_BYTES_DEC: &str = "48ffc000000000000000000000000000";
+    #[cfg(feature = "arm")]
+    const ARM_BYTES: &str = "0100a0e3000000000000000000000000";
+    #[cfg(feature = "riscv")]
+    const RISCV_BYTES: &str = "13051500000000000000000000000000";
+
+    fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut sorted = BTreeMap::new();
+                for (k, v) in map {
+                    sorted.insert(k.clone(), canonicalize_json(v));
+                }
+                let mut out = serde_json::Map::new();
+                for (k, v) in sorted {
+                    out.insert(k, v);
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(canonicalize_json).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+
+    fn normalize_text_output(output: &str) -> String {
+        let text = output.replace("\r\n", "\n");
+        let mut lines: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).collect();
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    fn normalize_json_output(output: &str) -> String {
+        let parsed: serde_json::Value = serde_json::from_str(output.trim()).expect("valid json");
+        canonicalize_json(&parsed).to_string()
+    }
+
+    fn normalize_c_like_output(output: &str) -> String {
+        let text = output.replace("\r\n", "\n");
+        let mut lines = Vec::new();
+        let mut prev_blank = false;
+        for raw_line in text.lines() {
+            let line = raw_line.trim_end();
+            let is_blank = line.is_empty();
+            if is_blank && prev_blank {
+                continue;
+            }
+            lines.push(line.to_string());
+            prev_blank = is_blank;
+        }
+        while lines.first().is_some_and(|l| l.is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
+    fn normalize_r2cmd_output(output: &str) -> String {
+        let text = output.replace("\r\n", "\n");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(!lines.is_empty(), "r2cmd output must not be empty");
+        assert_eq!(lines.len() % 2, 0, "r2cmd output must be line-paired");
+        let mut normalized = Vec::new();
+        for (idx, line) in lines.iter().enumerate() {
+            let line = line.trim_end();
+            if idx % 2 == 0 {
+                assert!(
+                    line.starts_with("# "),
+                    "expected sidecar comment line at index {}",
+                    idx
+                );
+                let sidecar: serde_json::Value =
+                    serde_json::from_str(line.trim_start_matches("# ")).expect("sidecar json");
+                normalized.push(format!("# {}", canonicalize_json(&sidecar)));
+            } else {
+                assert!(
+                    line.starts_with("ae "),
+                    "expected ae replay line at index {}",
+                    idx
+                );
+                normalized.push(line.to_string());
+            }
+        }
+        normalized.join("\n")
+    }
+
+    fn assert_deterministic_output(
+        arch: &str,
+        bytes_hex: &str,
+        action: InstructionAction,
+        format: ExportFormat,
+        normalizer: fn(&str) -> String,
+    ) -> String {
+        let run1 = run_action_output(arch, bytes_hex, "0x1000", action, format)
+            .expect("first run output should succeed");
+        let run2 = run_action_output(arch, bytes_hex, "0x1000", action, format)
+            .expect("second run output should succeed");
+        let norm1 = normalizer(&run1);
+        let norm2 = normalizer(&run2);
+        assert_eq!(
+            norm1, norm2,
+            "non-deterministic output for arch={}, action={}, format={}",
+            arch, action, format
+        );
+        norm1
+    }
+
+    fn assert_json_shape_for_action(action: InstructionAction, normalized_json: &str) {
+        let parsed: serde_json::Value = serde_json::from_str(normalized_json).expect("valid json");
+        match action {
+            InstructionAction::Lift => {
+                assert!(
+                    parsed
+                        .get("ops")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|ops| !ops.is_empty()),
+                    "lift json must contain non-empty ops"
+                );
+                assert!(
+                    parsed.get("mnemonic").is_some(),
+                    "lift json must have mnemonic"
+                );
+                assert!(parsed.get("size").is_some(), "lift json must have size");
+            }
+            InstructionAction::Ssa => {
+                assert!(
+                    parsed.as_array().is_some_and(|ops| !ops.is_empty()),
+                    "ssa json must contain non-empty array"
+                );
+            }
+            InstructionAction::Defuse => {
+                assert!(
+                    parsed.get("inputs").is_some(),
+                    "defuse json must have inputs"
+                );
+                assert!(
+                    parsed.get("outputs").is_some(),
+                    "defuse json must have outputs"
+                );
+                assert!(parsed.get("live").is_some(), "defuse json must have live");
+            }
+            InstructionAction::Dec => {
+                assert!(
+                    parsed.as_array().is_some(),
+                    "dec json must be a statement array"
+                );
+            }
+        }
+    }
+
+    fn run_matrix_for_arch(arch: &str, bytes_hex: &str, dec_bytes_hex: &str) {
+        for format in [
+            ExportFormat::Json,
+            ExportFormat::Text,
+            ExportFormat::Esil,
+            ExportFormat::R2Cmd,
+        ] {
+            let normalized = assert_deterministic_output(
+                arch,
+                bytes_hex,
+                InstructionAction::Lift,
+                format,
+                match format {
+                    ExportFormat::Json => normalize_json_output,
+                    ExportFormat::Text | ExportFormat::Esil => normalize_text_output,
+                    ExportFormat::R2Cmd => normalize_r2cmd_output,
+                    ExportFormat::CLike => unreachable!("not part of lift matrix"),
+                },
+            );
+            match format {
+                ExportFormat::Json => {
+                    assert_json_shape_for_action(InstructionAction::Lift, &normalized)
+                }
+                ExportFormat::Text | ExportFormat::Esil | ExportFormat::R2Cmd => {
+                    assert!(
+                        !normalized.trim().is_empty(),
+                        "lift output must be non-empty"
+                    )
+                }
+                ExportFormat::CLike => unreachable!("not part of lift matrix"),
+            }
+        }
+
+        for format in [ExportFormat::Json, ExportFormat::Text] {
+            let normalized = assert_deterministic_output(
+                arch,
+                bytes_hex,
+                InstructionAction::Ssa,
+                format,
+                match format {
+                    ExportFormat::Json => normalize_json_output,
+                    ExportFormat::Text => normalize_text_output,
+                    _ => unreachable!("ssa supports json/text"),
+                },
+            );
+            match format {
+                ExportFormat::Json => {
+                    assert_json_shape_for_action(InstructionAction::Ssa, &normalized)
+                }
+                ExportFormat::Text => {
+                    assert!(!normalized.trim().is_empty(), "ssa text must be non-empty")
+                }
+                _ => unreachable!("ssa supports json/text"),
+            }
+        }
+
+        for format in [ExportFormat::Json, ExportFormat::Text] {
+            let normalized = assert_deterministic_output(
+                arch,
+                bytes_hex,
+                InstructionAction::Defuse,
+                format,
+                match format {
+                    ExportFormat::Json => normalize_json_output,
+                    ExportFormat::Text => normalize_text_output,
+                    _ => unreachable!("defuse supports json/text"),
+                },
+            );
+            match format {
+                ExportFormat::Json => {
+                    assert_json_shape_for_action(InstructionAction::Defuse, &normalized)
+                }
+                ExportFormat::Text => {
+                    assert!(
+                        !normalized.trim().is_empty(),
+                        "defuse text must be non-empty"
+                    )
+                }
+                _ => unreachable!("defuse supports json/text"),
+            }
+        }
+
+        for format in [ExportFormat::CLike, ExportFormat::Json, ExportFormat::Text] {
+            let normalized = assert_deterministic_output(
+                arch,
+                dec_bytes_hex,
+                InstructionAction::Dec,
+                format,
+                match format {
+                    ExportFormat::CLike => normalize_c_like_output,
+                    ExportFormat::Json => normalize_json_output,
+                    ExportFormat::Text => normalize_text_output,
+                    _ => unreachable!("dec supports c_like/json/text"),
+                },
+            );
+            match format {
+                ExportFormat::Json => {
+                    assert_json_shape_for_action(InstructionAction::Dec, &normalized)
+                }
+                ExportFormat::CLike | ExportFormat::Text => {
+                    assert!(
+                        !normalized.trim().is_empty(),
+                        "dec output must be non-empty"
+                    )
+                }
+                _ => unreachable!("dec supports c_like/json/text"),
+            }
+        }
+    }
 
     fn contains_named_register(value: &serde_json::Value) -> bool {
         match value {
@@ -849,6 +1116,29 @@ mod tests {
             idx0.get("memory_class").and_then(serde_json::Value::as_str),
             Some("stack")
         );
+    }
+
+    #[test]
+    fn conformance_matrix_x86_64_deterministic() {
+        run_matrix_for_arch("x86-64", X86_BYTES_MINIMAL, X86_BYTES_DEC);
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn conformance_matrix_arm_deterministic() {
+        run_matrix_for_arch("arm", ARM_BYTES, ARM_BYTES);
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn conformance_matrix_riscv64_deterministic() {
+        run_matrix_for_arch("riscv64", RISCV_BYTES, RISCV_BYTES);
+    }
+
+    #[test]
+    #[cfg(feature = "riscv")]
+    fn conformance_matrix_riscv32_deterministic() {
+        run_matrix_for_arch("riscv32", RISCV_BYTES, RISCV_BYTES);
     }
 
     #[test]

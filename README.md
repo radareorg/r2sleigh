@@ -143,6 +143,19 @@ R2IL Format / Endianness / Memory Semantics
   - `AtomicCAS`
   - `LoadGuarded` / `StoreGuarded`
 
+Compatibility Guarantees
+------------------------
+
+- `.r2il` reader compatibility is guaranteed for format versions `v1`, `v2`, and `v3`.
+- `.r2il` writer always emits `v3`.
+- Loading legacy `v1`/`v2` artifacts upgrades fields in memory while preserving behavior.
+- Instruction export action/format compatibility is strict and validated:
+  - `lift`: `json`, `text`, `esil`, `r2cmd`
+  - `ssa`: `json`, `text`
+  - `defuse`: `json`, `text`
+  - `dec`: `c_like`, `json`, `text`
+- Unsupported action/format pairs fail explicitly (no silent fallback).
+
 Requirements
 ------------
 
