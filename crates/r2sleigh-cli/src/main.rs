@@ -1183,6 +1183,20 @@ mod tests {
     }
 
     #[test]
+    fn storeconditional_esil_uses_zero_success_code() {
+        let (disasm, _) = get_disassembler_with_spec("x86-64").expect("disassembler");
+        let op = r2il::R2ILOp::StoreConditional {
+            result: Some(r2il::Varnode::new(r2il::SpaceId::Unique, 0x10, 1)),
+            space: r2il::SpaceId::Ram,
+            addr: r2il::Varnode::new(r2il::SpaceId::Unique, 0x20, 8),
+            val: r2il::Varnode::new(r2il::SpaceId::Unique, 0x30, 8),
+            ordering: r2il::MemoryOrdering::Relaxed,
+        };
+        let esil = r2sleigh_lift::op_to_esil(&disasm, &op);
+        assert_eq!(esil, "tmp:0x30,tmp:0x20,=[8],0,tmp:0x10,=");
+    }
+
+    #[test]
     fn run_ssa_text_success() {
         let out = run_action_output(
             "x86-64",

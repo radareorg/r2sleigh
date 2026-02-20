@@ -488,8 +488,10 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
             result, addr, val, ..
         } => {
             let sz = size_suffix(val.size);
+            // Baseline LL/SC modeling: we only encode the success path in ESIL.
+            // SC success is architecturally reported as 0 (non-zero means failure).
             match result {
-                Some(dst) => format!("{},{},={},1,{},=", vn(val), vn(addr), sz, vn(dst)),
+                Some(dst) => format!("{},{},={},0,{},=", vn(val), vn(addr), sz, vn(dst)),
                 None => format!("{},{},={}", vn(val), vn(addr), sz),
             }
         }

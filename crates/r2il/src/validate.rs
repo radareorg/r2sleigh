@@ -677,7 +677,7 @@ pub fn validate_op_semantic(
         }
 
         // Memory rules
-        R2ILOp::Load { space, addr, .. } => {
+        R2ILOp::Load { dst, space, addr } => {
             let arch_expected = effective_arch_addr_size(arch);
             let expected = addr_space_size(*space, arch);
             check_size_addr_width(
@@ -695,7 +695,7 @@ pub fn validate_op_semantic(
                 op_index,
                 *space,
                 addr,
-                1,
+                dst.size,
                 true,
                 false,
                 "op.load.range",
@@ -1954,6 +1954,26 @@ mod tests {
             addr: Varnode::register(8, 8),
         });
         assert!(validate_block_semantic(&block, &arch).is_ok());
+    }
+
+    #[test]
+    fn const_load_range_checks_use_full_load_width() {
+        let mut arch = valid_archspec();
+        arch.spaces[0].valid_ranges.push(crate::MemoryRange {
+            start: 0x1000,
+            end: 0x1008,
+        });
+
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(0, 8),
+            space: SpaceId::Ram,
+            // Address is inside range for 1-byte access but out-of-range for 8-byte access.
+            addr: Varnode::constant(0x1007, 8),
+        });
+
+        let err = validate_block_semantic(&block, &arch).expect_err("load should fail range check");
+        assert!(err.issues.iter().any(|i| i.code == "op.load.range"));
     }
 
     #[test]

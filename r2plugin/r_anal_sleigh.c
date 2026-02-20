@@ -8,6 +8,7 @@
 #include <r_util/r_str.h>
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1985,44 +1986,66 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 		R2ILBlock *block = r2il_lift_block (ctx, buf, to_read, bb->addr, (unsigned int)bb_size);
 		if (block) {
 			/* Check if this block has switch info from radare2's analysis */
-				if (bb->switch_op && bb->switch_op->cases) {
-					size_t num_cases = r_list_length (bb->switch_op->cases);
-					if (num_cases > 0) {
+			if (bb->switch_op && bb->switch_op->cases) {
+				size_t num_cases = r_list_length (bb->switch_op->cases);
+				if (num_cases > 0) {
 					unsigned long long *case_values = malloc (num_cases * sizeof (unsigned long long));
 					unsigned long long *case_targets = malloc (num_cases * sizeof (unsigned long long));
 					if (case_values && case_targets) {
 						RListIter *case_iter;
 						RAnalCaseOp *case_op;
 						size_t i = 0;
+						unsigned long long observed_min = ULLONG_MAX;
+						unsigned long long observed_max = 0;
 						r_list_foreach (bb->switch_op->cases, case_iter, case_op) {
 							case_values[i] = case_op->value;
 							case_targets[i] = case_op->jump;
+							observed_min = R_MIN (observed_min, case_op->value);
+							observed_max = R_MAX (observed_max, case_op->value);
 							i++;
 						}
+
+						unsigned long long min_val = bb->switch_op->min_val;
+						unsigned long long max_val = bb->switch_op->max_val;
+						int range_invalid = min_val > max_val;
+						if (!range_invalid) {
+							for (size_t case_idx = 0; case_idx < num_cases; case_idx++) {
+								const unsigned long long value = case_values[case_idx];
+								if (value < min_val || value > max_val) {
+									range_invalid = 1;
+									break;
+								}
+							}
+						}
+						if (range_invalid) {
+							min_val = observed_min;
+							max_val = observed_max;
+						}
+
 						r2il_block_set_switch_info (block,
 							bb->switch_op->addr,
-							bb->switch_op->min_val,
-							bb->switch_op->max_val,
+							min_val,
+							max_val,
 							bb->switch_op->def_val,
 							case_values, case_targets, num_cases);
 					}
 					free (case_values);
-						free (case_targets);
-					}
+					free (case_targets);
 				}
-
-				if (!r2il_block_validate (ctx, block)) {
-					const char *err = r2il_error (ctx);
-					if (err && *err) {
-						R_LOG_ERROR ("r2sleigh: invalid block at 0x%"PFMT64x": %s", bb->addr, err);
-					} else {
-						R_LOG_ERROR ("r2sleigh: invalid block at 0x%"PFMT64x, bb->addr);
-					}
-					r2il_block_free (block);
-					continue;
-				}
-				block_array_push (out, block);
 			}
+
+			if (!r2il_block_validate (ctx, block)) {
+				const char *err = r2il_error (ctx);
+				if (err && *err) {
+					R_LOG_ERROR ("r2sleigh: invalid block at 0x%"PFMT64x": %s", bb->addr, err);
+				} else {
+					R_LOG_ERROR ("r2sleigh: invalid block at 0x%"PFMT64x, bb->addr);
+				}
+				r2il_block_free (block);
+				continue;
+			}
+			block_array_push (out, block);
+		}
 		}
 
 	return out->count > 0;

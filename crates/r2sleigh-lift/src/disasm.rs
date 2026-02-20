@@ -359,9 +359,17 @@ impl Disassembler {
     }
 
     fn normalize_memory_semantics(&self, block: &mut R2ILBlock, mnemonic: &str) {
-        normalize_memory_semantics_with_hints(block, &self.arch_name, mnemonic, |idx| {
-            self.userop_name(idx).map(str::to_string)
-        });
+        normalize_memory_semantics_with_hints(
+            block,
+            &self.arch_name,
+            mnemonic,
+            |idx| self.userop_name(idx).map(str::to_string),
+            |name| {
+                self.register(name)
+                    .ok()
+                    .map(|vn| self.translate_varnode(&vn))
+            },
+        );
     }
 
     /// Translate a single P-code instruction to an r2il operation.
@@ -740,13 +748,15 @@ impl<'a> InstructionLoader for ByteLoader<'a> {
     }
 }
 
-fn normalize_memory_semantics_with_hints<F>(
+fn normalize_memory_semantics_with_hints<F, G>(
     block: &mut R2ILBlock,
     arch_name: &str,
     mnemonic: &str,
     userop_name: F,
+    resolve_register: G,
 ) where
     F: Fn(u32) -> Option<String>,
+    G: Fn(&str) -> Option<Varnode>,
 {
     let arch = arch_name.to_ascii_lowercase();
     let token = mnemonic
@@ -840,30 +850,30 @@ fn normalize_memory_semantics_with_hints<F>(
 
     let sc_like = (arch.contains("riscv") && token.starts_with("sc."))
         || (arch.contains("arm") && token.starts_with("strex"));
-    if sc_like {
-        let result_candidate = first_register_output(block);
-        if let Some((op_index, space, addr, val)) =
+    if sc_like
+        && let Some((op_index, space, addr, val)) =
             block.ops.iter().enumerate().find_map(|(i, op)| match op {
                 R2ILOp::Store { space, addr, val } if *space == SpaceId::Ram => {
                     Some((i, *space, addr.clone(), val.clone()))
                 }
                 _ => None,
             })
-        {
-            block.ops[op_index] = R2ILOp::StoreConditional {
-                result: result_candidate,
-                space,
-                addr,
-                val,
-                ordering: op_ordering,
-            };
-            set_memory_hints(
-                block,
-                op_index,
-                Some(AtomicKind::StoreConditional),
-                Some(op_ordering),
-            );
-        }
+    {
+        let result_candidate = storeconditional_result_from_mnemonic(mnemonic, &resolve_register)
+            .or_else(|| nearest_register_output(block, op_index));
+        block.ops[op_index] = R2ILOp::StoreConditional {
+            result: result_candidate,
+            space,
+            addr,
+            val,
+            ordering: op_ordering,
+        };
+        set_memory_hints(
+            block,
+            op_index,
+            Some(AtomicKind::StoreConditional),
+            Some(op_ordering),
+        );
     }
 
     if arch.contains("riscv") && token.starts_with("amo") {
@@ -920,13 +930,43 @@ fn set_memory_hints(
     }
 }
 
-fn first_register_output(block: &R2ILBlock) -> Option<Varnode> {
+fn nearest_register_output(block: &R2ILBlock, pivot_index: usize) -> Option<Varnode> {
+    if pivot_index > 0
+        && let Some(vn) = block.ops[..pivot_index]
+            .iter()
+            .rev()
+            .filter_map(R2ILOp::output)
+            .find(|vn| vn.space == SpaceId::Register && vn.size > 0)
+    {
+        return Some(vn.clone());
+    }
+
     block
         .ops
         .iter()
+        .skip(pivot_index.saturating_add(1))
         .filter_map(R2ILOp::output)
         .find(|vn| vn.space == SpaceId::Register && vn.size > 0)
         .cloned()
+}
+
+fn storeconditional_result_from_mnemonic<G>(mnemonic: &str, resolve_register: G) -> Option<Varnode>
+where
+    G: Fn(&str) -> Option<Varnode>,
+{
+    let mut parts = mnemonic.trim().splitn(2, char::is_whitespace);
+    let _op = parts.next()?;
+    let operands = parts.next()?.trim();
+    if operands.is_empty() {
+        return None;
+    }
+
+    let first_operand = operands.split(',').next()?.trim();
+    let reg_name = first_operand.trim_matches(|c| matches!(c, '[' | ']' | '(' | ')' | '{' | '}'));
+    if reg_name.is_empty() {
+        return None;
+    }
+    resolve_register(reg_name)
 }
 
 fn is_fence_userop_name(name: &str) -> bool {
@@ -990,13 +1030,19 @@ mod tests {
             inputs: vec![],
         });
 
-        normalize_memory_semantics_with_hints(&mut block, "riscv64", "addi x0, x0, 0", |idx| {
-            if idx == 7 {
-                Some("fence".to_string())
-            } else {
-                None
-            }
-        });
+        normalize_memory_semantics_with_hints(
+            &mut block,
+            "riscv64",
+            "addi x0, x0, 0",
+            |idx| {
+                if idx == 7 {
+                    Some("fence".to_string())
+                } else {
+                    None
+                }
+            },
+            |_| None,
+        );
 
         assert!(matches!(block.ops[0], R2ILOp::Fence { .. }));
         let meta = block.op_metadata.get(&0).expect("metadata for op 0");
@@ -1013,7 +1059,13 @@ mod tests {
             addr: reg(8, 8),
         });
 
-        normalize_memory_semantics_with_hints(&mut block, "riscv64", "lr.w.aq a0,(a1)", |_| None);
+        normalize_memory_semantics_with_hints(
+            &mut block,
+            "riscv64",
+            "lr.w.aq a0,(a1)",
+            |_| None,
+            |_| None,
+        );
 
         match &block.ops[0] {
             R2ILOp::LoadLinked { ordering, .. } => {
@@ -1036,16 +1088,26 @@ mod tests {
             val: reg(12, 8),
         });
 
-        normalize_memory_semantics_with_hints(&mut block, "riscv64", "sc.w.rl a0,a1,(a2)", |_| {
-            None
-        });
+        normalize_memory_semantics_with_hints(
+            &mut block,
+            "riscv64",
+            "sc.w.rl a0,a1,(a2)",
+            |_| None,
+            |name| {
+                if name.eq_ignore_ascii_case("a0") {
+                    Some(reg(32, 8))
+                } else {
+                    None
+                }
+            },
+        );
 
         match &block.ops[1] {
             R2ILOp::StoreConditional {
                 result, ordering, ..
             } => {
                 assert_eq!(*ordering, MemoryOrdering::Release);
-                assert!(result.is_some(), "expected best-effort result var");
+                assert_eq!(result.as_ref().map(|v| (v.offset, v.size)), Some((32, 8)));
             }
             other => panic!("expected StoreConditional, got {other:?}"),
         }
@@ -1070,6 +1132,7 @@ mod tests {
             "riscv64",
             "amoadd.w.aqrl a0,a1,(a2)",
             |_| None,
+            |_| None,
         );
 
         for op_index in 0..2usize {
@@ -1091,8 +1154,47 @@ mod tests {
             val: reg(8, 8),
         });
 
-        normalize_memory_semantics_with_hints(&mut block, "riscv64", "add x1,x2,x3", |_| None);
+        normalize_memory_semantics_with_hints(
+            &mut block,
+            "riscv64",
+            "add x1,x2,x3",
+            |_| None,
+            |_| None,
+        );
 
         assert!(matches!(block.ops[0], R2ILOp::Store { .. }));
+    }
+
+    #[test]
+    fn normalization_sc_fallback_picks_nearest_register_output() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Copy {
+            dst: reg(0, 8),
+            src: reg(4, 8),
+        });
+        block.push(R2ILOp::Copy {
+            dst: reg(16, 8),
+            src: reg(20, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: reg(8, 8),
+            val: reg(12, 8),
+        });
+
+        normalize_memory_semantics_with_hints(
+            &mut block,
+            "riscv64",
+            "sc.w.rl unknown,a1,(a2)",
+            |_| None,
+            |_| None,
+        );
+
+        match &block.ops[2] {
+            R2ILOp::StoreConditional { result, .. } => {
+                assert_eq!(result.as_ref().map(|v| (v.offset, v.size)), Some((16, 8)));
+            }
+            other => panic!("expected StoreConditional, got {other:?}"),
+        }
     }
 }
