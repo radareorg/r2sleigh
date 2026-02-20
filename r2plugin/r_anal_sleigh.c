@@ -28,6 +28,7 @@ extern const char *r2il_error(const R2ILContext *ctx);
 /* Lifting */
 extern R2ILBlock *r2il_lift(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr);
 extern R2ILBlock *r2il_lift_block(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr, unsigned int block_size);
+extern void r2il_set_semantic_metadata_enabled(R2ILContext *ctx, bool enabled);
 extern void r2il_block_free(R2ILBlock *block);
 extern int r2il_block_validate(R2ILContext *ctx, const R2ILBlock *block);
 extern void r2il_block_set_switch_info(R2ILBlock *block, unsigned long long switch_addr,
@@ -134,6 +135,7 @@ static RCore *sleigh_pdd_core_plugin_core = NULL;
 #define SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL 256
 #define SLEIGH_CALLER_PROP_SAMPLE_MAX 5
 #define SLEIGH_TAINT_LABEL_MAX 6
+#define SLEIGH_COMMENT_PREFIX_SEMANTIC "sla:"
 #define SLEIGH_COMMENT_PREFIX_TAINT "sla.taint:"
 #define SLEIGH_COMMENT_PREFIX_TAINT_RISK "sla.taint.risk:"
 
@@ -2128,6 +2130,34 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 	return out->count > 0;
 }
 
+static bool cfg_get_bool_default_true(RAnal *anal, const char *key) {
+	RCore *core;
+
+	if (!anal || !anal->config || !key || !*key) {
+		return true;
+	}
+	core = anal->coreb.core;
+	if (!core || !core->config) {
+		return true;
+	}
+	return r_config_get_b (core->config, key);
+}
+
+static bool sleigh_semantic_metadata_enabled(RAnal *anal) {
+	return cfg_get_bool_default_true (anal, "anal.sla.meta");
+}
+
+static bool sleigh_semantic_comments_enabled(RAnal *anal) {
+	return cfg_get_bool_default_true (anal, "anal.sla.meta.comments");
+}
+
+static void configure_context_runtime_options(RAnal *anal, R2ILContext *ctx) {
+	if (!ctx) {
+		return;
+	}
+	r2il_set_semantic_metadata_enabled (ctx, sleigh_semantic_metadata_enabled (anal));
+}
+
 R2ILContext *get_context(RAnal *anal) {
 	const char *arch = anal->config->arch;
 	int bits = anal->config->bits;
@@ -2156,6 +2186,7 @@ R2ILContext *get_context(RAnal *anal) {
 
 	/* Check if we need to reinitialize */
 	if (sleigh_ctx && sleigh_arch && !strcmp (sleigh_arch, sleigh_arch_str)) {
+		configure_context_runtime_options (anal, sleigh_ctx);
 		return sleigh_ctx;
 	}
 
@@ -2170,14 +2201,16 @@ R2ILContext *get_context(RAnal *anal) {
 	/* Initialize new context */
 	sleigh_ctx = r2il_arch_init (sleigh_arch_str);
 	if (!sleigh_ctx) {
-		R_LOG_ERROR ("r2sleigh: failed to initialize context for %s", sleigh_arch_str);
+		/* Optional-arch builds are expected to miss some backends; stay silent
+		 * so unsupported architectures fall back to other anal plugins. */
+		R_LOG_DEBUG ("r2sleigh: backend unavailable for %s", sleigh_arch_str);
 		return NULL;
 	}
 
 	if (!r2il_is_loaded (sleigh_ctx)) {
 		const char *err = r2il_error (sleigh_ctx);
-		if (err) {
-			R_LOG_ERROR ("r2sleigh: %s", err);
+		if (err && *err) {
+			R_LOG_DEBUG ("r2sleigh: %s", err);
 		}
 		r2il_free (sleigh_ctx);
 		sleigh_ctx = NULL;
@@ -2193,6 +2226,7 @@ R2ILContext *get_context(RAnal *anal) {
 		r2il_string_free (profile);
 	}
 
+	configure_context_runtime_options (anal, sleigh_ctx);
 	return sleigh_ctx;
 }
 
@@ -3293,29 +3327,47 @@ static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
 
 	int result = r2sleigh_analyze_fcn (ctx,
 		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+	const bool semantic_comments_enabled = sleigh_semantic_comments_enabled (anal);
+	size_t semantic_comments_emitted = 0;
+	size_t i;
+
+	/* Always clear stale semantic lines first to keep writeback idempotent. */
+	set_sla_comment_line_with_prefix (anal, fcn->addr, NULL, SLEIGH_COMMENT_PREFIX_SEMANTIC);
+	for (i = 0; i < blocks.count; i++) {
+		set_sla_comment_line_with_prefix (anal,
+			r2il_block_addr (blocks.blocks[i]), NULL, SLEIGH_COMMENT_PREFIX_SEMANTIC);
+	}
 
 	/* Write SSA annotations as comments */
-	char *json = r2sleigh_analyze_fcn_annotations (ctx,
-		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
-	if (json && *json) {
-		RJson *root = r_json_parse (json);
-		if (root && root->type == R_JSON_ARRAY) {
-			const RJson *item;
-			for (item = root->children.first; item; item = item->next) {
-				if (item->type != R_JSON_OBJECT) {
-					continue;
+	if (semantic_comments_enabled) {
+		char *json = r2sleigh_analyze_fcn_annotations (ctx,
+			(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+		if (json && *json) {
+			RJson *root = r_json_parse (json);
+			if (root && root->type == R_JSON_ARRAY) {
+				const RJson *item;
+				for (item = root->children.first; item; item = item->next) {
+					if (item->type != R_JSON_OBJECT) {
+						continue;
+					}
+					const RJson *j_addr = r_json_get (item, "addr");
+					const RJson *j_comment = r_json_get (item, "comment");
+					if (!j_addr || j_addr->type != R_JSON_INTEGER
+						|| !j_comment || j_comment->type != R_JSON_STRING
+						|| !j_comment->str_value || !*j_comment->str_value) {
+						continue;
+					}
+					set_sla_comment_line_with_prefix (anal, (ut64)j_addr->num.u_value,
+						j_comment->str_value, SLEIGH_COMMENT_PREFIX_SEMANTIC);
+					semantic_comments_emitted++;
 				}
-				const RJson *j_addr = r_json_get (item, "addr");
-				const RJson *j_comment = r_json_get (item, "comment");
-				if (j_addr && j_comment && j_comment->str_value) {
-					r_meta_set_string (anal, R_META_TYPE_COMMENT,
-						(ut64)j_addr->num.u_value, j_comment->str_value);
-				}
+				r_json_free (root);
 			}
-			r_json_free (root);
+			r2il_string_free (json);
 		}
-		r2il_string_free (json);
 	}
+	R_LOG_DEBUG ("r2sleigh: semantic comments fcn=0x%"PFMT64x" enabled=%d emitted=%zu",
+		fcn->addr, semantic_comments_enabled? 1: 0, semantic_comments_emitted);
 
 	block_array_free (&blocks);
 	return result == 1;

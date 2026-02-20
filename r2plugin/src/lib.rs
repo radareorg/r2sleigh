@@ -15,7 +15,7 @@ use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize, validate_block_full};
 use r2sleigh_export::{
     ExportFormat, InstructionAction, InstructionExportInput, export_instruction, op_json_named,
 };
-use r2sleigh_lift::{Disassembler, build_arch_spec, userop_map_for_arch};
+use r2sleigh_lift::{Disassembler, SemanticMetadataOptions, build_arch_spec, userop_map_for_arch};
 use r2ssa::TaintPolicy;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -30,6 +30,7 @@ pub struct R2ILContext {
     arch: Option<ArchSpec>,
     arch_name_cstr: Option<CString>,
     disasm: Option<Disassembler>,
+    semantic_metadata_enabled: bool,
     error: Option<CString>,
 }
 
@@ -40,6 +41,7 @@ impl R2ILContext {
             arch: None,
             arch_name_cstr: None,
             disasm: None,
+            semantic_metadata_enabled: true,
             error: None,
         }
     }
@@ -50,6 +52,7 @@ impl R2ILContext {
             arch: Some(arch),
             arch_name_cstr: name,
             disasm: None,
+            semantic_metadata_enabled: true,
             error: None,
         }
     }
@@ -60,6 +63,7 @@ impl R2ILContext {
             arch: Some(arch),
             arch_name_cstr: name,
             disasm: Some(disasm),
+            semantic_metadata_enabled: true,
             error: None,
         }
     }
@@ -69,6 +73,7 @@ impl R2ILContext {
             arch: None,
             arch_name_cstr: None,
             disasm: None,
+            semantic_metadata_enabled: true,
             error: CString::new(msg).ok(),
         }
     }
@@ -384,7 +389,11 @@ pub extern "C" fn r2il_lift(
     };
 
     let slice = unsafe { slice::from_raw_parts(bytes, len) };
-    match disasm.lift(slice, addr) {
+    let lift_opts = SemanticMetadataOptions {
+        enabled: ctx_ref.semantic_metadata_enabled,
+        ..Default::default()
+    };
+    match disasm.lift_with_options(slice, addr, lift_opts) {
         Ok(block) => {
             if validate_block_in_context(ctx_ref, &block).is_err() {
                 return ptr::null_mut();
@@ -430,8 +439,12 @@ pub extern "C" fn r2il_lift_block(
 
     let slice = unsafe { slice::from_raw_parts(bytes, len) };
     let size = (block_size as usize).min(len);
+    let lift_opts = SemanticMetadataOptions {
+        enabled: ctx_ref.semantic_metadata_enabled,
+        ..Default::default()
+    };
 
-    match disasm.lift_block(slice, addr, size) {
+    match disasm.lift_block_with_options(slice, addr, size, lift_opts) {
         Ok(block) => {
             if validate_block_in_context(ctx_ref, &block).is_err() {
                 return ptr::null_mut();
@@ -444,6 +457,16 @@ pub extern "C" fn r2il_lift_block(
             ptr::null_mut()
         }
     }
+}
+
+/// Enable/disable semantic metadata auto-population during lifting.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_set_semantic_metadata_enabled(ctx: *mut R2ILContext, enabled: bool) {
+    if ctx.is_null() {
+        return;
+    }
+    let ctx_ref = unsafe { &mut *ctx };
+    ctx_ref.semantic_metadata_enabled = enabled;
 }
 
 /// Free a lifted block.
@@ -5771,6 +5794,85 @@ pub extern "C" fn r2sleigh_analyze_fcn(
     1 // Success
 }
 
+fn enum_label<T: serde::Serialize>(value: T) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn summarize_block_semantics(block: &R2ILBlock) -> Option<String> {
+    use std::collections::BTreeSet;
+
+    let mut storage_classes: BTreeSet<String> = BTreeSet::new();
+    let mut memory_classes: BTreeSet<String> = BTreeSet::new();
+    let mut orderings: BTreeSet<String> = BTreeSet::new();
+    let mut atomic_kinds: BTreeSet<String> = BTreeSet::new();
+    let mut pointer_like = false;
+
+    for (op_index, op) in block.ops.iter().enumerate() {
+        if let Some(meta) = block.op_metadata.get(&op_index) {
+            if let Some(memory_class) = meta.memory_class
+                && let Some(label) = enum_label(memory_class)
+            {
+                memory_classes.insert(label);
+            }
+            if let Some(ordering) = meta.memory_ordering
+                && let Some(label) = enum_label(ordering)
+            {
+                orderings.insert(label);
+            }
+            if let Some(kind) = meta.atomic_kind
+                && let Some(label) = enum_label(kind)
+            {
+                atomic_kinds.insert(label);
+            }
+        }
+
+        for vn in op_all_varnodes(op) {
+            if let Some(meta) = vn.meta.as_ref() {
+                if let Some(storage_class) = meta.storage_class
+                    && let Some(label) = enum_label(storage_class)
+                {
+                    storage_classes.insert(label);
+                }
+                if let Some(pointer_hint) = meta.pointer_hint
+                    && !matches!(pointer_hint, r2il::PointerHint::Unknown)
+                {
+                    pointer_like = true;
+                }
+            }
+        }
+    }
+
+    let mut parts = Vec::new();
+    if !storage_classes.is_empty() {
+        let labels: Vec<String> = storage_classes.into_iter().collect();
+        parts.push(format!("storage={}", labels.join(",")));
+    }
+    if !memory_classes.is_empty() {
+        let labels: Vec<String> = memory_classes.into_iter().collect();
+        parts.push(format!("mem={}", labels.join(",")));
+    }
+    if !orderings.is_empty() {
+        let labels: Vec<String> = orderings.into_iter().collect();
+        parts.push(format!("ord={}", labels.join(",")));
+    }
+    if !atomic_kinds.is_empty() {
+        let labels: Vec<String> = atomic_kinds.into_iter().collect();
+        parts.push(format!("atomic={}", labels.join(",")));
+    }
+    if pointer_like {
+        parts.push("ptr".to_string());
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 /// Annotation entry for analyze_fcn writeback.
 #[derive(serde::Serialize)]
 struct FcnAnnotation {
@@ -5805,6 +5907,11 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
         let blk = unsafe { &*blk_ptr };
         r2il_blocks.push(blk.clone());
     }
+
+    let semantic_by_addr: std::collections::HashMap<u64, String> = r2il_blocks
+        .iter()
+        .filter_map(|block| summarize_block_semantics(block).map(|summary| (block.addr, summary)))
+        .collect();
 
     // Build function-level SSA with phi nodes
     let ssa_func =
@@ -5890,6 +5997,15 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
             parts.push(format!("defines {}", defs.join(",")));
         }
 
+        if let Some(meta_summary) = semantic_by_addr.get(&block.addr) {
+            let mut summary = meta_summary.clone();
+            if summary.len() > 96 {
+                summary.truncate(96);
+                summary.push_str("...");
+            }
+            parts.push(format!("meta {}", summary));
+        }
+
         if !parts.is_empty() {
             annotations.push(FcnAnnotation {
                 addr: block.addr,
@@ -5929,14 +6045,26 @@ pub extern "C" fn r2sleigh_recover_vars(
         None => return ptr::null_mut(),
     };
 
-    // Convert R2ILBlocks to SSA
-    let mut ssa_blocks = Vec::new();
+    // Collect R2IL blocks first so we can preserve varnode metadata hints.
+    let mut r2il_blocks = Vec::new();
     for i in 0..num_blocks {
         let blk_ptr = unsafe { *blocks.add(i) };
         if blk_ptr.is_null() {
             continue;
         }
         let blk = unsafe { &*blk_ptr };
+        r2il_blocks.push(blk.clone());
+    }
+
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    let reg_type_hints = collect_register_type_hints(&r2il_blocks, disasm);
+
+    // Convert R2ILBlocks to SSA
+    let mut ssa_blocks = Vec::new();
+    for blk in &r2il_blocks {
         let ssa_block = r2ssa::block::to_ssa(blk, disasm);
         ssa_blocks.push(ssa_block);
     }
@@ -5946,7 +6074,7 @@ pub extern "C" fn r2sleigh_recover_vars(
     }
 
     // Recover variables from SSA analysis
-    let vars = recover_vars_from_ssa(&ssa_blocks, ctx_ref.arch.as_ref());
+    let vars = recover_vars_from_ssa(&ssa_blocks, ctx_ref.arch.as_ref(), &reg_type_hints);
 
     // Serialize to JSON
     match serde_json::to_string(&vars) {
@@ -6024,6 +6152,100 @@ struct DataRef {
     ref_type: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TypeHintRank {
+    Integer = 1,
+    Float = 2,
+    Pointer = 3,
+}
+
+fn size_to_signed_int_type(size: u32) -> String {
+    match size {
+        1 => "int8_t".to_string(),
+        2 => "int16_t".to_string(),
+        4 => "int32_t".to_string(),
+        8 => "int64_t".to_string(),
+        _ => format!("int{}_t", size.saturating_mul(8)),
+    }
+}
+
+fn size_to_unsigned_int_type(size: u32) -> String {
+    match size {
+        1 => "uint8_t".to_string(),
+        2 => "uint16_t".to_string(),
+        4 => "uint32_t".to_string(),
+        8 => "uint64_t".to_string(),
+        _ => format!("uint{}_t", size.saturating_mul(8)),
+    }
+}
+
+fn scalar_kind_to_type(kind: r2il::ScalarKind, size: u32) -> Option<(TypeHintRank, String)> {
+    match kind {
+        r2il::ScalarKind::Bool => Some((TypeHintRank::Integer, "bool".to_string())),
+        r2il::ScalarKind::SignedInt => Some((TypeHintRank::Integer, size_to_signed_int_type(size))),
+        r2il::ScalarKind::UnsignedInt => {
+            Some((TypeHintRank::Integer, size_to_unsigned_int_type(size)))
+        }
+        r2il::ScalarKind::Float => {
+            let ty = match size {
+                4 => "float".to_string(),
+                8 => "double".to_string(),
+                16 => "long double".to_string(),
+                _ => "float".to_string(),
+            };
+            Some((TypeHintRank::Float, ty))
+        }
+        r2il::ScalarKind::Bitvector | r2il::ScalarKind::Unknown => None,
+    }
+}
+
+fn metadata_type_hint(vn: &r2il::Varnode) -> Option<(TypeHintRank, String)> {
+    let meta = vn.meta.as_ref()?;
+
+    if let Some(pointer_hint) = meta.pointer_hint
+        && !matches!(pointer_hint, r2il::PointerHint::Unknown)
+    {
+        return Some((TypeHintRank::Pointer, "void *".to_string()));
+    }
+
+    let scalar_kind = meta.scalar_kind?;
+    scalar_kind_to_type(scalar_kind, vn.size)
+}
+
+fn collect_register_type_hints(
+    r2il_blocks: &[R2ILBlock],
+    disasm: &Disassembler,
+) -> std::collections::HashMap<String, String> {
+    let mut hints: std::collections::HashMap<String, (TypeHintRank, String)> =
+        std::collections::HashMap::new();
+
+    for block in r2il_blocks {
+        for op in &block.ops {
+            for vn in op_all_varnodes(op) {
+                if !vn.is_register() {
+                    continue;
+                }
+                let Some((rank, ty)) = metadata_type_hint(vn) else {
+                    continue;
+                };
+                let Some(name) = disasm.register_name(vn) else {
+                    continue;
+                };
+
+                let key = name.to_ascii_lowercase();
+                match hints.get(&key) {
+                    Some((old_rank, _)) if *old_rank >= rank => {}
+                    _ => {
+                        hints.insert(key, (rank, ty));
+                    }
+                }
+            }
+        }
+    }
+
+    hints.into_iter().map(|(k, (_rank, ty))| (k, ty)).collect()
+}
+
 const X86_ARG_REGS: &[(&str, &[&str])] = &[
     ("rdi", &["rdi", "edi", "di", "dil"]),
     ("rsi", &["rsi", "esi", "si", "sil"]),
@@ -6069,7 +6291,11 @@ fn recover_vars_arch_profile(arch: Option<&ArchSpec>) -> (ArgAliasMap, BaseRegLi
 }
 
 /// Recover variables from SSA blocks using architecture-specific lightweight heuristics.
-fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock], arch: Option<&ArchSpec>) -> Vec<VarProt> {
+fn recover_vars_from_ssa(
+    ssa_blocks: &[r2ssa::SSABlock],
+    arch: Option<&ArchSpec>,
+    reg_type_hints: &std::collections::HashMap<String, String>,
+) -> Vec<VarProt> {
     use std::collections::{HashMap, HashSet};
 
     let mut vars = Vec::new();
@@ -6161,11 +6387,15 @@ fn recover_vars_from_ssa(ssa_blocks: &[r2ssa::SSABlock], arch: Option<&ArchSpec>
                             && !seen_arg_regs.contains(*canonical)
                         {
                             seen_arg_regs.insert(canonical.to_string());
+                            let hinted_type = aliases
+                                .iter()
+                                .find_map(|alias| reg_type_hints.get(*alias).cloned())
+                                .or_else(|| reg_type_hints.get(*canonical).cloned());
                             vars.push(VarProt {
                                 name: format!("arg{}", i),
                                 kind: "r".to_string(),
                                 delta: 0,
-                                var_type: size_to_type(src.size),
+                                var_type: hinted_type.unwrap_or_else(|| size_to_type(src.size)),
                                 isarg: true,
                                 reg: Some(canonical.to_string()),
                             });

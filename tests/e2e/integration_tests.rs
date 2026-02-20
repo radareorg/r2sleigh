@@ -254,6 +254,16 @@ fn contains_named_register(value: &Value) -> bool {
     }
 }
 
+fn count_comment_lines_with_prefix(comments: &[Value], prefix: &str) -> usize {
+    comments
+        .iter()
+        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .flat_map(|comment| comment.lines())
+        .map(str::trim_start)
+        .filter(|line| line.starts_with(prefix))
+        .count()
+}
+
 // ============================================================================
 // 1. Basic Plugin Status
 // ============================================================================
@@ -2683,7 +2693,12 @@ mod ffi {
     use std::os::raw::c_char;
     use std::path::Path;
 
-    const PLUGIN_PATH: &str = "target/release/libr2sleigh_plugin.so";
+    #[cfg(target_os = "macos")]
+    const PLUGIN_PATH: &str = "../../target/release/libr2sleigh_plugin.dylib";
+    #[cfg(target_os = "linux")]
+    const PLUGIN_PATH: &str = "../../target/release/libr2sleigh_plugin.so";
+    #[cfg(target_os = "windows")]
+    const PLUGIN_PATH: &str = "../../target/release/r2sleigh_plugin.dll";
 
     fn require_plugin() -> bool {
         Path::new(PLUGIN_PATH).exists()
@@ -2921,6 +2936,36 @@ mod ffi {
             Value::Array(items) => items.iter().any(contains_unsigned_int_meta),
             _ => false,
         }
+    }
+
+    fn mem_access_has_addr_storage_class(mem_access_json: &str, storage_class: &str) -> bool {
+        let parsed: Value = serde_json::from_str(mem_access_json).expect("valid mem_access json");
+        parsed.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("addr_detail")
+                    .and_then(Value::as_object)
+                    .and_then(|detail| detail.get("meta"))
+                    .and_then(Value::as_object)
+                    .and_then(|meta| meta.get("storage_class"))
+                    .and_then(Value::as_str)
+                    == Some(storage_class)
+            })
+        })
+    }
+
+    fn mem_access_has_addr_pointer_hint(mem_access_json: &str, pointer_hint: &str) -> bool {
+        let parsed: Value = serde_json::from_str(mem_access_json).expect("valid mem_access json");
+        parsed.as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("addr_detail")
+                    .and_then(Value::as_object)
+                    .and_then(|detail| detail.get("meta"))
+                    .and_then(Value::as_object)
+                    .and_then(|meta| meta.get("pointer_hint"))
+                    .and_then(Value::as_str)
+                    == Some(pointer_hint)
+            })
+        })
     }
 
     #[test]
@@ -3369,6 +3414,329 @@ mod ffi {
             assert!(
                 contains_unsigned_int_meta(&parsed),
                 "operation JSON should include varnode metadata: {}",
+                json_str
+            );
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn lift_auto_populates_semantic_metadata_for_stack_memory() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_mem_access: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> *mut c_char,
+            > = lib.get(b"r2il_block_mem_access").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+
+            let arch = CString::new("x86-64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            assert!(!ctx.is_null(), "Failed to initialize x86-64 context");
+
+            // mov rax, qword [rsp]
+            let mut bytes = vec![0x48u8, 0x8b, 0x04, 0x24];
+            bytes.resize(16, 0x90);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift stack load");
+
+            let mem_ptr = r2il_block_mem_access(ctx, block);
+            assert!(!mem_ptr.is_null(), "Expected mem-access JSON");
+            let mem_json = CStr::from_ptr(mem_ptr).to_string_lossy().to_string();
+            r2il_string_free(mem_ptr);
+            assert!(
+                mem_access_has_addr_storage_class(&mem_json, "stack")
+                    && mem_access_has_addr_pointer_hint(&mem_json, "pointer_like"),
+                "Automatic metadata should populate stack/pointer addr metadata: {}",
+                mem_json
+            );
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn lift_respects_semantic_metadata_disable_toggle() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_set_semantic_metadata_enabled: libloading::Symbol<
+                unsafe extern "C" fn(*mut std::ffi::c_void, bool),
+            > = lib.get(b"r2il_set_semantic_metadata_enabled").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_mem_access: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> *mut c_char,
+            > = lib.get(b"r2il_block_mem_access").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+
+            let arch = CString::new("x86-64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            assert!(!ctx.is_null(), "Failed to initialize x86-64 context");
+
+            // mov rax, qword [rsp]
+            let mut bytes = vec![0x48u8, 0x8b, 0x04, 0x24];
+            bytes.resize(16, 0x90);
+
+            let enabled_block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(
+                !enabled_block.is_null(),
+                "Failed to lift baseline stack load with metadata enabled"
+            );
+            let enabled_mem_ptr = r2il_block_mem_access(ctx, enabled_block);
+            assert!(!enabled_mem_ptr.is_null(), "Expected enabled mem-access JSON");
+            let enabled_json = CStr::from_ptr(enabled_mem_ptr).to_string_lossy().to_string();
+            r2il_string_free(enabled_mem_ptr);
+            assert!(
+                mem_access_has_addr_storage_class(&enabled_json, "stack")
+                    && mem_access_has_addr_pointer_hint(&enabled_json, "pointer_like"),
+                "Enabled path should include semantic addr metadata: {}",
+                enabled_json
+            );
+            r2il_block_free(enabled_block);
+
+            r2il_set_semantic_metadata_enabled(ctx, false);
+            let disabled_block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x2000);
+            assert!(
+                !disabled_block.is_null(),
+                "Failed to lift stack load with metadata disabled"
+            );
+            let disabled_mem_ptr = r2il_block_mem_access(ctx, disabled_block);
+            assert!(!disabled_mem_ptr.is_null(), "Expected disabled mem-access JSON");
+            let disabled_json = CStr::from_ptr(disabled_mem_ptr).to_string_lossy().to_string();
+            r2il_string_free(disabled_mem_ptr);
+            assert!(
+                !mem_access_has_addr_storage_class(&disabled_json, "stack")
+                    && !mem_access_has_addr_pointer_hint(&disabled_json, "pointer_like"),
+                "Disabled path should suppress semantic addr metadata: {}",
+                disabled_json
+            );
+
+            r2il_block_free(disabled_block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn recover_vars_uses_pointer_metadata_for_arg_type() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2sleigh_recover_vars: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const *const std::ffi::c_void,
+                    usize,
+                    u64,
+                ) -> *mut c_char,
+            > = lib.get(b"r2sleigh_recover_vars").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+
+            let arch = CString::new("x86-64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            assert!(!ctx.is_null(), "Failed to initialize x86-64 context");
+
+            // mov rax, rdi
+            let mut bytes = vec![0x48u8, 0x89, 0xF8];
+            bytes.resize(16, 0x90);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift baseline instruction");
+
+            let block_ref = &mut *(block as *mut r2il::R2ILBlock);
+            let mut tagged = false;
+            for op in &mut block_ref.ops {
+                if let R2ILOp::Copy { src, .. } = op
+                    && src.space == r2il::SpaceId::Register
+                {
+                    let mut meta = r2il::VarnodeMetadata::default();
+                    meta.pointer_hint = Some(r2il::PointerHint::PointerLike);
+                    src.set_meta(meta);
+                    tagged = true;
+                    break;
+                }
+            }
+            assert!(tagged, "Expected to tag a register source with metadata");
+
+            let block_ptrs = [block as *const std::ffi::c_void];
+            let json_ptr =
+                r2sleigh_recover_vars(ctx, block_ptrs.as_ptr(), block_ptrs.len(), 0x1000);
+            assert!(!json_ptr.is_null(), "Expected recovered vars JSON");
+            let json_str = CStr::from_ptr(json_ptr).to_string_lossy().to_string();
+            r2il_string_free(json_ptr);
+
+            let parsed: Value = serde_json::from_str(&json_str).expect("valid recover vars json");
+            let vars = parsed.as_array().expect("recover vars array");
+            let has_pointer_arg = vars.iter().any(|entry| {
+                entry.get("reg").and_then(Value::as_str) == Some("rdi")
+                    && entry.get("type").and_then(Value::as_str) == Some("void *")
+            });
+            assert!(
+                has_pointer_arg,
+                "Recovered vars should include pointer-typed rdi arg from metadata: {}",
+                json_str
+            );
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn analyze_fcn_annotations_include_semantic_metadata() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2sleigh_analyze_fcn_annotations: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const *const std::ffi::c_void,
+                    usize,
+                    u64,
+                ) -> *mut c_char,
+            > = lib.get(b"r2sleigh_analyze_fcn_annotations").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+
+            let arch = CString::new("x86-64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            assert!(!ctx.is_null(), "Failed to initialize x86-64 context");
+
+            let mut bytes = vec![0x31u8, 0xC0]; // xor eax, eax
+            bytes.resize(16, 0x90);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift baseline instruction");
+
+            let block_ref = &mut *(block as *mut r2il::R2ILBlock);
+            let mut tagged = false;
+            for op in &mut block_ref.ops {
+                if let R2ILOp::Copy { dst, .. } = op {
+                    let mut meta = r2il::VarnodeMetadata::default();
+                    meta.storage_class = Some(r2il::StorageClass::ThreadLocal);
+                    dst.set_meta(meta);
+                    tagged = true;
+                    break;
+                }
+            }
+            assert!(tagged, "Expected to tag at least one varnode with metadata");
+            block_ref.set_op_metadata(
+                0,
+                r2il::OpMetadata {
+                    memory_class: Some(r2il::MemoryClass::ThreadLocal),
+                    ..Default::default()
+                },
+            );
+
+            let block_ptrs = [block as *const std::ffi::c_void];
+            let json_ptr = r2sleigh_analyze_fcn_annotations(
+                ctx,
+                block_ptrs.as_ptr(),
+                block_ptrs.len(),
+                0x1000,
+            );
+            assert!(!json_ptr.is_null(), "Expected function annotations JSON");
+            let json_str = CStr::from_ptr(json_ptr).to_string_lossy().to_string();
+            r2il_string_free(json_ptr);
+
+            let parsed: Value = serde_json::from_str(&json_str).expect("valid annotations json");
+            let anns = parsed.as_array().expect("annotations array");
+            let has_meta_comment = anns.iter().any(|entry| {
+                entry
+                    .get("comment")
+                    .and_then(Value::as_str)
+                    .map(|s| s.contains("meta ") && s.contains("thread_local"))
+                    .unwrap_or(false)
+            });
+            assert!(
+                has_meta_comment,
+                "Function annotations should include semantic metadata summary: {}",
                 json_str
             );
 
@@ -3981,6 +4349,118 @@ mod deep_integration {
         assert!(
             result.contains("plugin post-analysis") || !result.contains("ERROR"),
             "aaaa should run plugin post-analysis hooks"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_semantic_comments_present_without_sla_commands() {
+        setup();
+        let result = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(vuln_test_binary(), "aaaa; CCj", Duration::from_secs(60), &[])
+        });
+        result.assert_ok();
+        let parsed = parse_json(&result, "CCj after aaaa");
+        let comments = expect_array(&parsed, "CCj after aaaa");
+        let semantic_lines = count_comment_lines_with_prefix(comments, "sla:");
+        assert!(
+            semantic_lines > 0,
+            "aaaa should emit semantic `sla:` comments without explicit a:sla.* command"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_semantic_comments_idempotent() {
+        setup();
+
+        let once = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(vuln_test_binary(), "aaaa; CCj", Duration::from_secs(60), &[])
+        });
+        once.assert_ok();
+        let once_parsed = parse_json(&once, "CCj after one aaaa");
+        let once_comments = expect_array(&once_parsed, "CCj after one aaaa");
+        let once_count = count_comment_lines_with_prefix(once_comments, "sla:");
+        assert!(once_count > 0, "baseline semantic comment count should be non-zero");
+
+        let twice = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                "aaaa; aaaa; CCj",
+                Duration::from_secs(90),
+                &[],
+            )
+        });
+        twice.assert_ok();
+        let twice_parsed = parse_json(&twice, "CCj after two aaaa runs");
+        let twice_comments = expect_array(&twice_parsed, "CCj after two aaaa runs");
+        let twice_count = count_comment_lines_with_prefix(twice_comments, "sla:");
+
+        assert_eq!(
+            once_count, twice_count,
+            "semantic comment lines should stay stable across repeated aaaa"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_semantic_preserves_user_comment() {
+        setup();
+        let baseline = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(vuln_test_binary(), "aaaa; CCj", Duration::from_secs(60), &[])
+        });
+        baseline.assert_ok();
+        let baseline_parsed = parse_json(&baseline, "CCj baseline");
+        let baseline_comments = expect_array(&baseline_parsed, "CCj baseline");
+        let target_addr = baseline_comments
+            .iter()
+            .find(|entry| {
+                entry
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|comment| comment.lines().any(|line| line.trim_start().starts_with("sla:")))
+                    .unwrap_or(false)
+            })
+            .and_then(|entry| entry.get("offset").and_then(Value::as_u64))
+            .expect("expected at least one semantic-commented address");
+
+        let cmd = format!(
+            "s 0x{target_addr:x}; CCu user-note-semantic; aaaa; s 0x{target_addr:x}; CC."
+        );
+        let result = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(vuln_test_binary(), &cmd, Duration::from_secs(90), &[])
+        });
+        result.assert_ok();
+        assert!(
+            result.contains("user-note-semantic"),
+            "user comment should be preserved when semantic comments are rewritten"
+        );
+        assert!(
+            result.contains("sla:"),
+            "semantic comment should coexist with preserved user comment"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_semantic_comments_respect_config_toggle() {
+        setup();
+        let result = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                "e anal.sla.meta.comments=false; aaaa; CCj",
+                Duration::from_secs(90),
+                &[],
+            )
+        });
+        result.assert_ok();
+        if result.contains("variable 'anal.sla.meta.comments' not found") {
+            eprintln!("Skipping: anal.sla.meta.comments is not available in this radare2 build");
+            return;
+        }
+
+        let parsed = parse_json(&result, "CCj with semantic comments disabled");
+        let comments = expect_array(&parsed, "CCj with semantic comments disabled");
+        let semantic_lines = count_comment_lines_with_prefix(comments, "sla:");
+        assert_eq!(
+            semantic_lines, 0,
+            "semantic sla comments should be disabled when anal.sla.meta.comments=false"
         );
     }
 
