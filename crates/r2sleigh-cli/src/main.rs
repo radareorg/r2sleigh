@@ -7,12 +7,14 @@
 //!   r2sleigh disasm --arch x86-64 --bytes "554889e5"
 
 use clap::{Parser, Subcommand};
-use r2il::{serialize, validate_archspec, validate_block};
+use r2il::{serialize, validate_archspec, validate_block_full};
 use r2sleigh_lift::{Lifter, create_arm_spec, create_x86_64_spec};
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "sleigh-config")]
-use r2sleigh_lift::{Disassembler, format_op, op_to_esil_named, userop_map_for_arch};
+use r2sleigh_lift::{
+    Disassembler, build_arch_spec, format_op, op_to_esil_named, userop_map_for_arch,
+};
 
 /// r2sleigh - Sleigh to r2il compiler for radare2
 #[derive(Parser)]
@@ -393,6 +395,7 @@ fn build_disasm_json(
 #[cfg(feature = "sleigh-config")]
 fn render_esil_lines(
     disasm: &Disassembler,
+    arch_spec: &r2il::ArchSpec,
     bytes: &[u8],
     addr: u64,
 ) -> Result<Vec<String>, String> {
@@ -420,8 +423,7 @@ fn render_esil_lines(
             Ok(result) => result,
             Err(_) => break,
         };
-        validate_block(&block)
-            .map_err(|e| format!("Invalid lifted block at 0x{instr_addr:x}: {}", e))?;
+        validate_lifted_block(&block, arch_spec, instr_addr)?;
 
         let instr_size = block.size as usize;
         if instr_size == 0 {
@@ -440,6 +442,16 @@ fn render_esil_lines(
     }
 
     Ok(lines)
+}
+
+#[cfg(feature = "sleigh-config")]
+fn validate_lifted_block(
+    block: &r2il::R2ILBlock,
+    arch_spec: &r2il::ArchSpec,
+    addr: u64,
+) -> Result<(), String> {
+    validate_block_full(block, arch_spec)
+        .map_err(|e| format!("Invalid lifted block at 0x{addr:x}: {}", e))
 }
 
 #[cfg(feature = "sleigh-config")]
@@ -462,13 +474,13 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
     }
 
     // Get the disassembler for the requested architecture
-    let disasm = get_disassembler(arch)?;
+    let (disasm, arch_spec) = get_disassembler_with_spec(arch)?;
 
     // Lift the instruction
     let block = disasm
         .lift(&bytes, addr)
         .map_err(|e| format!("Lift failed: {}", e))?;
-    validate_block(&block).map_err(|e| format!("Invalid lifted block: {}", e))?;
+    validate_lifted_block(&block, &arch_spec, addr)?;
 
     // Also get the native disassembly for display
     let (mnemonic, size) = disasm
@@ -483,7 +495,7 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
             println!("{}", output);
         }
         "esil" => {
-            let lines = render_esil_lines(&disasm, &bytes, addr)?;
+            let lines = render_esil_lines(&disasm, &arch_spec, &bytes, addr)?;
             for line in lines {
                 println!("{}", line);
             }
@@ -502,10 +514,23 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
 }
 
 #[cfg(feature = "sleigh-config")]
+#[allow(dead_code)]
 fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
+    let (disasm, _) = get_disassembler_with_spec(arch)?;
+    Ok(disasm)
+}
+
+#[cfg(feature = "sleigh-config")]
+fn get_disassembler_with_spec(arch: &str) -> Result<(Disassembler, r2il::ArchSpec), String> {
     match arch.to_lowercase().as_str() {
         #[cfg(feature = "x86")]
         "x86-64" | "x86_64" | "x64" | "amd64" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_x86::SLA_X86_64,
+                sleigh_config::processor_x86::PSPEC_X86_64,
+                "x86-64",
+            )
+            .map_err(|e| e.to_string())?;
             let mut disasm = Disassembler::from_sla(
                 sleigh_config::processor_x86::SLA_X86_64,
                 sleigh_config::processor_x86::PSPEC_X86_64,
@@ -513,10 +538,16 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
             )
             .map_err(|e| e.to_string())?;
             disasm.set_userop_map(userop_map_for_arch("x86-64"));
-            Ok(disasm)
+            Ok((disasm, spec))
         }
         #[cfg(feature = "x86")]
         "x86" | "x86-32" | "i386" | "i686" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_x86::SLA_X86,
+                sleigh_config::processor_x86::PSPEC_X86,
+                "x86",
+            )
+            .map_err(|e| e.to_string())?;
             let mut disasm = Disassembler::from_sla(
                 sleigh_config::processor_x86::SLA_X86,
                 sleigh_config::processor_x86::PSPEC_X86,
@@ -524,10 +555,16 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
             )
             .map_err(|e| e.to_string())?;
             disasm.set_userop_map(userop_map_for_arch("x86"));
-            Ok(disasm)
+            Ok((disasm, spec))
         }
         #[cfg(feature = "arm")]
         "arm" | "arm32" | "arm-le" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_arm::SLA_ARM8_LE,
+                sleigh_config::processor_arm::PSPEC_ARMCORTEX,
+                "arm",
+            )
+            .map_err(|e| e.to_string())?;
             let mut disasm = Disassembler::from_sla(
                 sleigh_config::processor_arm::SLA_ARM8_LE,
                 // sleigh-config 1.x does not ship an ARM8 pspec; use a Cortex pspec instead.
@@ -536,7 +573,7 @@ fn get_disassembler(arch: &str) -> Result<Disassembler, String> {
             )
             .map_err(|e| e.to_string())?;
             disasm.set_userop_map(userop_map_for_arch("arm"));
-            Ok(disasm)
+            Ok((disasm, spec))
         }
         _ => {
             let mut supported: Vec<&str> = vec![];
@@ -610,14 +647,32 @@ mod tests {
 
     #[test]
     fn disasm_esil_includes_userop_name_across_instructions() {
-        let disasm = get_disassembler("x86-64").expect("disassembler");
+        let (disasm, arch_spec) = get_disassembler_with_spec("x86-64").expect("disassembler");
         let bytes = hex::decode("31c00fa2c3ffffffffffffffffffffffff").expect("bytes");
-        let lines = render_esil_lines(&disasm, &bytes, 0x1000).expect("render esil");
+        let lines = render_esil_lines(&disasm, &arch_spec, &bytes, 0x1000).expect("render esil");
         assert!(
             lines
                 .iter()
                 .any(|line| line.contains("CALLOTHER(") && line.contains("cpuid")),
             "ESIL should include named CallOther ops across multiple instructions"
+        );
+    }
+
+    #[test]
+    fn validate_lifted_block_reports_semantic_failure() {
+        let arch = r2il::ArchSpec::new("test");
+        let mut block = r2il::R2ILBlock::new(0x1000, 1);
+        block.push(r2il::R2ILOp::Copy {
+            dst: r2il::Varnode::register(0, 8),
+            src: r2il::Varnode::register(8, 4),
+        });
+
+        let err = validate_lifted_block(&block, &arch, 0x1000).expect_err("must fail");
+        assert!(
+            err.contains("Invalid lifted block at 0x1000")
+                && err.contains("op.copy.width_mismatch"),
+            "expected semantic validation failure, got: {}",
+            err
         );
     }
 }

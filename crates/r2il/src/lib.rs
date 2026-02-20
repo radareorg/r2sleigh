@@ -39,7 +39,8 @@ pub use regname::select_register_name;
 pub use serialize::{ArchSpec, RegisterDef};
 pub use space::{AddressSpace, SpaceId};
 pub use validate::{
-    ValidationError, ValidationIssue, validate_archspec, validate_block, validate_op,
+    ValidationError, ValidationIssue, validate_archspec, validate_block, validate_block_full,
+    validate_block_semantic, validate_op, validate_op_semantic,
 };
 pub use varnode::Varnode;
 

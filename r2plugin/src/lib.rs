@@ -11,7 +11,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use r2il::serialize::UserOpDef;
-use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize, validate_block};
+use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize, validate_block_full};
 use r2sleigh_lift::{Disassembler, build_arch_spec, op_to_esil, userop_map_for_arch};
 use r2ssa::TaintPolicy;
 use std::ffi::{CStr, CString};
@@ -77,6 +77,20 @@ impl R2ILContext {
     fn clear_error(&mut self) {
         self.error = None;
     }
+}
+
+fn validate_block_in_context(ctx: &mut R2ILContext, block: &R2ILBlock) -> Result<(), String> {
+    let Some(arch) = ctx.arch.as_ref() else {
+        let msg = "missing arch context for semantic validation".to_string();
+        ctx.set_error(&msg);
+        return Err(msg);
+    };
+
+    validate_block_full(block, arch).map_err(|e| {
+        let msg = format!("Invalid lifted block: {}", e);
+        ctx.set_error(&msg);
+        msg
+    })
 }
 
 /// Load an r2il file and return a context handle.
@@ -375,8 +389,7 @@ pub extern "C" fn r2il_lift(
     let slice = unsafe { slice::from_raw_parts(bytes, len) };
     match disasm.lift(slice, addr) {
         Ok(block) => {
-            if let Err(e) = validate_block(&block) {
-                ctx_ref.set_error(format!("Invalid lifted block: {}", e));
+            if validate_block_in_context(ctx_ref, &block).is_err() {
                 return ptr::null_mut();
             }
             ctx_ref.clear_error();
@@ -423,8 +436,7 @@ pub extern "C" fn r2il_lift_block(
 
     match disasm.lift_block(slice, addr, size) {
         Ok(block) => {
-            if let Err(e) = validate_block(&block) {
-                ctx_ref.set_error(format!("Invalid lifted block: {}", e));
+            if validate_block_in_context(ctx_ref, &block).is_err() {
                 return ptr::null_mut();
             }
             ctx_ref.clear_error();
@@ -501,7 +513,7 @@ pub extern "C" fn r2il_block_set_switch_info(
     block.set_switch_info(switch_info);
 }
 
-/// Validate a lifted block against r2il structural invariants.
+/// Validate a lifted block against full (structural + semantic) r2il invariants.
 ///
 /// Returns 1 when valid, 0 on invalid input or validation failure.
 /// On validation failure, the context error string is updated.
@@ -514,7 +526,12 @@ pub extern "C" fn r2il_block_validate(ctx: *mut R2ILContext, block: *const R2ILB
     let ctx_ref = unsafe { &mut *ctx };
     let block_ref = unsafe { &*block };
 
-    match validate_block(block_ref) {
+    let Some(arch) = ctx_ref.arch.as_ref() else {
+        ctx_ref.set_error("missing arch context for semantic validation");
+        return 0;
+    };
+
+    match validate_block_full(block_ref, arch) {
         Ok(()) => {
             ctx_ref.clear_error();
             1

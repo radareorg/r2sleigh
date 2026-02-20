@@ -339,6 +339,369 @@ pub fn validate_block(block: &R2ILBlock) -> Result<(), ValidationError> {
     }
 }
 
+/// Validate a single operation semantic constraints against architecture context.
+pub fn validate_op_semantic(
+    op: &R2ILOp,
+    arch: &ArchSpec,
+    op_index: usize,
+) -> Result<(), ValidationError> {
+    let mut issues = Vec::new();
+
+    match op {
+        // Copy / explicit conversion rules
+        R2ILOp::Copy { dst, src } => {
+            check_size_eq(
+                &mut issues,
+                "op.copy.width_mismatch",
+                op_index,
+                "dst.size",
+                dst.size,
+                "src.size",
+                src.size,
+            );
+        }
+        R2ILOp::IntZExt { dst, src } => {
+            check_size_gt(
+                &mut issues,
+                "op.intzext.non_expanding",
+                op_index,
+                "dst.size",
+                dst.size,
+                "src.size",
+                src.size,
+            );
+        }
+        R2ILOp::IntSExt { dst, src } => {
+            check_size_gt(
+                &mut issues,
+                "op.intsext.non_expanding",
+                op_index,
+                "dst.size",
+                dst.size,
+                "src.size",
+                src.size,
+            );
+        }
+        R2ILOp::Trunc { dst, src } => {
+            check_size_lt(
+                &mut issues,
+                "op.trunc.non_shrinking",
+                op_index,
+                "dst.size",
+                dst.size,
+                "src.size",
+                src.size,
+            );
+        }
+
+        // Integer arithmetic/bitwise rules
+        R2ILOp::IntAdd { dst, a, b }
+        | R2ILOp::IntSub { dst, a, b }
+        | R2ILOp::IntMult { dst, a, b }
+        | R2ILOp::IntDiv { dst, a, b }
+        | R2ILOp::IntSDiv { dst, a, b }
+        | R2ILOp::IntRem { dst, a, b }
+        | R2ILOp::IntSRem { dst, a, b }
+        | R2ILOp::IntAnd { dst, a, b }
+        | R2ILOp::IntOr { dst, a, b }
+        | R2ILOp::IntXor { dst, a, b } => {
+            let op_name = semantic_op_name(op);
+            check_size_eq(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "a.size",
+                a.size,
+                "b.size",
+                b.size,
+            );
+            check_size_eq(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "dst.size",
+                dst.size,
+                "a.size",
+                a.size,
+            );
+        }
+        R2ILOp::IntNegate { dst, src } | R2ILOp::IntNot { dst, src } => {
+            let op_name = semantic_op_name(op);
+            check_size_eq(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "dst.size",
+                dst.size,
+                "src.size",
+                src.size,
+            );
+        }
+        R2ILOp::IntLeft { dst, a, b }
+        | R2ILOp::IntRight { dst, a, b }
+        | R2ILOp::IntSRight { dst, a, b } => {
+            let op_name = semantic_op_name(op);
+            check_size_eq(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "dst.size",
+                dst.size,
+                "a.size",
+                a.size,
+            );
+            if b.size == 0 {
+                issues.push(ValidationIssue::new(
+                    "op.shift.amount_size_zero",
+                    format!("block.ops[{op_index}].b.size"),
+                    "shift amount size must be > 0",
+                ));
+            }
+        }
+        R2ILOp::IntCarry { dst, a, b }
+        | R2ILOp::IntSCarry { dst, a, b }
+        | R2ILOp::IntSBorrow { dst, a, b } => {
+            let op_name = semantic_op_name(op);
+            check_size_eq(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "a.size",
+                a.size,
+                "b.size",
+                b.size,
+            );
+            check_size_const(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "dst.size",
+                dst.size,
+                1,
+            );
+        }
+
+        // Compare/boolean rules
+        R2ILOp::IntEqual { dst, a, b }
+        | R2ILOp::IntNotEqual { dst, a, b }
+        | R2ILOp::IntLess { dst, a, b }
+        | R2ILOp::IntSLess { dst, a, b }
+        | R2ILOp::IntLessEqual { dst, a, b }
+        | R2ILOp::IntSLessEqual { dst, a, b } => {
+            let op_name = semantic_op_name(op);
+            check_size_eq(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "a.size",
+                a.size,
+                "b.size",
+                b.size,
+            );
+            check_size_const(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "dst.size",
+                dst.size,
+                1,
+            );
+        }
+        R2ILOp::BoolNot { dst, src } => {
+            check_size_const(
+                &mut issues,
+                "op.boolnot.width_mismatch",
+                op_index,
+                "src.size",
+                src.size,
+                1,
+            );
+            check_size_const(
+                &mut issues,
+                "op.boolnot.width_mismatch",
+                op_index,
+                "dst.size",
+                dst.size,
+                1,
+            );
+        }
+        R2ILOp::BoolAnd { dst, a, b }
+        | R2ILOp::BoolOr { dst, a, b }
+        | R2ILOp::BoolXor { dst, a, b } => {
+            let op_name = semantic_op_name(op);
+            check_size_const(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "a.size",
+                a.size,
+                1,
+            );
+            check_size_const(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "b.size",
+                b.size,
+                1,
+            );
+            check_size_const(
+                &mut issues,
+                op_name_width_code(op_name),
+                op_index,
+                "dst.size",
+                dst.size,
+                1,
+            );
+        }
+
+        // Memory rules
+        R2ILOp::Load { space, addr, .. } => {
+            let arch_expected = effective_arch_addr_size(arch);
+            let expected = addr_space_size(*space, arch);
+            check_size_addr_width(
+                &mut issues,
+                "op.load.addr_width_mismatch",
+                op_index,
+                "addr.size",
+                addr.size,
+                expected,
+                arch_expected,
+            );
+        }
+        R2ILOp::Store { space, addr, .. } => {
+            let arch_expected = effective_arch_addr_size(arch);
+            let expected = addr_space_size(*space, arch);
+            check_size_addr_width(
+                &mut issues,
+                "op.store.addr_width_mismatch",
+                op_index,
+                "addr.size",
+                addr.size,
+                expected,
+                arch_expected,
+            );
+        }
+
+        // Piece/Subpiece rules
+        R2ILOp::Piece { dst, hi, lo } => {
+            let expected = hi.size.saturating_add(lo.size);
+            check_size_const(
+                &mut issues,
+                "op.piece.width_mismatch",
+                op_index,
+                "dst.size",
+                dst.size,
+                expected,
+            );
+        }
+        R2ILOp::Subpiece { dst, src, offset } => {
+            let src_size = src.size;
+            if *offset >= src_size {
+                issues.push(ValidationIssue::new(
+                    "op.subpiece.offset_oob",
+                    format!("block.ops[{op_index}].offset"),
+                    format!(
+                        "subpiece offset {} is out of bounds for src size {}",
+                        offset, src_size
+                    ),
+                ));
+            } else if offset.saturating_add(dst.size) > src_size {
+                issues.push(ValidationIssue::new(
+                    "op.subpiece.width_oob",
+                    format!("block.ops[{op_index}].dst.size"),
+                    format!(
+                        "subpiece range offset {} + dst.size {} exceeds src size {}",
+                        offset, dst.size, src_size
+                    ),
+                ));
+            }
+        }
+
+        // Control-flow target rules
+        R2ILOp::Branch { target }
+        | R2ILOp::BranchInd { target }
+        | R2ILOp::Call { target }
+        | R2ILOp::CallInd { target }
+        | R2ILOp::Return { target } => {
+            if target.space != SpaceId::Const {
+                let arch_expected = effective_arch_addr_size(arch);
+                check_size_const(
+                    &mut issues,
+                    "op.controlflow.target_width_mismatch",
+                    op_index,
+                    "target.size",
+                    target.size,
+                    arch_expected,
+                );
+            }
+        }
+        R2ILOp::CBranch { target, cond } => {
+            if target.space != SpaceId::Const {
+                let arch_expected = effective_arch_addr_size(arch);
+                check_size_const(
+                    &mut issues,
+                    "op.cbranch.target_width_mismatch",
+                    op_index,
+                    "target.size",
+                    target.size,
+                    arch_expected,
+                );
+            }
+            check_size_const(
+                &mut issues,
+                "op.cbranch.cond_width_mismatch",
+                op_index,
+                "cond.size",
+                cond.size,
+                1,
+            );
+        }
+        _ => {}
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationError::from_issues(issues))
+    }
+}
+
+/// Validate semantic constraints for a full lifted block.
+pub fn validate_block_semantic(block: &R2ILBlock, arch: &ArchSpec) -> Result<(), ValidationError> {
+    let mut issues = Vec::new();
+
+    for (i, op) in block.ops.iter().enumerate() {
+        if let Err(err) = validate_op_semantic(op, arch, i) {
+            issues.extend(err.issues);
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationError::from_issues(issues))
+    }
+}
+
+/// Validate both structural and semantic constraints for a lifted block.
+pub fn validate_block_full(block: &R2ILBlock, arch: &ArchSpec) -> Result<(), ValidationError> {
+    let mut issues = Vec::new();
+
+    if let Err(err) = validate_block(block) {
+        issues.extend(err.issues);
+    }
+    if let Err(err) = validate_block_semantic(block, arch) {
+        issues.extend(err.issues);
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(ValidationError::from_issues(issues))
+    }
+}
+
 fn validate_varnode(
     issues: &mut Vec<ValidationIssue>,
     vn: &Varnode,
@@ -359,6 +722,234 @@ fn validate_varnode(
             "output/destination varnode must not be const space",
         ));
     }
+}
+
+fn addr_space_size(space: SpaceId, arch: &ArchSpec) -> u32 {
+    let arch_size = effective_arch_addr_size(arch);
+    let space_size = arch
+        .spaces
+        .iter()
+        .find(|s| s.id == space)
+        .map(|s| s.addr_size)
+        .unwrap_or(arch_size);
+
+    if space_size <= 1 {
+        arch_size
+    } else {
+        space_size
+    }
+}
+
+fn effective_arch_addr_size(arch: &ArchSpec) -> u32 {
+    if arch.addr_size > 1 {
+        return arch.addr_size;
+    }
+
+    if let Some(pc_size) = arch
+        .registers
+        .iter()
+        .find(|r| {
+            matches!(
+                r.name.to_ascii_lowercase().as_str(),
+                "pc" | "ip" | "eip" | "rip"
+            )
+        })
+        .map(|r| r.size)
+        .filter(|size| *size > 1)
+    {
+        return pc_size;
+    }
+
+    if let Some(default_size) = arch
+        .spaces
+        .iter()
+        .find(|s| s.is_default && s.addr_size > 1)
+        .map(|s| s.addr_size)
+    {
+        return default_size;
+    }
+
+    arch.spaces
+        .iter()
+        .map(|s| s.addr_size)
+        .max()
+        .filter(|size| *size > 1)
+        .unwrap_or(arch.addr_size.max(1))
+}
+
+fn semantic_op_name(op: &R2ILOp) -> &'static str {
+    match op {
+        R2ILOp::IntAdd { .. } => "intadd",
+        R2ILOp::IntSub { .. } => "intsub",
+        R2ILOp::IntMult { .. } => "intmult",
+        R2ILOp::IntDiv { .. } => "intdiv",
+        R2ILOp::IntSDiv { .. } => "intsdiv",
+        R2ILOp::IntRem { .. } => "intrem",
+        R2ILOp::IntSRem { .. } => "intsrem",
+        R2ILOp::IntAnd { .. } => "intand",
+        R2ILOp::IntOr { .. } => "intor",
+        R2ILOp::IntXor { .. } => "intxor",
+        R2ILOp::IntNegate { .. } => "intnegate",
+        R2ILOp::IntNot { .. } => "intnot",
+        R2ILOp::IntLeft { .. } => "intleft",
+        R2ILOp::IntRight { .. } => "intright",
+        R2ILOp::IntSRight { .. } => "intsright",
+        R2ILOp::IntCarry { .. } => "intcarry",
+        R2ILOp::IntSCarry { .. } => "intscarry",
+        R2ILOp::IntSBorrow { .. } => "intsborrow",
+        R2ILOp::IntEqual { .. } => "intequal",
+        R2ILOp::IntNotEqual { .. } => "intnotequal",
+        R2ILOp::IntLess { .. } => "intless",
+        R2ILOp::IntSLess { .. } => "intsless",
+        R2ILOp::IntLessEqual { .. } => "intlessequal",
+        R2ILOp::IntSLessEqual { .. } => "intslessequal",
+        R2ILOp::BoolAnd { .. } => "booland",
+        R2ILOp::BoolOr { .. } => "boolor",
+        R2ILOp::BoolXor { .. } => "boolxor",
+        _ => "op",
+    }
+}
+
+fn op_name_width_code(op_name: &str) -> &'static str {
+    match op_name {
+        "intadd" => "op.intadd.width_mismatch",
+        "intsub" => "op.intsub.width_mismatch",
+        "intmult" => "op.intmult.width_mismatch",
+        "intdiv" => "op.intdiv.width_mismatch",
+        "intsdiv" => "op.intsdiv.width_mismatch",
+        "intrem" => "op.intrem.width_mismatch",
+        "intsrem" => "op.intsrem.width_mismatch",
+        "intand" => "op.intand.width_mismatch",
+        "intor" => "op.intor.width_mismatch",
+        "intxor" => "op.intxor.width_mismatch",
+        "intnegate" => "op.intnegate.width_mismatch",
+        "intnot" => "op.intnot.width_mismatch",
+        "intleft" => "op.intleft.width_mismatch",
+        "intright" => "op.intright.width_mismatch",
+        "intsright" => "op.intsright.width_mismatch",
+        "intcarry" => "op.intcarry.width_mismatch",
+        "intscarry" => "op.intscarry.width_mismatch",
+        "intsborrow" => "op.intsborrow.width_mismatch",
+        "intequal" => "op.intequal.width_mismatch",
+        "intnotequal" => "op.intnotequal.width_mismatch",
+        "intless" => "op.intless.width_mismatch",
+        "intsless" => "op.intsless.width_mismatch",
+        "intlessequal" => "op.intlessequal.width_mismatch",
+        "intslessequal" => "op.intslessequal.width_mismatch",
+        "booland" => "op.booland.width_mismatch",
+        "boolor" => "op.boolor.width_mismatch",
+        "boolxor" => "op.boolxor.width_mismatch",
+        _ => "op.width_mismatch",
+    }
+}
+
+fn check_size_eq(
+    issues: &mut Vec<ValidationIssue>,
+    code: &'static str,
+    op_index: usize,
+    left_name: &str,
+    left: u32,
+    right_name: &str,
+    right: u32,
+) {
+    if left != right {
+        issues.push(ValidationIssue::new(
+            code,
+            format!("block.ops[{op_index}]"),
+            format!(
+                "{} ({}) must equal {} ({})",
+                left_name, left, right_name, right
+            ),
+        ));
+    }
+}
+
+fn check_size_gt(
+    issues: &mut Vec<ValidationIssue>,
+    code: &'static str,
+    op_index: usize,
+    left_name: &str,
+    left: u32,
+    right_name: &str,
+    right: u32,
+) {
+    if left <= right {
+        issues.push(ValidationIssue::new(
+            code,
+            format!("block.ops[{op_index}]"),
+            format!(
+                "{} ({}) must be greater than {} ({})",
+                left_name, left, right_name, right
+            ),
+        ));
+    }
+}
+
+fn check_size_lt(
+    issues: &mut Vec<ValidationIssue>,
+    code: &'static str,
+    op_index: usize,
+    left_name: &str,
+    left: u32,
+    right_name: &str,
+    right: u32,
+) {
+    if left >= right {
+        issues.push(ValidationIssue::new(
+            code,
+            format!("block.ops[{op_index}]"),
+            format!(
+                "{} ({}) must be less than {} ({})",
+                left_name, left, right_name, right
+            ),
+        ));
+    }
+}
+
+fn check_size_const(
+    issues: &mut Vec<ValidationIssue>,
+    code: &'static str,
+    op_index: usize,
+    field_name: &str,
+    actual: u32,
+    expected: u32,
+) {
+    if actual != expected {
+        issues.push(ValidationIssue::new(
+            code,
+            format!("block.ops[{op_index}].{field_name}"),
+            format!("expected size {}, got {}", expected, actual),
+        ));
+    }
+}
+
+fn check_size_addr_width(
+    issues: &mut Vec<ValidationIssue>,
+    code: &'static str,
+    op_index: usize,
+    field_name: &str,
+    actual: u32,
+    space_expected: u32,
+    arch_expected: u32,
+) {
+    if actual == space_expected || actual == arch_expected {
+        return;
+    }
+
+    let message = if space_expected == arch_expected {
+        format!("expected size {}, got {}", space_expected, actual)
+    } else {
+        format!(
+            "expected size {} (space) or {} (arch), got {}",
+            space_expected, arch_expected, actual
+        )
+    };
+
+    issues.push(ValidationIssue::new(
+        code,
+        format!("block.ops[{op_index}].{field_name}"),
+        message,
+    ));
 }
 
 #[cfg(test)]
@@ -395,6 +986,19 @@ mod tests {
     fn valid_minimal_block_passes() {
         let block = valid_block();
         assert!(validate_block(&block).is_ok());
+    }
+
+    #[test]
+    fn valid_semantic_block_passes() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::register(0, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::constant(1, 8),
+        });
+        assert!(validate_block_semantic(&block, &arch).is_ok());
+        assert!(validate_block_full(&block, &arch).is_ok());
     }
 
     #[test]
@@ -581,5 +1185,226 @@ mod tests {
                 .iter()
                 .any(|i| i.code == "arch.userops.duplicate_index")
         );
+    }
+
+    #[test]
+    fn copy_width_mismatch_fails() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(0, 8),
+            src: Varnode::register(8, 4),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.copy.width_mismatch")
+        );
+    }
+
+    #[test]
+    fn intadd_width_mismatch_fails() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::register(0, 8),
+            a: Varnode::register(8, 4),
+            b: Varnode::register(16, 4),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.intadd.width_mismatch")
+        );
+    }
+
+    #[test]
+    fn intcarry_dst_not_one_byte_fails() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::IntCarry {
+            dst: Varnode::register(0, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::register(16, 8),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.intcarry.width_mismatch")
+        );
+    }
+
+    #[test]
+    fn compare_dst_not_one_byte_fails() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::IntEqual {
+            dst: Varnode::register(0, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::register(16, 8),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.intequal.width_mismatch")
+        );
+    }
+
+    #[test]
+    fn zext_and_sext_non_expanding_fail() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::IntZExt {
+            dst: Varnode::register(0, 4),
+            src: Varnode::register(8, 4),
+        });
+        block.push(R2ILOp::IntSExt {
+            dst: Varnode::register(0, 4),
+            src: Varnode::register(8, 4),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.intzext.non_expanding")
+        );
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.intsext.non_expanding")
+        );
+    }
+
+    #[test]
+    fn trunc_non_shrinking_fails() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Trunc {
+            dst: Varnode::register(0, 8),
+            src: Varnode::register(8, 8),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.trunc.non_shrinking")
+        );
+    }
+
+    #[test]
+    fn load_store_addr_width_mismatch_fails() {
+        let mut arch = valid_archspec();
+        arch.addr_size = 8;
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(0, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::register(8, 4),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::register(8, 4),
+            val: Varnode::register(16, 8),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.load.addr_width_mismatch")
+        );
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.store.addr_width_mismatch")
+        );
+    }
+
+    #[test]
+    fn piece_and_subpiece_bounds_fail() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Piece {
+            dst: Varnode::register(0, 4),
+            hi: Varnode::register(8, 4),
+            lo: Varnode::register(16, 4),
+        });
+        block.push(R2ILOp::Subpiece {
+            dst: Varnode::register(0, 4),
+            src: Varnode::register(8, 4),
+            offset: 4,
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.piece.width_mismatch")
+        );
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.subpiece.offset_oob")
+        );
+    }
+
+    #[test]
+    fn non_const_branch_target_width_mismatch_fails() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Branch {
+            target: Varnode::ram(0x2000, 4),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.controlflow.target_width_mismatch")
+        );
+    }
+
+    #[test]
+    fn const_space_branch_target_allowed() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Branch {
+            target: Varnode::constant(0x2000, 4),
+        });
+        assert!(validate_block_semantic(&block, &arch).is_ok());
+    }
+
+    #[test]
+    fn cbranch_cond_width_mismatch_fails() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x2000, 8),
+            cond: Varnode::register(0, 8),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "op.cbranch.cond_width_mismatch")
+        );
+    }
+
+    #[test]
+    fn semantic_multi_issue_aggregation() {
+        let arch = valid_archspec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(0, 8),
+            src: Varnode::register(8, 4),
+        });
+        block.push(R2ILOp::IntCarry {
+            dst: Varnode::register(0, 2),
+            a: Varnode::register(8, 8),
+            b: Varnode::register(16, 4),
+        });
+        let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
+        assert!(err.issues.len() >= 3);
     }
 }
