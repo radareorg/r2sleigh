@@ -2514,6 +2514,7 @@ mod decompilation {
 
 mod ffi {
     use r2il::R2ILOp;
+    use serde_json::Value;
     use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
     use std::path::Path;
@@ -2522,6 +2523,21 @@ mod ffi {
 
     fn require_plugin() -> bool {
         Path::new(PLUGIN_PATH).exists()
+    }
+
+    fn contains_unsigned_int_meta(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                if let Some(meta) = map.get("meta").and_then(Value::as_object)
+                    && meta.get("scalar_kind").and_then(Value::as_str) == Some("unsigned_int")
+                {
+                    return true;
+                }
+                map.values().any(contains_unsigned_int_meta)
+            }
+            Value::Array(items) => items.iter().any(contains_unsigned_int_meta),
+            _ => false,
+        }
     }
 
     #[test]
@@ -2822,6 +2838,155 @@ mod ffi {
                 err.contains("op.copy.width_mismatch") && err.contains("block.ops"),
                 "Validation error should mention semantic width issue: {}",
                 err
+            );
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn block_validate_rejects_invalid_op_metadata_index() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_validate: libloading::Symbol<
+                unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
+            > = lib.get(b"r2il_block_validate").unwrap();
+            let r2il_error: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_void) -> *const c_char,
+            > = lib.get(b"r2il_error").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+
+            let arch = CString::new("x86-64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            assert!(!ctx.is_null(), "Failed to initialize x86-64 context");
+
+            let mut bytes = vec![0x31u8, 0xC0]; // xor eax, eax
+            bytes.resize(16, 0x90);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift baseline instruction");
+
+            assert_eq!(
+                r2il_block_validate(ctx, block),
+                1,
+                "Freshly lifted block should validate"
+            );
+
+            let block_ref = &mut *(block as *mut r2il::R2ILBlock);
+            let invalid_index = block_ref.ops.len();
+            block_ref.set_op_metadata(invalid_index, r2il::OpMetadata::default());
+
+            assert_eq!(
+                r2il_block_validate(ctx, block),
+                0,
+                "Validation should fail for out-of-range op metadata index"
+            );
+
+            let err_ptr = r2il_error(ctx);
+            assert!(
+                !err_ptr.is_null(),
+                "Validation failure should populate context error"
+            );
+            let err = CStr::from_ptr(err_ptr).to_string_lossy();
+            assert!(
+                err.contains("block.op_metadata") && err.contains("index_oob"),
+                "Validation error should mention op_metadata index issue: {}",
+                err
+            );
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn op_json_includes_varnode_metadata_when_present() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_op_json_named: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *const std::ffi::c_void,
+                    *const std::ffi::c_void,
+                    usize,
+                ) -> *mut c_char,
+            > = lib.get(b"r2il_block_op_json_named").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+
+            let arch = CString::new("x86-64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            assert!(!ctx.is_null(), "Failed to initialize x86-64 context");
+
+            let mut bytes = vec![0x31u8, 0xC0]; // xor eax, eax
+            bytes.resize(16, 0x90);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift baseline instruction");
+
+            let mut meta = r2il::VarnodeMetadata::default();
+            meta.scalar_kind = Some(r2il::ScalarKind::UnsignedInt);
+
+            let block_ref = &mut *(block as *mut r2il::R2ILBlock);
+            let mut op_index = None;
+            for (idx, op) in block_ref.ops.iter_mut().enumerate() {
+                if let R2ILOp::Copy { dst, .. } = op {
+                    dst.set_meta(meta.clone());
+                    op_index = Some(idx);
+                    break;
+                }
+            }
+            let op_index = op_index.expect("Expected at least one Copy op in xor block");
+
+            let json_ptr = r2il_block_op_json_named(ctx, block, op_index);
+            assert!(!json_ptr.is_null(), "Expected operation JSON");
+            let json_str = CStr::from_ptr(json_ptr).to_string_lossy().to_string();
+            r2il_string_free(json_ptr);
+
+            let parsed: Value = serde_json::from_str(&json_str).expect("valid operation json");
+            assert!(
+                contains_unsigned_int_meta(&parsed),
+                "operation JSON should include varnode metadata: {}",
+                json_str
             );
 
             r2il_block_free(block);

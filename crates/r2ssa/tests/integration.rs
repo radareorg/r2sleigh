@@ -146,6 +146,7 @@ mod tests {
             space: r2il::SpaceId::Register,
             offset,
             size,
+            meta: None,
         }
     }
 
@@ -154,6 +155,7 @@ mod tests {
             space: r2il::SpaceId::Const,
             offset: val,
             size,
+            meta: None,
         }
     }
 
@@ -175,6 +177,7 @@ mod tests {
                 addr: 0x1000,
                 size: 3,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![
                     // mov rax, rdi
                     R2ILOp::Copy {
@@ -187,6 +190,7 @@ mod tests {
                 addr: 0x1003,
                 size: 3,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![
                     // mov [rbx], rax
                     R2ILOp::Store {
@@ -252,6 +256,7 @@ mod tests {
                 addr: 0x1000,
                 size: 3,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![
                     // mov rax, rdi
                     R2ILOp::Copy {
@@ -264,6 +269,7 @@ mod tests {
                 addr: 0x1003,
                 size: 4,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![
                     // and rax, 0xff (mask - should clear taint per our policy)
                     R2ILOp::IntAnd {
@@ -277,6 +283,7 @@ mod tests {
                 addr: 0x1007,
                 size: 3,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![
                     // call rax (would be a sink, but RAX is now clean)
                     R2ILOp::Call {
@@ -312,6 +319,7 @@ mod tests {
                 addr: 0x1000,
                 size: 2,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![R2ILOp::CBranch {
                     target: make_const(0x1010, 8), // jump to right
                     cond: make_reg(RBX, 1),        // non-constant condition
@@ -322,6 +330,7 @@ mod tests {
                 addr: 0x1002,
                 size: 3,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![
                     R2ILOp::Copy {
                         dst: make_reg(RAX, 8),
@@ -337,6 +346,7 @@ mod tests {
                 addr: 0x1010,
                 size: 3,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![
                     R2ILOp::Copy {
                         dst: make_reg(RAX, 8),
@@ -352,6 +362,7 @@ mod tests {
                 addr: 0x1020,
                 size: 3,
                 switch_info: None,
+                op_metadata: Default::default(),
                 ops: vec![R2ILOp::Store {
                     space: SpaceId::Ram,
                     addr: make_reg(RCX, 8),

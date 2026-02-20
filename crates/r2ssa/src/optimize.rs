@@ -1958,6 +1958,7 @@ mod sccp_tests {
             space: SpaceId::Const,
             offset: val,
             size,
+            meta: None,
         }
     }
 
@@ -1966,6 +1967,7 @@ mod sccp_tests {
             space: SpaceId::Register,
             offset,
             size,
+            meta: None,
         }
     }
 
@@ -1974,6 +1976,7 @@ mod sccp_tests {
             space: SpaceId::Ram,
             offset: addr,
             size,
+            meta: None,
         }
     }
 
@@ -2034,6 +2037,7 @@ mod sccp_tests {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         }]);
 
         let (consts, _) = sccp(&func);
@@ -2054,6 +2058,7 @@ mod sccp_tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -2068,6 +2073,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -2082,6 +2088,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -2097,6 +2104,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ]);
 
@@ -2127,6 +2135,7 @@ mod sccp_tests {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         }]);
 
         let (consts, _) = sccp(&func);
@@ -2152,6 +2161,7 @@ mod sccp_tests {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         }]);
 
         let (consts, _) = sccp(&func);
@@ -2177,6 +2187,7 @@ mod sccp_tests {
                 },
             ],
             switch_info: None,
+            op_metadata: Default::default(),
         }]);
 
         let (consts, _) = sccp(&func);
@@ -2194,6 +2205,7 @@ mod sccp_tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -2208,6 +2220,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -2222,6 +2235,7 @@ mod sccp_tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -2230,6 +2244,7 @@ mod sccp_tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ]);
 

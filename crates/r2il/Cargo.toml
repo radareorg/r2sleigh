@@ -9,3 +9,6 @@ description = "Intermediate Language types for r2sleigh"
 serde.workspace = true
 bincode.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

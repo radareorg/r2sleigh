@@ -586,6 +586,7 @@ mod tests {
             space: SpaceId::Register,
             offset,
             size,
+            meta: None,
         }
     }
 
@@ -594,6 +595,7 @@ mod tests {
             space: SpaceId::Const,
             offset: value,
             size,
+            meta: None,
         }
     }
 
@@ -768,6 +770,7 @@ mod tests {
             addr: 0x1000,
             size: 3,
             switch_info: None,
+            op_metadata: Default::default(),
             ops: vec![
                 R2ILOp::Copy {
                     dst: make_reg(56, 8), // rdi
@@ -817,6 +820,7 @@ mod tests {
             addr: 0x2000,
             size: 2,
             switch_info: None,
+            op_metadata: Default::default(),
             ops: vec![
                 R2ILOp::Copy {
                     dst: make_reg(56, 8), // rdi

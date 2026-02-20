@@ -4,7 +4,9 @@
 //! intermediate representation for processor instruction semantics.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
+use crate::metadata::OpMetadata;
 use crate::space::SpaceId;
 use crate::varnode::Varnode;
 
@@ -1031,6 +1033,9 @@ pub struct R2ILBlock {
     /// Switch table information (if this block contains a switch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub switch_info: Option<SwitchInfo>,
+    /// Optional metadata for ops, keyed by operation index.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub op_metadata: BTreeMap<usize, OpMetadata>,
 }
 
 impl R2ILBlock {
@@ -1041,12 +1046,37 @@ impl R2ILBlock {
             size,
             ops: Vec::new(),
             switch_info: None,
+            op_metadata: BTreeMap::new(),
         }
     }
 
     /// Add an operation to this block.
     pub fn push(&mut self, op: R2ILOp) {
         self.ops.push(op);
+    }
+
+    /// Add an operation and optional metadata to this block.
+    pub fn push_with_metadata(&mut self, op: R2ILOp, meta: Option<OpMetadata>) {
+        let idx = self.ops.len();
+        self.ops.push(op);
+        if let Some(meta) = meta {
+            self.op_metadata.insert(idx, meta);
+        }
+    }
+
+    /// Set metadata for an operation index.
+    pub fn set_op_metadata(&mut self, op_index: usize, meta: OpMetadata) {
+        self.op_metadata.insert(op_index, meta);
+    }
+
+    /// Get metadata for an operation index.
+    pub fn op_metadata(&self, op_index: usize) -> Option<&OpMetadata> {
+        self.op_metadata.get(&op_index)
+    }
+
+    /// Remove metadata for an operation index.
+    pub fn remove_op_metadata(&mut self, op_index: usize) -> Option<OpMetadata> {
+        self.op_metadata.remove(&op_index)
     }
 
     /// Set the switch info for this block.

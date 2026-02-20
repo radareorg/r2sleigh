@@ -298,6 +298,20 @@ pub fn validate_block(block: &R2ILBlock) -> Result<(), ValidationError> {
         }
     }
 
+    for idx in block.op_metadata.keys() {
+        if *idx >= block.ops.len() {
+            issues.push(ValidationIssue::new(
+                "block.op_metadata.index_oob",
+                format!("block.op_metadata[{idx}]"),
+                format!(
+                    "op metadata index {} is out of bounds for {} op(s)",
+                    idx,
+                    block.ops.len()
+                ),
+            ));
+        }
+    }
+
     if let Some(sw) = &block.switch_info {
         if sw.min_val > sw.max_val {
             issues.push(ValidationIssue::new(
@@ -1406,5 +1420,45 @@ mod tests {
         });
         let err = validate_block_semantic(&block, &arch).expect_err("semantic should fail");
         assert!(err.issues.len() >= 3);
+    }
+
+    #[test]
+    fn block_op_metadata_valid_index_passes() {
+        let mut block = valid_block();
+        block.set_op_metadata(0, crate::OpMetadata::default());
+        assert!(validate_block(&block).is_ok());
+    }
+
+    #[test]
+    fn block_op_metadata_oob_fails() {
+        let mut block = valid_block();
+        block.set_op_metadata(2, crate::OpMetadata::default());
+        let err = validate_block(&block).expect_err("block should fail");
+        assert!(
+            err.issues
+                .iter()
+                .any(|i| i.code == "block.op_metadata.index_oob")
+        );
+    }
+
+    #[test]
+    fn block_op_metadata_json_omits_when_empty() {
+        let block = valid_block();
+        let json = serde_json::to_string(&block).expect("serialize");
+        assert!(
+            !json.contains("op_metadata"),
+            "op_metadata should be omitted when empty"
+        );
+    }
+
+    #[test]
+    fn block_op_metadata_json_present_when_set() {
+        let mut block = valid_block();
+        block.set_op_metadata(0, crate::OpMetadata::default());
+        let json = serde_json::to_string(&block).expect("serialize");
+        assert!(
+            json.contains("op_metadata"),
+            "op_metadata should be serialized"
+        );
     }
 }

@@ -406,6 +406,7 @@ mod tests {
             space: SpaceId::Const,
             offset: val,
             size,
+            meta: None,
         }
     }
 
@@ -414,6 +415,7 @@ mod tests {
             space: SpaceId::Register,
             offset,
             size,
+            meta: None,
         }
     }
 
@@ -542,6 +544,7 @@ mod tests {
                     src: make_const_vn(1, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -552,6 +555,7 @@ mod tests {
                     b: make_const_vn(2, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -582,6 +586,7 @@ mod tests {
                     val: make_reg_vn(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x2004,
@@ -592,6 +597,7 @@ mod tests {
                     addr: make_const_vn(0x1000, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 

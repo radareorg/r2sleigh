@@ -592,6 +592,7 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
                             space: r2il::SpaceId::Register,
                             offset,
                             size: size as u32,
+                            meta: None,
                         };
                         if let Some(name) = disasm.register_name(&vn) {
                             map.insert("name".to_string(), Value::String(name));
@@ -1388,6 +1389,7 @@ pub extern "C" fn r2il_block_varnodes(
                 space: space_str,
                 offset: vn.offset,
                 size: vn.size,
+                meta: vn.meta.clone(),
             });
         }
     }
@@ -1418,6 +1420,9 @@ fn varnode_to_json(vn: &Varnode, disasm: &Disassembler) -> Option<serde_json::Va
         && let Some(name) = disasm.register_name(vn)
     {
         json["name"] = serde_json::Value::String(name);
+    }
+    if let Some(meta) = vn.meta.as_ref() {
+        json["meta"] = serde_json::to_value(meta).ok()?;
     }
 
     Some(json)
@@ -1625,6 +1630,8 @@ struct VarnodeInfo {
     space: String,
     offset: u64,
     size: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meta: Option<r2il::VarnodeMetadata>,
 }
 
 /// Helper: collect all varnodes from an operation.
@@ -5589,6 +5596,7 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::ffi::{CStr, CString};
 
     #[test]
@@ -5822,6 +5830,45 @@ mod tests {
                 || output.contains("saved_fp"),
             "decompiler should keep decompilation stable with tsj context, got: {}",
             output
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn test_varnode_to_json_includes_meta_when_set() {
+        let (_, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
+        let meta = r2il::VarnodeMetadata {
+            scalar_kind: Some(r2il::ScalarKind::UnsignedInt),
+            pointer_hint: Some(r2il::PointerHint::PointerLike),
+            ..Default::default()
+        };
+        let vn = r2il::Varnode::register(0, 8).with_meta(meta);
+
+        let value = varnode_to_json(&vn, &disasm).expect("varnode json");
+        let meta_json = value
+            .get("meta")
+            .and_then(Value::as_object)
+            .expect("meta object");
+        assert_eq!(
+            meta_json.get("scalar_kind").and_then(Value::as_str),
+            Some("unsigned_int")
+        );
+        assert_eq!(
+            meta_json.get("pointer_hint").and_then(Value::as_str),
+            Some("pointer_like")
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn test_varnode_to_json_omits_meta_when_unset() {
+        let (_, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
+        let vn = r2il::Varnode::register(0, 8);
+
+        let value = varnode_to_json(&vn, &disasm).expect("varnode json");
+        assert!(
+            value.get("meta").is_none(),
+            "meta should be omitted when not set"
         );
     }
 

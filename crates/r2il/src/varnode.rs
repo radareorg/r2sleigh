@@ -3,7 +3,9 @@
 //! A Varnode represents a location and size of data, similar to Ghidra's VarnodeData.
 
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
+use crate::metadata::VarnodeMetadata;
 use crate::space::SpaceId;
 
 /// A varnode represents a sized piece of data at a specific location.
@@ -13,7 +15,7 @@ use crate::space::SpaceId;
 /// - A memory location (space=Ram, offset=address, size=access_size)
 /// - A constant value (space=Const, offset=value, size=value_size)
 /// - A temporary (space=Unique, offset=temp_id, size=temp_size)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Varnode {
     /// The address space this varnode belongs to
     pub space: SpaceId,
@@ -21,6 +23,9 @@ pub struct Varnode {
     pub offset: u64,
     /// Size in bytes
     pub size: u32,
+    /// Optional semantic metadata hints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<VarnodeMetadata>,
 }
 
 impl Varnode {
@@ -30,6 +35,7 @@ impl Varnode {
             space,
             offset,
             size,
+            meta: None,
         }
     }
 
@@ -39,6 +45,7 @@ impl Varnode {
             space: SpaceId::Const,
             offset: value,
             size,
+            meta: None,
         }
     }
 
@@ -48,6 +55,7 @@ impl Varnode {
             space: SpaceId::Register,
             offset,
             size,
+            meta: None,
         }
     }
 
@@ -57,6 +65,7 @@ impl Varnode {
             space: SpaceId::Ram,
             offset: address,
             size,
+            meta: None,
         }
     }
 
@@ -66,7 +75,24 @@ impl Varnode {
             space: SpaceId::Unique,
             offset: id,
             size,
+            meta: None,
         }
+    }
+
+    /// Return a copy of this varnode with metadata attached.
+    pub fn with_meta(mut self, meta: VarnodeMetadata) -> Self {
+        self.meta = Some(meta);
+        self
+    }
+
+    /// Set metadata on this varnode.
+    pub fn set_meta(&mut self, meta: VarnodeMetadata) {
+        self.meta = Some(meta);
+    }
+
+    /// Clear metadata on this varnode.
+    pub fn clear_meta(&mut self) {
+        self.meta = None;
     }
 
     /// Returns true if this is a constant.
@@ -120,9 +146,27 @@ impl std::fmt::Display for Varnode {
     }
 }
 
+impl PartialEq for Varnode {
+    fn eq(&self, other: &Self) -> bool {
+        self.space == other.space && self.offset == other.offset && self.size == other.size
+    }
+}
+
+impl Eq for Varnode {}
+
+impl Hash for Varnode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.space.hash(state);
+        self.offset.hash(state);
+        self.size.hash(state);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{PointerHint, ScalarKind};
+    use std::collections::HashSet;
 
     #[test]
     fn test_constant_varnode() {
@@ -139,5 +183,44 @@ mod tests {
         assert!(!v.is_const());
         assert_eq!(v.offset, 0x10);
         assert_eq!(v.size, 8);
+        assert!(v.meta.is_none());
+    }
+
+    #[test]
+    fn varnode_default_meta_none() {
+        let v = Varnode::default();
+        assert!(v.meta.is_none());
+    }
+
+    #[test]
+    fn varnode_with_meta_roundtrip_json() {
+        let meta = VarnodeMetadata {
+            scalar_kind: Some(ScalarKind::UnsignedInt),
+            pointer_hint: Some(PointerHint::PointerLike),
+            ..Default::default()
+        };
+
+        let v = Varnode::register(0x20, 8).with_meta(meta.clone());
+        let json = serde_json::to_string(&v).expect("serialize");
+        let de: Varnode = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(de, v);
+        assert_eq!(de.meta, Some(meta));
+    }
+
+    #[test]
+    fn varnode_eq_hash_ignores_meta() {
+        let meta = VarnodeMetadata {
+            scalar_kind: Some(ScalarKind::SignedInt),
+            ..Default::default()
+        };
+
+        let a = Varnode::register(0x30, 8);
+        let b = Varnode::register(0x30, 8).with_meta(meta);
+        assert_eq!(a, b);
+
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        assert_eq!(set.len(), 1);
     }
 }

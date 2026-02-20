@@ -7,10 +7,12 @@
 //!   r2sleigh disasm --arch x86-64 --bytes "554889e5"
 
 use clap::{Parser, Subcommand};
-use r2il::{serialize, validate_archspec, validate_block_full};
+use r2il::{serialize, validate_archspec};
 use r2sleigh_lift::{Lifter, create_arm_spec, create_x86_64_spec};
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "sleigh-config")]
+use r2il::validate_block_full;
 #[cfg(feature = "sleigh-config")]
 use r2sleigh_lift::{
     Disassembler, build_arch_spec, format_op, op_to_esil_named, userop_map_for_arch,
@@ -317,6 +319,7 @@ fn annotate_register_names(value: &mut serde_json::Value, disasm: &Disassembler)
                             space: r2il::SpaceId::Register,
                             offset,
                             size: size as u32,
+                            meta: None,
                         };
                         if let Some(name) = disasm.register_name(&vn) {
                             map.insert("name".to_string(), Value::String(name));
@@ -384,12 +387,19 @@ fn build_disasm_json(
         ops.push(value);
     }
 
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "addr": format!("0x{:x}", block.addr),
         "size": size,
         "mnemonic": mnemonic,
         "ops": ops,
-    }))
+    });
+    if !block.op_metadata.is_empty() {
+        let op_meta = serde_json::to_value(&block.op_metadata)
+            .map_err(|e| format!("Failed to serialize op metadata: {}", e))?;
+        out["op_metadata"] = op_meta;
+    }
+
+    Ok(out)
 }
 
 #[cfg(feature = "sleigh-config")]
@@ -673,6 +683,35 @@ mod tests {
                 && err.contains("op.copy.width_mismatch"),
             "expected semantic validation failure, got: {}",
             err
+        );
+    }
+
+    #[test]
+    fn disasm_json_includes_op_metadata_when_present() {
+        let disasm = get_disassembler("x86-64").expect("disassembler");
+        let mut block = r2il::R2ILBlock::new(0x1000, 1);
+        block.push_with_metadata(
+            r2il::R2ILOp::Copy {
+                dst: r2il::Varnode::register(0, 8),
+                src: r2il::Varnode::constant(1, 8),
+            },
+            Some(r2il::OpMetadata {
+                memory_class: Some(r2il::MemoryClass::Stack),
+            }),
+        );
+
+        let json = build_disasm_json(&disasm, &block, "mov", 1).expect("json");
+        let op_meta = json
+            .get("op_metadata")
+            .and_then(serde_json::Value::as_object)
+            .expect("op_metadata object");
+        let idx0 = op_meta
+            .get("0")
+            .and_then(serde_json::Value::as_object)
+            .expect("index 0 metadata");
+        assert_eq!(
+            idx0.get("memory_class").and_then(serde_json::Value::as_str),
+            Some("stack")
         );
     }
 }

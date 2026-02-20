@@ -656,6 +656,7 @@ impl Disassembler {
             space,
             offset: vn.address.offset,
             size: vn.size as u32,
+            meta: None,
         }
     }
 

@@ -536,6 +536,7 @@ mod tests {
             space: SpaceId::Const,
             offset: val,
             size,
+            meta: None,
         }
     }
 
@@ -544,6 +545,7 @@ mod tests {
             space: SpaceId::Register,
             offset,
             size,
+            meta: None,
         }
     }
 
@@ -552,6 +554,7 @@ mod tests {
             space: SpaceId::Ram,
             offset: addr,
             size,
+            meta: None,
         }
     }
 
@@ -572,6 +575,7 @@ mod tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -580,6 +584,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -604,6 +609,7 @@ mod tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -618,6 +624,7 @@ mod tests {
                     },
                 ],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -627,6 +634,7 @@ mod tests {
                     src: make_const(2, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -635,6 +643,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -662,6 +671,7 @@ mod tests {
                     src: make_const(1, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -672,6 +682,7 @@ mod tests {
                     b: make_const(1, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -701,6 +712,7 @@ mod tests {
                     src: make_const(42, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -709,6 +721,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -733,6 +746,7 @@ mod tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -741,6 +755,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -749,6 +764,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
@@ -770,6 +786,7 @@ mod tests {
                     cond: make_const(1, 1),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1004,
@@ -778,6 +795,7 @@ mod tests {
                     target: make_const(0x100c, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x1008,
@@ -786,6 +804,7 @@ mod tests {
                     target: make_const(0x100c, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
             R2ILBlock {
                 addr: 0x100c,
@@ -794,6 +813,7 @@ mod tests {
                     target: make_ram(0, 8),
                 }],
                 switch_info: None,
+                op_metadata: Default::default(),
             },
         ];
 
