@@ -3,9 +3,10 @@
 //! Provides utilities to run radare2 commands and validate plugin output.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
@@ -112,27 +113,11 @@ pub fn r2_cmd(binary: &str, cmd: &str) -> R2Result {
 
 /// Run radare2 with custom timeout
 pub fn r2_cmd_timeout(binary: &str, cmd: &str, timeout: Duration) -> R2Result {
-    let mut command = Command::new("timeout");
-    command.args([
-        &format!("{}s", timeout.as_secs()),
-        "r2",
-        "-q",
-        "-e",
-        "bin.relocs.apply=true",
-        "-c",
-        cmd,
-        binary,
-    ]);
-
-    if let Ok(home) = std::env::var("HOME") {
-        let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
-        command.env("R2_USER_PLUGINS", plugin_dir);
-    }
-
+    let mut command = Command::new("r2");
+    command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
+    configure_plugin_env(&mut command);
     let _guard = r2_exec_lock().lock().ok();
-    let output = command.output();
-
-    parse_output(output)
+    run_command_with_timeout(command, timeout)
 }
 
 /// Run radare2 without a timeout wrapper and with extra environment variables.
@@ -140,10 +125,7 @@ pub fn r2_cmd_with_env(binary: &str, cmd: &str, env: &[(&str, &str)]) -> R2Resul
     let mut command = Command::new("r2");
     command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
 
-    if let Ok(home) = std::env::var("HOME") {
-        let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
-        command.env("R2_USER_PLUGINS", plugin_dir);
-    }
+    configure_plugin_env(&mut command);
 
     for (key, value) in env {
         command.env(key, value);
@@ -151,7 +133,7 @@ pub fn r2_cmd_with_env(binary: &str, cmd: &str, env: &[(&str, &str)]) -> R2Resul
 
     let _guard = r2_exec_lock().lock().ok();
     let output = command.output();
-    parse_output(output)
+    parse_output(output, false)
 }
 
 /// Run radare2 with custom timeout and extra environment variables.
@@ -161,30 +143,16 @@ pub fn r2_cmd_timeout_with_env(
     timeout: Duration,
     env: &[(&str, &str)],
 ) -> R2Result {
-    let mut command = Command::new("timeout");
-    command.args([
-        &format!("{}s", timeout.as_secs()),
-        "r2",
-        "-q",
-        "-e",
-        "bin.relocs.apply=true",
-        "-c",
-        cmd,
-        binary,
-    ]);
-
-    if let Ok(home) = std::env::var("HOME") {
-        let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
-        command.env("R2_USER_PLUGINS", plugin_dir);
-    }
+    let mut command = Command::new("r2");
+    command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
+    configure_plugin_env(&mut command);
 
     for (key, value) in env {
         command.env(key, value);
     }
 
     let _guard = r2_exec_lock().lock().ok();
-    let output = command.output();
-    parse_output(output)
+    run_command_with_timeout(command, timeout)
 }
 
 /// Run r2 command seeking to a function first
@@ -199,27 +167,74 @@ pub fn r2_at_addr(binary: &str, addr: u64, cmd: &str) -> R2Result {
     r2_cmd(binary, &full_cmd)
 }
 
-fn parse_output(output: Result<Output, std::io::Error>) -> R2Result {
+fn configure_plugin_env(command: &mut Command) {
+    if let Ok(home) = std::env::var("HOME") {
+        let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
+        command.env("R2_USER_PLUGINS", plugin_dir);
+    }
+}
+
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> R2Result {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => return parse_output(Err(err), false),
+    };
+
+    let start = Instant::now();
+    let mut timed_out = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    timed_out = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => return parse_output(Err(err), false),
+        }
+    }
+
+    if timed_out {
+        let _ = child.kill();
+    }
+
+    parse_output(child.wait_with_output(), timed_out)
+}
+
+fn parse_output(output: Result<Output, std::io::Error>, timed_out: bool) -> R2Result {
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let mut stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let exit_code = out.status.code();
 
             // Detect real crashes: signal termination (SIGSEGV, SIGABRT, etc.) or
             // timeout-wrapper exit codes (128+signal).  Do NOT treat a plain non-zero
             // exit code as a crash — r2 legitimately returns non-zero sometimes.
             #[cfg(unix)]
-            let crashed = out.status.signal().is_some()
+            let crashed = timed_out
+                || out.status.signal().is_some()
                 || matches!(exit_code, Some(134) | Some(139) | Some(136) | Some(137));
             #[cfg(not(unix))]
-            let crashed = matches!(exit_code, Some(134) | Some(139) | Some(136) | Some(137));
+            let crashed =
+                timed_out || matches!(exit_code, Some(134) | Some(139) | Some(136) | Some(137));
 
             // Panic detection
             let panicked = stdout.contains("panicked")
                 || stderr.contains("panicked")
                 || stdout.contains("core dumped")
                 || stderr.contains("core dumped");
+
+            if timed_out {
+                if !stderr.is_empty() {
+                    stderr.push('\n');
+                }
+                stderr.push_str("r2 command timed out");
+            }
 
             R2Result {
                 stdout,

@@ -3531,8 +3531,13 @@ mod ffi {
                 "Failed to lift baseline stack load with metadata enabled"
             );
             let enabled_mem_ptr = r2il_block_mem_access(ctx, enabled_block);
-            assert!(!enabled_mem_ptr.is_null(), "Expected enabled mem-access JSON");
-            let enabled_json = CStr::from_ptr(enabled_mem_ptr).to_string_lossy().to_string();
+            assert!(
+                !enabled_mem_ptr.is_null(),
+                "Expected enabled mem-access JSON"
+            );
+            let enabled_json = CStr::from_ptr(enabled_mem_ptr)
+                .to_string_lossy()
+                .to_string();
             r2il_string_free(enabled_mem_ptr);
             assert!(
                 mem_access_has_addr_storage_class(&enabled_json, "stack")
@@ -3549,8 +3554,13 @@ mod ffi {
                 "Failed to lift stack load with metadata disabled"
             );
             let disabled_mem_ptr = r2il_block_mem_access(ctx, disabled_block);
-            assert!(!disabled_mem_ptr.is_null(), "Expected disabled mem-access JSON");
-            let disabled_json = CStr::from_ptr(disabled_mem_ptr).to_string_lossy().to_string();
+            assert!(
+                !disabled_mem_ptr.is_null(),
+                "Expected disabled mem-access JSON"
+            );
+            let disabled_json = CStr::from_ptr(disabled_mem_ptr)
+                .to_string_lossy()
+                .to_string();
             r2il_string_free(disabled_mem_ptr);
             assert!(
                 !mem_access_has_addr_storage_class(&disabled_json, "stack")
@@ -4195,6 +4205,30 @@ mod deep_integration {
             .map(str::to_string)
     }
 
+    fn afvj_reg_type_for_ref<'a>(json: &'a Value, reg_ref: &str) -> Option<&'a str> {
+        let reg_vars = json.get("reg")?.as_array()?;
+        reg_vars.iter().find_map(|entry| {
+            let ref_name = entry.get("ref").and_then(Value::as_str)?;
+            if ref_name.eq_ignore_ascii_case(reg_ref) {
+                return entry.get("type").and_then(Value::as_str);
+            }
+            None
+        })
+    }
+
+    fn pointer_arg_count(json: &Value) -> usize {
+        json.get("reg")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.get("type").and_then(Value::as_str))
+                    .filter(|ty| ty.contains('*'))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     /// Verify that `aaa` runs successfully with the plugin loaded
     #[test]
     fn aaa_succeeds_with_plugin() {
@@ -4283,6 +4317,99 @@ mod deep_integration {
         );
     }
 
+    #[test]
+    fn afvj_pointer_types_improve_for_pointer_usage_functions() {
+        setup();
+
+        let enabled = r2_cmd_timeout_with_env(
+            vuln_test_binary(),
+            "e anal.sla.meta=true; aaa; s dbg.vuln_memcpy; afva; afvj",
+            Duration::from_secs(60),
+            &[],
+        );
+        enabled.assert_ok();
+        let enabled_json = parse_json(&enabled, "afvj vuln_memcpy (meta=true)");
+        let enabled_arg0 = afvj_reg_type_for_ref(&enabled_json, "RDI");
+        let enabled_arg1 = afvj_reg_type_for_ref(&enabled_json, "RSI");
+        assert_eq!(
+            enabled_arg0,
+            Some("void *"),
+            "pointer-usage arg0 should recover as pointer with semantic metadata enabled"
+        );
+        assert_eq!(
+            enabled_arg1,
+            Some("void *"),
+            "pointer-usage arg1 should recover as pointer with semantic metadata enabled"
+        );
+
+        let disabled = r2_cmd_timeout_with_env(
+            vuln_test_binary(),
+            "e anal.sla.meta=false; aaa; s dbg.vuln_memcpy; afva; afvj",
+            Duration::from_secs(60),
+            &[],
+        );
+        disabled.assert_ok();
+        let disabled_json = parse_json(&disabled, "afvj vuln_memcpy (meta=false)");
+        let enabled_ptr_count = pointer_arg_count(&enabled_json);
+        let disabled_ptr_count = pointer_arg_count(&disabled_json);
+        assert!(
+            disabled_ptr_count <= enabled_ptr_count,
+            "disabling metadata should not increase pointer arg coverage (enabled={}, disabled={})",
+            enabled_ptr_count,
+            disabled_ptr_count
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2_cmd_timeout_does_not_depend_on_shell_timeout_binary() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        setup();
+
+        let which = Command::new("which")
+            .arg("r2")
+            .output()
+            .expect("which r2 should run");
+        assert!(
+            which.status.success(),
+            "which r2 should resolve executable path"
+        );
+        let r2_path = String::from_utf8_lossy(&which.stdout).trim().to_string();
+        assert!(!r2_path.is_empty(), "which r2 should return a path");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be monotonic")
+            .as_nanos();
+        let shim_dir = std::env::temp_dir().join(format!("r2-timeout-shim-{stamp}"));
+        fs::create_dir_all(&shim_dir).expect("create shim dir");
+        let shim_r2 = shim_dir.join("r2");
+        symlink(&r2_path, &shim_r2).expect("symlink r2 into shim dir");
+
+        let path = shim_dir
+            .to_str()
+            .expect("shim path should be valid unicode")
+            .to_string();
+        let result = r2_cmd_timeout_with_env(
+            vuln_test_binary(),
+            "aaa; s main; afvj",
+            Duration::from_secs(60),
+            &[("PATH", path.as_str())],
+        );
+
+        let _ = fs::remove_file(&shim_r2);
+        let _ = fs::remove_dir(&shim_dir);
+
+        result.assert_ok();
+        assert!(
+            !result.stderr.contains("Failed to execute r2"),
+            "timeout wrapper should execute r2 directly without external shell timeout dependency"
+        );
+    }
+
     /// Verify that `axj` (JSON xref output) works  
     #[test]
     fn axj_produces_json() {
@@ -4356,7 +4483,12 @@ mod deep_integration {
     fn aaaa_auto_semantic_comments_present_without_sla_commands() {
         setup();
         let result = retry_on_crash(|| {
-            r2_cmd_timeout_with_env(vuln_test_binary(), "aaaa; CCj", Duration::from_secs(60), &[])
+            r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                "aaaa; CCj",
+                Duration::from_secs(60),
+                &[],
+            )
         });
         result.assert_ok();
         let parsed = parse_json(&result, "CCj after aaaa");
@@ -4373,13 +4505,21 @@ mod deep_integration {
         setup();
 
         let once = retry_on_crash(|| {
-            r2_cmd_timeout_with_env(vuln_test_binary(), "aaaa; CCj", Duration::from_secs(60), &[])
+            r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                "aaaa; CCj",
+                Duration::from_secs(60),
+                &[],
+            )
         });
         once.assert_ok();
         let once_parsed = parse_json(&once, "CCj after one aaaa");
         let once_comments = expect_array(&once_parsed, "CCj after one aaaa");
         let once_count = count_comment_lines_with_prefix(once_comments, "sla:");
-        assert!(once_count > 0, "baseline semantic comment count should be non-zero");
+        assert!(
+            once_count > 0,
+            "baseline semantic comment count should be non-zero"
+        );
 
         let twice = retry_on_crash(|| {
             r2_cmd_timeout_with_env(
@@ -4404,7 +4544,12 @@ mod deep_integration {
     fn aaaa_auto_semantic_preserves_user_comment() {
         setup();
         let baseline = retry_on_crash(|| {
-            r2_cmd_timeout_with_env(vuln_test_binary(), "aaaa; CCj", Duration::from_secs(60), &[])
+            r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                "aaaa; CCj",
+                Duration::from_secs(60),
+                &[],
+            )
         });
         baseline.assert_ok();
         let baseline_parsed = parse_json(&baseline, "CCj baseline");
@@ -4415,15 +4560,18 @@ mod deep_integration {
                 entry
                     .get("name")
                     .and_then(Value::as_str)
-                    .map(|comment| comment.lines().any(|line| line.trim_start().starts_with("sla:")))
+                    .map(|comment| {
+                        comment
+                            .lines()
+                            .any(|line| line.trim_start().starts_with("sla:"))
+                    })
                     .unwrap_or(false)
             })
             .and_then(|entry| entry.get("offset").and_then(Value::as_u64))
             .expect("expected at least one semantic-commented address");
 
-        let cmd = format!(
-            "s 0x{target_addr:x}; CCu user-note-semantic; aaaa; s 0x{target_addr:x}; CC."
-        );
+        let cmd =
+            format!("s 0x{target_addr:x}; CCu user-note-semantic; aaaa; s 0x{target_addr:x}; CC.");
         let result = retry_on_crash(|| {
             r2_cmd_timeout_with_env(vuln_test_binary(), &cmd, Duration::from_secs(90), &[])
         });
@@ -5004,7 +5152,10 @@ mod deep_integration {
             .expect("caller propagation summary line should be present");
         let triggered = extract_summary_metric(&summary, "prop_callees_triggered")
             .expect("summary should include prop_callees_triggered");
-        assert!(triggered > 0, "at least one callee should trigger propagation");
+        assert!(
+            triggered > 0,
+            "at least one callee should trigger propagation"
+        );
         assert!(
             summary.contains("sample_callees=") && summary.contains("dbg.check_secret"),
             "sample_callees should include dbg.check_secret when it triggers propagation"
