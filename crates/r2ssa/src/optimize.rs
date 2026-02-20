@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::{BlockTerminator, PhiNode, SSAFunction, SSAOp, SSAVar};
+use crate::{BlockTerminator, PhiNode, SSAFunction, SSAOp, SSAVar, SourceSite};
 
 /// Configuration for SSA optimization passes.
 #[derive(Debug, Clone)]
@@ -161,32 +161,22 @@ impl PartialOrd for VarKey {
 
 fn build_use_map(func: &SSAFunction) -> HashMap<VarKey, Vec<UseLocation>> {
     let mut uses = HashMap::new();
-    for &addr in func.block_addrs() {
-        let Some(block) = func.get_block(addr) else {
-            continue;
-        };
-
-        for (phi_idx, phi) in block.phis.iter().enumerate() {
-            for (_, src) in &phi.sources {
-                uses.entry(VarKey::from_var(src))
-                    .or_insert_with(Vec::new)
-                    .push(UseLocation::Phi {
-                        block_addr: addr,
-                        phi_idx,
-                    });
-            }
-        }
-
-        for (op_idx, op) in block.ops.iter().enumerate() {
-            for src in op.sources() {
-                uses.entry(VarKey::from_var(src))
-                    .or_insert_with(Vec::new)
-                    .push(UseLocation::Op {
-                        block_addr: addr,
-                        op_idx,
-                    });
-            }
-        }
+    for block in func.blocks() {
+        block.for_each_source(|src| {
+            let use_loc = match src.site {
+                SourceSite::Phi { phi_idx, .. } => UseLocation::Phi {
+                    block_addr: block.addr,
+                    phi_idx,
+                },
+                SourceSite::Op { op_idx, .. } => UseLocation::Op {
+                    block_addr: block.addr,
+                    op_idx,
+                },
+            };
+            uses.entry(VarKey::from_var(src.var))
+                .or_insert_with(Vec::new)
+                .push(use_loc);
+        });
     }
     uses
 }
@@ -333,20 +323,8 @@ fn sccp(func: &SSAFunction) -> (HashMap<VarKey, u64>, HashSet<(u64, u64)>) {
     let use_map = build_use_map(func);
 
     for block in func.blocks() {
-        for phi in &block.phis {
-            init_if_input(&phi.dst, &mut lattice);
-            for (_, src) in &phi.sources {
-                init_if_input(src, &mut lattice);
-            }
-        }
-        for op in &block.ops {
-            if let Some(dst) = op.dst() {
-                init_if_input(dst, &mut lattice);
-            }
-            for src in op.sources() {
-                init_if_input(src, &mut lattice);
-            }
-        }
+        block.for_each_def(|def| init_if_input(def.var, &mut lattice));
+        block.for_each_source(|src| init_if_input(src.var, &mut lattice));
     }
 
     cfg_worklist.push_back((u64::MAX, func.entry));

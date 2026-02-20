@@ -507,46 +507,27 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
     let mut reg_versions: HashMap<String, Vec<(String, u32)>> = HashMap::new();
 
     for block in blocks {
-        for op in &block.ops {
-            if let Some(dst) = op.dst() {
-                if !is_register_candidate_var(dst, env) {
-                    continue;
-                }
-                let base = dst.name.to_ascii_lowercase();
-                reg_versions
-                    .entry(base)
-                    .or_default()
-                    .push((dst.display_name(), dst.version));
+        block.for_each_def(|def| {
+            if !is_register_candidate_var(def.var, env) {
+                return;
             }
-            for src in op.sources() {
-                if !is_register_candidate_var(src, env) {
-                    continue;
-                }
-                let base = src.name.to_ascii_lowercase();
-                reg_versions
-                    .entry(base)
-                    .or_default()
-                    .push((src.display_name(), src.version));
+            let base = def.var.name.to_ascii_lowercase();
+            reg_versions
+                .entry(base)
+                .or_default()
+                .push((def.var.display_name(), def.var.version));
+        });
+
+        block.for_each_source(|src| {
+            if !is_register_candidate_var(src.var, env) {
+                return;
             }
-        }
-        for phi in &block.phis {
-            if is_register_candidate_var(&phi.dst, env) {
-                let base = phi.dst.name.to_ascii_lowercase();
-                reg_versions
-                    .entry(base)
-                    .or_default()
-                    .push((phi.dst.display_name(), phi.dst.version));
-            }
-            for (_, src) in &phi.sources {
-                if is_register_candidate_var(src, env) {
-                    let base = src.name.to_ascii_lowercase();
-                    reg_versions
-                        .entry(base)
-                        .or_default()
-                        .push((src.display_name(), src.version));
-                }
-            }
-        }
+            let base = src.var.name.to_ascii_lowercase();
+            reg_versions
+                .entry(base)
+                .or_default()
+                .push((src.var.display_name(), src.var.version));
+        });
     }
 
     let mut uf_parent: HashMap<String, String> = HashMap::new();

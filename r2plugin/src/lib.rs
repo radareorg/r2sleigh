@@ -2249,41 +2249,21 @@ fn collect_taint_sources(
     let mut source_map: std::collections::HashMap<String, TaintSourceJson> =
         std::collections::HashMap::new();
     for block in ssa_func.blocks() {
-        for phi in &block.phis {
-            for (_, src) in &phi.sources {
-                if let Some(labels) = policy.is_source(src, block.addr) {
-                    let entry = source_map
-                        .entry(src.display_name())
-                        .or_insert(TaintSourceJson {
-                            var: src.display_name(),
-                            labels: Vec::new(),
-                            block: block.addr,
-                            block_hex: format!("0x{:x}", block.addr),
-                        });
-                    for label in labels {
-                        entry.labels.push(label.id);
-                    }
+        block.for_each_source(|src| {
+            if let Some(labels) = policy.is_source(src.var, block.addr) {
+                let entry = source_map
+                    .entry(src.var.display_name())
+                    .or_insert(TaintSourceJson {
+                        var: src.var.display_name(),
+                        labels: Vec::new(),
+                        block: block.addr,
+                        block_hex: format!("0x{:x}", block.addr),
+                    });
+                for label in labels {
+                    entry.labels.push(label.id);
                 }
             }
-        }
-
-        for op in &block.ops {
-            for src in op.sources() {
-                if let Some(labels) = policy.is_source(src, block.addr) {
-                    let entry = source_map
-                        .entry(src.display_name())
-                        .or_insert(TaintSourceJson {
-                            var: src.display_name(),
-                            labels: Vec::new(),
-                            block: block.addr,
-                            block_hex: format!("0x{:x}", block.addr),
-                        });
-                    for label in labels {
-                        entry.labels.push(label.id);
-                    }
-                }
-            }
-        }
+        });
     }
 
     for source in source_map.values_mut() {
@@ -3333,21 +3313,8 @@ fn seed_symbolic_state<'ctx>(
     };
 
     for block in func.blocks() {
-        for phi in &block.phis {
-            maybe_seed(&phi.dst);
-            for (_, src) in &phi.sources {
-                maybe_seed(src);
-            }
-        }
-
-        for op in &block.ops {
-            if let Some(dst) = op.dst() {
-                maybe_seed(dst);
-            }
-            for src in op.sources() {
-                maybe_seed(src);
-            }
-        }
+        block.for_each_def(|def| maybe_seed(def.var));
+        block.for_each_source(|src| maybe_seed(src.var));
     }
 }
 

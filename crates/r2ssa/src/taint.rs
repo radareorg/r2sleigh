@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use r2il::ArchSpec;
 use serde::{Deserialize, Serialize};
 
-use crate::function::{SSABlock, SSAFunction, UseLocation};
+use crate::function::{SSABlock, SSAFunction, SourceSite, UseLocation};
 use crate::op::SSAOp;
 use crate::var::SSAVar;
 
@@ -284,20 +284,17 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
     fn build_use_map(&self) -> HashMap<SSAVar, Vec<(u64, UseLocation)>> {
         let mut uses: HashMap<SSAVar, Vec<(u64, UseLocation)>> = HashMap::new();
         for block in self.func.blocks() {
-            for (phi_idx, phi) in block.phis.iter().enumerate() {
-                for (src_idx, (_, src)) in phi.sources.iter().enumerate() {
-                    uses.entry(src.clone())
-                        .or_default()
-                        .push((block.addr, UseLocation::Phi { phi_idx, src_idx }));
-                }
-            }
-            for (op_idx, op) in block.ops.iter().enumerate() {
-                for (src_idx, src) in op.sources().iter().enumerate() {
-                    uses.entry((*src).clone())
-                        .or_default()
-                        .push((block.addr, UseLocation::Op { op_idx, src_idx }));
-                }
-            }
+            block.for_each_source(|src| {
+                let use_loc = match src.site {
+                    SourceSite::Phi {
+                        phi_idx, src_idx, ..
+                    } => UseLocation::Phi { phi_idx, src_idx },
+                    SourceSite::Op { op_idx, src_idx } => UseLocation::Op { op_idx, src_idx },
+                };
+                uses.entry(src.var.clone())
+                    .or_default()
+                    .push((block.addr, use_loc));
+            });
         }
         uses
     }
@@ -309,19 +306,9 @@ impl<'a, P: TaintPolicy> TaintAnalysis<'a, P> {
         worklist: &mut VecDeque<SSAVar>,
     ) {
         for block in self.func.blocks() {
-            // Check phi sources
-            for phi in &block.phis {
-                for (_, src) in &phi.sources {
-                    self.maybe_add_source(src, block.addr, var_taints, worklist);
-                }
-            }
-
-            // Check op sources
-            for op in &block.ops {
-                for src in op.sources() {
-                    self.maybe_add_source(src, block.addr, var_taints, worklist);
-                }
-            }
+            block.for_each_source(|src| {
+                self.maybe_add_source(src.var, block.addr, var_taints, worklist);
+            });
         }
     }
 
@@ -858,6 +845,89 @@ mod tests {
         assert!(
             !names.iter().any(|name| name.starts_with("const:")),
             "Call target constant should not be treated as a tainted argument source"
+        );
+    }
+
+    #[test]
+    fn taint_propagates_through_phi_merge_to_store_sink() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                op_metadata: std::collections::BTreeMap::new(),
+                switch_info: None,
+                ops: vec![R2ILOp::CBranch {
+                    cond: make_const(1, 1),
+                    target: make_const(0x1008, 8),
+                }],
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                op_metadata: std::collections::BTreeMap::new(),
+                switch_info: None,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_reg(8, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                op_metadata: std::collections::BTreeMap::new(),
+                switch_info: None,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(0, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+            },
+            R2ILBlock {
+                addr: 0x100c,
+                size: 4,
+                op_metadata: std::collections::BTreeMap::new(),
+                switch_info: None,
+                ops: vec![R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: make_const(0x2000, 8),
+                    val: make_reg(0, 8),
+                }],
+            },
+        ];
+
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+        let merge = func.get_block(0x100c).expect("merge block");
+        assert!(
+            !merge.phis.is_empty(),
+            "fixture must include a merge phi for reg:0"
+        );
+
+        let policy = DefaultTaintPolicy::all_inputs()
+            .with_sink_calls(false)
+            .with_sink_stores(true);
+        let analysis = TaintAnalysis::new(&func, policy);
+        let result = analysis.analyze();
+
+        let sink_hit = result
+            .sink_hits
+            .iter()
+            .find(|hit| matches!(hit.op, SSAOp::Store { .. }))
+            .expect("store sink should be present");
+        assert!(
+            sink_hit
+                .tainted_vars
+                .iter()
+                .any(|(var, _)| var.name == "reg:0"),
+            "taint should flow through phi-merged reg:0 into the store sink"
         );
     }
 

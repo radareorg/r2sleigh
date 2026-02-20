@@ -63,6 +63,42 @@ pub struct PhiNode {
     pub sources: Vec<(u64, SSAVar)>, // (predecessor addr, variable)
 }
 
+/// Location metadata for a source variable use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceSite {
+    /// Source from a phi node input.
+    Phi {
+        phi_idx: usize,
+        src_idx: usize,
+        pred_addr: u64,
+    },
+    /// Source from a regular SSA operation input.
+    Op { op_idx: usize, src_idx: usize },
+}
+
+/// A source variable with its location metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceRef<'a> {
+    pub var: &'a SSAVar,
+    pub site: SourceSite,
+}
+
+/// Location metadata for a destination variable definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefSite {
+    /// Destination written by a phi node.
+    Phi { phi_idx: usize },
+    /// Destination written by a regular operation.
+    Op { op_idx: usize },
+}
+
+/// A destination variable with its definition site metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefRef<'a> {
+    pub var: &'a SSAVar,
+    pub site: DefSite,
+}
+
 impl SSAFunction {
     /// Build an SSA function from a sequence of r2il blocks.
     pub fn from_blocks(blocks: &[R2ILBlock]) -> Option<Self> {
@@ -367,26 +403,35 @@ impl SSAFunction {
         let mut uses = Vec::new();
 
         for (&addr, block) in &self.blocks {
-            // Check phi nodes
-            for (phi_idx, phi) in block.phis.iter().enumerate() {
-                for (src_idx, (_, src)) in phi.sources.iter().enumerate() {
-                    if src == var {
-                        uses.push((addr, UseLocation::Phi { phi_idx, src_idx }));
-                    }
+            block.for_each_source(|src| {
+                if src.var != var {
+                    return;
                 }
-            }
-
-            // Check operations
-            for (op_idx, op) in block.ops.iter().enumerate() {
-                for (src_idx, src) in op.sources().iter().enumerate() {
-                    if *src == var {
-                        uses.push((addr, UseLocation::Op { op_idx, src_idx }));
-                    }
-                }
-            }
+                let use_loc = match src.site {
+                    SourceSite::Phi {
+                        phi_idx, src_idx, ..
+                    } => UseLocation::Phi { phi_idx, src_idx },
+                    SourceSite::Op { op_idx, src_idx } => UseLocation::Op { op_idx, src_idx },
+                };
+                uses.push((addr, use_loc));
+            });
         }
 
         uses
+    }
+
+    /// Iterate over all source uses in all blocks.
+    pub fn for_each_source<F: FnMut(u64, SourceRef<'_>)>(&self, mut f: F) {
+        for block in self.blocks() {
+            block.for_each_source(|src| f(block.addr, src));
+        }
+    }
+
+    /// Iterate over all definitions in all blocks.
+    pub fn for_each_def<F: FnMut(u64, DefRef<'_>)>(&self, mut f: F) {
+        for block in self.blocks() {
+            block.for_each_def(|def| f(block.addr, def));
+        }
     }
 
     /// Compute a backward slice for a sink variable.
@@ -501,6 +546,61 @@ pub enum UseLocation {
 }
 
 impl SSABlock {
+    /// Visit all phi source variables in deterministic index order.
+    pub fn for_each_phi_source<F: FnMut(SourceRef<'_>)>(&self, mut f: F) {
+        for (phi_idx, phi) in self.phis.iter().enumerate() {
+            for (src_idx, (pred_addr, src)) in phi.sources.iter().enumerate() {
+                f(SourceRef {
+                    var: src,
+                    site: SourceSite::Phi {
+                        phi_idx,
+                        src_idx,
+                        pred_addr: *pred_addr,
+                    },
+                });
+            }
+        }
+    }
+
+    /// Visit all operation source variables in deterministic index order.
+    pub fn for_each_op_source<F: FnMut(SourceRef<'_>)>(&self, mut f: F) {
+        for (op_idx, op) in self.ops.iter().enumerate() {
+            let mut src_idx = 0usize;
+            op.for_each_source(|src| {
+                f(SourceRef {
+                    var: src,
+                    site: SourceSite::Op { op_idx, src_idx },
+                });
+                src_idx += 1;
+            });
+        }
+    }
+
+    /// Visit all source variables (phis first, then ops) in index order.
+    pub fn for_each_source<F: FnMut(SourceRef<'_>)>(&self, mut f: F) {
+        self.for_each_phi_source(&mut f);
+        self.for_each_op_source(f);
+    }
+
+    /// Visit all destination definitions (phis first, then ops) in index order.
+    pub fn for_each_def<F: FnMut(DefRef<'_>)>(&self, mut f: F) {
+        for (phi_idx, phi) in self.phis.iter().enumerate() {
+            f(DefRef {
+                var: &phi.dst,
+                site: DefSite::Phi { phi_idx },
+            });
+        }
+
+        for (op_idx, op) in self.ops.iter().enumerate() {
+            if let Some(dst) = op.dst() {
+                f(DefRef {
+                    var: dst,
+                    site: DefSite::Op { op_idx },
+                });
+            }
+        }
+    }
+
     /// Get all operations including phi nodes (as SSAOp::Phi).
     pub fn all_ops(&self) -> impl Iterator<Item = SSAOp> + '_ {
         let phi_ops = self.phis.iter().map(|phi| SSAOp::Phi {
@@ -824,5 +924,138 @@ mod tests {
         assert!(!func.block_addrs().contains(&0x1004));
         assert!(func.get_block(0x1004).is_none());
         assert_eq!(func.idom(0x1008), Some(0x1000));
+    }
+
+    #[test]
+    fn test_for_each_source_reports_phi_and_op_sites() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                op_metadata: std::collections::BTreeMap::new(),
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(1, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                op_metadata: std::collections::BTreeMap::new(),
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(2, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                op_metadata: std::collections::BTreeMap::new(),
+                switch_info: None,
+            },
+            R2ILBlock {
+                addr: 0x100c,
+                size: 4,
+                ops: vec![R2ILOp::IntAdd {
+                    dst: make_reg(8, 8),
+                    a: make_reg(0, 8),
+                    b: make_const(3, 8),
+                }],
+                op_metadata: std::collections::BTreeMap::new(),
+                switch_info: None,
+            },
+        ];
+
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+        let merge = func.get_block(0x100c).expect("merge block");
+        assert!(merge.has_phis(), "fixture should produce a merge phi");
+
+        let mut seen = Vec::new();
+        merge.for_each_source(|src| {
+            seen.push(match src.site {
+                SourceSite::Phi {
+                    phi_idx,
+                    src_idx,
+                    pred_addr,
+                } => format!(
+                    "phi:{}:{}:0x{:x}:{}",
+                    phi_idx,
+                    src_idx,
+                    pred_addr,
+                    src.var.display_name()
+                ),
+                SourceSite::Op { op_idx, src_idx } => {
+                    format!("op:{}:{}:{}", op_idx, src_idx, src.var.display_name())
+                }
+            });
+        });
+
+        assert_eq!(seen.len(), 4, "2 phi sources + 2 IntAdd sources expected");
+        assert!(
+            seen[0].starts_with("phi:0:0:"),
+            "first source should be first phi input"
+        );
+        assert!(
+            seen[1].starts_with("phi:0:1:"),
+            "second source should be second phi input"
+        );
+        assert!(
+            seen[2].starts_with("op:0:0:"),
+            "third source should be first op input"
+        );
+        assert!(
+            seen[3].starts_with("op:0:1:"),
+            "fourth source should be second op input"
+        );
+    }
+
+    #[test]
+    fn test_for_each_def_reports_phi_and_op_defs() {
+        let block = SSABlock {
+            addr: 0x2000,
+            size: 4,
+            phis: vec![PhiNode {
+                dst: SSAVar::new("reg:0", 2, 8),
+                sources: vec![(0x1000, SSAVar::new("reg:0", 0, 8))],
+            }],
+            ops: vec![
+                SSAOp::Copy {
+                    dst: SSAVar::new("reg:8", 1, 8),
+                    src: SSAVar::new("reg:0", 2, 8),
+                },
+                SSAOp::Return {
+                    target: SSAVar::new("reg:8", 1, 8),
+                },
+            ],
+        };
+
+        let mut seen = Vec::new();
+        block.for_each_def(|def| {
+            seen.push(match def.site {
+                DefSite::Phi { phi_idx } => format!("phi:{}:{}", phi_idx, def.var.display_name()),
+                DefSite::Op { op_idx } => format!("op:{}:{}", op_idx, def.var.display_name()),
+            });
+        });
+
+        assert_eq!(
+            seen,
+            vec!["phi:0:reg:0_2".to_string(), "op:0:reg:8_1".to_string()]
+        );
     }
 }
