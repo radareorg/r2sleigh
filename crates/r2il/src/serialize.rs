@@ -307,7 +307,7 @@ mod tests {
         let loaded = from_bytes(&bytes).unwrap();
 
         assert_eq!(loaded.name, "test-arch");
-        assert_eq!(loaded.big_endian, false);
+        assert!(!loaded.big_endian);
         assert_eq!(loaded.addr_size, 8);
         assert_eq!(loaded.registers.len(), 2);
         assert_eq!(loaded.spaces.len(), 2);

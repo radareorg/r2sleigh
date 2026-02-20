@@ -30,6 +30,7 @@ pub mod opcode;
 pub mod regname;
 pub mod serialize;
 pub mod space;
+pub mod validate;
 pub mod varnode;
 
 // Re-export main types at crate root
@@ -37,6 +38,9 @@ pub use opcode::{R2ILBlock, R2ILOp, SwitchCase, SwitchInfo};
 pub use regname::select_register_name;
 pub use serialize::{ArchSpec, RegisterDef};
 pub use space::{AddressSpace, SpaceId};
+pub use validate::{
+    ValidationError, ValidationIssue, validate_archspec, validate_block, validate_op,
+};
 pub use varnode::Varnode;
 
 /// Crate version for binary format compatibility checks.

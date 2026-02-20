@@ -729,21 +729,21 @@ mod tests {
         let mut state_a = SymState::new(&ctx, 0x1000);
         let x_a = SymValue::new_symbolic(&ctx, "x", 32);
         state_a.set_register("x", x_a.clone());
-        state_a.add_constraint(x_a.to_bv(&ctx).eq(&BV::from_u64(0, 32)));
+        state_a.add_constraint(x_a.to_bv(&ctx).eq(BV::from_u64(0, 32)));
         state_a.set_register("rax", SymValue::concrete(1, 64));
 
         let mut state_b = SymState::new(&ctx, 0x1000);
         let x_b = SymValue::new_symbolic(&ctx, "x", 32);
         state_b.set_register("x", x_b.clone());
-        state_b.add_constraint(x_b.to_bv(&ctx).eq(&BV::from_u64(1, 32)));
+        state_b.add_constraint(x_b.to_bv(&ctx).eq(BV::from_u64(1, 32)));
         state_b.set_register("rax", SymValue::concrete(2, 64));
 
         let merged = state_a.merge_with(&state_b);
         let merged_rax = merged.get_register("rax");
 
         let solver = Solver::new();
-        solver.assert(&merged.path_condition());
-        solver.assert(&x_b.to_bv(&ctx).eq(&BV::from_u64(0, 32)));
+        solver.assert(merged.path_condition());
+        solver.assert(x_b.to_bv(&ctx).eq(BV::from_u64(0, 32)));
         assert_eq!(solver.check(), SatResult::Sat);
         let model = solver.get_model().unwrap();
         let val = model
@@ -754,8 +754,8 @@ mod tests {
         assert_eq!(val, 1);
 
         let solver = Solver::new();
-        solver.assert(&merged.path_condition());
-        solver.assert(&x_b.to_bv(&ctx).eq(&BV::from_u64(1, 32)));
+        solver.assert(merged.path_condition());
+        solver.assert(x_b.to_bv(&ctx).eq(BV::from_u64(1, 32)));
         assert_eq!(solver.check(), SatResult::Sat);
         let model = solver.get_model().unwrap();
         let val = model

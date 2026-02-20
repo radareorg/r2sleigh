@@ -1637,7 +1637,11 @@ mod decompilation {
     #[test]
     fn decompiles_trailing_return_as_guard_clause() {
         setup();
-        let result = r2_at_func(vuln_test_binary(), "dbg.test_guard_tail_return", "a:sla.dec");
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.test_guard_tail_return",
+            "a:sla.dec",
+        );
         result.assert_ok();
         let normalized = normalized_dec_output(&result.stdout);
         let lines: Vec<&str> = normalized.lines().collect();
@@ -2358,7 +2362,8 @@ mod decompilation {
         result.assert_ok();
         let first_line = result.stdout.lines().next().unwrap_or("");
         assert!(
-            first_line.contains("int64_t") || first_line.contains("int32_t*")
+            first_line.contains("int64_t")
+                || first_line.contains("int32_t*")
                 || first_line.contains("DemoStruct*")
                 || first_line.contains("int32_t"),
             "test_struct_field should have typed parameters, got: {}",
@@ -2640,6 +2645,102 @@ mod ffi {
                 );
                 r2il_string_free(ssa_ptr);
             }
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn block_validate_rejects_invalid_switch_metadata() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const u8,
+                    usize,
+                    u64,
+                ) -> *mut std::ffi::c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_block_set_switch_info: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    u64,
+                    u64,
+                    u64,
+                    u64,
+                    *const u64,
+                    *const u64,
+                    usize,
+                ),
+            > = lib.get(b"r2il_block_set_switch_info").unwrap();
+            let r2il_block_validate: libloading::Symbol<
+                unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
+            > = lib.get(b"r2il_block_validate").unwrap();
+            let r2il_error: libloading::Symbol<
+                unsafe extern "C" fn(*const std::ffi::c_void) -> *const c_char,
+            > = lib.get(b"r2il_error").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut std::ffi::c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+
+            let arch = CString::new("x86-64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            assert!(!ctx.is_null(), "Failed to initialize x86-64 context");
+
+            let mut bytes = vec![0x31u8, 0xC0]; // xor eax, eax
+            bytes.resize(16, 0x90);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift baseline instruction");
+
+            assert_eq!(
+                r2il_block_validate(ctx, block),
+                1,
+                "Freshly lifted block should validate"
+            );
+
+            // Inject invalid switch metadata: duplicate case values.
+            let case_values = [0u64, 0u64];
+            let case_targets = [0x2000u64, 0x3000u64];
+            r2il_block_set_switch_info(
+                block,
+                0x1000,
+                0,
+                1,
+                0,
+                case_values.as_ptr(),
+                case_targets.as_ptr(),
+                case_values.len(),
+            );
+
+            assert_eq!(
+                r2il_block_validate(ctx, block),
+                0,
+                "Validation should fail for duplicate switch case values"
+            );
+
+            let err_ptr = r2il_error(ctx);
+            assert!(
+                !err_ptr.is_null(),
+                "Validation failure should populate context error"
+            );
+            let err = CStr::from_ptr(err_ptr).to_string_lossy();
+            assert!(
+                err.contains("switch") && err.contains("duplicate"),
+                "Validation error should mention duplicate switch case issue: {}",
+                err
+            );
 
             r2il_block_free(block);
             r2il_free(ctx);

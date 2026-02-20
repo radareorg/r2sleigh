@@ -237,11 +237,11 @@ mod tests {
 
             fn propagate(&self, op: &SSAOp, _source_taints: &[&TaintSet]) -> Option<TaintSet> {
                 // AND with a small constant (mask) clears taint
-                if let SSAOp::IntAnd { b, .. } = op {
-                    if b.is_const() {
-                        // Masking clears taint
-                        return Some(TaintSet::new());
-                    }
+                if let SSAOp::IntAnd { b, .. } = op
+                    && b.is_const()
+                {
+                    // Masking clears taint
+                    return Some(TaintSet::new());
                 }
                 None // Use default propagation
             }

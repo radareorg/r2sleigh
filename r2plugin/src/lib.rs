@@ -11,7 +11,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use r2il::serialize::UserOpDef;
-use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize};
+use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize, validate_block};
 use r2sleigh_lift::{Disassembler, build_arch_spec, op_to_esil, userop_map_for_arch};
 use r2ssa::TaintPolicy;
 use std::ffi::{CStr, CString};
@@ -68,6 +68,14 @@ impl R2ILContext {
             disasm: None,
             error: CString::new(msg).ok(),
         }
+    }
+
+    fn set_error(&mut self, msg: impl AsRef<str>) {
+        self.error = CString::new(msg.as_ref()).ok();
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
     }
 }
 
@@ -366,9 +374,16 @@ pub extern "C" fn r2il_lift(
 
     let slice = unsafe { slice::from_raw_parts(bytes, len) };
     match disasm.lift(slice, addr) {
-        Ok(block) => Box::into_raw(Box::new(block)),
+        Ok(block) => {
+            if let Err(e) = validate_block(&block) {
+                ctx_ref.set_error(format!("Invalid lifted block: {}", e));
+                return ptr::null_mut();
+            }
+            ctx_ref.clear_error();
+            Box::into_raw(Box::new(block))
+        }
         Err(e) => {
-            ctx_ref.error = CString::new(e.to_string()).ok();
+            ctx_ref.set_error(e.to_string());
             ptr::null_mut()
         }
     }
@@ -407,9 +422,16 @@ pub extern "C" fn r2il_lift_block(
     let size = (block_size as usize).min(len);
 
     match disasm.lift_block(slice, addr, size) {
-        Ok(block) => Box::into_raw(Box::new(block)),
+        Ok(block) => {
+            if let Err(e) = validate_block(&block) {
+                ctx_ref.set_error(format!("Invalid lifted block: {}", e));
+                return ptr::null_mut();
+            }
+            ctx_ref.clear_error();
+            Box::into_raw(Box::new(block))
+        }
         Err(e) => {
-            ctx_ref.error = CString::new(e.to_string()).ok();
+            ctx_ref.set_error(e.to_string());
             ptr::null_mut()
         }
     }
@@ -477,6 +499,31 @@ pub extern "C" fn r2il_block_set_switch_info(
     };
 
     block.set_switch_info(switch_info);
+}
+
+/// Validate a lifted block against r2il structural invariants.
+///
+/// Returns 1 when valid, 0 on invalid input or validation failure.
+/// On validation failure, the context error string is updated.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_validate(ctx: *mut R2ILContext, block: *const R2ILBlock) -> i32 {
+    if ctx.is_null() || block.is_null() {
+        return 0;
+    }
+
+    let ctx_ref = unsafe { &mut *ctx };
+    let block_ref = unsafe { &*block };
+
+    match validate_block(block_ref) {
+        Ok(()) => {
+            ctx_ref.clear_error();
+            1
+        }
+        Err(e) => {
+            ctx_ref.set_error(format!("Invalid block: {}", e));
+            0
+        }
+    }
 }
 
 /// Get the number of operations in a block.
@@ -5745,8 +5792,8 @@ mod tests {
         let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
 
         r2il_string_free(out);
-        r2il_block_free(block_load as *mut R2ILBlock);
-        r2il_block_free(block_ret as *mut R2ILBlock);
+        r2il_block_free(block_load);
+        r2il_block_free(block_ret);
         r2il_free(ctx);
 
         assert!(

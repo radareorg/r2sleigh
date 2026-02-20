@@ -7,7 +7,7 @@
 //!   r2sleigh disasm --arch x86-64 --bytes "554889e5"
 
 use clap::{Parser, Subcommand};
-use r2il::serialize;
+use r2il::{serialize, validate_archspec, validate_block};
 use r2sleigh_lift::{Lifter, create_arm_spec, create_x86_64_spec};
 use std::path::{Path, PathBuf};
 
@@ -157,6 +157,8 @@ fn cmd_compile(input: &Path, output: Option<&PathBuf>, _variant: &str) -> Result
         lifter.compile().map_err(|e| e.to_string())?
     };
 
+    validate_archspec(&spec).map_err(|e| format!("Invalid architecture specification: {}", e))?;
+
     // Save the compiled spec
     serialize::save(&spec, &output_path).map_err(|e| e.to_string())?;
 
@@ -182,6 +184,7 @@ fn cmd_compile(input: &Path, output: Option<&PathBuf>, _variant: &str) -> Result
 
 fn cmd_info(input: &Path, show_registers: bool, show_spaces: bool) -> Result<(), String> {
     let spec = serialize::load(input).map_err(|e| e.to_string())?;
+    validate_archspec(&spec).map_err(|e| format!("Invalid architecture specification: {}", e))?;
 
     println!("r2il File: {}", input.display());
     println!("Architecture: {}", spec.name);
@@ -264,6 +267,8 @@ fn cmd_test_arch(arch: &str, output: Option<&PathBuf>) -> Result<(), String> {
         Some(p) => p.clone(),
         None => PathBuf::from(format!("{}.r2il", arch)),
     };
+
+    validate_archspec(&spec).map_err(|e| format!("Invalid architecture specification: {}", e))?;
 
     serialize::save(&spec, &output_path).map_err(|e| e.to_string())?;
 
@@ -415,6 +420,8 @@ fn render_esil_lines(
             Ok(result) => result,
             Err(_) => break,
         };
+        validate_block(&block)
+            .map_err(|e| format!("Invalid lifted block at 0x{instr_addr:x}: {}", e))?;
 
         let instr_size = block.size as usize;
         if instr_size == 0 {
@@ -461,6 +468,7 @@ fn cmd_disasm(arch: &str, bytes_hex: &str, addr_str: &str, format: &str) -> Resu
     let block = disasm
         .lift(&bytes, addr)
         .map_err(|e| format!("Lift failed: {}", e))?;
+    validate_block(&block).map_err(|e| format!("Invalid lifted block: {}", e))?;
 
     // Also get the native disassembly for display
     let (mnemonic, size) = disasm
@@ -565,15 +573,12 @@ mod tests {
                     && map.contains_key("size");
                 if is_varnode {
                     let space = map.get("space").and_then(serde_json::Value::as_str);
-                    if let Some(space_str) = space {
-                        if space_str.eq_ignore_ascii_case("register") {
-                            if let Some(name) = map.get("name").and_then(serde_json::Value::as_str)
-                            {
-                                if !name.is_empty() {
-                                    return true;
-                                }
-                            }
-                        }
+                    if let Some(space_str) = space
+                        && space_str.eq_ignore_ascii_case("register")
+                        && let Some(name) = map.get("name").and_then(serde_json::Value::as_str)
+                        && !name.is_empty()
+                    {
+                        return true;
                     }
                 }
 

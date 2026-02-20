@@ -1727,7 +1727,7 @@ mod tests {
             SSAOp::Load {
                 dst: loaded.clone(),
                 space: "ram".to_string(),
-                addr: addr,
+                addr,
             },
             SSAOp::IntNotEqual {
                 dst: cond.clone(),

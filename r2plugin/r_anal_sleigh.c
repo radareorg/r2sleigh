@@ -26,6 +26,7 @@ extern const char *r2il_error(const R2ILContext *ctx);
 extern R2ILBlock *r2il_lift(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr);
 extern R2ILBlock *r2il_lift_block(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr, unsigned int block_size);
 extern void r2il_block_free(R2ILBlock *block);
+extern int r2il_block_validate(R2ILContext *ctx, const R2ILBlock *block);
 extern void r2il_block_set_switch_info(R2ILBlock *block, unsigned long long switch_addr,
     unsigned long long min_val, unsigned long long max_val, unsigned long long default_target,
     const unsigned long long *case_values, const unsigned long long *case_targets, size_t num_cases);
@@ -1984,9 +1985,9 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 		R2ILBlock *block = r2il_lift_block (ctx, buf, to_read, bb->addr, (unsigned int)bb_size);
 		if (block) {
 			/* Check if this block has switch info from radare2's analysis */
-			if (bb->switch_op && bb->switch_op->cases) {
-				size_t num_cases = r_list_length (bb->switch_op->cases);
-				if (num_cases > 0) {
+				if (bb->switch_op && bb->switch_op->cases) {
+					size_t num_cases = r_list_length (bb->switch_op->cases);
+					if (num_cases > 0) {
 					unsigned long long *case_values = malloc (num_cases * sizeof (unsigned long long));
 					unsigned long long *case_targets = malloc (num_cases * sizeof (unsigned long long));
 					if (case_values && case_targets) {
@@ -2006,12 +2007,23 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 							case_values, case_targets, num_cases);
 					}
 					free (case_values);
-					free (case_targets);
+						free (case_targets);
+					}
 				}
+
+				if (!r2il_block_validate (ctx, block)) {
+					const char *err = r2il_error (ctx);
+					if (err && *err) {
+						R_LOG_ERROR ("r2sleigh: invalid block at 0x%"PFMT64x": %s", bb->addr, err);
+					} else {
+						R_LOG_ERROR ("r2sleigh: invalid block at 0x%"PFMT64x, bb->addr);
+					}
+					r2il_block_free (block);
+					continue;
+				}
+				block_array_push (out, block);
 			}
-			block_array_push (out, block);
 		}
-	}
 
 	return out->count > 0;
 }
