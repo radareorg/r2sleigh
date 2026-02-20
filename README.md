@@ -53,6 +53,9 @@ make install
 # CLI: disassemble bytes
 r2sleigh disasm --arch x86-64 --bytes "4889e500000000000000000000000000"
 
+# CLI: one-liner instruction export (action + format)
+r2sleigh run --arch x86-64 --bytes "31c00000000000000000000000000000" --action lift --format r2cmd
+
 # Plugin: decompile a function
 r2 -qc 'aaa; s main; a:sla.dec' /bin/ls
 
@@ -71,6 +74,8 @@ Supported Architectures
 | x86-64       | `x86`       | Working |
 | x86 (32-bit) | `x86`      | Working |
 | ARM          | `arm`       | Available |
+| RISC-V 64    | `riscv`     | Available |
+| RISC-V 32    | `riscv`     | Available |
 | MIPS         | `mips`      | Available |
 
 Project Structure
@@ -80,6 +85,7 @@ Project Structure
 |-------|---------|
 | `r2il` | Core IL types: `Varnode`, `SpaceId`, `R2ILOp`, `R2ILBlock` |
 | `r2sleigh-lift` | Sleigh/P-code to r2il translation, ESIL formatting |
+| `r2sleigh-export` | Unified instruction exporter (lift/ssa/defuse/dec) |
 | `r2sleigh-cli` | CLI: compile, disasm, info commands |
 | `r2ssa` | SSA: CFG, dominator tree, phi nodes, optimization, taint |
 | `r2sym` | Symbolic execution: Z3 solver, path exploration |
@@ -105,6 +111,37 @@ Documentation
 | [doc/plugin.md](doc/plugin.md) | radare2 plugin and commands |
 | [doc/types.md](doc/types.md) | Type inference |
 | [doc/testing.md](doc/testing.md) | Testing strategy |
+
+CLI `run` Action/Format Matrix
+------------------------------
+
+- `lift`: `json`, `text`, `esil`, `r2cmd`
+- `ssa`: `json`, `text`
+- `defuse`: `json`, `text`
+- `dec`: `c_like`, `json`, `text`
+
+`r2cmd` emits replay lines with sidecar JSON comments:
+
+```text
+# {"op_index":0,"op":"Copy","op_json":{"Copy":{...}}}
+ae <esil_expression>
+```
+
+R2IL Format / Endianness / Memory Semantics
+-------------------------------------------
+
+- `FORMAT_VERSION` is now `3`.
+- Loader accepts v1, v2, and v3 `.r2il` files.
+- Saving always emits v3.
+- v1/v2 files are auto-upgraded in memory on load.
+- Legacy bool endianness remains as compatibility shim (`big_endian` / `r2il_is_big_endian`), while canonical fields are:
+  - `instruction_endianness`
+  - `memory_endianness`
+- Memory semantics baseline includes explicit ops and ordering:
+  - `Fence`
+  - `LoadLinked` / `StoreConditional`
+  - `AtomicCAS`
+  - `LoadGuarded` / `StoreGuarded`
 
 Requirements
 ------------

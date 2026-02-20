@@ -44,6 +44,7 @@ cargo run --release -p r2sleigh-cli --features x86 -- \
 | `x86` | x86, x86-64 | Most common; includes 16/32/64-bit modes |
 | `arm` | ARM (32-bit) | ARM v7 and earlier |
 | `mips` | MIPS | Big and little endian |
+| `riscv` | RISC-V (RV32GC, RV64GC) | Little-endian baseline |
 | `all-archs` | All of the above | Larger binary, longer compile |
 
 Building the radare2 Plugin
@@ -128,6 +129,13 @@ cargo test
 ```
 
 See [doc/testing.md](doc/testing.md) for the full testing guide.
+
+R2IL Format Compatibility
+-------------------------
+
+- Current writer format is `FORMAT_VERSION = 3`.
+- Loader is backward compatible with v1, v2, and v3 `.r2il` artifacts.
+- Re-saving any loaded artifact writes v3.
 
 Troubleshooting
 ---------------
