@@ -17,7 +17,11 @@ from typing import Any
 
 DEFAULT_RUNS = 7
 DEFAULT_MAX_OVERHEAD_PCT = 5.0
-AFVJ_POINTER_FUNCS = ("dbg.vuln_memcpy", "dbg.test_struct_field")
+AFVJ_POINTER_FUNCS = (
+    "dbg.safe_array_access",
+    "dbg.test_array_index",
+    "dbg.vuln_memcpy",
+)
 
 
 @dataclass
@@ -258,8 +262,14 @@ def main() -> int:
         comment_counts["bin_ls_forced_x86"]["meta_on"]["meta_lines"]
         > comment_counts["bin_ls_forced_x86"]["meta_off"]["meta_lines"]
     )
+    pointer_pass = {
+        func: afvj_counts[func]["meta_on"].get("pointer_args", 0)
+        >= afvj_counts[func]["meta_off"].get("pointer_args", 0)
+        for func in AFVJ_POINTER_FUNCS
+    }
+    pointer_pass_all = all(pointer_pass.values())
     perf_pass = overhead_pct <= args.max_overhead_pct
-    overall_pass = vuln_pass and ls_pass and perf_pass
+    overall_pass = vuln_pass and ls_pass and pointer_pass_all and perf_pass
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -280,6 +290,8 @@ def main() -> int:
         "status": {
             "semantic_meta_lines_vuln_test_pass": vuln_pass,
             "semantic_meta_lines_bin_ls_pass": ls_pass,
+            "afvj_pointer_coverage_pass": pointer_pass_all,
+            "afvj_pointer_coverage_by_func": pointer_pass,
             "perf_overhead_pass": perf_pass,
             "overall": "PASS" if overall_pass else "FAIL",
         },

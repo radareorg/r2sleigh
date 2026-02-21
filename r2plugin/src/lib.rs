@@ -5627,7 +5627,7 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
     }
 
     let ctx_ref = unsafe { &*ctx };
-    let Some(_disasm) = &ctx_ref.disasm else {
+    let Some(disasm) = &ctx_ref.disasm else {
         return ptr::null_mut();
     };
 
@@ -5693,6 +5693,18 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
             }
         })
         .collect();
+
+    if ctx_ref.semantic_metadata_enabled {
+        let reg_type_hints = collect_register_type_hints(&r2il_blocks, disasm);
+        let ssa_blocks: Vec<r2ssa::SSABlock> = r2il_blocks
+            .iter()
+            .map(|blk| r2ssa::block::to_ssa(blk, disasm))
+            .collect();
+        let recovered_vars =
+            recover_vars_from_ssa(&ssa_blocks, ctx_ref.arch.as_ref(), &reg_type_hints, true);
+        let pointer_arg_slots = collect_pointer_arg_slots(&recovered_vars);
+        overlay_inferred_param_pointer_types(&mut inferred_params, &pointer_arg_slots);
+    }
 
     inferred_params.sort_by(|a, b| {
         a.arg_index
@@ -6060,7 +6072,12 @@ pub extern "C" fn r2sleigh_recover_vars(
         return ptr::null_mut();
     }
 
-    let reg_type_hints = collect_register_type_hints(&r2il_blocks, disasm);
+    let semantic_typing_enabled = ctx_ref.semantic_metadata_enabled;
+    let reg_type_hints = if semantic_typing_enabled {
+        collect_register_type_hints(&r2il_blocks, disasm)
+    } else {
+        std::collections::HashMap::new()
+    };
 
     // Convert R2ILBlocks to SSA
     let mut ssa_blocks = Vec::new();
@@ -6074,7 +6091,12 @@ pub extern "C" fn r2sleigh_recover_vars(
     }
 
     // Recover variables from SSA analysis
-    let vars = recover_vars_from_ssa(&ssa_blocks, ctx_ref.arch.as_ref(), &reg_type_hints);
+    let vars = recover_vars_from_ssa(
+        &ssa_blocks,
+        ctx_ref.arch.as_ref(),
+        &reg_type_hints,
+        semantic_typing_enabled,
+    );
 
     // Serialize to JSON
     match serde_json::to_string(&vars) {
@@ -6330,6 +6352,10 @@ fn ssa_var_key(var: &r2ssa::SSAVar) -> String {
     format!("{}_{}", var.name.to_ascii_lowercase(), var.version)
 }
 
+fn ssa_var_block_key(block_addr: u64, var: &r2ssa::SSAVar) -> String {
+    format!("{}@{block_addr:x}", ssa_var_key(var))
+}
+
 fn ssa_var_is_const(var: &r2ssa::SSAVar) -> bool {
     parse_const_value(&var.name).is_some()
 }
@@ -6342,11 +6368,61 @@ fn ssa_var_is_register_like(name: &str) -> bool {
         || lower.starts_with("space"))
 }
 
+fn collect_register_version_keys(
+    ssa_blocks: &[r2ssa::SSABlock],
+) -> std::collections::HashMap<String, Vec<String>> {
+    use std::collections::HashMap;
+
+    let mut reg_versions: HashMap<String, Vec<String>> = HashMap::new();
+    for block in ssa_blocks {
+        for op in &block.ops {
+            let mut collect_var = |var: &r2ssa::SSAVar| {
+                if !ssa_var_is_register_like(&var.name) {
+                    return;
+                }
+                let reg_name = var.name.to_ascii_lowercase();
+                reg_versions
+                    .entry(reg_name)
+                    .or_default()
+                    .push(ssa_var_key(var));
+            };
+            if let Some(dst) = op.dst() {
+                collect_var(dst);
+            }
+            op.for_each_source(|src| collect_var(src));
+        }
+    }
+    for keys in reg_versions.values_mut() {
+        keys.sort();
+        keys.dedup();
+    }
+    reg_versions
+}
+
 fn ssa_var_is_stack_base(var: &r2ssa::SSAVar) -> bool {
     matches!(
         var.name.to_ascii_lowercase().as_str(),
         "rbp" | "rsp" | "ebp" | "esp" | "sp" | "fp" | "bp" | "s0" | "x2" | "x8"
     )
+}
+
+fn infer_pointer_width_bytes(ssa_blocks: &[r2ssa::SSABlock]) -> u32 {
+    let mut width = 0u32;
+    for block in ssa_blocks {
+        for op in &block.ops {
+            if let Some(dst) = op.dst()
+                && ssa_var_is_stack_base(dst)
+            {
+                width = width.max(dst.size);
+            }
+            op.for_each_source(|src| {
+                if ssa_var_is_stack_base(src) {
+                    width = width.max(src.size);
+                }
+            });
+        }
+    }
+    if width == 0 { 8 } else { width }
 }
 
 fn infer_index_like_var_keys(ssa_blocks: &[r2ssa::SSABlock]) -> std::collections::HashSet<String> {
@@ -6376,6 +6452,30 @@ fn infer_index_like_var_keys(ssa_blocks: &[r2ssa::SSABlock]) -> std::collections
                             changed |= index_like.insert(ssa_var_key(dst));
                         }
                     }
+                    r2ssa::SSAOp::IntMult { dst, a, b } => {
+                        let a_key = ssa_var_key(a);
+                        let b_key = ssa_var_key(b);
+                        let a_is_scaled_const = ssa_var_is_const(a);
+                        let b_is_scaled_const = ssa_var_is_const(b);
+                        if (index_like.contains(&a_key) && ssa_var_is_const(b))
+                            || (index_like.contains(&b_key) && ssa_var_is_const(a))
+                            // Treat `x * C` as index-like when one side is a constant
+                            // and the other side is data-dependent.
+                            || (a_is_scaled_const && !b_is_scaled_const)
+                            || (b_is_scaled_const && !a_is_scaled_const)
+                        {
+                            changed |= index_like.insert(ssa_var_key(dst));
+                        }
+                    }
+                    r2ssa::SSAOp::IntLeft { dst, a, b } => {
+                        let shift_amount = parse_const_value(&b.name).unwrap_or(u64::MAX);
+                        if (index_like.contains(&ssa_var_key(a)) && ssa_var_is_const(b))
+                            // Shifts by small constants are common index scaling.
+                            || shift_amount <= 6
+                        {
+                            changed |= index_like.insert(ssa_var_key(dst));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -6391,7 +6491,9 @@ fn infer_pointer_var_keys_from_ssa(
     use std::collections::{HashMap, HashSet};
 
     let mut pointer_vars: HashSet<String> = HashSet::new();
+    let register_versions = collect_register_version_keys(ssa_blocks);
     let index_like_vars = infer_index_like_var_keys(ssa_blocks);
+    let pointer_width = infer_pointer_width_bytes(ssa_blocks);
     let mut stack_addr_slots: HashMap<String, String> = HashMap::new();
     let mut pointer_stack_slots: HashSet<String> = HashSet::new();
 
@@ -6413,7 +6515,7 @@ fn infer_pointer_var_keys_from_ssa(
                             raw as i64
                         };
                         stack_addr_slots.insert(
-                            ssa_var_key(dst),
+                            ssa_var_block_key(block.addr, dst),
                             format!("{}:{offset}", a.name.to_ascii_lowercase()),
                         );
                     } else if matches!(op, r2ssa::SSAOp::IntAdd { .. })
@@ -6422,7 +6524,7 @@ fn infer_pointer_var_keys_from_ssa(
                     {
                         let raw = a_const.unwrap_or(0);
                         stack_addr_slots.insert(
-                            ssa_var_key(dst),
+                            ssa_var_block_key(block.addr, dst),
                             format!("{}:{}", b.name.to_ascii_lowercase(), raw as i64),
                         );
                     }
@@ -6482,6 +6584,8 @@ fn infer_pointer_var_keys_from_ssa(
                         let b_key = ssa_var_key(b);
                         let a_is_const = ssa_var_is_const(a);
                         let b_is_const = ssa_var_is_const(b);
+                        let a_index_like = index_like_vars.contains(&a_key);
+                        let b_index_like = index_like_vars.contains(&b_key);
 
                         if pointer_vars.contains(&dst_key) {
                             if a_is_const && !b_is_const {
@@ -6489,12 +6593,20 @@ fn infer_pointer_var_keys_from_ssa(
                             } else if b_is_const && !a_is_const {
                                 changed |= pointer_vars.insert(a_key.clone());
                             } else {
-                                let a_index_like = index_like_vars.contains(&a_key);
-                                let b_index_like = index_like_vars.contains(&b_key);
                                 if a_index_like && !b_index_like {
                                     changed |= pointer_vars.insert(b_key.clone());
                                 } else if b_index_like && !a_index_like {
                                     changed |= pointer_vars.insert(a_key.clone());
+                                } else if a_index_like && b_index_like {
+                                    // SSA versions can collide across blocks; when both operands
+                                    // look index-like, prefer the non-temporary operand as base.
+                                    let a_is_tmp = a.name.starts_with("tmp:");
+                                    let b_is_tmp = b.name.starts_with("tmp:");
+                                    if a_is_tmp && !b_is_tmp {
+                                        changed |= pointer_vars.insert(b_key.clone());
+                                    } else if b_is_tmp && !a_is_tmp {
+                                        changed |= pointer_vars.insert(a_key.clone());
+                                    }
                                 }
                             }
                         }
@@ -6534,28 +6646,40 @@ fn infer_pointer_var_keys_from_ssa(
                         }
                     }
                     r2ssa::SSAOp::Store { addr, val, .. } => {
-                        if let Some(slot) = stack_addr_slots.get(&ssa_var_key(addr)) {
+                        if let Some(slot) =
+                            stack_addr_slots.get(&ssa_var_block_key(block.addr, addr))
+                        {
                             let val_key = ssa_var_key(val);
-                            if pointer_vars.contains(&val_key) {
+                            if val.size >= pointer_width && pointer_vars.contains(&val_key) {
                                 changed |= pointer_stack_slots.insert(slot.clone());
                             }
-                            if pointer_stack_slots.contains(slot) {
+                            if val.size >= pointer_width && pointer_stack_slots.contains(slot) {
                                 changed |= pointer_vars.insert(val_key);
                             }
                         }
                     }
                     r2ssa::SSAOp::Load { dst, addr, .. } => {
-                        if let Some(slot) = stack_addr_slots.get(&ssa_var_key(addr)) {
+                        if let Some(slot) =
+                            stack_addr_slots.get(&ssa_var_block_key(block.addr, addr))
+                        {
                             let dst_key = ssa_var_key(dst);
-                            if pointer_stack_slots.contains(slot) {
+                            if dst.size >= pointer_width && pointer_stack_slots.contains(slot) {
                                 changed |= pointer_vars.insert(dst_key.clone());
                             }
-                            if pointer_vars.contains(&dst_key) {
+                            if dst.size >= pointer_width && pointer_vars.contains(&dst_key) {
                                 changed |= pointer_stack_slots.insert(slot.clone());
                             }
                         }
                     }
                     _ => {}
+                }
+            }
+        }
+
+        for reg_keys in register_versions.values() {
+            if reg_keys.iter().any(|key| pointer_vars.contains(key)) {
+                for key in reg_keys {
+                    changed |= pointer_vars.insert(key.clone());
                 }
             }
         }
@@ -6641,11 +6765,47 @@ fn merge_register_type_hints(
     merged
 }
 
+fn collect_pointer_arg_slots(vars: &[VarProt]) -> std::collections::BTreeSet<usize> {
+    vars.iter()
+        .filter(|var| var.kind == "r" && var.isarg && var.var_type.contains('*'))
+        .filter_map(|var| {
+            var.name
+                .strip_prefix("arg")
+                .and_then(|idx| idx.parse::<usize>().ok())
+        })
+        .collect()
+}
+
+fn overlay_inferred_param_pointer_types(
+    inferred_params: &mut [InferredParam],
+    pointer_arg_slots: &std::collections::BTreeSet<usize>,
+) {
+    if pointer_arg_slots.is_empty() {
+        return;
+    }
+
+    let param_count = inferred_params.len();
+    for (fallback_idx, param) in inferred_params.iter_mut().enumerate() {
+        let explicit_slot = if param.arg_index == usize::MAX {
+            None
+        } else {
+            Some(param.arg_index)
+        };
+        let slot = explicit_slot.unwrap_or(fallback_idx);
+        let fallback_slot_match = pointer_arg_slots.contains(&fallback_idx)
+            && (explicit_slot.is_none() || param_count == 1);
+        if pointer_arg_slots.contains(&slot) || fallback_slot_match {
+            param.ty = r2dec::CType::ptr(r2dec::CType::Void);
+        }
+    }
+}
+
 /// Recover variables from SSA blocks using architecture-specific lightweight heuristics.
 fn recover_vars_from_ssa(
     ssa_blocks: &[r2ssa::SSABlock],
     arch: Option<&ArchSpec>,
     metadata_reg_type_hints: &std::collections::HashMap<String, TypeHint>,
+    semantic_typing_enabled: bool,
 ) -> Vec<VarProt> {
     use std::collections::{HashMap, HashSet};
 
@@ -6653,9 +6813,16 @@ fn recover_vars_from_ssa(
     let mut seen_offsets: HashMap<i64, usize> = HashMap::new();
     let mut seen_arg_regs: HashSet<String> = HashSet::new();
     let (arg_regs, stack_bases, frame_bases) = recover_vars_arch_profile(arch);
-    let (usage_reg_type_hints, pointer_var_keys) = infer_usage_register_type_hints(ssa_blocks);
-    let reg_type_hints =
-        merge_register_type_hints(metadata_reg_type_hints, &usage_reg_type_hints, arg_regs);
+    let (usage_reg_type_hints, pointer_var_keys) = if semantic_typing_enabled {
+        infer_usage_register_type_hints(ssa_blocks)
+    } else {
+        (HashMap::new(), HashSet::new())
+    };
+    let reg_type_hints = if semantic_typing_enabled {
+        merge_register_type_hints(metadata_reg_type_hints, &usage_reg_type_hints, arg_regs)
+    } else {
+        HashMap::new()
+    };
 
     // Track temp variables that are stack addresses: temp_name -> (base_reg, offset)
     let mut stack_addr_temps: HashMap<String, (String, i64)> = HashMap::new();
@@ -6685,7 +6852,7 @@ fn recover_vars_from_ssa(
                             };
 
                             // Store this temp as a known stack address
-                            let dst_key = format!("{}_{}", dst.name.to_lowercase(), dst.version);
+                            let dst_key = ssa_var_block_key(block.addr, dst);
                             stack_addr_temps.insert(dst_key, (a_name.clone(), offset));
                         }
                     }
@@ -6695,16 +6862,18 @@ fn recover_vars_from_ssa(
                         && let Some(raw_offset) = parse_const_value(&a.name)
                     {
                         let offset = raw_offset as i64;
-                        let dst_key = format!("{}_{}", dst.name.to_lowercase(), dst.version);
+                        let dst_key = ssa_var_block_key(block.addr, dst);
                         stack_addr_temps.insert(dst_key, (b_name.clone(), offset));
                     }
                 }
 
                 // Pattern 2: Detect Store/Load with a known stack address temp
                 r2ssa::SSAOp::Store { addr, val, .. } => {
-                    let addr_key = format!("{}_{}", addr.name.to_lowercase(), addr.version);
+                    let addr_key = ssa_var_block_key(block.addr, addr);
                     if let Some((base_reg, offset)) = stack_addr_temps.get(&addr_key) {
-                        let type_override = if pointer_var_keys.contains(&ssa_var_key(val)) {
+                        let type_override = if semantic_typing_enabled
+                            && pointer_var_keys.contains(&ssa_var_key(val))
+                        {
                             Some("void *".to_string())
                         } else {
                             None
@@ -6721,9 +6890,11 @@ fn recover_vars_from_ssa(
                     }
                 }
                 r2ssa::SSAOp::Load { dst, addr, .. } => {
-                    let addr_key = format!("{}_{}", addr.name.to_lowercase(), addr.version);
+                    let addr_key = ssa_var_block_key(block.addr, addr);
                     if let Some((base_reg, offset)) = stack_addr_temps.get(&addr_key) {
-                        let type_override = if pointer_var_keys.contains(&ssa_var_key(dst)) {
+                        let type_override = if semantic_typing_enabled
+                            && pointer_var_keys.contains(&ssa_var_key(dst))
+                        {
                             Some("void *".to_string())
                         } else {
                             None
@@ -6753,9 +6924,12 @@ fn recover_vars_from_ssa(
                             && !seen_arg_regs.contains(*canonical)
                         {
                             seen_arg_regs.insert(canonical.to_string());
-                            let hinted_type =
+                            let hinted_type = if semantic_typing_enabled {
                                 strongest_hint_for_aliases(&reg_type_hints, canonical, aliases)
-                                    .map(|hint| hint.ty);
+                                    .map(|hint| hint.ty)
+                            } else {
+                                None
+                            };
                             vars.push(VarProt {
                                 name: format!("arg{}", i),
                                 kind: "r".to_string(),
@@ -7508,7 +7682,7 @@ mod tests {
         };
 
         let hints = std::collections::HashMap::new();
-        let vars = recover_vars_from_ssa(&[block], Some(&arch), &hints);
+        let vars = recover_vars_from_ssa(&[block], Some(&arch), &hints, true);
         let arg0 = vars
             .iter()
             .find(|v| v.reg.as_deref() == Some("rdi"))
@@ -7516,6 +7690,393 @@ mod tests {
         assert_eq!(
             arg0.var_type, "void *",
             "address-role usage should infer pointer type for arg0"
+        );
+    }
+
+    #[test]
+    fn recover_vars_usage_pointer_inference_handles_spill_reload_scaled_index() {
+        let arch = ArchSpec::new("x86-64");
+        let block = r2ssa::SSABlock {
+            addr: 0x2000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                    a: r2ssa::SSAVar::new("rbp", 0, 8),
+                    b: r2ssa::SSAVar::new("const:fffffffffffffff8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                    val: r2ssa::SSAVar::new("rdi", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:arr", 2, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("tmp:idx64", 1, 8),
+                    src: r2ssa::SSAVar::new("esi", 0, 4),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("tmp:scale", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:idx64", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:elem", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:arr", 2, 8),
+                    b: r2ssa::SSAVar::new("tmp:scale", 1, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:val", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:elem", 1, 8),
+                },
+            ],
+        };
+
+        let hints = std::collections::HashMap::new();
+        let vars = recover_vars_from_ssa(&[block], Some(&arch), &hints, true);
+        let arg0 = vars
+            .iter()
+            .find(|v| v.reg.as_deref() == Some("rdi"))
+            .expect("rdi argument should be recovered");
+        assert_eq!(
+            arg0.var_type, "void *",
+            "spill/reload + scaled index should preserve pointer type on arg0"
+        );
+    }
+
+    #[test]
+    fn recover_vars_usage_pointer_inference_handles_shift_scaled_index() {
+        let arch = ArchSpec::new("x86-64");
+        let block = r2ssa::SSABlock {
+            addr: 0x2100,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                    a: r2ssa::SSAVar::new("rbp", 0, 8),
+                    b: r2ssa::SSAVar::new("const:fffffffffffffff8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                    val: r2ssa::SSAVar::new("rdi", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:arr", 2, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("tmp:idx64", 1, 8),
+                    src: r2ssa::SSAVar::new("esi", 0, 4),
+                },
+                r2ssa::SSAOp::IntLeft {
+                    dst: r2ssa::SSAVar::new("tmp:scale", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:idx64", 1, 8),
+                    b: r2ssa::SSAVar::new("const:2", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:elem", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:arr", 2, 8),
+                    b: r2ssa::SSAVar::new("tmp:scale", 1, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:val", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:elem", 1, 8),
+                },
+            ],
+        };
+
+        let hints = std::collections::HashMap::new();
+        let vars = recover_vars_from_ssa(&[block], Some(&arch), &hints, true);
+        let arg0 = vars
+            .iter()
+            .find(|v| v.reg.as_deref() == Some("rdi"))
+            .expect("rdi argument should be recovered");
+        assert_eq!(
+            arg0.var_type, "void *",
+            "shift-scaled index should preserve pointer type on arg0"
+        );
+    }
+
+    #[test]
+    fn recover_vars_semantic_disable_falls_back_to_integer_types() {
+        let arch = ArchSpec::new("x86-64");
+        let block = r2ssa::SSABlock {
+            addr: 0x3000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:addr", 1, 8),
+                    a: r2ssa::SSAVar::new("rdi", 0, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:val", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:addr", 1, 8),
+                },
+            ],
+        };
+
+        let mut hints = std::collections::HashMap::new();
+        merge_type_hint(&mut hints, "rdi".to_string(), TypeHint::pointer());
+        let vars = recover_vars_from_ssa(&[block], Some(&arch), &hints, false);
+        let arg0 = vars
+            .iter()
+            .find(|v| v.reg.as_deref() == Some("rdi"))
+            .expect("rdi argument should be recovered");
+        assert_eq!(
+            arg0.var_type, "int64_t",
+            "semantic-disabled path should ignore metadata/usage pointer hints"
+        );
+    }
+
+    #[test]
+    fn recover_vars_safe_array_access_pattern_marks_rdi_pointer() {
+        let arch = ArchSpec::new("x86-64");
+        let blocks = vec![
+            r2ssa::SSABlock {
+                addr: 0x4014dc,
+                size: 4,
+                ops: vec![
+                    r2ssa::SSAOp::IntAdd {
+                        dst: r2ssa::SSAVar::new("tmp:4700", 1, 8),
+                        a: r2ssa::SSAVar::new("RBP", 0, 8),
+                        b: r2ssa::SSAVar::new("const:fffffffffffffff8", 0, 8),
+                    },
+                    r2ssa::SSAOp::Copy {
+                        dst: r2ssa::SSAVar::new("tmp:6b00", 1, 8),
+                        src: r2ssa::SSAVar::new("RDI", 0, 8),
+                    },
+                    r2ssa::SSAOp::Store {
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("tmp:4700", 1, 8),
+                        val: r2ssa::SSAVar::new("tmp:6b00", 1, 8),
+                    },
+                ],
+            },
+            r2ssa::SSABlock {
+                addr: 0x4014e0,
+                size: 4,
+                ops: vec![
+                    r2ssa::SSAOp::IntAdd {
+                        dst: r2ssa::SSAVar::new("tmp:4600", 1, 8),
+                        a: r2ssa::SSAVar::new("RBP", 0, 8),
+                        b: r2ssa::SSAVar::new("const:fffffffffffffff4", 0, 8),
+                    },
+                    r2ssa::SSAOp::Copy {
+                        dst: r2ssa::SSAVar::new("tmp:7000", 1, 4),
+                        src: r2ssa::SSAVar::new("ESI", 0, 4),
+                    },
+                    r2ssa::SSAOp::Store {
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("tmp:4600", 1, 8),
+                        val: r2ssa::SSAVar::new("tmp:7000", 1, 4),
+                    },
+                ],
+            },
+            r2ssa::SSABlock {
+                addr: 0x4014f7,
+                size: 4,
+                ops: vec![r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("RAX", 1, 8),
+                    src: r2ssa::SSAVar::new("EAX", 0, 4),
+                }],
+            },
+            r2ssa::SSABlock {
+                addr: 0x4014f9,
+                size: 4,
+                ops: vec![
+                    r2ssa::SSAOp::IntMult {
+                        dst: r2ssa::SSAVar::new("tmp:4c80", 1, 8),
+                        a: r2ssa::SSAVar::new("RAX", 0, 8),
+                        b: r2ssa::SSAVar::new("const:4", 0, 8),
+                    },
+                    r2ssa::SSAOp::Copy {
+                        dst: r2ssa::SSAVar::new("RDX", 1, 8),
+                        src: r2ssa::SSAVar::new("tmp:4c80", 1, 8),
+                    },
+                ],
+            },
+            r2ssa::SSABlock {
+                addr: 0x401501,
+                size: 4,
+                ops: vec![
+                    r2ssa::SSAOp::IntAdd {
+                        dst: r2ssa::SSAVar::new("tmp:4700", 1, 8),
+                        a: r2ssa::SSAVar::new("RBP", 0, 8),
+                        b: r2ssa::SSAVar::new("const:fffffffffffffff8", 0, 8),
+                    },
+                    r2ssa::SSAOp::Load {
+                        dst: r2ssa::SSAVar::new("tmp:11f80", 1, 8),
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("tmp:4700", 1, 8),
+                    },
+                    r2ssa::SSAOp::Copy {
+                        dst: r2ssa::SSAVar::new("RAX", 1, 8),
+                        src: r2ssa::SSAVar::new("tmp:11f80", 1, 8),
+                    },
+                ],
+            },
+            r2ssa::SSABlock {
+                addr: 0x401505,
+                size: 4,
+                ops: vec![r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("RAX", 1, 8),
+                    a: r2ssa::SSAVar::new("RAX", 1, 8),
+                    b: r2ssa::SSAVar::new("RDX", 0, 8),
+                }],
+            },
+            r2ssa::SSABlock {
+                addr: 0x401508,
+                size: 4,
+                ops: vec![
+                    r2ssa::SSAOp::Load {
+                        dst: r2ssa::SSAVar::new("tmp:11f00", 1, 4),
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("RAX", 0, 8),
+                    },
+                    r2ssa::SSAOp::Copy {
+                        dst: r2ssa::SSAVar::new("EAX", 1, 4),
+                        src: r2ssa::SSAVar::new("tmp:11f00", 1, 4),
+                    },
+                    r2ssa::SSAOp::IntZExt {
+                        dst: r2ssa::SSAVar::new("RAX", 1, 8),
+                        src: r2ssa::SSAVar::new("EAX", 1, 4),
+                    },
+                ],
+            },
+        ];
+
+        let hints = std::collections::HashMap::new();
+        let vars = recover_vars_from_ssa(&blocks, Some(&arch), &hints, true);
+        let arg0 = vars
+            .iter()
+            .find(|v| v.reg.as_deref() == Some("rdi"))
+            .expect("rdi argument should be recovered");
+        assert_eq!(
+            arg0.var_type, "void *",
+            "safe-array style spill/reload indexed deref should type arr arg as pointer"
+        );
+        let arg1 = vars
+            .iter()
+            .find(|v| v.reg.as_deref() == Some("rsi"))
+            .expect("rsi argument should be recovered");
+        assert_ne!(
+            arg1.var_type, "void *",
+            "index argument should remain non-pointer in this pattern"
+        );
+    }
+
+    #[test]
+    fn recover_vars_safe_array_access_minimal_two_block_pattern_marks_rdi_pointer() {
+        let arch = ArchSpec::new("x86-64");
+        let blocks = vec![
+            r2ssa::SSABlock {
+                addr: 0x5000,
+                size: 4,
+                ops: vec![
+                    r2ssa::SSAOp::IntAdd {
+                        dst: r2ssa::SSAVar::new("tmp:4700", 1, 8),
+                        a: r2ssa::SSAVar::new("RBP", 1, 8),
+                        b: r2ssa::SSAVar::new("const:fffffffffffffff0", 0, 8),
+                    },
+                    r2ssa::SSAOp::Copy {
+                        dst: r2ssa::SSAVar::new("tmp:6b00", 1, 8),
+                        src: r2ssa::SSAVar::new("RDI", 0, 8),
+                    },
+                    r2ssa::SSAOp::Store {
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("tmp:4700", 1, 8),
+                        val: r2ssa::SSAVar::new("tmp:6b00", 1, 8),
+                    },
+                    r2ssa::SSAOp::IntAdd {
+                        dst: r2ssa::SSAVar::new("tmp:4700", 2, 8),
+                        a: r2ssa::SSAVar::new("RBP", 1, 8),
+                        b: r2ssa::SSAVar::new("const:ffffffffffffffec", 0, 8),
+                    },
+                    r2ssa::SSAOp::Store {
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("tmp:4700", 2, 8),
+                        val: r2ssa::SSAVar::new("ESI", 0, 4),
+                    },
+                ],
+            },
+            r2ssa::SSABlock {
+                addr: 0x5010,
+                size: 4,
+                ops: vec![
+                    r2ssa::SSAOp::IntAdd {
+                        dst: r2ssa::SSAVar::new("tmp:4700", 9, 8),
+                        a: r2ssa::SSAVar::new("RBP", 1, 8),
+                        b: r2ssa::SSAVar::new("const:fffffffffffffff0", 0, 8),
+                    },
+                    r2ssa::SSAOp::Load {
+                        dst: r2ssa::SSAVar::new("tmp:11f80", 2, 8),
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("tmp:4700", 9, 8),
+                    },
+                    r2ssa::SSAOp::Copy {
+                        dst: r2ssa::SSAVar::new("RAX", 4, 8),
+                        src: r2ssa::SSAVar::new("tmp:11f80", 2, 8),
+                    },
+                    r2ssa::SSAOp::IntAdd {
+                        dst: r2ssa::SSAVar::new("tmp:4700", 10, 8),
+                        a: r2ssa::SSAVar::new("RBP", 1, 8),
+                        b: r2ssa::SSAVar::new("const:ffffffffffffffec", 0, 8),
+                    },
+                    r2ssa::SSAOp::Load {
+                        dst: r2ssa::SSAVar::new("tmp:11f00", 5, 4),
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("tmp:4700", 10, 8),
+                    },
+                    r2ssa::SSAOp::IntSExt {
+                        dst: r2ssa::SSAVar::new("RCX", 2, 8),
+                        src: r2ssa::SSAVar::new("tmp:11f00", 5, 4),
+                    },
+                    r2ssa::SSAOp::IntMult {
+                        dst: r2ssa::SSAVar::new("tmp:4900", 2, 8),
+                        a: r2ssa::SSAVar::new("RCX", 2, 8),
+                        b: r2ssa::SSAVar::new("const:4", 0, 8),
+                    },
+                    r2ssa::SSAOp::IntAdd {
+                        dst: r2ssa::SSAVar::new("tmp:4a00", 2, 8),
+                        a: r2ssa::SSAVar::new("RAX", 4, 8),
+                        b: r2ssa::SSAVar::new("tmp:4900", 2, 8),
+                    },
+                    r2ssa::SSAOp::Load {
+                        dst: r2ssa::SSAVar::new("tmp:11f00", 6, 4),
+                        space: "ram".to_string(),
+                        addr: r2ssa::SSAVar::new("tmp:4a00", 2, 8),
+                    },
+                    r2ssa::SSAOp::Copy {
+                        dst: r2ssa::SSAVar::new("EAX", 4, 4),
+                        src: r2ssa::SSAVar::new("tmp:11f00", 6, 4),
+                    },
+                    r2ssa::SSAOp::IntZExt {
+                        dst: r2ssa::SSAVar::new("RAX", 5, 8),
+                        src: r2ssa::SSAVar::new("EAX", 4, 4),
+                    },
+                ],
+            },
+        ];
+
+        let hints = std::collections::HashMap::new();
+        let vars = recover_vars_from_ssa(&blocks, Some(&arch), &hints, true);
+        let arg0 = vars
+            .iter()
+            .find(|v| v.reg.as_deref() == Some("rdi"))
+            .expect("rdi argument should be recovered");
+        assert_eq!(
+            arg0.var_type, "void *",
+            "two-block spill/reload + scaled-index pattern should mark rdi as pointer"
         );
     }
 
@@ -7571,6 +8132,24 @@ mod tests {
         );
         assert_eq!(vars.len(), 1);
         assert_eq!(vars[0].var_type, "void *");
+    }
+
+    #[test]
+    fn overlay_inferred_signature_params_with_pointer_slots() {
+        let mut inferred_params = vec![InferredParam {
+            name: "arg1".to_string(),
+            ty: r2dec::CType::Int(64),
+            arg_index: 1,
+        }];
+        let mut pointer_slots = std::collections::BTreeSet::new();
+        pointer_slots.insert(0);
+
+        overlay_inferred_param_pointer_types(&mut inferred_params, &pointer_slots);
+        assert_eq!(
+            inferred_params[0].ty,
+            r2dec::CType::ptr(r2dec::CType::Void),
+            "single-parameter fallback should adopt high-confidence pointer slot"
+        );
     }
 
     #[test]

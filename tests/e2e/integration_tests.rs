@@ -4229,6 +4229,33 @@ mod deep_integration {
             .unwrap_or(0)
     }
 
+    fn afcfj_first_arg_type<'a>(json: &'a Value) -> Option<&'a str> {
+        json.as_array()?
+            .first()?
+            .get("args")?
+            .as_array()?
+            .first()?
+            .get("type")?
+            .as_str()
+    }
+
+    fn resolve_fixture_function_name(listing: &str, short_name: &str) -> String {
+        let candidates = [
+            format!("dbg.{short_name}"),
+            format!("sym.{short_name}"),
+            format!("sym._{short_name}"),
+            short_name.to_string(),
+        ];
+        for candidate in candidates {
+            if listing.contains(&candidate) {
+                return candidate;
+            }
+        }
+        panic!(
+            "could not resolve function '{short_name}' in afl listing; expected dbg./sym. naming variants"
+        );
+    }
+
     /// Verify that `aaa` runs successfully with the plugin loaded
     #[test]
     fn aaa_succeeds_with_plugin() {
@@ -4358,6 +4385,52 @@ mod deep_integration {
             enabled_ptr_count,
             disabled_ptr_count
         );
+    }
+
+    #[test]
+    fn afvj_pointer_types_cover_array_index_patterns_and_respect_meta_toggle() {
+        setup();
+        let listing = r2_cmd_timeout_with_env(
+            vuln_test_binary(),
+            "aaa; afl",
+            Duration::from_secs(90),
+            &[],
+        );
+        listing.assert_ok();
+        for short_name in ["safe_array_access", "test_array_index"] {
+            let func = resolve_fixture_function_name(&listing.stdout, short_name);
+            let enabled_cmd = format!("e anal.sla.meta=true; aaa; s {func}; afva; afvj");
+            let enabled = r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                &enabled_cmd,
+                Duration::from_secs(60),
+                &[],
+            );
+            enabled.assert_ok();
+            let enabled_json = parse_json(&enabled, "afvj array-index (meta=true)");
+            let enabled_arg0 = afvj_reg_type_for_ref(&enabled_json, "RDI");
+            assert_eq!(
+                enabled_arg0,
+                Some("void *"),
+                "{short_name} arg0 should recover as pointer when semantic metadata is enabled"
+            );
+
+            let disabled_cmd = format!("e anal.sla.meta=false; aaa; s {func}; afva; afvj");
+            let disabled = r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                &disabled_cmd,
+                Duration::from_secs(60),
+                &[],
+            );
+            disabled.assert_ok();
+            let disabled_json = parse_json(&disabled, "afvj array-index (meta=false)");
+            let disabled_arg0 = afvj_reg_type_for_ref(&disabled_json, "RDI");
+            assert_ne!(
+                disabled_arg0,
+                Some("void *"),
+                "{short_name} arg0 should fall back when semantic metadata is disabled"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -4874,6 +4947,56 @@ mod deep_integration {
             repaired.contains("\"calltype\":\"amd64\""),
             "write-back should restore amd64 calling convention"
         );
+    }
+
+    #[test]
+    fn aaaa_signature_pointer_overlay_for_array_index_functions_respects_meta_toggle() {
+        setup();
+        let listing = r2_cmd_timeout_with_env(
+            vuln_test_binary(),
+            "aaa; afl",
+            Duration::from_secs(90),
+            &[],
+        );
+        listing.assert_ok();
+        for short_name in ["safe_array_access", "test_array_index"] {
+            let func = resolve_fixture_function_name(&listing.stdout, short_name);
+            let enabled_cmd = format!(
+                "e anal.sla.meta=true; aaa; s {func}; afs int {func}(int64_t arg0); aaaa; s {func}; afcfj"
+            );
+            let enabled = r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                &enabled_cmd,
+                Duration::from_secs(120),
+                &[],
+            );
+            enabled.assert_ok();
+            let enabled_json = parse_json(&enabled, "afcfj array-index (meta=true)");
+            let enabled_arg0 =
+                afcfj_first_arg_type(&enabled_json).expect("expected first arg type from afcfj");
+            assert!(
+                enabled_arg0.contains('*'),
+                "{short_name} signature arg0 should be pointer when semantic metadata is enabled, got {enabled_arg0}"
+            );
+
+            let disabled_cmd = format!(
+                "e anal.sla.meta=false; aaa; s {func}; afs int {func}(int64_t arg0); aaaa; s {func}; afcfj"
+            );
+            let disabled = r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                &disabled_cmd,
+                Duration::from_secs(120),
+                &[],
+            );
+            disabled.assert_ok();
+            let disabled_json = parse_json(&disabled, "afcfj array-index (meta=false)");
+            let disabled_arg0 =
+                afcfj_first_arg_type(&disabled_json).expect("expected first arg type from afcfj");
+            assert!(
+                !disabled_arg0.contains('*'),
+                "{short_name} signature arg0 should not be semantic-pointer when metadata is disabled, got {disabled_arg0}"
+            );
+        }
     }
 
     #[test]
