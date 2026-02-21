@@ -119,7 +119,7 @@ pub fn r2_cmd_timeout(binary: &str, cmd: &str, timeout: Duration) -> R2Result {
     command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
     configure_plugin_env(&mut command);
     let _guard = r2_exec_lock().lock().ok();
-    run_command_with_timeout(command, timeout)
+    run_command_with_timeout(command, scaled_timeout(timeout))
 }
 
 /// Run radare2 without a timeout wrapper and with extra environment variables.
@@ -154,7 +154,7 @@ pub fn r2_cmd_timeout_with_env(
     }
 
     let _guard = r2_exec_lock().lock().ok();
-    run_command_with_timeout(command, timeout)
+    run_command_with_timeout(command, scaled_timeout(timeout))
 }
 
 /// Run r2 command seeking to a function first
@@ -167,6 +167,19 @@ pub fn r2_at_func(binary: &str, func: &str, cmd: &str) -> R2Result {
 pub fn r2_at_addr(binary: &str, addr: u64, cmd: &str) -> R2Result {
     let full_cmd = format!("aaa; s 0x{:x}; {}", addr, cmd);
     r2_cmd(binary, &full_cmd)
+}
+
+fn scaled_timeout(timeout: Duration) -> Duration {
+    timeout
+        .checked_mul(parse_timeout_factor(std::env::var("R2SLEIGH_E2E_TIMEOUT_FACTOR").ok()))
+        .unwrap_or(Duration::MAX)
+}
+
+fn parse_timeout_factor(raw: Option<String>) -> u32 {
+    raw.as_deref()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&factor| factor > 0)
+        .unwrap_or(1)
 }
 
 fn configure_plugin_env(command: &mut Command) {
@@ -376,4 +389,24 @@ pub fn require_plugin() {
         "Plugin not found at {}. Run `cargo build --release -p r2plugin` first.",
         plugin_path
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_timeout_factor_defaults_to_one() {
+        assert_eq!(parse_timeout_factor(None), 1);
+        assert_eq!(parse_timeout_factor(Some(String::new())), 1);
+        assert_eq!(parse_timeout_factor(Some("bad".to_string())), 1);
+        assert_eq!(parse_timeout_factor(Some("0".to_string())), 1);
+    }
+
+    #[test]
+    fn parse_timeout_factor_accepts_positive_integer() {
+        assert_eq!(parse_timeout_factor(Some("2".to_string())), 2);
+        assert_eq!(parse_timeout_factor(Some("  4  ".to_string())), 4);
+    }
+
 }
