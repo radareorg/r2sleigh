@@ -6400,7 +6400,7 @@ fn collect_register_version_keys(
             if let Some(dst) = op.dst() {
                 collect_var(dst);
             }
-            op.for_each_source(|src| collect_var(src));
+            op.for_each_source(&mut collect_var);
         }
     }
     for keys in reg_versions.values_mut() {
@@ -6603,21 +6603,19 @@ fn infer_pointer_var_keys_from_ssa(
                                 changed |= pointer_vars.insert(b_key.clone());
                             } else if b_is_const && !a_is_const {
                                 changed |= pointer_vars.insert(a_key.clone());
-                            } else {
-                                if a_index_like && !b_index_like {
+                            } else if a_index_like && !b_index_like {
+                                changed |= pointer_vars.insert(b_key.clone());
+                            } else if b_index_like && !a_index_like {
+                                changed |= pointer_vars.insert(a_key.clone());
+                            } else if a_index_like && b_index_like {
+                                // SSA versions can collide across blocks; when both operands
+                                // look index-like, prefer the non-temporary operand as base.
+                                let a_is_tmp = a.name.starts_with("tmp:");
+                                let b_is_tmp = b.name.starts_with("tmp:");
+                                if a_is_tmp && !b_is_tmp {
                                     changed |= pointer_vars.insert(b_key.clone());
-                                } else if b_index_like && !a_index_like {
+                                } else if b_is_tmp && !a_is_tmp {
                                     changed |= pointer_vars.insert(a_key.clone());
-                                } else if a_index_like && b_index_like {
-                                    // SSA versions can collide across blocks; when both operands
-                                    // look index-like, prefer the non-temporary operand as base.
-                                    let a_is_tmp = a.name.starts_with("tmp:");
-                                    let b_is_tmp = b.name.starts_with("tmp:");
-                                    if a_is_tmp && !b_is_tmp {
-                                        changed |= pointer_vars.insert(b_key.clone());
-                                    } else if b_is_tmp && !a_is_tmp {
-                                        changed |= pointer_vars.insert(a_key.clone());
-                                    }
                                 }
                             }
                         }
@@ -6725,7 +6723,7 @@ fn infer_usage_register_type_hints(
             if let Some(dst) = op.dst() {
                 maybe_add(dst);
             }
-            op.for_each_source(|src| maybe_add(src));
+            op.for_each_source(&mut maybe_add);
         }
     }
 
