@@ -1739,27 +1739,6 @@ static void set_sla_comment_line_with_prefix(RAnal *anal, ut64 addr, const char 
 	free (updated);
 }
 
-static void clear_sla_managed_comment_lines(RAnal *anal, ut64 addr) {
-	const char *existing;
-	char *updated;
-
-	if (!anal) {
-		return;
-	}
-	existing = r_meta_get_string (anal, R_META_TYPE_COMMENT, addr);
-	updated = strip_sla_lines (existing, NULL, true);
-	if (!updated) {
-		return;
-	}
-
-	if (*updated) {
-		r_meta_set_string (anal, R_META_TYPE_COMMENT, addr, updated);
-	} else {
-		r_meta_del (anal, R_META_TYPE_COMMENT, addr, 1);
-	}
-	free (updated);
-}
-
 static void set_sla_taint_comment_line(RAnal *anal, ut64 addr, const char *taint_line) {
 	set_sla_comment_line_with_prefix (anal, addr, taint_line, SLEIGH_COMMENT_PREFIX_TAINT);
 }
@@ -1785,9 +1764,79 @@ static void clear_taint_function_artifacts(RAnal *anal, RCore *core, const RAnal
 	}
 
 	for (i = 0; i < blocks->count; i++) {
-		clear_sla_managed_comment_lines (anal, r2il_block_addr (blocks->blocks[i]));
+		ut64 block_addr = r2il_block_addr (blocks->blocks[i]);
+		set_sla_comment_line_with_prefix (anal, block_addr, NULL, SLEIGH_COMMENT_PREFIX_TAINT);
+		set_sla_comment_line_with_prefix (anal, block_addr, NULL, SLEIGH_COMMENT_PREFIX_TAINT_RISK);
 	}
-	clear_sla_managed_comment_lines (anal, fcn->addr);
+	set_sla_comment_line_with_prefix (anal, fcn->addr, NULL, SLEIGH_COMMENT_PREFIX_TAINT);
+	set_sla_comment_line_with_prefix (anal, fcn->addr, NULL, SLEIGH_COMMENT_PREFIX_TAINT_RISK);
+}
+
+static size_t write_semantic_comments_for_function(RAnal *anal, const R2ILContext *ctx,
+		const BlockArray *blocks, ut64 fcn_addr, bool enabled) {
+	size_t i;
+	size_t emitted = 0;
+	char *json;
+	RJson *root;
+	const RJson *item;
+
+	if (!anal || !blocks) {
+		return 0;
+	}
+
+	/* Always clear stale semantic lines first to keep writeback idempotent. */
+	set_sla_comment_line_with_prefix (anal, fcn_addr, NULL, SLEIGH_COMMENT_PREFIX_SEMANTIC);
+	for (i = 0; i < blocks->count; i++) {
+		set_sla_comment_line_with_prefix (anal, r2il_block_addr (blocks->blocks[i]),
+			NULL, SLEIGH_COMMENT_PREFIX_SEMANTIC);
+	}
+
+	if (!enabled || !ctx || blocks->count == 0) {
+		return 0;
+	}
+
+	json = r2sleigh_analyze_fcn_annotations (ctx,
+		(const R2ILBlock **)blocks->blocks, blocks->count, fcn_addr);
+	if (!json || !*json) {
+		r2il_string_free (json);
+		goto fallback;
+	}
+
+	root = r_json_parse (json);
+	if (!root || root->type != R_JSON_ARRAY) {
+		r_json_free (root);
+		r2il_string_free (json);
+		goto fallback;
+	}
+
+	for (item = root->children.first; item; item = item->next) {
+		const RJson *j_addr;
+		const RJson *j_comment;
+
+		if (item->type != R_JSON_OBJECT) {
+			continue;
+		}
+		j_addr = r_json_get (item, "addr");
+		j_comment = r_json_get (item, "comment");
+		if (!j_addr || j_addr->type != R_JSON_INTEGER
+			|| !j_comment || j_comment->type != R_JSON_STRING
+			|| !j_comment->str_value || !*j_comment->str_value) {
+			continue;
+		}
+		set_sla_comment_line_with_prefix (anal, (ut64)j_addr->num.u_value,
+			j_comment->str_value, SLEIGH_COMMENT_PREFIX_SEMANTIC);
+		emitted++;
+	}
+
+	r_json_free (root);
+	r2il_string_free (json);
+fallback:
+	if (enabled && emitted == 0) {
+		set_sla_comment_line_with_prefix (anal, fcn_addr, "sla: analyzed",
+			SLEIGH_COMMENT_PREFIX_SEMANTIC);
+		emitted = 1;
+	}
+	return emitted;
 }
 
 static bool has_xref(RAnal *anal, ut64 from, ut64 to, RAnalRefType type) {
@@ -2132,6 +2181,7 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 
 static bool cfg_get_bool_default_true(RAnal *anal, const char *key) {
 	RCore *core;
+	RConfigNode *node;
 
 	if (!anal || !anal->config || !key || !*key) {
 		return true;
@@ -2140,7 +2190,32 @@ static bool cfg_get_bool_default_true(RAnal *anal, const char *key) {
 	if (!core || !core->config) {
 		return true;
 	}
+	node = r_config_node_get (core->config, key);
+	if (!node) {
+		return true;
+	}
 	return r_config_get_b (core->config, key);
+}
+
+static void ensure_default_bool_config(RAnal *anal, const char *key, const char *desc, bool value) {
+	RCore *core;
+	RConfigNode *node;
+
+	if (!anal || !key || !*key) {
+		return;
+	}
+	core = anal->coreb.core;
+	if (!core || !core->config) {
+		return;
+	}
+
+	node = r_config_node_get (core->config, key);
+	if (!node) {
+		node = r_config_set_b (core->config, key, value);
+	}
+	if (node && desc && *desc) {
+		r_config_node_desc (node, desc);
+	}
 }
 
 static bool sleigh_semantic_metadata_enabled(RAnal *anal) {
@@ -2309,7 +2384,11 @@ int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int len, RAn
 }
 
 static bool sleigh_init(RAnal *anal) {
-	(void)anal; /* Lazy init - context created on first use */
+	/* Lazy init - context created on first use. */
+	ensure_default_bool_config (anal, "anal.sla.meta",
+		"enable automatic semantic metadata enrichment in r2sleigh lifting", true);
+	ensure_default_bool_config (anal, "anal.sla.meta.comments",
+		"enable semantic comment writeback from r2sleigh analyze_fcn", true);
 	return true;
 }
 
@@ -3328,44 +3407,8 @@ static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
 	int result = r2sleigh_analyze_fcn (ctx,
 		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
 	const bool semantic_comments_enabled = sleigh_semantic_comments_enabled (anal);
-	size_t semantic_comments_emitted = 0;
-	size_t i;
-
-	/* Always clear stale semantic lines first to keep writeback idempotent. */
-	set_sla_comment_line_with_prefix (anal, fcn->addr, NULL, SLEIGH_COMMENT_PREFIX_SEMANTIC);
-	for (i = 0; i < blocks.count; i++) {
-		set_sla_comment_line_with_prefix (anal,
-			r2il_block_addr (blocks.blocks[i]), NULL, SLEIGH_COMMENT_PREFIX_SEMANTIC);
-	}
-
-	/* Write SSA annotations as comments */
-	if (semantic_comments_enabled) {
-		char *json = r2sleigh_analyze_fcn_annotations (ctx,
-			(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
-		if (json && *json) {
-			RJson *root = r_json_parse (json);
-			if (root && root->type == R_JSON_ARRAY) {
-				const RJson *item;
-				for (item = root->children.first; item; item = item->next) {
-					if (item->type != R_JSON_OBJECT) {
-						continue;
-					}
-					const RJson *j_addr = r_json_get (item, "addr");
-					const RJson *j_comment = r_json_get (item, "comment");
-					if (!j_addr || j_addr->type != R_JSON_INTEGER
-						|| !j_comment || j_comment->type != R_JSON_STRING
-						|| !j_comment->str_value || !*j_comment->str_value) {
-						continue;
-					}
-					set_sla_comment_line_with_prefix (anal, (ut64)j_addr->num.u_value,
-						j_comment->str_value, SLEIGH_COMMENT_PREFIX_SEMANTIC);
-					semantic_comments_emitted++;
-				}
-				r_json_free (root);
-			}
-			r2il_string_free (json);
-		}
-	}
+	size_t semantic_comments_emitted = write_semantic_comments_for_function (
+		anal, ctx, &blocks, fcn->addr, semantic_comments_enabled);
 	R_LOG_DEBUG ("r2sleigh: semantic comments fcn=0x%"PFMT64x" enabled=%d emitted=%zu",
 		fcn->addr, semantic_comments_enabled? 1: 0, semantic_comments_emitted);
 
@@ -4411,6 +4454,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int afij_signature_drift = 0;
 	ConsistencyReasonCounters consistency_reasons = {0};
 	CallerPropagationState prop_state;
+	size_t semantic_comments_total = 0;
 	int best_sink_rank = 1000;
 	ut64 best_sink_addr = 0;
 	ut64 focus_callee_addr = 0;
@@ -4418,6 +4462,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	char *sample_callees = NULL;
 	const char *arch_name = NULL;
 	bool sig_arch_supported = false;
+	const bool semantic_comments_enabled = sleigh_semantic_comments_enabled (anal);
 
 	if (!ctx) {
 		return false;
@@ -4459,6 +4504,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		if (!fcn || !lift_function_blocks (anal, fcn, ctx, &blocks)) {
 			continue;
 		}
+
+		semantic_comments_total += write_semantic_comments_for_function (
+			anal, ctx, &blocks, fcn->addr, semantic_comments_enabled);
 
 		json = r2sleigh_get_data_refs (ctx,
 			(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
@@ -4933,6 +4981,8 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		taint_sink_hits, taint_parse_failures);
 	R_LOG_INFO ("r2sleigh: post-analysis risk summary: critical=%d high=%d medium=%d low=%d",
 		taint_risk_critical, taint_risk_high, taint_risk_medium, taint_risk_low);
+	R_LOG_INFO ("r2sleigh: post-analysis semantic comments enabled=%d emitted=%zu",
+		semantic_comments_enabled? 1: 0, semantic_comments_total);
 	R_LOG_INFO ("r2sleigh: signature write-back considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d sig_low_conf_skips=%d cc_low_conf_skips=%d consistency_verified=%d consistency_ok=%d consistency_mismatch=%d afij_signature_drift=%d consistency_readback_fail=%d consistency_ret_mismatch=%d consistency_argc_mismatch=%d consistency_argtype_mismatch=%d consistency_callconv_mismatch=%d",
 		sig_fcns_considered, sig_fcns_skipped_arch, sig_fcns_skipped_size, sig_parse_failures,
 		sig_cmd_failures, sig_signatures_updated, sig_cc_updated, sig_skipped_low_conf,

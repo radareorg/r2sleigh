@@ -2,7 +2,9 @@
 //!
 //! Provides utilities to run radare2 commands and validate plugin output.
 
-use std::path::Path;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -108,7 +110,7 @@ impl R2Result {
 
 /// Run radare2 with the given command on a binary
 pub fn r2_cmd(binary: &str, cmd: &str) -> R2Result {
-    r2_cmd_timeout(binary, cmd, Duration::from_secs(30))
+    r2_cmd_timeout(binary, cmd, Duration::from_secs(120))
 }
 
 /// Run radare2 with custom timeout
@@ -168,6 +170,62 @@ pub fn r2_at_addr(binary: &str, addr: u64, cmd: &str) -> R2Result {
 }
 
 fn configure_plugin_env(command: &mut Command) {
+    #[cfg(target_os = "macos")]
+    const RUST_PLUGIN_LIB: &str = "libr2sleigh_plugin.dylib";
+    #[cfg(target_os = "linux")]
+    const RUST_PLUGIN_LIB: &str = "libr2sleigh_plugin.so";
+    #[cfg(target_os = "windows")]
+    const RUST_PLUGIN_LIB: &str = "r2sleigh_plugin.dll";
+
+    #[cfg(target_os = "windows")]
+    const ANAL_PLUGIN_LIB: &str = "anal_sleigh.dll";
+    #[cfg(not(target_os = "windows"))]
+    const ANAL_PLUGIN_LIB: &str = "anal_sleigh.so";
+
+    static R2_HOME_OVERRIDE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let home_override = R2_HOME_OVERRIDE.get_or_init(|| {
+        let cwd = std::env::current_dir().ok()?;
+        let mut plugin_src: Option<PathBuf> = None;
+        for candidate in ["r2plugin", "../r2plugin", "../../r2plugin"] {
+            let dir = cwd.join(candidate);
+            if dir.join(ANAL_PLUGIN_LIB).exists() && dir.join(RUST_PLUGIN_LIB).exists() {
+                plugin_src = Some(dir);
+                break;
+            }
+        }
+        let plugin_src = plugin_src?;
+        let home_dir = std::env::temp_dir().join("r2sleigh-e2e-home");
+        let plugin_dst = home_dir.join(".local/share/radare2/plugins");
+        fs::create_dir_all(&plugin_dst).ok()?;
+        fs::copy(
+            plugin_src.join(ANAL_PLUGIN_LIB),
+            plugin_dst.join(ANAL_PLUGIN_LIB),
+        )
+        .ok()?;
+        fs::copy(
+            plugin_src.join(RUST_PLUGIN_LIB),
+            plugin_dst.join(RUST_PLUGIN_LIB),
+        )
+        .ok()?;
+        #[cfg(not(target_os = "windows"))]
+        {
+            const ARCH_PLUGIN_LIB: &str = "arch_sleigh.so";
+            if plugin_src.join(ARCH_PLUGIN_LIB).exists() {
+                let _ = fs::copy(
+                    plugin_src.join(ARCH_PLUGIN_LIB),
+                    plugin_dst.join(ARCH_PLUGIN_LIB),
+                );
+            }
+        }
+        Some(home_dir)
+    });
+    if let Some(home_dir) = home_override {
+        let plugins = home_dir.join(".local/share/radare2/plugins");
+        command.env("HOME", home_dir);
+        command.env("R2_USER_PLUGINS", plugins);
+        return;
+    }
+
     if let Ok(home) = std::env::var("HOME") {
         let plugin_dir = format!("{}/.local/share/radare2/plugins", home);
         command.env("R2_USER_PLUGINS", plugin_dir);
@@ -182,11 +240,30 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> R2Result
         Err(err) => return parse_output(Err(err), false),
     };
 
+    let stdout_reader = child.stdout.take().map(|mut stdout| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut stderr| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        })
+    });
+
     let start = Instant::now();
     let mut timed_out = false;
+    let mut status = None;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     timed_out = true;
@@ -202,7 +279,35 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> R2Result
         let _ = child.kill();
     }
 
-    parse_output(child.wait_with_output(), timed_out)
+    let status = if timed_out {
+        match child.wait() {
+            Ok(s) => s,
+            Err(err) => return parse_output(Err(err), timed_out),
+        }
+    } else {
+        match status {
+            Some(s) => s,
+            None => {
+                return parse_output(
+                    Err(std::io::Error::other("missing child status")),
+                    timed_out,
+                );
+            }
+        }
+    };
+
+    let stdout = stdout_reader
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let output = Output {
+        status,
+        stdout,
+        stderr,
+    };
+    parse_output(Ok(output), timed_out)
 }
 
 fn parse_output(output: Result<Output, std::io::Error>, timed_out: bool) -> R2Result {

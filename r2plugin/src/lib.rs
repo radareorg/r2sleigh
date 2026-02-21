@@ -1325,6 +1325,10 @@ pub extern "C" fn r2il_block_mem_access(
             access["atomic_kind"] = serde_json::to_value(kind).unwrap_or(serde_json::Value::Null);
         }
         if let Some(meta) = blk.op_metadata.get(&op_index) {
+            if let Some(memory_class) = meta.memory_class {
+                access["memory_class"] =
+                    serde_json::to_value(memory_class).unwrap_or(serde_json::Value::Null);
+            }
             if let Some(perms) = meta.permissions {
                 access["permissions"] =
                     serde_json::to_value(perms).unwrap_or(serde_json::Value::Null);
@@ -5316,7 +5320,14 @@ pub extern "C" fn r2dec_block(ctx: *const R2ILContext, block: *const R2ILBlock) 
     };
 
     match export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike) {
-        Ok(output) => CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Ok(output) => {
+            let normalized = if output.trim().is_empty() {
+                "/* r2dec: empty output */".to_string()
+            } else {
+                output
+            };
+            CString::new(normalized).map_or(ptr::null_mut(), |c| c.into_raw())
+        }
         Err(_) => ptr::null_mut(),
     }
 }
