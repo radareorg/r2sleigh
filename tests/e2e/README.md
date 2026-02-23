@@ -29,6 +29,17 @@ From the `tests/e2e` directory:
 cargo test
 ```
 
+Note: this directory sets `RUST_TEST_THREADS=1` via `tests/e2e/.cargo/config.toml`.
+The test harness already serializes `r2` execution with a global mutex, so a
+single test thread avoids noisy "running for over 60 seconds" messages from
+queued tests.
+
+From the workspace root, use:
+
+```bash
+cargo e2e-test
+```
+
 Run specific test module:
 
 ```bash

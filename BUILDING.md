@@ -128,6 +128,12 @@ cd tests/e2e
 cargo test
 ```
 
+For advisory semantic metadata/performance checks (non-blocking by default):
+
+```bash
+python3 scripts/bench_semantic_metadata.py --runs 7 --max-overhead-pct 5
+```
+
 See [doc/testing.md](doc/testing.md) for the full testing guide.
 
 Conformance / Compatibility Gate Commands

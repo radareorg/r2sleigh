@@ -8,8 +8,8 @@ use libsla::{
     IntOp, IntSign, OpCode, PcodeDisassembly, PcodeInstruction, PseudoOp, Sleigh, VarnodeData,
 };
 use r2il::{
-    AtomicKind, MemoryOrdering, OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode,
-    select_register_name,
+    AtomicKind, MemoryClass, MemoryOrdering, OpMetadata, PointerHint, R2ILBlock, R2ILOp,
+    ScalarKind, SpaceId, StorageClass, Varnode, select_register_name,
 };
 use std::collections::HashMap;
 
@@ -26,6 +26,32 @@ pub struct Disassembler {
     reg_name_map: HashMap<(u64, u32), String>,
     /// User-defined operations by index
     userop_map: HashMap<u32, String>,
+}
+
+/// Precision profile for lift-time semantic metadata inference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SemanticMetadataPrecision {
+    /// Conservative high-confidence rules only.
+    #[default]
+    High,
+}
+
+/// Options that control semantic metadata generation during lifting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticMetadataOptions {
+    /// Enable or disable semantic metadata inference.
+    pub enabled: bool,
+    /// Inference profile. Phase 1 supports only high precision.
+    pub precision: SemanticMetadataPrecision,
+}
+
+impl Default for SemanticMetadataOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            precision: SemanticMetadataPrecision::High,
+        }
+    }
 }
 
 /// Wrapper for libsla PcodeInstruction that implements PcodeSource.
@@ -233,6 +259,16 @@ impl Disassembler {
     /// Note: This lifts a **single instruction**. Use `lift_block` to lift
     /// multiple instructions within a basic block.
     pub fn lift(&self, bytes: &[u8], addr: u64) -> Result<R2ILBlock> {
+        self.lift_with_options(bytes, addr, SemanticMetadataOptions::default())
+    }
+
+    /// Lift a single instruction with explicit semantic metadata options.
+    pub fn lift_with_options(
+        &self,
+        bytes: &[u8],
+        addr: u64,
+        options: SemanticMetadataOptions,
+    ) -> Result<R2ILBlock> {
         let code_space = self.sleigh.default_code_space();
         let address = Address::new(code_space, addr);
 
@@ -257,6 +293,7 @@ impl Disassembler {
             .map(|(m, _)| m)
             .unwrap_or_default();
         self.normalize_memory_semantics(&mut block, &mnemonic);
+        self.annotate_semantic_metadata(&mut block, options);
         Ok(block)
     }
 
@@ -275,6 +312,17 @@ impl Disassembler {
     ///
     /// An `R2ILBlock` containing operations from all instructions in the block.
     pub fn lift_block(&self, bytes: &[u8], addr: u64, block_size: usize) -> Result<R2ILBlock> {
+        self.lift_block_with_options(bytes, addr, block_size, SemanticMetadataOptions::default())
+    }
+
+    /// Lift a basic block with explicit semantic metadata options.
+    pub fn lift_block_with_options(
+        &self,
+        bytes: &[u8],
+        addr: u64,
+        block_size: usize,
+        options: SemanticMetadataOptions,
+    ) -> Result<R2ILBlock> {
         let mut combined_block = R2ILBlock::new(addr, block_size as u32);
         let mut offset = 0usize;
 
@@ -296,17 +344,27 @@ impl Disassembler {
             };
 
             // Lift single instruction
-            match self.lift(&lift_bytes, instr_addr) {
+            match self.lift_with_options(&lift_bytes, instr_addr, options) {
                 Ok(instr_block) => {
-                    let instr_size = instr_block.size as usize;
+                    let R2ILBlock {
+                        size: instr_size_u32,
+                        ops,
+                        op_metadata,
+                        ..
+                    } = instr_block;
+                    let instr_size = instr_size_u32 as usize;
                     if instr_size == 0 {
                         // Prevent infinite loop on zero-size instruction
                         break;
                     }
 
+                    let base_op_index = combined_block.ops.len();
                     // Append all ops from this instruction
-                    for op in instr_block.ops {
+                    for op in ops {
                         combined_block.push(op);
+                    }
+                    for (idx, meta) in op_metadata {
+                        combined_block.set_op_metadata(base_op_index + idx, meta);
                     }
 
                     offset += instr_size;
@@ -370,6 +428,12 @@ impl Disassembler {
                     .map(|vn| self.translate_varnode(&vn))
             },
         );
+    }
+
+    fn annotate_semantic_metadata(&self, block: &mut R2ILBlock, options: SemanticMetadataOptions) {
+        annotate_semantic_metadata_with_hints(block, &self.arch_name, options, |vn| {
+            self.register_name(vn)
+        });
     }
 
     /// Translate a single P-code instruction to an r2il operation.
@@ -744,6 +808,517 @@ impl<'a> InstructionLoader for ByteLoader<'a> {
                 end,
                 self.bytes.len()
             ))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct VnKey {
+    space: SpaceId,
+    offset: u64,
+    size: u32,
+}
+
+impl From<&Varnode> for VnKey {
+    fn from(vn: &Varnode) -> Self {
+        Self {
+            space: vn.space,
+            offset: vn.offset,
+            size: vn.size,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct InferredSemantics {
+    storage_class: Option<StorageClass>,
+    pointer_hint: Option<PointerHint>,
+    scalar_kind: Option<ScalarKind>,
+}
+
+fn pointer_rank(hint: PointerHint) -> u8 {
+    match hint {
+        PointerHint::Unknown => 0,
+        PointerHint::PointerLike => 1,
+        PointerHint::CodePointer => 2,
+    }
+}
+
+fn scalar_rank(kind: ScalarKind) -> u8 {
+    match kind {
+        ScalarKind::Unknown => 0,
+        ScalarKind::Bitvector => 1,
+        ScalarKind::Bool | ScalarKind::SignedInt | ScalarKind::UnsignedInt | ScalarKind::Float => 2,
+    }
+}
+
+fn storage_rank(class: StorageClass) -> u8 {
+    match class {
+        StorageClass::Unknown => 0,
+        StorageClass::Register => 1,
+        StorageClass::Stack
+        | StorageClass::Heap
+        | StorageClass::Global
+        | StorageClass::ThreadLocal
+        | StorageClass::ConstData
+        | StorageClass::Volatile => 2,
+    }
+}
+
+fn memory_class_rank(class: MemoryClass) -> u8 {
+    match class {
+        MemoryClass::Unknown => 0,
+        MemoryClass::Ram => 1,
+        MemoryClass::Stack
+        | MemoryClass::Heap
+        | MemoryClass::Global
+        | MemoryClass::ThreadLocal
+        | MemoryClass::Mmio
+        | MemoryClass::IoPort
+        | MemoryClass::Code => 2,
+    }
+}
+
+fn merge_inferred_field<T: Copy>(
+    slot: &mut Option<T>,
+    incoming: Option<T>,
+    rank: impl Fn(T) -> u8,
+) {
+    let Some(new_val) = incoming else {
+        return;
+    };
+    match slot {
+        Some(old_val) if rank(*old_val) >= rank(new_val) => {}
+        _ => {
+            *slot = Some(new_val);
+        }
+    }
+}
+
+fn merge_inferred_semantics(dst: &mut InferredSemantics, src: InferredSemantics) {
+    merge_inferred_field(&mut dst.storage_class, src.storage_class, storage_rank);
+    merge_inferred_field(&mut dst.pointer_hint, src.pointer_hint, pointer_rank);
+    merge_inferred_field(&mut dst.scalar_kind, src.scalar_kind, scalar_rank);
+}
+
+fn varnode_existing_inference(vn: &Varnode) -> InferredSemantics {
+    let Some(meta) = vn.meta.as_ref() else {
+        return InferredSemantics::default();
+    };
+
+    InferredSemantics {
+        storage_class: meta
+            .storage_class
+            .filter(|v| !matches!(v, StorageClass::Unknown)),
+        pointer_hint: meta
+            .pointer_hint
+            .filter(|v| !matches!(v, PointerHint::Unknown)),
+        scalar_kind: meta
+            .scalar_kind
+            .filter(|v| !matches!(v, ScalarKind::Unknown)),
+    }
+}
+
+fn update_inferred_semantics(
+    inferred: &mut HashMap<VnKey, InferredSemantics>,
+    vn: &Varnode,
+    incoming: InferredSemantics,
+) {
+    let entry = inferred.entry(VnKey::from(vn)).or_default();
+    merge_inferred_semantics(entry, incoming);
+}
+
+fn merged_varnode_inference(
+    inferred: &HashMap<VnKey, InferredSemantics>,
+    vn: &Varnode,
+) -> InferredSemantics {
+    let mut out = varnode_existing_inference(vn);
+    if let Some(cur) = inferred.get(&VnKey::from(vn)) {
+        merge_inferred_semantics(&mut out, *cur);
+    }
+    out
+}
+
+fn is_x86_arch(arch_name: &str) -> bool {
+    arch_name.contains("x86")
+}
+
+fn is_stack_register(arch_name: &str, reg: &str) -> bool {
+    if is_x86_arch(arch_name) {
+        matches!(reg, "rsp" | "esp" | "sp" | "rbp" | "ebp" | "bp")
+    } else {
+        matches!(
+            reg,
+            "sp" | "rsp" | "esp" | "bp" | "rbp" | "ebp" | "fp" | "s0" | "x2" | "x8"
+        )
+    }
+}
+
+fn is_pc_register(reg: &str) -> bool {
+    matches!(reg, "pc" | "rip" | "eip" | "ip")
+}
+
+fn is_x86_tls_register(arch_name: &str, reg: &str) -> bool {
+    is_x86_arch(arch_name)
+        && matches!(
+            reg,
+            "fs" | "gs" | "fsbase" | "gsbase" | "fs_base" | "gs_base"
+        )
+}
+
+fn infer_address_storage_from_register(arch_name: &str, reg: &str) -> Option<StorageClass> {
+    if is_x86_tls_register(arch_name, reg) {
+        return Some(StorageClass::ThreadLocal);
+    }
+    if is_stack_register(arch_name, reg) {
+        return Some(StorageClass::Stack);
+    }
+    if is_pc_register(reg) {
+        return Some(StorageClass::Global);
+    }
+    None
+}
+
+fn map_storage_to_memory_class(storage: StorageClass) -> MemoryClass {
+    match storage {
+        StorageClass::Stack => MemoryClass::Stack,
+        StorageClass::Heap => MemoryClass::Heap,
+        StorageClass::Global => MemoryClass::Global,
+        StorageClass::ThreadLocal => MemoryClass::ThreadLocal,
+        StorageClass::Volatile => MemoryClass::Mmio,
+        _ => MemoryClass::Ram,
+    }
+}
+
+fn infer_op_memory_class(existing: Option<MemoryClass>, incoming: MemoryClass) -> MemoryClass {
+    match existing {
+        Some(cur) if memory_class_rank(cur) >= memory_class_rank(incoming) => cur,
+        _ => incoming,
+    }
+}
+
+fn apply_inferred_to_varnode(vn: &mut Varnode, inferred: &HashMap<VnKey, InferredSemantics>) {
+    let Some(extra) = inferred.get(&VnKey::from(&*vn)).copied() else {
+        return;
+    };
+
+    let mut meta = vn.meta.clone().unwrap_or_default();
+    let mut changed = false;
+
+    if let Some(storage) = extra.storage_class {
+        match meta.storage_class {
+            Some(cur) if storage_rank(cur) >= storage_rank(storage) => {}
+            _ => {
+                meta.storage_class = Some(storage);
+                changed = true;
+            }
+        }
+    }
+
+    if let Some(hint) = extra.pointer_hint {
+        match meta.pointer_hint {
+            Some(cur) if pointer_rank(cur) >= pointer_rank(hint) => {}
+            _ => {
+                meta.pointer_hint = Some(hint);
+                changed = true;
+            }
+        }
+    }
+
+    if let Some(kind) = extra.scalar_kind {
+        match meta.scalar_kind {
+            Some(cur) if scalar_rank(cur) >= scalar_rank(kind) => {}
+            _ => {
+                meta.scalar_kind = Some(kind);
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        vn.meta = Some(meta);
+    }
+}
+
+fn cached_register_name<F>(
+    vn: &Varnode,
+    reg_name_cache: &mut HashMap<VnKey, Option<String>>,
+    resolve_register: &F,
+) -> Option<String>
+where
+    F: Fn(&Varnode) -> Option<String>,
+{
+    if !vn.is_register() {
+        return None;
+    }
+
+    let key = VnKey::from(vn);
+    if let Some(cached) = reg_name_cache.get(&key) {
+        return cached.clone();
+    }
+
+    let resolved = resolve_register(vn).map(|name| name.to_ascii_lowercase());
+    reg_name_cache.insert(key, resolved.clone());
+    resolved
+}
+
+fn inferred_address_storage<F>(
+    vn: &Varnode,
+    inferred: &HashMap<VnKey, InferredSemantics>,
+    arch_name: &str,
+    reg_name_cache: &mut HashMap<VnKey, Option<String>>,
+    resolve_register: &F,
+) -> Option<StorageClass>
+where
+    F: Fn(&Varnode) -> Option<String>,
+{
+    if let Some(info) = inferred.get(&VnKey::from(vn))
+        && let Some(storage) = info.storage_class
+        && !matches!(storage, StorageClass::Register | StorageClass::Unknown)
+    {
+        return Some(storage);
+    }
+
+    if let Some(name) = cached_register_name(vn, reg_name_cache, resolve_register) {
+        return infer_address_storage_from_register(arch_name, &name);
+    }
+
+    None
+}
+
+fn annotate_semantic_metadata_with_hints<F>(
+    block: &mut R2ILBlock,
+    arch_name: &str,
+    options: SemanticMetadataOptions,
+    resolve_register: F,
+) where
+    F: Fn(&Varnode) -> Option<String>,
+{
+    if !options.enabled {
+        return;
+    }
+    if !matches!(options.precision, SemanticMetadataPrecision::High) {
+        return;
+    }
+
+    let arch = arch_name.to_ascii_lowercase();
+    let mut inferred: HashMap<VnKey, InferredSemantics> = HashMap::new();
+    let mut reg_name_cache: HashMap<VnKey, Option<String>> = HashMap::new();
+    let mut op_memory_updates: Vec<(usize, MemoryClass)> = Vec::new();
+
+    for op in &block.ops {
+        if let Some(dst) = op.output()
+            && dst.is_register()
+        {
+            update_inferred_semantics(
+                &mut inferred,
+                dst,
+                InferredSemantics {
+                    storage_class: Some(StorageClass::Register),
+                    ..Default::default()
+                },
+            );
+        }
+        for src in op.inputs() {
+            if src.is_register() {
+                update_inferred_semantics(
+                    &mut inferred,
+                    src,
+                    InferredSemantics {
+                        storage_class: Some(StorageClass::Register),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+
+    for (op_index, op) in block.ops.iter().enumerate() {
+        let mut dst_infer = InferredSemantics::default();
+        match op {
+            R2ILOp::Load { addr, .. }
+            | R2ILOp::LoadLinked { addr, .. }
+            | R2ILOp::LoadGuarded { addr, .. }
+            | R2ILOp::Store { addr, .. }
+            | R2ILOp::StoreConditional { addr, .. }
+            | R2ILOp::StoreGuarded { addr, .. }
+            | R2ILOp::AtomicCAS { addr, .. } => {
+                update_inferred_semantics(
+                    &mut inferred,
+                    addr,
+                    InferredSemantics {
+                        pointer_hint: Some(PointerHint::PointerLike),
+                        ..Default::default()
+                    },
+                );
+                let addr_storage = inferred_address_storage(
+                    addr,
+                    &inferred,
+                    &arch,
+                    &mut reg_name_cache,
+                    &resolve_register,
+                );
+                if let Some(storage) = addr_storage {
+                    update_inferred_semantics(
+                        &mut inferred,
+                        addr,
+                        InferredSemantics {
+                            storage_class: Some(storage),
+                            ..Default::default()
+                        },
+                    );
+                }
+                let memory_class =
+                    map_storage_to_memory_class(addr_storage.unwrap_or(StorageClass::Unknown));
+                op_memory_updates.push((op_index, memory_class));
+            }
+            R2ILOp::CallInd { target } | R2ILOp::BranchInd { target } => {
+                update_inferred_semantics(
+                    &mut inferred,
+                    target,
+                    InferredSemantics {
+                        pointer_hint: Some(PointerHint::CodePointer),
+                        ..Default::default()
+                    },
+                );
+            }
+            R2ILOp::PtrAdd { base, .. } | R2ILOp::PtrSub { base, .. } => {
+                dst_infer.pointer_hint = Some(PointerHint::PointerLike);
+                dst_infer.storage_class = inferred_address_storage(
+                    base,
+                    &inferred,
+                    &arch,
+                    &mut reg_name_cache,
+                    &resolve_register,
+                );
+            }
+            R2ILOp::SegmentOp {
+                segment, offset, ..
+            } => {
+                dst_infer.pointer_hint = Some(PointerHint::PointerLike);
+                let seg_storage = inferred_address_storage(
+                    segment,
+                    &inferred,
+                    &arch,
+                    &mut reg_name_cache,
+                    &resolve_register,
+                );
+                let off_storage = inferred_address_storage(
+                    offset,
+                    &inferred,
+                    &arch,
+                    &mut reg_name_cache,
+                    &resolve_register,
+                );
+                dst_infer.storage_class = seg_storage.or(off_storage);
+            }
+            R2ILOp::Copy { src, .. } | R2ILOp::Cast { src, .. } | R2ILOp::New { src, .. } => {
+                dst_infer = merged_varnode_inference(&inferred, src);
+                if matches!(
+                    dst_infer.storage_class,
+                    None | Some(StorageClass::Unknown) | Some(StorageClass::Register)
+                ) {
+                    dst_infer.storage_class = inferred_address_storage(
+                        src,
+                        &inferred,
+                        &arch,
+                        &mut reg_name_cache,
+                        &resolve_register,
+                    )
+                    .or(dst_infer.storage_class);
+                }
+            }
+            R2ILOp::IntAdd { a, b, .. } | R2ILOp::IntSub { a, b, .. } => {
+                let a_inf = merged_varnode_inference(&inferred, a);
+                let b_inf = merged_varnode_inference(&inferred, b);
+                let a_addr_storage = inferred_address_storage(
+                    a,
+                    &inferred,
+                    &arch,
+                    &mut reg_name_cache,
+                    &resolve_register,
+                );
+                let b_addr_storage = inferred_address_storage(
+                    b,
+                    &inferred,
+                    &arch,
+                    &mut reg_name_cache,
+                    &resolve_register,
+                );
+                let a_is_pointer = a_inf.pointer_hint.is_some() || a_addr_storage.is_some();
+                let b_is_pointer = b_inf.pointer_hint.is_some() || b_addr_storage.is_some();
+                if (a_is_pointer && b.is_const()) || (b_is_pointer && a.is_const()) {
+                    dst_infer.pointer_hint = Some(PointerHint::PointerLike);
+                    dst_infer.storage_class = if a_is_pointer {
+                        a_addr_storage.or(a_inf.storage_class)
+                    } else {
+                        b_addr_storage.or(b_inf.storage_class)
+                    };
+                }
+            }
+            R2ILOp::BoolNot { .. }
+            | R2ILOp::BoolAnd { .. }
+            | R2ILOp::BoolOr { .. }
+            | R2ILOp::BoolXor { .. }
+            | R2ILOp::IntEqual { .. }
+            | R2ILOp::IntNotEqual { .. }
+            | R2ILOp::IntLess { .. }
+            | R2ILOp::IntSLess { .. }
+            | R2ILOp::IntLessEqual { .. }
+            | R2ILOp::IntSLessEqual { .. }
+            | R2ILOp::FloatEqual { .. }
+            | R2ILOp::FloatNotEqual { .. }
+            | R2ILOp::FloatLess { .. }
+            | R2ILOp::FloatLessEqual { .. }
+            | R2ILOp::FloatNaN { .. } => {
+                dst_infer.scalar_kind = Some(ScalarKind::Bool);
+            }
+            R2ILOp::FloatAdd { .. }
+            | R2ILOp::FloatSub { .. }
+            | R2ILOp::FloatMult { .. }
+            | R2ILOp::FloatDiv { .. }
+            | R2ILOp::FloatNeg { .. }
+            | R2ILOp::FloatAbs { .. }
+            | R2ILOp::FloatSqrt { .. }
+            | R2ILOp::FloatCeil { .. }
+            | R2ILOp::FloatFloor { .. }
+            | R2ILOp::FloatRound { .. }
+            | R2ILOp::Int2Float { .. }
+            | R2ILOp::FloatFloat { .. } => {
+                dst_infer.scalar_kind = Some(ScalarKind::Float);
+            }
+            R2ILOp::IntSDiv { .. }
+            | R2ILOp::IntSRem { .. }
+            | R2ILOp::IntSRight { .. }
+            | R2ILOp::IntSExt { .. }
+            | R2ILOp::IntNegate { .. } => {
+                dst_infer.scalar_kind = Some(ScalarKind::SignedInt);
+            }
+            R2ILOp::IntDiv { .. } | R2ILOp::IntRem { .. } | R2ILOp::IntZExt { .. } => {
+                dst_infer.scalar_kind = Some(ScalarKind::UnsignedInt);
+            }
+            _ => {}
+        }
+
+        if let Some(dst) = op.output() {
+            update_inferred_semantics(&mut inferred, dst, dst_infer);
+        }
+    }
+
+    for (op_index, incoming_class) in op_memory_updates {
+        let current = block.op_metadata(op_index).and_then(|m| m.memory_class);
+        let merged_class = infer_op_memory_class(current, incoming_class);
+        let mut meta = block.op_metadata(op_index).cloned().unwrap_or_default();
+        meta.memory_class = Some(merged_class);
+        block.set_op_metadata(op_index, meta);
+    }
+
+    for op in &mut block.ops {
+        if let Some(dst) = op.output_mut() {
+            apply_inferred_to_varnode(dst, &inferred);
+        }
+        for src in op.inputs_mut() {
+            apply_inferred_to_varnode(src, &inferred);
         }
     }
 }
@@ -1196,5 +1771,196 @@ mod tests {
             }
             other => panic!("expected StoreConditional, got {other:?}"),
         }
+    }
+
+    fn reg_name_resolver<'a>(
+        map: &'a [(u64, u32, &'a str)],
+    ) -> impl Fn(&Varnode) -> Option<String> + 'a {
+        move |vn| {
+            map.iter()
+                .find(|(off, size, _)| *off == vn.offset && *size == vn.size)
+                .map(|(_, _, name)| (*name).to_string())
+        }
+    }
+
+    #[test]
+    fn semantic_metadata_marks_pointer_and_stack_memory_class() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Load {
+            dst: reg(0x10, 8),
+            space: SpaceId::Ram,
+            addr: reg(0x20, 8),
+        });
+
+        annotate_semantic_metadata_with_hints(
+            &mut block,
+            "x86-64",
+            SemanticMetadataOptions::default(),
+            reg_name_resolver(&[(0x10, 8, "rax"), (0x20, 8, "rsp")]),
+        );
+
+        let R2ILOp::Load { addr, .. } = &block.ops[0] else {
+            panic!("expected load op");
+        };
+        let meta = addr.meta.as_ref().expect("address metadata");
+        assert_eq!(meta.pointer_hint, Some(PointerHint::PointerLike));
+        assert_eq!(meta.storage_class, Some(StorageClass::Stack));
+
+        let op_meta = block.op_metadata(0).expect("load op metadata");
+        assert_eq!(op_meta.memory_class, Some(MemoryClass::Stack));
+    }
+
+    #[test]
+    fn semantic_metadata_marks_indirect_targets_as_code_pointers() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::CallInd {
+            target: reg(0x30, 8),
+        });
+
+        annotate_semantic_metadata_with_hints(
+            &mut block,
+            "x86-64",
+            SemanticMetadataOptions::default(),
+            reg_name_resolver(&[(0x30, 8, "rax")]),
+        );
+
+        let R2ILOp::CallInd { target } = &block.ops[0] else {
+            panic!("expected callind op");
+        };
+        let meta = target.meta.as_ref().expect("target metadata");
+        assert_eq!(meta.pointer_hint, Some(PointerHint::CodePointer));
+    }
+
+    #[test]
+    fn semantic_metadata_classifies_global_and_tls_memory() {
+        let mut block = R2ILBlock::new(0x1000, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x100, 8),
+            a: reg(0x40, 8),
+            b: Varnode::constant(0x20, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: reg(0x48, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x100, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: reg(0x50, 8),
+            space: SpaceId::Ram,
+            addr: reg(0x60, 8),
+        });
+
+        annotate_semantic_metadata_with_hints(
+            &mut block,
+            "x86-64",
+            SemanticMetadataOptions::default(),
+            reg_name_resolver(&[
+                (0x40, 8, "rip"),
+                (0x48, 8, "rax"),
+                (0x50, 8, "rbx"),
+                (0x60, 8, "fs"),
+            ]),
+        );
+
+        let R2ILOp::IntAdd { dst, .. } = &block.ops[0] else {
+            panic!("expected intadd");
+        };
+        let dst_meta = dst.meta.as_ref().expect("tmp metadata");
+        assert_eq!(dst_meta.storage_class, Some(StorageClass::Global));
+        assert_eq!(dst_meta.pointer_hint, Some(PointerHint::PointerLike));
+
+        let op_meta_global = block.op_metadata(1).expect("global load metadata");
+        assert_eq!(op_meta_global.memory_class, Some(MemoryClass::Global));
+
+        let op_meta_tls = block.op_metadata(2).expect("tls load metadata");
+        assert_eq!(op_meta_tls.memory_class, Some(MemoryClass::ThreadLocal));
+    }
+
+    #[test]
+    fn semantic_metadata_generic_stack_fallback() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: reg(0x200, 8),
+            val: reg(0x208, 8),
+        });
+
+        annotate_semantic_metadata_with_hints(
+            &mut block,
+            "riscv64",
+            SemanticMetadataOptions::default(),
+            reg_name_resolver(&[(0x200, 8, "sp"), (0x208, 8, "a0")]),
+        );
+
+        let op_meta = block.op_metadata(0).expect("store metadata");
+        assert_eq!(op_meta.memory_class, Some(MemoryClass::Stack));
+    }
+
+    #[test]
+    fn semantic_metadata_does_not_downgrade_existing_hints() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        let mut addr = reg(0x20, 8);
+        addr.meta = Some(r2il::VarnodeMetadata {
+            storage_class: Some(StorageClass::Global),
+            pointer_hint: Some(PointerHint::CodePointer),
+            ..Default::default()
+        });
+        block.push(R2ILOp::Load {
+            dst: reg(0x10, 8),
+            space: SpaceId::Ram,
+            addr,
+        });
+        block.set_op_metadata(
+            0,
+            OpMetadata {
+                memory_class: Some(MemoryClass::ThreadLocal),
+                ..Default::default()
+            },
+        );
+
+        annotate_semantic_metadata_with_hints(
+            &mut block,
+            "x86-64",
+            SemanticMetadataOptions::default(),
+            reg_name_resolver(&[(0x10, 8, "rax"), (0x20, 8, "rsp")]),
+        );
+
+        let R2ILOp::Load { addr, .. } = &block.ops[0] else {
+            panic!("expected load");
+        };
+        let meta = addr.meta.as_ref().expect("address metadata");
+        assert_eq!(meta.storage_class, Some(StorageClass::Global));
+        assert_eq!(meta.pointer_hint, Some(PointerHint::CodePointer));
+        let op_meta = block.op_metadata(0).expect("existing op metadata");
+        assert_eq!(op_meta.memory_class, Some(MemoryClass::ThreadLocal));
+    }
+
+    #[test]
+    fn semantic_metadata_can_be_disabled() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Load {
+            dst: reg(0x10, 8),
+            space: SpaceId::Ram,
+            addr: reg(0x20, 8),
+        });
+
+        annotate_semantic_metadata_with_hints(
+            &mut block,
+            "x86-64",
+            SemanticMetadataOptions {
+                enabled: false,
+                ..Default::default()
+            },
+            reg_name_resolver(&[(0x10, 8, "rax"), (0x20, 8, "rsp")]),
+        );
+
+        let R2ILOp::Load { addr, .. } = &block.ops[0] else {
+            panic!("expected load");
+        };
+        assert!(addr.meta.is_none(), "metadata should stay disabled");
+        assert!(
+            block.op_metadata.is_empty(),
+            "op metadata should stay disabled"
+        );
     }
 }

@@ -806,7 +806,7 @@ mod tests {
         );
         assert_eq!(
             lift_r2cmd,
-            "# {\"op\":\"Copy\",\"op_index\":0,\"op_json\":{\"Copy\":{\"dst\":{\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"},\"src\":{\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"}}}}\nae rax,rax,="
+            "# {\"op\":\"Copy\",\"op_index\":0,\"op_json\":{\"Copy\":{\"dst\":{\"meta\":{\"storage_class\":\"register\"},\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"},\"src\":{\"meta\":{\"storage_class\":\"register\"},\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"}}}}\nae rax,rax,="
         );
 
         let ssa_text = assert_export_deterministic(
