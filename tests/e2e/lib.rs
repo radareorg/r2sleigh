@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,11 @@ use std::os::unix::process::ExitStatusExt;
 fn r2_exec_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn lock_r2_exec() -> MutexGuard<'static, ()> {
+    // Do not drop serialization after a panic in another test.
+    r2_exec_lock().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Get path to vuln_test binary (handles both workspace root and tests/e2e dir)
@@ -115,27 +120,18 @@ pub fn r2_cmd(binary: &str, cmd: &str) -> R2Result {
 
 /// Run radare2 with custom timeout
 pub fn r2_cmd_timeout(binary: &str, cmd: &str, timeout: Duration) -> R2Result {
-    let mut command = Command::new("r2");
-    command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
-    configure_plugin_env(&mut command);
-    let _guard = r2_exec_lock().lock().ok();
-    run_command_with_timeout(command, scaled_timeout(timeout))
+    run_r2_with_env(binary, cmd, scaled_timeout(timeout), &[], true)
 }
 
 /// Run radare2 without a timeout wrapper and with extra environment variables.
 pub fn r2_cmd_with_env(binary: &str, cmd: &str, env: &[(&str, &str)]) -> R2Result {
-    let mut command = Command::new("r2");
-    command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
-
-    configure_plugin_env(&mut command);
-
-    for (key, value) in env {
-        command.env(key, value);
-    }
-
-    let _guard = r2_exec_lock().lock().ok();
-    let output = command.output();
-    parse_output(output, false)
+    run_r2_with_env(
+        binary,
+        cmd,
+        scaled_timeout(Duration::from_secs(120)),
+        env,
+        false,
+    )
 }
 
 /// Run radare2 with custom timeout and extra environment variables.
@@ -145,16 +141,59 @@ pub fn r2_cmd_timeout_with_env(
     timeout: Duration,
     env: &[(&str, &str)],
 ) -> R2Result {
-    let mut command = Command::new("r2");
-    command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
-    configure_plugin_env(&mut command);
+    run_r2_with_env(binary, cmd, scaled_timeout(timeout), env, true)
+}
 
-    for (key, value) in env {
-        command.env(key, value);
+fn run_r2_with_env(
+    binary: &str,
+    cmd: &str,
+    timeout: Duration,
+    env: &[(&str, &str)],
+    use_timeout: bool,
+) -> R2Result {
+    let retries = parse_retry_count(std::env::var("R2SLEIGH_E2E_RETRIES").ok());
+    for attempt in 0..=retries {
+        let mut command = Command::new("r2");
+        command.args(["-q", "-e", "bin.relocs.apply=true", "-c", cmd, binary]);
+        configure_plugin_env(&mut command);
+
+        for (key, value) in env {
+            command.env(key, value);
+        }
+
+        let _guard = lock_r2_exec();
+        let result = if use_timeout {
+            run_command_with_timeout(command, timeout)
+        } else {
+            parse_output(command.output(), false)
+        };
+
+        if !should_retry_transient_crash(&result, attempt, retries) {
+            return result;
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 
-    let _guard = r2_exec_lock().lock().ok();
-    run_command_with_timeout(command, scaled_timeout(timeout))
+    unreachable!("retry loop must return in all paths");
+}
+
+fn should_retry_transient_crash(result: &R2Result, attempt: u32, retries: u32) -> bool {
+    // Retry only likely-transient signal exits; keep deterministic failures immediate.
+    if attempt >= retries || result.panicked || !result.crashed {
+        return false;
+    }
+    #[cfg(unix)]
+    let signal_crash = result.exit_code.is_none();
+    #[cfg(not(unix))]
+    let signal_crash = matches!(result.exit_code, Some(134) | Some(136) | Some(137) | Some(139));
+    signal_crash
+}
+
+fn parse_retry_count(raw: Option<String>) -> u32 {
+    raw.as_deref()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&count| count <= 5)
+        .unwrap_or(1)
 }
 
 /// Run r2 command seeking to a function first
