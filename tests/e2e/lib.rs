@@ -193,7 +193,7 @@ fn parse_retry_count(raw: Option<String>) -> u32 {
     raw.as_deref()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|&count| count <= 5)
-        .unwrap_or(1)
+        .unwrap_or(2)
 }
 
 /// Run r2 command seeking to a function first

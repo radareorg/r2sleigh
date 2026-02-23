@@ -5896,6 +5896,24 @@ fn summarize_block_semantics(block: &R2ILBlock) -> Option<String> {
     }
 }
 
+fn is_filtered_cpu_flag_name_lower(name: &str) -> bool {
+    const CPU_FLAGS: [&str; 8] = ["cf", "zf", "sf", "pf", "of", "af", "df", "tf"];
+    CPU_FLAGS.iter().any(|flag| {
+        name == *flag
+            || name
+                .strip_prefix(flag)
+                .is_some_and(|rest| rest.starts_with('_'))
+    })
+}
+
+fn is_real_reg(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    !lower.starts_with("tmp:")
+        && !lower.starts_with("const:")
+        && !lower.starts_with("ram:")
+        && !is_filtered_cpu_flag_name_lower(&lower)
+}
+
 /// Annotation entry for analyze_fcn writeback.
 #[derive(serde::Serialize)]
 struct FcnAnnotation {
@@ -5942,20 +5960,6 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
             Some(f) => f,
             None => return ptr::null_mut(),
         };
-
-    fn is_real_reg(name: &str) -> bool {
-        !name.starts_with("tmp:")
-            && !name.starts_with("const:")
-            && !name.starts_with("ram:")
-            && !name.contains("CF_")
-            && !name.contains("ZF_")
-            && !name.contains("SF_")
-            && !name.contains("PF_")
-            && !name.contains("OF_")
-            && !name.contains("AF_")
-            && !name.contains("DF_")
-            && !name.contains("TF_")
-    }
 
     let mut annotations = Vec::new();
 
@@ -7187,6 +7191,29 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use std::ffi::{CStr, CString};
+
+    #[test]
+    fn semantic_comment_reg_filter_excludes_cpu_flags_case_insensitively() {
+        for flag in [
+            "cf", "zf", "sf", "pf", "of", "af", "df", "tf", "CF", "ZF_1", "of_12", "TF_99",
+        ] {
+            assert!(!is_real_reg(flag), "{flag} should be filtered out");
+        }
+
+        for name in ["rax", "rdi", "rflags", "eax", "XMM0"] {
+            assert!(
+                is_real_reg(name),
+                "{name} should be kept as a real register"
+            );
+        }
+
+        for synthetic in ["tmp:10", "const:4", "ram:1000", "TMP:5"] {
+            assert!(
+                !is_real_reg(synthetic),
+                "{synthetic} should be excluded as non-register data"
+            );
+        }
+    }
 
     #[cfg(feature = "x86")]
     unsafe fn c_string_to_owned(ptr: *mut c_char) -> String {

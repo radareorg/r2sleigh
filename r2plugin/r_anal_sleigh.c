@@ -1776,9 +1776,10 @@ static size_t write_semantic_comments_for_function(RAnal *anal, const R2ILContex
 		const BlockArray *blocks, ut64 fcn_addr, bool enabled) {
 	size_t i;
 	size_t emitted = 0;
-	char *json;
-	RJson *root;
+	char *json = NULL;
+	RJson *root = NULL;
 	const RJson *item;
+	bool parsed_annotation_array = false;
 
 	if (!anal || !blocks) {
 		return 0;
@@ -1798,16 +1799,16 @@ static size_t write_semantic_comments_for_function(RAnal *anal, const R2ILContex
 	json = r2sleigh_analyze_fcn_annotations (ctx,
 		(const R2ILBlock **)blocks->blocks, blocks->count, fcn_addr);
 	if (!json || !*json) {
-		r2il_string_free (json);
-		goto fallback;
+		R_LOG_DEBUG ("r2sleigh: semantic annotation generation returned empty payload for fcn=0x%"PFMT64x, fcn_addr);
+		goto cleanup;
 	}
 
 	root = r_json_parse (json);
 	if (!root || root->type != R_JSON_ARRAY) {
-		r_json_free (root);
-		r2il_string_free (json);
-		goto fallback;
+		R_LOG_DEBUG ("r2sleigh: semantic annotation JSON parse/type failure for fcn=0x%"PFMT64x, fcn_addr);
+		goto cleanup;
 	}
+	parsed_annotation_array = true;
 
 	for (item = root->children.first; item; item = item->next) {
 		const RJson *j_addr;
@@ -1828,10 +1829,10 @@ static size_t write_semantic_comments_for_function(RAnal *anal, const R2ILContex
 		emitted++;
 	}
 
+cleanup:
 	r_json_free (root);
 	r2il_string_free (json);
-fallback:
-	if (enabled && emitted == 0) {
+	if (enabled && parsed_annotation_array && emitted == 0) {
 		set_sla_comment_line_with_prefix (anal, fcn_addr, "sla: analyzed",
 			SLEIGH_COMMENT_PREFIX_SEMANTIC);
 		emitted = 1;

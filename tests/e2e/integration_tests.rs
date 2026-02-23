@@ -268,6 +268,14 @@ fn count_comment_lines_with_prefix(comments: &[Value], prefix: &str) -> usize {
         .count()
 }
 
+fn is_cpu_flag_name(name: &str) -> bool {
+    const CPU_FLAGS: [&str; 8] = ["cf", "zf", "sf", "pf", "of", "af", "df", "tf"];
+    let lower = name.trim().to_ascii_lowercase();
+    CPU_FLAGS
+        .iter()
+        .any(|flag| lower == *flag || lower.strip_prefix(flag).is_some_and(|rest| rest.starts_with('_')))
+}
+
 // ============================================================================
 // 1. Basic Plugin Status
 // ============================================================================
@@ -4613,6 +4621,56 @@ mod deep_integration {
         assert!(
             semantic_lines > 0,
             "aaaa should emit semantic `sla:` comments without explicit a:sla.* command"
+        );
+    }
+
+    #[test]
+    fn aaaa_auto_semantic_comments_filter_cpu_flag_noise() {
+        setup();
+        let result = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                "aaaa; CCj",
+                Duration::from_secs(60),
+                &[],
+            )
+        });
+        result.assert_ok();
+        let parsed = parse_json(&result, "CCj after aaaa");
+        let comments = expect_array(&parsed, "CCj after aaaa");
+
+        let mut checked_names = 0usize;
+        for line in comments
+            .iter()
+            .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+            .flat_map(|comment| comment.lines())
+            .map(str::trim_start)
+            .filter(|line| line.starts_with("sla:"))
+        {
+            for section in line.split(';') {
+                let section = section.trim();
+                let section = section.strip_prefix("sla: ").unwrap_or(section);
+                for prefix in ["uses ", "defines ", "merges "] {
+                    if let Some(list) = section.strip_prefix(prefix) {
+                        for name in list
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|name| !name.is_empty() && *name != "...")
+                        {
+                            checked_names += 1;
+                            assert!(
+                                !is_cpu_flag_name(name),
+                                "semantic comment should filter CPU-flag names, got `{name}` in line `{line}`"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked_names > 0,
+            "expected to inspect at least one semantic register name after aaaa"
         );
     }
 
