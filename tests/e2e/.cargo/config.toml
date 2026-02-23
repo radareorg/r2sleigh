@@ -1,0 +1,5 @@
+[env]
+# E2E tests serialize r2 invocations through a global mutex in `lib.rs`.
+# Running many Rust test threads causes lots of queued tests to be reported as
+# "running for over 60 seconds" even when they are just waiting for the lock.
+RUST_TEST_THREADS = "1"

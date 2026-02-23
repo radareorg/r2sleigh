@@ -44,6 +44,21 @@ cd tests/e2e
 cargo test
 ```
 
+### Advisory Semantic Metadata Benchmark
+
+Use the benchmark script to compare semantic output and `aaaa` timing with
+semantic metadata enabled vs disabled:
+
+```bash
+python3 scripts/bench_semantic_metadata.py \
+  --runs 7 \
+  --max-overhead-pct 5 \
+  --json-out /tmp/semantic-bench.json
+```
+
+Default behavior is advisory (always exits `0`) and reports PASS/FAIL in the
+output JSON. Use `--strict` to return non-zero on threshold failures.
+
 Test Harness
 ------------
 
