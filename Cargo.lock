@@ -1787,7 +1787,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1989,9 +1989,9 @@ dependencies = [
 
 [[package]]
 name = "z3"
-version = "0.19.8"
+version = "0.19.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b316d4b82bd53157762122e4f1ded4afd7ab9c6de93d14eb15b9476b340b2f27"
+checksum = "b1a0facc384f39876d22418a61b9bdd291451a374e36dc5036fc59b1f2062ff6"
 dependencies = [
  "log",
  "num",
@@ -2000,9 +2000,9 @@ dependencies = [
 
 [[package]]
 name = "z3-sys"
-version = "0.10.5"
+version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fab6d04d653bbb73381bc6c906c5545d522ac29def4571fadc720c39ab162f6"
+checksum = "7242a9063a67fadfe5b9d2956aa6c493c5159f2e22d69645876ed1bba6204643"
 dependencies = [
  "bindgen",
  "pkg-config",
