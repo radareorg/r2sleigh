@@ -159,7 +159,7 @@ fn merge_varnode_metadata(dst: &mut VarnodeMetadata, src: &VarnodeMetadata) {
         dst.permissions = src.permissions;
     }
     if dst.valid_range.is_none() {
-        dst.valid_range = src.valid_range.clone();
+        dst.valid_range = src.valid_range;
     }
     if dst.bank_id.is_none() {
         dst.bank_id = src.bank_id.clone();
