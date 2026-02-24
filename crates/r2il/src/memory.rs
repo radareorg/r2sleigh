@@ -19,10 +19,18 @@ pub enum MemoryOrdering {
 
 /// Memory access permissions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct MemoryPermissions {
+    /// Read capability.
     pub read: bool,
+    /// Write capability.
     pub write: bool,
+    /// Execute capability.
     pub execute: bool,
+    /// Access is volatile (side effects / no elision).
+    pub volatile: bool,
+    /// Access is cacheable.
+    pub cacheable: bool,
 }
 
 /// Valid memory range expressed as a half-open interval `[start, end)`.
@@ -79,10 +87,23 @@ mod tests {
             read: true,
             write: false,
             execute: true,
+            volatile: true,
+            cacheable: false,
         };
         let json = serde_json::to_string(&perms).expect("serialize");
         let decoded: MemoryPermissions = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, perms);
+    }
+
+    #[test]
+    fn memory_permissions_serde_defaults_new_fields() {
+        let json = r#"{"read":true,"write":false,"execute":false}"#;
+        let decoded: MemoryPermissions = serde_json::from_str(json).expect("deserialize");
+        assert!(decoded.read);
+        assert!(!decoded.write);
+        assert!(!decoded.execute);
+        assert!(!decoded.volatile);
+        assert!(!decoded.cacheable);
     }
 
     #[test]

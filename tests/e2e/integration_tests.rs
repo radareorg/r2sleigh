@@ -3911,6 +3911,8 @@ mod ffi {
                         read: true,
                         write: false,
                         execute: false,
+                        volatile: false,
+                        cacheable: true,
                     }),
                     valid_range: Some(r2il::MemoryRange {
                         start: 0x1000,
@@ -3954,6 +3956,18 @@ mod ffi {
             assert_eq!(
                 first.get("memory_class").and_then(Value::as_str),
                 Some("stack")
+            );
+            assert_eq!(
+                first.get("permissions")
+                    .and_then(|v| v.get("volatile"))
+                    .and_then(Value::as_bool),
+                Some(false)
+            );
+            assert_eq!(
+                first.get("permissions")
+                    .and_then(|v| v.get("cacheable"))
+                    .and_then(Value::as_bool),
+                Some(true)
             );
 
             r2il_block_free(block);

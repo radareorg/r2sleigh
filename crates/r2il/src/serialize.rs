@@ -578,6 +578,8 @@ mod tests {
             read: true,
             write: true,
             execute: false,
+            volatile: false,
+            cacheable: true,
         });
         ram.valid_ranges.push(crate::MemoryRange {
             start: 0x1000,
