@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use r2il::{PointerHint, ScalarKind};
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
 use r2types::{
     CTypeLike, Constraint, ConstraintSource, ExternalTypeDb, MemoryCapability, ResolvedSignature,
@@ -119,6 +120,7 @@ impl TypeInference {
         let deref_consumers = collect_deref_consumers(func, &defs);
         let mut struct_hints: HashMap<SSAVar, String> = HashMap::new();
 
+        self.emit_semantic_hint_constraints(func, &mut arena, &mut constraints);
         self.emit_inferred_constraints(
             func,
             &defs,
@@ -146,6 +148,65 @@ impl TypeInference {
             self.var_types.insert(var, hinted);
         }
         self.solved_types = Some(solved);
+    }
+
+    fn emit_semantic_hint_constraints(
+        &self,
+        func: &SSAFunction,
+        arena: &mut TypeArena,
+        constraints: &mut Vec<Constraint>,
+    ) {
+        for var in collect_vars(func) {
+            if var.is_const() {
+                continue;
+            }
+            let Some(meta) = func.semantic_var_metadata(&var) else {
+                continue;
+            };
+
+            if let Some(pointer_hint) = meta.pointer_hint
+                && !matches!(pointer_hint, PointerHint::Unknown)
+            {
+                let pointee = self.integer_type_id(1, Signedness::Unknown, arena);
+                constraints.push(Constraint::SetType {
+                    var: var.clone(),
+                    ty: arena.ptr(pointee),
+                    source: ConstraintSource::External,
+                });
+                continue;
+            }
+
+            let Some(kind) = meta.scalar_kind else {
+                continue;
+            };
+            let Some(ty) = self.semantic_scalar_kind_type(kind, var.size, arena) else {
+                continue;
+            };
+            constraints.push(Constraint::SetType {
+                var: var.clone(),
+                ty,
+                source: ConstraintSource::External,
+            });
+        }
+    }
+
+    fn semantic_scalar_kind_type(
+        &self,
+        kind: ScalarKind,
+        size: u32,
+        arena: &mut TypeArena,
+    ) -> Option<TypeId> {
+        match kind {
+            ScalarKind::Bool => Some(arena.bool_ty()),
+            ScalarKind::Float if size > 0 => Some(arena.float(size.saturating_mul(8))),
+            ScalarKind::SignedInt => Some(self.integer_type_id(size, Signedness::Signed, arena)),
+            ScalarKind::UnsignedInt => {
+                Some(self.integer_type_id(size, Signedness::Unsigned, arena))
+            }
+            ScalarKind::Bitvector => Some(self.integer_type_id(size, Signedness::Unknown, arena)),
+            ScalarKind::Unknown => None,
+            ScalarKind::Float => None,
+        }
     }
 
     fn emit_inferred_constraints(
@@ -1370,7 +1431,9 @@ fn struct_name_from_type(arena: &TypeArena, ty: TypeId) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+    use r2il::{
+        ArchSpec, PointerHint, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode, VarnodeMetadata,
+    };
     use r2types::Type;
 
     fn ssa_from_ops(ops: Vec<R2ILOp>, arch: Option<&ArchSpec>) -> SSAFunction {
@@ -1435,6 +1498,36 @@ mod tests {
         assert_eq!(parse_const_addr("const:0d40"), Some(40));
         assert_eq!(parse_const_addr("ram:401000_0"), Some(0x401000));
         assert_eq!(parse_const_addr("RAX_1"), None);
+    }
+
+    #[test]
+    fn test_semantic_pointer_hint_promotes_register_to_pointer_type() {
+        let mut hinted_src = Varnode::register(0x10, 8);
+        hinted_src.set_meta(VarnodeMetadata {
+            pointer_hint: Some(PointerHint::PointerLike),
+            ..Default::default()
+        });
+        let func = ssa_from_ops(
+            vec![R2ILOp::Copy {
+                dst: Varnode::unique(0x10, 8),
+                src: hinted_src,
+            }],
+            None,
+        );
+
+        let mut ti = TypeInference::new(64);
+        ti.infer_function(&func);
+
+        let arg = func
+            .used_vars()
+            .into_iter()
+            .find(|v| v.name == "reg:10" && v.version == 0)
+            .expect("expected source register SSA var");
+        let ty = ti.get_type(&arg);
+        assert!(
+            ty.is_pointer(),
+            "semantic pointer hint should yield pointer type, got {ty}"
+        );
     }
 
     #[test]
