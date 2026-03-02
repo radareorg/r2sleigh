@@ -8,8 +8,8 @@ use libsla::{
     IntOp, IntSign, OpCode, PcodeDisassembly, PcodeInstruction, PseudoOp, Sleigh, VarnodeData,
 };
 use r2il::{
-    AtomicKind, MemoryClass, MemoryOrdering, OpMetadata, PointerHint, R2ILBlock, R2ILOp,
-    ScalarKind, SpaceId, StorageClass, Varnode, select_register_name,
+    AtomicKind, MemoryClass, MemoryOrdering, MemoryPermissions, OpMetadata, PointerHint, R2ILBlock,
+    R2ILOp, ScalarKind, SpaceId, StorageClass, Varnode, select_register_name,
 };
 use std::collections::HashMap;
 
@@ -997,6 +997,32 @@ fn infer_op_memory_class(existing: Option<MemoryClass>, incoming: MemoryClass) -
     }
 }
 
+fn infer_op_permissions(op: &R2ILOp, memory_class: MemoryClass) -> Option<MemoryPermissions> {
+    let (read, write) = match op {
+        R2ILOp::Load { .. } | R2ILOp::LoadLinked { .. } | R2ILOp::LoadGuarded { .. } => {
+            (true, false)
+        }
+        R2ILOp::Store { .. } | R2ILOp::StoreConditional { .. } | R2ILOp::StoreGuarded { .. } => {
+            (false, true)
+        }
+        R2ILOp::AtomicCAS { .. } => (true, true),
+        _ => return None,
+    };
+
+    let (volatile, cacheable) = match memory_class {
+        MemoryClass::Mmio | MemoryClass::IoPort => (true, false),
+        _ => (false, true),
+    };
+
+    Some(MemoryPermissions {
+        read,
+        write,
+        execute: matches!(memory_class, MemoryClass::Code),
+        volatile,
+        cacheable,
+    })
+}
+
 fn apply_inferred_to_varnode(vn: &mut Varnode, inferred: &HashMap<VnKey, InferredSemantics>) {
     let Some(extra) = inferred.get(&VnKey::from(&*vn)).copied() else {
         return;
@@ -1104,7 +1130,7 @@ fn annotate_semantic_metadata_with_hints<F>(
     let arch = arch_name.to_ascii_lowercase();
     let mut inferred: HashMap<VnKey, InferredSemantics> = HashMap::new();
     let mut reg_name_cache: HashMap<VnKey, Option<String>> = HashMap::new();
-    let mut op_memory_updates: Vec<(usize, MemoryClass)> = Vec::new();
+    let mut op_memory_updates: Vec<(usize, MemoryClass, MemoryPermissions)> = Vec::new();
 
     for op in &block.ops {
         if let Some(dst) = op.output()
@@ -1170,7 +1196,9 @@ fn annotate_semantic_metadata_with_hints<F>(
                 }
                 let memory_class =
                     map_storage_to_memory_class(addr_storage.unwrap_or(StorageClass::Unknown));
-                op_memory_updates.push((op_index, memory_class));
+                if let Some(permissions) = infer_op_permissions(op, memory_class) {
+                    op_memory_updates.push((op_index, memory_class, permissions));
+                }
             }
             R2ILOp::CallInd { target } | R2ILOp::BranchInd { target } => {
                 update_inferred_semantics(
@@ -1305,11 +1333,14 @@ fn annotate_semantic_metadata_with_hints<F>(
         }
     }
 
-    for (op_index, incoming_class) in op_memory_updates {
+    for (op_index, incoming_class, incoming_perms) in op_memory_updates {
         let current = block.op_metadata(op_index).and_then(|m| m.memory_class);
         let merged_class = infer_op_memory_class(current, incoming_class);
         let mut meta = block.op_metadata(op_index).cloned().unwrap_or_default();
         meta.memory_class = Some(merged_class);
+        if meta.permissions.is_none() {
+            meta.permissions = Some(incoming_perms);
+        }
         block.set_op_metadata(op_index, meta);
     }
 
@@ -1808,6 +1839,16 @@ mod tests {
 
         let op_meta = block.op_metadata(0).expect("load op metadata");
         assert_eq!(op_meta.memory_class, Some(MemoryClass::Stack));
+        assert_eq!(
+            op_meta.permissions,
+            Some(MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+                volatile: false,
+                cacheable: true,
+            })
+        );
     }
 
     #[test]
@@ -1874,6 +1915,16 @@ mod tests {
 
         let op_meta_tls = block.op_metadata(2).expect("tls load metadata");
         assert_eq!(op_meta_tls.memory_class, Some(MemoryClass::ThreadLocal));
+        assert_eq!(
+            op_meta_tls.permissions,
+            Some(MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+                volatile: false,
+                cacheable: true,
+            })
+        );
     }
 
     #[test]
@@ -1894,6 +1945,56 @@ mod tests {
 
         let op_meta = block.op_metadata(0).expect("store metadata");
         assert_eq!(op_meta.memory_class, Some(MemoryClass::Stack));
+        assert_eq!(
+            op_meta.permissions,
+            Some(MemoryPermissions {
+                read: false,
+                write: true,
+                execute: false,
+                volatile: false,
+                cacheable: true,
+            })
+        );
+    }
+
+    #[test]
+    fn semantic_metadata_marks_mmio_permissions_as_volatile_non_cacheable() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        let mut src = reg(0x20, 8);
+        src.meta = Some(r2il::VarnodeMetadata {
+            storage_class: Some(StorageClass::Volatile),
+            pointer_hint: Some(PointerHint::PointerLike),
+            ..Default::default()
+        });
+        block.push(R2ILOp::Copy {
+            dst: Varnode::unique(0x200, 8),
+            src,
+        });
+        block.push(R2ILOp::Load {
+            dst: reg(0x10, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x200, 8),
+        });
+
+        annotate_semantic_metadata_with_hints(
+            &mut block,
+            "x86-64",
+            SemanticMetadataOptions::default(),
+            reg_name_resolver(&[(0x10, 8, "rax"), (0x20, 8, "rsp")]),
+        );
+
+        let op_meta = block.op_metadata(1).expect("load metadata");
+        assert_eq!(op_meta.memory_class, Some(MemoryClass::Mmio));
+        assert_eq!(
+            op_meta.permissions,
+            Some(MemoryPermissions {
+                read: true,
+                write: false,
+                execute: false,
+                volatile: true,
+                cacheable: false,
+            })
+        );
     }
 
     #[test]
@@ -1914,6 +2015,13 @@ mod tests {
             0,
             OpMetadata {
                 memory_class: Some(MemoryClass::ThreadLocal),
+                permissions: Some(MemoryPermissions {
+                    read: true,
+                    write: true,
+                    execute: false,
+                    volatile: true,
+                    cacheable: false,
+                }),
                 ..Default::default()
             },
         );
@@ -1933,6 +2041,16 @@ mod tests {
         assert_eq!(meta.pointer_hint, Some(PointerHint::CodePointer));
         let op_meta = block.op_metadata(0).expect("existing op metadata");
         assert_eq!(op_meta.memory_class, Some(MemoryClass::ThreadLocal));
+        assert_eq!(
+            op_meta.permissions,
+            Some(MemoryPermissions {
+                read: true,
+                write: true,
+                execute: false,
+                volatile: true,
+                cacheable: false,
+            })
+        );
     }
 
     #[test]

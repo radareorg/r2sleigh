@@ -1916,6 +1916,8 @@ mod tests {
             read: true,
             write: false,
             execute: false,
+            volatile: false,
+            cacheable: true,
         });
 
         let mut block = R2ILBlock::new(0x1000, 1);
@@ -1946,6 +1948,8 @@ mod tests {
             read: false,
             write: false,
             execute: false,
+            volatile: false,
+            cacheable: true,
         });
         let mut block = R2ILBlock::new(0x1000, 1);
         block.push(R2ILOp::Load {
