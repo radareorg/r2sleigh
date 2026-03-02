@@ -122,6 +122,7 @@ typedef struct {
 static SymStateCache sym_state_cache = {0};
 static bool sleigh_pdd_core_plugin_registered = false;
 static RCore *sleigh_pdd_core_plugin_core = NULL;
+static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn);
 
 /* Minimum bytes to pass to libsla (it reads ahead for variable-length instructions) */
 #define SLEIGH_MIN_BYTES 16
@@ -2245,7 +2246,9 @@ R2ILContext *get_context(RAnal *anal) {
 	} else if (!strcmp (arch, "x86")) {
 		sleigh_arch_str = (bits == 64) ? "x86-64" : "x86";
 	} else if (!strcmp (arch, "arm")) {
-		sleigh_arch_str = "arm";
+		sleigh_arch_str = (bits == 64) ? "arm64" : "arm";
+	} else if (!strcmp (arch, "arm64") || !strcmp (arch, "aarch64")) {
+		sleigh_arch_str = "arm64";
 	} else if (!strcmp (arch, "riscv")) {
 		sleigh_arch_str = (bits >= 64) ? "riscv64" : "riscv32";
 	} else if (!strcmp (arch, "riscv32") || !strcmp (arch, "rv32")) {
@@ -2406,6 +2409,28 @@ static bool sleigh_fini(RAnal *anal) {
 	return true;
 }
 
+static int sleigh_add_data_refs_for_function(RAnal *anal, RAnalFunction *fcn) {
+	int added = 0;
+	RVecAnalRef *refs;
+
+	if (!anal || !fcn) {
+		return 0;
+	}
+	refs = sleigh_get_data_refs (anal, fcn);
+	if (!refs) {
+		return 0;
+	}
+
+	RAnalRef *ref;
+	R_VEC_FOREACH (refs, ref) {
+		if (r_anal_xrefs_set (anal, ref->at, ref->addr, ref->type)) {
+			added++;
+		}
+	}
+	RVecAnalRef_free (refs);
+	return added;
+}
+
 static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 	ensure_sleigh_pdd_core_plugin (anal);
 	bool is_sla_ns = r_str_startswith (cmd, "sla");
@@ -2430,12 +2455,12 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.ssa    - Show SSA form of instruction");
 			r_cons_println (cons, "| a:sla.defuse - Show def-use analysis of instruction");
 			r_cons_println (cons, "| a:sla.ssa.func - Show function SSA with phi nodes");
-			r_cons_println (cons, "| a:sla.ssa.func.opt - Show optimized function SSA");
-			r_cons_println (cons, "| a:sla.defuse.func - Show function-wide def-use analysis");
-			r_cons_println (cons, "| a:sla.dom    - Show dominator tree for current function");
-			r_cons_println (cons, "| a:sla.slice <var> - Backward slice from variable (e.g. rax_3)");
-			r_cons_println (cons, "| a:sla.sym    - Symbolic execution summary for current function");
-			r_cons_println (cons, "| a:sla.sym.paths - Explore paths in current function");
+				r_cons_println (cons, "| a:sla.ssa.func.opt - Show optimized function SSA");
+				r_cons_println (cons, "| a:sla.defuse.func - Show function-wide def-use analysis");
+				r_cons_println (cons, "| a:sla.dom    - Show dominator tree for current function");
+				r_cons_println (cons, "| a:sla.slice <var> - Backward slice from variable (e.g. rax_3)");
+				r_cons_println (cons, "| a:sla.sym    - Symbolic execution summary for current function");
+				r_cons_println (cons, "| a:sla.sym.paths - Explore paths in current function");
 			r_cons_println (cons, "| a:sla.sym.merge [on|off] - Toggle symbolic state merging");
 			r_cons_println (cons, "| a:sla.taint  - Taint analysis for current function");
 			r_cons_println (cons, "| a:sla.dec [name|addr] - Decompile function (current by default)");
@@ -3410,6 +3435,9 @@ static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
 	const bool semantic_comments_enabled = sleigh_semantic_comments_enabled (anal);
 	size_t semantic_comments_emitted = write_semantic_comments_for_function (
 		anal, ctx, &blocks, fcn->addr, semantic_comments_enabled);
+	/* Populate DATA refs during normal function analysis so users do not need
+	 * to call a plugin-specific command for computed-address xrefs. */
+	(void)sleigh_add_data_refs_for_function (anal, fcn);
 	R_LOG_DEBUG ("r2sleigh: semantic comments fcn=0x%"PFMT64x" enabled=%d emitted=%zu",
 		fcn->addr, semantic_comments_enabled? 1: 0, semantic_comments_emitted);
 

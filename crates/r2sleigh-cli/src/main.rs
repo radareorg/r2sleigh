@@ -1092,6 +1092,7 @@ mod tests {
                 src: r2il::Varnode::constant(1, 8),
             },
             Some(r2il::OpMetadata {
+                instruction_addr: None,
                 memory_class: Some(r2il::MemoryClass::Stack),
                 endianness: None,
                 memory_ordering: None,

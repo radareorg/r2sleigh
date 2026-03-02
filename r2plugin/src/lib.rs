@@ -3167,6 +3167,23 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
             let (spec, dis) = apply_userop_map(spec, dis, "arm");
             Ok((spec, dis))
         }
+        #[cfg(feature = "arm")]
+        "arm64" | "arm64e" | "aarch64" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
+                sleigh_config::processor_aarch64::PSPEC_AARCH64,
+                "aarch64",
+            )
+            .map_err(|e| e.to_string())?;
+            let dis = Disassembler::from_sla(
+                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
+                sleigh_config::processor_aarch64::PSPEC_AARCH64,
+                "aarch64",
+            )
+            .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "arm64");
+            Ok((spec, dis))
+        }
         #[cfg(feature = "riscv")]
         "riscv64" | "rv64" | "rv64gc" => {
             let spec = build_arch_spec(
@@ -3206,7 +3223,7 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
             #[cfg(feature = "x86")]
             supported.extend(["x86-64", "x86"]);
             #[cfg(feature = "arm")]
-            supported.push("arm");
+            supported.extend(["arm", "arm64", "aarch64"]);
             #[cfg(feature = "riscv")]
             supported.extend(["riscv64", "riscv32"]);
 
@@ -6143,6 +6160,7 @@ pub extern "C" fn r2sleigh_get_data_refs(
 
     // Convert R2ILBlocks to SSA
     let mut ssa_blocks = Vec::new();
+    let mut op_source_addrs = Vec::new();
     for i in 0..num_blocks {
         let blk_ptr = unsafe { *blocks.add(i) };
         if blk_ptr.is_null() {
@@ -6150,6 +6168,7 @@ pub extern "C" fn r2sleigh_get_data_refs(
         }
         let blk = unsafe { &*blk_ptr };
         let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+        op_source_addrs.push(op_source_addrs_from_r2il_block(blk));
         ssa_blocks.push(ssa_block);
     }
 
@@ -6158,7 +6177,7 @@ pub extern "C" fn r2sleigh_get_data_refs(
     }
 
     // Get data refs from def-use analysis
-    let refs = get_data_refs_from_ssa(&ssa_blocks);
+    let refs = get_data_refs_from_ssa_with_op_sources(&ssa_blocks, Some(&op_source_addrs));
 
     // Serialize to JSON
     match serde_json::to_string(&refs) {
@@ -7061,8 +7080,7 @@ fn size_to_type(size: u32) -> String {
 /// immediate).  Addresses below 0x1000 are almost always small constants
 /// (flags, loop bounds, offsets) rather than real memory references.
 fn parse_const_addr(name: &str) -> Option<u64> {
-    let hex = name.strip_prefix("const:")?;
-    let addr = u64::from_str_radix(hex, 16).ok()?;
+    let addr = parse_const_value(name)?;
     // Filter out small immediates and character constants.
     // Real data/code addresses in ELF binaries are well above 0x10000:
     //   - Non-PIE x86-64: base 0x400000
@@ -7074,27 +7092,99 @@ fn parse_const_addr(name: &str) -> Option<u64> {
     if addr >= 0x10000 { Some(addr) } else { None }
 }
 
+fn resolve_const_value(
+    const_env: &std::collections::HashMap<String, u64>,
+    var: &r2ssa::SSAVar,
+) -> Option<u64> {
+    parse_const_value(&var.name).or_else(|| const_env.get(&ssa_var_key(var)).copied())
+}
+
+fn resolve_const_addr(
+    const_env: &std::collections::HashMap<String, u64>,
+    var: &r2ssa::SSAVar,
+) -> Option<u64> {
+    resolve_const_value(const_env, var).filter(|addr| *addr >= 0x10000)
+}
+
+fn bit_width(size: u32) -> u32 {
+    size.saturating_mul(8).min(64)
+}
+
+fn mask_to_bits(value: u64, bits: u32) -> u64 {
+    match bits {
+        0 => 0,
+        64 => value,
+        n => value & ((1u64 << n) - 1),
+    }
+}
+
+fn sign_extend_bits(value: u64, bits: u32) -> u64 {
+    if bits == 0 {
+        return 0;
+    }
+    if bits >= 64 {
+        return value;
+    }
+    let masked = mask_to_bits(value, bits);
+    let sign_bit = 1u64 << (bits - 1);
+    if (masked & sign_bit) != 0 {
+        masked | (!0u64 << bits)
+    } else {
+        masked
+    }
+}
+
+fn op_source_addrs_from_r2il_block(block: &R2ILBlock) -> Vec<u64> {
+    block
+        .ops
+        .iter()
+        .enumerate()
+        .map(|(op_idx, _)| {
+            block
+                .op_metadata(op_idx)
+                .and_then(|meta| meta.instruction_addr)
+                .unwrap_or(block.addr)
+        })
+        .collect()
+}
+
 /// Get data references from SSA blocks.
 ///
 /// A "data ref" means: instruction at address X references a **memory address** Y.
 /// We emit refs for:
 ///   - Copy/IntAdd/IntSub with a const: source that looks like an address (LEA, MOV imm)
+///   - Conservative constant chains across Copy/Cast/New/IntAdd/IntSub/PtrAdd/PtrSub
 ///   - Load/Store whose address operand is a const: (absolute memory access)
 ///   - Call/CallInd whose target is a const: (direct call target)
 ///
 /// We do NOT emit refs for register def-use flow between instructions — those
 /// are data-flow edges, not address references.
-fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
+fn get_data_refs_from_ssa_with_op_sources(
+    ssa_blocks: &[r2ssa::SSABlock],
+    op_sources: Option<&[Vec<u64>]>,
+) -> Vec<DataRef> {
     let mut refs = Vec::new();
+    // Keep a conservative constant environment across SSA blocks so linear
+    // address chains split across instructions/blocks (e.g., adrp + add) can
+    // still resolve to a final absolute target.
+    let mut const_env: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
-    for block in ssa_blocks {
-        for op in &block.ops {
+    for (block_idx, block) in ssa_blocks.iter().enumerate() {
+        for (op_idx, op) in block.ops.iter().enumerate() {
+            let from = op_sources
+                .and_then(|blocks| blocks.get(block_idx))
+                .and_then(|ops| ops.get(op_idx))
+                .copied()
+                .unwrap_or(block.addr);
             match op {
                 // Copy from const address (LEA, MOV imm)
-                r2ssa::SSAOp::Copy { src, .. } => {
+                r2ssa::SSAOp::Copy { dst, src } => {
+                    if let Some(value) = resolve_const_value(&const_env, src) {
+                        const_env.insert(ssa_var_key(dst), value);
+                    }
                     if let Some(addr) = parse_const_addr(&src.name) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "d".to_string(),
                         });
@@ -7103,9 +7193,9 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 
                 // Load from absolute address
                 r2ssa::SSAOp::Load { addr, .. } => {
-                    if let Some(target) = parse_const_addr(&addr.name) {
+                    if let Some(target) = resolve_const_addr(&const_env, addr) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: target,
                             ref_type: "d".to_string(),
                         });
@@ -7114,9 +7204,9 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 
                 // Store to absolute address
                 r2ssa::SSAOp::Store { addr, .. } => {
-                    if let Some(target) = parse_const_addr(&addr.name) {
+                    if let Some(target) = resolve_const_addr(&const_env, addr) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: target,
                             ref_type: "d".to_string(),
                         });
@@ -7124,28 +7214,133 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
                 }
 
                 // IntAdd/IntSub with a const operand (e.g., base + offset)
-                r2ssa::SSAOp::IntAdd { a, b, .. } | r2ssa::SSAOp::IntSub { a, b, .. } => {
+                r2ssa::SSAOp::IntAdd { dst, a, b } => {
+                    if let (Some(lhs), Some(rhs)) = (
+                        resolve_const_value(&const_env, a),
+                        resolve_const_value(&const_env, b),
+                    ) {
+                        const_env.insert(ssa_var_key(dst), lhs.wrapping_add(rhs));
+                    }
                     if let Some(addr) = parse_const_addr(&a.name) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "d".to_string(),
                         });
                     }
                     if let Some(addr) = parse_const_addr(&b.name) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "d".to_string(),
                         });
+                    }
+                    if let Some(target) = resolve_const_addr(&const_env, dst) {
+                        refs.push(DataRef {
+                            from,
+                            to: target,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                }
+                r2ssa::SSAOp::IntSub { dst, a, b } => {
+                    if let (Some(lhs), Some(rhs)) = (
+                        resolve_const_value(&const_env, a),
+                        resolve_const_value(&const_env, b),
+                    ) {
+                        const_env.insert(ssa_var_key(dst), lhs.wrapping_sub(rhs));
+                    }
+                    if let Some(addr) = parse_const_addr(&a.name) {
+                        refs.push(DataRef {
+                            from,
+                            to: addr,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                    if let Some(addr) = parse_const_addr(&b.name) {
+                        refs.push(DataRef {
+                            from,
+                            to: addr,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                    if let Some(target) = resolve_const_addr(&const_env, dst) {
+                        refs.push(DataRef {
+                            from,
+                            to: target,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                }
+                r2ssa::SSAOp::PtrAdd {
+                    dst,
+                    base,
+                    index,
+                    element_size,
+                } => {
+                    if let (Some(base_val), Some(index_val)) = (
+                        resolve_const_value(&const_env, base),
+                        resolve_const_value(&const_env, index),
+                    ) {
+                        let scaled = index_val.wrapping_mul((*element_size).into());
+                        const_env.insert(ssa_var_key(dst), base_val.wrapping_add(scaled));
+                    }
+                    if let Some(target) = resolve_const_addr(&const_env, dst) {
+                        refs.push(DataRef {
+                            from,
+                            to: target,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                }
+                r2ssa::SSAOp::PtrSub {
+                    dst,
+                    base,
+                    index,
+                    element_size,
+                } => {
+                    if let (Some(base_val), Some(index_val)) = (
+                        resolve_const_value(&const_env, base),
+                        resolve_const_value(&const_env, index),
+                    ) {
+                        let scaled = index_val.wrapping_mul((*element_size).into());
+                        const_env.insert(ssa_var_key(dst), base_val.wrapping_sub(scaled));
+                    }
+                    if let Some(target) = resolve_const_addr(&const_env, dst) {
+                        refs.push(DataRef {
+                            from,
+                            to: target,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                }
+                r2ssa::SSAOp::Cast { dst, src } | r2ssa::SSAOp::New { dst, src } => {
+                    if let Some(value) = resolve_const_value(&const_env, src) {
+                        const_env.insert(ssa_var_key(dst), value);
+                    }
+                }
+                r2ssa::SSAOp::IntZExt { dst, src } => {
+                    if let Some(value) = resolve_const_value(&const_env, src) {
+                        let src_bits = bit_width(src.size);
+                        let dst_bits = bit_width(dst.size);
+                        let zext = mask_to_bits(value, src_bits);
+                        const_env.insert(ssa_var_key(dst), mask_to_bits(zext, dst_bits));
+                    }
+                }
+                r2ssa::SSAOp::IntSExt { dst, src } => {
+                    if let Some(value) = resolve_const_value(&const_env, src) {
+                        let src_bits = bit_width(src.size);
+                        let dst_bits = bit_width(dst.size);
+                        let sext = sign_extend_bits(value, src_bits);
+                        const_env.insert(ssa_var_key(dst), mask_to_bits(sext, dst_bits));
                     }
                 }
 
                 // Direct call/branch to known address
                 r2ssa::SSAOp::Call { target, .. } | r2ssa::SSAOp::Branch { target } => {
-                    if let Some(addr) = parse_const_addr(&target.name) {
+                    if let Some(addr) = resolve_const_addr(&const_env, target) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "c".to_string(), // code/call ref
                         });
@@ -7154,9 +7349,9 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 
                 // Indirect call/branch where the target is a known constant
                 r2ssa::SSAOp::CallInd { target, .. } | r2ssa::SSAOp::BranchInd { target } => {
-                    if let Some(addr) = parse_const_addr(&target.name) {
+                    if let Some(addr) = resolve_const_addr(&const_env, target) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "c".to_string(),
                         });
@@ -7165,9 +7360,9 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 
                 // CBranch: the target is a const address
                 r2ssa::SSAOp::CBranch { target, .. } => {
-                    if let Some(addr) = parse_const_addr(&target.name) {
+                    if let Some(addr) = resolve_const_addr(&const_env, target) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "c".to_string(),
                         });
@@ -7213,6 +7408,123 @@ mod tests {
                 "{synthetic} should be excluded as non-register data"
             );
         }
+    }
+
+    #[test]
+    fn get_data_refs_resolves_const_add_chain_target() {
+        let block = r2ssa::SSABlock {
+            addr: 0x401000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    src: r2ssa::SSAVar::new("const:dead0000", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    b: r2ssa::SSAVar::new("const:beef", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:load", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                },
+            ],
+        };
+
+        let refs = get_data_refs_from_ssa_with_op_sources(&[block], None);
+        assert!(
+            refs.iter()
+                .any(|r| { r.from == 0x401000 && r.to == 0xdeadbeef && r.ref_type == "d" }),
+            "const add chain should emit DATA xref to the computed target"
+        );
+    }
+
+    #[test]
+    fn get_data_refs_ignores_small_const_add_chain() {
+        let block = r2ssa::SSABlock {
+            addr: 0x402000,
+            size: 4,
+            ops: vec![r2ssa::SSAOp::IntAdd {
+                dst: r2ssa::SSAVar::new("tmp:small", 1, 8),
+                a: r2ssa::SSAVar::new("const:40", 0, 8),
+                b: r2ssa::SSAVar::new("const:2", 0, 8),
+            }],
+        };
+
+        let refs = get_data_refs_from_ssa_with_op_sources(&[block], None);
+        assert!(
+            !refs.iter().any(|r| r.to == 0x42),
+            "small immediate constants should not be treated as addresses"
+        );
+    }
+
+    #[test]
+    fn get_data_refs_resolves_const_add_chain_across_blocks() {
+        let block_a = r2ssa::SSABlock {
+            addr: 0x403000,
+            size: 4,
+            ops: vec![r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                src: r2ssa::SSAVar::new("const:dead0000", 0, 8),
+            }],
+        };
+        let block_b = r2ssa::SSABlock {
+            addr: 0x403004,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    b: r2ssa::SSAVar::new("const:beef", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:load", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                },
+            ],
+        };
+
+        let refs = get_data_refs_from_ssa_with_op_sources(&[block_a, block_b], None);
+        assert!(
+            refs.iter()
+                .any(|r| { r.from == 0x403004 && r.to == 0xdeadbeef && r.ref_type == "d" }),
+            "const add chain split across blocks should emit DATA xref to the computed target"
+        );
+    }
+
+    #[test]
+    fn get_data_refs_uses_per_op_source_addr_when_available() {
+        let block = r2ssa::SSABlock {
+            addr: 0x404000,
+            size: 0x20,
+            ops: vec![
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    src: r2ssa::SSAVar::new("const:404d00", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    b: r2ssa::SSAVar::new("const:108", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:load", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                },
+            ],
+        };
+        let op_sources = vec![vec![0x404008, 0x40400c, 0x404010]];
+
+        let refs = get_data_refs_from_ssa_with_op_sources(&[block], Some(&op_sources));
+        assert!(
+            refs.iter()
+                .any(|r| { r.from != 0x404000 && r.to == 0x404d6c && r.ref_type == "d" }),
+            "computed add-chain xref should use a non-block-head op source address"
+        );
     }
 
     #[cfg(feature = "x86")]
@@ -8326,6 +8638,18 @@ mod integration_tests {
     }
 
     #[test]
+    #[cfg(feature = "arm")]
+    fn create_disassembler_for_arch_arm64() {
+        let (spec, disasm) = create_disassembler_for_arch("arm64").expect("arm64 disassembler");
+        assert_eq!(spec.name, "aarch64");
+        assert!(spec.addr_size > 0);
+        assert_eq!(
+            disasm.userop_name(0),
+            userop_map_for_arch("arm64").get(&0).map(String::as_str)
+        );
+    }
+
+    #[test]
     #[cfg(feature = "riscv")]
     fn create_disassembler_for_arch_riscv64() {
         let (spec, disasm) = create_disassembler_for_arch("riscv64").expect("riscv64 disassembler");
@@ -8337,6 +8661,16 @@ mod integration_tests {
             disasm.userop_name(0),
             userop_map_for_arch("riscv64").get(&0).map(String::as_str)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn r2il_arch_init_arm64_loaded() {
+        let arch_cstr = CString::new("arm64").unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(r2il_is_loaded(ctx_ptr), 1, "arm64 context should be loaded");
+        r2il_free(ctx_ptr);
     }
 
     #[test]

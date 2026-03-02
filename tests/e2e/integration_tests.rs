@@ -3904,6 +3904,7 @@ mod ffi {
                     addr: r2il::Varnode::constant(0x1000, 8),
                 },
                 Some(r2il::OpMetadata {
+                    instruction_addr: None,
                     memory_class: Some(r2il::MemoryClass::Stack),
                     endianness: None,
                     memory_ordering: Some(r2il::MemoryOrdering::AcqRel),
@@ -4564,6 +4565,105 @@ mod deep_integration {
             Value::Null => {}
             _ => panic!("axtj should return an array or null"),
         }
+    }
+
+    #[test]
+    fn axtj_reports_computed_const_add_chain_data_ref() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "sym.test_const_addr_chain",
+            "axtj 0x404e08",
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "axtj 0x404e08");
+        let refs = expect_array(&json, "axtj 0x404e08");
+        assert!(
+            refs.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("DATA")
+                    && item
+                        .get("fcn_name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.contains("test_const_addr_chain"))
+            }),
+            "computed constant add-chain should create a DATA xref for test_const_addr_chain"
+        );
+    }
+
+    #[test]
+    fn aar_populates_computed_const_add_chain_after_aa_af() {
+        setup();
+        let result = r2_cmd(
+            vuln_test_binary(),
+            "aa; s sym.test_const_addr_chain; af; aar; axtj 0x404e08",
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "axtj 0x404e08 after aar");
+        let refs = expect_array(&json, "axtj 0x404e08 after aar");
+        assert!(
+            refs.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("DATA")
+                    && item
+                        .get("fcn_name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.contains("test_const_addr_chain"))
+            }),
+            "aar should populate computed DATA xrefs after aa;af"
+        );
+    }
+
+    #[test]
+    fn af_auto_populates_computed_const_add_chain_data_ref() {
+        setup();
+        let result = r2_cmd(
+            vuln_test_binary(),
+            "aa; s sym.test_const_addr_chain; af; axtj 0x404e08",
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "axtj 0x404e08 after af");
+        let refs = expect_array(&json, "axtj 0x404e08 after af");
+        assert!(
+            refs.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("DATA")
+                    && item
+                        .get("fcn_name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.contains("test_const_addr_chain"))
+            }),
+            "af should automatically populate computed DATA xrefs"
+        );
+    }
+
+    #[test]
+    fn aar_computed_target_uses_instruction_address_for_from() {
+        setup();
+        let fcn_addr_probe = r2_cmd(vuln_test_binary(), "aa; s sym.test_const_addr_chain; ?v $$");
+        fcn_addr_probe.assert_ok();
+        let fcn_addr_text = fcn_addr_probe.stdout.trim();
+        let fcn_addr = u64::from_str_radix(fcn_addr_text.trim_start_matches("0x"), 16)
+            .unwrap_or_else(|_| panic!("failed to parse function address from '{}'", fcn_addr_text));
+
+        let result = r2_cmd(
+            vuln_test_binary(),
+            "aa; s sym.test_const_addr_chain; af; aar; axtj 0x404e08",
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "axtj 0x404e08 after aar");
+        let refs = expect_array(&json, "axtj 0x404e08 after aar");
+        assert!(
+            refs.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("DATA")
+                    && item
+                        .get("fcn_name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.contains("test_const_addr_chain"))
+                    && item
+                        .get("from")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|from| from != fcn_addr)
+            }),
+            "at least one DATA xref should use an instruction address, not only function entry"
+        );
     }
 
     /// Verify that radare2 works correctly without the plugin's advanced features

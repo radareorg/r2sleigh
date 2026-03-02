@@ -27,8 +27,8 @@ Plugin Callbacks
 
 sleigh_op: Lifts instructions during aaa. Generates ESIL.
 sleigh_recover_vars: Provides SSA-derived variables for afva.
-sleigh_analyze_fcn: Per-function SSA analysis after af.
-sleigh_get_data_refs: Def-use xrefs after aar.
+sleigh_analyze_fcn: Per-function SSA analysis after af (also auto-applies DATA xrefs).
+sleigh_get_data_refs: Def-use xrefs callback used by radare2 during aar when supported.
 sleigh_post_analysis: Auto-taint + signature/CC write-back during aaaa.
 
 Command Reference
@@ -59,6 +59,9 @@ Function-Level:
 - a:sla.dec -- Decompile to C
 
 Both a:sla and a:sleigh prefixes work.
+
+DATA xrefs are applied automatically during function analysis (`af`) and reference
+analysis (`aar`) via plugin callbacks.
 
 Instruction Export Path
 -----------------------

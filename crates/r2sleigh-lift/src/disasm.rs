@@ -359,12 +359,15 @@ impl Disassembler {
                     }
 
                     let base_op_index = combined_block.ops.len();
+                    let mut instr_op_metadata = op_metadata;
                     // Append all ops from this instruction
                     for op in ops {
                         combined_block.push(op);
                     }
-                    for (idx, meta) in op_metadata {
-                        combined_block.set_op_metadata(base_op_index + idx, meta);
+                    for local_idx in 0..(combined_block.ops.len() - base_op_index) {
+                        let mut meta = instr_op_metadata.remove(&local_idx).unwrap_or_default();
+                        meta.instruction_addr = Some(instr_addr);
+                        combined_block.set_op_metadata(base_op_index + local_idx, meta);
                     }
 
                     offset += instr_size;
