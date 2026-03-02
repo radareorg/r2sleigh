@@ -990,7 +990,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1989,9 +1989,9 @@ dependencies = [
 
 [[package]]
 name = "z3"
-version = "0.19.9"
+version = "0.19.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1a0facc384f39876d22418a61b9bdd291451a374e36dc5036fc59b1f2062ff6"
+checksum = "7a96a89e4d063f42e153c22ab840073654639149bab0882b6ea44856bdb50c7e"
 dependencies = [
  "log",
  "num",
@@ -2000,9 +2000,9 @@ dependencies = [
 
 [[package]]
 name = "z3-sys"
-version = "0.10.6"
+version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7242a9063a67fadfe5b9d2956aa6c493c5159f2e22d69645876ed1bba6204643"
+checksum = "2edfd1f4106f59e475dde9eab39eec89cf2d3fb41189eab87d575e0fa40a0818"
 dependencies = [
  "bindgen",
  "pkg-config",
