@@ -8,6 +8,7 @@
 #include <r_util/r_num.h>
 #include <r_util/r_str.h>
 #include <r_util/r_type.h>
+#include <sdb/ht_up.h>
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -152,6 +153,16 @@ typedef struct {
 static TypeWritebackCacheEntry *type_writeback_cache = NULL;
 static size_t type_writeback_cache_count = 0;
 static size_t type_writeback_cache_capacity = 0;
+static HtUP *type_writeback_cache_index = NULL;
+
+typedef struct {
+	ut64 key;
+	bool imported;
+} StructDeclMemoEntry;
+
+static StructDeclMemoEntry *struct_decl_memo = NULL;
+static size_t struct_decl_memo_count = 0;
+static size_t struct_decl_memo_capacity = 0;
 
 /* Minimum bytes to pass to libsla (it reads ahead for variable-length instructions) */
 #define SLEIGH_MIN_BYTES 16
@@ -220,12 +231,79 @@ static void type_writeback_cache_clear(void) {
 	type_writeback_cache = NULL;
 	type_writeback_cache_count = 0;
 	type_writeback_cache_capacity = 0;
+	ht_up_free (type_writeback_cache_index);
+	type_writeback_cache_index = NULL;
+}
+
+static void struct_decl_memo_clear(void) {
+	free (struct_decl_memo);
+	struct_decl_memo = NULL;
+	struct_decl_memo_count = 0;
+	struct_decl_memo_capacity = 0;
+}
+
+static bool struct_decl_memo_get(ut64 key, bool *imported) {
+	size_t i;
+	for (i = 0; i < struct_decl_memo_count; i++) {
+		if (struct_decl_memo[i].key == key) {
+			if (imported) {
+				*imported = struct_decl_memo[i].imported;
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+static void struct_decl_memo_put(ut64 key, bool imported) {
+	size_t i;
+	StructDeclMemoEntry *next;
+
+	for (i = 0; i < struct_decl_memo_count; i++) {
+		if (struct_decl_memo[i].key == key) {
+			struct_decl_memo[i].imported = imported;
+			return;
+		}
+	}
+
+	if (struct_decl_memo_count >= struct_decl_memo_capacity) {
+		size_t new_capacity = struct_decl_memo_capacity ? struct_decl_memo_capacity * 2 : 256;
+		next = realloc (struct_decl_memo, new_capacity * sizeof (StructDeclMemoEntry));
+		if (!next) {
+			return;
+		}
+		struct_decl_memo = next;
+		struct_decl_memo_capacity = new_capacity;
+	}
+
+	struct_decl_memo[struct_decl_memo_count].key = key;
+	struct_decl_memo[struct_decl_memo_count].imported = imported;
+	struct_decl_memo_count++;
 }
 
 static TypeWritebackCacheEntry *type_writeback_cache_get(ut64 addr) {
 	size_t i;
+	bool found = false;
+	void *encoded_index;
+
+	if (type_writeback_cache_index) {
+		encoded_index = ht_up_find (type_writeback_cache_index, addr, &found);
+		if (found) {
+			size_t idx_plus_one = (size_t)encoded_index;
+			if (idx_plus_one > 0) {
+				size_t idx = idx_plus_one - 1;
+				if (idx < type_writeback_cache_count && type_writeback_cache[idx].addr == addr) {
+					return &type_writeback_cache[idx];
+				}
+			}
+		}
+	}
+
 	for (i = 0; i < type_writeback_cache_count; i++) {
 		if (type_writeback_cache[i].addr == addr) {
+			if (type_writeback_cache_index) {
+				ht_up_insert (type_writeback_cache_index, addr, (void *)(size_t)(i + 1));
+			}
 			return &type_writeback_cache[i];
 		}
 	}
@@ -259,6 +337,12 @@ static bool type_writeback_cache_put(ut64 addr, ut64 key, ut64 dep_hash, ut64 pa
 	type_writeback_cache[type_writeback_cache_count].payload_hash = payload_hash;
 	type_writeback_cache[type_writeback_cache_count].dep_hash = dep_hash;
 	type_writeback_cache[type_writeback_cache_count].applied_hash = applied_hash;
+	if (!type_writeback_cache_index) {
+		type_writeback_cache_index = ht_up_new0 ();
+	}
+	if (type_writeback_cache_index) {
+		ht_up_insert (type_writeback_cache_index, addr, (void *)(size_t)(type_writeback_cache_count + 1));
+	}
 	type_writeback_cache_count++;
 	return true;
 }
@@ -1034,6 +1118,24 @@ static bool ut64_array_contains(const ut64 *items, size_t count, ut64 value) {
 	for (i = 0; i < count; i++) {
 		if (items[i] == value) {
 			return true;
+		}
+	}
+	return false;
+}
+
+static bool ut64_sorted_contains(const ut64 *items, size_t count, ut64 value) {
+	size_t lo = 0;
+	size_t hi = count;
+	while (lo < hi) {
+		size_t mid = lo + ((hi - lo) / 2);
+		ut64 cur = items[mid];
+		if (cur == value) {
+			return true;
+		}
+		if (cur < value) {
+			lo = mid + 1;
+		} else {
+			hi = mid;
 		}
 	}
 	return false;
@@ -2553,6 +2655,7 @@ static bool sleigh_fini(RAnal *anal) {
 	sleigh_arch = NULL;
 	sym_state_cache_clear ();
 	type_writeback_cache_clear ();
+	struct_decl_memo_clear ();
 	return true;
 }
 
@@ -4419,20 +4522,35 @@ static bool verify_var_rename_applied(RAnalVar *var, const char *expected_name) 
 static bool apply_struct_decl_candidate(RAnal *anal, RCore *core, const char *name, const char *decl) {
 	bool imported;
 	char *errmsg = NULL;
+	ut64 memo_key;
+	bool memo_result = false;
 
 	if (!anal || !name || !*name || !decl || !*decl) {
 		return false;
 	}
+	if (r_type_kind (anal->sdb_types, name) != R_TYPE_INVALID
+			|| r_type_get_bitsize (anal->sdb_types, name) > 0) {
+		return true;
+	}
+	memo_key = r_str_hash64 (name);
+	memo_key ^= (r_str_hash64 (decl) << 1);
+	if (struct_decl_memo_get (memo_key, &memo_result)) {
+		return memo_result;
+	}
 	imported = r_anal_import_c_decls (anal, decl, &errmsg);
 	free (errmsg);
 	if (imported && r_type_kind (anal->sdb_types, name) != R_TYPE_INVALID) {
+		struct_decl_memo_put (memo_key, true);
 		return true;
 	}
 	if (!core) {
+		struct_decl_memo_put (memo_key, false);
 		return false;
 	}
 	r_core_cmdf (core, "td %s", decl);
-	return r_type_kind (anal->sdb_types, name) != R_TYPE_INVALID;
+	imported = r_type_kind (anal->sdb_types, name) != R_TYPE_INVALID;
+	struct_decl_memo_put (memo_key, imported);
+	return imported;
 }
 
 static bool candidate_type_has_known_struct(RAnal *anal, const char *type_name) {
@@ -4635,6 +4753,10 @@ static ut64 compute_callee_dependency_hash(RAnal *anal, RAnalFunction *fcn) {
 	if (!anal || !fcn) {
 		return 0;
 	}
+	/* First pass: no cached applications yet, so dependency hash cannot change. */
+	if (type_writeback_cache_count == 0) {
+		return 0;
+	}
 	refs = r_anal_function_get_refs (fcn);
 	if (!refs) {
 		return 0;
@@ -4685,7 +4807,7 @@ static bool queue_addr_if_eligible(
 	if (is_new) {
 		*is_new = false;
 	}
-	if (!addr || !ut64_array_contains (eligible_addrs, eligible_count, addr)) {
+	if (!addr || !ut64_sorted_contains (eligible_addrs, eligible_count, addr)) {
 		return false;
 	}
 	already = ut64_array_contains (*queue, *queue_count, addr);
@@ -5491,6 +5613,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	size_t changed_type_count = 0;
 	size_t changed_type_cap = 0;
 
+	struct_decl_memo_clear ();
 	if (!ctx) {
 		return false;
 	}
@@ -5518,6 +5641,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	bool xref_enabled = post_mode != SLEIGH_MODE_FAST;
 	if (num_fcns == 0) {
 		free (tsj_shared_json);
+		struct_decl_memo_clear ();
 		return true;
 	}
 	caller_propagation_state_init (&prop_state);
@@ -6133,6 +6257,10 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		block_array_free (&blocks);
 	}
 
+	if (type_eligible_count > 1) {
+		qsort (type_eligible_addrs, type_eligible_count, sizeof (ut64), ut64_cmp_asc);
+	}
+
 	if (type_writeback_enabled) {
 		ut64 *queue = NULL;
 		size_t queue_count = 0;
@@ -6368,6 +6496,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	free (type_eligible_addrs);
 	free (changed_type_fcns);
 	free (tsj_shared_json);
+	struct_decl_memo_clear ();
 	if (best_sink_label) {
 		R_LOG_INFO ("r2sleigh: post-analysis most interesting sink 0x%"PFMT64x" label=%s",
 			best_sink_addr, best_sink_label);
