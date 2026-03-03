@@ -269,59 +269,9 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
     let mut profile = String::new();
     let mut reg_meta: std::collections::HashMap<String, (u32, u64, String)> =
         std::collections::HashMap::new();
-    let mut pc = None;
-    let mut sp = None;
-    let mut bp = None;
-    let mut a0 = None;
-    let mut a1 = None;
-    let mut a2 = None;
-    let mut a3 = None;
-    let mut r0 = None;
 
-    // Heuristics for roles
+    // Emit all original register names from Sleigh.
     for reg in &arch.registers {
-        let name_lower = reg.name.to_lowercase();
-
-        if name_lower == "pc" || name_lower == "rip" || name_lower == "eip" || name_lower == "ip" {
-            if pc.is_none() {
-                pc = Some(&reg.name);
-            }
-        } else if name_lower == "sp" || name_lower == "rsp" || name_lower == "esp" {
-            if sp.is_none() {
-                sp = Some(&reg.name);
-            }
-        } else if name_lower == "bp"
-            || name_lower == "rbp"
-            || name_lower == "ebp"
-            || name_lower == "fp"
-        {
-            if bp.is_none() {
-                bp = Some(&reg.name);
-            }
-        } else if name_lower == "r0"
-            || name_lower == "rax"
-            || name_lower == "eax"
-            || name_lower == "v0"
-        {
-            if r0.is_none() {
-                r0 = Some(&reg.name);
-            }
-        } else if name_lower == "rdi" || name_lower == "a0" {
-            if a0.is_none() {
-                a0 = Some(&reg.name);
-            }
-        } else if name_lower == "rsi" || name_lower == "a1" {
-            if a1.is_none() {
-                a1 = Some(&reg.name);
-            }
-        } else if name_lower == "rdx" || name_lower == "a2" {
-            if a2.is_none() {
-                a2 = Some(&reg.name);
-            }
-        } else if (name_lower == "rcx" || name_lower == "a3") && a3.is_none() {
-            a3 = Some(&reg.name);
-        }
-
         profile.push_str(&format!(
             "gpr\t{}\t.{}\t{}\t0\n",
             reg.name,
@@ -329,40 +279,119 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
             reg.offset
         ));
         reg_meta.insert(
-            name_lower.clone(),
+            reg.name.to_ascii_lowercase(),
             (reg.size * 8, reg.offset, reg.name.clone()),
         );
     }
 
+    // Emit lowercase aliases for case-insensitive lookups.
+    let mut lowercase_aliases = Vec::new();
     for (name_lower, (bits, offset, original)) in &reg_meta {
         if original != name_lower {
-            profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", name_lower, bits, offset));
+            lowercase_aliases.push((name_lower.clone(), *bits, *offset));
+        }
+    }
+    for (name_lower, bits, offset) in lowercase_aliases {
+        profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", name_lower, bits, offset));
+    }
+
+    // Synthesize missing aliases expected by radare2/ESIL for specific arches.
+    let mut add_gpr_alias = |alias_name: &str, source_name: &str| {
+        let alias_lower = alias_name.to_ascii_lowercase();
+        if reg_meta.contains_key(&alias_lower) {
+            return;
+        }
+        let Some((bits, offset, _)) = reg_meta.get(source_name).cloned() else {
+            return;
+        };
+        profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", alias_lower, bits, offset));
+        reg_meta.insert(alias_lower.clone(), (bits, offset, alias_lower));
+    };
+
+    let arch_name = arch.name.to_ascii_lowercase();
+    let is_arm64 = arch_name.contains("aarch64") || arch_name.contains("arm64");
+    if is_arm64 {
+        // AArch64 Sleigh specs often expose CY/ZR/NG/OV instead of cf/zf/nf/vf.
+        add_gpr_alias("cf", "cy");
+        add_gpr_alias("zf", "zr");
+        add_gpr_alias("nf", "ng");
+        add_gpr_alias("vf", "ov");
+        // ESIL/radare2 paths may reference lr directly; map it to x30.
+        add_gpr_alias("lr", "x30");
+    }
+
+    let first_existing = |candidates: &[&str]| -> Option<String> {
+        candidates
+            .iter()
+            .find_map(|name| reg_meta.get(*name).map(|(_, _, original)| original.clone()))
+    };
+
+    let pc = first_existing(&["pc", "rip", "eip", "ip"]);
+    let sp = first_existing(&["sp", "rsp", "esp"]);
+    let bp = first_existing(&["bp", "rbp", "ebp", "fp", "x29"]);
+
+    let mut a_roles: [Option<String>; 8] = std::array::from_fn(|_| None);
+    a_roles[0] = first_existing(&["rdi", "a0", "x0", "w0", "r0"]);
+    a_roles[1] = first_existing(&["rsi", "a1", "x1", "w1", "r1"]);
+    a_roles[2] = first_existing(&["rdx", "a2", "x2", "w2", "r2"]);
+    a_roles[3] = first_existing(&["rcx", "a3", "x3", "w3", "r3"]);
+
+    let mut r_roles: [Option<String>; 4] = std::array::from_fn(|_| None);
+    r_roles[0] = first_existing(&["r0", "rax", "eax", "v0", "x0", "w0"]);
+    r_roles[1] = first_existing(&["r1", "x1", "w1"]);
+    r_roles[2] = first_existing(&["r2", "x2", "w2"]);
+    r_roles[3] = first_existing(&["r3", "x3", "w3"]);
+
+    let mut sn = first_existing(&["sn"]);
+
+    if is_arm64 {
+        for idx in 0..8 {
+            if let Some(reg) = first_existing(&[&format!("x{idx}"), &format!("w{idx}")]) {
+                a_roles[idx] = Some(reg.clone());
+                if idx < 4 {
+                    r_roles[idx] = Some(reg);
+                }
+            }
+        }
+        if sn.is_none() {
+            sn = first_existing(&["x16", "x8"]);
         }
     }
 
-    if let Some(n) = pc {
+    if let Some(n) = pc.as_deref() {
         profile.push_str(&format!("=PC\t{}\n", n));
     }
-    if let Some(n) = sp {
+    if let Some(n) = sp.as_deref() {
         profile.push_str(&format!("=SP\t{}\n", n));
     }
-    if let Some(n) = bp {
+    if let Some(n) = bp.as_deref() {
         profile.push_str(&format!("=BP\t{}\n", n));
     }
-    if let Some(n) = a0 {
-        profile.push_str(&format!("=A0\t{}\n", n));
+    for (idx, reg) in a_roles.iter().enumerate() {
+        if let Some(n) = reg.as_deref() {
+            profile.push_str(&format!("=A{}\t{}\n", idx, n));
+        }
     }
-    if let Some(n) = a1 {
-        profile.push_str(&format!("=A1\t{}\n", n));
+    for (idx, reg) in r_roles.iter().enumerate() {
+        if let Some(n) = reg.as_deref() {
+            profile.push_str(&format!("=R{}\t{}\n", idx, n));
+        }
     }
-    if let Some(n) = a2 {
-        profile.push_str(&format!("=A2\t{}\n", n));
+    if let Some(n) = sn.as_deref() {
+        profile.push_str(&format!("=SN\t{}\n", n));
     }
-    if let Some(n) = a3 {
-        profile.push_str(&format!("=A3\t{}\n", n));
+
+    if let Some(n) = first_existing(&["cf"]).as_deref() {
+        profile.push_str(&format!("=CF\t{}\n", n));
     }
-    if let Some(n) = r0 {
-        profile.push_str(&format!("=R0\t{}\n", n));
+    if let Some(n) = first_existing(&["zf"]).as_deref() {
+        profile.push_str(&format!("=ZF\t{}\n", n));
+    }
+    if let Some(n) = first_existing(&["nf", "sf"]).as_deref() {
+        profile.push_str(&format!("=SF\t{}\n", n));
+    }
+    if let Some(n) = first_existing(&["vf", "of"]).as_deref() {
+        profile.push_str(&format!("=OF\t{}\n", n));
     }
 
     CString::new(profile).map_or(ptr::null_mut(), |c| c.into_raw())
@@ -3167,6 +3196,23 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
             let (spec, dis) = apply_userop_map(spec, dis, "arm");
             Ok((spec, dis))
         }
+        #[cfg(feature = "arm")]
+        "arm64" | "arm64e" | "aarch64" => {
+            let spec = build_arch_spec(
+                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
+                sleigh_config::processor_aarch64::PSPEC_AARCH64,
+                "aarch64",
+            )
+            .map_err(|e| e.to_string())?;
+            let dis = Disassembler::from_sla(
+                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
+                sleigh_config::processor_aarch64::PSPEC_AARCH64,
+                "aarch64",
+            )
+            .map_err(|e| e.to_string())?;
+            let (spec, dis) = apply_userop_map(spec, dis, "arm64");
+            Ok((spec, dis))
+        }
         #[cfg(feature = "riscv")]
         "riscv64" | "rv64" | "rv64gc" => {
             let spec = build_arch_spec(
@@ -3206,7 +3252,7 @@ fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), 
             #[cfg(feature = "x86")]
             supported.extend(["x86-64", "x86"]);
             #[cfg(feature = "arm")]
-            supported.push("arm");
+            supported.extend(["arm", "arm64", "aarch64"]);
             #[cfg(feature = "riscv")]
             supported.extend(["riscv64", "riscv32"]);
 
@@ -6143,6 +6189,7 @@ pub extern "C" fn r2sleigh_get_data_refs(
 
     // Convert R2ILBlocks to SSA
     let mut ssa_blocks = Vec::new();
+    let mut op_source_addrs = Vec::new();
     for i in 0..num_blocks {
         let blk_ptr = unsafe { *blocks.add(i) };
         if blk_ptr.is_null() {
@@ -6150,6 +6197,7 @@ pub extern "C" fn r2sleigh_get_data_refs(
         }
         let blk = unsafe { &*blk_ptr };
         let ssa_block = r2ssa::block::to_ssa(blk, disasm);
+        op_source_addrs.push(op_source_addrs_from_r2il_block(blk));
         ssa_blocks.push(ssa_block);
     }
 
@@ -6158,7 +6206,7 @@ pub extern "C" fn r2sleigh_get_data_refs(
     }
 
     // Get data refs from def-use analysis
-    let refs = get_data_refs_from_ssa(&ssa_blocks);
+    let refs = get_data_refs_from_ssa_with_op_sources(&ssa_blocks, Some(&op_source_addrs));
 
     // Serialize to JSON
     match serde_json::to_string(&refs) {
@@ -7061,8 +7109,7 @@ fn size_to_type(size: u32) -> String {
 /// immediate).  Addresses below 0x1000 are almost always small constants
 /// (flags, loop bounds, offsets) rather than real memory references.
 fn parse_const_addr(name: &str) -> Option<u64> {
-    let hex = name.strip_prefix("const:")?;
-    let addr = u64::from_str_radix(hex, 16).ok()?;
+    let addr = parse_const_value(name)?;
     // Filter out small immediates and character constants.
     // Real data/code addresses in ELF binaries are well above 0x10000:
     //   - Non-PIE x86-64: base 0x400000
@@ -7074,27 +7121,99 @@ fn parse_const_addr(name: &str) -> Option<u64> {
     if addr >= 0x10000 { Some(addr) } else { None }
 }
 
+fn resolve_const_value(
+    const_env: &std::collections::HashMap<String, u64>,
+    var: &r2ssa::SSAVar,
+) -> Option<u64> {
+    parse_const_value(&var.name).or_else(|| const_env.get(&ssa_var_key(var)).copied())
+}
+
+fn resolve_const_addr(
+    const_env: &std::collections::HashMap<String, u64>,
+    var: &r2ssa::SSAVar,
+) -> Option<u64> {
+    resolve_const_value(const_env, var).filter(|addr| *addr >= 0x10000)
+}
+
+fn bit_width(size: u32) -> u32 {
+    size.saturating_mul(8).min(64)
+}
+
+fn mask_to_bits(value: u64, bits: u32) -> u64 {
+    match bits {
+        0 => 0,
+        64 => value,
+        n => value & ((1u64 << n) - 1),
+    }
+}
+
+fn sign_extend_bits(value: u64, bits: u32) -> u64 {
+    if bits == 0 {
+        return 0;
+    }
+    if bits >= 64 {
+        return value;
+    }
+    let masked = mask_to_bits(value, bits);
+    let sign_bit = 1u64 << (bits - 1);
+    if (masked & sign_bit) != 0 {
+        masked | (!0u64 << bits)
+    } else {
+        masked
+    }
+}
+
+fn op_source_addrs_from_r2il_block(block: &R2ILBlock) -> Vec<u64> {
+    block
+        .ops
+        .iter()
+        .enumerate()
+        .map(|(op_idx, _)| {
+            block
+                .op_metadata(op_idx)
+                .and_then(|meta| meta.instruction_addr)
+                .unwrap_or(block.addr)
+        })
+        .collect()
+}
+
 /// Get data references from SSA blocks.
 ///
 /// A "data ref" means: instruction at address X references a **memory address** Y.
 /// We emit refs for:
 ///   - Copy/IntAdd/IntSub with a const: source that looks like an address (LEA, MOV imm)
+///   - Conservative constant chains across Copy/Cast/New/IntAdd/IntSub/PtrAdd/PtrSub
 ///   - Load/Store whose address operand is a const: (absolute memory access)
 ///   - Call/CallInd whose target is a const: (direct call target)
 ///
 /// We do NOT emit refs for register def-use flow between instructions — those
 /// are data-flow edges, not address references.
-fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
+fn get_data_refs_from_ssa_with_op_sources(
+    ssa_blocks: &[r2ssa::SSABlock],
+    op_sources: Option<&[Vec<u64>]>,
+) -> Vec<DataRef> {
     let mut refs = Vec::new();
+    // Keep a conservative constant environment across SSA blocks so linear
+    // address chains split across instructions/blocks (e.g., adrp + add) can
+    // still resolve to a final absolute target.
+    let mut const_env: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 
-    for block in ssa_blocks {
-        for op in &block.ops {
+    for (block_idx, block) in ssa_blocks.iter().enumerate() {
+        for (op_idx, op) in block.ops.iter().enumerate() {
+            let from = op_sources
+                .and_then(|blocks| blocks.get(block_idx))
+                .and_then(|ops| ops.get(op_idx))
+                .copied()
+                .unwrap_or(block.addr);
             match op {
                 // Copy from const address (LEA, MOV imm)
-                r2ssa::SSAOp::Copy { src, .. } => {
+                r2ssa::SSAOp::Copy { dst, src } => {
+                    if let Some(value) = resolve_const_value(&const_env, src) {
+                        const_env.insert(ssa_var_key(dst), value);
+                    }
                     if let Some(addr) = parse_const_addr(&src.name) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "d".to_string(),
                         });
@@ -7103,9 +7222,9 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 
                 // Load from absolute address
                 r2ssa::SSAOp::Load { addr, .. } => {
-                    if let Some(target) = parse_const_addr(&addr.name) {
+                    if let Some(target) = resolve_const_addr(&const_env, addr) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: target,
                             ref_type: "d".to_string(),
                         });
@@ -7114,9 +7233,9 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 
                 // Store to absolute address
                 r2ssa::SSAOp::Store { addr, .. } => {
-                    if let Some(target) = parse_const_addr(&addr.name) {
+                    if let Some(target) = resolve_const_addr(&const_env, addr) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: target,
                             ref_type: "d".to_string(),
                         });
@@ -7124,28 +7243,133 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
                 }
 
                 // IntAdd/IntSub with a const operand (e.g., base + offset)
-                r2ssa::SSAOp::IntAdd { a, b, .. } | r2ssa::SSAOp::IntSub { a, b, .. } => {
+                r2ssa::SSAOp::IntAdd { dst, a, b } => {
+                    if let (Some(lhs), Some(rhs)) = (
+                        resolve_const_value(&const_env, a),
+                        resolve_const_value(&const_env, b),
+                    ) {
+                        const_env.insert(ssa_var_key(dst), lhs.wrapping_add(rhs));
+                    }
                     if let Some(addr) = parse_const_addr(&a.name) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "d".to_string(),
                         });
                     }
                     if let Some(addr) = parse_const_addr(&b.name) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "d".to_string(),
                         });
+                    }
+                    if let Some(target) = resolve_const_addr(&const_env, dst) {
+                        refs.push(DataRef {
+                            from,
+                            to: target,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                }
+                r2ssa::SSAOp::IntSub { dst, a, b } => {
+                    if let (Some(lhs), Some(rhs)) = (
+                        resolve_const_value(&const_env, a),
+                        resolve_const_value(&const_env, b),
+                    ) {
+                        const_env.insert(ssa_var_key(dst), lhs.wrapping_sub(rhs));
+                    }
+                    if let Some(addr) = parse_const_addr(&a.name) {
+                        refs.push(DataRef {
+                            from,
+                            to: addr,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                    if let Some(addr) = parse_const_addr(&b.name) {
+                        refs.push(DataRef {
+                            from,
+                            to: addr,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                    if let Some(target) = resolve_const_addr(&const_env, dst) {
+                        refs.push(DataRef {
+                            from,
+                            to: target,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                }
+                r2ssa::SSAOp::PtrAdd {
+                    dst,
+                    base,
+                    index,
+                    element_size,
+                } => {
+                    if let (Some(base_val), Some(index_val)) = (
+                        resolve_const_value(&const_env, base),
+                        resolve_const_value(&const_env, index),
+                    ) {
+                        let scaled = index_val.wrapping_mul((*element_size).into());
+                        const_env.insert(ssa_var_key(dst), base_val.wrapping_add(scaled));
+                    }
+                    if let Some(target) = resolve_const_addr(&const_env, dst) {
+                        refs.push(DataRef {
+                            from,
+                            to: target,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                }
+                r2ssa::SSAOp::PtrSub {
+                    dst,
+                    base,
+                    index,
+                    element_size,
+                } => {
+                    if let (Some(base_val), Some(index_val)) = (
+                        resolve_const_value(&const_env, base),
+                        resolve_const_value(&const_env, index),
+                    ) {
+                        let scaled = index_val.wrapping_mul((*element_size).into());
+                        const_env.insert(ssa_var_key(dst), base_val.wrapping_sub(scaled));
+                    }
+                    if let Some(target) = resolve_const_addr(&const_env, dst) {
+                        refs.push(DataRef {
+                            from,
+                            to: target,
+                            ref_type: "d".to_string(),
+                        });
+                    }
+                }
+                r2ssa::SSAOp::Cast { dst, src } | r2ssa::SSAOp::New { dst, src } => {
+                    if let Some(value) = resolve_const_value(&const_env, src) {
+                        const_env.insert(ssa_var_key(dst), value);
+                    }
+                }
+                r2ssa::SSAOp::IntZExt { dst, src } => {
+                    if let Some(value) = resolve_const_value(&const_env, src) {
+                        let src_bits = bit_width(src.size);
+                        let dst_bits = bit_width(dst.size);
+                        let zext = mask_to_bits(value, src_bits);
+                        const_env.insert(ssa_var_key(dst), mask_to_bits(zext, dst_bits));
+                    }
+                }
+                r2ssa::SSAOp::IntSExt { dst, src } => {
+                    if let Some(value) = resolve_const_value(&const_env, src) {
+                        let src_bits = bit_width(src.size);
+                        let dst_bits = bit_width(dst.size);
+                        let sext = sign_extend_bits(value, src_bits);
+                        const_env.insert(ssa_var_key(dst), mask_to_bits(sext, dst_bits));
                     }
                 }
 
                 // Direct call/branch to known address
                 r2ssa::SSAOp::Call { target, .. } | r2ssa::SSAOp::Branch { target } => {
-                    if let Some(addr) = parse_const_addr(&target.name) {
+                    if let Some(addr) = resolve_const_addr(&const_env, target) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "c".to_string(), // code/call ref
                         });
@@ -7154,9 +7378,9 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 
                 // Indirect call/branch where the target is a known constant
                 r2ssa::SSAOp::CallInd { target, .. } | r2ssa::SSAOp::BranchInd { target } => {
-                    if let Some(addr) = parse_const_addr(&target.name) {
+                    if let Some(addr) = resolve_const_addr(&const_env, target) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "c".to_string(),
                         });
@@ -7165,9 +7389,9 @@ fn get_data_refs_from_ssa(ssa_blocks: &[r2ssa::SSABlock]) -> Vec<DataRef> {
 
                 // CBranch: the target is a const address
                 r2ssa::SSAOp::CBranch { target, .. } => {
-                    if let Some(addr) = parse_const_addr(&target.name) {
+                    if let Some(addr) = resolve_const_addr(&const_env, target) {
                         refs.push(DataRef {
-                            from: block.addr,
+                            from,
                             to: addr,
                             ref_type: "c".to_string(),
                         });
@@ -7213,6 +7437,123 @@ mod tests {
                 "{synthetic} should be excluded as non-register data"
             );
         }
+    }
+
+    #[test]
+    fn get_data_refs_resolves_const_add_chain_target() {
+        let block = r2ssa::SSABlock {
+            addr: 0x401000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    src: r2ssa::SSAVar::new("const:dead0000", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    b: r2ssa::SSAVar::new("const:beef", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:load", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                },
+            ],
+        };
+
+        let refs = get_data_refs_from_ssa_with_op_sources(&[block], None);
+        assert!(
+            refs.iter()
+                .any(|r| { r.from == 0x401000 && r.to == 0xdeadbeef && r.ref_type == "d" }),
+            "const add chain should emit DATA xref to the computed target"
+        );
+    }
+
+    #[test]
+    fn get_data_refs_ignores_small_const_add_chain() {
+        let block = r2ssa::SSABlock {
+            addr: 0x402000,
+            size: 4,
+            ops: vec![r2ssa::SSAOp::IntAdd {
+                dst: r2ssa::SSAVar::new("tmp:small", 1, 8),
+                a: r2ssa::SSAVar::new("const:40", 0, 8),
+                b: r2ssa::SSAVar::new("const:2", 0, 8),
+            }],
+        };
+
+        let refs = get_data_refs_from_ssa_with_op_sources(&[block], None);
+        assert!(
+            !refs.iter().any(|r| r.to == 0x42),
+            "small immediate constants should not be treated as addresses"
+        );
+    }
+
+    #[test]
+    fn get_data_refs_resolves_const_add_chain_across_blocks() {
+        let block_a = r2ssa::SSABlock {
+            addr: 0x403000,
+            size: 4,
+            ops: vec![r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                src: r2ssa::SSAVar::new("const:dead0000", 0, 8),
+            }],
+        };
+        let block_b = r2ssa::SSABlock {
+            addr: 0x403004,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    b: r2ssa::SSAVar::new("const:beef", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:load", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                },
+            ],
+        };
+
+        let refs = get_data_refs_from_ssa_with_op_sources(&[block_a, block_b], None);
+        assert!(
+            refs.iter()
+                .any(|r| { r.from == 0x403004 && r.to == 0xdeadbeef && r.ref_type == "d" }),
+            "const add chain split across blocks should emit DATA xref to the computed target"
+        );
+    }
+
+    #[test]
+    fn get_data_refs_uses_per_op_source_addr_when_available() {
+        let block = r2ssa::SSABlock {
+            addr: 0x404000,
+            size: 0x20,
+            ops: vec![
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    src: r2ssa::SSAVar::new("const:404d00", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                    a: r2ssa::SSAVar::new("tmp:base", 1, 8),
+                    b: r2ssa::SSAVar::new("const:108", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:load", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:target", 1, 8),
+                },
+            ],
+        };
+        let op_sources = vec![vec![0x404008, 0x40400c, 0x404010]];
+
+        let refs = get_data_refs_from_ssa_with_op_sources(&[block], Some(&op_sources));
+        assert!(
+            refs.iter()
+                .any(|r| { r.from != 0x404000 && r.to == 0x404d6c && r.ref_type == "d" }),
+            "computed add-chain xref should use a non-block-head op source address"
+        );
     }
 
     #[cfg(feature = "x86")]
@@ -8326,6 +8667,18 @@ mod integration_tests {
     }
 
     #[test]
+    #[cfg(feature = "arm")]
+    fn create_disassembler_for_arch_arm64() {
+        let (spec, disasm) = create_disassembler_for_arch("arm64").expect("arm64 disassembler");
+        assert_eq!(spec.name, "aarch64");
+        assert!(spec.addr_size > 0);
+        assert_eq!(
+            disasm.userop_name(0),
+            userop_map_for_arch("arm64").get(&0).map(String::as_str)
+        );
+    }
+
+    #[test]
     #[cfg(feature = "riscv")]
     fn create_disassembler_for_arch_riscv64() {
         let (spec, disasm) = create_disassembler_for_arch("riscv64").expect("riscv64 disassembler");
@@ -8337,6 +8690,108 @@ mod integration_tests {
             disasm.userop_name(0),
             userop_map_for_arch("riscv64").get(&0).map(String::as_str)
         );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn r2il_arch_init_arm64_loaded() {
+        let arch_cstr = CString::new("arm64").unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(r2il_is_loaded(ctx_ptr), 1, "arm64 context should be loaded");
+        r2il_free(ctx_ptr);
+    }
+
+    #[cfg(feature = "arm")]
+    fn profile_for_arch(arch: &str) -> String {
+        let arch_cstr = CString::new(arch).unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(
+            r2il_is_loaded(ctx_ptr),
+            1,
+            "{arch} context should be loaded"
+        );
+        let profile_ptr = r2il_get_reg_profile(ctx_ptr);
+        assert!(
+            !profile_ptr.is_null(),
+            "register profile should not be null"
+        );
+        let profile = unsafe { CStr::from_ptr(profile_ptr).to_str().unwrap().to_string() };
+        r2il_string_free(profile_ptr);
+        r2il_free(ctx_ptr);
+        profile
+    }
+
+    #[cfg(feature = "arm")]
+    fn role_target(profile: &str, role: &str) -> Option<String> {
+        profile
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("={}\t", role)))
+            .map(str::trim)
+            .map(str::to_string)
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_reg_profile_includes_required_arg_aliases() {
+        let profile = profile_for_arch("arm64");
+        for role in ["A0", "A1", "A2", "A3", "SN"] {
+            assert!(
+                role_target(&profile, role).is_some(),
+                "arm64 profile should define ={role}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_reg_profile_includes_condition_flag_names() {
+        let profile = profile_for_arch("arm64");
+        for flag in ["cf", "zf", "nf", "vf"] {
+            assert!(
+                profile.contains(&format!("gpr\t{flag}\t.")),
+                "arm64 profile should define {flag} register alias"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_reg_profile_has_flag_role_aliases() {
+        let profile = profile_for_arch("arm64");
+        for role in ["CF", "ZF", "SF", "OF"] {
+            assert!(
+                role_target(&profile, role).is_some(),
+                "arm64 profile should define ={role}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_reg_profile_includes_lr_alias() {
+        let profile = profile_for_arch("arm64");
+        assert!(
+            profile.contains("gpr\tlr\t."),
+            "arm64 profile should define lr alias"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn reg_profile_alias_roles_target_existing_registers() {
+        let profile = profile_for_arch("arm64");
+        for role in ["A0", "A1", "A2", "A3", "SN", "CF", "ZF", "SF", "OF"] {
+            let Some(target) = role_target(&profile, role) else {
+                continue;
+            };
+            assert!(
+                profile.contains(&format!("gpr\t{}\t.", target)),
+                "={role} points to missing register '{}'",
+                target
+            );
+        }
     }
 
     #[test]

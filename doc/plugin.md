@@ -27,8 +27,8 @@ Plugin Callbacks
 
 sleigh_op: Lifts instructions during aaa. Generates ESIL.
 sleigh_recover_vars: Provides SSA-derived variables for afva.
-sleigh_analyze_fcn: Per-function SSA analysis after af.
-sleigh_get_data_refs: Def-use xrefs after aar.
+sleigh_analyze_fcn: Per-function SSA analysis after af (also auto-applies DATA xrefs).
+sleigh_get_data_refs: Def-use xrefs callback used by radare2 during aar when supported.
 sleigh_post_analysis: Auto-taint + signature/CC write-back during aaaa.
 
 Command Reference
@@ -59,6 +59,9 @@ Function-Level:
 - a:sla.dec -- Decompile to C
 
 Both a:sla and a:sleigh prefixes work.
+
+DATA xrefs are applied automatically during function analysis (`af`) and reference
+analysis (`aar`) via plugin callbacks.
 
 Instruction Export Path
 -----------------------
@@ -113,9 +116,28 @@ SLEIGH_TAINT_MAX_BLOCKS: Max blocks for auto-taint. Default 200.
 SLEIGH_SIG_WRITEBACK_MAX_BLOCKS: Max blocks for automatic signature/CC write-back. Default 200.
 SLEIGH_SIG_MIN_CONFIDENCE: Minimum confidence for signature overwrite. Default 70.
 SLEIGH_CC_MIN_CONFIDENCE: Minimum confidence for calling convention overwrite. Default 80.
-SLEIGH_CALLER_PROP_MAX_CALLEES: Max propagated callees per `aaaa` run. Default 128.
-SLEIGH_CALLER_PROP_MAX_CALLERS_PER_CALLEE: Max direct callers reanalyzed per callee. Default 32.
-SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL: Max caller reanalysis updates per `aaaa` run. Default 256.
+
+Runtime analysis profile:
+
+- `anal.sla.mode` (default `balanced`)
+- Accepted values: `full`, `balanced`, `fast`
+
+Mode semantics:
+
+| Context | `full` | `balanced` | `fast` |
+|---|---|---|---|
+| `aa` / `aaa` callbacks | full behavior | balanced behavior | reduced behavior |
+| `aaaa` post-analysis | full behavior | full behavior (forced) | reduced behavior |
+
+Behavior by mode:
+
+| Pass | `full` | `balanced` | `fast` |
+|---|---|---|---|
+| semantic comments | on | on | off |
+| recover vars | on | on | off |
+| computed data xrefs | on | on | off |
+| post taint | on | on | off |
+| post signature/callconv write-back | on | on | off |
 
 Automatic Signature Write-Back (aaaa)
 -------------------------------------
@@ -124,18 +146,14 @@ During `aaaa`, the plugin also performs function signature + calling convention
 write-back for x86/x86-64 functions:
 
 - Builds SSA and infers return/parameter types.
-- Applies inferred signature via direct `RAnal` update first (`r_anal_str_to_fcn`), then verifies from type DB (`r_type_func_*`); falls back to `afs` only when API apply is unverified.
-- Applies inferred calling convention via direct function update first (`fcn->callconv`), verifies on function state, and falls back to `afc` only when API apply is unverified.
+- Applies inferred signature via direct `RAnal` update first (`r_anal_str_to_fcn`), then falls back to `afs` if needed.
+- Applies inferred calling convention via direct function update first (`fcn->callconv`), then falls back to `afc` if needed.
 - Confidence-gated overwrite: signature `>= 70`, calling convention `>= 80`.
-- Practical consistency check:
-  - `afcfj` is validated against inferred return/args.
-  - `afij.calltype` is validated when CC write-back was applied.
-  - `afij.signature` drift is tracked and logged (best-effort, non-fatal).
+- Practical consistency verification is currently disabled by default.
 - After verified signature apply, direct caller xrefs are propagated in a
   targeted pass:
   - xref scope: direct `CALL/CODE/JUMP` refs only.
   - caller reanalysis: type-match + `afva` var recovery.
-  - bounded by callee/per-callee/total caller caps (non-fatal when exceeded).
   - each caller function is updated at most once per `aaaa` run.
 - Propagation metrics are logged in summary (`prop_*`) with
   `sample_callees=` trace for up to 5 triggered callees.

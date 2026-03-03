@@ -99,6 +99,9 @@ pub struct VarnodeMetadata {
 /// Optional metadata hints attached to an operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct OpMetadata {
+    /// Source instruction address for this operation when lifted as part of a block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_addr: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_class: Option<MemoryClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

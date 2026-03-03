@@ -409,6 +409,13 @@ int test_guard_tail_return(int x) {
     return 0;
 }
 
+// Test 38: Constant address add-chain for data-xref recovery (base + offset)
+int test_const_addr_chain(void) {
+    volatile uintptr_t base = 0x404d00ULL;
+    volatile uintptr_t target = base + 0x108ULL;
+    return (target == 0x404e08ULL) ? 1 : 0;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -711,6 +718,9 @@ int main(int argc, char *argv[]) {
                     test_guard_tail_return(x)
                 );
             }
+            break;
+        case 38:
+            printf("test_const_addr_chain() = %d\n", test_const_addr_chain());
             break;
         default:
             printf("Unknown test: %d\n", test);
