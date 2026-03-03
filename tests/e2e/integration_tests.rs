@@ -271,9 +271,12 @@ fn count_comment_lines_with_prefix(comments: &[Value], prefix: &str) -> usize {
 fn is_cpu_flag_name(name: &str) -> bool {
     const CPU_FLAGS: [&str; 8] = ["cf", "zf", "sf", "pf", "of", "af", "df", "tf"];
     let lower = name.trim().to_ascii_lowercase();
-    CPU_FLAGS
-        .iter()
-        .any(|flag| lower == *flag || lower.strip_prefix(flag).is_some_and(|rest| rest.starts_with('_')))
+    CPU_FLAGS.iter().any(|flag| {
+        lower == *flag
+            || lower
+                .strip_prefix(flag)
+                .is_some_and(|rest| rest.starts_with('_'))
+    })
 }
 
 // ============================================================================
@@ -3960,13 +3963,15 @@ mod ffi {
                 Some("stack")
             );
             assert_eq!(
-                first.get("permissions")
+                first
+                    .get("permissions")
                     .and_then(|v| v.get("volatile"))
                     .and_then(Value::as_bool),
                 Some(false)
             );
             assert_eq!(
-                first.get("permissions")
+                first
+                    .get("permissions")
                     .and_then(|v| v.get("cacheable"))
                     .and_then(Value::as_bool),
                 Some(true)
@@ -4253,8 +4258,7 @@ mod deep_integration {
         merged
             .lines()
             .find(|line| {
-                line.contains("r2sleigh: signature write-back")
-                    && line.contains("considered=")
+                line.contains("r2sleigh: signature write-back") && line.contains("considered=")
             })
             .map(str::to_string)
     }
@@ -4264,6 +4268,14 @@ mod deep_integration {
         merged
             .lines()
             .find(|line| line.contains("r2sleigh: signature write-back apply-path"))
+            .map(str::to_string)
+    }
+
+    fn find_type_writeback_summary(result: &e2e::R2Result) -> Option<String> {
+        let merged = format!("{}\n{}", result.stdout, result.stderr);
+        merged
+            .lines()
+            .find(|line| line.contains("r2sleigh: type write-back"))
             .map(str::to_string)
     }
 
@@ -4447,7 +4459,8 @@ mod deep_integration {
         listing.assert_ok();
         for short_name in ["safe_array_access", "test_array_index"] {
             let func = resolve_fixture_function_name(&listing.stdout, short_name);
-            let enabled_cmd = format!("a:sla.info >/dev/null; e anal.sla.mode=full; aaa; s {func}; afva; afvj");
+            let enabled_cmd =
+                format!("a:sla.info >/dev/null; e anal.sla.mode=full; aaa; s {func}; afva; afvj");
             let enabled = r2_cmd_timeout_with_env(
                 vuln_test_binary(),
                 &enabled_cmd,
@@ -4463,7 +4476,8 @@ mod deep_integration {
                 "{short_name} arg0 should recover as pointer when semantic metadata is enabled"
             );
 
-            let disabled_cmd = format!("a:sla.info >/dev/null; e anal.sla.mode=fast; aaa; s {func}; afva; afvj");
+            let disabled_cmd =
+                format!("a:sla.info >/dev/null; e anal.sla.mode=fast; aaa; s {func}; afva; afvj");
             let disabled = r2_cmd_timeout_with_env(
                 vuln_test_binary(),
                 &disabled_cmd,
@@ -4591,8 +4605,8 @@ mod deep_integration {
                 item.get("type").and_then(Value::as_str) == Some("DATA")
                     && item
                         .get("fcn_name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| name.contains("test_const_addr_chain"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.contains("test_const_addr_chain"))
             }),
             "aar should populate computed DATA xrefs after aa;af"
         );
@@ -4627,7 +4641,9 @@ mod deep_integration {
         fcn_addr_probe.assert_ok();
         let fcn_addr_text = fcn_addr_probe.stdout.trim();
         let fcn_addr = u64::from_str_radix(fcn_addr_text.trim_start_matches("0x"), 16)
-            .unwrap_or_else(|_| panic!("failed to parse function address from '{}'", fcn_addr_text));
+            .unwrap_or_else(|_| {
+                panic!("failed to parse function address from '{}'", fcn_addr_text)
+            });
 
         let result = r2_cmd(
             vuln_test_binary(),
@@ -4687,6 +4703,31 @@ mod deep_integration {
         assert!(
             is_json || result.stdout.trim().is_empty(),
             "a:sla.ssa should produce JSON output or be empty"
+        );
+    }
+
+    #[test]
+    fn sla_types_command_emits_payload_json() {
+        setup();
+        let result = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "aaa; s dbg.check_secret; a:sla.types",
+        );
+        result.assert_ok();
+        let json = parse_json(&result, "a:sla.types");
+        let obj = expect_object(&json, "a:sla.types");
+        assert!(
+            obj.contains_key("signature"),
+            "type payload should include inferred signature"
+        );
+        assert!(
+            obj.contains_key("var_type_candidates"),
+            "type payload should include per-variable candidates"
+        );
+        assert!(
+            obj.contains_key("struct_decls"),
+            "type payload should include struct declarations list"
         );
     }
 
@@ -4883,7 +4924,10 @@ mod deep_integration {
             "semantic sla comments should be disabled in fast mode"
         );
         let taint_lines = count_comment_lines_with_prefix(comments, "sla.taint:");
-        assert_eq!(taint_lines, 0, "taint comments should be disabled in fast mode");
+        assert_eq!(
+            taint_lines, 0,
+            "taint comments should be disabled in fast mode"
+        );
     }
 
     #[test]
@@ -5327,6 +5371,57 @@ mod deep_integration {
         assert!(
             result.contains("cc_cmd_apply_fail="),
             "write-back summary should include callconv fallback failure counter"
+        );
+    }
+
+    #[test]
+    fn aaaa_type_writeback_metrics_present() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "aaaa");
+        result.assert_ok();
+        let summary = find_type_writeback_summary(&result)
+            .expect("type write-back summary line should be present");
+        assert!(
+            summary.contains("vars_considered="),
+            "type summary should include vars_considered"
+        );
+        assert!(
+            summary.contains("vars_applied="),
+            "type summary should include vars_applied"
+        );
+    }
+
+    #[test]
+    fn aaaa_type_writeback_respects_mode_toggle() {
+        setup();
+        let fast = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "e anal.sla.mode=fast; aaaa",
+        );
+        fast.assert_ok();
+        let fast_summary = find_type_writeback_summary(&fast)
+            .expect("type write-back summary line should be present in fast mode");
+        let fast_enabled = extract_summary_metric(&fast_summary, "enabled")
+            .expect("summary should include enabled flag");
+        assert_eq!(
+            fast_enabled, 0,
+            "fast mode should disable type write-back integration"
+        );
+
+        let full = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "e anal.sla.mode=full; e anal.sla.type.writeback=balanced; aaaa",
+        );
+        full.assert_ok();
+        let full_summary = find_type_writeback_summary(&full)
+            .expect("type write-back summary line should be present in full mode");
+        let full_enabled = extract_summary_metric(&full_summary, "enabled")
+            .expect("summary should include enabled flag");
+        assert_eq!(
+            full_enabled, 1,
+            "full mode with balanced writeback should enable type integration"
         );
     }
 

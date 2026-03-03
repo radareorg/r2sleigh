@@ -5420,14 +5420,14 @@ struct InferredParam {
     arg_index: usize,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct InferredParamJson {
     name: String,
     #[serde(rename = "type")]
     param_type: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct InferredSignatureCcJson {
     function_name: String,
     signature: String,
@@ -5436,6 +5436,89 @@ struct InferredSignatureCcJson {
     callconv: String,
     arch: String,
     confidence: u8,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct VarTypeCandidateJson {
+    name: String,
+    kind: String,
+    delta: i64,
+    #[serde(rename = "type")]
+    var_type: String,
+    isarg: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reg: Option<String>,
+    size: u32,
+    confidence: u8,
+    source: String,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct VarRenameCandidateJson {
+    name: String,
+    target_name: String,
+    confidence: u8,
+    source: String,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct StructFieldCandidateJson {
+    name: String,
+    offset: u64,
+    #[serde(rename = "type")]
+    field_type: String,
+    confidence: u8,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct StructDeclCandidateJson {
+    name: String,
+    decl: String,
+    confidence: u8,
+    source: String,
+    fields: Vec<StructFieldCandidateJson>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct GlobalTypeLinkCandidateJson {
+    addr: u64,
+    #[serde(rename = "type")]
+    target_type: String,
+    confidence: u8,
+    source: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct InterprocSummaryJson {
+    callsite_count: usize,
+    iterations: usize,
+    converged: bool,
+}
+
+#[derive(Debug, serde::Serialize, Default)]
+struct TypeWritebackDiagnosticsJson {
+    conflicts: Vec<String>,
+    warnings: Vec<String>,
+    solver_warnings: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct InferredTypeWritebackJson {
+    function_name: String,
+    signature: String,
+    ret_type: String,
+    params: Vec<InferredParamJson>,
+    callconv: String,
+    arch: String,
+    confidence: u8,
+    var_type_candidates: Vec<VarTypeCandidateJson>,
+    var_rename_candidates: Vec<VarRenameCandidateJson>,
+    struct_decls: Vec<StructDeclCandidateJson>,
+    global_type_links: Vec<GlobalTypeLinkCandidateJson>,
+    interproc: InterprocSummaryJson,
+    diagnostics: TypeWritebackDiagnosticsJson,
 }
 
 #[cfg(test)]
@@ -5665,6 +5748,315 @@ fn format_afs_signature(
     format!("{ret_type} {function_name} ({params_str})")
 }
 
+fn cstr_or_default(ptr: *const c_char, default: &str) -> String {
+    if ptr.is_null() {
+        return default.to_string();
+    }
+    unsafe { CStr::from_ptr(ptr).to_string_lossy().to_string() }
+}
+
+fn is_generic_type_string(ty: &str) -> bool {
+    let lower = ty.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+    if lower.starts_with("byte[") || lower.starts_with("int") || lower.starts_with("uint") {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "void *"
+            | "void*"
+            | "char *"
+            | "char*"
+            | "long"
+            | "unsigned long"
+            | "unsigned"
+            | "int"
+            | "unknown"
+    )
+}
+
+fn estimate_c_type_size_bytes(ty: &str, ptr_bits: u32) -> u64 {
+    let lower = ty.trim().to_ascii_lowercase();
+    if lower.contains('*') {
+        return (ptr_bits / 8).max(1) as u64;
+    }
+    if lower.contains("int8") || lower == "char" || lower == "unsigned char" {
+        return 1;
+    }
+    if lower.contains("int16") || lower == "short" || lower == "unsigned short" {
+        return 2;
+    }
+    if lower.contains("int32") || lower == "int" || lower == "unsigned int" {
+        return 4;
+    }
+    if lower.contains("int64") || lower == "long" || lower == "unsigned long" || lower == "size_t" {
+        return 8;
+    }
+    if lower == "float" {
+        return 4;
+    }
+    if lower == "double" || lower == "long double" {
+        return 8;
+    }
+    1
+}
+
+fn build_struct_decl(
+    name: &str,
+    fields: &[StructFieldCandidateJson],
+    ptr_bits: u32,
+) -> Option<String> {
+    if fields.is_empty() {
+        return None;
+    }
+    let clean_name = sanitize_c_identifier(name)?;
+    let mut lines = vec![format!("typedef struct {} {{", clean_name)];
+    let mut cursor = 0u64;
+    for field in fields {
+        if field.offset > cursor {
+            let gap = field.offset - cursor;
+            lines.push(format!("  uint8_t _pad_{cursor:x}[{gap}];"));
+            cursor = field.offset;
+        }
+        let field_name = sanitize_c_identifier(&field.name)
+            .unwrap_or_else(|| format!("field_{:x}", field.offset));
+        lines.push(format!("  {} {};", field.field_type, field_name));
+        cursor = cursor.saturating_add(estimate_c_type_size_bytes(&field.field_type, ptr_bits));
+    }
+    lines.push(format!("}} {};", clean_name));
+    Some(lines.join("\n"))
+}
+
+fn parse_existing_var_types(json_str: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
+        return out;
+    };
+    let Some(obj) = value.as_object() else {
+        return out;
+    };
+    for bucket in ["reg", "bp", "sp"] {
+        let Some(entries) = obj.get(bucket).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(entry_obj) = entry.as_object() else {
+                continue;
+            };
+            let Some(name) = entry_obj.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(ty) = entry_obj
+                .get("type")
+                .or_else(|| entry_obj.get("vartype"))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            out.entry(name.to_string())
+                .or_insert_with(|| ty.to_string());
+        }
+    }
+    out
+}
+
+fn collect_arg_slot_map(arch: Option<&ArchSpec>) -> std::collections::HashMap<String, usize> {
+    let (arg_regs, _, _) = recover_vars_arch_profile(arch);
+    let mut out = std::collections::HashMap::new();
+    for (idx, (canonical, aliases)) in arg_regs.iter().enumerate() {
+        out.insert((*canonical).to_string(), idx);
+        for alias in *aliases {
+            out.insert((*alias).to_string(), idx);
+        }
+    }
+    out
+}
+
+fn infer_structs_from_ssa(
+    ssa_blocks: &[r2ssa::SSABlock],
+    arch: Option<&ArchSpec>,
+    ptr_bits: u32,
+) -> (
+    Vec<StructDeclCandidateJson>,
+    std::collections::HashMap<usize, String>,
+) {
+    use std::collections::{BTreeMap, HashMap};
+    use std::hash::{Hash, Hasher};
+
+    let arg_slot_map = collect_arg_slot_map(arch);
+    let mut addr_temps: HashMap<String, (usize, i64)> = HashMap::new();
+    let mut slot_fields: HashMap<usize, BTreeMap<u64, String>> = HashMap::new();
+
+    for block in ssa_blocks {
+        for op in &block.ops {
+            match op {
+                r2ssa::SSAOp::IntAdd { dst, a, b } | r2ssa::SSAOp::IntSub { dst, a, b } => {
+                    let a_name = a.name.to_ascii_lowercase();
+                    let b_name = b.name.to_ascii_lowercase();
+                    if a.version == 0
+                        && let Some(slot) = arg_slot_map.get(a_name.as_str()).copied()
+                        && let Some(raw) = parse_const_value(&b.name)
+                    {
+                        let offset = if matches!(op, r2ssa::SSAOp::IntSub { .. }) {
+                            -(raw as i64)
+                        } else {
+                            raw as i64
+                        };
+                        addr_temps.insert(ssa_var_block_key(block.addr, dst), (slot, offset));
+                    } else if matches!(op, r2ssa::SSAOp::IntAdd { .. })
+                        && b.version == 0
+                        && let Some(slot) = arg_slot_map.get(b_name.as_str()).copied()
+                        && let Some(raw) = parse_const_value(&a.name)
+                    {
+                        addr_temps.insert(ssa_var_block_key(block.addr, dst), (slot, raw as i64));
+                    }
+                }
+                r2ssa::SSAOp::Load { dst, addr, .. } => {
+                    let mut slot_offset = None;
+                    if addr.version == 0 {
+                        let name = addr.name.to_ascii_lowercase();
+                        if let Some(slot) = arg_slot_map.get(name.as_str()).copied() {
+                            slot_offset = Some((slot, 0i64));
+                        }
+                    }
+                    if slot_offset.is_none() {
+                        slot_offset = addr_temps
+                            .get(&ssa_var_block_key(block.addr, addr))
+                            .copied();
+                    }
+                    if let Some((slot, offset)) = slot_offset
+                        && (0..=0x2000).contains(&offset)
+                    {
+                        slot_fields
+                            .entry(slot)
+                            .or_default()
+                            .entry(offset as u64)
+                            .or_insert_with(|| size_to_type(dst.size));
+                    }
+                }
+                r2ssa::SSAOp::Store { addr, val, .. } => {
+                    let mut slot_offset = None;
+                    if addr.version == 0 {
+                        let name = addr.name.to_ascii_lowercase();
+                        if let Some(slot) = arg_slot_map.get(name.as_str()).copied() {
+                            slot_offset = Some((slot, 0i64));
+                        }
+                    }
+                    if slot_offset.is_none() {
+                        slot_offset = addr_temps
+                            .get(&ssa_var_block_key(block.addr, addr))
+                            .copied();
+                    }
+                    if let Some((slot, offset)) = slot_offset
+                        && (0..=0x2000).contains(&offset)
+                    {
+                        slot_fields
+                            .entry(slot)
+                            .or_default()
+                            .entry(offset as u64)
+                            .or_insert_with(|| size_to_type(val.size));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut struct_decls = Vec::new();
+    let mut slot_type_overrides = HashMap::new();
+    let mut slots: Vec<usize> = slot_fields.keys().copied().collect();
+    slots.sort_unstable();
+
+    for slot in slots {
+        let Some(fields_map) = slot_fields.get(&slot) else {
+            continue;
+        };
+        if fields_map.len() < 2 {
+            continue;
+        }
+        let mut shape = String::new();
+        let mut fields = Vec::new();
+        for (offset, ty) in fields_map {
+            shape.push_str(&format!("{offset:x}:{ty};"));
+            fields.push(StructFieldCandidateJson {
+                name: format!("field_{offset:x}"),
+                offset: *offset,
+                field_type: ty.clone(),
+                confidence: 86,
+            });
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        shape.hash(&mut hasher);
+        let struct_name = format!("sla_struct_{:016x}", hasher.finish());
+        let Some(decl) = build_struct_decl(&struct_name, &fields, ptr_bits) else {
+            continue;
+        };
+        struct_decls.push(StructDeclCandidateJson {
+            name: struct_name.clone(),
+            decl,
+            confidence: 86,
+            source: "local_inferred".to_string(),
+            fields,
+        });
+        slot_type_overrides.insert(slot, format!("struct {} *", struct_name));
+    }
+
+    (struct_decls, slot_type_overrides)
+}
+
+fn collect_external_struct_candidates(
+    tsj_json: &str,
+    ptr_bits: u32,
+) -> (Vec<StructDeclCandidateJson>, Vec<String>) {
+    let db = r2types::ExternalTypeDb::from_tsj_json(tsj_json);
+    let mut keys: Vec<String> = db.structs.keys().cloned().collect();
+    keys.sort();
+
+    let mut out = Vec::new();
+    for key in keys {
+        let Some(st) = db.structs.get(&key) else {
+            continue;
+        };
+        if st.fields.is_empty() {
+            continue;
+        }
+        let mut fields = Vec::new();
+        for (offset, field) in &st.fields {
+            fields.push(StructFieldCandidateJson {
+                name: field.name.clone(),
+                offset: *offset,
+                field_type: field.ty.clone().unwrap_or_else(|| "uint8_t".to_string()),
+                confidence: 95,
+            });
+        }
+        let Some(decl) = build_struct_decl(&st.name, &fields, ptr_bits) else {
+            continue;
+        };
+        out.push(StructDeclCandidateJson {
+            name: st.name.clone(),
+            decl,
+            confidence: 95,
+            source: "external_type_db".to_string(),
+            fields,
+        });
+    }
+    (out, db.diagnostics)
+}
+
+fn count_callsites(ssa_blocks: &[r2ssa::SSABlock]) -> usize {
+    let mut count = 0usize;
+    for block in ssa_blocks {
+        for op in &block.ops {
+            if matches!(op, r2ssa::SSAOp::Call { .. } | r2ssa::SSAOp::CallInd { .. }) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 /// Infer function signature + calling convention for post-analysis write-back.
 ///
 /// Returns JSON:
@@ -5814,6 +6206,283 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
         callconv,
         arch: arch_name,
         confidence,
+    };
+
+    match serde_json::to_string(&payload) {
+        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Infer full type write-back payload (signature + per-variable + structs + globals).
+///
+/// Returns JSON suitable for plugin-side confidence/conflict policy.
+/// Caller must free with r2il_string_free().
+#[unsafe(no_mangle)]
+pub extern "C" fn r2sleigh_infer_type_writeback_json(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    fcn_addr: u64,
+    fcn_name: *const c_char,
+    afcfj_json: *const c_char,
+    afvj_json: *const c_char,
+    tsj_json: *const c_char,
+) -> *mut c_char {
+    if ctx.is_null() || blocks.is_null() || num_blocks == 0 {
+        return ptr::null_mut();
+    }
+
+    let sig_ptr = r2sleigh_infer_signature_cc_json(ctx, blocks, num_blocks, fcn_addr, fcn_name);
+    if sig_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    let sig_text = unsafe { CStr::from_ptr(sig_ptr).to_string_lossy().to_string() };
+    r2il_string_free(sig_ptr);
+    let Ok(sig) = serde_json::from_str::<InferredSignatureCcJson>(&sig_text) else {
+        return ptr::null_mut();
+    };
+
+    let afcfj = cstr_or_default(afcfj_json, "[]");
+    let afvj = cstr_or_default(afvj_json, "{}");
+    let tsj = cstr_or_default(tsj_json, "{}");
+
+    let ctx_ref = unsafe { &*ctx };
+    let Some(disasm) = &ctx_ref.disasm else {
+        return ptr::null_mut();
+    };
+    let ptr_bits = ctx_ref.arch.as_ref().map(|a| a.addr_size * 8).unwrap_or(64);
+
+    let mut r2il_blocks = Vec::new();
+    for i in 0..num_blocks {
+        let blk_ptr = unsafe { *blocks.add(i) };
+        if blk_ptr.is_null() {
+            continue;
+        }
+        let blk = unsafe { &*blk_ptr };
+        r2il_blocks.push(blk.clone());
+    }
+    if r2il_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    let semantic_typing_enabled = ctx_ref.semantic_metadata_enabled;
+    let reg_type_hints = if semantic_typing_enabled {
+        collect_register_type_hints(&r2il_blocks, disasm)
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let ssa_blocks: Vec<r2ssa::SSABlock> = r2il_blocks
+        .iter()
+        .map(|blk| r2ssa::block::to_ssa(blk, disasm))
+        .collect();
+    if ssa_blocks.is_empty() {
+        return ptr::null_mut();
+    }
+
+    let vars = recover_vars_from_ssa(
+        &ssa_blocks,
+        ctx_ref.arch.as_ref(),
+        &reg_type_hints,
+        semantic_typing_enabled,
+    );
+
+    let mut diagnostics = TypeWritebackDiagnosticsJson::default();
+    let existing_types = parse_existing_var_types(&afvj);
+    let stack_vars = parse_external_stack_vars(&afvj, ptr_bits);
+    let sig_ctx = parse_signature_context(&afcfj, ptr_bits);
+    let mut param_types = std::collections::HashMap::new();
+    let mut param_names = std::collections::HashMap::new();
+    if let Some(current) = sig_ctx.current.as_ref() {
+        for (idx, param) in current.params.iter().enumerate() {
+            if let Some(ty) = param.ty.as_ref() {
+                param_types.insert(idx, ty.to_string());
+            }
+            if !is_generic_arg_name(&param.name) {
+                param_names.insert(idx, param.name.clone());
+            }
+        }
+    }
+
+    let (mut struct_decls, slot_struct_types) =
+        infer_structs_from_ssa(&ssa_blocks, ctx_ref.arch.as_ref(), ptr_bits);
+    let (external_structs, solver_warnings) = collect_external_struct_candidates(&tsj, ptr_bits);
+    diagnostics.solver_warnings = solver_warnings;
+    {
+        let mut seen = std::collections::HashSet::new();
+        let mut merged = Vec::new();
+        for decl in external_structs.into_iter().chain(struct_decls.into_iter()) {
+            if seen.insert(decl.name.to_ascii_lowercase()) {
+                merged.push(decl);
+            }
+        }
+        struct_decls = merged;
+    }
+
+    let mut var_type_candidates = Vec::new();
+    let mut var_rename_candidates = Vec::new();
+    let mut seen_renames = std::collections::HashSet::new();
+
+    for var in &vars {
+        let mut source = "local_inferred".to_string();
+        let mut confidence = if var.var_type.contains('*') {
+            92
+        } else if var.isarg {
+            88
+        } else {
+            84
+        };
+        let mut evidence = vec!["ssa-var-recovery".to_string()];
+        let mut chosen_type = var.var_type.clone();
+
+        let arg_slot = var
+            .name
+            .strip_prefix("arg")
+            .and_then(|idx| idx.parse::<usize>().ok());
+
+        if let Some(slot) = arg_slot
+            && let Some(sig_ty) = param_types.get(&slot)
+            && !is_generic_type_string(sig_ty)
+        {
+            chosen_type = sig_ty.clone();
+            confidence = 96;
+            source = "signature_registry".to_string();
+            evidence.push("afcfj-current".to_string());
+        } else if let Some(slot) = arg_slot
+            && let Some(struct_ty) = slot_struct_types.get(&slot)
+            && is_generic_type_string(&chosen_type)
+        {
+            chosen_type = struct_ty.clone();
+            confidence = 90;
+            source = "local_struct_inference".to_string();
+            evidence.push("ssa-field-offset-pattern".to_string());
+        }
+
+        if let Some(existing_ty) = existing_types.get(&var.name)
+            && !is_generic_type_string(existing_ty)
+        {
+            if is_generic_type_string(&chosen_type) {
+                chosen_type = existing_ty.clone();
+                confidence = 98;
+                source = "existing_state".to_string();
+                evidence.push("afvj-existing-type".to_string());
+            } else if !existing_ty.eq_ignore_ascii_case(&chosen_type) {
+                diagnostics.conflicts.push(format!(
+                    "var `{}` existing type `{}` conflicts with inferred `{}`",
+                    var.name, existing_ty, chosen_type
+                ));
+            }
+        }
+
+        if (var.kind == "b" || var.kind == "s")
+            && let Some(ext) = stack_vars.get(&var.delta)
+            && let Some(ext_ty) = ext.ty.as_ref()
+        {
+            let ext_ty_str = ext_ty.to_string();
+            if !is_generic_type_string(&ext_ty_str) && is_generic_type_string(&chosen_type) {
+                chosen_type = ext_ty_str;
+                confidence = 97;
+                source = "external_type_db".to_string();
+                evidence.push("afvj-stack-annotation".to_string());
+            }
+            if ext.name != var.name
+                && is_low_quality_stack_name(&var.name)
+                && !is_low_quality_stack_name(&ext.name)
+            {
+                let target_name =
+                    sanitize_c_identifier(&ext.name).unwrap_or_else(|| ext.name.clone());
+                if target_name != var.name
+                    && seen_renames.insert(format!("{}->{target_name}", var.name))
+                {
+                    var_rename_candidates.push(VarRenameCandidateJson {
+                        name: var.name.clone(),
+                        target_name,
+                        confidence: 94,
+                        source: "external_type_db".to_string(),
+                        evidence: vec!["stack-var-name-from-afvj".to_string()],
+                    });
+                }
+            }
+        }
+
+        if let Some(slot) = arg_slot
+            && let Some(param_name) = param_names.get(&slot)
+            && is_generic_arg_name(&var.name)
+        {
+            let target_name =
+                sanitize_c_identifier(param_name).unwrap_or_else(|| param_name.clone());
+            if !target_name.is_empty()
+                && target_name != var.name
+                && seen_renames.insert(format!("{}->{target_name}", var.name))
+            {
+                var_rename_candidates.push(VarRenameCandidateJson {
+                    name: var.name.clone(),
+                    target_name,
+                    confidence: 95,
+                    source: "signature_registry".to_string(),
+                    evidence: vec!["afcfj-param-name".to_string()],
+                });
+            }
+        }
+
+        var_type_candidates.push(VarTypeCandidateJson {
+            name: var.name.clone(),
+            kind: var.kind.clone(),
+            delta: var.delta,
+            var_type: chosen_type.clone(),
+            isarg: var.isarg,
+            reg: var.reg.clone(),
+            size: estimate_c_type_size_bytes(&chosen_type, ptr_bits) as u32,
+            confidence,
+            source,
+            evidence,
+        });
+    }
+
+    let global_type_links = if let Some(first_struct) = struct_decls.first().map(|d| d.name.clone())
+    {
+        let mut unique = std::collections::BTreeSet::new();
+        let mut links = Vec::new();
+        for data_ref in get_data_refs_from_ssa_with_op_sources(&ssa_blocks, None) {
+            if data_ref.ref_type != "d" || data_ref.to < 0x10000 {
+                continue;
+            }
+            if unique.insert(data_ref.to) {
+                links.push(GlobalTypeLinkCandidateJson {
+                    addr: data_ref.to,
+                    target_type: format!("struct {} *", first_struct),
+                    confidence: 72,
+                    source: "dataflow_hint".to_string(),
+                });
+            }
+            if links.len() >= 16 {
+                break;
+            }
+        }
+        links
+    } else {
+        Vec::new()
+    };
+
+    let payload = InferredTypeWritebackJson {
+        function_name: sig.function_name,
+        signature: sig.signature,
+        ret_type: sig.ret_type,
+        params: sig.params,
+        callconv: sig.callconv,
+        arch: sig.arch,
+        confidence: sig.confidence,
+        var_type_candidates,
+        var_rename_candidates,
+        struct_decls,
+        global_type_links,
+        interproc: InterprocSummaryJson {
+            callsite_count: count_callsites(&ssa_blocks),
+            iterations: 1,
+            converged: true,
+        },
+        diagnostics,
     };
 
     match serde_json::to_string(&payload) {
