@@ -607,23 +607,22 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
 
         BranchInd { target } => format!("{},pc,=", vn(target)),
 
-        // NOTE: ESIL for Call/Return is x86-64 specific:
-        // - Uses 'rsp' as stack pointer (ARM uses 'sp', MIPS uses '$sp')
-        // - Uses 8-byte pointer size (32-bit would use 4)
-        // For other architectures, this needs architecture-aware generation
-        // that takes stack pointer name and pointer size as parameters.
         Call { target } => {
-            // Call: push return address, jump to target
-            format!("pc,8,rsp,-=,rsp,=[8],{},pc,=", vn(target))
+            let ptr_size = ptr_size_for_arch(disasm);
+            let sp = stack_reg_for_arch(disasm);
+            format_call_esil(&vn(target), sp, ptr_size)
         }
 
         CallInd { target } => {
-            format!("pc,8,rsp,-=,rsp,=[8],{},pc,=", vn(target))
+            let ptr_size = ptr_size_for_arch(disasm);
+            let sp = stack_reg_for_arch(disasm);
+            format_call_esil(&vn(target), sp, ptr_size)
         }
 
         Return { target: _ } => {
-            // Return: pop return address, jump
-            "rsp,[8],pc,=,8,rsp,+=".to_string()
+            let ptr_size = ptr_size_for_arch(disasm);
+            let sp = stack_reg_for_arch(disasm);
+            format_return_esil(sp, ptr_size)
         }
 
         // ========== Floating Point ==========
@@ -731,6 +730,34 @@ pub fn op_to_esil(disasm: &Disassembler, op: &R2ILOp) -> String {
     }
 }
 
+fn stack_reg_for_arch(disasm: &Disassembler) -> &'static str {
+    let arch = disasm.arch_name().to_ascii_lowercase();
+    if arch.contains("x86") {
+        if arch.contains("64") { "rsp" } else { "esp" }
+    } else {
+        "sp"
+    }
+}
+
+fn ptr_size_for_arch(disasm: &Disassembler) -> u32 {
+    let arch = disasm.arch_name().to_ascii_lowercase();
+    if arch.contains("64") {
+        8
+    } else if arch.contains("16") {
+        2
+    } else {
+        4
+    }
+}
+
+fn format_call_esil(target: &str, sp_reg: &str, ptr_size: u32) -> String {
+    format!("pc,{ptr_size},{sp_reg},-=,{sp_reg},=[{ptr_size}],{target},pc,=")
+}
+
+fn format_return_esil(sp_reg: &str, ptr_size: u32) -> String {
+    format!("{sp_reg},[{ptr_size}],pc,=,{ptr_size},{sp_reg},+=")
+}
+
 /// Convert an R2ILOp into an ESIL string with userop names (best-effort).
 pub fn op_to_esil_named(disasm: &Disassembler, op: &R2ILOp) -> String {
     match op {
@@ -764,5 +791,28 @@ fn format_callother_esil(
     match output {
         Some(dst) => format!("{},CALLOTHER({}),{},=", args_str, userop_str, vn(dst)),
         None => format!("{},CALLOTHER({})", args_str, userop_str),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_call_esil, format_return_esil};
+
+    #[test]
+    fn call_esil_uses_x86_64_stack_and_width() {
+        let esil = format_call_esil("0x401000", "rsp", 8);
+        assert_eq!(esil, "pc,8,rsp,-=,rsp,=[8],0x401000,pc,=");
+    }
+
+    #[test]
+    fn call_esil_uses_arm64_stack_and_width() {
+        let esil = format_call_esil("0x1000", "sp", 8);
+        assert_eq!(esil, "pc,8,sp,-=,sp,=[8],0x1000,pc,=");
+    }
+
+    #[test]
+    fn return_esil_supports_32bit_pointer_width() {
+        let esil = format_return_esil("esp", 4);
+        assert_eq!(esil, "esp,[4],pc,=,4,esp,+=");
     }
 }

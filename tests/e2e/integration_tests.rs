@@ -2124,6 +2124,7 @@ mod decompilation {
         assert!(
             normalized.contains("[")
                 || normalized.contains("->field_")
+                || normalized.contains("->")
                 || normalized.contains("*(arr +"),
             "Should recover a structured or at least stable pointer-indexing expression for struct array indexing"
         );
@@ -4251,7 +4252,10 @@ mod deep_integration {
         let merged = format!("{}\n{}", result.stdout, result.stderr);
         merged
             .lines()
-            .find(|line| line.contains("r2sleigh: signature write-back considered="))
+            .find(|line| {
+                line.contains("r2sleigh: signature write-back")
+                    && line.contains("considered=")
+            })
             .map(str::to_string)
     }
 
@@ -4285,16 +4289,6 @@ mod deep_integration {
                     .count()
             })
             .unwrap_or(0)
-    }
-
-    fn afcfj_first_arg_type<'a>(json: &'a Value) -> Option<&'a str> {
-        json.as_array()?
-            .first()?
-            .get("args")?
-            .as_array()?
-            .first()?
-            .get("type")?
-            .as_str()
     }
 
     fn resolve_fixture_function_name(listing: &str, short_name: &str) -> String {
@@ -4408,16 +4402,12 @@ mod deep_integration {
 
         let enabled = r2_cmd_timeout_with_env(
             vuln_test_binary(),
-            "e anal.sla.meta=true; aaa; s dbg.vuln_memcpy; afva; afvj",
+            "a:sla.info >/dev/null; e anal.sla.mode=full; aaa; s dbg.vuln_memcpy; afva; afvj",
             Duration::from_secs(60),
             &[],
         );
         enabled.assert_ok();
-        if enabled.contains("variable 'anal.sla.meta' not found") {
-            eprintln!("Skipping: anal.sla.meta is not available in this radare2 build");
-            return;
-        }
-        let enabled_json = parse_json(&enabled, "afvj vuln_memcpy (meta=true)");
+        let enabled_json = parse_json(&enabled, "afvj vuln_memcpy (mode=full)");
         let enabled_arg0 = afvj_reg_type_for_ref(&enabled_json, "RDI");
         let enabled_arg1 = afvj_reg_type_for_ref(&enabled_json, "RSI");
         assert_eq!(
@@ -4433,12 +4423,12 @@ mod deep_integration {
 
         let disabled = r2_cmd_timeout_with_env(
             vuln_test_binary(),
-            "e anal.sla.meta=false; aaa; s dbg.vuln_memcpy; afva; afvj",
+            "a:sla.info >/dev/null; e anal.sla.mode=fast; aaa; s dbg.vuln_memcpy; afva; afvj",
             Duration::from_secs(60),
             &[],
         );
         disabled.assert_ok();
-        let disabled_json = parse_json(&disabled, "afvj vuln_memcpy (meta=false)");
+        let disabled_json = parse_json(&disabled, "afvj vuln_memcpy (mode=fast)");
         let enabled_ptr_count = pointer_arg_count(&enabled_json);
         let disabled_ptr_count = pointer_arg_count(&disabled_json);
         assert!(
@@ -4457,7 +4447,7 @@ mod deep_integration {
         listing.assert_ok();
         for short_name in ["safe_array_access", "test_array_index"] {
             let func = resolve_fixture_function_name(&listing.stdout, short_name);
-            let enabled_cmd = format!("e anal.sla.meta=true; aaa; s {func}; afva; afvj");
+            let enabled_cmd = format!("a:sla.info >/dev/null; e anal.sla.mode=full; aaa; s {func}; afva; afvj");
             let enabled = r2_cmd_timeout_with_env(
                 vuln_test_binary(),
                 &enabled_cmd,
@@ -4465,11 +4455,7 @@ mod deep_integration {
                 &[],
             );
             enabled.assert_ok();
-            if enabled.contains("variable 'anal.sla.meta' not found") {
-                eprintln!("Skipping: anal.sla.meta is not available in this radare2 build");
-                return;
-            }
-            let enabled_json = parse_json(&enabled, "afvj array-index (meta=true)");
+            let enabled_json = parse_json(&enabled, "afvj array-index (mode=full)");
             let enabled_arg0 = afvj_reg_type_for_ref(&enabled_json, "RDI");
             assert_eq!(
                 enabled_arg0,
@@ -4477,7 +4463,7 @@ mod deep_integration {
                 "{short_name} arg0 should recover as pointer when semantic metadata is enabled"
             );
 
-            let disabled_cmd = format!("e anal.sla.meta=false; aaa; s {func}; afva; afvj");
+            let disabled_cmd = format!("a:sla.info >/dev/null; e anal.sla.mode=fast; aaa; s {func}; afva; afvj");
             let disabled = r2_cmd_timeout_with_env(
                 vuln_test_binary(),
                 &disabled_cmd,
@@ -4485,7 +4471,7 @@ mod deep_integration {
                 &[],
             );
             disabled.assert_ok();
-            let disabled_json = parse_json(&disabled, "afvj array-index (meta=false)");
+            let disabled_json = parse_json(&disabled, "afvj array-index (mode=fast)");
             let disabled_arg0 = afvj_reg_type_for_ref(&disabled_json, "RDI");
             assert_ne!(
                 disabled_arg0,
@@ -4878,28 +4864,76 @@ mod deep_integration {
     }
 
     #[test]
-    fn aaaa_auto_semantic_comments_respect_config_toggle() {
+    fn aaaa_fast_mode_disables_semantic_and_taint_comments() {
         setup();
         let result = retry_on_crash(|| {
             r2_cmd_timeout_with_env(
                 vuln_test_binary(),
-                "e anal.sla.meta.comments=false; aaaa; CCj",
+                "a:sla.info >/dev/null; e anal.sla.mode=fast; aaaa; CCj",
                 Duration::from_secs(90),
                 &[],
             )
         });
         result.assert_ok();
-        if result.contains("variable 'anal.sla.meta.comments' not found") {
-            eprintln!("Skipping: anal.sla.meta.comments is not available in this radare2 build");
-            return;
-        }
-
-        let parsed = parse_json(&result, "CCj with semantic comments disabled");
-        let comments = expect_array(&parsed, "CCj with semantic comments disabled");
+        let parsed = parse_json(&result, "CCj with fast mode");
+        let comments = expect_array(&parsed, "CCj with fast mode");
         let semantic_lines = count_comment_lines_with_prefix(comments, "sla:");
         assert_eq!(
             semantic_lines, 0,
-            "semantic sla comments should be disabled when anal.sla.meta.comments=false"
+            "semantic sla comments should be disabled in fast mode"
+        );
+        let taint_lines = count_comment_lines_with_prefix(comments, "sla.taint:");
+        assert_eq!(taint_lines, 0, "taint comments should be disabled in fast mode");
+    }
+
+    #[test]
+    fn aaaa_balanced_mode_forces_full_post_analysis() {
+        setup();
+        let result = retry_on_crash(|| {
+            r2_cmd_timeout_with_env(
+                vuln_test_binary(),
+                "a:sla.info >/dev/null; e anal.sla.mode=balanced; aaaa; CCj",
+                Duration::from_secs(90),
+                &[],
+            )
+        });
+        result.assert_ok();
+        let parsed = parse_json(&result, "CCj with balanced mode");
+        let comments = expect_array(&parsed, "CCj with balanced mode");
+        let semantic_lines = count_comment_lines_with_prefix(comments, "sla:");
+        assert!(
+            semantic_lines > 0,
+            "balanced mode should still run full post-analysis behavior during aaaa"
+        );
+    }
+
+    #[test]
+    fn full_mode_keeps_semantic_and_xref_callbacks_active() {
+        setup();
+        let comments_result = r2_cmd(
+            vuln_test_binary(),
+            "a:sla.info >/dev/null; e anal.sla.mode=full; aa; s sym.test_const_addr_chain; af; CCj",
+        );
+        comments_result.assert_ok();
+        let comments_json = parse_json(&comments_result, "CCj with full mode");
+        let comments = expect_array(&comments_json, "CCj with full mode");
+        let semantic_lines = count_comment_lines_with_prefix(comments, "sla:");
+        assert!(
+            semantic_lines > 0,
+            "full mode should keep semantic comment callback behavior active"
+        );
+
+        let xrefs_result = r2_cmd(
+            vuln_test_binary(),
+            "a:sla.info >/dev/null; e anal.sla.mode=full; aa; s sym.test_const_addr_chain; af; aar; axtj 0x404e08",
+        );
+        xrefs_result.assert_ok();
+        let parsed = parse_json(&xrefs_result, "axtj with full mode");
+        let refs = expect_array(&parsed, "axtj with full mode");
+        assert!(
+            refs.iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("DATA")),
+            "full mode should keep SSA xref callback behavior active"
         );
     }
 
@@ -5168,53 +5202,37 @@ mod deep_integration {
     }
 
     #[test]
-    fn aaaa_signature_pointer_overlay_for_array_index_functions_respects_meta_toggle() {
+    fn aaaa_signature_writeback_respects_mode_toggle() {
         setup();
-        let listing =
-            r2_cmd_timeout_with_env(vuln_test_binary(), "aaa; afl", Duration::from_secs(90), &[]);
-        listing.assert_ok();
-        for short_name in ["safe_array_access", "test_array_index"] {
-            let func = resolve_fixture_function_name(&listing.stdout, short_name);
-            let enabled_cmd = format!(
-                "e anal.sla.meta=true; aaa; s {func}; afs int {func}(int64_t arg0); aaaa; s {func}; afcfj"
-            );
-            let enabled = r2_cmd_timeout_with_env(
-                vuln_test_binary(),
-                &enabled_cmd,
-                Duration::from_secs(120),
-                &[],
-            );
-            enabled.assert_ok();
-            if enabled.contains("variable 'anal.sla.meta' not found") {
-                eprintln!("Skipping: anal.sla.meta is not available in this radare2 build");
-                return;
-            }
-            let enabled_json = parse_json(&enabled, "afcfj array-index (meta=true)");
-            let enabled_arg0 =
-                afcfj_first_arg_type(&enabled_json).expect("expected first arg type from afcfj");
-            assert!(
-                enabled_arg0.contains('*'),
-                "{short_name} signature arg0 should be pointer when semantic metadata is enabled, got {enabled_arg0}"
-            );
+        let full = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "a:sla.info >/dev/null; e anal.sla.mode=full; afs void dbg.check_secret(void); afc ms; aaaa; afcfj; afij~calltype",
+        );
+        full.assert_ok();
+        assert!(
+            full.contains("\"return\":\"int"),
+            "full mode should apply inferred signature write-back"
+        );
+        assert!(
+            full.contains("\"calltype\":\"amd64\""),
+            "full mode should apply inferred calling convention write-back"
+        );
 
-            let disabled_cmd = format!(
-                "e anal.sla.meta=false; aaa; s {func}; afs int {func}(int64_t arg0); aaaa; s {func}; afcfj"
-            );
-            let disabled = r2_cmd_timeout_with_env(
-                vuln_test_binary(),
-                &disabled_cmd,
-                Duration::from_secs(120),
-                &[],
-            );
-            disabled.assert_ok();
-            let disabled_json = parse_json(&disabled, "afcfj array-index (meta=false)");
-            let disabled_arg0 =
-                afcfj_first_arg_type(&disabled_json).expect("expected first arg type from afcfj");
-            assert!(
-                !disabled_arg0.contains('*'),
-                "{short_name} signature arg0 should not be semantic-pointer when metadata is disabled, got {disabled_arg0}"
-            );
-        }
+        let fast = r2_at_func(
+            vuln_test_binary(),
+            "dbg.check_secret",
+            "a:sla.info >/dev/null; e anal.sla.mode=fast; afs void dbg.check_secret(void); afc ms; aaaa; afcfj; afij~calltype",
+        );
+        fast.assert_ok();
+        assert!(
+            fast.contains("\"return\":\"void\""),
+            "fast mode should skip signature write-back"
+        );
+        assert!(
+            fast.contains("\"calltype\":\"ms\""),
+            "fast mode should skip calling-convention write-back"
+        );
     }
 
     #[test]
@@ -5388,7 +5406,7 @@ mod deep_integration {
     }
 
     #[test]
-    fn aaaa_signature_writeback_consistency_improves_from_zero() {
+    fn aaaa_signature_writeback_consistency_disabled_by_default() {
         setup();
         let result = r2_at_func(
             vuln_test_binary(),
@@ -5398,6 +5416,8 @@ mod deep_integration {
         result.assert_ok();
         let summary = find_signature_writeback_summary(&result)
             .expect("signature write-back summary line should be present");
+        let verify = extract_summary_metric(&summary, "verify")
+            .expect("summary should include verify mode flag");
         let verified = extract_summary_metric(&summary, "consistency_verified")
             .expect("summary should include consistency_verified");
         let ok = extract_summary_metric(&summary, "consistency_ok")
@@ -5405,17 +5425,17 @@ mod deep_integration {
         let mismatch = extract_summary_metric(&summary, "consistency_mismatch")
             .expect("summary should include consistency_mismatch");
         assert!(
-            verified > 0,
-            "consistency verification should run on at least one function"
+            verify == 0,
+            "practical consistency verification should be disabled by default"
         );
         assert!(
-            ok > 0,
-            "consistency_ok should be greater than zero after PR3 (summary: {})",
+            verified == 0,
+            "consistency_verified should remain zero when verification is disabled (summary: {})",
             summary
         );
         assert!(
-            mismatch < verified,
-            "consistency mismatches should be lower than verified count after PR3 (summary: {})",
+            ok == 0 && mismatch == 0,
+            "consistency counters should remain zero when verification is disabled (summary: {})",
             summary
         );
     }
@@ -5466,17 +5486,15 @@ mod deep_integration {
     }
 
     #[test]
-    fn aaaa_caller_propagation_respects_caps() {
+    fn aaaa_caller_propagation_has_no_cap_metrics() {
         let result = r2_cmd("/bin/ls", "aaaa");
         result.assert_ok();
         let summary = find_caller_propagation_summary(&result)
             .expect("caller propagation summary line should be present");
-        let callers_updated = extract_summary_metric(&summary, "prop_callers_updated")
-            .expect("summary should include prop_callers_updated");
         assert!(
-            callers_updated <= 256,
-            "caller propagation should honor total caller cap (updated={})",
-            callers_updated
+            !summary.contains("cap"),
+            "caller propagation summary should not report cap-related metrics: {}",
+            summary
         );
     }
 

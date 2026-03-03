@@ -2,14 +2,20 @@
 
 #include <r_arch.h>
 #include <r_anal.h>
+#include <string.h>
 #include "r2sleigh_plugin.h"
 
-static char *sleigh_arch_regs(RArchSession *as) {
-	/* Get the analysis context from the arch session user data */
-	RAnal *anal = (RAnal *)as->user;
-	if (!anal) {
-		/* Return minimal x86-64 profile as fallback */
-		const char *profile = "gpr\trax\t.64\t0\t0\n\
+static const char *fallback_profile_generic(void) {
+	return "gpr\tpc\t.64\t0\t0\n\
+gpr\tsp\t.64\t8\t0\n\
+gpr\ta0\t.64\t16\t0\n\
+=PC\tpc\n\
+=SP\tsp\n\
+=A0\ta0\n";
+}
+
+static const char *fallback_profile_x86_64(void) {
+	return "gpr\trax\t.64\t0\t0\n\
 gpr\trbx\t.64\t1\t0\n\
 gpr\trcx\t.64\t2\t0\n\
 gpr\trdx\t.64\t3\t0\n\
@@ -43,54 +49,77 @@ gpr\tof\t.1\t20\t0\n\
 =A0\trdi\n\
 =A1\trsi\n\
 =A2\trdx\n\
-=A3\trcx\n";
-		return strdup (profile);
+=A3\trcx\n\
+=CF\tcf\n\
+=ZF\tzf\n\
+=SF\tsf\n\
+=OF\tof\n";
+}
+
+static const char *fallback_profile_arm64(void) {
+	return "gpr\tx0\t.64\t0\t0\n\
+gpr\tx1\t.64\t8\t0\n\
+gpr\tx2\t.64\t16\t0\n\
+gpr\tx3\t.64\t24\t0\n\
+gpr\tx8\t.64\t64\t0\n\
+gpr\tx16\t.64\t128\t0\n\
+gpr\tx29\t.64\t232\t0\n\
+gpr\tsp\t.64\t248\t0\n\
+gpr\tpc\t.64\t256\t0\n\
+gpr\tcf\t.1\t280\t0\n\
+gpr\tzf\t.1\t281\t0\n\
+gpr\tnf\t.1\t282\t0\n\
+gpr\tvf\t.1\t283\t0\n\
+=PC\tpc\n\
+=SP\tsp\n\
+=BP\tx29\n\
+=R0\tx0\n\
+=R1\tx1\n\
+=R2\tx2\n\
+=R3\tx3\n\
+=A0\tx0\n\
+=A1\tx1\n\
+=A2\tx2\n\
+=A3\tx3\n\
+=SN\tx16\n\
+=CF\tcf\n\
+=ZF\tzf\n\
+=SF\tnf\n\
+=OF\tvf\n";
+}
+
+static const char *sleigh_fallback_profile(RAnal *anal) {
+	if (!anal || !anal->config || !anal->config->arch[0]) {
+		return fallback_profile_generic ();
+	}
+	const char *arch = anal->config->arch;
+	const int bits = anal->config->bits;
+	if (!strcmp (arch, "arm64") || !strcmp (arch, "aarch64")
+		|| (!strcmp (arch, "arm") && bits == 64)) {
+		return fallback_profile_arm64 ();
+	}
+	if (!strcmp (arch, "x86")) {
+		return fallback_profile_x86_64 ();
+	}
+	return fallback_profile_generic ();
+}
+
+static char *sleigh_arch_regs(RArchSession *as) {
+	/* Get the analysis context from the arch session user data */
+	RAnal *anal = (RAnal *)as->user;
+	const char *fallback = sleigh_fallback_profile (anal);
+	if (!anal) {
+		return strdup (fallback);
 	}
 
 	/* Try to get register profile from r2sleigh context */
 	R2ILContext *ctx = get_context (anal);
 	if (!ctx) {
-		/* Return minimal x86-64 profile as fallback */
-		const char *profile = "gpr\trax\t.64\t0\t0\n\
-gpr\trbx\t.64\t1\t0\n\
-gpr\trcx\t.64\t2\t0\n\
-gpr\trdx\t.64\t3\t0\n\
-gpr\trsi\t.64\t4\t0\n\
-gpr\trdi\t.64\t5\t0\n\
-gpr\tr8\t.64\t6\t0\n\
-gpr\tr9\t.64\t7\t0\n\
-gpr\tr10\t.64\t8\t0\n\
-gpr\tr11\t.64\t9\t0\n\
-gpr\tr12\t.64\t10\t0\n\
-gpr\tr13\t.64\t11\t0\n\
-gpr\tr14\t.64\t12\t0\n\
-gpr\tr15\t.64\t13\t0\n\
-gpr\trsp\t.64\t14\t0\n\
-gpr\trbp\t.64\t15\t0\n\
-gpr\trip\t.64\t16\t0\n\
-gpr\teax\t.32\t0\t0\n\
-gpr\tecx\t.32\t2\t0\n\
-gpr\tedx\t.32\t3\t0\n\
-gpr\tesi\t.32\t4\t0\n\
-gpr\tedi\t.32\t5\t0\n\
-gpr\tal\t.8\t0\t0\n\
-gpr\tzf\t.1\t17\t0\n\
-gpr\tcf\t.1\t18\t0\n\
-gpr\tsf\t.1\t19\t0\n\
-gpr\tof\t.1\t20\t0\n\
-=PC\trip\n\
-=SP\trsp\n\
-=BP\trbp\n\
-=R0\trax\n\
-=A0\trdi\n\
-=A1\trsi\n\
-=A2\trdx\n\
-=A3\trcx\n";
-		return strdup (profile);
+		return strdup (fallback);
 	}
 
 	char *profile = r2il_get_reg_profile (ctx);
-	return profile ? profile : NULL;
+	return profile ? profile : strdup (fallback);
 }
 
 static bool sleigh_arch_decode(RArchSession *as, RAnalOp *op, RArchDecodeMask mask) {

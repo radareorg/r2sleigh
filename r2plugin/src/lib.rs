@@ -269,59 +269,9 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
     let mut profile = String::new();
     let mut reg_meta: std::collections::HashMap<String, (u32, u64, String)> =
         std::collections::HashMap::new();
-    let mut pc = None;
-    let mut sp = None;
-    let mut bp = None;
-    let mut a0 = None;
-    let mut a1 = None;
-    let mut a2 = None;
-    let mut a3 = None;
-    let mut r0 = None;
 
-    // Heuristics for roles
+    // Emit all original register names from Sleigh.
     for reg in &arch.registers {
-        let name_lower = reg.name.to_lowercase();
-
-        if name_lower == "pc" || name_lower == "rip" || name_lower == "eip" || name_lower == "ip" {
-            if pc.is_none() {
-                pc = Some(&reg.name);
-            }
-        } else if name_lower == "sp" || name_lower == "rsp" || name_lower == "esp" {
-            if sp.is_none() {
-                sp = Some(&reg.name);
-            }
-        } else if name_lower == "bp"
-            || name_lower == "rbp"
-            || name_lower == "ebp"
-            || name_lower == "fp"
-        {
-            if bp.is_none() {
-                bp = Some(&reg.name);
-            }
-        } else if name_lower == "r0"
-            || name_lower == "rax"
-            || name_lower == "eax"
-            || name_lower == "v0"
-        {
-            if r0.is_none() {
-                r0 = Some(&reg.name);
-            }
-        } else if name_lower == "rdi" || name_lower == "a0" {
-            if a0.is_none() {
-                a0 = Some(&reg.name);
-            }
-        } else if name_lower == "rsi" || name_lower == "a1" {
-            if a1.is_none() {
-                a1 = Some(&reg.name);
-            }
-        } else if name_lower == "rdx" || name_lower == "a2" {
-            if a2.is_none() {
-                a2 = Some(&reg.name);
-            }
-        } else if (name_lower == "rcx" || name_lower == "a3") && a3.is_none() {
-            a3 = Some(&reg.name);
-        }
-
         profile.push_str(&format!(
             "gpr\t{}\t.{}\t{}\t0\n",
             reg.name,
@@ -329,40 +279,119 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
             reg.offset
         ));
         reg_meta.insert(
-            name_lower.clone(),
+            reg.name.to_ascii_lowercase(),
             (reg.size * 8, reg.offset, reg.name.clone()),
         );
     }
 
+    // Emit lowercase aliases for case-insensitive lookups.
+    let mut lowercase_aliases = Vec::new();
     for (name_lower, (bits, offset, original)) in &reg_meta {
         if original != name_lower {
-            profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", name_lower, bits, offset));
+            lowercase_aliases.push((name_lower.clone(), *bits, *offset));
+        }
+    }
+    for (name_lower, bits, offset) in lowercase_aliases {
+        profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", name_lower, bits, offset));
+    }
+
+    // Synthesize missing aliases expected by radare2/ESIL for specific arches.
+    let mut add_gpr_alias = |alias_name: &str, source_name: &str| {
+        let alias_lower = alias_name.to_ascii_lowercase();
+        if reg_meta.contains_key(&alias_lower) {
+            return;
+        }
+        let Some((bits, offset, _)) = reg_meta.get(source_name).cloned() else {
+            return;
+        };
+        profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", alias_lower, bits, offset));
+        reg_meta.insert(alias_lower.clone(), (bits, offset, alias_lower));
+    };
+
+    let arch_name = arch.name.to_ascii_lowercase();
+    let is_arm64 = arch_name.contains("aarch64") || arch_name.contains("arm64");
+    if is_arm64 {
+        // AArch64 Sleigh specs often expose CY/ZR/NG/OV instead of cf/zf/nf/vf.
+        add_gpr_alias("cf", "cy");
+        add_gpr_alias("zf", "zr");
+        add_gpr_alias("nf", "ng");
+        add_gpr_alias("vf", "ov");
+        // ESIL/radare2 paths may reference lr directly; map it to x30.
+        add_gpr_alias("lr", "x30");
+    }
+
+    let first_existing = |candidates: &[&str]| -> Option<String> {
+        candidates
+            .iter()
+            .find_map(|name| reg_meta.get(*name).map(|(_, _, original)| original.clone()))
+    };
+
+    let pc = first_existing(&["pc", "rip", "eip", "ip"]);
+    let sp = first_existing(&["sp", "rsp", "esp"]);
+    let bp = first_existing(&["bp", "rbp", "ebp", "fp", "x29"]);
+
+    let mut a_roles: [Option<String>; 8] = std::array::from_fn(|_| None);
+    a_roles[0] = first_existing(&["rdi", "a0", "x0", "w0", "r0"]);
+    a_roles[1] = first_existing(&["rsi", "a1", "x1", "w1", "r1"]);
+    a_roles[2] = first_existing(&["rdx", "a2", "x2", "w2", "r2"]);
+    a_roles[3] = first_existing(&["rcx", "a3", "x3", "w3", "r3"]);
+
+    let mut r_roles: [Option<String>; 4] = std::array::from_fn(|_| None);
+    r_roles[0] = first_existing(&["r0", "rax", "eax", "v0", "x0", "w0"]);
+    r_roles[1] = first_existing(&["r1", "x1", "w1"]);
+    r_roles[2] = first_existing(&["r2", "x2", "w2"]);
+    r_roles[3] = first_existing(&["r3", "x3", "w3"]);
+
+    let mut sn = first_existing(&["sn"]);
+
+    if is_arm64 {
+        for idx in 0..8 {
+            if let Some(reg) = first_existing(&[&format!("x{idx}"), &format!("w{idx}")]) {
+                a_roles[idx] = Some(reg.clone());
+                if idx < 4 {
+                    r_roles[idx] = Some(reg);
+                }
+            }
+        }
+        if sn.is_none() {
+            sn = first_existing(&["x16", "x8"]);
         }
     }
 
-    if let Some(n) = pc {
+    if let Some(n) = pc.as_deref() {
         profile.push_str(&format!("=PC\t{}\n", n));
     }
-    if let Some(n) = sp {
+    if let Some(n) = sp.as_deref() {
         profile.push_str(&format!("=SP\t{}\n", n));
     }
-    if let Some(n) = bp {
+    if let Some(n) = bp.as_deref() {
         profile.push_str(&format!("=BP\t{}\n", n));
     }
-    if let Some(n) = a0 {
-        profile.push_str(&format!("=A0\t{}\n", n));
+    for (idx, reg) in a_roles.iter().enumerate() {
+        if let Some(n) = reg.as_deref() {
+            profile.push_str(&format!("=A{}\t{}\n", idx, n));
+        }
     }
-    if let Some(n) = a1 {
-        profile.push_str(&format!("=A1\t{}\n", n));
+    for (idx, reg) in r_roles.iter().enumerate() {
+        if let Some(n) = reg.as_deref() {
+            profile.push_str(&format!("=R{}\t{}\n", idx, n));
+        }
     }
-    if let Some(n) = a2 {
-        profile.push_str(&format!("=A2\t{}\n", n));
+    if let Some(n) = sn.as_deref() {
+        profile.push_str(&format!("=SN\t{}\n", n));
     }
-    if let Some(n) = a3 {
-        profile.push_str(&format!("=A3\t{}\n", n));
+
+    if let Some(n) = first_existing(&["cf"]).as_deref() {
+        profile.push_str(&format!("=CF\t{}\n", n));
     }
-    if let Some(n) = r0 {
-        profile.push_str(&format!("=R0\t{}\n", n));
+    if let Some(n) = first_existing(&["zf"]).as_deref() {
+        profile.push_str(&format!("=ZF\t{}\n", n));
+    }
+    if let Some(n) = first_existing(&["nf", "sf"]).as_deref() {
+        profile.push_str(&format!("=SF\t{}\n", n));
+    }
+    if let Some(n) = first_existing(&["vf", "of"]).as_deref() {
+        profile.push_str(&format!("=OF\t{}\n", n));
     }
 
     CString::new(profile).map_or(ptr::null_mut(), |c| c.into_raw())
@@ -8671,6 +8700,98 @@ mod integration_tests {
         assert!(!ctx_ptr.is_null(), "context pointer should not be null");
         assert_eq!(r2il_is_loaded(ctx_ptr), 1, "arm64 context should be loaded");
         r2il_free(ctx_ptr);
+    }
+
+    #[cfg(feature = "arm")]
+    fn profile_for_arch(arch: &str) -> String {
+        let arch_cstr = CString::new(arch).unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(
+            r2il_is_loaded(ctx_ptr),
+            1,
+            "{arch} context should be loaded"
+        );
+        let profile_ptr = r2il_get_reg_profile(ctx_ptr);
+        assert!(
+            !profile_ptr.is_null(),
+            "register profile should not be null"
+        );
+        let profile = unsafe { CStr::from_ptr(profile_ptr).to_str().unwrap().to_string() };
+        r2il_string_free(profile_ptr);
+        r2il_free(ctx_ptr);
+        profile
+    }
+
+    #[cfg(feature = "arm")]
+    fn role_target(profile: &str, role: &str) -> Option<String> {
+        profile
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("={}\t", role)))
+            .map(str::trim)
+            .map(str::to_string)
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_reg_profile_includes_required_arg_aliases() {
+        let profile = profile_for_arch("arm64");
+        for role in ["A0", "A1", "A2", "A3", "SN"] {
+            assert!(
+                role_target(&profile, role).is_some(),
+                "arm64 profile should define ={role}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_reg_profile_includes_condition_flag_names() {
+        let profile = profile_for_arch("arm64");
+        for flag in ["cf", "zf", "nf", "vf"] {
+            assert!(
+                profile.contains(&format!("gpr\t{flag}\t.")),
+                "arm64 profile should define {flag} register alias"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_reg_profile_has_flag_role_aliases() {
+        let profile = profile_for_arch("arm64");
+        for role in ["CF", "ZF", "SF", "OF"] {
+            assert!(
+                role_target(&profile, role).is_some(),
+                "arm64 profile should define ={role}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_reg_profile_includes_lr_alias() {
+        let profile = profile_for_arch("arm64");
+        assert!(
+            profile.contains("gpr\tlr\t."),
+            "arm64 profile should define lr alias"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn reg_profile_alias_roles_target_existing_registers() {
+        let profile = profile_for_arch("arm64");
+        for role in ["A0", "A1", "A2", "A3", "SN", "CF", "ZF", "SF", "OF"] {
+            let Some(target) = role_target(&profile, role) else {
+                continue;
+            };
+            assert!(
+                profile.contains(&format!("gpr\t{}\t.", target)),
+                "={role} points to missing register '{}'",
+                target
+            );
+        }
     }
 
     #[test]

@@ -124,6 +124,12 @@ static bool sleigh_pdd_core_plugin_registered = false;
 static RCore *sleigh_pdd_core_plugin_core = NULL;
 static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn);
 
+typedef enum {
+	SLEIGH_MODE_FULL = 0,
+	SLEIGH_MODE_BALANCED = 1,
+	SLEIGH_MODE_FAST = 2,
+} SleighMode;
+
 /* Minimum bytes to pass to libsla (it reads ahead for variable-length instructions) */
 #define SLEIGH_MIN_BYTES 16
 #define SLEIGH_BLOCK_MAX_BYTES 256
@@ -131,9 +137,6 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn);
 #define SLEIGH_SIG_WRITEBACK_MAX_BLOCKS 200
 #define SLEIGH_SIG_MIN_CONFIDENCE 70
 #define SLEIGH_CC_MIN_CONFIDENCE 80
-#define SLEIGH_CALLER_PROP_MAX_CALLEES 128
-#define SLEIGH_CALLER_PROP_MAX_CALLERS_PER_CALLEE 32
-#define SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL 256
 #define SLEIGH_CALLER_PROP_SAMPLE_MAX 5
 #define SLEIGH_TAINT_LABEL_MAX 6
 #define SLEIGH_COMMENT_PREFIX_SEMANTIC "sla:"
@@ -677,6 +680,8 @@ static void fill_op_values_enhanced(RAnal *anal, RAnalOp *op, R2ILContext *ctx, 
 		return;
 	}
 
+	op->direction = 0;
+
 	// Get memory accesses
 	char *mem_json = r2il_block_mem_access (ctx, block);
 	if (mem_json) {
@@ -692,14 +697,35 @@ static void fill_op_values_enhanced(RAnal *anal, RAnalOp *op, R2ILContext *ctx, 
 						bool is_store = !strcmp (type->str_value, "store");
 						if (is_store) {
 							access = R_PERM_W;
+							op->direction |= R_ANAL_OP_DIR_WRITE;
+						} else if (!strcmp (type->str_value, "load")) {
+							op->direction |= R_ANAL_OP_DIR_READ;
 						}
 						add_memory_archvalue (anal, mem_access, is_store ? &op->dsts : &op->srcs, access);
+					}
+
+					const RJson *stack = r_json_get (mem_access, "stack");
+					const RJson *stack_offset = r_json_get (mem_access, "stack_offset");
+					if (stack && stack->type == R_JSON_BOOLEAN && stack->num.u_value && !op->stackop) {
+						if (type && type->str_value) {
+							if (!strcmp (type->str_value, "store")) {
+								op->stackop = R_ANAL_STACK_SET;
+							} else if (!strcmp (type->str_value, "load")) {
+								op->stackop = R_ANAL_STACK_GET;
+							}
+						}
+						if (stack_offset && stack_offset->type == R_JSON_INTEGER) {
+							op->stackptr = stack_offset->num.s_value;
+						}
 					}
 				}
 			}
 		}
 		r_json_free (mem_root);
 		r2il_string_free (mem_json);
+	}
+	if (op->direction == 0) {
+		op->direction = R_ANAL_OP_DIR_READ;
 	}
 
 	// Get all varnodes to find immediate values
@@ -732,101 +758,6 @@ static void fill_op_values_enhanced(RAnal *anal, RAnalOp *op, R2ILContext *ctx, 
 		r_json_free (root);
 		r2il_string_free (defuse_json);
 	}
-}
-
-static void analyze_stack_operation(R2ILContext *ctx, const R2ILBlock *block, RAnalOp *op) {
-	if (!ctx || !block || !op) {
-		return;
-	}
-
-	// Get memory accesses to identify stack operations
-	char *mem_json = r2il_block_mem_access (ctx, block);
-	if (!mem_json) {
-		return;
-	}
-
-	RJson *mem_root = r_json_parse (mem_json);
-	if (!mem_root || mem_root->type != R_JSON_ARRAY) {
-		r_json_free (mem_root);
-		r2il_string_free (mem_json);
-		return;
-	}
-
-	// Look for stack operations
-	size_t i;
-	for (i = 0; i < mem_root->children.count; i++) {
-		const RJson *mem_access = r_json_item (mem_root, i);
-		if (!mem_access) continue;
-
-		const RJson *stack = r_json_get (mem_access, "stack");
-		const RJson *stack_offset = r_json_get (mem_access, "stack_offset");
-		const RJson *type = r_json_get (mem_access, "type");
-
-		if (stack && stack->type == R_JSON_BOOLEAN && stack->num.u_value) {
-			// This is a stack operation
-			if (type && type->str_value) {
-				if (strcmp (type->str_value, "store") == 0) {
-					op->stackop = R_ANAL_STACK_SET;
-				} else if (strcmp (type->str_value, "load") == 0) {
-					op->stackop = R_ANAL_STACK_GET;
-				}
-			}
-
-			// Set stack pointer offset
-			if (stack_offset && stack_offset->type == R_JSON_INTEGER) {
-				op->stackptr = stack_offset->num.s_value;
-			}
-
-			break; // Only handle first stack operation for now
-		}
-	}
-
-	r_json_free (mem_root);
-	r2il_string_free (mem_json);
-}
-
-static void set_operation_direction(R2ILContext *ctx, const R2ILBlock *block, RAnalOp *op) {
-	if (!ctx || !block || !op) {
-		return;
-	}
-
-	// Get memory accesses to determine direction
-	char *mem_json = r2il_block_mem_access (ctx, block);
-	if (!mem_json) {
-		return;
-	}
-
-	RJson *mem_root = r_json_parse (mem_json);
-	if (!mem_root || mem_root->type != R_JSON_ARRAY) {
-		r_json_free (mem_root);
-		r2il_string_free (mem_json);
-		return;
-	}
-
-	op->direction = 0; // Default: no specific direction
-
-	size_t i;
-	for (i = 0; i < mem_root->children.count; i++) {
-		const RJson *mem_access = r_json_item (mem_root, i);
-		if (!mem_access) continue;
-
-		const RJson *type = r_json_get (mem_access, "type");
-		if (type && type->str_value) {
-			if (strcmp (type->str_value, "store") == 0) {
-				op->direction |= R_ANAL_OP_DIR_WRITE;
-			} else if (strcmp (type->str_value, "load") == 0) {
-				op->direction |= R_ANAL_OP_DIR_READ;
-			}
-		}
-	}
-
-	// If no memory operations, default to read
-	if (op->direction == 0) {
-		op->direction = R_ANAL_OP_DIR_READ;
-	}
-
-	r_json_free (mem_root);
-	r2il_string_free (mem_json);
 }
 
 static void print_reg_values_json(RCons *cons, const RVecRArchValue *vec) {
@@ -904,13 +835,10 @@ typedef struct {
 	size_t sample_callees_count;
 	size_t sample_callees_capacity;
 	int prop_callees_triggered;
-	int prop_callees_skipped_cap;
 	int prop_callers_considered;
 	int prop_callers_updated;
 	int prop_callers_dedup_skipped;
 	int prop_callers_missing_fcn;
-	int prop_callers_per_callee_cap_skipped;
-	int prop_callers_total_cap_skipped;
 	int prop_type_match_failures;
 	int prop_afva_failures;
 } CallerPropagationState;
@@ -2181,29 +2109,52 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 	return out->count > 0;
 }
 
-static bool cfg_get_bool_default_true(RAnal *anal, const char *key) {
+static SleighMode cfg_get_mode_default_balanced(RAnal *anal) {
 	RCore *core;
 	RConfigNode *node;
+	const char *mode;
 
-	if (!anal || !anal->config || !key || !*key) {
-		return true;
+	if (!anal || !anal->config) {
+		return SLEIGH_MODE_BALANCED;
 	}
 	core = anal->coreb.core;
 	if (!core || !core->config) {
-		return true;
+		return SLEIGH_MODE_BALANCED;
 	}
-	node = r_config_node_get (core->config, key);
+	node = r_config_node_get (core->config, "anal.sla.mode");
 	if (!node) {
-		return true;
+		return SLEIGH_MODE_BALANCED;
 	}
-	return r_config_get_b (core->config, key);
+	mode = r_config_get (core->config, "anal.sla.mode");
+	if (!mode || !*mode) {
+		return SLEIGH_MODE_BALANCED;
+	}
+	if (!strcasecmp (mode, "full")) {
+		return SLEIGH_MODE_FULL;
+	}
+	if (!strcasecmp (mode, "fast")) {
+		return SLEIGH_MODE_FAST;
+	}
+	if (!strcasecmp (mode, "balanced")) {
+		return SLEIGH_MODE_BALANCED;
+	}
+	return SLEIGH_MODE_BALANCED;
 }
 
-static void ensure_default_bool_config(RAnal *anal, const char *key, const char *desc, bool value) {
+static bool sleigh_mode_is_fast(RAnal *anal) {
+	return cfg_get_mode_default_balanced (anal) == SLEIGH_MODE_FAST;
+}
+
+static SleighMode sleigh_mode_effective_for_post_analysis(RAnal *anal) {
+	SleighMode mode = cfg_get_mode_default_balanced (anal);
+	return mode == SLEIGH_MODE_FAST ? SLEIGH_MODE_FAST : SLEIGH_MODE_FULL;
+}
+
+static void ensure_default_string_config(RAnal *anal, const char *key, const char *desc, const char *value) {
 	RCore *core;
 	RConfigNode *node;
 
-	if (!anal || !key || !*key) {
+	if (!anal || !key || !*key || !value) {
 		return;
 	}
 	core = anal->coreb.core;
@@ -2213,29 +2164,34 @@ static void ensure_default_bool_config(RAnal *anal, const char *key, const char 
 
 	node = r_config_node_get (core->config, key);
 	if (!node) {
-		node = r_config_set_b (core->config, key, value);
+		bool was_locked = core->config->lock;
+		if (was_locked) {
+			core->config->lock = false;
+		}
+		node = r_config_set (core->config, key, value);
+		if (was_locked) {
+			core->config->lock = true;
+		}
 	}
 	if (node && desc && *desc) {
 		r_config_node_desc (node, desc);
 	}
 }
 
-static bool sleigh_semantic_metadata_enabled(RAnal *anal) {
-	return cfg_get_bool_default_true (anal, "anal.sla.meta");
-}
-
-static bool sleigh_semantic_comments_enabled(RAnal *anal) {
-	return cfg_get_bool_default_true (anal, "anal.sla.meta.comments");
+static void ensure_sleigh_default_configs(RAnal *anal) {
+	ensure_default_string_config (anal, "anal.sla.mode",
+		"analysis profile for r2sleigh: full|balanced|fast", "balanced");
 }
 
 static void configure_context_runtime_options(RAnal *anal, R2ILContext *ctx) {
 	if (!ctx) {
 		return;
 	}
-	r2il_set_semantic_metadata_enabled (ctx, sleigh_semantic_metadata_enabled (anal));
+	r2il_set_semantic_metadata_enabled (ctx, !sleigh_mode_is_fast (anal));
 }
 
 R2ILContext *get_context(RAnal *anal) {
+	ensure_sleigh_default_configs (anal);
 	const char *arch = anal->config->arch;
 	int bits = anal->config->bits;
 
@@ -2330,36 +2286,31 @@ int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int len, RAn
 		use_len = SLEIGH_MIN_BYTES;
 	}
 
-	/* Lift the instruction */
 	R2ILBlock *block = r2il_lift (sleigh_ctx, use_data, use_len, addr);
 	if (!block) {
 		return -1;
 	}
 
-	/* Fill RAnalOp fields */
 	op->addr = addr;
 	op->size = r2il_block_size (block);
 	op->type = r2il_block_type (block);
-
 	ut64 jump_addr = r2il_block_jump (block);
 	if (jump_addr != 0) {
 		op->jump = jump_addr;
 	}
-
 	ut64 fail_addr = r2il_block_fail (block);
 	if (fail_addr != 0) {
 		op->fail = fail_addr;
 	}
 
-	/* Get mnemonic if requested */
 	if (mask & R_ARCH_OP_MASK_DISASM) {
 		char *mnem = r2il_block_mnemonic (ctx, use_data, use_len, addr);
 		if (mnem) {
-			op->mnemonic = mnem; /* ownership transferred */
+			op->mnemonic = strdup (mnem);
+			r2il_string_free (mnem);
 		}
 	}
 
-	/* Get ESIL if requested */
 	if (mask & R_ARCH_OP_MASK_ESIL) {
 		char *esil = r2il_block_to_esil (ctx, block);
 		if (esil) {
@@ -2369,18 +2320,9 @@ int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int len, RAn
 	}
 
 	if (mask & R_ARCH_OP_MASK_VAL) {
-		// Clear existing values first
 		RVecRArchValue_clear (&op->srcs);
 		RVecRArchValue_clear (&op->dsts);
-
-		// Use enhanced value filling with memory/immediate support
 		fill_op_values_enhanced (anal, op, ctx, block);
-
-		// Add stack operation metadata
-		analyze_stack_operation (ctx, block, op);
-
-		// Set operation direction
-		set_operation_direction (ctx, block, op);
 	}
 
 	r2il_block_free (block);
@@ -2389,10 +2331,9 @@ int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int len, RAn
 
 static bool sleigh_init(RAnal *anal) {
 	/* Lazy init - context created on first use. */
-	ensure_default_bool_config (anal, "anal.sla.meta",
-		"enable automatic semantic metadata enrichment in r2sleigh lifting", true);
-	ensure_default_bool_config (anal, "anal.sla.meta.comments",
-		"enable semantic comment writeback from r2sleigh analyze_fcn", true);
+	ensure_sleigh_default_configs (anal);
+	/* Prime context early so register aliases are available before aa/aaa passes. */
+	(void)get_context (anal);
 	return true;
 }
 
@@ -2407,28 +2348,6 @@ static bool sleigh_fini(RAnal *anal) {
 	sleigh_arch = NULL;
 	sym_state_cache_clear ();
 	return true;
-}
-
-static int sleigh_add_data_refs_for_function(RAnal *anal, RAnalFunction *fcn) {
-	int added = 0;
-	RVecAnalRef *refs;
-
-	if (!anal || !fcn) {
-		return 0;
-	}
-	refs = sleigh_get_data_refs (anal, fcn);
-	if (!refs) {
-		return 0;
-	}
-
-	RAnalRef *ref;
-	R_VEC_FOREACH (refs, ref) {
-		if (r_anal_xrefs_set (anal, ref->at, ref->addr, ref->type)) {
-			added++;
-		}
-	}
-	RVecAnalRef_free (refs);
-	return added;
 }
 
 static char *sleigh_cmd(RAnal *anal, const char *cmd) {
@@ -3425,24 +3344,22 @@ static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
 		return false;
 	}
 
+	if (sleigh_mode_is_fast (anal)) {
+		return true;
+	}
+
 	BlockArray blocks;
 	if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 		return false;
 	}
 
-	int result = r2sleigh_analyze_fcn (ctx,
-		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
-	const bool semantic_comments_enabled = sleigh_semantic_comments_enabled (anal);
 	size_t semantic_comments_emitted = write_semantic_comments_for_function (
-		anal, ctx, &blocks, fcn->addr, semantic_comments_enabled);
-	/* Populate DATA refs during normal function analysis so users do not need
-	 * to call a plugin-specific command for computed-address xrefs. */
-	(void)sleigh_add_data_refs_for_function (anal, fcn);
+		anal, ctx, &blocks, fcn->addr, true);
 	R_LOG_DEBUG ("r2sleigh: semantic comments fcn=0x%"PFMT64x" enabled=%d emitted=%zu",
-		fcn->addr, semantic_comments_enabled? 1: 0, semantic_comments_emitted);
+		fcn->addr, 1, semantic_comments_emitted);
 
 	block_array_free (&blocks);
-	return result == 1;
+	return true;
 }
 
 /* Helper to free RAnalVarProt */
@@ -3460,6 +3377,9 @@ static void var_prot_free(void *ptr) {
 static RList *sleigh_recover_vars(RAnal *anal, RAnalFunction *fcn) {
 	ensure_sleigh_pdd_core_plugin (anal);
 	if (!fcn || !anal) {
+		return NULL;
+	}
+	if (sleigh_mode_is_fast (anal)) {
 		return NULL;
 	}
 
@@ -3592,6 +3512,9 @@ static RList *sleigh_recover_vars(RAnal *anal, RAnalFunction *fcn) {
 static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 	ensure_sleigh_pdd_core_plugin (anal);
 	if (!fcn || !anal) {
+		return NULL;
+	}
+	if (sleigh_mode_is_fast (anal)) {
 		return NULL;
 	}
 
@@ -4099,13 +4022,8 @@ static void propagate_signature_to_direct_callers(
 	size_t callee_callers_capacity = 0;
 	size_t i;
 	size_t len;
-	int callee_updates = 0;
 
 	if (!anal || !core || !state || !callee_addr) {
-		return;
-	}
-	if (state->prop_callees_triggered >= SLEIGH_CALLER_PROP_MAX_CALLEES) {
-		state->prop_callees_skipped_cap++;
 		return;
 	}
 	refs = r_anal_xrefs_get (anal, callee_addr);
@@ -4141,17 +4059,8 @@ static void propagate_signature_to_direct_callers(
 			state->prop_callers_dedup_skipped++;
 			continue;
 		}
-		if (callee_updates >= SLEIGH_CALLER_PROP_MAX_CALLERS_PER_CALLEE) {
-			state->prop_callers_per_callee_cap_skipped++;
-			continue;
-		}
-		if (state->prop_callers_updated >= SLEIGH_CALLER_PROP_MAX_CALLERS_TOTAL) {
-			state->prop_callers_total_cap_skipped++;
-			continue;
-		}
 		if (!append_unique_ut64 (&state->updated_callers, &state->updated_callers_count,
 				&state->updated_callers_capacity, caller_addr)) {
-			state->prop_callers_total_cap_skipped++;
 			continue;
 		}
 		if (!run_caller_type_match (anal, caller_fcn)) {
@@ -4161,7 +4070,6 @@ static void propagate_signature_to_direct_callers(
 			state->prop_afva_failures++;
 		}
 		state->prop_callers_updated++;
-		callee_updates++;
 	}
 
 	free (callee_callers);
@@ -4491,7 +4399,11 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	char *sample_callees = NULL;
 	const char *arch_name = NULL;
 	bool sig_arch_supported = false;
-	const bool semantic_comments_enabled = sleigh_semantic_comments_enabled (anal);
+	SleighMode post_mode = sleigh_mode_effective_for_post_analysis (anal);
+	bool semantic_comments_enabled = post_mode != SLEIGH_MODE_FAST;
+	bool taint_enabled = post_mode != SLEIGH_MODE_FAST;
+	bool sigwrite_enabled = post_mode != SLEIGH_MODE_FAST;
+	bool sigverify_enabled = false;
 
 	if (!ctx) {
 		return false;
@@ -4507,92 +4419,111 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	}
 
 	int num_fcns = r_list_length (anal->fcns);
+	bool xref_enabled = post_mode != SLEIGH_MODE_FAST;
 	if (num_fcns == 0) {
 		return true;
 	}
 	caller_propagation_state_init (&prop_state);
-
-	R_LOG_INFO ("r2sleigh: post-analysis xref pass over %d functions", num_fcns);
+	if (xref_enabled) {
+		R_LOG_INFO ("r2sleigh: post-analysis xref pass over %d functions", num_fcns);
+	} else {
+		R_LOG_INFO ("r2sleigh: post-analysis running in fast mode");
+	}
 
 	RListIter *iter;
 	RAnalFunction *fcn;
 	r_list_foreach (anal->fcns, iter, fcn) {
 		int bb_count = (fcn && fcn->bbs) ? r_list_length (fcn->bbs) : 0;
-		bool taint_eligible = bb_count <= SLEIGH_TAINT_MAX_BLOCKS;
+		bool taint_eligible = taint_enabled && bb_count <= SLEIGH_TAINT_MAX_BLOCKS;
+		bool sig_eligible = sigwrite_enabled && sig_arch_supported && core && bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS;
+		bool semantic_for_fcn = semantic_comments_enabled;
+		bool xref_for_fcn = xref_enabled;
+		bool need_blocks = semantic_for_fcn || xref_for_fcn || taint_eligible || sig_eligible;
 		const char *fcn_name = (fcn && fcn->name) ? fcn->name : "unknown";
 		BlockArray blocks;
-		char *json;
-		RJson *root;
+		char *json = NULL;
+		RJson *root = NULL;
 
-		if (taint_eligible) {
-			taint_fcns_eligible++;
-		} else {
-			taint_fcns_skipped++;
-		}
-
-		if (!fcn || !lift_function_blocks (anal, fcn, ctx, &blocks)) {
-			continue;
-		}
-
-		semantic_comments_total += write_semantic_comments_for_function (
-			anal, ctx, &blocks, fcn->addr, semantic_comments_enabled);
-
-		json = r2sleigh_get_data_refs (ctx,
-			(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
-		if (!json || !*json) {
-			r2il_string_free (json);
-		} else {
-			root = r_json_parse (json);
-			if (!root || root->type != R_JSON_ARRAY) {
-				r_json_free (root);
-				r2il_string_free (json);
+		if (taint_enabled) {
+			if (taint_eligible) {
+				taint_fcns_eligible++;
 			} else {
-				const RJson *item;
-				for (item = root->children.first; item; item = item->next) {
-					if (item->type != R_JSON_OBJECT) {
-						continue;
-					}
-					const RJson *j_from = r_json_get (item, "from");
-					const RJson *j_to = r_json_get (item, "to");
-					const RJson *j_type = r_json_get (item, "type");
-					if (!j_from || !j_to) {
-						continue;
-					}
-
-					ut64 from = (ut64)j_from->num.u_value;
-					ut64 to = (ut64)j_to->num.u_value;
-					RAnalRefType type = R_ANAL_REF_TYPE_DATA;
-
-					if (j_type && j_type->str_value) {
-						switch (j_type->str_value[0]) {
-						case 'c':
-						case 'C':
-							type = R_ANAL_REF_TYPE_CALL;
-							break;
-						case 'j':
-						case 'J':
-							type = R_ANAL_REF_TYPE_JUMP;
-							break;
-						case 's':
-						case 'S':
-							type = R_ANAL_REF_TYPE_STRN;
-							break;
-						default:
-							type = R_ANAL_REF_TYPE_DATA;
-						}
-					}
-
-					if (r_anal_xrefs_set (anal, from, to, type)) {
-						xrefs_added++;
-					}
-				}
-				r_json_free (root);
-				r2il_string_free (json);
+				taint_fcns_skipped++;
 			}
 		}
 
-		/* Remove previous auto-generated taint artifacts for this function. */
-		clear_taint_function_artifacts (anal, core, fcn, &blocks);
+		if (!fcn || !need_blocks) {
+			continue;
+		}
+		if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+			continue;
+		}
+
+		if (semantic_for_fcn) {
+			semantic_comments_total += write_semantic_comments_for_function (
+				anal, ctx, &blocks, fcn->addr, semantic_for_fcn);
+		}
+
+		if (xref_for_fcn) {
+			json = r2sleigh_get_data_refs (ctx,
+				(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+			if (!json || !*json) {
+				r2il_string_free (json);
+			} else {
+				root = r_json_parse (json);
+				if (!root || root->type != R_JSON_ARRAY) {
+					r_json_free (root);
+					r2il_string_free (json);
+				} else {
+					const RJson *item;
+					for (item = root->children.first; item; item = item->next) {
+						if (item->type != R_JSON_OBJECT) {
+							continue;
+						}
+						const RJson *j_from = r_json_get (item, "from");
+						const RJson *j_to = r_json_get (item, "to");
+						const RJson *j_type = r_json_get (item, "type");
+						if (!j_from || !j_to) {
+							continue;
+						}
+
+						ut64 from = (ut64)j_from->num.u_value;
+						ut64 to = (ut64)j_to->num.u_value;
+						RAnalRefType type = R_ANAL_REF_TYPE_DATA;
+
+						if (j_type && j_type->str_value) {
+							switch (j_type->str_value[0]) {
+							case 'c':
+							case 'C':
+								type = R_ANAL_REF_TYPE_CALL;
+								break;
+							case 'j':
+							case 'J':
+								type = R_ANAL_REF_TYPE_JUMP;
+								break;
+							case 's':
+							case 'S':
+								type = R_ANAL_REF_TYPE_STRN;
+								break;
+							default:
+								type = R_ANAL_REF_TYPE_DATA;
+							}
+						}
+
+						if (r_anal_xrefs_set (anal, from, to, type)) {
+							xrefs_added++;
+						}
+					}
+					r_json_free (root);
+					r2il_string_free (json);
+				}
+			}
+		}
+
+		/* Remove previous auto-generated taint artifacts only when taint sweep is active. */
+		if (taint_enabled) {
+			clear_taint_function_artifacts (anal, core, fcn, &blocks);
+		}
 
 		if (taint_eligible) {
 			char *taint_json = r2taint_function_summary_json (ctx,
@@ -4875,7 +4806,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			r2il_string_free (taint_json);
 		}
 
-		if (!sig_arch_supported || !core) {
+		if (!sigwrite_enabled) {
+			/* Signature writeback explicitly disabled for this run. */
+		} else if (!sig_arch_supported || !core) {
 			sig_fcns_skipped_arch++;
 		} else if (bb_count > SLEIGH_SIG_WRITEBACK_MAX_BLOCKS) {
 			sig_fcns_skipped_size++;
@@ -4981,7 +4914,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						}
 					}
 
-					if (signature_applied || cc_applied) {
+					if (sigverify_enabled && (signature_applied || cc_applied)) {
 						consistency_verified++;
 						if (verify_practical_signature_consistency (
 								core, fcn->addr, sig_root, signature_applied, cc_applied,
@@ -5005,15 +4938,15 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	}
 
 	R_LOG_INFO ("r2sleigh: post-analysis added %d xrefs", xrefs_added);
-	R_LOG_INFO ("r2sleigh: post-analysis taint eligible=%d skipped=%d comments=%d flags=%d xrefs=%d sink_hits=%d parse_failures=%d",
-		taint_fcns_eligible, taint_fcns_skipped, taint_comments, taint_flags, taint_xrefs,
+	R_LOG_INFO ("r2sleigh: post-analysis taint enabled=%d eligible=%d skipped=%d comments=%d flags=%d xrefs=%d sink_hits=%d parse_failures=%d",
+		taint_enabled? 1: 0, taint_fcns_eligible, taint_fcns_skipped, taint_comments, taint_flags, taint_xrefs,
 		taint_sink_hits, taint_parse_failures);
 	R_LOG_INFO ("r2sleigh: post-analysis risk summary: critical=%d high=%d medium=%d low=%d",
 		taint_risk_critical, taint_risk_high, taint_risk_medium, taint_risk_low);
 	R_LOG_INFO ("r2sleigh: post-analysis semantic comments enabled=%d emitted=%zu",
 		semantic_comments_enabled? 1: 0, semantic_comments_total);
-	R_LOG_INFO ("r2sleigh: signature write-back considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d sig_low_conf_skips=%d cc_low_conf_skips=%d consistency_verified=%d consistency_ok=%d consistency_mismatch=%d afij_signature_drift=%d consistency_readback_fail=%d consistency_ret_mismatch=%d consistency_argc_mismatch=%d consistency_argtype_mismatch=%d consistency_callconv_mismatch=%d",
-		sig_fcns_considered, sig_fcns_skipped_arch, sig_fcns_skipped_size, sig_parse_failures,
+	R_LOG_INFO ("r2sleigh: signature write-back enabled=%d verify=%d considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d sig_low_conf_skips=%d cc_low_conf_skips=%d consistency_verified=%d consistency_ok=%d consistency_mismatch=%d afij_signature_drift=%d consistency_readback_fail=%d consistency_ret_mismatch=%d consistency_argc_mismatch=%d consistency_argtype_mismatch=%d consistency_callconv_mismatch=%d",
+		sigwrite_enabled? 1: 0, sigverify_enabled? 1: 0, sig_fcns_considered, sig_fcns_skipped_arch, sig_fcns_skipped_size, sig_parse_failures,
 		sig_cmd_failures, sig_signatures_updated, sig_cc_updated, sig_skipped_low_conf,
 		cc_skipped_low_conf, consistency_verified, consistency_ok, consistency_mismatch,
 		afij_signature_drift, consistency_reasons.readback_fail,
@@ -5025,11 +4958,10 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		cc_api_verify_fail, cc_cmd_fallback_attempted,
 		cc_cmd_apply_ok, cc_cmd_apply_fail);
 	sample_callees = format_sample_callees (prop_state.sample_callees, prop_state.sample_callees_count);
-	R_LOG_INFO ("r2sleigh: caller propagation prop_callees_triggered=%d prop_callees_skipped_cap=%d prop_callers_considered=%d prop_callers_updated=%d prop_callers_dedup_skipped=%d prop_callers_missing_fcn=%d prop_callers_per_callee_cap_skipped=%d prop_callers_total_cap_skipped=%d prop_type_match_failures=%d prop_afva_failures=%d sample_callees=%s",
-		prop_state.prop_callees_triggered, prop_state.prop_callees_skipped_cap,
+	R_LOG_INFO ("r2sleigh: caller propagation prop_callees_triggered=%d prop_callers_considered=%d prop_callers_updated=%d prop_callers_dedup_skipped=%d prop_callers_missing_fcn=%d prop_type_match_failures=%d prop_afva_failures=%d sample_callees=%s",
+		prop_state.prop_callees_triggered,
 		prop_state.prop_callers_considered, prop_state.prop_callers_updated,
 		prop_state.prop_callers_dedup_skipped, prop_state.prop_callers_missing_fcn,
-		prop_state.prop_callers_per_callee_cap_skipped, prop_state.prop_callers_total_cap_skipped,
 		prop_state.prop_type_match_failures, prop_state.prop_afva_failures,
 		sample_callees ? sample_callees : "-");
 	free (sample_callees);

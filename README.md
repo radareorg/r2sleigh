@@ -43,9 +43,10 @@ cargo build --release -p r2sleigh-cli --features x86
 
 ```bash
 cd r2plugin
-make RUST_FEATURES=x86
-make install
+make RUST_FEATURES=all-archs install
 ```
+
+For a smaller build, you can still choose one architecture (for example, `RUST_FEATURES=x86`).
 
 ### First commands
 

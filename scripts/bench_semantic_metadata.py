@@ -134,13 +134,13 @@ def count_semantic_lines(comments_payload: Any) -> dict[str, int]:
 def collect_comment_metrics(
     r2: str, binary: str, metadata_enabled: bool, force_x86: bool
 ) -> dict[str, Any]:
+    mode = "full" if metadata_enabled else "fast"
     cmd_parts = []
     if force_x86:
         cmd_parts.extend(["e anal.arch=x86", "e arch.bits=64"])
     cmd_parts.extend(
         [
-            f"e anal.sla.meta={'true' if metadata_enabled else 'false'}",
-            "e anal.sla.meta.comments=true",
+            f"a:sla.info >/dev/null; e anal.sla.mode={mode}",
             "aaaa",
             "CCj",
         ]
@@ -166,9 +166,10 @@ def collect_comment_metrics(
 def collect_afvj_pointer_count(
     r2: str, binary: str, func_name: str, metadata_enabled: bool
 ) -> dict[str, Any]:
+    mode = "full" if metadata_enabled else "fast"
     cmd = "; ".join(
         [
-            f"e anal.sla.meta={'true' if metadata_enabled else 'false'}",
+            f"a:sla.info >/dev/null; e anal.sla.mode={mode}",
             "aaa",
             f"s {func_name}",
             "afva",
@@ -198,6 +199,7 @@ def collect_afvj_pointer_count(
 
 
 def median_timing(r2: str, metadata_enabled: bool, runs: int) -> dict[str, Any]:
+    mode = "full" if metadata_enabled else "fast"
     timings = []
     errors = []
     for _ in range(runs):
@@ -205,7 +207,7 @@ def median_timing(r2: str, metadata_enabled: bool, runs: int) -> dict[str, Any]:
             [
                 "e anal.arch=x86",
                 "e arch.bits=64",
-                f"e anal.sla.meta={'true' if metadata_enabled else 'false'}",
+                f"a:sla.info >/dev/null; e anal.sla.mode={mode}",
                 "aaaa",
             ]
         )
