@@ -416,6 +416,56 @@ int test_const_addr_chain(void) {
     return (target == 0x404e08ULL) ? 1 : 0;
 }
 
+typedef struct {
+    int tag;
+    int len;
+    long marker;
+} TypeChainObj;
+
+// Test 39: Leaf in a multi-hop caller/callee chain with struct field accesses.
+int test_type_leaf(TypeChainObj *obj, int v) {
+    obj->tag = v;
+    obj->len = v + 1;
+    return obj->tag + obj->len;
+}
+
+// Test 40: Mid-level call propagates and adds another field write.
+int test_type_mid(TypeChainObj *obj, int v) {
+    int acc = test_type_leaf(obj, v);
+    obj->marker = (long)&global_counter;
+    return acc + (int)(obj->marker != 0);
+}
+
+// Test 41: Top-level caller used to validate multi-hop interproc propagation.
+int test_type_top(int v) {
+    TypeChainObj obj = {0};
+    return test_type_mid(&obj, v) + obj.tag;
+}
+
+typedef struct {
+    int first;
+    int second;
+} GlobalTypeA;
+
+typedef struct {
+    short lo;
+    short hi;
+    int tail;
+} GlobalTypeB;
+
+volatile GlobalTypeA g_type_a = {0};
+volatile GlobalTypeB g_type_b = {0};
+
+// Test 42: Competing global access shapes for global type-link ranking.
+int test_global_type_compete(int x) {
+    g_type_a.first = x;
+    g_type_a.second = x + 7;
+    g_type_b.lo = (short)x;
+    g_type_b.hi = (short)(x + 1);
+    g_type_b.tail = g_type_a.second;
+    return g_type_b.tail + g_type_a.first;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -721,6 +771,34 @@ int main(int argc, char *argv[]) {
             break;
         case 38:
             printf("test_const_addr_chain() = %d\n", test_const_addr_chain());
+            break;
+        case 39: {
+            TypeChainObj obj = {0};
+            if (argc > 2) {
+                int v = atoi(argv[2]);
+                printf("test_type_leaf(&obj, %d) = %d\n", v, test_type_leaf(&obj, v));
+            }
+            break;
+        }
+        case 40: {
+            TypeChainObj obj = {0};
+            if (argc > 2) {
+                int v = atoi(argv[2]);
+                printf("test_type_mid(&obj, %d) = %d\n", v, test_type_mid(&obj, v));
+            }
+            break;
+        }
+        case 41:
+            if (argc > 2) {
+                int v = atoi(argv[2]);
+                printf("test_type_top(%d) = %d\n", v, test_type_top(v));
+            }
+            break;
+        case 42:
+            if (argc > 2) {
+                int x = atoi(argv[2]);
+                printf("test_global_type_compete(%d) = %d\n", x, test_global_type_compete(x));
+            }
             break;
         default:
             printf("Unknown test: %d\n", test);

@@ -102,6 +102,9 @@ extern char *r2sleigh_infer_signature_cc_json(const R2ILContext *ctx, const R2IL
 	unsigned long long fcn_addr, const char *fcn_name);
 extern char *r2sleigh_infer_type_writeback_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
 	unsigned long long fcn_addr, const char *fcn_name, const char *afcfj_json, const char *afvj_json, const char *tsj_json);
+extern char *r2sleigh_infer_type_writeback_json_ex(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
+	unsigned long long fcn_addr, const char *fcn_name, const char *afcfj_json, const char *afvj_json, const char *tsj_json,
+	size_t interproc_iter, size_t interproc_max_iters, int interproc_converged, const char *interproc_scope_json);
 /* Per-architecture context (lazy init)
  *
  * WARNING: These globals are NOT thread-safe. This plugin assumes
@@ -142,6 +145,8 @@ typedef struct {
 	ut64 addr;
 	ut64 key;
 	ut64 payload_hash;
+	ut64 dep_hash;
+	ut64 applied_hash;
 } TypeWritebackCacheEntry;
 
 static TypeWritebackCacheEntry *type_writeback_cache = NULL;
@@ -160,6 +165,7 @@ static size_t type_writeback_cache_capacity = 0;
 #define SLEIGH_TYPE_STRUCT_MIN_CONF_DEFAULT 85
 #define SLEIGH_TYPE_INTERPROC_MAX_ITERS_DEFAULT 12
 #define SLEIGH_TYPE_MAX_BLOCKS_DEFAULT 500
+#define SLEIGH_TYPE_GLOBAL_MAX_LINKS_DEFAULT 128
 #define SLEIGH_CALLER_PROP_SAMPLE_MAX 5
 #define SLEIGH_TAINT_LABEL_MAX 6
 #define SLEIGH_COMMENT_PREFIX_SEMANTIC "sla:"
@@ -226,13 +232,15 @@ static TypeWritebackCacheEntry *type_writeback_cache_get(ut64 addr) {
 	return NULL;
 }
 
-static bool type_writeback_cache_put(ut64 addr, ut64 key, ut64 payload_hash) {
+static bool type_writeback_cache_put(ut64 addr, ut64 key, ut64 dep_hash, ut64 payload_hash, ut64 applied_hash) {
 	TypeWritebackCacheEntry *entry = type_writeback_cache_get (addr);
 	TypeWritebackCacheEntry *next;
 
 	if (entry) {
 		entry->key = key;
 		entry->payload_hash = payload_hash;
+		entry->dep_hash = dep_hash;
+		entry->applied_hash = applied_hash;
 		return true;
 	}
 
@@ -249,6 +257,8 @@ static bool type_writeback_cache_put(ut64 addr, ut64 key, ut64 payload_hash) {
 	type_writeback_cache[type_writeback_cache_count].addr = addr;
 	type_writeback_cache[type_writeback_cache_count].key = key;
 	type_writeback_cache[type_writeback_cache_count].payload_hash = payload_hash;
+	type_writeback_cache[type_writeback_cache_count].dep_hash = dep_hash;
+	type_writeback_cache[type_writeback_cache_count].applied_hash = applied_hash;
 	type_writeback_cache_count++;
 	return true;
 }
@@ -2348,6 +2358,11 @@ static int cfg_get_type_max_blocks(RAnal *anal) {
 		SLEIGH_TYPE_MAX_BLOCKS_DEFAULT, 1, 4096);
 }
 
+static int cfg_get_type_global_max_links(RAnal *anal) {
+	return cfg_get_int_clamped (anal, "anal.sla.type.global.max_links",
+		SLEIGH_TYPE_GLOBAL_MAX_LINKS_DEFAULT, 1, 4096);
+}
+
 static bool cfg_get_type_cache_enabled(RAnal *anal) {
 	return cfg_get_int_clamped (anal, "anal.sla.type.cache", 1, 0, 1) != 0;
 }
@@ -2367,6 +2382,8 @@ static void ensure_sleigh_default_configs(RAnal *anal) {
 		"maximum interprocedural propagation iterations", SLEIGH_TYPE_INTERPROC_MAX_ITERS_DEFAULT);
 	ensure_default_int_config (anal, "anal.sla.type.max_blocks",
 		"maximum basic blocks for type write-back inference", SLEIGH_TYPE_MAX_BLOCKS_DEFAULT);
+	ensure_default_int_config (anal, "anal.sla.type.global.max_links",
+		"maximum global type links applied per function payload", SLEIGH_TYPE_GLOBAL_MAX_LINKS_DEFAULT);
 	ensure_default_int_config (anal, "anal.sla.type.cache",
 		"cache unchanged function type payloads across repeated aaaa runs", 1);
 }
@@ -3880,6 +3897,10 @@ static bool is_signature_writeback_arch_supported (const char *arch_name) {
 		|| !strcmp (arch_name, "amd64"));
 }
 
+static bool is_type_writeback_arch_supported (const char *arch_name) {
+	return arch_name && *arch_name;
+}
+
 static bool is_x64_signature_arch (const char *arch_name) {
 	return arch_name
 		&& (!strcmp (arch_name, "x86-64")
@@ -3897,6 +3918,7 @@ static const RJson *json_next_object (const RJson *item) {
 }
 
 static int json_array_object_count(const RJson *array_root);
+static bool is_caller_propagation_ref_type (RAnalRefType type);
 
 static char *normalize_compare_string (const char *s) {
 	size_t len;
@@ -4224,6 +4246,8 @@ typedef struct {
 	int global_links_considered;
 	int global_links_applied;
 	int global_links_skipped_low_conf;
+	int global_links_conflict_skip;
+	int global_links_existing_preserved;
 	int global_links_fail;
 	int payload_parse_failures;
 	int payload_missing;
@@ -4231,8 +4255,14 @@ typedef struct {
 	int cache_misses;
 	int cache_invalidates;
 	int cache_updates;
+	int type_fcns_skipped_arch;
+	int type_fcns_skipped_size;
 	int fixpoint_iters;
 	int fixpoint_converged;
+	int fixpoint_queue_pushes;
+	int fixpoint_queue_pops;
+	int fixpoint_requeues;
+	char fixpoint_stop_reason[16];
 } TypeWritebackCounters;
 
 static bool json_is_string_with_value(const RJson *value) {
@@ -4249,11 +4279,32 @@ static int confidence_threshold_for_mode(int base, SleighTypeWritebackMode mode,
 	return base;
 }
 
+static bool is_opaque_placeholder_type_name(const char *type_name) {
+	char *normalized;
+	bool opaque = false;
+
+	if (!type_name || !*type_name) {
+		return false;
+	}
+	normalized = normalize_compare_string (type_name);
+	if (!normalized) {
+		return false;
+	}
+	if (strstr (normalized, "type_0x")) {
+		opaque = true;
+	}
+	free (normalized);
+	return opaque;
+}
+
 static bool is_generic_type_name(const char *type_name) {
 	char *normalized;
 	bool generic;
 
 	if (!type_name || !*type_name) {
+		return true;
+	}
+	if (is_opaque_placeholder_type_name (type_name)) {
 		return true;
 	}
 	normalized = normalize_compare_string (type_name);
@@ -4384,6 +4435,43 @@ static bool apply_struct_decl_candidate(RAnal *anal, RCore *core, const char *na
 	return r_type_kind (anal->sdb_types, name) != R_TYPE_INVALID;
 }
 
+static bool candidate_type_has_known_struct(RAnal *anal, const char *type_name) {
+	const char *struct_kw;
+	const char *name_start;
+	char name_buf[192];
+	size_t i = 0;
+	ut64 bitsize;
+
+	if (!anal || !type_name || !*type_name) {
+		return false;
+	}
+	struct_kw = strstr (type_name, "struct ");
+	if (!struct_kw) {
+		return true;
+	}
+	name_start = struct_kw + strlen ("struct ");
+	while (*name_start && isspace ((unsigned char)*name_start)) {
+		name_start++;
+	}
+	while (name_start[i] && i + 1 < sizeof (name_buf)) {
+		char ch = name_start[i];
+		if (!(isalnum ((unsigned char)ch) || ch == '_')) {
+			break;
+		}
+		name_buf[i] = ch;
+		i++;
+	}
+	name_buf[i] = '\0';
+	if (!name_buf[0]) {
+		return false;
+	}
+	if (r_type_kind (anal->sdb_types, name_buf) != R_TYPE_INVALID) {
+		return true;
+	}
+	bitsize = r_type_get_bitsize (anal->sdb_types, name_buf);
+	return bitsize > 0;
+}
+
 static bool apply_var_type_candidate(
 	RAnal *anal,
 	RCore *core,
@@ -4411,6 +4499,13 @@ static bool apply_var_type_candidate(
 		return false;
 	}
 	free (existing_type);
+
+	if (!candidate_type_has_known_struct (anal, candidate_type)) {
+		if (counters) {
+			counters->vars_skipped_conflict++;
+		}
+		return false;
+	}
 
 	r_anal_var_set_type (anal, var, candidate_type);
 	api_ok = verify_var_type_applied (var, candidate_type);
@@ -4462,11 +4557,30 @@ static bool apply_var_rename_candidate(
 	return verify_var_rename_applied (var, new_name);
 }
 
-static bool apply_global_type_link_candidate(RAnal *anal, RCore *core, ut64 addr, const char *type_name) {
+static bool apply_global_type_link_candidate(RAnal *anal, RCore *core, ut64 addr, const char *type_name, TypeWritebackCounters *tc) {
+	char *existing = NULL;
 	int rc;
 	if (!anal || !type_name || !*type_name || !addr) {
 		return false;
 	}
+	if (is_opaque_placeholder_type_name (type_name) || !candidate_type_has_known_struct (anal, type_name)) {
+		if (tc) {
+			tc->global_links_conflict_skip++;
+		}
+		return false;
+	}
+	existing = r_type_link_at (anal->sdb_types, addr);
+	if (existing && *existing && !strings_match_normalized (existing, type_name)) {
+		if (!is_generic_type_name (existing)) {
+			if (tc) {
+				tc->global_links_conflict_skip++;
+				tc->global_links_existing_preserved++;
+			}
+			free (existing);
+			return false;
+		}
+	}
+	free (existing);
 	rc = r_type_set_link (anal->sdb_types, type_name, addr);
 	if (rc > 0) {
 		return true;
@@ -4487,6 +4601,7 @@ static ut64 compute_type_cache_key(
 	const char *afcfj_json,
 	const char *afvj_json,
 	ut64 tsj_hash,
+	ut64 dep_hash,
 	SleighTypeWritebackMode mode,
 	int min_conf,
 	int rename_min_conf,
@@ -4505,9 +4620,154 @@ static ut64 compute_type_cache_key(
 	key ^= ((ut64)(struct_min_conf & 0xff) << 24);
 	key ^= ((ut64)(max_iters & 0xffff) << 40);
 	key ^= tsj_hash;
+	key ^= dep_hash;
 	key ^= r_str_hash64 (afcfj_json? afcfj_json: "");
 	key ^= r_str_hash64 (afvj_json? afvj_json: "");
 	return key;
+}
+
+static ut64 compute_callee_dependency_hash(RAnal *anal, RAnalFunction *fcn) {
+	RVecAnalRef *refs;
+	ut64 dep_hash = 0;
+	size_t i;
+	size_t len;
+
+	if (!anal || !fcn) {
+		return 0;
+	}
+	refs = r_anal_function_get_refs (fcn);
+	if (!refs) {
+		return 0;
+	}
+	len = RVecAnalRef_length (refs);
+	for (i = 0; i < len; i++) {
+		RAnalRef *ref = RVecAnalRef_at (refs, i);
+		RAnalFunction *callee_fcn;
+		TypeWritebackCacheEntry *entry;
+		if (!ref || !is_caller_propagation_ref_type (ref->type)) {
+			continue;
+		}
+		callee_fcn = r_anal_get_fcn_in (anal, ref->addr, 0);
+		if (!callee_fcn) {
+			continue;
+		}
+		entry = type_writeback_cache_get (callee_fcn->addr);
+		if (entry) {
+			dep_hash ^= entry->applied_hash;
+		}
+	}
+	RVecAnalRef_free (refs);
+	return dep_hash;
+}
+
+static int ut64_cmp_asc(const void *a, const void *b) {
+	ut64 av = *(const ut64 *)a;
+	ut64 bv = *(const ut64 *)b;
+	if (av < bv) {
+		return -1;
+	}
+	if (av > bv) {
+		return 1;
+	}
+	return 0;
+}
+
+static bool queue_addr_if_eligible(
+	ut64 addr,
+	const ut64 *eligible_addrs,
+	size_t eligible_count,
+	ut64 **queue,
+	size_t *queue_count,
+	size_t *queue_cap,
+	bool *is_new
+) {
+	bool already;
+	if (is_new) {
+		*is_new = false;
+	}
+	if (!addr || !ut64_array_contains (eligible_addrs, eligible_count, addr)) {
+		return false;
+	}
+	already = ut64_array_contains (*queue, *queue_count, addr);
+	if (!append_unique_ut64 (queue, queue_count, queue_cap, addr)) {
+		return false;
+	}
+	if (!already && is_new) {
+		*is_new = true;
+	}
+	return true;
+}
+
+static void enqueue_fixpoint_neighbors(
+	RAnal *anal,
+	RAnalFunction *fcn,
+	const ut64 *eligible_addrs,
+	size_t eligible_count,
+	ut64 **queue,
+	size_t *queue_count,
+	size_t *queue_cap,
+	TypeWritebackCounters *tc,
+	bool requeue_phase
+) {
+	RVecAnalRef *xrefs;
+	RVecAnalRef *refs;
+	size_t i;
+	size_t len;
+	bool inserted;
+
+	if (!anal || !fcn || !eligible_addrs || !queue || !queue_count || !queue_cap) {
+		return;
+	}
+
+	xrefs = r_anal_xrefs_get (anal, fcn->addr);
+	if (xrefs) {
+		len = RVecAnalRef_length (xrefs);
+		for (i = 0; i < len; i++) {
+			RAnalRef *ref = RVecAnalRef_at (xrefs, i);
+			RAnalFunction *caller_fcn;
+			if (!ref || !ref->at || !is_caller_propagation_ref_type (ref->type)) {
+				continue;
+			}
+			caller_fcn = r_anal_get_fcn_in (anal, ref->at, 0);
+			if (!caller_fcn) {
+				continue;
+			}
+			inserted = false;
+			queue_addr_if_eligible (caller_fcn->addr, eligible_addrs, eligible_count, queue, queue_count, queue_cap, &inserted);
+			if (inserted && tc) {
+				tc->fixpoint_queue_pushes++;
+				if (requeue_phase) {
+					tc->fixpoint_requeues++;
+				}
+			}
+		}
+		RVecAnalRef_free (xrefs);
+	}
+
+	refs = r_anal_function_get_refs (fcn);
+	if (refs) {
+		len = RVecAnalRef_length (refs);
+		for (i = 0; i < len; i++) {
+			RAnalRef *ref = RVecAnalRef_at (refs, i);
+			RAnalFunction *callee_fcn;
+			if (!ref || !is_caller_propagation_ref_type (ref->type)) {
+				continue;
+			}
+			callee_fcn = r_anal_get_fcn_in (anal, ref->addr, 0);
+			if (!callee_fcn) {
+				continue;
+			}
+			inserted = false;
+			queue_addr_if_eligible (callee_fcn->addr, eligible_addrs, eligible_count, queue, queue_count, queue_cap, &inserted);
+			if (inserted && tc) {
+				tc->fixpoint_queue_pushes++;
+				if (requeue_phase) {
+					tc->fixpoint_requeues++;
+				}
+			}
+		}
+		RVecAnalRef_free (refs);
+	}
 }
 
 static bool is_caller_propagation_ref_type (RAnalRefType type) {
@@ -4517,9 +4777,27 @@ static bool is_caller_propagation_ref_type (RAnalRefType type) {
 		|| masked == R_ANAL_REF_TYPE_JUMP;
 }
 
-static bool run_caller_type_match (RAnal *anal, RAnalFunction *caller_fcn) {
-	if (!anal || !caller_fcn) {
+static bool function_has_opaque_type_markers(RCore *core, RAnalFunction *fcn) {
+	char *afcfj_json;
+	bool has_opaque = false;
+	if (!core || !fcn) {
 		return false;
+	}
+	afcfj_json = r_core_cmd_str_at (core, fcn->addr, "afcfj");
+	if (afcfj_json && strstr (afcfj_json, "type_0x")) {
+		has_opaque = true;
+	}
+	free (afcfj_json);
+	return has_opaque;
+}
+
+static bool run_caller_type_match (RAnal *anal, RCore *core, RAnalFunction *caller_fcn) {
+	if (!anal || !caller_fcn || !core) {
+		return false;
+	}
+	/* Avoid flooding logs with "unknown type struct type_0x..." from opaque DB placeholders. */
+	if (function_has_opaque_type_markers (core, caller_fcn)) {
+		return true;
 	}
 	r_anal_type_match (anal, caller_fcn);
 	return true;
@@ -4622,7 +4900,7 @@ static void propagate_signature_to_direct_callers(
 				&state->updated_callers_capacity, caller_addr)) {
 			continue;
 		}
-		if (!run_caller_type_match (anal, caller_fcn)) {
+		if (!run_caller_type_match (anal, core, caller_fcn)) {
 			state->prop_type_match_failures++;
 		}
 		if (!run_caller_afva (core, caller_fcn)) {
@@ -4911,6 +5189,7 @@ static bool apply_type_writeback_payload(
 	int min_conf,
 	int rename_min_conf,
 	int struct_min_conf,
+	int global_max_links,
 	TypeWritebackCounters *tc
 ) {
 	const RJson *j_structs;
@@ -4919,6 +5198,7 @@ static bool apply_type_writeback_payload(
 	const RJson *j_links;
 	const RJson *item;
 	bool changed = false;
+	int global_applied_this_payload = 0;
 	int type_apply_threshold = confidence_threshold_for_mode (min_conf, wb_mode, 10);
 	int rename_apply_threshold = confidence_threshold_for_mode (rename_min_conf, wb_mode, 8);
 	int struct_apply_threshold = confidence_threshold_for_mode (struct_min_conf, wb_mode, 10);
@@ -5076,6 +5356,9 @@ static bool apply_type_writeback_payload(
 
 	j_links = r_json_get (payload_root, "global_type_links");
 	if (j_links && j_links->type == R_JSON_ARRAY) {
+		ut64 *seen_addrs = NULL;
+		size_t seen_count = 0;
+		size_t seen_cap = 0;
 		for (item = json_next_object (j_links->children.first); item; item = json_next_object (item->next)) {
 			const RJson *j_addr = r_json_get (item, "addr");
 			const RJson *j_type = r_json_get (item, "type");
@@ -5088,21 +5371,40 @@ static bool apply_type_writeback_payload(
 			if (!addr || !json_is_string_with_value (j_type)) {
 				continue;
 			}
+			if (ut64_array_contains (seen_addrs, seen_count, addr)) {
+				continue;
+			}
 			if (confidence < type_apply_threshold) {
 				if (tc) {
 					tc->global_links_skipped_low_conf++;
 				}
 				continue;
 			}
-			if (apply_global_type_link_candidate (anal, core, addr, j_type->str_value)) {
+			if (global_applied_this_payload >= global_max_links) {
+				if (tc) {
+					tc->global_links_skipped_low_conf++;
+				}
+				continue;
+			}
+			if (is_opaque_placeholder_type_name (j_type->str_value)
+					|| !candidate_type_has_known_struct (anal, j_type->str_value)) {
+				if (tc) {
+					tc->global_links_conflict_skip++;
+				}
+				continue;
+			}
+			append_unique_ut64 (&seen_addrs, &seen_count, &seen_cap, addr);
+			if (apply_global_type_link_candidate (anal, core, addr, j_type->str_value, tc)) {
 				if (tc) {
 					tc->global_links_applied++;
 				}
+				global_applied_this_payload++;
 				changed = true;
 			} else if (tc) {
 				tc->global_links_fail++;
 			}
 		}
+		free (seen_addrs);
 	}
 
 	return changed;
@@ -5165,6 +5467,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	char *sample_callees = NULL;
 	const char *arch_name = NULL;
 	bool sig_arch_supported = false;
+	bool type_arch_supported = false;
 	SleighMode post_mode = sleigh_mode_effective_for_post_analysis (anal);
 	SleighTypeWritebackMode type_wb_mode = cfg_get_type_writeback_mode_default_balanced (anal);
 	int type_min_conf = cfg_get_type_min_conf (anal);
@@ -5172,6 +5475,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int type_struct_min_conf = cfg_get_type_struct_min_conf (anal);
 	int type_max_iters = cfg_get_type_interproc_max_iters (anal);
 	int type_max_blocks = cfg_get_type_max_blocks (anal);
+	int type_global_max_links = cfg_get_type_global_max_links (anal);
 	bool type_cache_enabled = cfg_get_type_cache_enabled (anal);
 	bool semantic_comments_enabled = post_mode != SLEIGH_MODE_FAST;
 	bool taint_enabled = post_mode != SLEIGH_MODE_FAST;
@@ -5180,6 +5484,12 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	bool sigverify_enabled = false;
 	char *tsj_shared_json = NULL;
 	ut64 tsj_shared_hash = 0;
+	ut64 *type_eligible_addrs = NULL;
+	size_t type_eligible_count = 0;
+	size_t type_eligible_cap = 0;
+	ut64 *changed_type_fcns = NULL;
+	size_t changed_type_count = 0;
+	size_t changed_type_cap = 0;
 
 	if (!ctx) {
 		return false;
@@ -5187,6 +5497,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	core = anal->coreb.core;
 	arch_name = r2il_arch_name (ctx);
 	sig_arch_supported = is_signature_writeback_arch_supported (arch_name);
+	type_arch_supported = is_type_writeback_arch_supported (arch_name);
 	if (core) {
 		RAnalFunction *focus_fcn = r_anal_get_fcn_in (anal, core->addr, 0);
 		if (focus_fcn) {
@@ -5222,7 +5533,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		int bb_count = (fcn && fcn->bbs) ? r_list_length (fcn->bbs) : 0;
 		bool taint_eligible = taint_enabled && bb_count <= SLEIGH_TAINT_MAX_BLOCKS;
 		bool sig_eligible = sigwrite_enabled && sig_arch_supported && core && bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS;
-		bool type_eligible = type_writeback_enabled && sig_arch_supported && core && bb_count <= type_max_blocks;
+		bool type_eligible = type_writeback_enabled && type_arch_supported && core && bb_count <= type_max_blocks;
 		bool semantic_for_fcn = semantic_comments_enabled;
 		bool xref_for_fcn = xref_enabled;
 		bool need_blocks = semantic_for_fcn || xref_for_fcn || taint_eligible || sig_eligible || type_eligible;
@@ -5236,6 +5547,16 @@ static bool sleigh_post_analysis(RAnal *anal) {
 				taint_fcns_eligible++;
 			} else {
 				taint_fcns_skipped++;
+			}
+		}
+		if (type_eligible) {
+			append_unique_ut64 (&type_eligible_addrs, &type_eligible_count, &type_eligible_cap, fcn->addr);
+		}
+		if (type_writeback_enabled) {
+			if (!type_arch_supported || !core) {
+				type_wb.type_fcns_skipped_arch++;
+			} else if (bb_count > type_max_blocks) {
+				type_wb.type_fcns_skipped_size++;
 			}
 		}
 
@@ -5593,10 +5914,12 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			r2il_string_free (taint_json);
 		}
 
-		if (!sigwrite_enabled) {
+		if (!sigwrite_enabled && !type_writeback_enabled) {
 			/* Signature writeback explicitly disabled for this run. */
-		} else if (!sig_arch_supported || !core) {
-			sig_fcns_skipped_arch++;
+		} else if (!core) {
+			if (sigwrite_enabled) {
+				sig_fcns_skipped_arch++;
+			}
 		} else if (bb_count > SLEIGH_SIG_WRITEBACK_MAX_BLOCKS && !type_eligible) {
 			sig_fcns_skipped_size++;
 		} else {
@@ -5615,11 +5938,17 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			bool signature_drift = false;
 			bool type_payload_changed = false;
 			bool signature_part_eligible = bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS;
+			bool signature_arch_eligible = sig_arch_supported;
+			bool sig_metrics_eligible = signature_arch_eligible && signature_part_eligible;
 			ut64 cache_key = 0;
 			ut64 payload_hash = 0;
+			ut64 dep_hash = 0;
 			sig_fcns_considered++;
 			if (!signature_part_eligible) {
 				sig_fcns_skipped_size++;
+			}
+			if (!signature_arch_eligible) {
+				sig_fcns_skipped_arch++;
 			}
 
 			afcfj_json = r_core_cmd_str_at (core, fcn->addr, "afcfj");
@@ -5635,8 +5964,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 
 			if (type_cache_enabled && type_writeback_enabled) {
 				TypeWritebackCacheEntry *cache_entry;
+				dep_hash = compute_callee_dependency_hash (anal, fcn);
 				cache_key = compute_type_cache_key (fcn, afcfj_json, afvj_json,
-					tsj_shared_hash, type_wb_mode, type_min_conf,
+					tsj_shared_hash, dep_hash, type_wb_mode, type_min_conf,
 					type_rename_min_conf, type_struct_min_conf, type_max_iters);
 				cache_entry = type_writeback_cache_get (fcn->addr);
 				if (cache_entry && cache_entry->key == cache_key) {
@@ -5652,20 +5982,25 @@ static bool sleigh_post_analysis(RAnal *anal) {
 				}
 			}
 
-			payload_json = r2sleigh_infer_type_writeback_json (ctx,
+			payload_json = r2sleigh_infer_type_writeback_json_ex (ctx,
 				(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, fcn->name,
 				afcfj_json? afcfj_json: "[]",
 				afvj_json? afvj_json: "{}",
-				tsj_shared_json? tsj_shared_json: "{}");
+				tsj_shared_json? tsj_shared_json: "{}",
+				1, type_max_iters, 1, "{}");
 			if (!payload_json || !*payload_json) {
-				sig_parse_failures++;
+				if (sig_metrics_eligible) {
+					sig_parse_failures++;
+				}
 				type_wb.payload_missing++;
 				r2il_string_free (payload_json);
 			} else {
 				payload_hash = r_str_hash64 (payload_json);
 				payload_root = r_json_parse (payload_json);
 				if (!payload_root || payload_root->type != R_JSON_OBJECT) {
-					sig_parse_failures++;
+					if (sig_metrics_eligible) {
+						sig_parse_failures++;
+					}
 					type_wb.payload_parse_failures++;
 					r_json_free (payload_root);
 					r2il_string_free (payload_json);
@@ -5677,7 +6012,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						confidence = (int)j_confidence->num.u_value;
 					}
 
-					if (signature_part_eligible
+					if (signature_arch_eligible && signature_part_eligible
 							&& j_signature && j_signature->type == R_JSON_STRING
 							&& j_signature->str_value && *j_signature->str_value) {
 						if (confidence < SLEIGH_SIG_MIN_CONFIDENCE) {
@@ -5712,10 +6047,12 @@ static bool sleigh_post_analysis(RAnal *anal) {
 								fcn_name, fcn->addr);
 						}
 					} else {
-						sig_parse_failures++;
+						if (sig_metrics_eligible) {
+							sig_parse_failures++;
+						}
 					}
 
-					if (signature_part_eligible
+					if (signature_arch_eligible && signature_part_eligible
 							&& j_callconv && j_callconv->type == R_JSON_STRING
 							&& j_callconv->str_value && *j_callconv->str_value) {
 						if (confidence < SLEIGH_CC_MIN_CONFIDENCE) {
@@ -5751,13 +6088,18 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					if (type_eligible && type_writeback_enabled) {
 						type_payload_changed = apply_type_writeback_payload (
 							anal, core, fcn, payload_root, type_wb_mode,
-							type_min_conf, type_rename_min_conf, type_struct_min_conf, &type_wb);
+							type_min_conf, type_rename_min_conf, type_struct_min_conf,
+							type_global_max_links, &type_wb);
 						if (type_payload_changed) {
-							run_caller_type_match (anal, fcn);
+							append_unique_ut64 (&changed_type_fcns, &changed_type_count, &changed_type_cap, fcn->addr);
+							run_caller_type_match (anal, core, fcn);
 							run_caller_afva (core, fcn);
 							propagate_signature_to_direct_callers (anal, core, fcn->addr, fcn_name,
 								&prop_state, focus_callee_addr && fcn->addr == focus_callee_addr);
 						}
+					}
+					if ((signature_applied || cc_applied) && type_writeback_enabled) {
+						append_unique_ut64 (&changed_type_fcns, &changed_type_count, &changed_type_cap, fcn->addr);
 					}
 
 					if (signature_part_eligible && sigverify_enabled && (signature_applied || cc_applied)) {
@@ -5775,7 +6117,8 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					}
 
 					if (type_cache_enabled && type_writeback_enabled) {
-						if (type_writeback_cache_put (fcn->addr, cache_key, payload_hash)) {
+						ut64 applied_hash = type_payload_changed? payload_hash: 0;
+						if (type_writeback_cache_put (fcn->addr, cache_key, dep_hash, payload_hash, applied_hash)) {
 							type_wb.cache_updates++;
 						}
 					}
@@ -5788,6 +6131,180 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		}
 
 		block_array_free (&blocks);
+	}
+
+	if (type_writeback_enabled) {
+		ut64 *queue = NULL;
+		size_t queue_count = 0;
+		size_t queue_cap = 0;
+		size_t i;
+		int iter_idx = 1;
+		bool converged = true;
+		if (changed_type_count > 0 && type_eligible_count > 0) {
+			for (i = 0; i < changed_type_count; i++) {
+				RAnalFunction *changed_fcn = r_anal_get_fcn_in (anal, changed_type_fcns[i], 0);
+				if (!changed_fcn) {
+					continue;
+				}
+				enqueue_fixpoint_neighbors (anal, changed_fcn,
+					type_eligible_addrs, type_eligible_count,
+					&queue, &queue_count, &queue_cap, &type_wb, false);
+			}
+		}
+		while (queue_count > 0 && iter_idx < type_max_iters) {
+			ut64 *current = queue;
+			size_t current_count = queue_count;
+			iter_idx++;
+			type_wb.fixpoint_iters = iter_idx;
+			qsort (current, current_count, sizeof (ut64), ut64_cmp_asc);
+			queue = NULL;
+			queue_count = 0;
+			queue_cap = 0;
+
+			for (i = 0; i < current_count; i++) {
+				ut64 faddr = current[i];
+				RAnalFunction *fcn = r_anal_get_fcn_in (anal, faddr, 0);
+				int bb_count;
+				BlockArray blocks;
+				char *afcfj_json = NULL;
+				char *afvj_json = NULL;
+				char *payload_json = NULL;
+				RJson *payload_root = NULL;
+				bool type_changed = false;
+				bool sig_or_cc_changed = false;
+				ut64 payload_hash = 0;
+				ut64 dep_hash = 0;
+				ut64 cache_key = 0;
+				type_wb.fixpoint_queue_pops++;
+				if (!fcn) {
+					continue;
+				}
+				bb_count = (fcn->bbs)? r_list_length (fcn->bbs): 0;
+				if (bb_count > type_max_blocks) {
+					type_wb.type_fcns_skipped_size++;
+					continue;
+				}
+				if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
+					continue;
+				}
+
+				afcfj_json = r_core_cmd_str_at (core, fcn->addr, "afcfj");
+				if (!afcfj_json || afcfj_json[0] != '[') {
+					free (afcfj_json);
+					afcfj_json = strdup ("[]");
+				}
+				afvj_json = r_core_cmd_str_at (core, fcn->addr, "afvj");
+				if (!afvj_json || afvj_json[0] != '{') {
+					free (afvj_json);
+					afvj_json = strdup ("{}");
+				}
+
+				if (type_cache_enabled) {
+					TypeWritebackCacheEntry *cache_entry;
+					dep_hash = compute_callee_dependency_hash (anal, fcn);
+					cache_key = compute_type_cache_key (fcn, afcfj_json, afvj_json,
+						tsj_shared_hash, dep_hash, type_wb_mode, type_min_conf,
+						type_rename_min_conf, type_struct_min_conf, type_max_iters);
+					cache_entry = type_writeback_cache_get (fcn->addr);
+					if (cache_entry && cache_entry->key == cache_key) {
+						type_wb.cache_hits++;
+						free (afcfj_json);
+						free (afvj_json);
+						block_array_free (&blocks);
+						continue;
+					}
+					type_wb.cache_misses++;
+					if (cache_entry) {
+						type_wb.cache_invalidates++;
+					}
+				}
+
+				payload_json = r2sleigh_infer_type_writeback_json_ex (ctx,
+					(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, fcn->name,
+					afcfj_json? afcfj_json: "[]",
+					afvj_json? afvj_json: "{}",
+					tsj_shared_json? tsj_shared_json: "{}",
+					(size_t)iter_idx, (size_t)type_max_iters, 0,
+					"{\"phase\":\"fixpoint\"}");
+				if (!payload_json || !*payload_json) {
+					type_wb.payload_missing++;
+					r2il_string_free (payload_json);
+					free (afcfj_json);
+					free (afvj_json);
+					block_array_free (&blocks);
+					continue;
+				}
+				payload_hash = r_str_hash64 (payload_json);
+				payload_root = r_json_parse (payload_json);
+				if (!payload_root || payload_root->type != R_JSON_OBJECT) {
+					type_wb.payload_parse_failures++;
+					r_json_free (payload_root);
+					r2il_string_free (payload_json);
+					free (afcfj_json);
+					free (afvj_json);
+					block_array_free (&blocks);
+					continue;
+				}
+
+				if (sig_arch_supported && bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS) {
+					const RJson *j_sig = r_json_get (payload_root, "signature");
+					const RJson *j_cc = r_json_get (payload_root, "callconv");
+					const RJson *j_conf = r_json_get (payload_root, "confidence");
+					int conf = (j_conf && j_conf->type == R_JSON_INTEGER)? (int)j_conf->num.u_value: 0;
+					if (j_sig && j_sig->type == R_JSON_STRING && j_sig->str_value && *j_sig->str_value
+							&& conf >= SLEIGH_SIG_MIN_CONFIDENCE) {
+						WritebackApplyResult wa = apply_inferred_signature (anal, core, fcn, j_sig->str_value, payload_root);
+						if (wa.path != WRITEBACK_APPLY_NONE) {
+							sig_or_cc_changed = true;
+							sig_signatures_updated++;
+						}
+					}
+					if (j_cc && j_cc->type == R_JSON_STRING && j_cc->str_value && *j_cc->str_value
+							&& conf >= SLEIGH_CC_MIN_CONFIDENCE) {
+						WritebackApplyResult wa = apply_inferred_callconv (anal, core, fcn, j_cc->str_value);
+						if (wa.path != WRITEBACK_APPLY_NONE) {
+							sig_or_cc_changed = true;
+							sig_cc_updated++;
+						}
+					}
+				}
+
+				type_changed = apply_type_writeback_payload (anal, core, fcn, payload_root, type_wb_mode,
+					type_min_conf, type_rename_min_conf, type_struct_min_conf,
+					type_global_max_links, &type_wb);
+				if (type_changed || sig_or_cc_changed) {
+					run_caller_type_match (anal, core, fcn);
+					run_caller_afva (core, fcn);
+					enqueue_fixpoint_neighbors (anal, fcn,
+						type_eligible_addrs, type_eligible_count,
+						&queue, &queue_count, &queue_cap, &type_wb, true);
+				}
+				if (type_cache_enabled) {
+					ut64 applied_hash = (type_changed || sig_or_cc_changed)? payload_hash: 0;
+					if (type_writeback_cache_put (fcn->addr, cache_key, dep_hash, payload_hash, applied_hash)) {
+						type_wb.cache_updates++;
+					}
+				}
+				r_json_free (payload_root);
+				r2il_string_free (payload_json);
+				free (afcfj_json);
+				free (afvj_json);
+				block_array_free (&blocks);
+			}
+			free (current);
+		}
+		if (queue_count == 0) {
+			converged = true;
+			snprintf (type_wb.fixpoint_stop_reason, sizeof (type_wb.fixpoint_stop_reason), "queue_empty");
+		} else {
+			converged = false;
+			snprintf (type_wb.fixpoint_stop_reason, sizeof (type_wb.fixpoint_stop_reason), "max_iters");
+		}
+		free (queue);
+		if (type_wb.fixpoint_iters == 0) {
+			type_wb.fixpoint_iters = 1;
+		}
+		type_wb.fixpoint_converged = converged? 1: 0;
 	}
 
 	R_LOG_INFO ("r2sleigh: post-analysis added %d xrefs", xrefs_added);
@@ -5810,9 +6327,11 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		sig_cmd_apply_ok, sig_cmd_apply_fail, cc_api_apply_ok,
 		cc_api_verify_fail, cc_cmd_fallback_attempted,
 		cc_cmd_apply_ok, cc_cmd_apply_fail);
-	type_wb.fixpoint_iters = type_writeback_enabled? 1: 0;
-	type_wb.fixpoint_converged = type_writeback_enabled? 1: 0;
-	R_LOG_INFO ("r2sleigh: type write-back enabled=%d mode=%d vars_considered=%d vars_applied=%d vars_hint_only=%d vars_low_conf=%d vars_conflict=%d vars_api_verify_fail=%d vars_cmd_fallback_attempted=%d vars_cmd_apply_fail=%d renames_considered=%d renames_applied=%d renames_low_conf=%d renames_conflict=%d rename_generated_guard_skips=%d structs_considered=%d structs_imported=%d structs_low_conf=%d structs_import_fail=%d global_links_considered=%d global_links_applied=%d global_links_low_conf=%d global_links_fail=%d payload_missing=%d payload_parse_failures=%d cache_hits=%d cache_misses=%d cache_invalidates=%d cache_updates=%d fixpoint_iters=%d fixpoint_converged=%d",
+	if (!type_wb.fixpoint_stop_reason[0]) {
+		snprintf (type_wb.fixpoint_stop_reason, sizeof (type_wb.fixpoint_stop_reason),
+			type_writeback_enabled? "queue_empty": "off");
+	}
+	R_LOG_INFO ("r2sleigh: type write-back enabled=%d mode=%d vars_considered=%d vars_applied=%d vars_hint_only=%d vars_low_conf=%d vars_conflict=%d vars_api_verify_fail=%d vars_cmd_fallback_attempted=%d vars_cmd_apply_fail=%d renames_considered=%d renames_applied=%d renames_low_conf=%d renames_conflict=%d rename_generated_guard_skips=%d structs_considered=%d structs_imported=%d structs_low_conf=%d structs_import_fail=%d global_links_considered=%d global_links_applied=%d global_links_low_conf=%d global_links_conflict_skip=%d global_links_existing_preserved=%d global_links_fail=%d payload_missing=%d payload_parse_failures=%d cache_hits=%d cache_misses=%d cache_invalidates=%d cache_updates=%d type_skipped_arch=%d type_skipped_size=%d fixpoint_iters=%d fixpoint_converged=%d fixpoint_queue_pushes=%d fixpoint_queue_pops=%d fixpoint_requeues=%d fixpoint_stop=%s",
 		type_writeback_enabled? 1: 0, (int)type_wb_mode,
 		type_wb.vars_considered, type_wb.vars_applied, type_wb.vars_hint_only,
 		type_wb.vars_skipped_low_conf, type_wb.vars_skipped_conflict,
@@ -5823,10 +6342,20 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		type_wb.structs_considered, type_wb.structs_imported,
 		type_wb.structs_skipped_low_conf, type_wb.structs_import_fail,
 		type_wb.global_links_considered, type_wb.global_links_applied,
-		type_wb.global_links_skipped_low_conf, type_wb.global_links_fail,
+		type_wb.global_links_skipped_low_conf, type_wb.global_links_conflict_skip,
+		type_wb.global_links_existing_preserved, type_wb.global_links_fail,
 		type_wb.payload_missing, type_wb.payload_parse_failures,
 		type_wb.cache_hits, type_wb.cache_misses, type_wb.cache_invalidates, type_wb.cache_updates,
-		type_wb.fixpoint_iters, type_wb.fixpoint_converged);
+		type_wb.type_fcns_skipped_arch, type_wb.type_fcns_skipped_size,
+		type_wb.fixpoint_iters, type_wb.fixpoint_converged,
+		type_wb.fixpoint_queue_pushes, type_wb.fixpoint_queue_pops, type_wb.fixpoint_requeues,
+		type_wb.fixpoint_stop_reason);
+	R_LOG_INFO ("r2sleigh: type write-back fixpoint iters=%d converged=%d queue_pushes=%d queue_pops=%d requeues=%d stop=%s type_skipped_arch=%d type_skipped_size=%d global_links_conflict_skip=%d global_links_existing_preserved=%d",
+		type_wb.fixpoint_iters, type_wb.fixpoint_converged,
+		type_wb.fixpoint_queue_pushes, type_wb.fixpoint_queue_pops, type_wb.fixpoint_requeues,
+		type_wb.fixpoint_stop_reason,
+		type_wb.type_fcns_skipped_arch, type_wb.type_fcns_skipped_size,
+		type_wb.global_links_conflict_skip, type_wb.global_links_existing_preserved);
 	sample_callees = format_sample_callees (prop_state.sample_callees, prop_state.sample_callees_count);
 	R_LOG_INFO ("r2sleigh: caller propagation prop_callees_triggered=%d prop_callers_considered=%d prop_callers_updated=%d prop_callers_dedup_skipped=%d prop_callers_missing_fcn=%d prop_type_match_failures=%d prop_afva_failures=%d sample_callees=%s",
 		prop_state.prop_callees_triggered,
@@ -5836,6 +6365,8 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		sample_callees ? sample_callees : "-");
 	free (sample_callees);
 	caller_propagation_state_fini (&prop_state);
+	free (type_eligible_addrs);
+	free (changed_type_fcns);
 	free (tsj_shared_json);
 	if (best_sink_label) {
 		R_LOG_INFO ("r2sleigh: post-analysis most interesting sink 0x%"PFMT64x" label=%s",

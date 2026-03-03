@@ -4279,6 +4279,14 @@ mod deep_integration {
             .map(str::to_string)
     }
 
+    fn find_type_fixpoint_summary(result: &e2e::R2Result) -> Option<String> {
+        let merged = format!("{}\n{}", result.stdout, result.stderr);
+        merged
+            .lines()
+            .find(|line| line.contains("r2sleigh: type write-back fixpoint"))
+            .map(str::to_string)
+    }
+
     fn afvj_reg_type_for_ref<'a>(json: &'a Value, reg_ref: &str) -> Option<&'a str> {
         let reg_vars = json.get("reg")?.as_array()?;
         reg_vars.iter().find_map(|entry| {
@@ -4728,6 +4736,14 @@ mod deep_integration {
         assert!(
             obj.contains_key("struct_decls"),
             "type payload should include struct declarations list"
+        );
+        let interproc = obj
+            .get("interproc")
+            .and_then(Value::as_object)
+            .expect("type payload should include interproc object");
+        assert!(
+            interproc.contains_key("iterations") && interproc.contains_key("max_iterations"),
+            "interproc object should include extended iteration metadata"
         );
     }
 
@@ -5422,6 +5438,76 @@ mod deep_integration {
         assert_eq!(
             full_enabled, 1,
             "full mode with balanced writeback should enable type integration"
+        );
+    }
+
+    #[test]
+    fn aaaa_type_writeback_fixpoint_metrics_extended_present() {
+        setup();
+        let result = r2_cmd(vuln_test_binary(), "e anal.sla.mode=full; aaaa");
+        result.assert_ok();
+        let summary = find_type_fixpoint_summary(&result)
+            .expect("type write-back fixpoint summary line should be present");
+        assert!(
+            summary.contains("queue_pushes=")
+                && summary.contains("queue_pops=")
+                && summary.contains("stop="),
+            "type summary should include worklist fixpoint metrics"
+        );
+        assert!(
+            summary.contains("global_links_conflict_skip=")
+                && summary.contains("global_links_existing_preserved=")
+                && summary.contains("type_skipped_arch=")
+                && summary.contains("type_skipped_size="),
+            "type summary should include global-link conflict policy metrics"
+        );
+    }
+
+    #[test]
+    fn aaaa_type_writeback_fixpoint_iterates_on_multihop_chain() {
+        setup();
+        let result = r2_cmd(
+            vuln_test_binary(),
+            "s dbg.test_type_leaf; afs void dbg.test_type_leaf(void); \
+             s dbg.test_type_mid; afs void dbg.test_type_mid(void); \
+             s dbg.test_type_top; afs void dbg.test_type_top(void); \
+             e anal.sla.mode=full; e anal.sla.type.writeback=balanced; \
+             e anal.sla.type.interproc.max_iters=12; aaaa",
+        );
+        result.assert_ok();
+        let summary = find_type_fixpoint_summary(&result)
+            .expect("type write-back fixpoint summary line should be present");
+        let iters =
+            extract_summary_metric(&summary, "iters").expect("summary should include iters");
+        assert!(
+            iters > 1,
+            "fixpoint should perform more than one iteration on a poisoned multi-hop chain"
+        );
+    }
+
+    #[test]
+    fn aaaa_type_writeback_fixpoint_respects_max_iters_bound() {
+        setup();
+        let result = r2_cmd(
+            vuln_test_binary(),
+            "s dbg.test_type_leaf; afs void dbg.test_type_leaf(void); \
+             s dbg.test_type_mid; afs void dbg.test_type_mid(void); \
+             s dbg.test_type_top; afs void dbg.test_type_top(void); \
+             e anal.sla.mode=full; e anal.sla.type.writeback=balanced; \
+             e anal.sla.type.interproc.max_iters=1; aaaa",
+        );
+        result.assert_ok();
+        let summary = find_type_fixpoint_summary(&result)
+            .expect("type write-back fixpoint summary line should be present");
+        let converged = extract_summary_metric(&summary, "converged")
+            .expect("summary should include converged");
+        assert_eq!(
+            converged, 0,
+            "max_iters=1 should leave fixpoint unconverged for poisoned multi-hop chain"
+        );
+        assert!(
+            summary.contains("stop=max_iters"),
+            "fixpoint stop reason should report max_iters when bound is hit"
         );
     }
 
