@@ -10,7 +10,7 @@ r2il = { path = "../r2il" }
 r2sleigh-lift = { path = "../r2sleigh-lift" }
 serde.workspace = true
 thiserror.workspace = true
-petgraph = "0.6"
+petgraph = "0.8"
 
 [dev-dependencies]
 sleigh-config = { version = "1.0", features = ["x86"] }
