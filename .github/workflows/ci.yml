@@ -14,13 +14,17 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Self-hosted runner optimization: persist incremental build artifacts
+  # across jobs/runs to avoid repeatedly recompiling the full workspace.
+  CARGO_TARGET_DIR: /tmp/r2sleigh-target
 
 jobs:
-  # ── Preflight: ensure toolchain is ready ────────────────────────────
-  preflight:
-    name: Preflight
+  # ── Quality checks (single compile pipeline) ───────────────────────
+  quality:
+    name: Format + Clippy + Unit Tests
     runs-on: self-hosted
     steps:
+      - uses: actions/checkout@v6
       - name: Setup Rust PATH
         run: |
           for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
@@ -33,140 +37,53 @@ jobs:
             echo "::error::cargo not found. See scripts/setup-runner.sh"
             exit 1
           fi
-
-      - name: Installing radare2 from git
-        run: |
-          if [ -d /tmp/radare2 ]; then
-            cd /tmp/radare2 && git fetch --depth=1 origin && git reset --hard origin/master
-          else
-            git clone --depth=1 https://github.com/radareorg/radare2 /tmp/radare2
-          fi
-          cd /tmp/radare2 && sys/install.sh
-
+      - name: Prepare shared target dir
+        run: mkdir -p "$CARGO_TARGET_DIR"
       - name: Print versions
         run: |
           echo "rustc:      $(rustc --version)"
           echo "cargo:      $(cargo --version)"
-          echo "gcc:        $(gcc --version | head -1)"
-          echo "r2:         $(r2 -v 2>&1 | head -1)"
-          echo "r_anal:     $(pkg-config --modversion r_anal 2>/dev/null || echo 'not found')"
-
-  # ── Formatting ──────────────────────────────────────────────────────
-  fmt:
-    name: Rustfmt
-    runs-on: self-hosted
-    needs: preflight
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - run: cargo fmt --all -- --check
-
-  # ── Linting ─────────────────────────────────────────────────────────
-  clippy:
-    name: Clippy (${{ matrix.features }})
-    runs-on: self-hosted
-    needs: fmt
-    strategy:
-      matrix:
-        features: [x86, arm, all-archs]
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-clippy-${{ matrix.features }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          restore-keys: |
-            cargo-clippy-${{ matrix.features }}-
-            cargo-build-${{ matrix.features }}-
-
-      - run: cargo clippy --features ${{ matrix.features }} -- -D warnings
-
-  # ── Build ───────────────────────────────────────────────────────────
-  build:
-    name: Build (${{ matrix.features }})
-    runs-on: self-hosted
-    needs: fmt
-    strategy:
-      fail-fast: false
-      matrix:
-        features: [x86, arm, all-archs]
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-build-${{ matrix.features }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          restore-keys: |
-            cargo-build-${{ matrix.features }}-
-
-      - name: Build workspace
-        run: cargo build --features ${{ matrix.features }}
-      - name: Build plugin
-        run: cargo build --features ${{ matrix.features }} -p r2sleigh-plugin
-
-  # ── Unit tests ──────────────────────────────────────────────────────
-  test:
-    name: Unit Tests
-    runs-on: self-hosted
-    needs: build
-    steps:
-      - uses: actions/checkout@v6
-      - name: Setup PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-test-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          restore-keys: |
-            cargo-test-
-            cargo-build-all-archs-
-
-      - run: cargo test --all-features
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Unit tests
+        run: cargo test --workspace --all-features
 
   # ── E2E tests ───────────────────────────────────────────────────────
   e2e:
     name: Integration Tests
     runs-on: self-hosted
-    needs: build
     steps:
       - uses: actions/checkout@v6
-      - name: Setup PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-e2e-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          restore-keys: |
-            cargo-e2e-
-            cargo-build-x86-
-
-      - name: Build plugin (release)
-        run: cargo build --release --features x86 -p r2sleigh-plugin
+      - name: Setup Rust PATH
+        run: |
+          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
+            if [ -d "$p" ]; then
+              echo "$p" >> "$GITHUB_PATH"
+              export PATH="$p:$PATH"
+            fi
+          done
+          if ! command -v cargo &>/dev/null; then
+            echo "::error::cargo not found. See scripts/setup-runner.sh"
+            exit 1
+          fi
+      - name: Prepare shared target dir
+        run: mkdir -p "$CARGO_TARGET_DIR"
+      - name: Ensure radare2 + headers
+        run: |
+          if command -v r2 &>/dev/null && pkg-config --exists r_anal; then
+            echo "radare2 and r_anal already available"
+          else
+            echo "Installing radare2 from git..."
+            if [ -d /tmp/radare2/.git ]; then
+              cd /tmp/radare2 && git fetch --depth=1 origin && git reset --hard origin/master
+            else
+              rm -rf /tmp/radare2
+              git clone --depth=1 https://github.com/radareorg/radare2 /tmp/radare2
+            fi
+            cd /tmp/radare2 && sys/install.sh
+          fi
 
       - name: Build and install r2 plugin
         run: make -C r2plugin RUST_FEATURES=x86 install
@@ -195,24 +112,24 @@ jobs:
   release:
     name: Release Build
     runs-on: self-hosted
-    needs: test
+    needs: [quality, e2e]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6
-      - name: Setup PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-release-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
-          restore-keys: |
-            cargo-release-
-            cargo-build-all-archs-
+      - name: Setup Rust PATH
+        run: |
+          for p in "$HOME/.cargo/bin" "/root/.cargo/bin" "/usr/local/cargo/bin"; do
+            if [ -d "$p" ]; then
+              echo "$p" >> "$GITHUB_PATH"
+              export PATH="$p:$PATH"
+            fi
+          done
+          if ! command -v cargo &>/dev/null; then
+            echo "::error::cargo not found. See scripts/setup-runner.sh"
+            exit 1
+          fi
+      - name: Prepare shared target dir
+        run: mkdir -p "$CARGO_TARGET_DIR"
 
       - name: Build release (all architectures)
         run: cargo build --release --features all-archs
