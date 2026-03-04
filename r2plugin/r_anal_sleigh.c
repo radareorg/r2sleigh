@@ -4519,6 +4519,82 @@ static bool verify_var_rename_applied(RAnalVar *var, const char *expected_name) 
 	return !strcmp (var->name, expected_name);
 }
 
+static bool is_composite_type_kind(RTypeKind kind) {
+	return kind == R_TYPE_STRUCT || kind == R_TYPE_UNION || kind == R_TYPE_ENUM;
+}
+
+static bool type_name_is_materialized(RAnal *anal, const char *type_name) {
+	RTypeKind kind;
+	ut64 bitsize;
+
+	if (!anal || !anal->sdb_types || !type_name || !*type_name) {
+		return false;
+	}
+	kind = r_type_kind (anal->sdb_types, type_name);
+	bitsize = r_type_get_bitsize (anal->sdb_types, type_name);
+	return bitsize > 0 || is_composite_type_kind (kind);
+}
+
+static const char *canonicalize_type_name_for_apply(const char *type_name, char *buf, size_t buf_sz) {
+	const char *trim_start;
+	const char *trim_end;
+	size_t len;
+	char *star;
+
+	if (!type_name || !buf || buf_sz < 8) {
+		return type_name;
+	}
+	trim_start = type_name;
+	while (*trim_start && isspace ((unsigned char)*trim_start)) {
+		trim_start++;
+	}
+	trim_end = trim_start + strlen (trim_start);
+	while (trim_end > trim_start && isspace ((unsigned char)trim_end[-1])) {
+		trim_end--;
+	}
+	len = (size_t)(trim_end - trim_start);
+	if (len >= buf_sz) {
+		len = buf_sz - 1;
+	}
+	memcpy (buf, trim_start, len);
+	buf[len] = '\0';
+	if (!buf[0]) {
+		return type_name;
+	}
+	while (!strncmp (buf, "type.", 5)) {
+		memmove (buf, buf + 5, strlen (buf + 5) + 1);
+	}
+	if (!strncmp (buf, "struct.", 7)) {
+		memmove (buf + strlen ("struct "), buf + 7, strlen (buf + 7) + 1);
+		memcpy (buf, "struct ", strlen ("struct "));
+	} else if (!strncmp (buf, "union.", 6)) {
+		memmove (buf + strlen ("union "), buf + 6, strlen (buf + 6) + 1);
+		memcpy (buf, "union ", strlen ("union "));
+	} else if (!strncmp (buf, "enum.", 5)) {
+		memmove (buf + strlen ("enum "), buf + 5, strlen (buf + 5) + 1);
+		memcpy (buf, "enum ", strlen ("enum "));
+	}
+	if (!strncmp (buf, "struct type.", 12)) {
+		memmove (buf + strlen ("struct "), buf + 12, strlen (buf + 12) + 1);
+		memcpy (buf, "struct ", strlen ("struct "));
+	} else if (!strncmp (buf, "union type.", 11)) {
+		memmove (buf + strlen ("union "), buf + 11, strlen (buf + 11) + 1);
+		memcpy (buf, "union ", strlen ("union "));
+	} else if (!strncmp (buf, "enum type.", 10)) {
+		memmove (buf + strlen ("enum "), buf + 10, strlen (buf + 10) + 1);
+		memcpy (buf, "enum ", strlen ("enum "));
+	}
+	star = strchr (buf, '*');
+	if (star && star > buf && star[-1] != ' ') {
+		size_t prefix = (size_t)(star - buf);
+		if (prefix + 2 < buf_sz) {
+			memmove (star + 1, star, strlen (star) + 1);
+			star[0] = ' ';
+		}
+	}
+	return buf;
+}
+
 static bool apply_struct_decl_candidate(RAnal *anal, RCore *core, const char *name, const char *decl) {
 	bool imported;
 	char *errmsg = NULL;
@@ -4528,8 +4604,7 @@ static bool apply_struct_decl_candidate(RAnal *anal, RCore *core, const char *na
 	if (!anal || !name || !*name || !decl || !*decl) {
 		return false;
 	}
-	if (r_type_kind (anal->sdb_types, name) != R_TYPE_INVALID
-			|| r_type_get_bitsize (anal->sdb_types, name) > 0) {
+	if (type_name_is_materialized (anal, name)) {
 		return true;
 	}
 	memo_key = r_str_hash64 (name);
@@ -4539,7 +4614,7 @@ static bool apply_struct_decl_candidate(RAnal *anal, RCore *core, const char *na
 	}
 	imported = r_anal_import_c_decls (anal, decl, &errmsg);
 	free (errmsg);
-	if (imported && r_type_kind (anal->sdb_types, name) != R_TYPE_INVALID) {
+	if (imported && type_name_is_materialized (anal, name)) {
 		struct_decl_memo_put (memo_key, true);
 		return true;
 	}
@@ -4548,7 +4623,7 @@ static bool apply_struct_decl_candidate(RAnal *anal, RCore *core, const char *na
 		return false;
 	}
 	r_core_cmdf (core, "td %s", decl);
-	imported = r_type_kind (anal->sdb_types, name) != R_TYPE_INVALID;
+	imported = type_name_is_materialized (anal, name);
 	struct_decl_memo_put (memo_key, imported);
 	return imported;
 }
@@ -4557,19 +4632,73 @@ static bool candidate_type_has_known_struct(RAnal *anal, const char *type_name) 
 	const char *struct_kw;
 	const char *name_start;
 	char name_buf[192];
+	char *normalized = NULL;
+	size_t name_len;
 	size_t i = 0;
-	ut64 bitsize;
+	char canonical_type[192];
+	const char *candidate_type;
 
 	if (!anal || !type_name || !*type_name) {
 		return false;
 	}
-	struct_kw = strstr (type_name, "struct ");
+	candidate_type = canonicalize_type_name_for_apply (type_name, canonical_type, sizeof (canonical_type));
+	struct_kw = strstr (candidate_type, "struct ");
 	if (!struct_kw) {
-		return true;
+		struct_kw = strstr (candidate_type, "struct.");
 	}
-	name_start = struct_kw + strlen ("struct ");
+	if (!struct_kw) {
+		normalized = normalize_compare_string (candidate_type);
+		if (!normalized) {
+			return false;
+		}
+		remove_substring_inplace (normalized, "const");
+		remove_substring_inplace (normalized, "volatile");
+		remove_substring_inplace (normalized, "restrict");
+		remove_substring_inplace (normalized, "register");
+		name_len = strlen (normalized);
+		while (name_len > 0 && normalized[name_len - 1] == '*') {
+			normalized[--name_len] = '\0';
+		}
+		if (!*normalized) {
+			free (normalized);
+			return false;
+		}
+		if (!strcmp (normalized, "void")
+				|| !strcmp (normalized, "bool")
+				|| !strcmp (normalized, "char")
+				|| !strcmp (normalized, "signedchar")
+				|| !strcmp (normalized, "unsignedchar")
+				|| !strcmp (normalized, "short")
+				|| !strcmp (normalized, "unsignedshort")
+				|| !strcmp (normalized, "int")
+				|| !strcmp (normalized, "unsigned")
+				|| !strcmp (normalized, "unsignedint")
+				|| !strcmp (normalized, "long")
+				|| !strcmp (normalized, "unsignedlong")
+				|| !strcmp (normalized, "longlong")
+				|| !strcmp (normalized, "unsignedlonglong")
+				|| !strcmp (normalized, "float")
+				|| !strcmp (normalized, "double")
+				|| !strcmp (normalized, "size_t")
+				|| !strncmp (normalized, "int", 3)
+				|| !strncmp (normalized, "uint", 4)) {
+			free (normalized);
+			return true;
+		}
+		if (name_len >= sizeof (name_buf)) {
+			name_len = sizeof (name_buf) - 1;
+		}
+		memcpy (name_buf, normalized, name_len);
+		name_buf[name_len] = '\0';
+		free (normalized);
+		return type_name_is_materialized (anal, name_buf);
+	}
+	name_start = struct_kw + strlen (!strncmp (struct_kw, "struct.", 7)? "struct.": "struct ");
 	while (*name_start && isspace ((unsigned char)*name_start)) {
 		name_start++;
+	}
+	if (!strncmp (name_start, "type.", 5)) {
+		name_start += 5;
 	}
 	while (name_start[i] && i + 1 < sizeof (name_buf)) {
 		char ch = name_start[i];
@@ -4583,11 +4712,7 @@ static bool candidate_type_has_known_struct(RAnal *anal, const char *type_name) 
 	if (!name_buf[0]) {
 		return false;
 	}
-	if (r_type_kind (anal->sdb_types, name_buf) != R_TYPE_INVALID) {
-		return true;
-	}
-	bitsize = r_type_get_bitsize (anal->sdb_types, name_buf);
-	return bitsize > 0;
+	return type_name_is_materialized (anal, name_buf);
 }
 
 static bool apply_var_type_candidate(
@@ -4601,15 +4726,21 @@ static bool apply_var_type_candidate(
 ) {
 	char *existing_type = NULL;
 	bool api_ok = false;
+	char canonical_type[192];
+	const char *apply_type;
 
 	if (!anal || !fcn || !var || !candidate_type || !*candidate_type) {
+		return false;
+	}
+	apply_type = canonicalize_type_name_for_apply (candidate_type, canonical_type, sizeof (canonical_type));
+	if (!apply_type || !*apply_type) {
 		return false;
 	}
 
 	if (var->type && *var->type) {
 		existing_type = strdup (var->type);
 	}
-	if (existing_type && !is_generic_type_name (existing_type) && is_generic_type_name (candidate_type)) {
+	if (existing_type && !is_generic_type_name (existing_type) && is_generic_type_name (apply_type)) {
 		if (counters) {
 			counters->vars_skipped_conflict++;
 		}
@@ -4618,15 +4749,15 @@ static bool apply_var_type_candidate(
 	}
 	free (existing_type);
 
-	if (!candidate_type_has_known_struct (anal, candidate_type)) {
+	if (!candidate_type_has_known_struct (anal, apply_type)) {
 		if (counters) {
 			counters->vars_skipped_conflict++;
 		}
 		return false;
 	}
 
-	r_anal_var_set_type (anal, var, candidate_type);
-	api_ok = verify_var_type_applied (var, candidate_type);
+	r_anal_var_set_type (anal, var, apply_type);
+	api_ok = verify_var_type_applied (var, apply_type);
 	if (api_ok) {
 		return true;
 	}
@@ -4639,9 +4770,9 @@ static bool apply_var_type_candidate(
 	if (counters) {
 		counters->vars_cmd_fallback_attempted++;
 	}
-	r_core_cmdf_at (core, fcn->addr, "afvt %s \"%s\"", candidate_name, candidate_type);
+	r_core_cmdf_at (core, fcn->addr, "afvt %s \"%s\"", candidate_name, apply_type);
 	var = r_anal_function_get_var_byname (fcn, candidate_name);
-	if (verify_var_type_applied (var, candidate_type)) {
+	if (verify_var_type_applied (var, apply_type)) {
 		return true;
 	}
 	if (counters) {
@@ -4678,17 +4809,23 @@ static bool apply_var_rename_candidate(
 static bool apply_global_type_link_candidate(RAnal *anal, RCore *core, ut64 addr, const char *type_name, TypeWritebackCounters *tc) {
 	char *existing = NULL;
 	int rc;
+	char canonical_type[192];
+	const char *apply_type;
 	if (!anal || !type_name || !*type_name || !addr) {
 		return false;
 	}
-	if (is_opaque_placeholder_type_name (type_name) || !candidate_type_has_known_struct (anal, type_name)) {
+	apply_type = canonicalize_type_name_for_apply (type_name, canonical_type, sizeof (canonical_type));
+	if (!apply_type || !*apply_type) {
+		return false;
+	}
+	if (is_opaque_placeholder_type_name (apply_type) || !candidate_type_has_known_struct (anal, apply_type)) {
 		if (tc) {
 			tc->global_links_conflict_skip++;
 		}
 		return false;
 	}
 	existing = r_type_link_at (anal->sdb_types, addr);
-	if (existing && *existing && !strings_match_normalized (existing, type_name)) {
+	if (existing && *existing && !strings_match_normalized (existing, apply_type)) {
 		if (!is_generic_type_name (existing)) {
 			if (tc) {
 				tc->global_links_conflict_skip++;
@@ -4699,18 +4836,18 @@ static bool apply_global_type_link_candidate(RAnal *anal, RCore *core, ut64 addr
 		}
 	}
 	free (existing);
-	rc = r_type_set_link (anal->sdb_types, type_name, addr);
+	rc = r_type_set_link (anal->sdb_types, apply_type, addr);
 	if (rc > 0) {
 		return true;
 	}
-	rc = r_type_link_offset (anal->sdb_types, type_name, addr);
+	rc = r_type_link_offset (anal->sdb_types, apply_type, addr);
 	if (rc > 0) {
 		return true;
 	}
 	if (!core) {
 		return false;
 	}
-	r_core_cmdf_at (core, addr, "tl %s", type_name);
+	r_core_cmdf_at (core, addr, "tl %s", apply_type);
 	return true;
 }
 
@@ -5383,12 +5520,21 @@ static bool apply_type_writeback_payload(
 			const char *reg_name = json_is_string_with_value (j_reg)? j_reg->str_value: NULL;
 			const char *candidate_name = json_is_string_with_value (j_name)? j_name->str_value: NULL;
 			const char *candidate_type = json_is_string_with_value (j_type)? j_type->str_value: NULL;
+			char canonical_candidate_type[192];
+			const char *apply_type = NULL;
 			RAnalVar *var;
 
 			if (tc) {
 				tc->vars_considered++;
 			}
 			if (!candidate_name || !candidate_type || !*candidate_name || !*candidate_type) {
+				continue;
+			}
+			apply_type = canonicalize_type_name_for_apply (candidate_type, canonical_candidate_type, sizeof (canonical_candidate_type));
+			if (!apply_type || !*apply_type || !candidate_type_has_known_struct (anal, apply_type)) {
+				if (tc) {
+					tc->vars_skipped_conflict++;
+				}
 				continue;
 			}
 			if (confidence < type_apply_threshold) {
@@ -5410,7 +5556,7 @@ static bool apply_type_writeback_payload(
 			}
 			var = lookup_var_for_candidate (anal, fcn, candidate_name, kind, delta, reg_name);
 			if (!var && confidence >= 95) {
-				var = r_anal_function_set_var (fcn, delta, kind, candidate_type,
+				var = r_anal_function_set_var (fcn, delta, kind, apply_type,
 					size > 0? size: 4, isarg, candidate_name);
 			}
 			if (!var) {

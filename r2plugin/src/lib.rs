@@ -4739,17 +4739,9 @@ fn is_low_quality_stack_name(name: &str) -> bool {
 }
 
 fn parse_external_type(raw_ty: &str, ptr_bits: u32) -> Option<r2dec::CType> {
-    let mut ty = raw_ty.trim().to_string();
+    let mut ty = normalize_external_type_name(raw_ty);
     if ty.is_empty() {
         return None;
-    }
-
-    for qualifier in ["const", "volatile", "restrict", "signed"] {
-        ty = ty
-            .split_whitespace()
-            .filter(|part| !part.eq_ignore_ascii_case(qualifier))
-            .collect::<Vec<_>>()
-            .join(" ");
     }
 
     let mut array_size = None;
@@ -4804,6 +4796,18 @@ fn parse_external_type(raw_ty: &str, ptr_bits: u32) -> Option<r2dec::CType> {
             "size_t" => Some(r2dec::CType::UInt(ptr_bits)),
             "float" => Some(r2dec::CType::Float(32)),
             "double" => Some(r2dec::CType::Float(64)),
+            _ if ty.to_ascii_lowercase().starts_with("struct ") => ty
+                .split_whitespace()
+                .nth(1)
+                .map(|name| r2dec::CType::Struct(name.to_string())),
+            _ if ty.to_ascii_lowercase().starts_with("union ") => ty
+                .split_whitespace()
+                .nth(1)
+                .map(|name| r2dec::CType::Union(name.to_string())),
+            _ if ty.to_ascii_lowercase().starts_with("enum ") => ty
+                .split_whitespace()
+                .nth(1)
+                .map(|name| r2dec::CType::Enum(name.to_string())),
             _ => None,
         }
     }?;
@@ -5768,7 +5772,8 @@ fn is_opaque_placeholder_type_name(ty: &str) -> bool {
 }
 
 fn is_generic_type_string(ty: &str) -> bool {
-    let lower = ty.trim().to_ascii_lowercase();
+    let normalized = normalize_external_type_name(ty);
+    let lower = normalized.trim().to_ascii_lowercase();
     if lower.is_empty() {
         return true;
     }
@@ -5792,12 +5797,87 @@ fn is_generic_type_string(ty: &str) -> bool {
     )
 }
 
+fn normalize_prefixed_aggregate_type(ty: &str, prefix: &str) -> Option<String> {
+    let dotted = format!("{prefix}.");
+    if !ty.to_ascii_lowercase().starts_with(&dotted) {
+        return None;
+    }
+    let rest = &ty[dotted.len()..];
+    let ident_len = rest
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                None
+            } else {
+                Some(idx)
+            }
+        })
+        .unwrap_or(rest.len());
+    if ident_len == 0 {
+        return None;
+    }
+    let raw_name = &rest[..ident_len];
+    let name = sanitize_c_identifier(raw_name).unwrap_or_else(|| raw_name.replace('.', "_"));
+    if name.is_empty() {
+        return None;
+    }
+    let suffix = rest[ident_len..].trim_start();
+    if suffix.is_empty() {
+        Some(format!("{prefix} {name}"))
+    } else {
+        Some(format!("{prefix} {name} {suffix}"))
+    }
+}
+
 fn normalize_external_type_name(ty: &str) -> String {
-    let trimmed = ty.trim();
-    if is_opaque_placeholder_type_name(trimmed) {
+    let mut normalized = ty.trim().to_string();
+    if normalized.is_empty() || is_opaque_placeholder_type_name(&normalized) {
         return "void *".to_string();
     }
-    trimmed.to_string()
+
+    for qualifier in ["const", "volatile", "restrict", "register"] {
+        normalized = normalized
+            .split_whitespace()
+            .filter(|part| !part.eq_ignore_ascii_case(qualifier))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    loop {
+        let lower = normalized.to_ascii_lowercase();
+        if lower.starts_with("type.") {
+            normalized = normalized[5..].trim_start().to_string();
+            continue;
+        }
+        if lower.starts_with("struct type.") {
+            normalized = format!("struct {}", normalized["struct type.".len()..].trim_start());
+            continue;
+        }
+        if lower.starts_with("union type.") {
+            normalized = format!("union {}", normalized["union type.".len()..].trim_start());
+            continue;
+        }
+        if lower.starts_with("enum type.") {
+            normalized = format!("enum {}", normalized["enum type.".len()..].trim_start());
+            continue;
+        }
+        break;
+    }
+
+    if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "struct") {
+        normalized = tagged;
+    } else if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "union") {
+        normalized = tagged;
+    } else if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "enum") {
+        normalized = tagged;
+    }
+
+    normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() || is_opaque_placeholder_type_name(&normalized) {
+        "void *".to_string()
+    } else {
+        normalized
+    }
 }
 
 fn estimate_c_type_size_bytes(ty: &str, ptr_bits: u32) -> u64 {
@@ -5879,7 +5959,7 @@ fn parse_existing_var_types(json_str: &str) -> std::collections::HashMap<String,
                 continue;
             };
             out.entry(name.to_string())
-                .or_insert_with(|| ty.to_string());
+                .or_insert_with(|| normalize_external_type_name(ty));
         }
     }
     out
@@ -6230,7 +6310,7 @@ fn infer_structs_from_ssa(
             fields,
         });
         slot_fields_for_links.insert(slot, normalized_fields);
-        slot_type_overrides.insert(slot, format!("struct {} *", struct_name));
+        slot_type_overrides.insert(slot, format!("{struct_name} *"));
     }
 
     (struct_decls, slot_type_overrides, slot_fields_for_links)
@@ -6347,16 +6427,13 @@ fn align_local_structs_with_external(
             }
         });
         if let Some(ext_name) = replacement {
-            *ty = format!("struct {} *", ext_name);
+            *ty = format!("{ext_name} *");
             continue;
         }
-        if let Some(local_name) = ty
-            .strip_prefix("struct ")
-            .and_then(|s| s.strip_suffix(" *"))
-            .map(str::to_string)
+        if let Some(local_name) = ty.trim().strip_suffix(" *").map(str::to_string)
             && let Some(ext_name) = local_to_external.get(&local_name)
         {
-            *ty = format!("struct {} *", ext_name);
+            *ty = format!("{ext_name} *");
         }
     }
 }
@@ -6370,7 +6447,7 @@ fn score_global_type_links(
 
     let mut per_type_weight: BTreeMap<String, i32> = BTreeMap::new();
     for decl in struct_decls {
-        let key = format!("struct {} *", decl.name);
+        let key = format!("{} *", decl.name);
         if is_generic_type_string(&key) {
             continue;
         }
@@ -6382,10 +6459,7 @@ fn score_global_type_links(
         per_type_weight.insert(key, 60 + source_boost + (decl.fields.len() as i32).min(24));
     }
     for var in var_type_candidates {
-        if var.var_type.starts_with("struct ")
-            && var.var_type.ends_with(" *")
-            && !is_generic_type_string(&var.var_type)
-        {
+        if var.var_type.contains('*') && !is_generic_type_string(&var.var_type) {
             *per_type_weight.entry(var.var_type.clone()).or_insert(55) +=
                 8 + (var.confidence as i32 / 10);
         }
@@ -6836,6 +6910,7 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
             }
         }
 
+        let chosen_type = normalize_external_type_name(&chosen_type);
         var_type_candidates.push(VarTypeCandidateJson {
             name: var.name.clone(),
             kind: var.kind.clone(),
@@ -9007,6 +9082,55 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_external_type_name_handles_type_prefixes() {
+        assert_eq!(normalize_external_type_name("type.int"), "int");
+        assert_eq!(
+            normalize_external_type_name("const type.uint64_t *"),
+            "uint64_t *"
+        );
+        assert_eq!(
+            normalize_external_type_name("struct.sla_example *"),
+            "struct sla_example *"
+        );
+        assert_eq!(
+            normalize_external_type_name("struct type.foo_bar *"),
+            "struct foo_bar *"
+        );
+    }
+
+    #[test]
+    fn test_parse_external_type_accepts_type_prefixed_primitives() {
+        assert_eq!(
+            parse_external_type("type.int", 64),
+            Some(r2dec::CType::Int(32))
+        );
+        assert_eq!(
+            parse_external_type("type.uint16_t *", 64),
+            Some(r2dec::CType::ptr(r2dec::CType::UInt(16)))
+        );
+        assert_eq!(
+            parse_external_type("struct.sla_node *", 64),
+            Some(r2dec::CType::ptr(r2dec::CType::Struct(
+                "sla_node".to_string()
+            )))
+        );
+    }
+
+    #[test]
+    fn test_parse_existing_var_types_normalizes_type_prefixes() {
+        let json = r#"{
+            "reg":[{"name":"arg0","type":"type.int"}],
+            "bp":[{"name":"local_10h","type":"struct.sla_pair *"}]
+        }"#;
+        let parsed = parse_existing_var_types(json);
+        assert_eq!(parsed.get("arg0").map(String::as_str), Some("int"));
+        assert_eq!(
+            parsed.get("local_10h").map(String::as_str),
+            Some("struct sla_pair *")
+        );
+    }
+
+    #[test]
     fn test_parse_signature_context_legacy_array() {
         let json =
             r#"[{"name":"dbg.main","return":"int32_t","args":[{"name":"x","type":"int32_t"}]}]"#;
@@ -10074,7 +10198,7 @@ mod integration_tests {
             name: "arg0".to_string(),
             kind: "r".to_string(),
             delta: 0,
-            var_type: "struct ext_struct *".to_string(),
+            var_type: "ext_struct *".to_string(),
             isarg: true,
             reg: Some("rdi".to_string()),
             size: 8,
@@ -10085,7 +10209,7 @@ mod integration_tests {
 
         let links = score_global_type_links(&[block], &struct_decls, &var_types);
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].target_type, "struct ext_struct *");
+        assert_eq!(links[0].target_type, "ext_struct *");
     }
 
     #[test]
