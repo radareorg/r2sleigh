@@ -4732,6 +4732,8 @@ static bool apply_var_type_candidate(
 	if (!anal || !fcn || !var || !candidate_type || !*candidate_type) {
 		return false;
 	}
+	(void)core;
+	(void)candidate_name;
 	apply_type = canonicalize_type_name_for_apply (candidate_type, canonical_type, sizeof (canonical_type));
 	if (!apply_type || !*apply_type) {
 		return false;
@@ -4764,20 +4766,8 @@ static bool apply_var_type_candidate(
 	if (counters) {
 		counters->vars_api_verify_fail++;
 	}
-	if (!core || !candidate_name || !*candidate_name) {
-		return false;
-	}
-	if (counters) {
-		counters->vars_cmd_fallback_attempted++;
-	}
-	r_core_cmdf_at (core, fcn->addr, "afvt %s \"%s\"", candidate_name, apply_type);
-	var = r_anal_function_get_var_byname (fcn, candidate_name);
-	if (verify_var_type_applied (var, apply_type)) {
-		return true;
-	}
-	if (counters) {
-		counters->vars_cmd_apply_fail++;
-	}
+	/* Keep API-only var type apply. The command fallback can emit noisy
+	 * "unknown type ..." logs repeatedly on large analyses. */
 	return false;
 }
 
@@ -4814,6 +4804,7 @@ static bool apply_global_type_link_candidate(RAnal *anal, RCore *core, ut64 addr
 	if (!anal || !type_name || !*type_name || !addr) {
 		return false;
 	}
+	(void)core;
 	apply_type = canonicalize_type_name_for_apply (type_name, canonical_type, sizeof (canonical_type));
 	if (!apply_type || !*apply_type) {
 		return false;
@@ -4844,11 +4835,9 @@ static bool apply_global_type_link_candidate(RAnal *anal, RCore *core, ut64 addr
 	if (rc > 0) {
 		return true;
 	}
-	if (!core) {
-		return false;
-	}
-	r_core_cmdf_at (core, addr, "tl %s", apply_type);
-	return true;
+	/* Keep API-only type links. Command fallback (`tl`) floods logs with
+	 * per-address unknown-type errors when a type cannot be resolved. */
+	return false;
 }
 
 static ut64 compute_type_cache_key(

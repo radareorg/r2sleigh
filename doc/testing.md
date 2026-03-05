@@ -44,6 +44,31 @@ cd tests/e2e
 cargo test
 ```
 
+### Snapshot Tests (tests/r2r/)
+
+Fast deterministic regression checks using `r2r` with diffable expectations.
+
+Run with:
+
+```bash
+make -C tests/r2r run
+```
+
+`tests/r2r` is preferred for stable command output checks (`a:sla.info/json/regs/mem/vars`)
+and migrated deterministic integration checks from:
+- `plugin_status`
+- `instruction_analysis` (deterministic slice)
+- `function_ssa` / `ssa_opt` (deterministic slice)
+- `cfg`
+- `slicing` (basic deterministic slice)
+- stress regression smoke checks
+- taint/symbolic/path/interactive-symbolic stable slices
+- decompilation guardrail snapshots
+- deep radare2 integration smoke checks
+
+`tests/e2e` keeps non-snapshot checks (CLI run behavior, direct FFI, and
+analysis-quality benchmark thresholds).
+
 ### Advisory Semantic Metadata Benchmark
 
 Use the benchmark script to compare semantic output and `aaaa` timing with
@@ -153,11 +178,12 @@ What to Test for Each Feature
 
 New opcode:
   - Unit test in crate
-  - e2e test via a:sla.json checking the opcode appears
+  - r2r test via a:sla.json when output is deterministic
+  - e2e semantic assertion if structure/churn requires richer parsing
 
 New plugin command:
-  - e2e test that the command runs without crash
-  - e2e test checking expected output format
+  - r2r snapshot test for deterministic output formatting
+  - e2e test for semantic/edge-case behavior where snapshots are brittle
 
 New optimization pass:
   - Unit test in r2ssa with before/after SSA
@@ -176,6 +202,7 @@ Before committing:
 
 1. cargo build --features x86 succeeds
 2. cargo test --features x86 passes
-3. cd tests/e2e && cargo test passes (for plugin changes)
-4. New feature has at least one test
-5. Edge cases are covered (empty input, large input, error paths)
+3. make -C tests/r2r run passes (for deterministic plugin-output changes)
+4. cd tests/e2e && cargo test passes (for semantic/ffi/high-churn plugin changes)
+5. New feature has at least one test
+6. Edge cases are covered (empty input, large input, error paths)

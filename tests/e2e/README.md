@@ -1,6 +1,11 @@
-# E2E Tests for r2sleigh
+# E2E Tests for r2sleigh (Rust Semantic/FFI Suite)
 
-Rust-based integration tests for the r2sleigh plugin.
+Rust-based integration tests for non-snapshot coverage:
+- CLI `run` export behavior
+- direct plugin FFI ABI checks
+- analysis-quality benchmark thresholds
+
+For deterministic command-output diffs, use `tests/r2r`.
 
 ## Prerequisites
 
@@ -23,6 +28,14 @@ Rust-based integration tests for the r2sleigh plugin.
 
 ## Running Tests
 
+Snapshot suite:
+
+```bash
+make -C tests/r2r run
+```
+
+Rust semantic/FFI suite:
+
 From the `tests/e2e` directory:
 
 ```bash
@@ -43,9 +56,9 @@ cargo e2e-test
 Run specific test module:
 
 ```bash
-cargo test plugin_status
-cargo test symbolic
-cargo test decompilation
+cargo test cli_run
+cargo test ffi
+cargo test analysis_quality_benchmark
 ```
 
 Run with output:
@@ -54,18 +67,24 @@ Run with output:
 cargo test -- --nocapture
 ```
 
+From workspace root:
+
+```bash
+cargo test -p r2sleigh-e2e-tests
+```
+
 ## Test Structure
 
 | Module | Description |
 |--------|-------------|
-| `plugin_status` | Basic plugin loading and arch detection |
-| `instruction_analysis` | Per-instruction analysis (JSON, regs, mem, SSA) |
-| `function_ssa` | Function-level SSA form |
-| `cfg` | Control flow graph and dominators |
-| `slicing` | Backward slicing |
-| `taint` | Taint analysis |
-| `symbolic` | Symbolic execution |
-| `paths` | Path exploration and solving |
-| `merging` | State merging options |
-| `decompilation` | C decompilation output |
+| `cli_run` | CLI `run` action export regression checks |
 | `ffi` | Direct FFI tests against plugin library |
+| `analysis_quality_benchmark` | Analysis-quality threshold and coverage metrics |
+
+## When to use Rust E2E vs r2r
+
+- Use `tests/r2r` for deterministic command output snapshots (`a:sla.*` text/JSON views).
+- Use `tests/e2e` for:
+  - FFI behavior and ABI checks
+  - CLI run/export behavior checks
+  - analysis quality and performance thresholds

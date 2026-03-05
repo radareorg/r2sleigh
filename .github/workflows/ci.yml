@@ -50,9 +50,9 @@ jobs:
       - name: Unit tests
         run: cargo test --workspace --all-features
 
-  # ── E2E tests ───────────────────────────────────────────────────────
-  e2e:
-    name: Integration Tests
+  # ── Fast snapshot tests (r2r) ───────────────────────────────────────
+  r2r:
+    name: Snapshot Tests (r2r)
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v6
@@ -85,34 +85,16 @@ jobs:
             cd /tmp/radare2 && sys/install.sh
           fi
 
-      - name: Build and install r2 plugin
-        run: make -C r2plugin RUST_FEATURES=x86 install
-
-      - name: Compile test binaries
-        working-directory: tests/e2e
-        run: |
-          gcc -O0 -g -fno-stack-protector -no-pie -o vuln_test vuln_test.c
-          gcc -O0 -g -fno-stack-protector -no-pie -o stress_test stress_test.c -lm
-          gcc -O2 -g -fno-stack-protector -no-pie -o stress_test_opt stress_test.c -lm
-          if [ -f test_func.c ]; then
-            gcc -O0 -g -o test_func test_func.c
-          fi
-          if [ -f sym_test.c ]; then
-            gcc -O0 -g -o sym_test sym_test.c
-          fi
-
-      - name: Run E2E tests
-        working-directory: tests/e2e
-        run: cargo test
+      - name: Run r2r snapshot tests
+        run: make -C tests/r2r run
         env:
-          RUST_LOG: info
-          R2SLEIGH_E2E_RETRIES: "3"
+          R2R_JOBS: "8"
 
   # ── Release build check ────────────────────────────────────────────
   release:
     name: Release Build
     runs-on: self-hosted
-    needs: [quality, e2e]
+    needs: [quality, r2r]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6

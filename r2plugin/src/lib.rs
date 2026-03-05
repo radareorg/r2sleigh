@@ -6310,7 +6310,7 @@ fn infer_structs_from_ssa(
             fields,
         });
         slot_fields_for_links.insert(slot, normalized_fields);
-        slot_type_overrides.insert(slot, format!("{struct_name} *"));
+        slot_type_overrides.insert(slot, format!("struct {} *", struct_name));
     }
 
     (struct_decls, slot_type_overrides, slot_fields_for_links)
@@ -6427,13 +6427,16 @@ fn align_local_structs_with_external(
             }
         });
         if let Some(ext_name) = replacement {
-            *ty = format!("{ext_name} *");
+            *ty = format!("struct {} *", ext_name);
             continue;
         }
-        if let Some(local_name) = ty.trim().strip_suffix(" *").map(str::to_string)
+        if let Some(local_name) = ty
+            .strip_prefix("struct ")
+            .and_then(|s| s.strip_suffix(" *"))
+            .map(str::to_string)
             && let Some(ext_name) = local_to_external.get(&local_name)
         {
-            *ty = format!("{ext_name} *");
+            *ty = format!("struct {} *", ext_name);
         }
     }
 }
@@ -6447,7 +6450,7 @@ fn score_global_type_links(
 
     let mut per_type_weight: BTreeMap<String, i32> = BTreeMap::new();
     for decl in struct_decls {
-        let key = format!("{} *", decl.name);
+        let key = format!("struct {} *", decl.name);
         if is_generic_type_string(&key) {
             continue;
         }
@@ -6459,7 +6462,10 @@ fn score_global_type_links(
         per_type_weight.insert(key, 60 + source_boost + (decl.fields.len() as i32).min(24));
     }
     for var in var_type_candidates {
-        if var.var_type.contains('*') && !is_generic_type_string(&var.var_type) {
+        if var.var_type.starts_with("struct ")
+            && var.var_type.ends_with(" *")
+            && !is_generic_type_string(&var.var_type)
+        {
             *per_type_weight.entry(var.var_type.clone()).or_insert(55) +=
                 8 + (var.confidence as i32 / 10);
         }
@@ -10198,7 +10204,7 @@ mod integration_tests {
             name: "arg0".to_string(),
             kind: "r".to_string(),
             delta: 0,
-            var_type: "ext_struct *".to_string(),
+            var_type: "struct ext_struct *".to_string(),
             isarg: true,
             reg: Some("rdi".to_string()),
             size: 8,
@@ -10209,7 +10215,7 @@ mod integration_tests {
 
         let links = score_global_type_links(&[block], &struct_decls, &var_types);
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].target_type, "ext_struct *");
+        assert_eq!(links[0].target_type, "struct ext_struct *");
     }
 
     #[test]

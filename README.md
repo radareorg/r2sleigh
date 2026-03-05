@@ -113,6 +113,17 @@ Documentation
 | [doc/types.md](doc/types.md) | Type inference |
 | [doc/testing.md](doc/testing.md) | Testing strategy |
 
+Testing Quick Commands
+----------------------
+
+```bash
+# Plugin regression suite
+make -C tests/r2r run
+
+# Rust non-snapshot integration suite
+cd tests/e2e && cargo test
+```
+
 CLI `run` Action/Format Matrix
 ------------------------------
 
