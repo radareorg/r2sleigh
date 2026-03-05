@@ -103,7 +103,7 @@ jobs:
 
       - name: Run E2E tests
         working-directory: tests/e2e
-        run: cargo test -- --test-threads=1
+        run: cargo test
         env:
           RUST_LOG: info
           R2SLEIGH_E2E_RETRIES: "3"

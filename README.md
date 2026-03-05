@@ -131,10 +131,10 @@ ae <esil_expression>
 R2IL Format / Endianness / Memory Semantics
 -------------------------------------------
 
-- `FORMAT_VERSION` is now `3`.
-- Loader accepts v1, v2, and v3 `.r2il` files.
-- Saving always emits v3.
-- v1/v2 files are auto-upgraded in memory on load.
+- `FORMAT_VERSION` is now `4`.
+- Saving emits v4 (`postcard` encoding).
+- Optional legacy loader support for v1/v2/v3 (`bincode` encoding) is available via the `r2il/legacy-bincode` feature.
+- Legacy v1/v2 files are auto-upgraded in memory on load when legacy support is enabled.
 - Legacy bool endianness remains as compatibility shim (`big_endian` / `r2il_is_big_endian`), while canonical fields are:
   - `instruction_endianness`
   - `memory_endianness`
@@ -147,9 +147,10 @@ R2IL Format / Endianness / Memory Semantics
 Compatibility Guarantees
 ------------------------
 
-- `.r2il` reader compatibility is guaranteed for format versions `v1`, `v2`, and `v3`.
-- `.r2il` writer always emits `v3`.
-- Loading legacy `v1`/`v2` artifacts upgrades fields in memory while preserving behavior.
+- `.r2il` writer emits format version `v4`.
+- `.r2il` reader supports `v4` by default.
+- Reading legacy `v1`/`v2`/`v3` artifacts requires enabling `r2il/legacy-bincode`.
+- With legacy support enabled, loading v1/v2 artifacts upgrades fields in memory while preserving behavior.
 - Instruction export action/format compatibility is strict and validated:
   - `lift`: `json`, `text`, `esil`, `r2cmd`
   - `ssa`: `json`, `text`

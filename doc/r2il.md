@@ -439,10 +439,11 @@ Behavior notes:
 
 1. `mixed` and `custom` are metadata-level only for now; deep execution semantics are deferred.
 2. Validation checks legacy mismatch (`arch.endianness.legacy_mismatch`) when `big_endian` disagrees with derived v2 fields.
-3. The current `.r2il` writer target is v3:
-   - loader accepts v1/v2/v3
-   - writer emits v3
-   - v1/v2 load auto-upgrades in memory
+3. The current `.r2il` writer target is v4:
+   - default loader accepts v4 (postcard encoding)
+   - optional legacy loader support for v1/v2/v3 requires `r2il/legacy-bincode`
+   - writer emits v4
+   - legacy v1/v2 loads auto-upgrade in memory when legacy support is enabled
 
 Memory Semantics + Topology
 ---------------------------

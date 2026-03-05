@@ -7,8 +7,13 @@ description = "Intermediate Language types for r2sleigh"
 
 [dependencies]
 serde.workspace = true
-bincode.workspace = true
+postcard.workspace = true
 thiserror.workspace = true
+bincode = { version = "1.3", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+
+[features]
+default = []
+legacy-bincode = ["dep:bincode"]

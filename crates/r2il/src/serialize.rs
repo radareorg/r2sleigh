@@ -1,6 +1,6 @@
 //! Serialization support for r2il types.
 //!
-//! This module provides binary serialization using bincode for efficient
+//! This module provides binary serialization using postcard for efficient
 //! storage and loading of architecture specifications.
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,11 @@ pub enum SerializeError {
     Io(#[from] std::io::Error),
 
     #[error("Serialization error: {0}")]
-    Bincode(#[from] bincode::Error),
+    Postcard(#[from] postcard::Error),
+
+    #[cfg(feature = "legacy-bincode")]
+    #[error("Legacy bincode decode error: {0}")]
+    LegacyBincode(#[from] bincode::Error),
 
     #[error("Invalid magic bytes: expected R2IL")]
     InvalidMagic,
@@ -337,6 +341,40 @@ struct FileHeader {
     arch_name: String,
 }
 
+fn encode_current<T: Serialize>(value: &T) -> Result<Vec<u8>> {
+    Ok(postcard::to_stdvec(value)?)
+}
+
+fn decode_current<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
+    Ok(postcard::from_bytes(bytes)?)
+}
+
+#[cfg(feature = "legacy-bincode")]
+fn decode_legacy<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
+    Ok(bincode::deserialize(bytes)?)
+}
+
+#[cfg(not(feature = "legacy-bincode"))]
+fn decode_legacy<T>(_bytes: &[u8], version: u32) -> Result<T> {
+    Err(SerializeError::UnsupportedVersion(version))
+}
+
+#[cfg(feature = "legacy-bincode")]
+fn decode_file_header(bytes: &[u8]) -> Result<FileHeader> {
+    match decode_current(bytes) {
+        Ok(header) => Ok(header),
+        Err(primary) => match decode_legacy(bytes) {
+            Ok(legacy_header) => Ok(legacy_header),
+            Err(_) => Err(primary),
+        },
+    }
+}
+
+#[cfg(not(feature = "legacy-bincode"))]
+fn decode_file_header(bytes: &[u8]) -> Result<FileHeader> {
+    decode_current(bytes)
+}
+
 /// Save an architecture specification to a file.
 pub fn save(arch: &ArchSpec, path: &Path) -> Result<()> {
     let file = File::create(path)?;
@@ -350,13 +388,13 @@ pub fn save(arch: &ArchSpec, path: &Path) -> Result<()> {
         version: FORMAT_VERSION,
         arch_name: arch.name.clone(),
     };
-    let header_bytes = bincode::serialize(&header)?;
+    let header_bytes = encode_current(&header)?;
     let header_len = header_bytes.len() as u32;
     writer.write_all(&header_len.to_le_bytes())?;
     writer.write_all(&header_bytes)?;
 
     // Serialize the architecture spec
-    let arch_bytes = bincode::serialize(arch)?;
+    let arch_bytes = encode_current(arch)?;
     writer.write_all(&arch_bytes)?;
 
     writer.flush()?;
@@ -382,7 +420,7 @@ pub fn load(path: &Path) -> Result<ArchSpec> {
 
     let mut header_bytes = vec![0u8; header_len];
     reader.read_exact(&mut header_bytes)?;
-    let header: FileHeader = bincode::deserialize(&header_bytes)?;
+    let header: FileHeader = decode_file_header(&header_bytes)?;
 
     // Read the rest as architecture spec
     let mut arch_bytes = Vec::new();
@@ -402,13 +440,13 @@ pub fn to_bytes(arch: &ArchSpec) -> Result<Vec<u8>> {
         version: FORMAT_VERSION,
         arch_name: arch.name.clone(),
     };
-    let header_bytes = bincode::serialize(&header)?;
+    let header_bytes = encode_current(&header)?;
     let header_len = header_bytes.len() as u32;
     bytes.extend_from_slice(&header_len.to_le_bytes());
     bytes.extend_from_slice(&header_bytes);
 
     // Serialize the architecture spec
-    let arch_bytes = bincode::serialize(arch)?;
+    let arch_bytes = encode_current(arch)?;
     bytes.extend_from_slice(&arch_bytes);
 
     Ok(bytes)
@@ -433,7 +471,7 @@ pub fn from_bytes(bytes: &[u8]) -> Result<ArchSpec> {
     }
 
     // Deserialize header
-    let header: FileHeader = bincode::deserialize(&bytes[8..8 + header_len])?;
+    let header: FileHeader = decode_file_header(&bytes[8..8 + header_len])?;
 
     deserialize_archspec_bytes(header.version, &bytes[8 + header_len..])
 }
@@ -441,15 +479,29 @@ pub fn from_bytes(bytes: &[u8]) -> Result<ArchSpec> {
 fn deserialize_archspec_bytes(version: u32, bytes: &[u8]) -> Result<ArchSpec> {
     match version {
         1 => {
-            let legacy: ArchSpecV1 = bincode::deserialize(bytes)?;
+            #[cfg(feature = "legacy-bincode")]
+            let legacy: ArchSpecV1 = decode_legacy(bytes)?;
+            #[cfg(not(feature = "legacy-bincode"))]
+            let legacy: ArchSpecV1 = decode_legacy(bytes, version)?;
             Ok(legacy.into())
         }
         2 => {
-            let legacy: ArchSpecV2 = bincode::deserialize(bytes)?;
+            #[cfg(feature = "legacy-bincode")]
+            let legacy: ArchSpecV2 = decode_legacy(bytes)?;
+            #[cfg(not(feature = "legacy-bincode"))]
+            let legacy: ArchSpecV2 = decode_legacy(bytes, version)?;
             Ok(legacy.into())
         }
+        3 => {
+            #[cfg(feature = "legacy-bincode")]
+            let mut arch: ArchSpec = decode_legacy(bytes)?;
+            #[cfg(not(feature = "legacy-bincode"))]
+            let mut arch: ArchSpec = decode_legacy(bytes, version)?;
+            arch.sync_legacy_big_endian();
+            Ok(arch)
+        }
         FORMAT_VERSION => {
-            let mut arch: ArchSpec = bincode::deserialize(bytes)?;
+            let mut arch: ArchSpec = decode_current(bytes)?;
             arch.sync_legacy_big_endian();
             Ok(arch)
         }
@@ -461,6 +513,7 @@ fn deserialize_archspec_bytes(version: u32, bytes: &[u8]) -> Result<ArchSpec> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "legacy-bincode")]
     fn encode_v1_bytes(arch: &ArchSpecV1) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -479,6 +532,7 @@ mod tests {
         bytes
     }
 
+    #[cfg(feature = "legacy-bincode")]
     fn encode_v2_bytes(arch: &ArchSpecV2) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -497,6 +551,25 @@ mod tests {
         bytes
     }
 
+    #[cfg(feature = "legacy-bincode")]
+    fn encode_v3_legacy_bytes(arch: &ArchSpec) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+
+        let header = FileHeader {
+            version: 3,
+            arch_name: arch.name.clone(),
+        };
+        let header_bytes = bincode::serialize(&header).expect("serialize header");
+        let header_len = header_bytes.len() as u32;
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+
+        let arch_bytes = bincode::serialize(arch).expect("serialize arch v3");
+        bytes.extend_from_slice(&arch_bytes);
+        bytes
+    }
+
     fn header_version_from_bytes(bytes: &[u8]) -> u32 {
         assert!(
             bytes.len() >= 8,
@@ -509,7 +582,7 @@ mod tests {
             "serialized bytes too short for header"
         );
         let header: FileHeader =
-            bincode::deserialize(&bytes[8..8 + header_len]).expect("deserialize header");
+            decode_current(&bytes[8..8 + header_len]).expect("deserialize header");
         header.version
     }
 
@@ -548,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn archspec_defaults_use_little_endianness_v3() {
+    fn archspec_defaults_use_little_endianness_current() {
         let arch = ArchSpec::new("default");
         assert_eq!(arch.instruction_endianness, Endianness::Little);
         assert_eq!(arch.memory_endianness, Endianness::Little);
@@ -556,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_roundtrip_preserves_instruction_and_memory_endianness() {
+    fn current_roundtrip_preserves_instruction_and_memory_endianness() {
         let mut arch = ArchSpec::new("mixed-scope");
         arch.set_instruction_endianness(Endianness::Big);
         arch.set_memory_endianness(Endianness::Little);
@@ -570,8 +643,8 @@ mod tests {
     }
 
     #[test]
-    fn v3_roundtrip_preserves_topology_fields() {
-        let mut arch = ArchSpec::new("topology-v3");
+    fn current_roundtrip_preserves_topology_fields() {
+        let mut arch = ArchSpec::new("topology-current");
         let mut ram = AddressSpace::ram(8);
         ram.memory_class = Some(crate::MemoryClass::Mmio);
         ram.permissions = Some(crate::MemoryPermissions {
@@ -613,7 +686,8 @@ mod tests {
     }
 
     #[test]
-    fn v1_file_loads_and_upgrades_to_v3_fields() {
+    #[cfg(feature = "legacy-bincode")]
+    fn v1_file_loads_and_upgrades_to_current_fields() {
         let legacy = ArchSpecV1 {
             name: "legacy".to_string(),
             variant: "default".to_string(),
@@ -672,12 +746,13 @@ mod tests {
         assert_eq!(
             header_version_from_bytes(&reserialized),
             FORMAT_VERSION,
-            "upgraded v1 save must emit v3"
+            "upgraded v1 save must emit current format"
         );
     }
 
     #[test]
-    fn v2_file_loads_and_upgrades_to_v3_fields() {
+    #[cfg(feature = "legacy-bincode")]
+    fn v2_file_loads_and_upgrades_to_current_fields() {
         let legacy = ArchSpecV2 {
             name: "legacy-v2".to_string(),
             variant: "default".to_string(),
@@ -713,7 +788,7 @@ mod tests {
         assert_eq!(
             header_version_from_bytes(&reserialized),
             FORMAT_VERSION,
-            "upgraded v2 save must emit v3"
+            "upgraded v2 save must emit current format"
         );
     }
 
@@ -725,6 +800,41 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-bincode")]
+    fn v3_file_loads_with_legacy_feature_enabled() {
+        let mut arch = ArchSpec::new("legacy-v3");
+        arch.set_instruction_endianness(Endianness::Big);
+        arch.set_memory_endianness(Endianness::Little);
+        let bytes = encode_v3_legacy_bytes(&arch);
+        let loaded = from_bytes(&bytes).expect("load v3");
+        assert_eq!(loaded.name, "legacy-v3");
+        assert_eq!(loaded.instruction_endianness, Endianness::Big);
+        assert_eq!(loaded.memory_endianness, Endianness::Little);
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-bincode"))]
+    fn legacy_v3_version_rejected_without_legacy_feature() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        let header = FileHeader {
+            version: 3,
+            arch_name: "legacy-v3".to_string(),
+        };
+        let header_bytes = encode_current(&header).expect("serialize header");
+        let header_len = header_bytes.len() as u32;
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(&header_bytes);
+        bytes.extend_from_slice(&[0x00]); // payload is ignored because version gate runs first.
+
+        let err = from_bytes(&bytes).expect_err("v3 should be rejected without legacy feature");
+        assert!(
+            matches!(err, SerializeError::UnsupportedVersion(3)),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn unsupported_future_version_rejected() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -732,7 +842,7 @@ mod tests {
             version: FORMAT_VERSION + 1,
             arch_name: "future".to_string(),
         };
-        let header_bytes = bincode::serialize(&header).expect("serialize header");
+        let header_bytes = encode_current(&header).expect("serialize header");
         let header_len = header_bytes.len() as u32;
         bytes.extend_from_slice(&header_len.to_le_bytes());
         bytes.extend_from_slice(&header_bytes);
