@@ -85,10 +85,15 @@ jobs:
             cd /tmp/radare2 && sys/install.sh
           fi
 
+      - name: Prepare r2r temp dir
+        run: mkdir -p "${{ runner.temp }}/r2r-tmp"
       - name: Run r2r snapshot tests
-        run: make -C tests/r2r run
         env:
-          R2R_JOBS: "8"
+          R2R_JOBS: "4"
+          TMPDIR: ${{ runner.temp }}/r2r-tmp
+          TMP: ${{ runner.temp }}/r2r-tmp
+          TEMP: ${{ runner.temp }}/r2r-tmp
+        run: make -C tests/r2r run
 
   # ── Release build check ────────────────────────────────────────────
   release:
