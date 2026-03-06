@@ -90,9 +90,7 @@ jobs:
       - name: Run r2r snapshot tests
         env:
           R2R_JOBS: "4"
-          TMPDIR: ${{ runner.temp }}/r2r-tmp
-          TMP: ${{ runner.temp }}/r2r-tmp
-          TEMP: ${{ runner.temp }}/r2r-tmp
+          R2R_TMPDIR: ${{ runner.temp }}/r2r-tmp
         run: make -C tests/r2r run
 
   # ── Release build check ────────────────────────────────────────────

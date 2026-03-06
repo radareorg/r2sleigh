@@ -1,7 +1,8 @@
 # r2r test harness for r2sleigh plugin
 
-R2R_JOBS ?= 8
+R2R_JOBS ?= 4
 R2R_TIMEOUT ?= 120
+R2R_TMPDIR ?= /tmp/r2sleigh-r2r-tmp
 
 .PHONY: all ensure-tools build-bins link-bins install-plugin run
 
@@ -32,4 +33,6 @@ install-plugin:
 	$(MAKE) -C ../../r2plugin RUST_FEATURES=x86 install
 
 run: ensure-tools link-bins install-plugin
-	r2r -t $(R2R_TIMEOUT) -j $(R2R_JOBS) -L db/extras
+	@mkdir -p "$(R2R_TMPDIR)"
+	TMPDIR="$(R2R_TMPDIR)" TMP="$(R2R_TMPDIR)" TEMP="$(R2R_TMPDIR)" \
+		r2r -t $(R2R_TIMEOUT) -j $(R2R_JOBS) -L db/extras
