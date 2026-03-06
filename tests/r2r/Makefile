@@ -33,6 +33,7 @@ install-plugin:
 	$(MAKE) -C ../../r2plugin RUST_FEATURES=x86 install
 
 run: ensure-tools link-bins install-plugin
+	@rm -rf "$(R2R_TMPDIR)"
 	@mkdir -p "$(R2R_TMPDIR)"
 	TMPDIR="$(R2R_TMPDIR)" TMP="$(R2R_TMPDIR)" TEMP="$(R2R_TMPDIR)" \
 		r2r -t $(R2R_TIMEOUT) -j $(R2R_JOBS) -L db/extras

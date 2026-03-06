@@ -86,11 +86,13 @@ jobs:
           fi
 
       - name: Prepare r2r temp dir
-        run: mkdir -p "${{ runner.temp }}/r2r-tmp"
+        run: |
+          rm -rf /tmp/r2sleigh-r2r-tmp
+          mkdir -p /tmp/r2sleigh-r2r-tmp
       - name: Run r2r snapshot tests
         env:
-          R2R_JOBS: "4"
-          R2R_TMPDIR: ${{ runner.temp }}/r2r-tmp
+          R2R_JOBS: "2"
+          R2R_TMPDIR: /tmp/r2sleigh-r2r-tmp
         run: make -C tests/r2r run
 
   # ── Release build check ────────────────────────────────────────────
