@@ -72,7 +72,15 @@ jobs:
         run: mkdir -p "$CARGO_TARGET_DIR"
       - name: Ensure radare2 + headers
         run: |
-          if command -v r2 &>/dev/null && pkg-config --exists r_anal; then
+          check_radare2() {
+            command -v r2 >/dev/null &&
+            command -v r2r >/dev/null &&
+            pkg-config --exists r_anal &&
+            r2 -v >/dev/null 2>&1 &&
+            R2R_OFFLINE=1 r2r -n -L tests/r2r/db/extras >/dev/null 2>&1
+          }
+
+          if check_radare2; then
             echo "radare2 and r_anal already available"
           else
             echo "Installing radare2 from git..."
@@ -83,6 +91,8 @@ jobs:
               git clone --depth=1 https://github.com/radareorg/radare2 /tmp/radare2
             fi
             cd /tmp/radare2 && sys/install.sh
+            cd "$GITHUB_WORKSPACE"
+            check_radare2
           fi
 
       - name: Prepare r2r temp dir
@@ -93,6 +103,7 @@ jobs:
         env:
           R2R_JOBS: "2"
           R2R_TMPDIR: /tmp/r2sleigh-r2r-tmp
+          R2R_OFFLINE: "1"
         run: make -C tests/r2r run
 
   # ── Release build check ────────────────────────────────────────────
