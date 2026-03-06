@@ -153,9 +153,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 R2IL Format Compatibility
 -------------------------
 
-- Current writer format is `FORMAT_VERSION = 3`.
-- Loader is backward compatible with v1, v2, and v3 `.r2il` artifacts.
-- Re-saving any loaded artifact writes v3.
+- Current writer format is `FORMAT_VERSION = 4`.
+- Default loader support is for v4 `.r2il` artifacts (postcard encoding).
+- Legacy v1/v2/v3 loading requires `r2il/legacy-bincode`.
+- Re-saving any loaded artifact writes v4.
 
 Troubleshooting
 ---------------

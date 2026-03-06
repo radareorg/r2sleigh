@@ -221,6 +221,7 @@ struct StoreInfo {
     space: String,
     addr: SSAVar,
     val: SSAVar,
+    access_size: u32,
 }
 
 fn collect_store_infos(func: &SSAFunction) -> Vec<StoreInfo> {
@@ -235,6 +236,7 @@ fn collect_store_infos(func: &SSAFunction) -> Vec<StoreInfo> {
                     space: space.clone(),
                     addr: addr.clone(),
                     val: val.clone(),
+                    access_size: val.size,
                 });
             }
         }
@@ -256,9 +258,153 @@ fn const_value(var: &SSAVar) -> Option<u64> {
     Some(val)
 }
 
-fn addresses_may_alias(a: &SSAVar, b: &SSAVar) -> bool {
-    match (const_value(a), const_value(b)) {
-        (Some(a_val), Some(b_val)) => a_val == b_val,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddressRegion {
+    Const,
+    Stack,
+    Global,
+    Heap,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddressProvenance {
+    region: AddressRegion,
+    base: Option<String>,
+    offset: Option<i64>,
+    absolute: Option<u64>,
+}
+
+fn parse_i64_component(component: &str) -> Option<i64> {
+    let trimmed = component.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(hex) = trimmed
+        .strip_prefix("-0x")
+        .or_else(|| trimmed.strip_prefix("-0X"))
+    {
+        let val = i64::from_str_radix(hex, 16).ok()?;
+        return Some(-val);
+    }
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        return i64::from_str_radix(hex, 16).ok();
+    }
+    trimmed.parse::<i64>().ok()
+}
+
+fn detect_address_provenance(var: &SSAVar) -> AddressProvenance {
+    if let Some(abs) = const_value(var) {
+        return AddressProvenance {
+            region: AddressRegion::Const,
+            base: None,
+            offset: Some(0),
+            absolute: Some(abs),
+        };
+    }
+
+    let lower = var.name.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("ram:") {
+        return AddressProvenance {
+            region: AddressRegion::Global,
+            base: Some("ram".to_string()),
+            offset: None,
+            absolute: if let Some(hex) = rest.strip_prefix("0x") {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                rest.parse::<u64>().ok()
+            },
+        };
+    }
+    if let Some(rest) = lower.strip_prefix("stack:") {
+        let mut parts = rest.split(':');
+        let base = parts.next().map(str::to_string);
+        let offset = parts.next().and_then(parse_i64_component);
+        return AddressProvenance {
+            region: AddressRegion::Stack,
+            base,
+            offset,
+            absolute: None,
+        };
+    }
+    if lower.starts_with("heap:") || lower.contains("malloc") || lower.contains("heap") {
+        return AddressProvenance {
+            region: AddressRegion::Heap,
+            base: Some("heap".to_string()),
+            offset: None,
+            absolute: None,
+        };
+    }
+    if lower.starts_with("obj.")
+        || lower.starts_with("sym.")
+        || lower.starts_with("data.")
+        || lower.starts_with("got.")
+    {
+        return AddressProvenance {
+            region: AddressRegion::Global,
+            base: Some(lower),
+            offset: Some(0),
+            absolute: None,
+        };
+    }
+    if matches!(
+        lower.as_str(),
+        "rbp" | "rsp" | "ebp" | "esp" | "sp" | "fp" | "bp" | "s0" | "x8"
+    ) {
+        return AddressProvenance {
+            region: AddressRegion::Stack,
+            base: Some(lower),
+            offset: Some(0),
+            absolute: None,
+        };
+    }
+
+    AddressProvenance {
+        region: AddressRegion::Unknown,
+        base: None,
+        offset: None,
+        absolute: None,
+    }
+}
+
+fn ranges_overlap(a_base: i128, a_size: u32, b_base: i128, b_size: u32) -> bool {
+    let a_end = a_base + i128::from(a_size.max(1));
+    let b_end = b_base + i128::from(b_size.max(1));
+    a_base < b_end && b_base < a_end
+}
+
+fn addresses_may_alias(a: &SSAVar, a_size: u32, b: &SSAVar, b_size: u32) -> bool {
+    let pa = detect_address_provenance(a);
+    let pb = detect_address_provenance(b);
+
+    if let (Some(a_abs), Some(b_abs)) = (pa.absolute, pb.absolute) {
+        return ranges_overlap(i128::from(a_abs), a_size, i128::from(b_abs), b_size);
+    }
+
+    if pa.region != AddressRegion::Unknown
+        && pb.region != AddressRegion::Unknown
+        && pa.region != pb.region
+    {
+        return false;
+    }
+
+    match (pa.region, pb.region) {
+        (AddressRegion::Stack, AddressRegion::Stack)
+        | (AddressRegion::Global, AddressRegion::Global)
+        | (AddressRegion::Heap, AddressRegion::Heap) => {
+            if pa.base.is_some() && pb.base.is_some() && pa.base != pb.base {
+                return false;
+            }
+            match (pa.offset, pb.offset) {
+                (Some(a_off), Some(b_off)) => {
+                    ranges_overlap(i128::from(a_off), a_size, i128::from(b_off), b_size)
+                }
+                _ => true,
+            }
+        }
         _ => true,
     }
 }
@@ -269,12 +415,13 @@ fn add_aliasing_stores(
     stores: &[StoreInfo],
     sink_space: &str,
     sink_addr: &SSAVar,
+    sink_access_size: u32,
 ) {
     for store in stores {
         if store.space != sink_space {
             continue;
         }
-        if !addresses_may_alias(&store.addr, sink_addr) {
+        if !addresses_may_alias(&store.addr, store.access_size, sink_addr, sink_access_size) {
             continue;
         }
         if slice.add_op(SliceOpRef::Op {
@@ -325,8 +472,15 @@ fn walk_backward(
                     for src in op.sources() {
                         worklist.push_back(src.clone());
                     }
-                    if let SSAOp::Load { space, addr, .. } = op {
-                        add_aliasing_stores(slice, worklist, stores, space.as_str(), addr);
+                    if let SSAOp::Load { space, addr, dst } = op {
+                        add_aliasing_stores(
+                            slice,
+                            worklist,
+                            stores,
+                            space.as_str(),
+                            addr,
+                            dst.size,
+                        );
                     }
                 }
             }
@@ -379,8 +533,25 @@ pub fn backward_slice_from_op(func: &SSAFunction, sink: SliceOpRef) -> BackwardS
                 for src in op.sources() {
                     worklist.push_back(src.clone());
                 }
-                if let SSAOp::Load { space, addr, .. } | SSAOp::Store { space, addr, .. } = op {
-                    add_aliasing_stores(&mut slice, &mut worklist, &stores, space.as_str(), addr);
+                if let SSAOp::Load { space, addr, dst } = op {
+                    add_aliasing_stores(
+                        &mut slice,
+                        &mut worklist,
+                        &stores,
+                        space.as_str(),
+                        addr,
+                        dst.size,
+                    );
+                }
+                if let SSAOp::Store { space, addr, val } = op {
+                    add_aliasing_stores(
+                        &mut slice,
+                        &mut worklist,
+                        &stores,
+                        space.as_str(),
+                        addr,
+                        val.size,
+                    );
                 }
             }
         }
@@ -614,5 +785,30 @@ mod tests {
             block_addr: 0x2000,
             op_idx: 0
         }));
+    }
+
+    #[test]
+    fn test_alias_provenance_distinguishes_stack_vs_global() {
+        let stack_addr = make_var("stack:rbp:-0x10", 0, 8);
+        let global_addr = make_var("ram:0x401000", 0, 8);
+        assert!(
+            !addresses_may_alias(&stack_addr, 8, &global_addr, 8),
+            "stack and global provenance classes should not alias"
+        );
+    }
+
+    #[test]
+    fn test_alias_range_overlap_for_adjacent_constants() {
+        let base = make_var("const:0x1000", 0, 8);
+        let near = make_var("const:0x1004", 0, 8);
+        let far = make_var("const:0x1100", 0, 8);
+        assert!(
+            addresses_may_alias(&base, 8, &near, 8),
+            "constant ranges that overlap should alias"
+        );
+        assert!(
+            !addresses_may_alias(&base, 8, &far, 8),
+            "distant constant ranges should not alias"
+        );
     }
 }

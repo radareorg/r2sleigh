@@ -60,4 +60,4 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAGIC: &[u8; 4] = b"R2IL";
 
 /// Current binary format version.
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;

@@ -8,7 +8,10 @@ RUST_FEATURES ?= x86
 ANAL_PLUGIN_NAME = anal_sleigh
 ARCH_PLUGIN_NAME = arch_sleigh
 RUST_LIB = libr2sleigh_plugin
-RUST_BUILD_DIR = ../target/$(RUST_TARGET)
+# Keep in sync with Cargo output directory. This allows CI to override
+# CARGO_TARGET_DIR (e.g. shared incremental target on self-hosted runners).
+CARGO_TARGET_DIR ?= ../target
+RUST_BUILD_DIR = $(CARGO_TARGET_DIR)/$(RUST_TARGET)
 
 # Detect OS
 UNAME := $(shell uname)
@@ -37,7 +40,7 @@ LDFLAGS = $(R2_LDFLAGS) -L$(RUST_BUILD_DIR) -lr2sleigh_plugin $(LDFLAGS_OS) -lst
 ANAL_PLUGIN_SO = $(ANAL_PLUGIN_NAME).$(PLUGIN_EXT)
 ARCH_PLUGIN_SO = $(ARCH_PLUGIN_NAME).$(PLUGIN_EXT)
 
-.PHONY: all clean install uninstall rust rust-debug rust-release help
+.PHONY: all clean install uninstall rust rust-debug rust-release help arch_sleigh.o r_anal_sleigh_arch.o
 
 all: $(ANAL_PLUGIN_SO) $(ARCH_PLUGIN_SO)
 
