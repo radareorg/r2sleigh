@@ -35,6 +35,155 @@ pub struct ExternalTypeDb {
     pub diagnostics: Vec<String>,
 }
 
+fn is_opaque_placeholder_type_name(ty: &str) -> bool {
+    let lower = ty.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let stripped = lower.strip_prefix("struct ").unwrap_or(&lower).trim_start();
+    stripped.starts_with("type_0x") || lower.contains(" type_0x")
+}
+
+fn normalize_prefixed_aggregate_type(ty: &str, prefix: &str) -> Option<String> {
+    let dotted = format!("{prefix}.");
+    if !ty.to_ascii_lowercase().starts_with(&dotted) {
+        return None;
+    }
+    let rest = &ty[dotted.len()..];
+    let ident_len = rest
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                None
+            } else {
+                Some(idx)
+            }
+        })
+        .unwrap_or(rest.len());
+    if ident_len == 0 {
+        return None;
+    }
+    let raw_name = &rest[..ident_len];
+    let name = raw_name.replace('.', "_");
+    if name.is_empty() {
+        return None;
+    }
+    let suffix = rest[ident_len..].trim_start();
+    if suffix.is_empty() {
+        Some(format!("{prefix} {name}"))
+    } else {
+        Some(format!("{prefix} {name} {suffix}"))
+    }
+}
+
+fn normalize_primitive_alias(base: &str) -> Option<&'static str> {
+    match base.to_ascii_lowercase().as_str() {
+        "long" | "long int" | "longint" => Some("long"),
+        "longu" | "unsigned long" | "unsigned long int" | "unsignedlong" | "unsignedlongint" => {
+            Some("unsigned long")
+        }
+        "long long" | "long long int" | "longlong" | "longlongint" => Some("long long"),
+        "long long unsigned"
+        | "unsigned long long"
+        | "unsigned long long int"
+        | "unsignedlonglong"
+        | "unsignedlonglongint"
+        | "longlongu" => Some("unsigned long long"),
+        "bool" | "_bool" => Some("bool"),
+        "boolean" => Some("bool"),
+        "uintptr_t" => Some("size_t"),
+        "intptr_t" => Some("ssize_t"),
+        _ => None,
+    }
+}
+
+pub fn normalize_external_type_name(ty: &str) -> String {
+    let mut normalized = ty.trim().to_string();
+    if normalized.is_empty() || is_opaque_placeholder_type_name(&normalized) {
+        return "void *".to_string();
+    }
+
+    for qualifier in ["const", "volatile", "restrict", "register"] {
+        normalized = normalized
+            .split_whitespace()
+            .filter(|part| !part.eq_ignore_ascii_case(qualifier))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    loop {
+        let lower = normalized.to_ascii_lowercase();
+        if lower.starts_with("type.") {
+            normalized = normalized[5..].trim_start().to_string();
+            continue;
+        }
+        if lower.starts_with("struct type.") {
+            normalized = format!("struct {}", normalized["struct type.".len()..].trim_start());
+            continue;
+        }
+        if lower.starts_with("union type.") {
+            normalized = format!("union {}", normalized["union type.".len()..].trim_start());
+            continue;
+        }
+        if lower.starts_with("enum type.") {
+            normalized = format!("enum {}", normalized["enum type.".len()..].trim_start());
+            continue;
+        }
+        break;
+    }
+
+    if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "struct") {
+        normalized = tagged;
+    } else if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "union") {
+        normalized = tagged;
+    } else if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "enum") {
+        normalized = tagged;
+    }
+
+    let mut ptr_suffix = String::new();
+    while normalized.trim_end().ends_with('*') {
+        normalized = normalized.trim_end_matches('*').trim_end().to_string();
+        if ptr_suffix.is_empty() {
+            ptr_suffix.push_str(" *");
+        } else {
+            ptr_suffix.push('*');
+        }
+    }
+
+    let lower = normalized.to_ascii_lowercase();
+    if lower.starts_with("struct ") || lower.starts_with("union ") || lower.starts_with("enum ") {
+        normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.contains('.') {
+            let mut parts = normalized.splitn(2, ' ');
+            let prefix = parts.next().unwrap_or("struct");
+            let ident = parts.next().unwrap_or("").replace('.', "_");
+            normalized = format!("{prefix} {}", ident.trim());
+        }
+    } else {
+        if let Some(alias) = normalize_primitive_alias(&normalized) {
+            normalized = alias.to_string();
+        }
+        if normalized.contains('.') {
+            return "void *".to_string();
+        }
+    }
+
+    normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() || is_opaque_placeholder_type_name(&normalized) {
+        return "void *".to_string();
+    }
+    format!("{normalized}{ptr_suffix}")
+}
+
+fn normalize_aggregate_name(name: &str, prefix: &str) -> String {
+    let normalized = normalize_external_type_name(name);
+    normalized
+        .strip_prefix(&format!("{prefix} "))
+        .unwrap_or(name)
+        .trim()
+        .to_string()
+}
+
 impl ExternalTypeDb {
     pub fn from_tsj_json(json_str: &str) -> Self {
         let trimmed = json_str.trim();
@@ -139,7 +288,7 @@ impl ExternalTypeDb {
             .to_string();
 
         let mut out = ExternalStruct {
-            name: struct_name,
+            name: normalize_aggregate_name(&struct_name, "struct"),
             fields: BTreeMap::new(),
         };
 
@@ -166,12 +315,12 @@ impl ExternalTypeDb {
                     let ty = member
                         .get("type")
                         .and_then(Value::as_str)
-                        .map(str::to_string)
+                        .map(normalize_external_type_name)
                         .or_else(|| {
                             member
                                 .get("fmt")
                                 .and_then(Value::as_str)
-                                .map(str::to_string)
+                                .map(normalize_external_type_name)
                         });
 
                     out.fields
@@ -216,7 +365,7 @@ impl ExternalTypeDb {
             .unwrap_or(fallback_name)
             .to_string();
         let mut out = ExternalUnion {
-            name: union_name,
+            name: normalize_aggregate_name(&union_name, "union"),
             fields: BTreeMap::new(),
         };
 
@@ -239,12 +388,12 @@ impl ExternalTypeDb {
                     let ty = member
                         .get("type")
                         .and_then(Value::as_str)
-                        .map(str::to_string)
+                        .map(normalize_external_type_name)
                         .or_else(|| {
                             member
                                 .get("fmt")
                                 .and_then(Value::as_str)
-                                .map(str::to_string)
+                                .map(normalize_external_type_name)
                         });
                     out.fields
                         .entry(offset)
@@ -283,7 +432,7 @@ impl ExternalTypeDb {
             .unwrap_or(fallback_name)
             .to_string();
         let mut out = ExternalEnum {
-            name: enum_name,
+            name: normalize_aggregate_name(&enum_name, "enum"),
             variants: BTreeMap::new(),
         };
 
@@ -439,6 +588,56 @@ mod tests {
         assert_eq!(
             en.variants.get(&1).map(|name| name.as_str()),
             Some("STATE_CONNECTING")
+        );
+    }
+
+    #[test]
+    fn normalize_type_aliases_and_dotted_member_types() {
+        assert_eq!(normalize_external_type_name("type.bool"), "bool");
+        assert_eq!(normalize_external_type_name("type.LONG"), "long");
+        assert_eq!(normalize_external_type_name("type.LONGU"), "unsigned long");
+        assert_eq!(normalize_external_type_name("type.uintptr_t"), "size_t");
+        assert_eq!(
+            normalize_external_type_name("type.struct.IOCPU_Data *"),
+            "struct IOCPU_Data *"
+        );
+        assert_eq!(
+            normalize_external_type_name("type.IOCPU_VTable.setCPUNumber"),
+            "void *"
+        );
+    }
+
+    #[test]
+    fn parse_kernel_style_struct_fields_are_canonicalized() {
+        let json = r#"
+        {
+          "types": [
+            {
+              "kind": "struct",
+              "name": "type.struct.IOCPU_Data",
+              "members": [
+                {"name": "meta", "offset": 0, "type": "type.struct.OSMetaClass_VTable *"},
+                {"name": "setter", "offset": 8, "type": "type.IOCPU_VTable.setCPUNumber"},
+                {"name": "count", "offset": 16, "type": "type.LONGU"}
+              ]
+            }
+          ]
+        }
+        "#;
+        let db = ExternalTypeDb::from_tsj_json(json);
+        let st = db.structs.get("iocpu_data").expect("struct missing");
+        assert_eq!(st.name, "IOCPU_Data");
+        assert_eq!(
+            st.fields.get(&0).and_then(|f| f.ty.as_deref()),
+            Some("struct OSMetaClass_VTable *")
+        );
+        assert_eq!(
+            st.fields.get(&8).and_then(|f| f.ty.as_deref()),
+            Some("void *")
+        );
+        assert_eq!(
+            st.fields.get(&16).and_then(|f| f.ty.as_deref()),
+            Some("unsigned long")
         );
     }
 }

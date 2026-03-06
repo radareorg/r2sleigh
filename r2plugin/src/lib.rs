@@ -5797,82 +5797,8 @@ fn is_generic_type_string(ty: &str) -> bool {
     )
 }
 
-fn normalize_prefixed_aggregate_type(ty: &str, prefix: &str) -> Option<String> {
-    let dotted = format!("{prefix}.");
-    if !ty.to_ascii_lowercase().starts_with(&dotted) {
-        return None;
-    }
-    let rest = &ty[dotted.len()..];
-    let ident_len = rest
-        .char_indices()
-        .find_map(|(idx, ch)| {
-            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
-                None
-            } else {
-                Some(idx)
-            }
-        })
-        .unwrap_or(rest.len());
-    if ident_len == 0 {
-        return None;
-    }
-    let raw_name = &rest[..ident_len];
-    let name = sanitize_c_identifier(raw_name).unwrap_or_else(|| raw_name.replace('.', "_"));
-    if name.is_empty() {
-        return None;
-    }
-    let suffix = rest[ident_len..].trim_start();
-    if suffix.is_empty() {
-        Some(format!("{prefix} {name}"))
-    } else {
-        Some(format!("{prefix} {name} {suffix}"))
-    }
-}
-
 fn normalize_external_type_name(ty: &str) -> String {
-    let mut normalized = ty.trim().to_string();
-    if normalized.is_empty() || is_opaque_placeholder_type_name(&normalized) {
-        return "void *".to_string();
-    }
-
-    for qualifier in ["const", "volatile", "restrict", "register"] {
-        normalized = normalized
-            .split_whitespace()
-            .filter(|part| !part.eq_ignore_ascii_case(qualifier))
-            .collect::<Vec<_>>()
-            .join(" ");
-    }
-
-    loop {
-        let lower = normalized.to_ascii_lowercase();
-        if lower.starts_with("type.") {
-            normalized = normalized[5..].trim_start().to_string();
-            continue;
-        }
-        if lower.starts_with("struct type.") {
-            normalized = format!("struct {}", normalized["struct type.".len()..].trim_start());
-            continue;
-        }
-        if lower.starts_with("union type.") {
-            normalized = format!("union {}", normalized["union type.".len()..].trim_start());
-            continue;
-        }
-        if lower.starts_with("enum type.") {
-            normalized = format!("enum {}", normalized["enum type.".len()..].trim_start());
-            continue;
-        }
-        break;
-    }
-
-    if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "struct") {
-        normalized = tagged;
-    } else if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "union") {
-        normalized = tagged;
-    } else if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "enum") {
-        normalized = tagged;
-    }
-
-    normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = r2types::normalize_external_type_name(ty);
     if normalized.is_empty() || is_opaque_placeholder_type_name(&normalized) {
         "void *".to_string()
     } else {
@@ -9102,6 +9028,12 @@ mod tests {
             normalize_external_type_name("struct type.foo_bar *"),
             "struct foo_bar *"
         );
+        assert_eq!(normalize_external_type_name("type.LONG"), "long");
+        assert_eq!(normalize_external_type_name("type.LONGU"), "unsigned long");
+        assert_eq!(
+            normalize_external_type_name("type.IOCPU_VTable.setCPUNumber"),
+            "void *"
+        );
     }
 
     #[test]
@@ -9119,6 +9051,10 @@ mod tests {
             Some(r2dec::CType::ptr(r2dec::CType::Struct(
                 "sla_node".to_string()
             )))
+        );
+        assert_eq!(
+            parse_external_type("type.IOCPU_VTable.setCPUNumber", 64),
+            Some(r2dec::CType::ptr(r2dec::CType::Void))
         );
     }
 

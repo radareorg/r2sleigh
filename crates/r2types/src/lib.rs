@@ -9,7 +9,10 @@ pub mod solver;
 
 pub use constraint::{Constraint, ConstraintSource, MemoryCapability};
 pub use convert::{CTypeLike, to_c_type_like};
-pub use external::{ExternalEnum, ExternalField, ExternalStruct, ExternalTypeDb, ExternalUnion};
+pub use external::{
+    ExternalEnum, ExternalField, ExternalStruct, ExternalTypeDb, ExternalUnion,
+    normalize_external_type_name,
+};
 pub use model::{Signedness, StructField, StructShape, Type, TypeArena, TypeId};
 pub use oracle::TypeOracle;
 pub use signature::{ResolvedSignature, SignatureRegistry};
