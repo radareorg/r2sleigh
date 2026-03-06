@@ -169,6 +169,7 @@ static size_t struct_decl_memo_capacity = 0;
 #define SLEIGH_BLOCK_MAX_BYTES 256
 #define SLEIGH_TAINT_MAX_BLOCKS 200
 #define SLEIGH_SIG_WRITEBACK_MAX_BLOCKS 200
+#define SLEIGH_SIG_WRITEBACK_GLOBAL_MAX_FCNS 128
 #define SLEIGH_SIG_MIN_CONFIDENCE 70
 #define SLEIGH_CC_MIN_CONFIDENCE 80
 #define SLEIGH_TYPE_MIN_CONF_DEFAULT 85
@@ -176,6 +177,7 @@ static size_t struct_decl_memo_capacity = 0;
 #define SLEIGH_TYPE_STRUCT_MIN_CONF_DEFAULT 85
 #define SLEIGH_TYPE_INTERPROC_MAX_ITERS_DEFAULT 12
 #define SLEIGH_TYPE_MAX_BLOCKS_DEFAULT 500
+#define SLEIGH_TYPE_WRITEBACK_GLOBAL_MAX_FCNS 128
 #define SLEIGH_TYPE_GLOBAL_MAX_LINKS_DEFAULT 128
 #define SLEIGH_CALLER_PROP_SAMPLE_MAX 5
 #define SLEIGH_TAINT_LABEL_MAX 6
@@ -5774,6 +5776,8 @@ static bool sleigh_post_analysis(RAnal *anal) {
 
 	int num_fcns = r_list_length (anal->fcns);
 	bool xref_enabled = post_mode != SLEIGH_MODE_FAST;
+	bool sigwrite_focus_only = sigwrite_enabled && num_fcns > SLEIGH_SIG_WRITEBACK_GLOBAL_MAX_FCNS;
+	bool type_writeback_focus_only = type_writeback_enabled && num_fcns > SLEIGH_TYPE_WRITEBACK_GLOBAL_MAX_FCNS;
 	if (num_fcns == 0) {
 		free (tsj_shared_json);
 		struct_decl_memo_clear ();
@@ -5790,9 +5794,13 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	RAnalFunction *fcn;
 	r_list_foreach (anal->fcns, iter, fcn) {
 		int bb_count = (fcn && fcn->bbs) ? r_list_length (fcn->bbs) : 0;
+		bool sig_scope_eligible = !sigwrite_focus_only || (focus_callee_addr && fcn && fcn->addr == focus_callee_addr);
+		bool type_scope_eligible = !type_writeback_focus_only || (focus_callee_addr && fcn && fcn->addr == focus_callee_addr);
 		bool taint_eligible = taint_enabled && bb_count <= SLEIGH_TAINT_MAX_BLOCKS;
-		bool sig_eligible = sigwrite_enabled && sig_arch_supported && core && bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS;
-		bool type_eligible = type_writeback_enabled && type_arch_supported && core && bb_count <= type_max_blocks;
+		bool sig_eligible = sigwrite_enabled && sig_arch_supported && core
+			&& bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS && sig_scope_eligible;
+		bool type_eligible = type_writeback_enabled && type_arch_supported && core
+			&& bb_count <= type_max_blocks && type_scope_eligible;
 		bool semantic_for_fcn = semantic_comments_enabled;
 		bool xref_for_fcn = xref_enabled;
 		bool need_blocks = semantic_for_fcn || xref_for_fcn || taint_eligible || sig_eligible || type_eligible;

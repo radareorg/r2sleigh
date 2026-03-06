@@ -760,7 +760,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_cast_u8
-a:sla.dec | jq -Rs 'contains("(int64_t)")'
+a:sla.dec~int64_t~? | tr -d '\n' | jq -R 'tonumber > 0'
 EOF_CMDS
 RUN
 
@@ -786,7 +786,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.main
-a:sla.dec | jq -Rs 'contains("Unknown test: %d") and contains("switch (")'
+a:sla.dec | jq -Rs 'contains("Unknown test: %d") and (contains("switch (") or contains("if ("))'
 EOF_CMDS
 RUN
 

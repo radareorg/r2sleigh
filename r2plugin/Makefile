@@ -40,7 +40,7 @@ LDFLAGS = $(R2_LDFLAGS) -L$(RUST_BUILD_DIR) -lr2sleigh_plugin $(LDFLAGS_OS) -lst
 ANAL_PLUGIN_SO = $(ANAL_PLUGIN_NAME).$(PLUGIN_EXT)
 ARCH_PLUGIN_SO = $(ARCH_PLUGIN_NAME).$(PLUGIN_EXT)
 
-.PHONY: all clean install uninstall rust rust-debug rust-release help
+.PHONY: all clean install uninstall rust rust-debug rust-release help arch_sleigh.o r_anal_sleigh_arch.o
 
 all: $(ANAL_PLUGIN_SO) $(ARCH_PLUGIN_SO)
 
