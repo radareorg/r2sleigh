@@ -6,16 +6,10 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     labels:
       - "dependencies"
       - "rust"
-    ignore:
-      # Major version bumps with breaking changes — upgrade manually
-      - dependency-name: "thiserror"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "petgraph"
-        update-types: ["version-update:semver-major"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -23,7 +17,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 10
     labels:
       - "dependencies"
       - "ci"

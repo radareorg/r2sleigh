@@ -143,11 +143,11 @@ Automatic Signature Write-Back (aaaa)
 -------------------------------------
 
 During `aaaa`, the plugin also performs function signature + calling convention
-write-back for x86/x86-64 functions:
+write-back:
 
 - Builds SSA and infers return/parameter types.
-- Applies inferred signature via direct `RAnal` update first (`r_anal_str_to_fcn`), then falls back to `afs` if needed.
-- Applies inferred calling convention via direct function update first (`fcn->callconv`), then falls back to `afc` if needed.
+- Applies inferred signatures on any supported loaded architecture via direct `RAnal` update first (`r_anal_str_to_fcn`), then falls back to `afs` if needed.
+- Applies inferred calling conventions only when the payload contains a non-empty verified calling convention. In practice this is currently strongest on x86/x86-64.
 - Confidence-gated overwrite: signature `>= 70`, calling convention `>= 80`.
 - Practical consistency verification is currently disabled by default.
 - After verified signature apply, direct caller xrefs are propagated in a

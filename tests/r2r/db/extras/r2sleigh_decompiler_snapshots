@@ -1,0 +1,25 @@
+NAME=decompiler_bool_carrier_chain_full_snapshot
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+int32_t dbg.test_bool_carrier_chain(int32_t arg1, int32_t arg2)
+{
+    local_14 = arg1;
+    local_18 = arg2;
+    <carrier_assign>
+    <carrier_store>
+    local_10 = (int64_t)local_4;
+    if (0 != 0) {
+        <true_branch_return>
+    } else {
+        <false_branch_return>
+    }
+}
+
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaaa
+s sym.test_bool_carrier_chain
+a:sla.dec | awk "BEGIN{saw=0} /^[[:space:]]*eax(_[0-9]+)? = .*;$/ { print \"    <carrier_assign>\"; next } /^[[:space:]]*local_4 = eax(_[0-9]+)?;$/ { print \"    <carrier_store>\"; next } /^[[:space:]]*return .*;$/ { if (saw) print \"        <false_branch_return>\"; else { print \"        <true_branch_return>\"; saw=1 } next } { print }"
+EOF_CMDS
+RUN

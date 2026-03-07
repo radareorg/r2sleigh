@@ -96,8 +96,7 @@ fn analyze_stack_vars(
                         &scratch.info.stack_vars,
                         &use_info.var_aliases,
                         env,
-                    ) && stack_var_name.starts_with("arg")
-                    {
+                    ) {
                         let expr = CExpr::Var(stack_var_name);
                         scratch
                             .info
@@ -161,6 +160,9 @@ fn stack_var_for_addr_var(
     env: &PassEnv<'_>,
 ) -> Option<String> {
     let addr_key = addr.display_name();
+    let offset_backed =
+        utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
+            .and_then(|offset| stack_vars.get(&offset).cloned());
     if let Some(alias) = resolve_stack_alias_from_addr_expr(
         &CExpr::Var(addr_key.clone()),
         definitions,
@@ -169,6 +171,9 @@ fn stack_var_for_addr_var(
         0,
         &mut HashSet::new(),
     ) {
+        if let Some(preferred) = preferred_stack_alias(&alias, offset_backed.clone(), stack_vars) {
+            return Some(preferred);
+        }
         return Some(alias);
     }
 
@@ -196,11 +201,51 @@ fn stack_var_for_addr_var(
         0,
         &mut HashSet::new(),
     ) {
+        if let Some(preferred) = preferred_stack_alias(&alias, offset_backed.clone(), stack_vars) {
+            return Some(preferred);
+        }
         return Some(alias);
     }
 
-    utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
-        .and_then(|offset| stack_vars.get(&offset).cloned())
+    offset_backed
+}
+
+fn is_generic_stack_name(name: &str) -> bool {
+    name.starts_with("local_") || name.starts_with("stack_") || name == "saved_fp"
+}
+
+fn preferred_stack_alias(
+    alias: &str,
+    offset_backed: Option<String>,
+    stack_vars: &HashMap<i64, String>,
+) -> Option<String> {
+    if !is_generic_stack_name(alias) {
+        return None;
+    }
+    if let Some(preferred) = offset_backed
+        && !is_generic_stack_name(&preferred)
+    {
+        return Some(preferred);
+    }
+    let offset = parse_generic_stack_name_offset(alias)?;
+    let preferred = stack_vars.get(&offset)?.clone();
+    if is_generic_stack_name(&preferred) {
+        return None;
+    }
+    Some(preferred)
+}
+
+fn parse_generic_stack_name_offset(name: &str) -> Option<i64> {
+    if name == "saved_fp" {
+        return Some(0);
+    }
+    if let Some(rest) = name.strip_prefix("local_") {
+        return i64::from_str_radix(rest, 16).ok().map(|v| -v);
+    }
+    if let Some(rest) = name.strip_prefix("stack_") {
+        return i64::from_str_radix(rest, 16).ok();
+    }
+    None
 }
 
 fn resolve_stack_alias_from_addr_expr(

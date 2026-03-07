@@ -3,6 +3,7 @@
 R2R_JOBS ?= 4
 R2R_TIMEOUT ?= 120
 R2R_TMPDIR ?= /tmp/r2sleigh-r2r-tmp
+R2R_RUST_FEATURES ?= all-archs
 
 .PHONY: all ensure-tools build-bins link-bins install-plugin run
 
@@ -30,7 +31,7 @@ link-bins: build-bins
 	@if [ -f ../e2e/sym_test ]; then ln -sf ../../e2e/sym_test bins/sym_test; fi
 
 install-plugin:
-	$(MAKE) -C ../../r2plugin RUST_FEATURES=x86 install
+	$(MAKE) -C ../../r2plugin RUST_FEATURES=$(R2R_RUST_FEATURES) install
 
 run: ensure-tools link-bins install-plugin
 	@rm -rf "$(R2R_TMPDIR)"

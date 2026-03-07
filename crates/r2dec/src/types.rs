@@ -53,12 +53,8 @@ pub struct FunctionType {
 impl TypeInference {
     /// Create a new type inference context.
     pub fn new(ptr_size: u32) -> Self {
-        Self {
-            var_types: HashMap::new(),
-            func_types: HashMap::new(),
-            function_names: HashMap::new(),
-            ptr_size,
-            arg_regs: if ptr_size == 64 {
+        let (arg_regs, ret_regs) = if ptr_size == 64 {
+            (
                 vec![
                     "rdi".to_string(),
                     "rsi".to_string(),
@@ -66,11 +62,7 @@ impl TypeInference {
                     "rcx".to_string(),
                     "r8".to_string(),
                     "r9".to_string(),
-                ]
-            } else {
-                vec![]
-            },
-            ret_regs: if ptr_size == 64 {
+                ],
                 vec![
                     "rax".to_string(),
                     "eax".to_string(),
@@ -78,10 +70,26 @@ impl TypeInference {
                     "xmm0_qa".to_string(),
                     "xmm0_qb".to_string(),
                     "st0".to_string(),
-                ]
-            } else {
-                vec!["eax".to_string(), "xmm0".to_string(), "st0".to_string()]
-            },
+                ],
+            )
+        } else {
+            (
+                vec![],
+                vec!["eax".to_string(), "xmm0".to_string(), "st0".to_string()],
+            )
+        };
+        Self::new_with_abi(ptr_size, arg_regs, ret_regs)
+    }
+
+    /// Create a new type inference context with explicit ABI register sets.
+    pub fn new_with_abi(ptr_size: u32, arg_regs: Vec<String>, ret_regs: Vec<String>) -> Self {
+        Self {
+            var_types: HashMap::new(),
+            func_types: HashMap::new(),
+            function_names: HashMap::new(),
+            ptr_size,
+            arg_regs,
+            ret_regs,
             signature_registry: SignatureRegistry::from_embedded_json(),
             external_signature: None,
             external_stack_vars: HashMap::new(),

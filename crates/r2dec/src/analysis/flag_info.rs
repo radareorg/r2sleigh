@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use r2ssa::SSAOp;
 
 use super::{FlagInfo, PassEnv, UseInfo, utils};
+use crate::ast::{BinaryOp, CExpr, UnaryOp};
 use crate::fold::SSABlock;
 
 #[derive(Debug, Default)]
@@ -118,7 +119,104 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
                     .insert(dst.display_name(), (a_name, b_name));
             }
         }
+
+        let predicate_expr = match op {
+            SSAOp::Copy { src, .. }
+            | SSAOp::IntZExt { src, .. }
+            | SSAOp::IntSExt { src, .. }
+            | SSAOp::Trunc { src, .. }
+            | SSAOp::Cast { src, .. } => predicate_passthrough_expr(src, scratch),
+            SSAOp::BoolNot { src, .. } => Some(CExpr::unary(
+                UnaryOp::Not,
+                predicate_operand_expr(src, scratch),
+            )),
+            SSAOp::BoolAnd { a, b, .. } => Some(CExpr::binary(
+                BinaryOp::And,
+                predicate_operand_expr(a, scratch),
+                predicate_operand_expr(b, scratch),
+            )),
+            SSAOp::BoolOr { a, b, .. } => Some(CExpr::binary(
+                BinaryOp::Or,
+                predicate_operand_expr(a, scratch),
+                predicate_operand_expr(b, scratch),
+            )),
+            SSAOp::BoolXor { a, b, .. } => Some(CExpr::binary(
+                BinaryOp::BitXor,
+                predicate_operand_expr(a, scratch),
+                predicate_operand_expr(b, scratch),
+            )),
+            SSAOp::IntEqual { a, b, .. } => Some(CExpr::binary(
+                BinaryOp::Eq,
+                predicate_operand_expr(a, scratch),
+                predicate_operand_expr(b, scratch),
+            )),
+            SSAOp::IntNotEqual { a, b, .. } => Some(CExpr::binary(
+                BinaryOp::Ne,
+                predicate_operand_expr(a, scratch),
+                predicate_operand_expr(b, scratch),
+            )),
+            SSAOp::IntLess { a, b, .. } | SSAOp::IntSLess { a, b, .. } => Some(CExpr::binary(
+                BinaryOp::Lt,
+                predicate_operand_expr(a, scratch),
+                predicate_operand_expr(b, scratch),
+            )),
+            SSAOp::IntLessEqual { a, b, .. } | SSAOp::IntSLessEqual { a, b, .. } => {
+                Some(CExpr::binary(
+                    BinaryOp::Le,
+                    predicate_operand_expr(a, scratch),
+                    predicate_operand_expr(b, scratch),
+                ))
+            }
+            _ => None,
+        };
+
+        if let (Some(dst), Some(expr)) = (op.dst(), predicate_expr) {
+            record_predicate_expr(scratch, dst.display_name(), expr, use_info);
+        }
     }
+}
+
+fn const_expr_from_name(name: &str) -> Option<CExpr> {
+    let val = utils::parse_const_value(name)?;
+    Some(if val > 0x7fffffff {
+        CExpr::UIntLit(val)
+    } else {
+        CExpr::IntLit(val as i64)
+    })
+}
+
+fn predicate_passthrough_expr(src: &r2ssa::SSAVar, scratch: &FlagScratch) -> Option<CExpr> {
+    if let Some(expr) = scratch.info.predicate_exprs.get(&src.display_name()) {
+        return Some(expr.clone());
+    }
+    if src.is_const() {
+        return const_expr_from_name(&src.name);
+    }
+    if utils::is_cpu_flag(&src.name.to_lowercase()) {
+        return Some(CExpr::Var(src.display_name()));
+    }
+    None
+}
+
+fn predicate_operand_expr(src: &r2ssa::SSAVar, scratch: &FlagScratch) -> CExpr {
+    predicate_passthrough_expr(src, scratch).unwrap_or_else(|| {
+        if src.is_const() {
+            const_expr_from_name(&src.name).unwrap_or_else(|| CExpr::Var(src.display_name()))
+        } else {
+            CExpr::Var(src.display_name())
+        }
+    })
+}
+
+fn record_predicate_expr(
+    scratch: &mut FlagScratch,
+    dst_key: String,
+    expr: CExpr,
+    use_info: &UseInfo,
+) {
+    let formatted = utils::format_traced_name(&dst_key, &use_info.var_aliases);
+    scratch.info.predicate_exprs.insert(dst_key, expr.clone());
+    scratch.info.predicate_exprs.insert(formatted, expr);
 }
 
 fn op_can_be_flag_glue(op: &SSAOp) -> bool {

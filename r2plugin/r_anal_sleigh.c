@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -150,10 +151,21 @@ typedef struct {
 	ut64 applied_hash;
 } TypeWritebackCacheEntry;
 
+typedef struct {
+	ut64 addr;
+	ut64 key;
+	ut64 payload_hash;
+	int ref_count;
+} DataRefCacheEntry;
+
 static TypeWritebackCacheEntry *type_writeback_cache = NULL;
 static size_t type_writeback_cache_count = 0;
 static size_t type_writeback_cache_capacity = 0;
 static HtUP *type_writeback_cache_index = NULL;
+static DataRefCacheEntry *data_ref_cache = NULL;
+static size_t data_ref_cache_count = 0;
+static size_t data_ref_cache_capacity = 0;
+static HtUP *data_ref_cache_index = NULL;
 
 typedef struct {
 	ut64 key;
@@ -217,6 +229,173 @@ static void block_array_free(BlockArray *arr) {
 	arr->capacity = 0;
 }
 
+static ut64 sleigh_hash_mix(ut64 hash, ut64 value) {
+	hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+	return hash;
+}
+
+static ut64 compute_block_array_hash(const BlockArray *blocks) {
+	size_t i;
+	ut64 hash = 0xcbf29ce484222325ULL;
+
+	if (!blocks) {
+		return 0;
+	}
+	hash = sleigh_hash_mix (hash, blocks->count);
+	for (i = 0; i < blocks->count; i++) {
+		const R2ILBlock *block = blocks->blocks[i];
+		hash = sleigh_hash_mix (hash, r2il_block_addr (block));
+		hash = sleigh_hash_mix (hash, r2il_block_size (block));
+		hash = sleigh_hash_mix (hash, r2il_block_op_count (block));
+		hash = sleigh_hash_mix (hash, r2il_block_type (block));
+		hash = sleigh_hash_mix (hash, r2il_block_jump (block));
+		hash = sleigh_hash_mix (hash, r2il_block_fail (block));
+	}
+	return hash;
+}
+
+static ut64 compute_xref_cache_key(RAnalFunction *fcn, const BlockArray *blocks, SleighMode mode) {
+	ut64 key = fcn? fcn->addr: 0;
+	int bb_count = (fcn && fcn->bbs)? r_list_length (fcn->bbs): 0;
+	int linear_size = fcn? r_anal_function_linear_size (fcn): 0;
+
+	key = sleigh_hash_mix (key, (ut64)bb_count);
+	key = sleigh_hash_mix (key, (ut64)linear_size);
+	key = sleigh_hash_mix (key, compute_block_array_hash (blocks));
+	key = sleigh_hash_mix (key, (ut64)mode);
+	return key;
+}
+
+static bool is_top_level_type_entry(const char *name, const char *kind) {
+	return name && *name && kind && *kind
+		&& !strchr (name, '.')
+		&& (!strcmp (kind, "struct") || !strcmp (kind, "union") || !strcmp (kind, "enum"));
+}
+
+static void append_type_fields_json(PJ *pj, Sdb *tdb, const char *type_name, const char *kind, int ptr_bits) {
+	char *members_query;
+	char *members;
+	int i;
+	int count;
+	bool is_union;
+
+	if (!pj || !tdb || !type_name || !*type_name || !kind || !*kind) {
+		return;
+	}
+
+	members_query = r_str_newf ("%s.%s", kind, type_name);
+	members = members_query? sdb_get (tdb, members_query, 0): NULL;
+	free (members_query);
+	if (!members) {
+		return;
+	}
+
+	is_union = !strcmp (kind, "union");
+	pj_k (pj, "fields");
+	pj_a (pj);
+
+	ut32 current_offset = 0;
+	count = r_str_split (members, ',');
+	for (i = 0; i < count; i++) {
+		const char *member_name = r_str_word_get0 (members, i);
+		char *member_query;
+		char *member_details;
+		int details_len;
+		const char *field_type;
+		const char *arr_size_str;
+		ut32 arr_size;
+		ut32 type_size;
+		ut32 field_size;
+
+		if (!member_name || R_STR_ISEMPTY (member_name)) {
+			continue;
+		}
+		member_query = r_str_newf ("%s.%s.%s", kind, type_name, member_name);
+		member_details = member_query? sdb_get (tdb, member_query, 0): NULL;
+		free (member_query);
+		if (!member_details) {
+			continue;
+		}
+		details_len = r_str_split (member_details, ',');
+		if (details_len < 3) {
+			free (member_details);
+			continue;
+		}
+
+		field_type = r_str_word_get0 (member_details, 0);
+		arr_size_str = r_str_word_get0 (member_details, 2);
+		arr_size = arr_size_str? (ut32)r_num_get (NULL, arr_size_str): 0;
+		arr_size = arr_size? arr_size: 1;
+		if (field_type && strchr (field_type, '*')) {
+			type_size = ptr_bits > 0? (ut32)(ptr_bits / 8): 8;
+		} else {
+			ut64 type_bits = field_type? r_type_get_bitsize (tdb, field_type): 0;
+			type_size = type_bits > 0? (ut32)(type_bits / 8): 1;
+		}
+		field_size = type_size * arr_size;
+
+		pj_o (pj);
+		pj_ks (pj, "name", member_name);
+		pj_ks (pj, "type", field_type? field_type: "void *");
+		pj_ki (pj, "offset", current_offset);
+		pj_ki (pj, "size", field_size);
+		if (arr_size > 1) {
+			pj_ki (pj, "array_size", arr_size);
+		}
+		pj_end (pj);
+
+		if (!is_union) {
+			current_offset += field_size;
+		}
+		free (member_details);
+	}
+
+	pj_end (pj);
+	free (members);
+}
+
+static char *sleigh_export_types_json(RAnal *anal) {
+	PJ *pj;
+	Sdb *tdb;
+	SdbList *list;
+	SdbListIter *it;
+	SdbKv *kv;
+	int ptr_bits;
+
+	if (!anal || !anal->sdb_types) {
+		return strdup ("{}");
+	}
+	tdb = anal->sdb_types;
+	ptr_bits = anal->config? anal->config->bits: 64;
+	pj = pj_new ();
+	if (!pj) {
+		return strdup ("{}");
+	}
+
+	pj_o (pj);
+	pj_k (pj, "types");
+	pj_a (pj);
+	list = sdb_foreach_list (tdb, true);
+	ls_foreach (list, it, kv) {
+		const char *name = sdbkv_key (kv);
+		const char *kind = sdbkv_value (kv);
+		if (!is_top_level_type_entry (name, kind)) {
+			continue;
+		}
+		pj_o (pj);
+		pj_ks (pj, "name", name);
+		pj_ks (pj, "kind", kind);
+		if (!strcmp (kind, "struct") || !strcmp (kind, "union")) {
+			append_type_fields_json (pj, tdb, name, kind, ptr_bits);
+		}
+		pj_end (pj);
+	}
+	ls_free (list);
+	pj_end (pj);
+	pj_end (pj);
+	return pj_drain (pj);
+}
+
 static void sym_state_cache_clear(void) {
 	free (sym_state_cache.mode);
 	free (sym_state_cache.result_json);
@@ -235,6 +414,15 @@ static void type_writeback_cache_clear(void) {
 	type_writeback_cache_capacity = 0;
 	ht_up_free (type_writeback_cache_index);
 	type_writeback_cache_index = NULL;
+}
+
+static void data_ref_cache_clear(void) {
+	free (data_ref_cache);
+	data_ref_cache = NULL;
+	data_ref_cache_count = 0;
+	data_ref_cache_capacity = 0;
+	ht_up_free (data_ref_cache_index);
+	data_ref_cache_index = NULL;
 }
 
 static void struct_decl_memo_clear(void) {
@@ -281,6 +469,70 @@ static void struct_decl_memo_put(ut64 key, bool imported) {
 	struct_decl_memo[struct_decl_memo_count].key = key;
 	struct_decl_memo[struct_decl_memo_count].imported = imported;
 	struct_decl_memo_count++;
+}
+
+static DataRefCacheEntry *data_ref_cache_get(ut64 addr) {
+	size_t i;
+	bool found = false;
+	void *encoded_index;
+
+	if (data_ref_cache_index) {
+		encoded_index = ht_up_find (data_ref_cache_index, addr, &found);
+		if (found) {
+			size_t idx_plus_one = (size_t)encoded_index;
+			if (idx_plus_one > 0) {
+				size_t idx = idx_plus_one - 1;
+				if (idx < data_ref_cache_count && data_ref_cache[idx].addr == addr) {
+					return &data_ref_cache[idx];
+				}
+			}
+		}
+	}
+
+	for (i = 0; i < data_ref_cache_count; i++) {
+		if (data_ref_cache[i].addr == addr) {
+			if (data_ref_cache_index) {
+				ht_up_insert (data_ref_cache_index, addr, (void *)(size_t)(i + 1));
+			}
+			return &data_ref_cache[i];
+		}
+	}
+	return NULL;
+}
+
+static bool data_ref_cache_put(ut64 addr, ut64 key, ut64 payload_hash, int ref_count) {
+	DataRefCacheEntry *entry = data_ref_cache_get (addr);
+	DataRefCacheEntry *next;
+
+	if (entry) {
+		entry->key = key;
+		entry->payload_hash = payload_hash;
+		entry->ref_count = ref_count;
+		return true;
+	}
+
+	if (data_ref_cache_count >= data_ref_cache_capacity) {
+		size_t new_capacity = data_ref_cache_capacity ? data_ref_cache_capacity * 2 : 256;
+		next = realloc (data_ref_cache, new_capacity * sizeof (DataRefCacheEntry));
+		if (!next) {
+			return false;
+		}
+		data_ref_cache = next;
+		data_ref_cache_capacity = new_capacity;
+	}
+
+	data_ref_cache[data_ref_cache_count].addr = addr;
+	data_ref_cache[data_ref_cache_count].key = key;
+	data_ref_cache[data_ref_cache_count].payload_hash = payload_hash;
+	data_ref_cache[data_ref_cache_count].ref_count = ref_count;
+	if (!data_ref_cache_index) {
+		data_ref_cache_index = ht_up_new0 ();
+	}
+	if (data_ref_cache_index) {
+		ht_up_insert (data_ref_cache_index, addr, (void *)(size_t)(data_ref_cache_count + 1));
+	}
+	data_ref_cache_count++;
+	return true;
 }
 
 static TypeWritebackCacheEntry *type_writeback_cache_get(ut64 addr) {
@@ -1025,6 +1277,7 @@ typedef struct {
 	bool api_verify_fail;
 	bool cmd_fallback_attempted;
 	bool cmd_apply_fail;
+	char detail[256];
 } WritebackApplyResult;
 
 static bool append_unique_ut64(ut64 **items, size_t *count, size_t *capacity, ut64 value) {
@@ -2500,6 +2753,9 @@ static void configure_context_runtime_options(RAnal *anal, R2ILContext *ctx) {
 }
 
 R2ILContext *get_context(RAnal *anal) {
+	if (!anal || !anal->config || !anal->config->arch[0]) {
+		return NULL;
+	}
 	ensure_sleigh_default_configs (anal);
 	const char *arch = anal->config->arch;
 	int bits = anal->config->bits;
@@ -2541,6 +2797,10 @@ R2ILContext *get_context(RAnal *anal) {
 	}
 	free (sleigh_arch);
 	sleigh_arch = NULL;
+	sym_state_cache_clear ();
+	data_ref_cache_clear ();
+	type_writeback_cache_clear ();
+	struct_decl_memo_clear ();
 
 	/* Initialize new context */
 	sleigh_ctx = r2il_arch_init (sleigh_arch_str);
@@ -2656,6 +2916,7 @@ static bool sleigh_fini(RAnal *anal) {
 	free (sleigh_arch);
 	sleigh_arch = NULL;
 	sym_state_cache_clear ();
+	data_ref_cache_clear ();
 	type_writeback_cache_clear ();
 	struct_decl_memo_clear ();
 	return true;
@@ -3130,7 +3391,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			afvj_json = strdup ("{}");
 		}
 
-		tsj_json = r_core_cmd_str (core, "tsj");
+		tsj_json = sleigh_export_types_json (anal);
 		if (!tsj_json || (tsj_json[0] != '{' && tsj_json[0] != '[')) {
 			free (tsj_json);
 			tsj_json = strdup ("{}");
@@ -3626,7 +3887,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			}
 
 			/* Get host type DB metadata (structs) in JSON form. */
-			types_json = r_core_cmd_str (core, "tsj");
+			types_json = sleigh_export_types_json (anal);
 			if (!types_json || (types_json[0] != '{' && types_json[0] != '[')) {
 				free (types_json);
 				types_json = strdup ("{}");
@@ -3882,6 +4143,97 @@ static RList *sleigh_recover_vars(RAnal *anal, RAnalFunction *fcn) {
 	return vars;
 }
 
+static RAnalRefType data_ref_type_from_json(RAnal *anal, ut64 to_addr, const char *type_name) {
+	if (type_name && *type_name) {
+		switch (type_name[0]) {
+		case 'c':
+		case 'C':
+			return R_ANAL_REF_TYPE_CALL;
+		case 'j':
+		case 'J':
+			return R_ANAL_REF_TYPE_JUMP;
+		case 's':
+		case 'S':
+			return R_ANAL_REF_TYPE_STRN;
+		default:
+			break;
+		}
+	}
+	return r_anal_get_fcn_in (anal, to_addr, 0)? R_ANAL_REF_TYPE_CODE: R_ANAL_REF_TYPE_DATA;
+}
+
+static int collect_data_refs_from_json(
+	RAnal *anal,
+	RAnalFunction *fcn,
+	const char *json,
+	RVecAnalRef *refs,
+	bool apply_to_anal
+) {
+	RJson *root;
+	const RJson *item;
+	int added = 0;
+	char *json_copy;
+
+	if (!anal || !json || !*json) {
+		return 0;
+	}
+
+	json_copy = strdup (json);
+	if (!json_copy) {
+		return 0;
+	}
+	root = r_json_parse (json_copy);
+	if (!root || root->type != R_JSON_ARRAY) {
+		free (json_copy);
+		r_json_free (root);
+		return 0;
+	}
+
+	for (item = root->children.first; item; item = item->next) {
+		const RJson *j_from;
+		const RJson *j_to;
+		const RJson *j_type;
+		ut64 from_addr;
+		ut64 to_addr;
+		RAnalRefType ref_type;
+
+		if (item->type != R_JSON_OBJECT) {
+			continue;
+		}
+		j_from = r_json_get (item, "from");
+		j_to = r_json_get (item, "to");
+		j_type = r_json_get (item, "type");
+		if (!j_from || !j_to) {
+			continue;
+		}
+
+		from_addr = (ut64)j_from->num.u_value;
+		to_addr = (ut64)j_to->num.u_value;
+		if (fcn && to_addr >= fcn->addr && to_addr < fcn->addr + r_anal_function_linear_size (fcn)) {
+			continue;
+		}
+		ref_type = data_ref_type_from_json (anal, to_addr, j_type? j_type->str_value: NULL);
+
+		if (refs) {
+			RAnalRef ref = {
+				.at = from_addr,
+				.addr = to_addr,
+				.type = ref_type,
+			};
+			RVecAnalRef_push_back (refs, &ref);
+		}
+		if (apply_to_anal && r_anal_xrefs_set (anal, from_addr, to_addr, ref_type)) {
+			added++;
+		} else if (!apply_to_anal) {
+			added++;
+		}
+	}
+
+	r_json_free (root);
+	free (json_copy);
+	return added;
+}
+
 /* Called during reference analysis (aar) */
 static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 	ensure_sleigh_pdd_core_plugin (anal);
@@ -3898,17 +4250,18 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 	}
 
 	BlockArray blocks;
+	ut64 cache_key;
 	if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 		return NULL;
 	}
+	cache_key = compute_xref_cache_key (fcn, &blocks, sleigh_mode_effective_for_post_analysis (anal));
 
 	char *json = r2sleigh_get_data_refs (ctx,
 		(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
 
-	block_array_free (&blocks);
-
 	if (!json || !*json) {
 		r2il_string_free (json);
+		block_array_free (&blocks);
 		return NULL;
 	}
 
@@ -3916,76 +4269,13 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 	RVecAnalRef *refs = RVecAnalRef_new ();
 	if (!refs) {
 		r2il_string_free (json);
+		block_array_free (&blocks);
 		return NULL;
 	}
-
-	RJson *root = r_json_parse (json);
-	if (!root || root->type != R_JSON_ARRAY) {
-		r2il_string_free (json);
-		RVecAnalRef_free (refs);
-		return NULL;
-	}
-
-	const RJson *item;
-	for (item = root->children.first; item; item = item->next) {
-		if (item->type != R_JSON_OBJECT) {
-			continue;
-		}
-
-		const RJson *j_from = r_json_get (item, "from");
-		const RJson *j_to = r_json_get (item, "to");
-		const RJson *j_type = r_json_get (item, "type");
-
-		if (!j_from || !j_to) {
-			continue;
-		}
-
-		ut64 from_addr = (ut64)j_from->num.u_value;
-		ut64 to_addr = (ut64)j_to->num.u_value;
-
-		/* Skip intra-function refs: if the target is within the same
-		 * function, r2 already has these as code xrefs from the CFG. */
-		if (to_addr >= fcn->addr && to_addr < fcn->addr + r_anal_function_linear_size (fcn)) {
-			continue;
-		}
-
-		RAnalRef ref = {
-			.at = from_addr,
-			.addr = to_addr,
-			.type = R_ANAL_REF_TYPE_DATA  /* default to data ref */
-		};
-
-		/* Parse type if present */
-		if (j_type && j_type->str_value) {
-			switch (j_type->str_value[0]) {
-			case 'c':
-			case 'C':
-				ref.type = R_ANAL_REF_TYPE_CALL;
-				break;
-			case 'j':
-			case 'J':
-				ref.type = R_ANAL_REF_TYPE_JUMP;
-				break;
-			case 's':
-			case 'S':
-				ref.type = R_ANAL_REF_TYPE_STRN;
-				break;
-			default:
-				/* If the target is inside a known function, emit as
-				 * CODE ref (function pointer) rather than DATA. */
-				if (r_anal_get_fcn_in (anal, to_addr, 0)) {
-					ref.type = R_ANAL_REF_TYPE_CODE;
-				} else {
-					ref.type = R_ANAL_REF_TYPE_DATA;
-				}
-			}
-		}
-
-		RVecAnalRef_push_back (refs, &ref);
-	}
-
-	r_json_free (root);
+	int ref_count = collect_data_refs_from_json (anal, fcn, json, refs, false);
+	data_ref_cache_put (fcn->addr, cache_key, r_str_hash64 (json), ref_count);
 	r2il_string_free (json);
+	block_array_free (&blocks);
 
 	if (RVecAnalRef_empty (refs)) {
 		RVecAnalRef_free (refs);
@@ -3996,14 +4286,18 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 }
 
 static bool is_signature_writeback_arch_supported (const char *arch_name) {
-	return arch_name
-		&& (!strcmp (arch_name, "x86") || !strcmp (arch_name, "x86-64")
-		|| !strcmp (arch_name, "x86_64") || !strcmp (arch_name, "x64")
-		|| !strcmp (arch_name, "amd64"));
+	return arch_name && *arch_name;
 }
 
 static bool is_type_writeback_arch_supported (const char *arch_name) {
 	return arch_name && *arch_name;
+}
+
+static bool is_callconv_writeback_arch_supported (const char *arch_name) {
+	return arch_name
+		&& (!strcmp (arch_name, "x86") || !strcmp (arch_name, "x86-64")
+		|| !strcmp (arch_name, "x86_64") || !strcmp (arch_name, "x64")
+		|| !strcmp (arch_name, "amd64"));
 }
 
 static bool is_x64_signature_arch (const char *arch_name) {
@@ -4169,7 +4463,17 @@ static bool types_match_canonical(const char *a, const char *b, bool long_is_i64
 	return match;
 }
 
-static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJson *sig_root) {
+static void write_reason_msg(char *buf, size_t buf_sz, const char *fmt, ...) {
+	va_list ap;
+	if (!buf || !buf_sz) {
+		return;
+	}
+	va_start (ap, fmt);
+	vsnprintf (buf, buf_sz, fmt, ap);
+	va_end (ap);
+}
+
+static bool verify_signature_type_db_ex(RAnal *anal, RAnalFunction *fcn, const RJson *sig_root, char *reason, size_t reason_sz) {
 	const RJson *j_expected_ret;
 	const RJson *j_expected_params;
 	const RJson *j_expected_arch;
@@ -4181,7 +4485,11 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 	int actual_count;
 	int i;
 
+	if (reason && reason_sz) {
+		reason[0] = '\0';
+	}
 	if (!anal || !fcn || !fcn->name || !sig_root || sig_root->type != R_JSON_OBJECT) {
+		write_reason_msg (reason, reason_sz, "invalid verification inputs");
 		return false;
 	}
 	j_expected_ret = r_json_get (sig_root, "ret_type");
@@ -4190,6 +4498,7 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 	if (!j_expected_ret || j_expected_ret->type != R_JSON_STRING
 			|| !j_expected_ret->str_value
 			|| !j_expected_params || j_expected_params->type != R_JSON_ARRAY) {
+		write_reason_msg (reason, reason_sz, "missing ret_type/params in payload");
 		return false;
 	}
 	if (j_expected_arch && j_expected_arch->type == R_JSON_STRING && j_expected_arch->str_value) {
@@ -4198,10 +4507,13 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 
 	typed_name = r_type_func_name (anal->sdb_types, fcn->name);
 	if (!typed_name) {
+		write_reason_msg (reason, reason_sz, "typed name missing in type db for %s", fcn->name);
 		return false;
 	}
 	actual_ret = r_type_func_ret (anal->sdb_types, typed_name);
 	if (!actual_ret || !types_match_canonical (j_expected_ret->str_value, actual_ret, long_is_i64)) {
+		write_reason_msg (reason, reason_sz, "return mismatch expected=%s actual=%s",
+			j_expected_ret->str_value, actual_ret? actual_ret: "<missing>");
 		free (typed_name);
 		return false;
 	}
@@ -4216,6 +4528,8 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 		free (actual_arg0);
 	}
 	if (expected_count != actual_count) {
+		write_reason_msg (reason, reason_sz, "argc mismatch expected=%d actual=%d",
+			expected_count, actual_count);
 		free (typed_name);
 		return false;
 	}
@@ -4227,26 +4541,32 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 		bool match;
 
 		if (!expected_param || expected_param->type != R_JSON_OBJECT) {
+			write_reason_msg (reason, reason_sz, "malformed expected param entry at index %d", i);
 			free (typed_name);
 			return false;
 		}
 		j_expected_type = r_json_get (expected_param, "type");
 		if (!j_expected_type || j_expected_type->type != R_JSON_STRING
 				|| !j_expected_type->str_value) {
+			write_reason_msg (reason, reason_sz, "missing expected arg type at index %d", i);
 			free (typed_name);
 			return false;
 		}
 		actual_type = r_type_func_args_type (anal->sdb_types, typed_name, i);
 		match = actual_type
 			&& types_match_canonical (j_expected_type->str_value, actual_type, long_is_i64);
-		free (actual_type);
 		if (!match) {
+			write_reason_msg (reason, reason_sz, "arg[%d] type mismatch expected=%s actual=%s",
+				i, j_expected_type->str_value, actual_type? actual_type: "<missing>");
+			free (actual_type);
 			free (typed_name);
 			return false;
 		}
+		free (actual_type);
 		expected_param = json_next_object (expected_param->next);
 	}
 	if (expected_param) {
+		write_reason_msg (reason, reason_sz, "unexpected trailing expected param entry");
 		free (typed_name);
 		return false;
 	}
@@ -4281,9 +4601,12 @@ static WritebackApplyResult apply_inferred_signature(
 		return res;
 	}
 	rc = r_anal_str_to_fcn (anal, fcn, signature);
-	if (rc > 0 && verify_signature_type_db (anal, fcn, sig_root)) {
+	if (rc > 0 && verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))) {
 		res.path = WRITEBACK_APPLY_API;
 		return res;
+	}
+	if (rc <= 0 && !res.detail[0]) {
+		write_reason_msg (res.detail, sizeof (res.detail), "r_anal_str_to_fcn rc=%d", rc);
 	}
 	res.api_verify_fail = true;
 	if (!core) {
@@ -4291,7 +4614,7 @@ static WritebackApplyResult apply_inferred_signature(
 	}
 	res.cmd_fallback_attempted = true;
 	r_core_cmdf_at (core, fcn->addr, "afs %s", signature);
-	if (verify_signature_type_db (anal, fcn, sig_root)) {
+	if (verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))) {
 		res.path = WRITEBACK_APPLY_CMD;
 		return res;
 	}
@@ -5681,6 +6004,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	R2ILContext *ctx = get_context (anal);
 	RCore *core;
 	int xrefs_added = 0;
+	int xref_cache_hits = 0;
+	int xref_recomputes = 0;
+	int xref_dirty_queued = 0;
 	int taint_comments = 0;
 	int taint_flags = 0;
 	int taint_xrefs = 0;
@@ -5698,7 +6024,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int sig_parse_failures = 0;
 	int sig_cmd_failures = 0;
 	int sig_skipped_low_conf = 0;
+	int cc_skipped_arch = 0;
 	int cc_skipped_low_conf = 0;
+	int cc_missing_payload = 0;
 	int sig_signatures_updated = 0;
 	int sig_cc_updated = 0;
 	int sig_api_apply_ok = 0;
@@ -5726,6 +6054,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	char *sample_callees = NULL;
 	const char *arch_name = NULL;
 	bool sig_arch_supported = false;
+	bool cc_arch_supported = false;
 	bool type_arch_supported = false;
 	SleighMode post_mode = sleigh_mode_effective_for_post_analysis (anal);
 	SleighTypeWritebackMode type_wb_mode = cfg_get_type_writeback_mode_default_balanced (anal);
@@ -5736,7 +6065,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int type_max_blocks = cfg_get_type_max_blocks (anal);
 	int type_global_max_links = cfg_get_type_global_max_links (anal);
 	bool type_cache_enabled = cfg_get_type_cache_enabled (anal);
-	bool semantic_comments_enabled = post_mode != SLEIGH_MODE_FAST;
+	bool semantic_comments_enabled = false;
 	bool taint_enabled = post_mode != SLEIGH_MODE_FAST;
 	bool sigwrite_enabled = post_mode != SLEIGH_MODE_FAST;
 	bool type_writeback_enabled = sigwrite_enabled && type_wb_mode != SLEIGH_TYPE_WRITEBACK_OFF;
@@ -5757,13 +6086,14 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	core = anal->coreb.core;
 	arch_name = r2il_arch_name (ctx);
 	sig_arch_supported = is_signature_writeback_arch_supported (arch_name);
+	cc_arch_supported = is_callconv_writeback_arch_supported (arch_name);
 	type_arch_supported = is_type_writeback_arch_supported (arch_name);
 	if (core) {
 		RAnalFunction *focus_fcn = r_anal_get_fcn_in (anal, core->addr, 0);
 		if (focus_fcn) {
 			focus_callee_addr = focus_fcn->addr;
 		}
-		tsj_shared_json = r_core_cmd_str (core, "tsj");
+		tsj_shared_json = sleigh_export_types_json (anal);
 		if (!tsj_shared_json || (tsj_shared_json[0] != '{' && tsj_shared_json[0] != '[')) {
 			free (tsj_shared_json);
 			tsj_shared_json = strdup ("{}");
@@ -5784,9 +6114,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		return true;
 	}
 	caller_propagation_state_init (&prop_state);
-	if (xref_enabled) {
-		R_LOG_INFO ("r2sleigh: post-analysis xref pass over %d functions", num_fcns);
-	} else {
+	if (!xref_enabled) {
 		R_LOG_INFO ("r2sleigh: post-analysis running in fast mode");
 	}
 
@@ -5801,13 +6129,10 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			&& bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS && sig_scope_eligible;
 		bool type_eligible = type_writeback_enabled && type_arch_supported && core
 			&& bb_count <= type_max_blocks && type_scope_eligible;
-		bool semantic_for_fcn = semantic_comments_enabled;
-		bool xref_for_fcn = xref_enabled;
-		bool need_blocks = semantic_for_fcn || xref_for_fcn || taint_eligible || sig_eligible || type_eligible;
+		bool semantic_for_fcn = false;
+		bool need_blocks = taint_eligible || sig_eligible || type_eligible;
 		const char *fcn_name = (fcn && fcn->name) ? fcn->name : "unknown";
 		BlockArray blocks;
-		char *json = NULL;
-		RJson *root = NULL;
 
 		if (taint_enabled) {
 			if (taint_eligible) {
@@ -5837,62 +6162,6 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		if (semantic_for_fcn) {
 			semantic_comments_total += write_semantic_comments_for_function (
 				anal, ctx, &blocks, fcn->addr, semantic_for_fcn);
-		}
-
-		if (xref_for_fcn) {
-			json = r2sleigh_get_data_refs (ctx,
-				(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
-			if (!json || !*json) {
-				r2il_string_free (json);
-			} else {
-				root = r_json_parse (json);
-				if (!root || root->type != R_JSON_ARRAY) {
-					r_json_free (root);
-					r2il_string_free (json);
-				} else {
-					const RJson *item;
-					for (item = root->children.first; item; item = item->next) {
-						if (item->type != R_JSON_OBJECT) {
-							continue;
-						}
-						const RJson *j_from = r_json_get (item, "from");
-						const RJson *j_to = r_json_get (item, "to");
-						const RJson *j_type = r_json_get (item, "type");
-						if (!j_from || !j_to) {
-							continue;
-						}
-
-						ut64 from = (ut64)j_from->num.u_value;
-						ut64 to = (ut64)j_to->num.u_value;
-						RAnalRefType type = R_ANAL_REF_TYPE_DATA;
-
-						if (j_type && j_type->str_value) {
-							switch (j_type->str_value[0]) {
-							case 'c':
-							case 'C':
-								type = R_ANAL_REF_TYPE_CALL;
-								break;
-							case 'j':
-							case 'J':
-								type = R_ANAL_REF_TYPE_JUMP;
-								break;
-							case 's':
-							case 'S':
-								type = R_ANAL_REF_TYPE_STRN;
-								break;
-							default:
-								type = R_ANAL_REF_TYPE_DATA;
-							}
-						}
-
-						if (r_anal_xrefs_set (anal, from, to, type)) {
-							xrefs_added++;
-						}
-					}
-					r_json_free (root);
-					r2il_string_free (json);
-				}
-			}
 		}
 
 		/* Remove previous auto-generated taint artifacts only when taint sweep is active. */
@@ -6197,15 +6466,18 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			const RJson *j_signature;
 			const RJson *j_callconv;
 			const RJson *j_confidence;
+			const RJson *j_callconv_confidence;
 			WritebackApplyResult sig_apply = {0};
 			WritebackApplyResult cc_apply = {0};
 			int confidence = 0;
+			int cc_confidence = 0;
 			bool signature_applied = false;
 			bool cc_applied = false;
 			bool signature_drift = false;
 			bool type_payload_changed = false;
 			bool signature_part_eligible = bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS;
 			bool signature_arch_eligible = sig_arch_supported;
+			bool callconv_arch_eligible = cc_arch_supported;
 			bool sig_metrics_eligible = signature_arch_eligible && signature_part_eligible;
 			ut64 cache_key = 0;
 			ut64 payload_hash = 0;
@@ -6275,8 +6547,12 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					j_signature = r_json_get (payload_root, "signature");
 					j_callconv = r_json_get (payload_root, "callconv");
 					j_confidence = r_json_get (payload_root, "confidence");
+					j_callconv_confidence = r_json_get (payload_root, "callconv_confidence");
 					if (j_confidence && j_confidence->type == R_JSON_INTEGER) {
 						confidence = (int)j_confidence->num.u_value;
+					}
+					if (j_callconv_confidence && j_callconv_confidence->type == R_JSON_INTEGER) {
+						cc_confidence = (int)j_callconv_confidence->num.u_value;
 					}
 
 					if (signature_arch_eligible && signature_part_eligible
@@ -6310,8 +6586,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 								&prop_state, focus_callee_addr && fcn->addr == focus_callee_addr);
 						} else if (confidence >= SLEIGH_SIG_MIN_CONFIDENCE) {
 							sig_cmd_failures++;
-							R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x,
-								fcn_name, fcn->addr);
+							R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x" reason=%s sig=%.160s",
+								fcn_name, fcn->addr, sig_apply.detail[0]? sig_apply.detail: "unknown",
+								j_signature->str_value);
 						}
 					} else {
 						if (sig_metrics_eligible) {
@@ -6319,10 +6596,12 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						}
 					}
 
-					if (signature_arch_eligible && signature_part_eligible
+					if (signature_part_eligible
 							&& j_callconv && j_callconv->type == R_JSON_STRING
 							&& j_callconv->str_value && *j_callconv->str_value) {
-						if (confidence < SLEIGH_CC_MIN_CONFIDENCE) {
+						if (!callconv_arch_eligible) {
+							cc_skipped_arch++;
+						} else if (cc_confidence < SLEIGH_CC_MIN_CONFIDENCE) {
 							cc_skipped_low_conf++;
 						} else {
 							cc_apply = apply_inferred_callconv (anal, core, fcn, j_callconv->str_value);
@@ -6345,11 +6624,13 @@ static bool sleigh_post_analysis(RAnal *anal) {
 								cc_applied = true;
 							}
 						}
-						if (!cc_applied && confidence >= SLEIGH_CC_MIN_CONFIDENCE) {
+						if (callconv_arch_eligible && !cc_applied && cc_confidence >= SLEIGH_CC_MIN_CONFIDENCE) {
 							sig_cmd_failures++;
 							R_LOG_WARN ("r2sleigh: calling-convention write-back failed for %s @ 0x%"PFMT64x,
 								fcn_name, fcn->addr);
 						}
+					} else if (signature_part_eligible) {
+						cc_missing_payload++;
 					}
 
 					if (type_eligible && type_writeback_enabled) {
@@ -6398,6 +6679,58 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		}
 
 		block_array_free (&blocks);
+	}
+
+	if (xref_enabled) {
+		ut64 *xref_queue = NULL;
+		size_t xref_queue_count = 0;
+		size_t xref_queue_cap = 0;
+		RListIter *xref_iter;
+		RAnalFunction *xref_fcn;
+
+		r_list_foreach (anal->fcns, xref_iter, xref_fcn) {
+			if (!xref_fcn) {
+				continue;
+			}
+			if (data_ref_cache_get (xref_fcn->addr)) {
+				xref_cache_hits++;
+				continue;
+			}
+			append_unique_ut64 (&xref_queue, &xref_queue_count, &xref_queue_cap, xref_fcn->addr);
+			xref_dirty_queued++;
+		}
+
+		while (xref_queue_count > 0) {
+			ut64 faddr = xref_queue[--xref_queue_count];
+			RAnalFunction *xref_fcn_cur = r_anal_get_fcn_in (anal, faddr, 0);
+			BlockArray xref_blocks;
+			char *xref_json;
+			ut64 cache_key;
+			int ref_count;
+
+			if (!xref_fcn_cur) {
+				continue;
+			}
+			if (!lift_function_blocks (anal, xref_fcn_cur, ctx, &xref_blocks)) {
+				continue;
+			}
+			cache_key = compute_xref_cache_key (xref_fcn_cur, &xref_blocks, post_mode);
+			xref_json = r2sleigh_get_data_refs (ctx,
+				(const R2ILBlock **)xref_blocks.blocks, xref_blocks.count, xref_fcn_cur->addr);
+			if (!xref_json || !*xref_json) {
+				r2il_string_free (xref_json);
+				block_array_free (&xref_blocks);
+				continue;
+			}
+
+			ref_count = collect_data_refs_from_json (anal, xref_fcn_cur, xref_json, NULL, true);
+			xrefs_added += ref_count;
+			xref_recomputes++;
+			data_ref_cache_put (xref_fcn_cur->addr, cache_key, r_str_hash64 (xref_json), ref_count);
+			r2il_string_free (xref_json);
+			block_array_free (&xref_blocks);
+		}
+		free (xref_queue);
 	}
 
 	if (type_eligible_count > 1) {
@@ -6521,7 +6854,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					const RJson *j_sig = r_json_get (payload_root, "signature");
 					const RJson *j_cc = r_json_get (payload_root, "callconv");
 					const RJson *j_conf = r_json_get (payload_root, "confidence");
+					const RJson *j_cc_conf = r_json_get (payload_root, "callconv_confidence");
 					int conf = (j_conf && j_conf->type == R_JSON_INTEGER)? (int)j_conf->num.u_value: 0;
+					int cc_conf = (j_cc_conf && j_cc_conf->type == R_JSON_INTEGER)? (int)j_cc_conf->num.u_value: 0;
 					if (j_sig && j_sig->type == R_JSON_STRING && j_sig->str_value && *j_sig->str_value
 							&& conf >= SLEIGH_SIG_MIN_CONFIDENCE) {
 						WritebackApplyResult wa = apply_inferred_signature (anal, core, fcn, j_sig->str_value, payload_root);
@@ -6531,12 +6866,18 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						}
 					}
 					if (j_cc && j_cc->type == R_JSON_STRING && j_cc->str_value && *j_cc->str_value
-							&& conf >= SLEIGH_CC_MIN_CONFIDENCE) {
+							&& cc_conf >= SLEIGH_CC_MIN_CONFIDENCE) {
+						if (!cc_arch_supported) {
+							cc_skipped_arch++;
+						} else {
 						WritebackApplyResult wa = apply_inferred_callconv (anal, core, fcn, j_cc->str_value);
 						if (wa.path != WRITEBACK_APPLY_NONE) {
 							sig_or_cc_changed = true;
 							sig_cc_updated++;
 						}
+						}
+					} else {
+						cc_missing_payload++;
 					}
 				}
 
@@ -6586,22 +6927,25 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		taint_risk_critical, taint_risk_high, taint_risk_medium, taint_risk_low);
 	R_LOG_INFO ("r2sleigh: post-analysis semantic comments enabled=%d emitted=%zu",
 		semantic_comments_enabled? 1: 0, semantic_comments_total);
-	R_LOG_INFO ("r2sleigh: signature write-back enabled=%d verify=%d considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d sig_low_conf_skips=%d cc_low_conf_skips=%d consistency_verified=%d consistency_ok=%d consistency_mismatch=%d afij_signature_drift=%d consistency_readback_fail=%d consistency_ret_mismatch=%d consistency_argc_mismatch=%d consistency_argtype_mismatch=%d consistency_callconv_mismatch=%d",
+	R_LOG_INFO ("r2sleigh: signature write-back enabled=%d verify=%d considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d sig_low_conf_skips=%d cc_low_conf_skips=%d cc_skipped_arch=%d cc_missing_payload=%d consistency_verified=%d consistency_ok=%d consistency_mismatch=%d afij_signature_drift=%d consistency_readback_fail=%d consistency_ret_mismatch=%d consistency_argc_mismatch=%d consistency_argtype_mismatch=%d consistency_callconv_mismatch=%d",
 		sigwrite_enabled? 1: 0, sigverify_enabled? 1: 0, sig_fcns_considered, sig_fcns_skipped_arch, sig_fcns_skipped_size, sig_parse_failures,
 		sig_cmd_failures, sig_signatures_updated, sig_cc_updated, sig_skipped_low_conf,
-		cc_skipped_low_conf, consistency_verified, consistency_ok, consistency_mismatch,
+		cc_skipped_low_conf, cc_skipped_arch, cc_missing_payload, consistency_verified, consistency_ok, consistency_mismatch,
 		afij_signature_drift, consistency_reasons.readback_fail,
 		consistency_reasons.ret_mismatch, consistency_reasons.argc_mismatch,
 		consistency_reasons.argtype_mismatch, consistency_reasons.callconv_mismatch);
-	R_LOG_INFO ("r2sleigh: signature write-back apply-path sig_api_apply_ok=%d sig_api_verify_fail=%d sig_cmd_fallback_attempted=%d sig_cmd_apply_ok=%d sig_cmd_apply_fail=%d cc_api_apply_ok=%d cc_api_verify_fail=%d cc_cmd_fallback_attempted=%d cc_cmd_apply_ok=%d cc_cmd_apply_fail=%d",
+	R_LOG_INFO ("r2sleigh: signature write-back apply-path sig_api_apply_ok=%d sig_api_verify_fail=%d sig_cmd_fallback_attempted=%d sig_cmd_apply_ok=%d sig_cmd_apply_fail=%d cc_api_apply_ok=%d cc_api_verify_fail=%d cc_cmd_fallback_attempted=%d cc_cmd_apply_ok=%d cc_cmd_apply_fail=%d cc_missing_payload=%d",
 		sig_api_apply_ok, sig_api_verify_fail, sig_cmd_fallback_attempted,
 		sig_cmd_apply_ok, sig_cmd_apply_fail, cc_api_apply_ok,
 		cc_api_verify_fail, cc_cmd_fallback_attempted,
-		cc_cmd_apply_ok, cc_cmd_apply_fail);
+		cc_cmd_apply_ok, cc_cmd_apply_fail, cc_missing_payload);
 	if (!type_wb.fixpoint_stop_reason[0]) {
 		snprintf (type_wb.fixpoint_stop_reason, sizeof (type_wb.fixpoint_stop_reason),
 			type_writeback_enabled? "queue_empty": "off");
 	}
+	R_LOG_INFO ("r2sleigh: post-analysis summary fcns=%d xref_cache_hits=%d xref_recomputes=%d xref_dirty_queued=%d type_queue_pops=%d type_fixpoint_converged=%d",
+		num_fcns, xref_cache_hits, xref_recomputes, xref_dirty_queued,
+		type_wb.fixpoint_queue_pops, type_wb.fixpoint_converged);
 	R_LOG_INFO ("r2sleigh: type write-back enabled=%d mode=%d vars_considered=%d vars_applied=%d vars_hint_only=%d vars_low_conf=%d vars_conflict=%d vars_api_verify_fail=%d vars_cmd_fallback_attempted=%d vars_cmd_apply_fail=%d renames_considered=%d renames_applied=%d renames_low_conf=%d renames_conflict=%d rename_generated_guard_skips=%d structs_considered=%d structs_imported=%d structs_low_conf=%d structs_import_fail=%d global_links_considered=%d global_links_applied=%d global_links_low_conf=%d global_links_conflict_skip=%d global_links_existing_preserved=%d global_links_fail=%d payload_missing=%d payload_parse_failures=%d cache_hits=%d cache_misses=%d cache_invalidates=%d cache_updates=%d type_skipped_arch=%d type_skipped_size=%d fixpoint_iters=%d fixpoint_converged=%d fixpoint_queue_pushes=%d fixpoint_queue_pops=%d fixpoint_requeues=%d fixpoint_stop=%s",
 		type_writeback_enabled? 1: 0, (int)type_wb_mode,
 		type_wb.vars_considered, type_wb.vars_applied, type_wb.vars_hint_only,

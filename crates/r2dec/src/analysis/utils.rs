@@ -179,6 +179,7 @@ pub(crate) fn extract_offset_from_expr(expr: &CExpr, fp_name: &str, sp_name: &st
     match expr {
         CExpr::Paren(inner) => extract_offset_from_expr(inner, fp_name, sp_name),
         CExpr::Cast { expr: inner, .. } => extract_offset_from_expr(inner, fp_name, sp_name),
+        CExpr::AddrOf(inner) => extract_offset_from_expr(inner, fp_name, sp_name),
         CExpr::Binary {
             op: BinaryOp::Add,
             left,
@@ -216,10 +217,24 @@ pub(crate) fn extract_offset_from_expr(expr: &CExpr, fp_name: &str, sp_name: &st
             if name_lower.contains(fp_name) || name_lower.contains(sp_name) {
                 return Some(0);
             }
-            None
+            parse_canonical_stack_name_offset(&name_lower)
         }
         _ => None,
     }
+}
+
+fn parse_canonical_stack_name_offset(name: &str) -> Option<i64> {
+    let stripped = name.strip_prefix('&').unwrap_or(name);
+    if stripped == "saved_fp" {
+        return Some(0);
+    }
+    if let Some(rest) = stripped.strip_prefix("local_") {
+        return i64::from_str_radix(rest, 16).ok().map(|v| -v);
+    }
+    if let Some(rest) = stripped.strip_prefix("stack_") {
+        return i64::from_str_radix(rest, 16).ok();
+    }
+    None
 }
 
 pub(crate) fn extract_stack_offset_from_var(
