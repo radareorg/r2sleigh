@@ -3729,25 +3729,40 @@ fn normalize_external_type_name(ty: &str) -> String {
     }
 }
 
+fn estimate_parsed_c_type_size_bytes(ty: &r2dec::CType, ptr_bits: u32) -> Option<u64> {
+    match ty {
+        r2dec::CType::Void => Some(0),
+        r2dec::CType::Bool => Some(1),
+        r2dec::CType::Int(bits) | r2dec::CType::UInt(bits) | r2dec::CType::Float(bits) => {
+            Some((u64::from(*bits).saturating_add(7) / 8).max(1))
+        }
+        r2dec::CType::Pointer(_) | r2dec::CType::Function { .. } => {
+            Some((ptr_bits / 8).max(1) as u64)
+        }
+        r2dec::CType::Array(inner, Some(count)) => {
+            estimate_parsed_c_type_size_bytes(inner, ptr_bits)
+                .map(|inner_size| inner_size.saturating_mul(*count as u64))
+        }
+        r2dec::CType::Array(inner, None) => estimate_parsed_c_type_size_bytes(inner, ptr_bits),
+        r2dec::CType::Enum(_) => Some(4),
+        r2dec::CType::Struct(_)
+        | r2dec::CType::Union(_)
+        | r2dec::CType::Typedef(_)
+        | r2dec::CType::Unknown => None,
+    }
+}
+
 fn estimate_c_type_size_bytes(ty: &str, ptr_bits: u32) -> u64 {
-    let lower = ty.trim().to_ascii_lowercase();
+    if let Some(parsed) = parse_external_type(ty, ptr_bits)
+        && let Some(size) = estimate_parsed_c_type_size_bytes(&parsed, ptr_bits)
+        && size > 0
+    {
+        return size;
+    }
+
+    let lower = normalize_external_type_name(ty).trim().to_ascii_lowercase();
     if lower.contains('*') {
         return (ptr_bits / 8).max(1) as u64;
-    }
-    if lower.contains("int8") || lower == "char" || lower == "unsigned char" {
-        return 1;
-    }
-    if lower.contains("int16") || lower == "short" || lower == "unsigned short" {
-        return 2;
-    }
-    if lower.contains("int32") || lower == "int" || lower == "unsigned int" {
-        return 4;
-    }
-    if lower.contains("int64") || lower == "long" || lower == "unsigned long" || lower == "size_t" {
-        return 8;
-    }
-    if lower == "float" {
-        return 4;
     }
     if lower == "double" || lower == "long double" {
         return 8;
@@ -5710,6 +5725,47 @@ mod tests {
         assert_eq!(
             parse_external_type("ssize_t *", 64),
             Some(r2dec::CType::ptr(r2dec::CType::Int(64)))
+        );
+    }
+
+    #[test]
+    fn test_estimate_c_type_size_bytes_respects_ptr_width_for_long_and_size_t() {
+        assert_eq!(estimate_c_type_size_bytes("long", 32), 4);
+        assert_eq!(estimate_c_type_size_bytes("unsigned long", 32), 4);
+        assert_eq!(estimate_c_type_size_bytes("size_t", 32), 4);
+        assert_eq!(estimate_c_type_size_bytes("ssize_t", 32), 4);
+        assert_eq!(estimate_c_type_size_bytes("intptr_t", 32), 4);
+
+        assert_eq!(estimate_c_type_size_bytes("long", 64), 8);
+        assert_eq!(estimate_c_type_size_bytes("unsigned long", 64), 8);
+        assert_eq!(estimate_c_type_size_bytes("size_t", 64), 8);
+        assert_eq!(estimate_c_type_size_bytes("ssize_t", 64), 8);
+    }
+
+    #[test]
+    fn test_build_struct_decl_does_not_insert_fake_padding_for_32bit_long_layouts() {
+        let decl = build_struct_decl(
+            "demo",
+            &[
+                StructFieldCandidateJson {
+                    name: "f_0".to_string(),
+                    offset: 0,
+                    field_type: "long".to_string(),
+                    confidence: 90,
+                },
+                StructFieldCandidateJson {
+                    name: "f_4".to_string(),
+                    offset: 4,
+                    field_type: "int32_t".to_string(),
+                    confidence: 90,
+                },
+            ],
+            32,
+        )
+        .expect("struct decl");
+        assert!(
+            !decl.contains("_pad_4"),
+            "32-bit long should not force synthetic padding: {decl}"
         );
     }
 
