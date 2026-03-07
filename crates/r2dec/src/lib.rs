@@ -598,7 +598,7 @@ impl Decompiler {
             .map(|(name, ty)| (normalize_callee_name(name), ty.clone()))
             .collect::<std::collections::HashMap<_, _>>();
 
-        let mut recovered_param_infos: Vec<_> = var_recovery
+        let recovered_param_infos: Vec<_> = var_recovery
             .parameters()
             .iter()
             .map(|v| {
@@ -611,19 +611,6 @@ impl Decompiler {
                 )
             })
             .collect();
-        recovered_param_infos.sort_by(|a, b| {
-            let ai =
-                a.1.name
-                    .strip_prefix("arg")
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .unwrap_or(usize::MAX);
-            let bi =
-                b.1.name
-                    .strip_prefix("arg")
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .unwrap_or(usize::MAX);
-            ai.cmp(&bi).then_with(|| a.1.name.cmp(&b.1.name))
-        });
         let params = merge_params_with_external_signature(
             recovered_param_infos
                 .iter()
@@ -847,6 +834,28 @@ impl Decompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+    use r2ssa::SSAFunction;
+
+    fn ssa_from_ops(ops: Vec<R2ILOp>, arch: &ArchSpec) -> SSAFunction {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        for op in ops {
+            block.push(op);
+        }
+        SSAFunction::from_blocks_with_arch(&[block], Some(arch))
+            .expect("SSA function should build")
+            .with_name("stable_demo")
+    }
+
+    fn test_arch_for_decompile() -> ArchSpec {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.add_register(RegisterDef::new("RAX", 0x00, 8));
+        arch.add_register(RegisterDef::new("RDI", 0x10, 8));
+        arch.add_register(RegisterDef::new("RSI", 0x18, 8));
+        arch.add_register(RegisterDef::new("RBP", 0x20, 8));
+        arch.add_register(RegisterDef::new("RSP", 0x28, 8));
+        arch
+    }
 
     #[test]
     fn test_decompiler_config_default() {
@@ -961,5 +970,87 @@ mod tests {
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, "buf");
         assert_eq!(params[1].name, "count");
+    }
+
+    #[test]
+    fn decompile_is_stable_with_external_param_names_and_local_order() {
+        let arch = test_arch_for_decompile();
+        let func = ssa_from_ops(
+            vec![
+                R2ILOp::Load {
+                    dst: Varnode::unique(0x10, 8),
+                    space: SpaceId::Ram,
+                    addr: Varnode::register(0x20, 8),
+                },
+                R2ILOp::Load {
+                    dst: Varnode::unique(0x11, 8),
+                    space: SpaceId::Ram,
+                    addr: Varnode::register(0x28, 8),
+                },
+                R2ILOp::IntAdd {
+                    dst: Varnode::unique(0x12, 8),
+                    a: Varnode::register(0x10, 8),
+                    b: Varnode::register(0x18, 8),
+                },
+                R2ILOp::IntAdd {
+                    dst: Varnode::unique(0x13, 8),
+                    a: Varnode::unique(0x12, 8),
+                    b: Varnode::unique(0x10, 8),
+                },
+                R2ILOp::IntAdd {
+                    dst: Varnode::register(0x00, 8),
+                    a: Varnode::unique(0x13, 8),
+                    b: Varnode::unique(0x11, 8),
+                },
+                R2ILOp::Return {
+                    target: Varnode::register(0x00, 8),
+                },
+            ],
+            &arch,
+        );
+
+        let mut decompiler = Decompiler::new(DecompilerConfig::x86_64());
+        decompiler.set_function_signature(Some(ExternalFunctionSignature {
+            ret_type: Some(CType::Int(64)),
+            params: vec![
+                ExternalFunctionParam {
+                    name: "zzz_first".to_string(),
+                    ty: Some(CType::Int(64)),
+                },
+                ExternalFunctionParam {
+                    name: "aaa_second".to_string(),
+                    ty: Some(CType::Int(64)),
+                },
+            ],
+        }));
+
+        let built_first = decompiler.build_function(&func);
+        let built_second = decompiler.build_function(&func);
+        let first = decompiler.decompile(&func);
+        let second = decompiler.decompile(&func);
+
+        assert_eq!(first, second, "decompiled text should be byte-stable");
+        assert!(first.contains("stable_demo(int64_t zzz_first, int64_t aaa_second)"));
+        assert_eq!(
+            built_first
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["zzz_first".to_string(), "aaa_second".to_string()]
+        );
+        assert_eq!(
+            built_first
+                .locals
+                .iter()
+                .map(|local| local.name.clone())
+                .collect::<Vec<_>>(),
+            built_second
+                .locals
+                .iter()
+                .map(|local| local.name.clone())
+                .collect::<Vec<_>>(),
+            "local declaration order should be stable across builds"
+        );
     }
 }
