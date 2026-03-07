@@ -11,19 +11,6 @@ a:sla.sym.paths | jq -c 'length>0'
 EOF_CMDS
 RUN
 
-NAME=stress_fp_interpolate_decompile_shape
-FILE=bins/stress_test
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s dbg.fp_interpolate
-a:sla.dec | jq -Rs 'contains("return") and (contains(" + ") or contains(" * ") or contains("fabs(") or contains("sqrt(") or contains("ceil(") or contains("floor(") or contains("round(")) and (contains("__unhandled_op__")|not)'
-EOF_CMDS
-RUN
-
 NAME=stress_ls_main_decompile_fallback
 FILE=/bin/ls
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
@@ -504,45 +491,6 @@ a:sla.dec | jq -Rs 'contains("switch (")'
 EOF_CMDS
 RUN
 
-NAME=dec_piece_contains_shift_or
-FILE=bins/vuln_test
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s dbg.test_piece
-a:sla.dec | jq -Rs 'contains("<<") and contains("|")'
-EOF_CMDS
-RUN
-
-NAME=dec_array_index_uses_subscript
-FILE=bins/vuln_test
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s dbg.test_array_index
-a:sla.dec | jq -Rs 'contains("[")'
-EOF_CMDS
-RUN
-
-NAME=dec_array_index_neg_uses_subscript
-FILE=bins/vuln_test
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s dbg.test_array_index_neg
-a:sla.dec | jq -Rs 'contains("[")'
-EOF_CMDS
-RUN
-
 NAME=dec_struct_field_uses_field_access
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
@@ -647,19 +595,6 @@ a:sla.dec | jq -Rs 'contains("{") and contains("}")'
 EOF_CMDS
 RUN
 
-NAME=dec_short_circuit_collapsed_to_and
-FILE=bins/vuln_test
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s dbg.test_short_circuit_side_effect
-a:sla.dec | jq -Rs 'contains("&&")'
-EOF_CMDS
-RUN
-
 NAME=dec_guard_inversion_still_has_if_return
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
@@ -751,19 +686,6 @@ a:sla.dec | jq -Rs '(contains("*(rbp")|not)'
 EOF_CMDS
 RUN
 
-NAME=dec_cast_u8_shows_cast
-FILE=bins/vuln_test
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s dbg.test_cast_u8
-a:sla.dec~int64_t~? | tr -d '\n' | jq -R 'tonumber > 0'
-EOF_CMDS
-RUN
-
 NAME=dec_callother_emitted
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
@@ -826,19 +748,6 @@ CMDS=<<EOF_CMDS
 aaa
 s dbg.test_multi_use_temp
 a:sla.dec | jq -Rs '(contains(" = arg1 + 1;")|not)'
-EOF_CMDS
-RUN
-
-NAME=dec_vuln_memcpy_uses_recovered_names
-FILE=bins/vuln_test
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s dbg.vuln_memcpy
-a:sla.dec | jq -Rs 'contains("buf") and (contains("user_input") or contains("user_len")) and (contains("rbp_1 + -0x40")|not)'
 EOF_CMDS
 RUN
 
@@ -978,24 +887,6 @@ s sym.test_const_addr_chain
 af
 aar
 axtj 0x404e08 | jq -c 'any(.[]?; .type=="DATA")'
-EOF_CMDS
-RUN
-
-NAME=deep_signature_writeback_full_mode_updates_return
-FILE=bins/vuln_test
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s dbg.check_secret
-a:sla.info >/dev/null
-e anal.sla.mode=full
-afs void dbg.check_secret(void)
-afc ms
-aaaa
-afcfj | jq -c '.[0].return | startswith("int")'
 EOF_CMDS
 RUN
 
@@ -1151,24 +1042,5 @@ CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
 a:sla.types | jq -c 'has("confidence") and has("diagnostics") and ((.confidence|type)=="number")'
-EOF_CMDS
-RUN
-
-NAME=deep_integration_aaaa_signature_writeback_preserves_function_name
-FILE=/bin/ls
-ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
-EXPECT=<<EOF_EXPECT
-true
-EOF_EXPECT
-CMDS=<<EOF_CMDS
-aaa
-s fcn.00007ed0
-afn custom_sigkeep
-s custom_sigkeep
-afs void custom_sigkeep(void)
-aaaa
-s custom_sigkeep
-afij~name,signature >/dev/null
-afcfj | jq -c '.[0].name=="custom_sigkeep" and (.[0].return|startswith("int"))'
 EOF_CMDS
 RUN

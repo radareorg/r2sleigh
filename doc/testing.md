@@ -54,6 +54,11 @@ Run with:
 make -C tests/r2r run
 ```
 
+The `tests/r2r` harness installs the plugin with `all-archs` by default so
+running snapshots does not clobber a local ARM/RISC-V capable plugin install.
+Override with `R2R_RUST_FEATURES=...` only when you intentionally want a
+reduced backend set.
+
 `tests/r2r` is preferred for stable command output checks (`a:sla.info/json/regs/mem/vars`)
 and migrated deterministic integration checks from:
 - `plugin_status`
@@ -193,7 +198,8 @@ Bug fix:
   - Regression test reproducing the original bug
 
 Decompiler change:
-  - e2e test via a:sla.dec checking output
+  - r2r full snapshot via `a:sla.dec` when output is deterministic
+  - e2e only when decompiler behavior needs semantic parsing instead of snapshot diffs
 
 Test Coverage Checklist
 -----------------------

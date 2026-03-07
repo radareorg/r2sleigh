@@ -728,6 +728,29 @@ mod tests {
     }
 
     #[test]
+    fn test_simplify_predicate_rewrites_sub_var_cmp_zero() {
+        let ctx = FoldingContext::new(64);
+        let expr = CExpr::binary(
+            BinaryOp::Ne,
+            CExpr::binary(
+                BinaryOp::Sub,
+                CExpr::Var("x".to_string()),
+                CExpr::Var("y".to_string()),
+            ),
+            CExpr::IntLit(0),
+        );
+        let simplified = ctx.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(
+                BinaryOp::Ne,
+                CExpr::Var("x".to_string()),
+                CExpr::Var("y".to_string())
+            )
+        );
+    }
+
+    #[test]
     fn test_simplify_predicate_rewrites_sub_all_ones_cmp_zero() {
         let ctx = FoldingContext::new(64);
         let expr = CExpr::binary(
@@ -1494,6 +1517,69 @@ mod tests {
         assert!(
             !expr_contains_sub_zero_cmp_scaffold(&rhs),
             "Predicate copy helper output should not contain cmp-to-zero subtraction scaffold"
+        );
+    }
+
+    #[test]
+    fn test_predicate_cast_and_boolnot_assignment_preserve_source_expression() {
+        let edi_0 = make_var("EDI", 0, 4);
+        let cmp = make_var("tmp:9200", 1, 1);
+        let casted = make_var("tmp:9201", 1, 4);
+        let negated = make_var("tmp:9202", 1, 1);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let block = make_block(vec![
+            SSAOp::IntNotEqual {
+                dst: cmp.clone(),
+                a: edi_0,
+                b: const_0,
+            },
+            SSAOp::IntZExt {
+                dst: casted.clone(),
+                src: cmp.clone(),
+            },
+            SSAOp::BoolNot {
+                dst: negated.clone(),
+                src: casted,
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+
+        let cast_stmt = ctx
+            .op_to_stmt(&block.ops[1])
+            .expect("casted predicate assignment should lower");
+        let Some((_, cast_rhs)) = FoldingContext::assignment_target_and_rhs(&cast_stmt) else {
+            panic!("expected assignment statement for casted predicate");
+        };
+        assert!(
+            expr_contains_binary_op(cast_rhs, BinaryOp::Ne),
+            "Cast assignment should preserve the predicate comparison"
+        );
+        assert!(
+            !matches!(cast_rhs, CExpr::IntLit(_) | CExpr::UIntLit(_)),
+            "Predicate cast assignment must not collapse to a literal"
+        );
+
+        let negated_stmt = ctx
+            .op_to_stmt(&block.ops[2])
+            .expect("boolnot predicate assignment should lower");
+        let Some((_, negated_rhs)) = FoldingContext::assignment_target_and_rhs(&negated_stmt)
+        else {
+            panic!("expected assignment statement for negated predicate");
+        };
+        assert!(
+            ctx.is_assignment_predicate_expr(negated_rhs),
+            "BoolNot assignment should still lower to a predicate expression"
+        );
+        assert!(
+            !matches!(negated_rhs, CExpr::IntLit(_) | CExpr::UIntLit(_)),
+            "Negated predicate assignment must not collapse to a literal"
+        );
+        assert!(
+            !expr_contains_flag_artifact(negated_rhs),
+            "BoolNot assignment should not reintroduce raw flag artifacts"
         );
     }
 

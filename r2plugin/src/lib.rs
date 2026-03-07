@@ -4642,6 +4642,7 @@ struct AfcfjFunction {
 #[allow(dead_code)]
 enum AfvjRef {
     Stack { base: String, offset: i64 },
+    Register(String),
     Other(serde_json::Value),
 }
 
@@ -4658,9 +4659,86 @@ struct AfvjVar {
 #[derive(Debug, Deserialize)]
 struct AfvjPayload {
     #[serde(default)]
+    reg: Vec<AfvjVar>,
+    #[serde(default)]
     bp: Vec<AfvjVar>,
     #[serde(default)]
     sp: Vec<AfvjVar>,
+}
+
+fn parse_external_reg_params(json_str: &str, ptr_bits: u32) -> Vec<r2dec::ExternalRegisterParam> {
+    let payload = match serde_json::from_str::<AfvjPayload>(json_str) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut used_names = std::collections::HashSet::new();
+    payload
+        .reg
+        .into_iter()
+        .enumerate()
+        .map(|(idx, entry)| {
+            let raw_name = entry.name.unwrap_or_else(|| format!("arg{}", idx));
+            let mut name =
+                sanitize_c_identifier(&raw_name).unwrap_or_else(|| format!("arg{}", idx + 1));
+            if !is_generic_arg_name(&name) {
+                name = uniquify_name(name, &mut used_names);
+            }
+            r2dec::ExternalRegisterParam {
+                name,
+                ty: entry
+                    .ty
+                    .as_deref()
+                    .and_then(|raw| parse_external_type(raw, ptr_bits)),
+                reg: entry
+                    .reference
+                    .and_then(|r| match r {
+                        AfvjRef::Register(reg) => Some(reg),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+fn merge_signature_with_reg_params(
+    signature: Option<r2dec::ExternalFunctionSignature>,
+    reg_params: Vec<r2dec::ExternalRegisterParam>,
+) -> Option<r2dec::ExternalFunctionSignature> {
+    if reg_params.is_empty() {
+        return signature;
+    }
+
+    let mut sig = signature.unwrap_or_default();
+    if sig.params.is_empty() {
+        sig.params = reg_params
+            .into_iter()
+            .map(|param| r2dec::ExternalFunctionParam {
+                name: param.name,
+                ty: param.ty,
+            })
+            .collect();
+        return Some(sig);
+    }
+
+    for (idx, reg_param) in reg_params.into_iter().enumerate() {
+        if let Some(existing) = sig.params.get_mut(idx) {
+            if existing.ty.is_none() {
+                existing.ty = reg_param.ty.clone();
+            }
+            if is_generic_arg_name(&existing.name) && !is_generic_arg_name(&reg_param.name) {
+                existing.name = reg_param.name;
+            }
+        } else {
+            sig.params.push(r2dec::ExternalFunctionParam {
+                name: reg_param.name,
+                ty: reg_param.ty,
+            });
+        }
+    }
+
+    Some(sig)
 }
 
 fn parse_addr_name_map(json_str: &str) -> std::collections::HashMap<u64, String> {
@@ -4842,7 +4920,7 @@ fn parse_afcfj_signature_entries(
     let first = entries.into_iter().next()?;
 
     let mut used_names = std::collections::HashSet::new();
-    let params = first
+    let mut params: Vec<_> = first
         .args
         .into_iter()
         .enumerate()
@@ -4863,6 +4941,12 @@ fn parse_afcfj_signature_entries(
             }
         })
         .collect();
+    if params.len() == 1
+        && params[0].ty == Some(r2dec::CType::Void)
+        && is_generic_arg_name(&params[0].name)
+    {
+        params.clear();
+    }
 
     let ret_type_raw = first.return_type.or(first.ret);
     let ret_type = ret_type_raw
@@ -5287,7 +5371,12 @@ fn run_full_decompile_on_large_stack(
             decompiler.set_symbols(parse_addr_name_map(&symbols_str));
 
             let sig_ctx = parse_signature_context(&signature_str, ptr_bits);
-            decompiler.set_function_signature(sig_ctx.current);
+            let reg_params = parse_external_reg_params(&stack_vars_str, ptr_bits);
+            decompiler.set_register_params(reg_params.clone());
+            decompiler.set_function_signature(merge_signature_with_reg_params(
+                sig_ctx.current,
+                reg_params,
+            ));
             if !sig_ctx.known.is_empty() {
                 decompiler.set_known_function_signatures(sig_ctx.known);
             }
@@ -5422,6 +5511,42 @@ struct InferredParam {
     name: String,
     ty: r2dec::CType,
     arg_index: usize,
+    size_bytes: u32,
+    evidence: TypeEvidence,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TypeEvidence {
+    pointer_proven: u8,
+    pointer_likely: u8,
+    scalar_proven: u8,
+    scalar_likely: u8,
+    bool_like: u8,
+    width_bits: u32,
+}
+
+impl TypeEvidence {
+    fn pointer_score(&self) -> u16 {
+        (self.pointer_proven as u16) * 4 + (self.pointer_likely as u16) * 2
+    }
+
+    fn scalar_score(&self) -> u16 {
+        (self.scalar_proven as u16) * 4
+            + (self.scalar_likely as u16) * 2
+            + (self.bool_like as u16) * 3
+    }
+
+    fn has_pointer_signal(&self) -> bool {
+        self.pointer_proven > 0 || self.pointer_likely > 0
+    }
+
+    fn has_scalar_signal(&self) -> bool {
+        self.scalar_proven > 0 || self.scalar_likely > 0 || self.bool_like > 0
+    }
+
+    fn has_conflict(&self) -> bool {
+        self.has_pointer_signal() && self.has_scalar_signal()
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -5440,6 +5565,7 @@ struct InferredSignatureCcJson {
     callconv: String,
     arch: String,
     confidence: u8,
+    callconv_confidence: u8,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -5520,6 +5646,7 @@ struct InferredTypeWritebackJson {
     callconv: String,
     arch: String,
     confidence: u8,
+    callconv_confidence: u8,
     var_type_candidates: Vec<VarTypeCandidateJson>,
     var_rename_candidates: Vec<VarRenameCandidateJson>,
     struct_decls: Vec<StructDeclCandidateJson>,
@@ -5560,11 +5687,206 @@ fn decompiler_config_for_arch_name(arch_name: &str, ptr_bits: u32) -> r2dec::Dec
     }
 }
 
+#[derive(Debug, Default)]
+struct SignatureTypeEvidenceContext {
+    pointer_vars: std::collections::HashSet<String>,
+    scalar_proven_vars: std::collections::HashSet<String>,
+    scalar_likely_vars: std::collections::HashSet<String>,
+    bool_like_vars: std::collections::HashSet<String>,
+    width_bits: std::collections::HashMap<String, u32>,
+}
+
+fn merge_initial_type_evidence(initial_ty: &r2dec::CType, evidence: &mut TypeEvidence) {
+    match initial_ty {
+        r2dec::CType::Pointer(_) => evidence.pointer_likely = evidence.pointer_likely.max(1),
+        r2dec::CType::Bool => evidence.bool_like = evidence.bool_like.max(1),
+        r2dec::CType::Int(bits) | r2dec::CType::UInt(bits) => {
+            evidence.scalar_likely = evidence.scalar_likely.max(1);
+            evidence.width_bits = evidence.width_bits.max(*bits);
+        }
+        r2dec::CType::Float(bits) => {
+            evidence.scalar_proven = evidence.scalar_proven.max(1);
+            evidence.width_bits = evidence.width_bits.max(*bits);
+        }
+        _ => {}
+    }
+}
+
+fn fallback_scalar_type(
+    var_size_bytes: u32,
+    evidence: &TypeEvidence,
+    ptr_bits: u32,
+) -> r2dec::CType {
+    if evidence.bool_like > 0
+        && evidence.pointer_score() == 0
+        && evidence.scalar_proven == 0
+        && evidence.scalar_likely <= 1
+    {
+        return r2dec::CType::Bool;
+    }
+
+    let width_bits = evidence.width_bits.max(var_size_bytes.saturating_mul(8));
+    let width_bits = match width_bits {
+        0 => {
+            if ptr_bits >= 64 {
+                64
+            } else {
+                32
+            }
+        }
+        1 => 8,
+        2..=8 => 8,
+        9..=16 => 16,
+        17..=32 => 32,
+        _ => 64,
+    };
+
+    r2dec::CType::Int(width_bits)
+}
+
+fn materialize_signature_ctype(ty: r2dec::CType, ptr_bits: u32) -> r2dec::CType {
+    match ty {
+        r2dec::CType::Pointer(inner) => {
+            if matches!(*inner, r2dec::CType::Unknown | r2dec::CType::Void)
+                || matches!(
+                    inner.as_ref(),
+                    r2dec::CType::Struct(name)
+                        | r2dec::CType::Union(name)
+                        | r2dec::CType::Enum(name)
+                        if is_unmaterialized_aggregate_name(name)
+                )
+            {
+                return r2dec::CType::void_ptr();
+            }
+            let inner = materialize_signature_ctype(*inner, ptr_bits);
+            r2dec::CType::ptr(inner)
+        }
+        r2dec::CType::Array(inner, len) => {
+            if matches!(*inner, r2dec::CType::Unknown | r2dec::CType::Void) {
+                return r2dec::CType::Array(Box::new(r2dec::CType::u8()), len);
+            }
+            let inner = materialize_signature_ctype(*inner, ptr_bits);
+            r2dec::CType::Array(Box::new(inner), len)
+        }
+        r2dec::CType::Function { ret, params } => {
+            let ret = materialize_signature_ctype(*ret, ptr_bits);
+            let ret = if matches!(ret, r2dec::CType::Unknown) {
+                fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
+            } else {
+                ret
+            };
+            let params = params
+                .into_iter()
+                .map(|param| materialize_signature_ctype(param, ptr_bits))
+                .collect();
+            r2dec::CType::Function {
+                ret: Box::new(ret),
+                params,
+            }
+        }
+        r2dec::CType::Unknown => {
+            fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
+        }
+        r2dec::CType::Struct(name) if is_unmaterialized_aggregate_name(&name) => {
+            fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
+        }
+        r2dec::CType::Union(name) if is_unmaterialized_aggregate_name(&name) => {
+            fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
+        }
+        r2dec::CType::Enum(name) if is_unmaterialized_aggregate_name(&name) => {
+            fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
+        }
+        other => other,
+    }
+}
+
+fn resolve_evidence_driven_type(
+    initial_ty: r2dec::CType,
+    var_size_bytes: u32,
+    ptr_bits: u32,
+    evidence: &TypeEvidence,
+) -> r2dec::CType {
+    if matches!(initial_ty, r2dec::CType::Float(_)) {
+        return initial_ty;
+    }
+
+    let pointer_score = evidence.pointer_score();
+    let scalar_score = evidence.scalar_score();
+    let initial_is_pointer = matches!(initial_ty, r2dec::CType::Pointer(_));
+    let initial_is_scalar = matches!(
+        initial_ty,
+        r2dec::CType::Bool | r2dec::CType::Int(_) | r2dec::CType::UInt(_)
+    );
+
+    if initial_is_pointer && pointer_score.saturating_add(1) >= scalar_score {
+        return initial_ty;
+    }
+    if initial_is_scalar && scalar_score.saturating_add(1) >= pointer_score {
+        return initial_ty;
+    }
+
+    match initial_ty {
+        r2dec::CType::Struct(_)
+        | r2dec::CType::Union(_)
+        | r2dec::CType::Enum(_)
+        | r2dec::CType::Typedef(_) => {
+            if pointer_score > scalar_score.saturating_add(1) {
+                return r2dec::CType::void_ptr();
+            }
+            if scalar_score > pointer_score.saturating_add(2) {
+                return fallback_scalar_type(var_size_bytes, evidence, ptr_bits);
+            }
+            return initial_ty;
+        }
+        _ => {}
+    }
+
+    if pointer_score > scalar_score.saturating_add(1) {
+        return r2dec::CType::void_ptr();
+    }
+    if scalar_score > pointer_score
+        || matches!(initial_ty, r2dec::CType::Void | r2dec::CType::Unknown)
+    {
+        return fallback_scalar_type(var_size_bytes, evidence, ptr_bits);
+    }
+
+    sanitize_inferred_param_type(initial_ty, var_size_bytes, ptr_bits)
+}
+
+fn collect_type_evidence_for_var(
+    evidence_ctx: &SignatureTypeEvidenceContext,
+    var: &r2ssa::SSAVar,
+    initial_ty: &r2dec::CType,
+) -> TypeEvidence {
+    let key = ssa_var_key(var);
+    let mut evidence = TypeEvidence::default();
+    if evidence_ctx.pointer_vars.contains(&key) {
+        evidence.pointer_proven = 1;
+    }
+    if evidence_ctx.scalar_proven_vars.contains(&key) {
+        evidence.scalar_proven = 1;
+    }
+    if evidence_ctx.scalar_likely_vars.contains(&key) {
+        evidence.scalar_likely = 1;
+    }
+    if evidence_ctx.bool_like_vars.contains(&key) {
+        evidence.bool_like = 1;
+    }
+    if let Some(bits) = evidence_ctx.width_bits.get(&key) {
+        evidence.width_bits = *bits;
+    }
+    merge_initial_type_evidence(initial_ty, &mut evidence);
+    evidence
+}
+
 fn infer_signature_return_type(
     func: &r2ssa::SSAFunction,
     type_inference: &r2dec::TypeInference,
-) -> r2dec::CType {
+    ptr_bits: u32,
+    evidence_ctx: &SignatureTypeEvidenceContext,
+) -> (r2dec::CType, TypeEvidence) {
     let mut candidates = Vec::new();
+    let mut candidate_evidence = Vec::new();
 
     for block in func.blocks() {
         for op in &block.ops {
@@ -5579,36 +5901,58 @@ fn infer_signature_return_type(
                 } else {
                     64
                 };
-                candidates.push(r2dec::CType::Float(bits));
+                let ty = r2dec::CType::Float(bits);
+                let mut evidence = TypeEvidence::default();
+                merge_initial_type_evidence(&ty, &mut evidence);
+                evidence.width_bits = bits;
+                candidates.push(ty);
+                candidate_evidence.push(evidence);
                 continue;
             }
 
-            candidates.push(type_inference.get_type(target));
+            let initial_ty = type_inference.get_type(target);
+            let evidence = collect_type_evidence_for_var(evidence_ctx, target, &initial_ty);
+            let ty = resolve_evidence_driven_type(initial_ty, target.size, ptr_bits, &evidence);
+            candidates.push(ty);
+            candidate_evidence.push(evidence);
         }
     }
 
     if candidates.is_empty() {
-        return r2dec::CType::Void;
+        return (r2dec::CType::Void, TypeEvidence::default());
     }
 
     let mut meaningful: Vec<r2dec::CType> = candidates
-        .into_iter()
+        .iter()
         .filter(|ty| !matches!(ty, r2dec::CType::Unknown))
+        .cloned()
         .collect();
     if meaningful.is_empty() {
-        return r2dec::CType::Int(32);
+        let fallback_evidence = candidate_evidence.into_iter().next().unwrap_or_default();
+        return (
+            fallback_scalar_type((ptr_bits / 8).max(1), &fallback_evidence, ptr_bits),
+            fallback_evidence,
+        );
     }
     if meaningful.iter().all(|ty| ty == &meaningful[0]) {
-        return meaningful.remove(0);
+        return (
+            meaningful.remove(0),
+            candidate_evidence.into_iter().next().unwrap_or_default(),
+        );
     }
     if let Some(float_ty) = meaningful
         .iter()
         .find(|ty| matches!(ty, r2dec::CType::Float(_)))
         .cloned()
     {
-        return float_ty;
+        let evidence = candidate_evidence
+            .into_iter()
+            .find(|e| e.width_bits >= 32)
+            .unwrap_or_default();
+        return (float_ty, evidence);
     }
-    meaningful.remove(0)
+    let evidence = candidate_evidence.into_iter().next().unwrap_or_default();
+    (meaningful.remove(0), evidence)
 }
 
 fn canonical_x86_64_arg_reg(name: &str) -> Option<&'static str> {
@@ -5712,17 +6056,83 @@ fn sanitize_inferred_param_type(
     ty
 }
 
-fn compute_inference_confidence(
-    base_confidence: u8,
-    param_count: usize,
-    has_known_ret: bool,
+fn is_informative_type(ty: &r2dec::CType) -> bool {
+    !matches!(ty, r2dec::CType::Void | r2dec::CType::Unknown)
+}
+
+fn compute_signature_confidence(
+    params: &[InferredParam],
+    ret_type: &r2dec::CType,
+    ret_evidence: &TypeEvidence,
 ) -> u8 {
-    let mut confidence = base_confidence.min(100);
-    if param_count > 0 {
-        confidence = confidence.saturating_add(4).min(100);
+    let mut confidence: i32 = 48;
+    if !params.is_empty() {
+        confidence += 8;
     }
-    if has_known_ret {
-        confidence = confidence.saturating_add(2).min(100);
+
+    for param in params {
+        let evidence = &param.evidence;
+        if evidence.pointer_proven > 0 || evidence.scalar_proven > 0 {
+            confidence += 6;
+        } else if evidence.bool_like > 0
+            || evidence.pointer_likely > 0
+            || evidence.scalar_likely > 0
+        {
+            confidence += 3;
+        } else if is_informative_type(&param.ty) {
+            confidence += 2;
+        } else {
+            confidence -= 2;
+        }
+
+        if evidence.has_conflict() {
+            confidence -= 4;
+        }
+    }
+
+    if is_informative_type(ret_type) {
+        confidence += 4;
+        if ret_evidence.pointer_proven > 0
+            || ret_evidence.scalar_proven > 0
+            || ret_evidence.bool_like > 0
+        {
+            confidence += 2;
+        }
+    } else if ret_evidence.has_pointer_signal() || ret_evidence.has_scalar_signal() {
+        confidence += 2;
+    }
+
+    if ret_evidence.has_conflict() {
+        confidence -= 3;
+    }
+
+    confidence.clamp(0, 100) as u8
+}
+
+fn compute_callconv_inference(
+    arch_name: &str,
+    input_counts: &std::collections::HashMap<String, u32>,
+) -> (String, u8) {
+    match arch_name {
+        "x86-64" => {
+            let (callconv, confidence) = infer_callconv_x86_64_from_counts(input_counts);
+            (callconv.to_string(), confidence)
+        }
+        "x86" => ("cdecl".to_string(), 64),
+        _ => (String::new(), 0),
+    }
+}
+
+fn explicit_signature_context_strength(sig: &r2dec::ExternalFunctionSignature) -> u8 {
+    let typed_params = sig
+        .params
+        .iter()
+        .filter(|param| param.ty.as_ref().is_some_and(is_informative_type))
+        .count() as u8;
+    let has_ret = sig.ret_type.as_ref().is_some_and(is_informative_type);
+    let mut confidence = 76u8.saturating_add(typed_params.saturating_mul(4)).min(96);
+    if has_ret {
+        confidence = confidence.saturating_add(6).min(96);
     }
     confidence
 }
@@ -5767,8 +6177,21 @@ fn is_opaque_placeholder_type_name(ty: &str) -> bool {
     if lower.is_empty() {
         return false;
     }
-    let stripped = lower.strip_prefix("struct ").unwrap_or(&lower).trim_start();
-    stripped.starts_with("type_0x") || lower.contains(" type_0x")
+    let stripped = lower
+        .strip_prefix("struct ")
+        .unwrap_or(&lower)
+        .trim_start()
+        .trim_end_matches('*')
+        .trim_end();
+    stripped == "anon"
+        || stripped.starts_with("anon_")
+        || stripped.starts_with("type_0x")
+        || lower.contains(" type_0x")
+}
+
+fn is_unmaterialized_aggregate_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    lower.is_empty() || lower == "anon" || lower.starts_with("anon_")
 }
 
 fn is_generic_type_string(ty: &str) -> bool {
@@ -6505,6 +6928,11 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
             Some(f) => f.with_name(&function_name),
             None => return ptr::null_mut(),
         };
+    let ssa_blocks: Vec<r2ssa::SSABlock> = r2il_blocks
+        .iter()
+        .map(|blk| r2ssa::block::to_ssa(blk, disasm))
+        .collect();
+    let evidence_ctx = collect_signature_type_evidence_context(&ssa_blocks);
 
     let mut var_recovery = r2dec::VariableRecovery::new(&cfg.sp_name, &cfg.fp_name, cfg.ptr_size);
     var_recovery.recover(&ssa_func);
@@ -6516,11 +6944,16 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
         .parameters()
         .into_iter()
         .map(|v| {
-            let mut ty = type_inference.get_type(&v.ssa_var);
-            if matches!(ty, r2dec::CType::Void | r2dec::CType::Unknown) {
-                ty = type_inference.type_from_size(v.ssa_var.size);
+            let initial_ty = type_inference.get_type(&v.ssa_var);
+            let mut evidence =
+                collect_type_evidence_for_var(&evidence_ctx, &v.ssa_var, &initial_ty);
+            if matches!(initial_ty, r2dec::CType::Void | r2dec::CType::Unknown) {
+                merge_initial_type_evidence(
+                    &type_inference.type_from_size(v.ssa_var.size),
+                    &mut evidence,
+                );
             }
-            ty = sanitize_inferred_param_type(ty, v.ssa_var.size, ptr_bits);
+            let ty = resolve_evidence_driven_type(initial_ty, v.ssa_var.size, ptr_bits, &evidence);
             let arg_index = v
                 .name
                 .strip_prefix("arg")
@@ -6530,20 +6963,27 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
                 name: v.name.clone(),
                 ty,
                 arg_index,
+                size_bytes: v.ssa_var.size,
+                evidence,
             }
         })
         .collect();
 
     if ctx_ref.semantic_metadata_enabled {
         let reg_type_hints = collect_register_type_hints(&r2il_blocks, disasm);
-        let ssa_blocks: Vec<r2ssa::SSABlock> = r2il_blocks
-            .iter()
-            .map(|blk| r2ssa::block::to_ssa(blk, disasm))
-            .collect();
         let recovered_vars =
             recover_vars_from_ssa(&ssa_blocks, ctx_ref.arch.as_ref(), &reg_type_hints, true);
         let pointer_arg_slots = collect_pointer_arg_slots(&recovered_vars);
-        overlay_inferred_param_pointer_types(&mut inferred_params, &pointer_arg_slots);
+        merge_pointer_slot_evidence(&mut inferred_params, &pointer_arg_slots);
+    }
+
+    for param in &mut inferred_params {
+        param.ty = resolve_evidence_driven_type(
+            param.ty.clone(),
+            param.size_bytes,
+            ptr_bits,
+            &param.evidence,
+        );
     }
 
     inferred_params.sort_by(|a, b| {
@@ -6551,10 +6991,9 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
             .cmp(&b.arg_index)
             .then_with(|| a.name.cmp(&b.name))
     });
-
     let mut used_param_names = std::collections::HashSet::new();
     let params: Vec<InferredParamJson> = inferred_params
-        .into_iter()
+        .iter()
         .enumerate()
         .map(|(idx, p)| {
             let fallback_idx = if p.arg_index == usize::MAX {
@@ -6564,29 +7003,19 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
             };
             InferredParamJson {
                 name: normalize_inferred_param_name(&p.name, fallback_idx, &mut used_param_names),
-                param_type: p.ty.to_string(),
+                param_type: materialize_signature_ctype(p.ty.clone(), ptr_bits).to_string(),
             }
         })
         .collect();
 
-    let ret_type = infer_signature_return_type(&ssa_func, &type_inference);
+    let (ret_type, ret_evidence) =
+        infer_signature_return_type(&ssa_func, &type_inference, ptr_bits, &evidence_ctx);
+    let ret_type = materialize_signature_ctype(ret_type, ptr_bits);
     let ret_type_str = ret_type.to_string();
 
     let input_counts = collect_version0_input_regs(&ssa_func);
-    let (callconv, base_confidence) = match arch_name.as_str() {
-        "x86-64" => {
-            let (cc, confidence) = infer_callconv_x86_64_from_counts(&input_counts);
-            (cc.to_string(), confidence)
-        }
-        "x86" => ("cdecl".to_string(), 64),
-        _ => (String::new(), 32),
-    };
-
-    let confidence = compute_inference_confidence(
-        base_confidence,
-        params.len(),
-        !matches!(ret_type, r2dec::CType::Unknown),
-    );
+    let (callconv, callconv_confidence) = compute_callconv_inference(&arch_name, &input_counts);
+    let confidence = compute_signature_confidence(&inferred_params, &ret_type, &ret_evidence);
 
     let signature = format_afs_signature(&function_name, &ret_type_str, &params);
     let payload = InferredSignatureCcJson {
@@ -6597,6 +7026,7 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
         callconv,
         arch: arch_name,
         confidence,
+        callconv_confidence,
     };
 
     match serde_json::to_string(&payload) {
@@ -6645,7 +7075,7 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
     }
     let sig_text = unsafe { CStr::from_ptr(sig_ptr).to_string_lossy().to_string() };
     r2il_string_free(sig_ptr);
-    let Ok(sig) = serde_json::from_str::<InferredSignatureCcJson>(&sig_text) else {
+    let Ok(mut sig) = serde_json::from_str::<InferredSignatureCcJson>(&sig_text) else {
         return ptr::null_mut();
     };
 
@@ -6701,14 +7131,33 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
     let mut param_types = std::collections::HashMap::new();
     let mut param_names = std::collections::HashMap::new();
     if let Some(current) = sig_ctx.current.as_ref() {
+        if let Some(ret_ty) = current.ret_type.as_ref() {
+            let ret_ty_str = ret_ty.to_string();
+            if !matches!(ret_ty, r2dec::CType::Unknown) {
+                sig.ret_type = ret_ty_str;
+            }
+        }
         for (idx, param) in current.params.iter().enumerate() {
             if let Some(ty) = param.ty.as_ref() {
-                param_types.insert(idx, ty.to_string());
+                let ty_str = ty.to_string();
+                param_types.insert(idx, ty_str.clone());
+                if !matches!(ty, r2dec::CType::Unknown)
+                    && let Some(inferred_param) = sig.params.get_mut(idx)
+                {
+                    inferred_param.param_type = ty_str;
+                }
             }
             if !is_generic_arg_name(&param.name) {
                 param_names.insert(idx, param.name.clone());
+                if let Some(inferred_param) = sig.params.get_mut(idx) {
+                    inferred_param.name = param.name.clone();
+                }
             }
         }
+        sig.signature = format_afs_signature(&sig.function_name, &sig.ret_type, &sig.params);
+        sig.confidence = sig
+            .confidence
+            .max(explicit_signature_context_strength(current));
     }
 
     let (mut struct_decls, mut slot_struct_types, slot_field_profiles) = infer_structs_from_ssa(
@@ -6871,6 +7320,7 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
         callconv: sig.callconv,
         arch: sig.arch,
         confidence: sig.confidence,
+        callconv_confidence: sig.callconv_confidence,
         var_type_candidates,
         var_rename_candidates,
         struct_decls,
@@ -7918,6 +8368,262 @@ fn infer_pointer_var_keys_from_ssa(
     pointer_vars
 }
 
+fn merge_width_hint(
+    width_hints: &mut std::collections::HashMap<String, u32>,
+    var: &r2ssa::SSAVar,
+    bits: u32,
+) {
+    let entry = width_hints.entry(ssa_var_key(var)).or_insert(0);
+    *entry = (*entry).max(bits.max(var.size.saturating_mul(8)));
+}
+
+fn mark_scalar_var(
+    vars: &mut std::collections::HashSet<String>,
+    width_hints: &mut std::collections::HashMap<String, u32>,
+    var: &r2ssa::SSAVar,
+) {
+    vars.insert(ssa_var_key(var));
+    merge_width_hint(width_hints, var, var.size.saturating_mul(8));
+}
+
+fn infer_scalar_var_evidence_from_ssa(
+    ssa_blocks: &[r2ssa::SSABlock],
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+    std::collections::HashMap<String, u32>,
+) {
+    use std::collections::{HashMap, HashSet};
+
+    let register_versions = collect_register_version_keys(ssa_blocks);
+    let mut scalar_proven: HashSet<String> = HashSet::new();
+    let mut scalar_likely: HashSet<String> = HashSet::new();
+    let mut bool_like: HashSet<String> = HashSet::new();
+    let mut width_hints: HashMap<String, u32> = HashMap::new();
+
+    for block in ssa_blocks {
+        for op in &block.ops {
+            match op {
+                r2ssa::SSAOp::IntMult { a, b, .. }
+                | r2ssa::SSAOp::IntDiv { a, b, .. }
+                | r2ssa::SSAOp::IntSDiv { a, b, .. }
+                | r2ssa::SSAOp::IntRem { a, b, .. }
+                | r2ssa::SSAOp::IntSRem { a, b, .. }
+                | r2ssa::SSAOp::IntAnd { a, b, .. }
+                | r2ssa::SSAOp::IntOr { a, b, .. }
+                | r2ssa::SSAOp::IntXor { a, b, .. }
+                | r2ssa::SSAOp::IntLeft { a, b, .. }
+                | r2ssa::SSAOp::IntRight { a, b, .. }
+                | r2ssa::SSAOp::IntSRight { a, b, .. }
+                | r2ssa::SSAOp::IntCarry { a, b, .. }
+                | r2ssa::SSAOp::IntSCarry { a, b, .. }
+                | r2ssa::SSAOp::IntSBorrow { a, b, .. } => {
+                    mark_scalar_var(&mut scalar_proven, &mut width_hints, a);
+                    mark_scalar_var(&mut scalar_proven, &mut width_hints, b);
+                }
+                r2ssa::SSAOp::IntNegate { src, .. }
+                | r2ssa::SSAOp::IntNot { src, .. }
+                | r2ssa::SSAOp::PopCount { src, .. }
+                | r2ssa::SSAOp::Lzcount { src, .. } => {
+                    mark_scalar_var(&mut scalar_proven, &mut width_hints, src);
+                }
+                r2ssa::SSAOp::PtrAdd { index, .. } | r2ssa::SSAOp::PtrSub { index, .. } => {
+                    mark_scalar_var(&mut scalar_proven, &mut width_hints, index);
+                }
+                r2ssa::SSAOp::IntAdd { a, b, .. } | r2ssa::SSAOp::IntSub { a, b, .. } => {
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, a);
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, b);
+                }
+                r2ssa::SSAOp::IntEqual { dst, a, b }
+                | r2ssa::SSAOp::IntNotEqual { dst, a, b }
+                | r2ssa::SSAOp::IntLess { dst, a, b }
+                | r2ssa::SSAOp::IntSLess { dst, a, b }
+                | r2ssa::SSAOp::IntLessEqual { dst, a, b }
+                | r2ssa::SSAOp::IntSLessEqual { dst, a, b } => {
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, a);
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, b);
+                    bool_like.insert(ssa_var_key(dst));
+                    merge_width_hint(&mut width_hints, dst, 1);
+                }
+                r2ssa::SSAOp::BoolNot { dst, src } => {
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, src);
+                    bool_like.insert(ssa_var_key(src));
+                    bool_like.insert(ssa_var_key(dst));
+                    merge_width_hint(&mut width_hints, dst, 1);
+                }
+                r2ssa::SSAOp::BoolAnd { dst, a, b }
+                | r2ssa::SSAOp::BoolOr { dst, a, b }
+                | r2ssa::SSAOp::BoolXor { dst, a, b } => {
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, a);
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, b);
+                    bool_like.insert(ssa_var_key(a));
+                    bool_like.insert(ssa_var_key(b));
+                    bool_like.insert(ssa_var_key(dst));
+                    merge_width_hint(&mut width_hints, dst, 1);
+                }
+                r2ssa::SSAOp::CBranch { cond, .. }
+                | r2ssa::SSAOp::LoadGuarded { guard: cond, .. }
+                | r2ssa::SSAOp::StoreGuarded { guard: cond, .. } => {
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, cond);
+                    bool_like.insert(ssa_var_key(cond));
+                    merge_width_hint(&mut width_hints, cond, 1);
+                }
+                r2ssa::SSAOp::IntZExt { dst, src } | r2ssa::SSAOp::IntSExt { dst, src } => {
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, src);
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, dst);
+                    merge_width_hint(&mut width_hints, dst, dst.size.saturating_mul(8));
+                }
+                r2ssa::SSAOp::Subpiece { dst, src, .. } => {
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, src);
+                    mark_scalar_var(&mut scalar_likely, &mut width_hints, dst);
+                    merge_width_hint(&mut width_hints, dst, dst.size.saturating_mul(8));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in ssa_blocks {
+            for op in &block.ops {
+                match op {
+                    r2ssa::SSAOp::Phi { dst, sources } => {
+                        let dst_key = ssa_var_key(dst);
+                        let any_proven = sources
+                            .iter()
+                            .any(|src| scalar_proven.contains(&ssa_var_key(src)));
+                        let any_likely = sources
+                            .iter()
+                            .any(|src| scalar_likely.contains(&ssa_var_key(src)));
+                        let any_bool = sources
+                            .iter()
+                            .any(|src| bool_like.contains(&ssa_var_key(src)));
+                        if any_proven {
+                            changed |= scalar_proven.insert(dst_key.clone());
+                        }
+                        if any_likely || any_proven {
+                            changed |= scalar_likely.insert(dst_key.clone());
+                        }
+                        if any_bool {
+                            changed |= bool_like.insert(dst_key.clone());
+                        }
+                        for src in sources {
+                            if scalar_proven.contains(&dst_key) {
+                                changed |= scalar_proven.insert(ssa_var_key(src));
+                            }
+                            if scalar_likely.contains(&dst_key) {
+                                changed |= scalar_likely.insert(ssa_var_key(src));
+                            }
+                            if bool_like.contains(&dst_key) {
+                                changed |= bool_like.insert(ssa_var_key(src));
+                            }
+                        }
+                    }
+                    r2ssa::SSAOp::Copy { dst, src }
+                    | r2ssa::SSAOp::Cast { dst, src }
+                    | r2ssa::SSAOp::New { dst, src }
+                    | r2ssa::SSAOp::IntZExt { dst, src }
+                    | r2ssa::SSAOp::IntSExt { dst, src } => {
+                        let dst_key = ssa_var_key(dst);
+                        let src_key = ssa_var_key(src);
+                        if scalar_proven.contains(&src_key) {
+                            changed |= scalar_proven.insert(dst_key.clone());
+                        }
+                        if scalar_proven.contains(&dst_key) {
+                            changed |= scalar_proven.insert(src_key.clone());
+                        }
+                        if scalar_likely.contains(&src_key) || scalar_proven.contains(&src_key) {
+                            changed |= scalar_likely.insert(dst_key.clone());
+                        }
+                        if scalar_likely.contains(&dst_key) || scalar_proven.contains(&dst_key) {
+                            changed |= scalar_likely.insert(src_key.clone());
+                        }
+                        if bool_like.contains(&src_key) {
+                            changed |= bool_like.insert(dst_key.clone());
+                        }
+                        if bool_like.contains(&dst_key) {
+                            changed |= bool_like.insert(src_key.clone());
+                        }
+                        if let Some(bits) = width_hints.get(&src_key).copied() {
+                            let entry = width_hints.entry(dst_key).or_insert(0);
+                            if bits > *entry {
+                                *entry = bits;
+                                changed = true;
+                            }
+                        }
+                    }
+                    r2ssa::SSAOp::Subpiece { dst, src, .. } => {
+                        let dst_key = ssa_var_key(dst);
+                        let src_key = ssa_var_key(src);
+                        if scalar_likely.contains(&src_key) || scalar_proven.contains(&src_key) {
+                            changed |= scalar_likely.insert(dst_key.clone());
+                        }
+                        if bool_like.contains(&src_key) {
+                            changed |= bool_like.insert(dst_key.clone());
+                        }
+                        let entry = width_hints.entry(dst_key).or_insert(0);
+                        let bits = dst.size.saturating_mul(8);
+                        if bits > *entry {
+                            *entry = bits;
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for reg_keys in register_versions.values() {
+            let any_proven = reg_keys.iter().any(|key| scalar_proven.contains(key));
+            let any_likely = reg_keys.iter().any(|key| scalar_likely.contains(key));
+            let any_bool = reg_keys.iter().any(|key| bool_like.contains(key));
+            let max_bits = reg_keys
+                .iter()
+                .filter_map(|key| width_hints.get(key).copied())
+                .max()
+                .unwrap_or(0);
+            for key in reg_keys {
+                if any_proven {
+                    changed |= scalar_proven.insert(key.clone());
+                }
+                if any_likely || any_proven {
+                    changed |= scalar_likely.insert(key.clone());
+                }
+                if any_bool {
+                    changed |= bool_like.insert(key.clone());
+                }
+                if max_bits > 0 {
+                    let entry = width_hints.entry(key.clone()).or_insert(0);
+                    if max_bits > *entry {
+                        *entry = max_bits;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    (scalar_proven, scalar_likely, bool_like, width_hints)
+}
+
+fn collect_signature_type_evidence_context(
+    ssa_blocks: &[r2ssa::SSABlock],
+) -> SignatureTypeEvidenceContext {
+    let pointer_vars = infer_pointer_var_keys_from_ssa(ssa_blocks);
+    let (scalar_proven_vars, scalar_likely_vars, bool_like_vars, width_bits) =
+        infer_scalar_var_evidence_from_ssa(ssa_blocks);
+    SignatureTypeEvidenceContext {
+        pointer_vars,
+        scalar_proven_vars,
+        scalar_likely_vars,
+        bool_like_vars,
+        width_bits,
+    }
+}
+
 fn infer_usage_register_type_hints(
     ssa_blocks: &[r2ssa::SSABlock],
 ) -> (
@@ -8006,7 +8712,7 @@ fn collect_pointer_arg_slots(vars: &[VarProt]) -> std::collections::BTreeSet<usi
         .collect()
 }
 
-fn overlay_inferred_param_pointer_types(
+fn merge_pointer_slot_evidence(
     inferred_params: &mut [InferredParam],
     pointer_arg_slots: &std::collections::BTreeSet<usize>,
 ) {
@@ -8025,7 +8731,7 @@ fn overlay_inferred_param_pointer_types(
         let fallback_slot_match = pointer_arg_slots.contains(&fallback_idx)
             && (explicit_slot.is_none() || param_count == 1);
         if pointer_arg_slots.contains(&slot) || fallback_slot_match {
-            param.ty = r2dec::CType::ptr(r2dec::CType::Void);
+            param.evidence.pointer_proven = param.evidence.pointer_proven.max(1);
         }
     }
 }
@@ -9014,6 +9720,18 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_external_signature_drops_void_placeholder_param() {
+        let json =
+            r#"[{"name":"dbg.test","args":[{"name":"arg1","type":"void"}],"return":"int32_t"}]"#;
+        let sig = parse_external_signature(json, 64).expect("signature should parse");
+        assert_eq!(sig.ret_type, Some(r2dec::CType::Int(32)));
+        assert!(
+            sig.params.is_empty(),
+            "single generic void placeholder should be treated as an empty parameter list"
+        );
+    }
+
+    #[test]
     fn test_normalize_external_type_name_handles_type_prefixes() {
         assert_eq!(normalize_external_type_name("type.int"), "int");
         assert_eq!(
@@ -9120,6 +9838,46 @@ mod tests {
         assert_eq!(vars.get(&-64).map(|v| v.name.as_str()), Some("buf"));
         assert_eq!(vars.get(&-72).map(|v| v.name.as_str()), Some("user_input"));
         assert_eq!(vars.get(&80).map(|v| v.base.as_deref()), Some(Some("RSP")));
+    }
+
+    #[test]
+    fn test_parse_external_reg_params_from_afvj_payload() {
+        let json = r#"{"reg":[{"name":"arg0","kind":"reg","type":"int32_t","ref":"RDI"},{"name":"arg1","kind":"reg","type":"int32_t","ref":"RSI"}]}"#;
+        let params = parse_external_reg_params(json, 64);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "arg0");
+        assert_eq!(params[0].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(params[0].reg, "RDI");
+        assert_eq!(params[1].name, "arg1");
+        assert_eq!(params[1].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(params[1].reg, "RSI");
+    }
+
+    #[test]
+    fn test_merge_signature_with_reg_params_fills_missing_host_args() {
+        let merged = merge_signature_with_reg_params(
+            Some(r2dec::ExternalFunctionSignature {
+                ret_type: Some(r2dec::CType::Int(32)),
+                params: Vec::new(),
+            }),
+            vec![
+                r2dec::ExternalRegisterParam {
+                    name: "arg0".to_string(),
+                    ty: Some(r2dec::CType::Int(32)),
+                    reg: "RDI".to_string(),
+                },
+                r2dec::ExternalRegisterParam {
+                    name: "arg1".to_string(),
+                    ty: Some(r2dec::CType::Int(32)),
+                    reg: "RSI".to_string(),
+                },
+            ],
+        )
+        .expect("merged signature");
+        assert_eq!(merged.ret_type, Some(r2dec::CType::Int(32)));
+        assert_eq!(merged.params.len(), 2);
+        assert_eq!(merged.params[0].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(merged.params[1].ty, Some(r2dec::CType::Int(32)));
     }
 
     #[test]
@@ -9740,21 +10498,145 @@ mod tests {
     }
 
     #[test]
-    fn overlay_inferred_signature_params_with_pointer_slots() {
+    fn pointer_slot_evidence_marks_param_as_pointer_without_direct_overwrite() {
         let mut inferred_params = vec![InferredParam {
             name: "arg1".to_string(),
             ty: r2dec::CType::Int(64),
             arg_index: 1,
+            size_bytes: 8,
+            evidence: TypeEvidence::default(),
         }];
         let mut pointer_slots = std::collections::BTreeSet::new();
         pointer_slots.insert(0);
 
-        overlay_inferred_param_pointer_types(&mut inferred_params, &pointer_slots);
+        merge_pointer_slot_evidence(&mut inferred_params, &pointer_slots);
         assert_eq!(
-            inferred_params[0].ty,
-            r2dec::CType::ptr(r2dec::CType::Void),
-            "single-parameter fallback should adopt high-confidence pointer slot"
+            inferred_params[0].evidence.pointer_proven, 1,
+            "single-parameter fallback should contribute high-confidence pointer evidence"
         );
+    }
+
+    #[test]
+    fn scalar_only_argument_evidence_prefers_integer_type() {
+        let blocks = vec![r2ssa::SSABlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntAnd {
+                    dst: r2ssa::SSAVar::new("tmp:masked", 1, 4),
+                    a: r2ssa::SSAVar::new("esi", 0, 4),
+                    b: r2ssa::SSAVar::new("const:ff", 0, 4),
+                },
+                r2ssa::SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("tmp:eq", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:masked", 1, 4),
+                    b: r2ssa::SSAVar::new("const:0", 0, 4),
+                },
+            ],
+        }];
+        let evidence_ctx = collect_signature_type_evidence_context(&blocks);
+        let initial_ty = r2dec::CType::Unknown;
+        let evidence = collect_type_evidence_for_var(
+            &evidence_ctx,
+            &r2ssa::SSAVar::new("esi", 0, 4),
+            &initial_ty,
+        );
+        let ty = resolve_evidence_driven_type(initial_ty, 4, 64, &evidence);
+        assert_eq!(ty, r2dec::CType::Int(32));
+    }
+
+    #[test]
+    fn deref_argument_evidence_prefers_pointer_type() {
+        let blocks = vec![r2ssa::SSABlock {
+            addr: 0x1100,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:val", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("rdi", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("eax", 1, 4),
+                    a: r2ssa::SSAVar::new("tmp:val", 1, 4),
+                    b: r2ssa::SSAVar::new("const:1", 0, 4),
+                },
+            ],
+        }];
+        let evidence_ctx = collect_signature_type_evidence_context(&blocks);
+        let initial_ty = r2dec::CType::Unknown;
+        let evidence = collect_type_evidence_for_var(
+            &evidence_ctx,
+            &r2ssa::SSAVar::new("rdi", 0, 8),
+            &initial_ty,
+        );
+        let ty = resolve_evidence_driven_type(initial_ty, 8, 64, &evidence);
+        assert_eq!(ty, r2dec::CType::void_ptr());
+    }
+
+    #[test]
+    fn mixed_pointer_and_scalar_evidence_stays_conservative() {
+        let evidence = TypeEvidence {
+            pointer_proven: 1,
+            scalar_likely: 1,
+            ..TypeEvidence::default()
+        };
+        let ty = resolve_evidence_driven_type(r2dec::CType::Unknown, 8, 64, &evidence);
+        assert_eq!(ty, r2dec::CType::void_ptr());
+    }
+
+    #[test]
+    fn bool_like_branch_only_argument_prefers_bool() {
+        let blocks = vec![r2ssa::SSABlock {
+            addr: 0x1200,
+            size: 4,
+            ops: vec![r2ssa::SSAOp::CBranch {
+                target: r2ssa::SSAVar::new("const:1300", 0, 8),
+                cond: r2ssa::SSAVar::new("dil", 0, 1),
+            }],
+        }];
+        let evidence_ctx = collect_signature_type_evidence_context(&blocks);
+        let initial_ty = r2dec::CType::Unknown;
+        let evidence = collect_type_evidence_for_var(
+            &evidence_ctx,
+            &r2ssa::SSAVar::new("dil", 0, 1),
+            &initial_ty,
+        );
+        let ty = resolve_evidence_driven_type(initial_ty, 1, 64, &evidence);
+        assert_eq!(ty, r2dec::CType::Bool);
+    }
+
+    #[test]
+    fn return_type_evidence_prefers_scalar_for_arithmetic_result() {
+        let mut block = r2il::R2ILBlock::new(0x1300, 4);
+        block.push(r2il::R2ILOp::IntAdd {
+            dst: r2il::Varnode::unique(0x10, 4),
+            a: r2il::Varnode::unique(0x20, 4),
+            b: r2il::Varnode::constant(1, 4),
+        });
+        block.push(r2il::R2ILOp::Return {
+            target: r2il::Varnode::unique(0x10, 4),
+        });
+        let func = r2ssa::SSAFunction::from_blocks_with_arch(&[block], None).expect("ssa function");
+        let blocks = vec![r2ssa::SSABlock {
+            addr: 0x1300,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:10", 1, 4),
+                    a: r2ssa::SSAVar::new("tmp:20", 0, 4),
+                    b: r2ssa::SSAVar::new("const:1", 0, 4),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("tmp:10", 1, 4),
+                },
+            ],
+        }];
+        let evidence_ctx = collect_signature_type_evidence_context(&blocks);
+        let mut type_inference = r2dec::TypeInference::new(64);
+        type_inference.infer_function(&func);
+        let (ret_ty, _) = infer_signature_return_type(&func, &type_inference, 64, &evidence_ctx);
+        assert_eq!(ret_ty, r2dec::CType::Int(32));
     }
 
     #[test]
@@ -9798,6 +10680,34 @@ mod tests {
     }
 
     #[test]
+    fn materialize_signature_type_rewrites_unknown_pointer_to_void_ptr() {
+        let ty = materialize_signature_ctype(r2dec::CType::ptr(r2dec::CType::Unknown), 64);
+        assert_eq!(ty, r2dec::CType::void_ptr());
+        assert_eq!(ty.to_string(), "void*");
+    }
+
+    #[test]
+    fn materialize_signature_type_rewrites_unknown_return_to_scalar_fallback() {
+        let ty = materialize_signature_ctype(r2dec::CType::Unknown, 64);
+        assert_eq!(ty, r2dec::CType::Int(64));
+    }
+
+    #[test]
+    fn materialize_signature_type_rewrites_struct_anon_pointer_to_void_ptr() {
+        let ty = materialize_signature_ctype(
+            r2dec::CType::ptr(r2dec::CType::Struct("anon".to_string())),
+            64,
+        );
+        assert_eq!(ty, r2dec::CType::void_ptr());
+    }
+
+    #[test]
+    fn opaque_placeholder_detection_treats_anon_as_unmaterialized() {
+        assert!(is_opaque_placeholder_type_name("struct anon *"));
+        assert!(is_unmaterialized_aggregate_name("anon"));
+    }
+
+    #[test]
     fn test_infer_callconv_x86_64_prefers_amd64_for_sysv_inputs() {
         let mut counts = std::collections::HashMap::new();
         counts.insert("rdi".to_string(), 3);
@@ -9820,24 +10730,123 @@ mod tests {
     }
 
     #[test]
-    fn confidence_gate_low_case() {
-        let confidence = compute_inference_confidence(60, 0, false);
+    fn non_x86_strong_evidence_can_clear_signature_threshold() {
+        let params = vec![
+            InferredParam {
+                name: "arg0".to_string(),
+                ty: r2dec::CType::void_ptr(),
+                arg_index: 0,
+                size_bytes: 8,
+                evidence: TypeEvidence {
+                    pointer_proven: 1,
+                    ..TypeEvidence::default()
+                },
+            },
+            InferredParam {
+                name: "arg1".to_string(),
+                ty: r2dec::CType::Int(32),
+                arg_index: 1,
+                size_bytes: 4,
+                evidence: TypeEvidence {
+                    scalar_proven: 1,
+                    width_bits: 32,
+                    ..TypeEvidence::default()
+                },
+            },
+            InferredParam {
+                name: "arg2".to_string(),
+                ty: r2dec::CType::Bool,
+                arg_index: 2,
+                size_bytes: 1,
+                evidence: TypeEvidence {
+                    bool_like: 1,
+                    width_bits: 8,
+                    ..TypeEvidence::default()
+                },
+            },
+        ];
+        let confidence = compute_signature_confidence(
+            &params,
+            &r2dec::CType::Int(32),
+            &TypeEvidence {
+                scalar_proven: 1,
+                width_bits: 32,
+                ..TypeEvidence::default()
+            },
+        );
+        assert!(confidence >= SIG_WRITEBACK_CONFIDENCE_MIN);
+    }
+
+    #[test]
+    fn unknown_noisy_evidence_stays_below_signature_threshold() {
+        let params = vec![InferredParam {
+            name: "arg0".to_string(),
+            ty: r2dec::CType::Unknown,
+            arg_index: 0,
+            size_bytes: 8,
+            evidence: TypeEvidence {
+                pointer_likely: 1,
+                scalar_likely: 1,
+                ..TypeEvidence::default()
+            },
+        }];
+        let confidence =
+            compute_signature_confidence(&params, &r2dec::CType::Unknown, &TypeEvidence::default());
         assert!(confidence < SIG_WRITEBACK_CONFIDENCE_MIN);
-        assert!(confidence < CC_WRITEBACK_CONFIDENCE_MIN);
     }
 
     #[test]
-    fn confidence_gate_mid_case() {
-        let confidence = compute_inference_confidence(72, 0, false);
+    fn explicit_external_signature_context_yields_high_confidence() {
+        let ctx = r2dec::ExternalFunctionSignature {
+            ret_type: Some(r2dec::CType::Int(32)),
+            params: vec![r2dec::ExternalFunctionParam {
+                name: "items".to_string(),
+                ty: Some(r2dec::CType::ptr(r2dec::CType::Int(8))),
+            }],
+        };
+        let confidence = explicit_signature_context_strength(&ctx);
         assert!(confidence >= SIG_WRITEBACK_CONFIDENCE_MIN);
-        assert!(confidence < CC_WRITEBACK_CONFIDENCE_MIN);
     }
 
     #[test]
-    fn confidence_gate_high_case() {
-        let confidence = compute_inference_confidence(76, 1, true);
-        assert!(confidence >= SIG_WRITEBACK_CONFIDENCE_MIN);
-        assert!(confidence >= CC_WRITEBACK_CONFIDENCE_MIN);
+    fn non_x86_callconv_confidence_stays_low_when_signature_is_high() {
+        let params = vec![
+            InferredParam {
+                name: "arg0".to_string(),
+                ty: r2dec::CType::void_ptr(),
+                arg_index: 0,
+                size_bytes: 8,
+                evidence: TypeEvidence {
+                    pointer_proven: 1,
+                    ..TypeEvidence::default()
+                },
+            },
+            InferredParam {
+                name: "arg1".to_string(),
+                ty: r2dec::CType::Int(64),
+                arg_index: 1,
+                size_bytes: 8,
+                evidence: TypeEvidence {
+                    scalar_proven: 1,
+                    width_bits: 64,
+                    ..TypeEvidence::default()
+                },
+            },
+        ];
+        let sig_conf = compute_signature_confidence(
+            &params,
+            &r2dec::CType::Int(64),
+            &TypeEvidence {
+                scalar_proven: 1,
+                width_bits: 64,
+                ..TypeEvidence::default()
+            },
+        );
+        let (callconv, callconv_conf) =
+            compute_callconv_inference("aarch64", &std::collections::HashMap::new());
+        assert!(sig_conf >= SIG_WRITEBACK_CONFIDENCE_MIN);
+        assert!(callconv.is_empty());
+        assert!(callconv_conf < CC_WRITEBACK_CONFIDENCE_MIN);
     }
 
     #[test]

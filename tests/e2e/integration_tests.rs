@@ -168,6 +168,8 @@ mod ffi {
     const X86_BYTES_BASE: &[u8] = &[0x48, 0x89, 0xc0]; // mov rax, rax
     const X86_BYTES_DEC: &[u8] = &[0xc3]; // ret
     const ARM_BYTES_BASE: &[u8] = &[0x01, 0x00, 0xa0, 0xe3]; // mov r0, r1 style fixture
+    const ARM64_BYTES_BASE: &[u8] = &[0x00, 0x00, 0x01, 0x8b]; // add x0, x0, x1
+    const ARM64_BYTES_RET: &[u8] = &[0xc0, 0x03, 0x5f, 0xd6]; // ret
     const RISCV_BYTES_BASE: &[u8] = &[0x13, 0x05, 0x15, 0x00]; // addi a0,a0,1
 
     fn padded_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -1665,6 +1667,341 @@ mod ffi {
             return;
         }
         assert_ffi_deterministic_for_arch("riscv32", RISCV_BYTES_BASE, RISCV_BYTES_BASE);
+    }
+
+    #[test]
+    fn infer_type_writeback_respects_explicit_signature_context() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(*mut c_void, *const u8, usize, u64) -> *mut c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+            let infer_type_writeback: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *const c_void,
+                    *const *const c_void,
+                    usize,
+                    u64,
+                    *const c_char,
+                    *const c_char,
+                    *const c_char,
+                    *const c_char,
+                ) -> *mut c_char,
+            > = lib.get(b"r2sleigh_infer_type_writeback_json").unwrap();
+
+            let arch = CString::new("x86-64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            assert!(!ctx.is_null(), "Failed to initialize x86-64 context");
+
+            let mut bytes = vec![0x48u8, 0x89, 0xF8]; // mov rax, rdi
+            bytes.resize(16, 0x90);
+            let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+            assert!(!block.is_null(), "Failed to lift fixture block");
+
+            let block_ptrs = [block as *const c_void];
+            let fcn_name = CString::new("sym.demo").unwrap();
+            let afcfj = CString::new(
+                r#"{
+                    "current":[{"name":"sym.demo","return":"int32_t","args":[{"name":"items","type":"char *"}]}]
+                }"#,
+            )
+            .unwrap();
+            let empty = CString::new("{}").unwrap();
+            let json_ptr = infer_type_writeback(
+                ctx,
+                block_ptrs.as_ptr(),
+                block_ptrs.len(),
+                0x1000,
+                fcn_name.as_ptr(),
+                afcfj.as_ptr(),
+                empty.as_ptr(),
+                empty.as_ptr(),
+            );
+            assert!(!json_ptr.is_null(), "Expected type writeback JSON");
+
+            let json_str = CStr::from_ptr(json_ptr).to_string_lossy().to_string();
+            r2il_string_free(json_ptr);
+            let parsed: Value = serde_json::from_str(&json_str).expect("valid type writeback json");
+            let params = parsed
+                .get("params")
+                .and_then(Value::as_array)
+                .expect("params array");
+            assert_eq!(
+                params
+                    .first()
+                    .and_then(Value::as_object)
+                    .and_then(|obj| obj.get("name"))
+                    .and_then(Value::as_str),
+                Some("items")
+            );
+            let param_ty = params
+                .first()
+                .and_then(Value::as_object)
+                .and_then(|obj| obj.get("type"))
+                .and_then(Value::as_str);
+            assert!(
+                matches!(param_ty, Some("char *") | Some("int8_t*") | Some("int8_t *")),
+                "explicit param type should survive via canonicalization, got {:?} in {}",
+                param_ty,
+                json_str
+            );
+            assert_eq!(
+                parsed.get("ret_type").and_then(Value::as_str),
+                Some("int32_t")
+            );
+            assert!(
+                parsed
+                    .get("confidence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|conf| conf >= 70),
+                "explicit signature context should force high signature confidence: {}",
+                json_str
+            );
+
+            r2il_block_free(block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn infer_signature_cc_json_non_x86_allows_empty_callconv() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_is_loaded: libloading::Symbol<unsafe extern "C" fn(*const c_void) -> i32> =
+                lib.get(b"r2il_is_loaded").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(*mut c_void, *const u8, usize, u64) -> *mut c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+            let infer_signature: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *const c_void,
+                    *const *const c_void,
+                    usize,
+                    u64,
+                    *const c_char,
+                ) -> *mut c_char,
+            > = lib.get(b"r2sleigh_infer_signature_cc_json").unwrap();
+
+            let arch = CString::new("aarch64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            if ctx.is_null() || r2il_is_loaded(ctx) != 1 {
+                eprintln!("Skipping: plugin not built with aarch64 support");
+                if !ctx.is_null() {
+                    r2il_free(ctx);
+                }
+                return;
+            }
+
+            let mut add_bytes = ARM64_BYTES_BASE.to_vec();
+            add_bytes.resize(16, 0);
+            let mut ret_bytes = ARM64_BYTES_RET.to_vec();
+            ret_bytes.resize(16, 0);
+            let add_block = r2il_lift(ctx, add_bytes.as_ptr(), add_bytes.len(), 0x1000);
+            let ret_block = r2il_lift(ctx, ret_bytes.as_ptr(), ret_bytes.len(), 0x1004);
+            assert!(!add_block.is_null(), "Failed to lift aarch64 add block");
+            assert!(!ret_block.is_null(), "Failed to lift aarch64 ret block");
+
+            let block_ptrs = [add_block as *const c_void, ret_block as *const c_void];
+            let fcn_name = CString::new("sym.a64_demo").unwrap();
+            let json_ptr = infer_signature(
+                ctx,
+                block_ptrs.as_ptr(),
+                block_ptrs.len(),
+                0x1000,
+                fcn_name.as_ptr(),
+            );
+            assert!(!json_ptr.is_null(), "Expected signature inference JSON");
+
+            let json_str = CStr::from_ptr(json_ptr).to_string_lossy().to_string();
+            r2il_string_free(json_ptr);
+            let parsed: Value = serde_json::from_str(&json_str).expect("valid signature json");
+            assert_eq!(
+                parsed.get("arch").and_then(Value::as_str),
+                Some("aarch64")
+            );
+            assert_eq!(
+                parsed.get("callconv").and_then(Value::as_str),
+                Some(""),
+                "non-x86 payload should allow empty callconv: {}",
+                json_str
+            );
+            assert!(
+                parsed
+                    .get("callconv_confidence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|conf| conf < 80),
+                "non-x86 payload should keep low callconv confidence: {}",
+                json_str
+            );
+            assert!(
+                parsed
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .is_some_and(|sig| sig.contains("sym.a64_demo")),
+                "aarch64 signature payload should still include a signature string: {}",
+                json_str
+            );
+
+            r2il_block_free(add_block);
+            r2il_block_free(ret_block);
+            r2il_free(ctx);
+        }
+    }
+
+    #[test]
+    fn infer_type_writeback_non_x86_keeps_signature_without_callconv() {
+        if !require_plugin() {
+            eprintln!("Skipping: plugin not built");
+            return;
+        }
+
+        unsafe {
+            let lib = libloading::Library::new(PLUGIN_PATH).expect("load plugin");
+            let r2il_arch_init: libloading::Symbol<
+                unsafe extern "C" fn(*const c_char) -> *mut c_void,
+            > = lib.get(b"r2il_arch_init").unwrap();
+            let r2il_is_loaded: libloading::Symbol<unsafe extern "C" fn(*const c_void) -> i32> =
+                lib.get(b"r2il_is_loaded").unwrap();
+            let r2il_lift: libloading::Symbol<
+                unsafe extern "C" fn(*mut c_void, *const u8, usize, u64) -> *mut c_void,
+            > = lib.get(b"r2il_lift").unwrap();
+            let r2il_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"r2il_free").unwrap();
+            let r2il_block_free: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+                lib.get(b"r2il_block_free").unwrap();
+            let r2il_string_free: libloading::Symbol<unsafe extern "C" fn(*mut c_char)> =
+                lib.get(b"r2il_string_free").unwrap();
+            let infer_type_writeback: libloading::Symbol<
+                unsafe extern "C" fn(
+                    *const c_void,
+                    *const *const c_void,
+                    usize,
+                    u64,
+                    *const c_char,
+                    *const c_char,
+                    *const c_char,
+                    *const c_char,
+                ) -> *mut c_char,
+            > = lib.get(b"r2sleigh_infer_type_writeback_json").unwrap();
+
+            let arch = CString::new("aarch64").unwrap();
+            let ctx = r2il_arch_init(arch.as_ptr());
+            if ctx.is_null() || r2il_is_loaded(ctx) != 1 {
+                eprintln!("Skipping: plugin not built with aarch64 support");
+                if !ctx.is_null() {
+                    r2il_free(ctx);
+                }
+                return;
+            }
+
+            let mut add_bytes = ARM64_BYTES_BASE.to_vec();
+            add_bytes.resize(16, 0);
+            let mut ret_bytes = ARM64_BYTES_RET.to_vec();
+            ret_bytes.resize(16, 0);
+            let add_block = r2il_lift(ctx, add_bytes.as_ptr(), add_bytes.len(), 0x1000);
+            let ret_block = r2il_lift(ctx, ret_bytes.as_ptr(), ret_bytes.len(), 0x1004);
+            assert!(!add_block.is_null(), "Failed to lift aarch64 add block");
+            assert!(!ret_block.is_null(), "Failed to lift aarch64 ret block");
+
+            let block_ptrs = [add_block as *const c_void, ret_block as *const c_void];
+            let fcn_name = CString::new("sym.a64_demo").unwrap();
+            let empty_obj = CString::new("{}").unwrap();
+            let afcfj = CString::new(
+                r#"{
+                    "current":[{"name":"sym.a64_demo","return":"int32_t","args":[{"name":"items","type":"char *"}]}]
+                }"#,
+            )
+            .unwrap();
+            let json_ptr = infer_type_writeback(
+                ctx,
+                block_ptrs.as_ptr(),
+                block_ptrs.len(),
+                0x1000,
+                fcn_name.as_ptr(),
+                afcfj.as_ptr(),
+                empty_obj.as_ptr(),
+                empty_obj.as_ptr(),
+            );
+            assert!(!json_ptr.is_null(), "Expected non-x86 type writeback JSON");
+
+            let json_str = CStr::from_ptr(json_ptr).to_string_lossy().to_string();
+            r2il_string_free(json_ptr);
+            let parsed: Value = serde_json::from_str(&json_str).expect("valid type writeback json");
+            assert_eq!(
+                parsed.get("arch").and_then(Value::as_str),
+                Some("aarch64")
+            );
+            assert_eq!(
+                parsed.get("callconv").and_then(Value::as_str),
+                Some(""),
+                "non-x86 type writeback payload should not require callconv: {}",
+                json_str
+            );
+            assert!(
+                parsed
+                    .get("callconv_confidence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|conf| conf < 80),
+                "non-x86 type writeback payload should keep low callconv confidence: {}",
+                json_str
+            );
+            assert!(
+                parsed
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .is_some_and(|sig| sig.contains("sym.a64_demo")),
+                "signature should still be present on non-x86 payload: {}",
+                json_str
+            );
+            assert!(
+                parsed
+                    .get("params")
+                    .and_then(Value::as_array)
+                    .is_some(),
+                "non-x86 type writeback payload should still serialize params: {}",
+                json_str
+            );
+            assert!(
+                parsed
+                    .get("confidence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|conf| conf >= 70),
+                "explicit non-x86 signature context should raise signature confidence: {}",
+                json_str
+            );
+
+            r2il_block_free(add_block);
+            r2il_block_free(ret_block);
+            r2il_free(ctx);
+        }
     }
 }
 

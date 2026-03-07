@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1276,6 +1277,7 @@ typedef struct {
 	bool api_verify_fail;
 	bool cmd_fallback_attempted;
 	bool cmd_apply_fail;
+	char detail[256];
 } WritebackApplyResult;
 
 static bool append_unique_ut64(ut64 **items, size_t *count, size_t *capacity, ut64 value) {
@@ -4284,14 +4286,18 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 }
 
 static bool is_signature_writeback_arch_supported (const char *arch_name) {
-	return arch_name
-		&& (!strcmp (arch_name, "x86") || !strcmp (arch_name, "x86-64")
-		|| !strcmp (arch_name, "x86_64") || !strcmp (arch_name, "x64")
-		|| !strcmp (arch_name, "amd64"));
+	return arch_name && *arch_name;
 }
 
 static bool is_type_writeback_arch_supported (const char *arch_name) {
 	return arch_name && *arch_name;
+}
+
+static bool is_callconv_writeback_arch_supported (const char *arch_name) {
+	return arch_name
+		&& (!strcmp (arch_name, "x86") || !strcmp (arch_name, "x86-64")
+		|| !strcmp (arch_name, "x86_64") || !strcmp (arch_name, "x64")
+		|| !strcmp (arch_name, "amd64"));
 }
 
 static bool is_x64_signature_arch (const char *arch_name) {
@@ -4457,7 +4463,17 @@ static bool types_match_canonical(const char *a, const char *b, bool long_is_i64
 	return match;
 }
 
-static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJson *sig_root) {
+static void write_reason_msg(char *buf, size_t buf_sz, const char *fmt, ...) {
+	va_list ap;
+	if (!buf || !buf_sz) {
+		return;
+	}
+	va_start (ap, fmt);
+	vsnprintf (buf, buf_sz, fmt, ap);
+	va_end (ap);
+}
+
+static bool verify_signature_type_db_ex(RAnal *anal, RAnalFunction *fcn, const RJson *sig_root, char *reason, size_t reason_sz) {
 	const RJson *j_expected_ret;
 	const RJson *j_expected_params;
 	const RJson *j_expected_arch;
@@ -4469,7 +4485,11 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 	int actual_count;
 	int i;
 
+	if (reason && reason_sz) {
+		reason[0] = '\0';
+	}
 	if (!anal || !fcn || !fcn->name || !sig_root || sig_root->type != R_JSON_OBJECT) {
+		write_reason_msg (reason, reason_sz, "invalid verification inputs");
 		return false;
 	}
 	j_expected_ret = r_json_get (sig_root, "ret_type");
@@ -4478,6 +4498,7 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 	if (!j_expected_ret || j_expected_ret->type != R_JSON_STRING
 			|| !j_expected_ret->str_value
 			|| !j_expected_params || j_expected_params->type != R_JSON_ARRAY) {
+		write_reason_msg (reason, reason_sz, "missing ret_type/params in payload");
 		return false;
 	}
 	if (j_expected_arch && j_expected_arch->type == R_JSON_STRING && j_expected_arch->str_value) {
@@ -4486,10 +4507,13 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 
 	typed_name = r_type_func_name (anal->sdb_types, fcn->name);
 	if (!typed_name) {
+		write_reason_msg (reason, reason_sz, "typed name missing in type db for %s", fcn->name);
 		return false;
 	}
 	actual_ret = r_type_func_ret (anal->sdb_types, typed_name);
 	if (!actual_ret || !types_match_canonical (j_expected_ret->str_value, actual_ret, long_is_i64)) {
+		write_reason_msg (reason, reason_sz, "return mismatch expected=%s actual=%s",
+			j_expected_ret->str_value, actual_ret? actual_ret: "<missing>");
 		free (typed_name);
 		return false;
 	}
@@ -4504,6 +4528,8 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 		free (actual_arg0);
 	}
 	if (expected_count != actual_count) {
+		write_reason_msg (reason, reason_sz, "argc mismatch expected=%d actual=%d",
+			expected_count, actual_count);
 		free (typed_name);
 		return false;
 	}
@@ -4515,26 +4541,32 @@ static bool verify_signature_type_db(RAnal *anal, RAnalFunction *fcn, const RJso
 		bool match;
 
 		if (!expected_param || expected_param->type != R_JSON_OBJECT) {
+			write_reason_msg (reason, reason_sz, "malformed expected param entry at index %d", i);
 			free (typed_name);
 			return false;
 		}
 		j_expected_type = r_json_get (expected_param, "type");
 		if (!j_expected_type || j_expected_type->type != R_JSON_STRING
 				|| !j_expected_type->str_value) {
+			write_reason_msg (reason, reason_sz, "missing expected arg type at index %d", i);
 			free (typed_name);
 			return false;
 		}
 		actual_type = r_type_func_args_type (anal->sdb_types, typed_name, i);
 		match = actual_type
 			&& types_match_canonical (j_expected_type->str_value, actual_type, long_is_i64);
-		free (actual_type);
 		if (!match) {
+			write_reason_msg (reason, reason_sz, "arg[%d] type mismatch expected=%s actual=%s",
+				i, j_expected_type->str_value, actual_type? actual_type: "<missing>");
+			free (actual_type);
 			free (typed_name);
 			return false;
 		}
+		free (actual_type);
 		expected_param = json_next_object (expected_param->next);
 	}
 	if (expected_param) {
+		write_reason_msg (reason, reason_sz, "unexpected trailing expected param entry");
 		free (typed_name);
 		return false;
 	}
@@ -4569,9 +4601,12 @@ static WritebackApplyResult apply_inferred_signature(
 		return res;
 	}
 	rc = r_anal_str_to_fcn (anal, fcn, signature);
-	if (rc > 0 && verify_signature_type_db (anal, fcn, sig_root)) {
+	if (rc > 0 && verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))) {
 		res.path = WRITEBACK_APPLY_API;
 		return res;
+	}
+	if (rc <= 0 && !res.detail[0]) {
+		write_reason_msg (res.detail, sizeof (res.detail), "r_anal_str_to_fcn rc=%d", rc);
 	}
 	res.api_verify_fail = true;
 	if (!core) {
@@ -4579,7 +4614,7 @@ static WritebackApplyResult apply_inferred_signature(
 	}
 	res.cmd_fallback_attempted = true;
 	r_core_cmdf_at (core, fcn->addr, "afs %s", signature);
-	if (verify_signature_type_db (anal, fcn, sig_root)) {
+	if (verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))) {
 		res.path = WRITEBACK_APPLY_CMD;
 		return res;
 	}
@@ -5989,7 +6024,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	int sig_parse_failures = 0;
 	int sig_cmd_failures = 0;
 	int sig_skipped_low_conf = 0;
+	int cc_skipped_arch = 0;
 	int cc_skipped_low_conf = 0;
+	int cc_missing_payload = 0;
 	int sig_signatures_updated = 0;
 	int sig_cc_updated = 0;
 	int sig_api_apply_ok = 0;
@@ -6017,6 +6054,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	char *sample_callees = NULL;
 	const char *arch_name = NULL;
 	bool sig_arch_supported = false;
+	bool cc_arch_supported = false;
 	bool type_arch_supported = false;
 	SleighMode post_mode = sleigh_mode_effective_for_post_analysis (anal);
 	SleighTypeWritebackMode type_wb_mode = cfg_get_type_writeback_mode_default_balanced (anal);
@@ -6048,6 +6086,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	core = anal->coreb.core;
 	arch_name = r2il_arch_name (ctx);
 	sig_arch_supported = is_signature_writeback_arch_supported (arch_name);
+	cc_arch_supported = is_callconv_writeback_arch_supported (arch_name);
 	type_arch_supported = is_type_writeback_arch_supported (arch_name);
 	if (core) {
 		RAnalFunction *focus_fcn = r_anal_get_fcn_in (anal, core->addr, 0);
@@ -6427,15 +6466,18 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			const RJson *j_signature;
 			const RJson *j_callconv;
 			const RJson *j_confidence;
+			const RJson *j_callconv_confidence;
 			WritebackApplyResult sig_apply = {0};
 			WritebackApplyResult cc_apply = {0};
 			int confidence = 0;
+			int cc_confidence = 0;
 			bool signature_applied = false;
 			bool cc_applied = false;
 			bool signature_drift = false;
 			bool type_payload_changed = false;
 			bool signature_part_eligible = bb_count <= SLEIGH_SIG_WRITEBACK_MAX_BLOCKS;
 			bool signature_arch_eligible = sig_arch_supported;
+			bool callconv_arch_eligible = cc_arch_supported;
 			bool sig_metrics_eligible = signature_arch_eligible && signature_part_eligible;
 			ut64 cache_key = 0;
 			ut64 payload_hash = 0;
@@ -6505,8 +6547,12 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					j_signature = r_json_get (payload_root, "signature");
 					j_callconv = r_json_get (payload_root, "callconv");
 					j_confidence = r_json_get (payload_root, "confidence");
+					j_callconv_confidence = r_json_get (payload_root, "callconv_confidence");
 					if (j_confidence && j_confidence->type == R_JSON_INTEGER) {
 						confidence = (int)j_confidence->num.u_value;
+					}
+					if (j_callconv_confidence && j_callconv_confidence->type == R_JSON_INTEGER) {
+						cc_confidence = (int)j_callconv_confidence->num.u_value;
 					}
 
 					if (signature_arch_eligible && signature_part_eligible
@@ -6540,8 +6586,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 								&prop_state, focus_callee_addr && fcn->addr == focus_callee_addr);
 						} else if (confidence >= SLEIGH_SIG_MIN_CONFIDENCE) {
 							sig_cmd_failures++;
-							R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x,
-								fcn_name, fcn->addr);
+							R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x" reason=%s sig=%.160s",
+								fcn_name, fcn->addr, sig_apply.detail[0]? sig_apply.detail: "unknown",
+								j_signature->str_value);
 						}
 					} else {
 						if (sig_metrics_eligible) {
@@ -6549,10 +6596,12 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						}
 					}
 
-					if (signature_arch_eligible && signature_part_eligible
+					if (signature_part_eligible
 							&& j_callconv && j_callconv->type == R_JSON_STRING
 							&& j_callconv->str_value && *j_callconv->str_value) {
-						if (confidence < SLEIGH_CC_MIN_CONFIDENCE) {
+						if (!callconv_arch_eligible) {
+							cc_skipped_arch++;
+						} else if (cc_confidence < SLEIGH_CC_MIN_CONFIDENCE) {
 							cc_skipped_low_conf++;
 						} else {
 							cc_apply = apply_inferred_callconv (anal, core, fcn, j_callconv->str_value);
@@ -6575,11 +6624,13 @@ static bool sleigh_post_analysis(RAnal *anal) {
 								cc_applied = true;
 							}
 						}
-						if (!cc_applied && confidence >= SLEIGH_CC_MIN_CONFIDENCE) {
+						if (callconv_arch_eligible && !cc_applied && cc_confidence >= SLEIGH_CC_MIN_CONFIDENCE) {
 							sig_cmd_failures++;
 							R_LOG_WARN ("r2sleigh: calling-convention write-back failed for %s @ 0x%"PFMT64x,
 								fcn_name, fcn->addr);
 						}
+					} else if (signature_part_eligible) {
+						cc_missing_payload++;
 					}
 
 					if (type_eligible && type_writeback_enabled) {
@@ -6803,7 +6854,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					const RJson *j_sig = r_json_get (payload_root, "signature");
 					const RJson *j_cc = r_json_get (payload_root, "callconv");
 					const RJson *j_conf = r_json_get (payload_root, "confidence");
+					const RJson *j_cc_conf = r_json_get (payload_root, "callconv_confidence");
 					int conf = (j_conf && j_conf->type == R_JSON_INTEGER)? (int)j_conf->num.u_value: 0;
+					int cc_conf = (j_cc_conf && j_cc_conf->type == R_JSON_INTEGER)? (int)j_cc_conf->num.u_value: 0;
 					if (j_sig && j_sig->type == R_JSON_STRING && j_sig->str_value && *j_sig->str_value
 							&& conf >= SLEIGH_SIG_MIN_CONFIDENCE) {
 						WritebackApplyResult wa = apply_inferred_signature (anal, core, fcn, j_sig->str_value, payload_root);
@@ -6813,12 +6866,18 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						}
 					}
 					if (j_cc && j_cc->type == R_JSON_STRING && j_cc->str_value && *j_cc->str_value
-							&& conf >= SLEIGH_CC_MIN_CONFIDENCE) {
+							&& cc_conf >= SLEIGH_CC_MIN_CONFIDENCE) {
+						if (!cc_arch_supported) {
+							cc_skipped_arch++;
+						} else {
 						WritebackApplyResult wa = apply_inferred_callconv (anal, core, fcn, j_cc->str_value);
 						if (wa.path != WRITEBACK_APPLY_NONE) {
 							sig_or_cc_changed = true;
 							sig_cc_updated++;
 						}
+						}
+					} else {
+						cc_missing_payload++;
 					}
 				}
 
@@ -6868,18 +6927,18 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		taint_risk_critical, taint_risk_high, taint_risk_medium, taint_risk_low);
 	R_LOG_INFO ("r2sleigh: post-analysis semantic comments enabled=%d emitted=%zu",
 		semantic_comments_enabled? 1: 0, semantic_comments_total);
-	R_LOG_INFO ("r2sleigh: signature write-back enabled=%d verify=%d considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d sig_low_conf_skips=%d cc_low_conf_skips=%d consistency_verified=%d consistency_ok=%d consistency_mismatch=%d afij_signature_drift=%d consistency_readback_fail=%d consistency_ret_mismatch=%d consistency_argc_mismatch=%d consistency_argtype_mismatch=%d consistency_callconv_mismatch=%d",
+	R_LOG_INFO ("r2sleigh: signature write-back enabled=%d verify=%d considered=%d skipped_arch=%d skipped_size=%d parse_failures=%d command_failures=%d signatures_updated=%d cc_updated=%d sig_low_conf_skips=%d cc_low_conf_skips=%d cc_skipped_arch=%d cc_missing_payload=%d consistency_verified=%d consistency_ok=%d consistency_mismatch=%d afij_signature_drift=%d consistency_readback_fail=%d consistency_ret_mismatch=%d consistency_argc_mismatch=%d consistency_argtype_mismatch=%d consistency_callconv_mismatch=%d",
 		sigwrite_enabled? 1: 0, sigverify_enabled? 1: 0, sig_fcns_considered, sig_fcns_skipped_arch, sig_fcns_skipped_size, sig_parse_failures,
 		sig_cmd_failures, sig_signatures_updated, sig_cc_updated, sig_skipped_low_conf,
-		cc_skipped_low_conf, consistency_verified, consistency_ok, consistency_mismatch,
+		cc_skipped_low_conf, cc_skipped_arch, cc_missing_payload, consistency_verified, consistency_ok, consistency_mismatch,
 		afij_signature_drift, consistency_reasons.readback_fail,
 		consistency_reasons.ret_mismatch, consistency_reasons.argc_mismatch,
 		consistency_reasons.argtype_mismatch, consistency_reasons.callconv_mismatch);
-	R_LOG_INFO ("r2sleigh: signature write-back apply-path sig_api_apply_ok=%d sig_api_verify_fail=%d sig_cmd_fallback_attempted=%d sig_cmd_apply_ok=%d sig_cmd_apply_fail=%d cc_api_apply_ok=%d cc_api_verify_fail=%d cc_cmd_fallback_attempted=%d cc_cmd_apply_ok=%d cc_cmd_apply_fail=%d",
+	R_LOG_INFO ("r2sleigh: signature write-back apply-path sig_api_apply_ok=%d sig_api_verify_fail=%d sig_cmd_fallback_attempted=%d sig_cmd_apply_ok=%d sig_cmd_apply_fail=%d cc_api_apply_ok=%d cc_api_verify_fail=%d cc_cmd_fallback_attempted=%d cc_cmd_apply_ok=%d cc_cmd_apply_fail=%d cc_missing_payload=%d",
 		sig_api_apply_ok, sig_api_verify_fail, sig_cmd_fallback_attempted,
 		sig_cmd_apply_ok, sig_cmd_apply_fail, cc_api_apply_ok,
 		cc_api_verify_fail, cc_cmd_fallback_attempted,
-		cc_cmd_apply_ok, cc_cmd_apply_fail);
+		cc_cmd_apply_ok, cc_cmd_apply_fail, cc_missing_payload);
 	if (!type_wb.fixpoint_stop_reason[0]) {
 		snprintf (type_wb.fixpoint_stop_reason, sizeof (type_wb.fixpoint_stop_reason),
 			type_writeback_enabled? "queue_empty": "off");

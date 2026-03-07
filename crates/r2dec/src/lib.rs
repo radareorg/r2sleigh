@@ -94,7 +94,8 @@ fn merge_params_with_external_signature(
         return recovered_params;
     }
 
-    (0..signature.params.len())
+    let target_len = recovered_params.len().max(signature.params.len());
+    (0..target_len)
         .map(|idx| {
             let fallback_name = format!("arg{}", idx + 1);
             let mut param = recovered_params.get(idx).cloned().unwrap_or(ast::CParam {
@@ -116,6 +117,94 @@ fn merge_params_with_external_signature(
         .collect()
 }
 
+fn register_alias_names(reg_name: &str) -> Vec<String> {
+    let lower = reg_name.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return Vec::new();
+    }
+
+    match lower.as_str() {
+        "rdi" | "edi" | "di" | "dil" => {
+            return vec!["rdi", "edi", "di", "dil"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        }
+        "rsi" | "esi" | "si" | "sil" => {
+            return vec!["rsi", "esi", "si", "sil"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        }
+        "rdx" | "edx" | "dx" | "dl" => {
+            return vec!["rdx", "edx", "dx", "dl"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        }
+        "rcx" | "ecx" | "cx" | "cl" => {
+            return vec!["rcx", "ecx", "cx", "cl"]
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+        }
+        _ => {}
+    }
+
+    for base in ["r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"] {
+        if lower == base
+            || lower == format!("{base}d")
+            || lower == format!("{base}w")
+            || lower == format!("{base}b")
+        {
+            return vec![
+                base.to_string(),
+                format!("{base}d"),
+                format!("{base}w"),
+                format!("{base}b"),
+            ];
+        }
+    }
+
+    if let Some(rest) = lower.strip_prefix('x')
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return vec![lower.clone(), format!("w{rest}")];
+    }
+    if let Some(rest) = lower.strip_prefix('w')
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return vec![format!("x{rest}"), lower];
+    }
+
+    vec![lower]
+}
+
+fn build_param_register_aliases(
+    params: &[ast::CParam],
+    recovered_params: &[(r2ssa::SSAVar, ast::CParam)],
+    register_params: &[ExternalRegisterParam],
+) -> std::collections::HashMap<String, String> {
+    let mut aliases = std::collections::HashMap::new();
+
+    for (idx, (ssa_var, _)) in recovered_params.iter().enumerate() {
+        if let Some(param) = params.get(idx) {
+            aliases.insert(ssa_var.name.to_ascii_lowercase(), param.name.clone());
+        }
+    }
+
+    for (idx, reg_param) in register_params.iter().enumerate() {
+        let Some(param) = params.get(idx) else {
+            continue;
+        };
+        for alias in register_alias_names(&reg_param.reg) {
+            aliases.insert(alias, param.name.clone());
+        }
+    }
+
+    aliases
+}
+
 /// Decompiler configuration.
 #[derive(Debug, Clone)]
 pub struct DecompilerConfig {
@@ -127,6 +216,12 @@ pub struct DecompilerConfig {
     pub sp_name: String,
     /// Frame pointer register name.
     pub fp_name: String,
+    /// Ordered argument registers for the active ABI.
+    pub arg_regs: Vec<String>,
+    /// Return-value registers for the active ABI.
+    pub ret_regs: Vec<String>,
+    /// Caller-saved registers for the active ABI.
+    pub caller_saved_regs: HashSet<String>,
     /// Soft cap for function blocks before forcing fallback.
     pub max_blocks: usize,
 }
@@ -138,6 +233,26 @@ impl Default for DecompilerConfig {
             ptr_size: 64,
             sp_name: "rsp".to_string(),
             fp_name: "rbp".to_string(),
+            arg_regs: vec![
+                "rdi".to_string(),
+                "rsi".to_string(),
+                "rdx".to_string(),
+                "rcx".to_string(),
+                "r8".to_string(),
+                "r9".to_string(),
+            ],
+            ret_regs: vec![
+                "rax".to_string(),
+                "eax".to_string(),
+                "xmm0".to_string(),
+                "xmm0_qa".to_string(),
+                "xmm0_qb".to_string(),
+                "st0".to_string(),
+            ],
+            caller_saved_regs: ["rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             max_blocks: 200,
         }
     }
@@ -150,6 +265,12 @@ impl DecompilerConfig {
             ptr_size: 32,
             sp_name: "esp".to_string(),
             fp_name: "ebp".to_string(),
+            arg_regs: vec![],
+            ret_regs: vec!["eax".to_string(), "xmm0".to_string(), "st0".to_string()],
+            caller_saved_regs: ["eax", "ecx", "edx"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             ..Default::default()
         }
     }
@@ -165,6 +286,15 @@ impl DecompilerConfig {
             ptr_size: 32,
             sp_name: "sp".to_string(),
             fp_name: "fp".to_string(),
+            arg_regs: ["r0", "r1", "r2", "r3"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ret_regs: vec!["r0".to_string()],
+            caller_saved_regs: ["r0", "r1", "r2", "r3", "r12", "lr", "ip"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
             ..Default::default()
         }
     }
@@ -175,6 +305,18 @@ impl DecompilerConfig {
             ptr_size: 64,
             sp_name: "sp".to_string(),
             fp_name: "fp".to_string(),
+            arg_regs: ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ret_regs: vec!["x0".to_string(), "w0".to_string()],
+            caller_saved_regs: [
+                "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
+                "x13", "x14", "x15", "x16", "x17",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
             ..Default::default()
         }
     }
@@ -185,6 +327,18 @@ impl DecompilerConfig {
             ptr_size: 32,
             sp_name: "sp".to_string(),
             fp_name: "s0".to_string(),
+            arg_regs: ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ret_regs: vec!["a0".to_string()],
+            caller_saved_regs: [
+                "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5",
+                "a6", "a7",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
             ..Default::default()
         }
     }
@@ -195,6 +349,18 @@ impl DecompilerConfig {
             ptr_size: 64,
             sp_name: "sp".to_string(),
             fp_name: "s0".to_string(),
+            arg_regs: ["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            ret_regs: vec!["a0".to_string()],
+            caller_saved_regs: [
+                "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5",
+                "a6", "a7",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
             ..Default::default()
         }
     }
@@ -207,6 +373,17 @@ pub struct ExternalFunctionParam {
     pub name: String,
     /// Optional type recovered from external metadata.
     pub ty: Option<CType>,
+}
+
+/// External register-backed parameter metadata recovered from host analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalRegisterParam {
+    /// Parameter name recovered from external metadata.
+    pub name: String,
+    /// Optional type recovered from external metadata.
+    pub ty: Option<CType>,
+    /// Register reference reported by host analysis.
+    pub reg: String,
 }
 
 /// External function signature recovered from host analysis.
@@ -239,6 +416,8 @@ pub struct DecompilerContext {
     pub symbols: std::collections::HashMap<u64, String>,
     /// Optional external function signature.
     pub function_signature: Option<ExternalFunctionSignature>,
+    /// Register-backed parameter metadata from host analysis.
+    pub register_params: Vec<ExternalRegisterParam>,
     /// Optional known function signatures from host analysis.
     pub known_function_signatures: std::collections::HashMap<String, FunctionType>,
     /// Stack variables keyed by signed stack offset.
@@ -286,6 +465,11 @@ impl Decompiler {
     /// Set an externally recovered function signature.
     pub fn set_function_signature(&mut self, signature: Option<ExternalFunctionSignature>) {
         self.context.function_signature = signature;
+    }
+
+    /// Set externally recovered register-backed parameters.
+    pub fn set_register_params(&mut self, register_params: Vec<ExternalRegisterParam>) {
+        self.context.register_params = register_params;
     }
 
     /// Set externally recovered known function signatures keyed by name.
@@ -362,10 +546,12 @@ impl Decompiler {
         let func = &normalized_func;
 
         // Recover variables
-        let mut var_recovery = VariableRecovery::new(
+        let mut var_recovery = VariableRecovery::new_with_abi(
             &self.config.sp_name,
             &self.config.fp_name,
             self.config.ptr_size,
+            self.config.arg_regs.clone(),
+            self.config.ret_regs.clone(),
         );
         if let Some(signature) = &self.context.function_signature {
             var_recovery.set_external_signature(signature.clone());
@@ -376,7 +562,11 @@ impl Decompiler {
         var_recovery.recover(func);
 
         // Infer types
-        let mut type_inference = TypeInference::new(self.config.ptr_size);
+        let mut type_inference = TypeInference::new_with_abi(
+            self.config.ptr_size,
+            self.config.arg_regs.clone(),
+            self.config.ret_regs.clone(),
+        );
         if !self.context.function_names.is_empty() {
             type_inference.set_function_names(self.context.function_names.clone());
         }
@@ -408,9 +598,58 @@ impl Decompiler {
             .map(|(name, ty)| (normalize_callee_name(name), ty.clone()))
             .collect::<std::collections::HashMap<_, _>>();
 
-        let mut fold_arch = FoldArchConfig::for_ptr_size(self.config.ptr_size);
-        fold_arch.sp_name = self.config.sp_name.clone();
-        fold_arch.fp_name = self.config.fp_name.clone();
+        let mut recovered_param_infos: Vec<_> = var_recovery
+            .parameters()
+            .iter()
+            .map(|v| {
+                (
+                    v.ssa_var.clone(),
+                    ast::CParam {
+                        ty: type_inference.get_type(&v.ssa_var),
+                        name: v.name.clone(),
+                    },
+                )
+            })
+            .collect();
+        recovered_param_infos.sort_by(|a, b| {
+            let ai =
+                a.1.name
+                    .strip_prefix("arg")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(usize::MAX);
+            let bi =
+                b.1.name
+                    .strip_prefix("arg")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(usize::MAX);
+            ai.cmp(&bi).then_with(|| a.1.name.cmp(&b.1.name))
+        });
+        let params = merge_params_with_external_signature(
+            recovered_param_infos
+                .iter()
+                .map(|(_, param)| param.clone())
+                .collect(),
+            self.context.function_signature.as_ref(),
+        );
+        let param_register_aliases = build_param_register_aliases(
+            &params,
+            &recovered_param_infos,
+            &self.context.register_params,
+        );
+
+        let fold_arch = FoldArchConfig {
+            ptr_size: self.config.ptr_size,
+            sp_name: self.config.sp_name.clone(),
+            fp_name: self.config.fp_name.clone(),
+            ret_reg_name: self
+                .config
+                .ret_regs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "rax".to_string()),
+            arg_regs: self.config.arg_regs.clone(),
+            caller_saved_regs: self.config.caller_saved_regs.clone(),
+        };
         let fold_inputs = FoldInputs {
             arch: &fold_arch,
             function_names: &self.context.function_names,
@@ -418,6 +657,7 @@ impl Decompiler {
             symbols: &self.context.symbols,
             known_function_signatures: &known_function_signatures,
             external_stack_vars: &self.context.stack_vars,
+            param_register_aliases: &param_register_aliases,
             type_hints: &type_hints,
             type_oracle,
         };
@@ -488,35 +728,6 @@ impl Decompiler {
             .name
             .clone()
             .unwrap_or_else(|| format!("sub_{:x}", func.entry));
-
-        // Collect parameters -- always include in signature even if inlined in body
-        let mut recovered_params: Vec<ast::CParam> = var_recovery
-            .parameters()
-            .iter()
-            .map(|v| ast::CParam {
-                ty: type_inference.get_type(&v.ssa_var),
-                name: v.name.clone(),
-            })
-            .collect();
-        // Sort by arg number when available, then by name.
-        recovered_params.sort_by(|a, b| {
-            let ai = a
-                .name
-                .strip_prefix("arg")
-                .and_then(|n| n.parse::<usize>().ok())
-                .unwrap_or(usize::MAX);
-            let bi = b
-                .name
-                .strip_prefix("arg")
-                .and_then(|n| n.parse::<usize>().ok())
-                .unwrap_or(usize::MAX);
-            ai.cmp(&bi).then_with(|| a.name.cmp(&b.name))
-        });
-
-        let params = merge_params_with_external_signature(
-            recovered_params,
-            self.context.function_signature.as_ref(),
-        );
 
         // Collect locals -- on fallback keep locals conservatively.
         let locals: Vec<ast::CLocal> = if use_conservative_locals {
@@ -662,6 +873,17 @@ mod tests {
     }
 
     #[test]
+    fn test_decompiler_config_aarch64() {
+        let config = DecompilerConfig::aarch64();
+        assert_eq!(config.ptr_size, 64);
+        assert_eq!(config.sp_name, "sp");
+        assert_eq!(config.fp_name, "fp");
+        assert_eq!(config.arg_regs[0], "x0");
+        assert_eq!(config.ret_regs[0], "x0");
+        assert!(config.caller_saved_regs.contains("x17"));
+    }
+
+    #[test]
     fn test_decompiler_config_riscv32() {
         let config = DecompilerConfig::riscv32();
         assert_eq!(config.ptr_size, 32);
@@ -678,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn external_signature_arity_caps_function_header_params() {
+    fn external_signature_does_not_shrink_richer_recovered_header_params() {
         let recovered = vec![
             ast::CParam {
                 ty: CType::Int(32),
@@ -708,9 +930,36 @@ mod tests {
         };
 
         let params = merge_params_with_external_signature(recovered, Some(&signature));
-        assert_eq!(params.len(), 2, "external arity should be authoritative");
+        assert_eq!(
+            params.len(),
+            3,
+            "external signature should not shrink a richer recovered header"
+        );
         assert_eq!(params[0].name, "src");
         assert_eq!(params[1].name, "len");
+        assert_eq!(params[2].name, "arg3");
         assert!(matches!(params[1].ty, CType::UInt(64)));
+    }
+
+    #[test]
+    fn external_signature_can_extend_empty_recovered_header_params() {
+        let signature = ExternalFunctionSignature {
+            ret_type: None,
+            params: vec![
+                ExternalFunctionParam {
+                    name: "buf".to_string(),
+                    ty: Some(CType::Pointer(Box::new(CType::Int(8)))),
+                },
+                ExternalFunctionParam {
+                    name: "count".to_string(),
+                    ty: Some(CType::UInt(64)),
+                },
+            ],
+        };
+
+        let params = merge_params_with_external_signature(Vec::new(), Some(&signature));
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "buf");
+        assert_eq!(params[1].name, "count");
     }
 }

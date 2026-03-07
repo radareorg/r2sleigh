@@ -38,6 +38,7 @@ pub(crate) struct FoldInputs<'a> {
     pub(crate) symbols: &'a HashMap<u64, String>,
     pub(crate) known_function_signatures: &'a HashMap<String, FunctionType>,
     pub(crate) external_stack_vars: &'a HashMap<i64, ExternalStackVar>,
+    pub(crate) param_register_aliases: &'a HashMap<String, String>,
     pub(crate) type_hints: &'a HashMap<String, CType>,
     pub(crate) type_oracle: Option<&'a dyn TypeOracle>,
 }
@@ -128,6 +129,7 @@ impl<'a> FoldingContext<'a> {
     pub fn new(ptr_size: u32) -> Self {
         static EMPTY_U64_STRING: OnceLock<HashMap<u64, String>> = OnceLock::new();
         static EMPTY_I64_STACK: OnceLock<HashMap<i64, ExternalStackVar>> = OnceLock::new();
+        static EMPTY_STRING_STRING: OnceLock<HashMap<String, String>> = OnceLock::new();
         static EMPTY_STRING_FNTY: OnceLock<HashMap<String, FunctionType>> = OnceLock::new();
         static EMPTY_STRING_CTYPE: OnceLock<HashMap<String, CType>> = OnceLock::new();
         static ARCH64: OnceLock<FoldArchConfig> = OnceLock::new();
@@ -146,6 +148,7 @@ impl<'a> FoldingContext<'a> {
             symbols: EMPTY_U64_STRING.get_or_init(HashMap::new),
             known_function_signatures: EMPTY_STRING_FNTY.get_or_init(HashMap::new),
             external_stack_vars: EMPTY_I64_STACK.get_or_init(HashMap::new),
+            param_register_aliases: EMPTY_STRING_STRING.get_or_init(HashMap::new),
             type_hints: EMPTY_STRING_CTYPE.get_or_init(HashMap::new),
             type_oracle: None,
         };

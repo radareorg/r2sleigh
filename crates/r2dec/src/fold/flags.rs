@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use r2ssa::{SSAOp, SSAVar};
 
 use crate::analysis;
-use crate::ast::{BinaryOp, CExpr, UnaryOp};
+use crate::ast::{BinaryOp, CExpr, CType, UnaryOp};
 
 use super::context::FoldingContext;
 use super::op_lower::parse_const_value;
@@ -35,13 +35,38 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    pub(super) fn predicate_exprs_map(&self) -> &std::collections::HashMap<String, CExpr> {
+        &self.state.analysis_ctx.flag_info.predicate_exprs
+    }
+
+    pub(super) fn lookup_predicate_expr(&self, name: &str) -> Option<CExpr> {
+        if let Some(expr) = self.predicate_exprs_map().get(name) {
+            return Some(expr.clone());
+        }
+        let lower = name.to_ascii_lowercase();
+        if let Some(expr) = self.predicate_exprs_map().get(&lower) {
+            return Some(expr.clone());
+        }
+        if let Some((ssa_name, _)) = self
+            .var_aliases_map()
+            .iter()
+            .find(|(_, alias)| alias.eq_ignore_ascii_case(name))
+            && let Some(expr) = self.predicate_exprs_map().get(ssa_name)
+        {
+            return Some(expr.clone());
+        }
+        None
+    }
+
     pub(super) fn predicate_candidate_for_var(&self, var: &SSAVar) -> Option<CExpr> {
         let key = var.display_name();
-        self.lookup_definition(&key)
+        self.lookup_predicate_expr(&key)
+            .or_else(|| self.lookup_definition(&key))
             .or_else(|| self.formatted_defs_map().get(&key).cloned())
             .or_else(|| {
                 let rendered = self.var_name(var);
-                self.formatted_defs_map().get(&rendered).cloned()
+                self.lookup_predicate_expr(&rendered)
+                    .or_else(|| self.formatted_defs_map().get(&rendered).cloned())
             })
     }
 
@@ -66,6 +91,7 @@ impl<'a> FoldingContext<'a> {
                 is_cpu_flag(&name.to_lowercase())
                     || self.flag_only_values_set().contains(name)
                     || self.condition_vars_set().contains(name)
+                    || self.lookup_predicate_expr(name).is_some()
             }
             CExpr::Unary {
                 op: UnaryOp::Not, ..
@@ -109,11 +135,8 @@ impl<'a> FoldingContext<'a> {
             return self.const_to_expr(var);
         }
 
-        let key = var.display_name();
         let expr = self
-            .definitions_map()
-            .get(&key)
-            .cloned()
+            .predicate_candidate_for_var(var)
             .unwrap_or_else(|| CExpr::Var(self.var_name(var)));
         let expr = self.rewrite_stack_expr(expr);
         let expr = self.rewrite_condition_stack_aliases(expr);
@@ -233,6 +256,32 @@ impl<'a> FoldingContext<'a> {
     pub(super) fn rewrite_predicate_once(&self, expr: CExpr) -> CExpr {
         match expr {
             CExpr::Binary {
+                op: BinaryOp::Le,
+                left,
+                right,
+            } => {
+                if let Some(rewritten) =
+                    self.rewrite_unsigned_nonzero_test(left.as_ref(), right.as_ref())
+                {
+                    rewritten
+                } else {
+                    CExpr::binary(BinaryOp::Le, *left, *right)
+                }
+            }
+            CExpr::Binary {
+                op: BinaryOp::Ge,
+                left,
+                right,
+            } => {
+                if let Some(rewritten) =
+                    self.rewrite_unsigned_nonzero_test(right.as_ref(), left.as_ref())
+                {
+                    rewritten
+                } else {
+                    CExpr::binary(BinaryOp::Ge, *left, *right)
+                }
+            }
+            CExpr::Binary {
                 op: BinaryOp::And,
                 left,
                 right,
@@ -246,19 +295,13 @@ impl<'a> FoldingContext<'a> {
             CExpr::Unary {
                 op: UnaryOp::Not,
                 operand,
-            } => match *operand {
-                CExpr::Binary {
-                    op: BinaryOp::Eq,
-                    left,
-                    right,
-                } => CExpr::binary(BinaryOp::Ne, *left, *right),
-                CExpr::Binary {
-                    op: BinaryOp::Ne,
-                    left,
-                    right,
-                } => CExpr::binary(BinaryOp::Eq, *left, *right),
-                other => CExpr::unary(UnaryOp::Not, other),
-            },
+            } => {
+                if let Some(rewritten) = self.rewrite_not_unsigned_nonzero_test(operand.as_ref()) {
+                    rewritten
+                } else {
+                    self.negate_condition_expr(*operand)
+                }
+            }
             CExpr::Binary {
                 op: BinaryOp::Sub,
                 left,
@@ -349,6 +392,21 @@ impl<'a> FoldingContext<'a> {
         right: CExpr,
     ) -> CExpr {
         if self.is_zero_expr(&right) {
+            if self.is_boolean_value_expr(&left) {
+                return match cmp_op {
+                    BinaryOp::Eq => self.negate_condition_expr(left),
+                    BinaryOp::Ne => left,
+                    _ => CExpr::binary(cmp_op, left, right),
+                };
+            }
+            if let Some((sub_lhs, sub_rhs)) = self.extract_sub_operands(&left) {
+                let rhs = self.resolve_predicate_operand(&sub_rhs, 0, &mut HashSet::new());
+                return CExpr::binary(
+                    cmp_op,
+                    self.resolve_predicate_operand(&sub_lhs, 0, &mut HashSet::new()),
+                    self.normalize_sub_cmp_constant(rhs),
+                );
+            }
             if let Some(base) = self.strip_test_self(&left) {
                 return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
             }
@@ -361,6 +419,21 @@ impl<'a> FoldingContext<'a> {
         }
 
         if self.is_zero_expr(&left) {
+            if self.is_boolean_value_expr(&right) {
+                return match cmp_op {
+                    BinaryOp::Eq => self.negate_condition_expr(right),
+                    BinaryOp::Ne => right,
+                    _ => CExpr::binary(cmp_op, left, right),
+                };
+            }
+            if let Some((sub_lhs, sub_rhs)) = self.extract_sub_operands(&right) {
+                let rhs = self.resolve_predicate_operand(&sub_rhs, 0, &mut HashSet::new());
+                return CExpr::binary(
+                    cmp_op,
+                    self.resolve_predicate_operand(&sub_lhs, 0, &mut HashSet::new()),
+                    self.normalize_sub_cmp_constant(rhs),
+                );
+            }
             if let Some(base) = self.strip_test_self(&right) {
                 return CExpr::binary(cmp_op, base, CExpr::IntLit(0));
             }
@@ -373,6 +446,126 @@ impl<'a> FoldingContext<'a> {
         }
 
         CExpr::binary(cmp_op, left, right)
+    }
+
+    pub(super) fn rewrite_unsigned_nonzero_test(
+        &self,
+        left: &CExpr,
+        right: &CExpr,
+    ) -> Option<CExpr> {
+        if !self.is_predicate_one_expr(left) {
+            return None;
+        }
+
+        let candidate = self.extract_unsigned_truthy_candidate(right)?;
+        Some(if self.is_boolean_value_expr(&candidate) {
+            candidate
+        } else {
+            CExpr::binary(BinaryOp::Ne, candidate, CExpr::IntLit(0))
+        })
+    }
+
+    pub(super) fn rewrite_not_unsigned_nonzero_test(&self, expr: &CExpr) -> Option<CExpr> {
+        let CExpr::Binary {
+            op: BinaryOp::Le,
+            left,
+            right,
+        } = expr
+        else {
+            return None;
+        };
+
+        if !self.is_predicate_one_expr(left) {
+            return None;
+        }
+
+        let candidate = self.extract_unsigned_truthy_candidate(right)?;
+        Some(if self.is_boolean_value_expr(&candidate) {
+            self.negate_condition_expr(candidate)
+        } else {
+            CExpr::binary(BinaryOp::Eq, candidate, CExpr::IntLit(0))
+        })
+    }
+
+    pub(super) fn extract_unsigned_truthy_candidate(&self, expr: &CExpr) -> Option<CExpr> {
+        match expr {
+            CExpr::Paren(inner) => self.extract_unsigned_truthy_candidate(inner),
+            CExpr::Cast {
+                ty: CType::UInt(_) | CType::Bool,
+                expr: inner,
+            } => Some(inner.as_ref().clone()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn negate_condition_expr(&self, expr: CExpr) -> CExpr {
+        match expr {
+            CExpr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => *operand,
+            CExpr::Binary { op, left, right } => {
+                let negated = match op {
+                    BinaryOp::Eq => Some(BinaryOp::Ne),
+                    BinaryOp::Ne => Some(BinaryOp::Eq),
+                    BinaryOp::Lt => Some(BinaryOp::Ge),
+                    BinaryOp::Le => Some(BinaryOp::Gt),
+                    BinaryOp::Gt => Some(BinaryOp::Le),
+                    BinaryOp::Ge => Some(BinaryOp::Lt),
+                    _ => None,
+                };
+
+                if let Some(op) = negated {
+                    CExpr::Binary { op, left, right }
+                } else {
+                    CExpr::unary(UnaryOp::Not, CExpr::Binary { op, left, right })
+                }
+            }
+            other => CExpr::unary(UnaryOp::Not, other),
+        }
+    }
+
+    pub(super) fn is_boolean_value_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                is_cpu_flag(&name.to_lowercase())
+                    || self.flag_only_values_set().contains(name)
+                    || self.condition_vars_set().contains(name)
+                    || self.lookup_predicate_expr(name).is_some()
+            }
+            CExpr::Unary {
+                op: UnaryOp::Not, ..
+            } => true,
+            CExpr::Binary { op, .. } => matches!(
+                op,
+                BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::And
+                    | BinaryOp::Or
+                    | BinaryOp::BitXor
+            ),
+            CExpr::Paren(inner) => self.is_boolean_value_expr(inner),
+            CExpr::Cast {
+                ty: CType::Bool,
+                expr: _,
+            } => true,
+            CExpr::Cast { expr: inner, .. } => self.is_boolean_value_expr(inner),
+            _ => false,
+        }
+    }
+
+    pub(super) fn is_predicate_one_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Paren(inner) => self.is_predicate_one_expr(inner),
+            CExpr::Cast { expr: inner, .. } => self.is_predicate_one_expr(inner),
+            CExpr::IntLit(1) | CExpr::UIntLit(1) => true,
+            CExpr::Var(name) => name == "1",
+            _ => false,
+        }
     }
 
     pub(super) fn normalize_sub_cmp_constant(&self, value: CExpr) -> CExpr {
@@ -482,6 +675,7 @@ impl<'a> FoldingContext<'a> {
                 is_cpu_flag(&name.to_lowercase())
                     || self.flag_only_values_set().contains(name)
                     || self.condition_vars_set().contains(name)
+                    || self.lookup_predicate_expr(name).is_some()
             }
             CExpr::Unary {
                 op: UnaryOp::Not, ..
@@ -511,11 +705,13 @@ impl<'a> FoldingContext<'a> {
         if is_cpu_flag(&name.to_lowercase())
             || self.condition_vars_set().contains(name)
             || self.flag_only_values_set().contains(name)
+            || self.lookup_predicate_expr(name).is_some()
         {
             return true;
         }
 
-        self.lookup_definition(name)
+        self.lookup_predicate_expr(name)
+            .or_else(|| self.lookup_definition(name))
             .or_else(|| self.formatted_defs_map().get(name).cloned())
             .map(|expr| self.is_predicate_like_expr(&expr))
             .unwrap_or(false)
@@ -536,6 +732,24 @@ impl<'a> FoldingContext<'a> {
                 if let Some(alias) = self.arg_alias_for_rendered_name(name) {
                     return CExpr::Var(alias);
                 }
+                if let Some(inner) = self.lookup_predicate_expr(name)
+                    && inner != CExpr::Var(name.clone())
+                {
+                    if let CExpr::Var(inner_name) = &inner {
+                        if inner_name.starts_with("arg") {
+                            return CExpr::Var(inner_name.clone());
+                        }
+                        if let Some(alias) = self.arg_alias_for_rendered_name(inner_name) {
+                            return CExpr::Var(alias);
+                        }
+                    }
+                    if !self.should_expand_predicate_var(name) || !visited.insert(name.clone()) {
+                        return CExpr::Var(name.clone());
+                    }
+                    let expanded = self.expand_predicate_vars(&inner, depth + 1, visited);
+                    visited.remove(name);
+                    return expanded;
+                }
                 if let Some(inner) = self
                     .lookup_definition(name)
                     .or_else(|| self.formatted_defs_map().get(name).cloned())
@@ -553,7 +767,8 @@ impl<'a> FoldingContext<'a> {
                 }
 
                 let expanded = self
-                    .lookup_definition(name)
+                    .lookup_predicate_expr(name)
+                    .or_else(|| self.lookup_definition(name))
                     .or_else(|| self.formatted_defs_map().get(name).cloned())
                     .filter(|inner| self.is_predicate_like_expr(inner))
                     .map(|inner| self.expand_predicate_vars(&inner, depth + 1, visited))
@@ -1389,12 +1604,18 @@ impl<'a> FoldingContext<'a> {
                 if let Some(alias) = self.arg_alias_for_rendered_name(name) {
                     return CExpr::Var(alias);
                 }
+                if let Some(inner) = self.lookup_predicate_expr(name)
+                    && inner != CExpr::Var(name.clone())
+                {
+                    return self.resolve_predicate_operand(&inner, depth + 1, visited);
+                }
                 if !visited.insert(name.clone()) {
                     return CExpr::Var(name.clone());
                 }
 
                 let resolved = self
-                    .lookup_definition(name)
+                    .lookup_predicate_expr(name)
+                    .or_else(|| self.lookup_definition(name))
                     .or_else(|| self.formatted_defs_map().get(name).cloned())
                     .map(|inner| {
                         if let Some(stack_var) = self.stack_alias_from_deref_expr(&inner) {

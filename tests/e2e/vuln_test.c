@@ -466,6 +466,16 @@ int test_global_type_compete(int x) {
     return g_type_b.tail + g_type_a.first;
 }
 
+// Test 43: Predicate carrier through cast/bool-not chain for decompiler normalization
+int test_bool_carrier_chain(int x, int y) {
+    int neq = x != y;
+    unsigned long widened = (unsigned long)neq;
+    if (!widened) {
+        return y;
+    }
+    return x;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) {
         printf("Usage: %s <test_num> [args...]\n", argv[0]);
@@ -798,6 +808,18 @@ int main(int argc, char *argv[]) {
             if (argc > 2) {
                 int x = atoi(argv[2]);
                 printf("test_global_type_compete(%d) = %d\n", x, test_global_type_compete(x));
+            }
+            break;
+        case 43:
+            if (argc > 3) {
+                int x = atoi(argv[2]);
+                int y = atoi(argv[3]);
+                printf(
+                    "test_bool_carrier_chain(%d, %d) = %d\n",
+                    x,
+                    y,
+                    test_bool_carrier_chain(x, y)
+                );
             }
             break;
         default:

@@ -35,6 +35,7 @@ pub(crate) struct PassEnv<'a> {
     pub(crate) strings: &'a HashMap<u64, String>,
     pub(crate) symbols: &'a HashMap<u64, String>,
     pub(crate) arg_regs: &'a [String],
+    pub(crate) param_register_aliases: &'a HashMap<String, String>,
     pub(crate) caller_saved_regs: &'a HashSet<String>,
     pub(crate) type_hints: &'a HashMap<String, CType>,
     pub(crate) type_oracle: Option<&'a dyn TypeOracle>,
@@ -64,6 +65,7 @@ pub(crate) struct FlagInfo {
     pub(crate) flag_origins: HashMap<String, (String, String)>,
     pub(crate) sub_results: HashMap<String, (String, String)>,
     pub(crate) flag_only_values: HashSet<String>,
+    pub(crate) predicate_exprs: HashMap<String, CExpr>,
 }
 
 #[allow(dead_code)]
@@ -77,6 +79,14 @@ pub(crate) struct StackInfo {
 impl UseInfo {
     pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv<'_>) -> Self {
         use_info::analyze(blocks, env)
+    }
+
+    pub(crate) fn analyze_with_definition_overrides(
+        blocks: &[SSABlock],
+        env: &PassEnv<'_>,
+        definition_overrides: &HashMap<String, CExpr>,
+    ) -> Self {
+        use_info::analyze_with_definition_overrides(blocks, env, definition_overrides)
     }
 }
 

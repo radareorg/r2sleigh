@@ -161,7 +161,7 @@ static int sleigh_arch_info(RArchSession *as, ut32 query) {
 }
 
 /* Define architecture plugins for different variants */
-const RArchPlugin r_arch_plugin_sleigh_x86 = {
+RArchPlugin r_arch_plugin_sleigh_x86 = {
 	.meta = {
 		.name = "r2sleigh",
 		.author = "r2sleigh project",

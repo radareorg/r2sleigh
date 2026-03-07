@@ -12,19 +12,6 @@ use super::{MAX_STACK_ALIAS_DEPTH, MAX_STACK_OFFSET_DEPTH};
 const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
 
 impl<'a> FoldingContext<'a> {
-    pub(super) fn is_stack_alias_expr(&self, expr: &CExpr) -> bool {
-        match expr {
-            CExpr::Var(name) => {
-                let lowered = name.to_lowercase();
-                lowered.starts_with("arg")
-                    || lowered.starts_with("local_")
-                    || lowered.starts_with("&arg")
-                    || lowered.starts_with("&local_")
-            }
-            _ => false,
-        }
-    }
-
     /// Try to extract a stack offset from a variable name or its definition.
     pub(crate) fn extract_stack_offset_from_var(&self, var: &SSAVar) -> Option<i64> {
         let name_lower = var.name.to_lowercase();

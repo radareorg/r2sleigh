@@ -1,611 +1,369 @@
 # Agent Guidelines for r2sleigh
 
-> LLM-optimized context for AI coding assistants working on this codebase.
+> LLM-focused working notes for contributors and coding agents.
 
 ## Project Summary
 
-**r2sleigh** = Sleigh-to-r2il compiler for radare2. Converts Ghidra P-code to ESIL.
+`r2sleigh` is a Sleigh-to-r2il pipeline for radare2.
 
-```
-Input:  Ghidra .sla files (via libsla)
-Output: r2il binary format + ESIL text
+```text
+.sla (Ghidra) --> libsla --> P-code --> r2il --> ESIL
+                                          |
+                                          +--> SSA (r2ssa)
+                                          +--> Type inference (r2types)
+                                          +--> Symbolic / taint (r2sym)
+                                          +--> Decompiler (r2dec)
+                                          +--> Plugin / CLI export surfaces
 ```
 
-## Architecture (READ THIS FIRST)
+The repository is no longer just "P-code to ESIL". A lot of current work lands in SSA, decompilation, symbolic execution, type inference, and radare2 integration layers.
 
-```
+## Read This First
+
+1. Default to `tests/r2r` for new plugin regressions and command-output checks.
+2. Do not add new snapshot-style plugin tests to `tests/e2e/integration_tests.rs` unless the case genuinely cannot be expressed in `r2r`.
+3. Build and run commands in this repo have drifted over time. Prefer the commands in this file over older examples.
+4. File paths below use the current `src/` layout. Older references like `r2plugin/lib.rs` are stale.
+5. Architecture feature support differs by crate. Check the relevant `Cargo.toml` before documenting or wiring a new arch.
+
+## Workspace Layout
+
+```text
 crates/
-├── r2il/           # Core IL types (Varnode, R2ILOp, ArchSpec)
-├── r2sleigh-lift/  # P-code → r2il translation
-├── r2sleigh-cli/   # CLI tool (compile, disasm, info)
-├── r2ssa/          # SSA transformation and analysis
-├── r2sym/          # Symbolic execution + taint analysis
-└── r2dec/          # Decompiler (expression folding, structuring, symbols)
-r2plugin/           # C-ABI for radare2 integration
+├── r2il/             # Core IL types and serialization
+├── r2sleigh-lift/    # Sleigh/P-code lifting, disassembly, ESIL formatting
+├── r2sleigh-export/  # Unified export pipeline for lift/ssa/defuse/dec
+├── r2sleigh-cli/     # Standalone CLI
+├── r2ssa/            # SSA form, dominators, def-use, optimization
+├── r2sym/            # Symbolic execution, taint, summaries, solving
+├── r2types/          # Type inference and signatures
+└── r2dec/            # Decompiler AST, folding, lowering, codegen
+r2plugin/             # Rust cdylib + C radare2 wrapper
+tests/
+├── r2r/              # Preferred snapshot and command regression suite
+└── e2e/              # Rust semantic/FFI/benchmark suite and fixture binaries
 ```
 
-### Data Flow
+## Core Types and Entry Points
 
-```
-.sla (Ghidra) → libsla → P-code ops → PcodeTranslator → R2ILOp → ESIL string
-                                                              ↓
-                                                          to_ssa()
-                                                              ↓
-                                                         SSABlock → def_use()
+| Type / Function | Location | Purpose |
+|-----------------|----------|---------|
+| `Varnode` | `crates/r2il/src/varnode.rs` | Sized data location: reg/mem/const/unique |
+| `SpaceId` | `crates/r2il/src/space.rs` | Address-space enum |
+| `R2ILOp` | `crates/r2il/src/opcode.rs` | Semantic IL op enum |
+| `R2ILBlock` | `crates/r2il/src/opcode.rs` | One-instruction IL block |
+| `ArchSpec` | `crates/r2il/src/serialize.rs` | Architecture metadata |
+| `Disassembler` | `crates/r2sleigh-lift/src/disasm.rs` | libsla wrapper and P-code lifting |
+| `format_op()` / `op_to_esil()` | `crates/r2sleigh-lift/src/esil.rs` | Text and ESIL formatting |
+| `run_action_output()` | `crates/r2sleigh-cli/src/main.rs` | CLI action/format dispatcher |
+| export helpers | `crates/r2sleigh-export/src/lib.rs` | Shared export pipeline used by CLI/plugin |
+| `SSAVar` | `crates/r2ssa/src/var.rs` | Versioned SSA variable |
+| `SSAOp` | `crates/r2ssa/src/op.rs` | SSA operation enum |
+| `to_ssa()` | `crates/r2ssa/src/block.rs` | R2IL block -> SSA block |
+| `DefUseInfo` | `crates/r2ssa/src/defuse.rs` | Def-use analysis result |
+| `FunctionSSABlock` / `SSAFunction` | `crates/r2ssa/src/function.rs` | Function-level SSA with phi nodes |
+| `AnalysisResult` and type passes | `crates/r2types/src/` | Type inference payloads |
+| `CExpr` / `CStmt` | `crates/r2dec/src/ast.rs` | Decompiler AST |
+| `FoldingContext` | `crates/r2dec/src/fold/` | Expression folding and simplification |
+| `LowerCtx` | `crates/r2dec/src/analysis/lower.rs` | SSA-to-expression lowering |
+| plugin Rust surface | `r2plugin/src/lib.rs` | JSON commands, analysis helpers, FFI |
+| plugin C wrapper | `r2plugin/r_anal_sleigh.c` | radare2 callbacks and command dispatch |
+
+## Build and Run
+
+Use these commands from the workspace root unless noted otherwise.
+
+```bash
+# Build the workspace with x86 support
+cargo build --workspace --features x86
+
+# Run the Rust test suite
+cargo test --workspace --features x86
+
+# Run the CLI explicitly
+cargo run -p r2sleigh-cli --bin r2sleigh --features x86 -- \
+  disasm --arch x86-64 --bytes "31c00000000000000000000000000000" --format json
+
+# Install the plugin via the workspace alias
+cargo install-plugin -- --features x86
+
+# Or install all plugin architectures through the Makefile helper
+make -C r2plugin RUST_FEATURES=all-archs install
+
+# Run the preferred plugin regression suite
+make -C tests/r2r run
+
+# Run the Rust e2e suite when needed
+cargo e2e-test
 ```
 
-### Key Types
+Notes:
+
+- `cargo run --features x86 -- ...` is stale at the workspace root; use `-p r2sleigh-cli --bin r2sleigh`.
+- `cargo install-plugin` is defined in `.cargo/config.toml` and wraps `r2plugin/src/bin/r2sleigh-plugin-install.rs`.
+- x86/x86-64 disassembly still needs at least 16 bytes of input; pad with zeros.
+
+## Architecture Support
+
+Feature matrices are not identical across crates.
+
+- `r2plugin` currently exposes `x86`, `arm`, `riscv`, and `all-archs`.
+- `r2sleigh-cli` currently exposes `x86`, `arm`, `mips`, `riscv`, and `all-archs`.
+- There is still some compatibility code for `mips` in shared/plugin code, but the plugin crate itself is currently feature-gated around `x86`, `arm`, and `riscv`.
+- If you change architecture wiring, inspect both `r2plugin/Cargo.toml` and `crates/r2sleigh-cli/Cargo.toml`.
+
+For radare2 auto-selection, the plugin currently maps common values like:
+
+- `anal.arch=x86`, `anal.bits=64` -> `x86-64`
+- `anal.arch=x86`, `anal.bits=32` -> `x86`
+- `anal.arch=arm`, `anal.bits=32` -> `arm`
+- `anal.arch=arm`, `anal.bits=64` or `anal.arch=arm64` / `aarch64` -> `aarch64`
+- `anal.arch=riscv`, `anal.bits=32` -> `riscv32`
+- `anal.arch=riscv`, `anal.bits=64` -> `riscv64`
+
+Manual override stays:
+
+```bash
+r2 -qc 'a:sla.arch x86-64; a:sla.arch' /bin/ls
+```
+
+## Testing Policy
+
+### Default: `tests/r2r`
+
+Use `tests/r2r` for new regressions involving:
+
+- plugin commands such as `a:sla.*`, `a:sym.*`, `pdd`, `pdD`
+- JSON/text/ESIL/CFG/SSA/def-use/type payload shape
+- command UX, help text, error text, and normalized decompiler output
+- radare2 integration behavior that is best expressed as command snapshots
+
+Why:
+
+- faster feedback
+- better snapshot-style diffs
+- already normalized around radare2 command execution
+- consistent with how users exercise the plugin
+
+### Use `tests/e2e` only when `r2r` is the wrong tool
+
+Keep Rust E2E tests for:
+
+- FFI / ABI checks
+- CLI `run` export semantics
+- analysis-quality thresholds or benchmark-style assertions
+- cases that need direct Rust-side orchestration rather than command snapshots
+
+`tests/e2e/integration_tests.rs` still exists, but it is not the default place for new plugin regression coverage.
+
+## Adding New Tests
+
+### Preferred workflow for new features
+
+1. Implement the feature.
+2. If the user-facing behavior is visible through radare2 commands, add or update an `r2r` case.
+3. If the feature needs a specific binary pattern, add or update a fixture source under `tests/e2e/`.
+4. Run `make -C tests/r2r run`.
+5. If the change also affects CLI semantics, FFI, or benchmark-style behavior, run `cargo e2e-test` or a focused `tests/e2e` module.
+
+### Where to put new `r2r` cases
+
+`tests/r2r/db/extras/r2sleigh_core`
+- very small, deterministic instruction-level checks
+- good for `a:sla.json`, `a:sla.regs`, `a:sla.mem`, `a:sla.vars`
+
+`tests/r2r/db/extras/r2sleigh_integration_fast`
+- function-level plugin behavior that should stay quick
+- good for `a:sla.ssa.func`, `a:sla.cfg.json`, `a:sla.dom`, `a:sla.types`, `a:sla.opvals`
+
+`tests/r2r/db/extras/r2sleigh_integration_extended`
+- slower or heavier coverage
+- symbolic execution, taint, complex decompilation, larger binaries
+
+### `r2r` test authoring tips
+
+- Normalize output with `jq -c`, `grep`, `head`, `tail`, or boolean expressions.
+- Prefer structural assertions over brittle full-output matches when formatting is likely to evolve.
+- Keep these args unless you have a reason not to:
+
+```text
+-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+```
+
+- `tests/r2r/Makefile` builds the fixture binaries from `tests/e2e/` and symlinks them into `tests/r2r/bins/`.
+- If you add a brand-new fixture binary, update `tests/r2r/Makefile` so the harness links it.
+
+Minimal `r2r` example:
+
+```text
+NAME=instruction_json_nonempty
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+s 0x401281
+a:sla.json | jq -c 'length>0'
+EOF_CMDS
+RUN
+```
+
+### Fixture guidance
+
+Use the smallest fixture that exercises the behavior:
+
+- `tests/e2e/vuln_test.c` for focused plugin features and common analysis cases
+- `tests/e2e/stress_test.c` for larger decompiler/symbolic/type cases
+- `tests/e2e/test_func.c` for small structured helper functions
+- `tests/e2e/sym_test.c` for symbolic-execution-specific patterns
+
+When you add a fixture function:
+
+1. Add the function with a short comment explaining what it exercises.
+2. Wire it into the fixture's `main()` or other entry path if the tests need runtime access.
+3. Add or update the corresponding `r2r` snapshot.
+
+## Common Change Workflows
+
+### Add a new R2IL opcode
+
+1. Add the variant to `crates/r2il/src/opcode.rs`.
+2. Teach the lifter to emit it in `crates/r2sleigh-lift/src/disasm.rs`.
+3. Add text and ESIL formatting in `crates/r2sleigh-lift/src/esil.rs`.
+4. Check any export path that formats or serializes the new op through `crates/r2sleigh-export/src/lib.rs` or CLI output.
+5. Add tests. Prefer an `r2r` snapshot when the opcode is visible through plugin output.
+
+### Add SSA support for a new op
+
+1. Add the SSA variant to `crates/r2ssa/src/op.rs`.
+2. Convert it in `crates/r2ssa/src/block.rs`.
+3. Update `dst()` and `sources()` in `crates/r2ssa/src/op.rs`.
+4. Add function-level or instruction-level coverage, usually via `a:sla.ssa`, `a:sla.ssa.func`, or `a:sla.defuse`.
+
+### Add decompiler support for a new SSA op
+
+1. Add lowering in `crates/r2dec/src/analysis/lower.rs` if needed.
+2. Add fold/codegen support under `crates/r2dec/src/fold/`.
+3. Test through `a:sla.dec` snapshots and add direct Rust tests when local folding behavior is easier to assert there.
+
+### Add or change a plugin command
+
+1. Rust-side command data shaping usually lives in `r2plugin/src/lib.rs`.
+2. radare2 command dispatch and help text live in `r2plugin/r_anal_sleigh.c`.
+3. Add or update `r2r` coverage for help text, happy path, and error path.
+
+### Add a new architecture
+
+1. Update the relevant crate feature flags.
+2. Wire spec/disassembler creation in the CLI, plugin, and export surfaces that need it.
+3. Add at least one focused test path for the new arch.
+4. Prefer documenting only architectures that are actually wired and tested in the crate you changed.
+
+## Plugin Command Surface
+
+Common instruction-level commands:
+
+| Command | Purpose |
+|---------|---------|
+| `a:sla` | status / help |
+| `a:sla.info` | current architecture info |
+| `a:sla.arch [name]` | get or set Sleigh arch override |
+| `a:sla.json` | raw r2il for current instruction |
+| `a:sla.regs` | read/write registers |
+| `a:sla.opvals` | analysis src/dst register view |
+| `a:sla.mem` | memory accesses |
+| `a:sla.vars` | varnodes |
+| `a:sla.ssa` | instruction SSA |
+| `a:sla.defuse` | instruction def-use |
+
+Function-level commands:
+
+| Command | Purpose |
+|---------|---------|
+| `a:sla.ssa.func` | function SSA with phi nodes |
+| `a:sla.ssa.func.opt` | optimized function SSA |
+| `a:sla.defuse.func` | function-wide def-use |
+| `a:sla.dom` | dominator tree |
+| `a:sla.slice <var>` | backward slice |
+| `a:sla.types` | type-inference payload |
+| `a:sla.taint` | taint analysis |
+| `a:sla.sym` | symbolic summary |
+| `a:sla.sym.paths` | explored symbolic paths |
+| `a:sla.sym.merge [on|off]` | symbolic merge toggle |
+| `a:sla.dec [name|addr]` | decompile |
+| `pdd`, `pdD` | aliases for `a:sla.dec` |
+| `a:sla.cfg` | ASCII CFG |
+| `a:sla.cfg.json` | CFG JSON |
+
+Targeted symbolic commands:
+
+| Command | Purpose |
+|---------|---------|
+| `a:sym.explore <target>` | explore paths reaching target |
+| `a:sym.solve <target>` | solve concrete input for target |
+| `a:sym.state` | show cached symbolic state |
+
+Important:
+
+- Use `a:sym.solve`, not the old `a:sla.sym.solve` spelling.
+- Use `a:sla.cfg.json` when you want stable structured assertions.
+
+## Two SSA Block Types
+
+There are two different block types in `r2ssa`:
 
 | Type | Location | Purpose |
 |------|----------|---------|
-| `Varnode` | `r2il/varnode.rs` | Sized data location (reg/mem/const/temp) |
-| `SpaceId` | `r2il/space.rs` | Address space enum (Ram, Register, Unique, Const) |
-| `R2ILOp` | `r2il/opcode.rs` | 60+ semantic operations (Copy, IntAdd, Load, Branch...) |
-| `R2ILBlock` | `r2il/opcode.rs` | Sequence of ops for one instruction |
-| `Disassembler` | `r2sleigh-lift/disasm.rs` | Wraps libsla for P-code generation |
-| `op_to_esil()` | `r2sleigh-lift/esil.rs` | Converts R2ILOp → ESIL string |
-| `SSAVar` | `r2ssa/var.rs` | Versioned variable (name_version) |
-| `SSAOp` | `r2ssa/op.rs` | SSA operation with versioned vars |
-| `SSABlock` | `r2ssa/block.rs` | SSA form of an instruction |
-| `FunctionSSABlock` | `r2ssa/function.rs` | SSA block with phi nodes (used by r2dec) |
-| `SSAFunction` | `r2ssa/function.rs` | Complete function in SSA form |
-| `DefUseInfo` | `r2ssa/defuse.rs` | Def-use chain analysis results |
-| `CExpr` | `r2dec/ast.rs` | C expression AST |
-| `CStmt` | `r2dec/ast.rs` | C statement AST |
-| `FoldingContext` | `r2dec/fold.rs` | Expression folding, dead code elimination, predicate simplification |
-| `AnalysisContext` | `r2dec/analysis/mod.rs` | Top-level struct holding UseInfo, FlagInfo, StackInfo |
-| `LowerCtx` | `r2dec/analysis/lower.rs` | SSA to CExpr lowering with symbol resolution |
+| `SSABlock` | `crates/r2ssa/src/block.rs` | single-instruction SSA block |
+| `FunctionSSABlock` | `crates/r2ssa/src/function.rs` | function block with phi nodes |
 
-## Build Commands
+`r2dec` works with `FunctionSSABlock`.
 
-```bash
-# Standard build
-cargo build --features x86
-
-# Run CLI
-cargo run --features x86 -- disasm --arch x86-64 --bytes "31c0000000000000000000000000000000"
-
-# Test
-cargo test --all-features
-```
-
-**IMPORTANT**: Disassembly requires 16+ bytes of input (pad with zeros).
-
-## Local Plugin Setup (radare2 in sibling dir)
-
-- Build + install: `make -C r2plugin RUST_FEATURES=x86 install`
-- Verify load: `r2 -qc 'L' /bin/ls` (check for sleigh in the plugin list)
-- Plugin dir comes from `r2 -H R2_USER_PLUGINS` (see `r2plugin/Makefile`)
-- `pkg-config r_anal` is used for headers/libs; set `PKG_CONFIG_PATH` if needed
-
-### Using Plugin Automatically with `aaa`
-
-**Important**: The plugin implements the `op` callback, which radare2 calls automatically during analysis. However, radare2 selects analysis plugins based on architecture matching, not via a config variable.
-
-The plugin will be used automatically when:
-1. **Architecture matches**: The plugin supports `x86`, `arm`, and `mips` architectures
-2. **Plugin is loaded**: Ensure it's installed in `~/.local/share/radare2/plugins/`
-3. **Architecture is set correctly**: radare2 auto-detects from the binary, or set explicitly:
-
-```bash
-# The plugin works automatically if architecture matches
-r2 -qc 'e bin.relocs.apply=true; aaa' /bin/ls
-
-# Verify plugin is working:
-r2 -qc 'e bin.relocs.apply=true; aaa; s entry0+4; a:sla.info' /bin/ls
-
-# If architecture doesn't match, set it explicitly:
-r2 -qc 'e anal.arch=x86; e anal.bits=64; aaa' /bin/ls
-```
-
-The plugin auto-detects architecture from `anal.arch` and `anal.bits`:
-- `anal.arch=x86` + `anal.bits=64` → uses `x86-64`
-- `anal.arch=x86` + `anal.bits=32` → uses `x86`
-- `anal.arch=arm` → uses `arm`
-- `anal.arch=mips` → uses `mips`
-
-You can override with: `a:sla.arch x86-64`
-
-**Note**: The plugin's `op` callback is called automatically by radare2 during analysis (`aaa`, `aa`, etc.) when the architecture matches. There's no need to "select" it explicitly - it works transparently.
-
-## Code Style
-
-### Rust Conventions
-
-- Edition 2024 (requires `#[unsafe(no_mangle)]` syntax)
-- Use `thiserror` for error types
-- Prefer `format!()` over string concatenation
-- Feature flags: `x86`, `arm` (via `sleigh-config`)
-
-### ESIL Syntax (Critical)
-
-ESIL = Reverse Polish Notation for radare2's VM.
-
-```
-a,b,+     → a + b
-a,b,=     → b = a (assignment)
-a,[N]     → read N bytes from addr a
-a,b,=[N]  → write N bytes of b to addr a
-a,?{,x,}  → if a then x
-```
-
-**Operators**:
-| Op | ESIL | Notes |
-|----|------|-------|
-| add | `+` | |
-| sub | `-` | ASCII 0x2D only! |
-| bitwise NOT | `~` | NOT `!` (boolean) |
-| signed shift right | `>>>` | NOT `>>>>` |
-| sign extend | `val,bits,~~` | |
-| compare | `==`, `<`, `<$` (signed) | |
-
-### Adding New Opcodes
-
-1. Add variant to `R2ILOp` enum in `r2il/opcode.rs`
-2. Add translation in `translate_pcode()` in `r2sleigh-lift/pcode.rs`
-3. Add ESIL output in `op_to_esil()` in `r2sleigh-cli/main.rs`
-4. Add formatting in `format_op()` in same file
-5. **Add integration test** in `tests/e2e/integration_tests.rs` to prevent regression
-6. **Add test case** to `tests/e2e/vuln_test.c` if the feature needs a specific binary pattern to test
-
-## Integration Testing Requirements
-
-**MANDATORY**: When adding any new feature, you MUST add an integration test.
-
-### Workflow for New Features
-
-1. **Implement the feature** (opcode, analysis, plugin command, etc.)
-2. **Check if test binary is needed**:
-   - If the feature needs a specific binary pattern, add a test function to `tests/e2e/vuln_test.c`
-   - Compile: `gcc -O0 -g -fno-stack-protector -no-pie -o vuln_test vuln_test.c`
-3. **Add integration test** in `tests/e2e/integration_tests.rs`:
-   - Use the `e2e` test harness (`r2_at_func`, `r2_at_addr`, etc.)
-   - Add to appropriate module or create new module
-   - Use `rstest` for parameterized tests when testing multiple cases
-4. **Run tests**: `cd tests/e2e && cargo test`
-5. **Verify**: All tests pass before committing
-
-### Test Coverage Checklist
-
-When adding a feature, ensure tests cover:
-- ✅ Basic functionality (command executes without crash)
-- ✅ Expected output format (JSON structure, text patterns)
-- ✅ Error cases (invalid input, missing data)
-- ✅ Edge cases (empty results, boundary conditions)
-
-### Adding Test Cases to vuln_test.c
-
-If your new feature requires a specific binary pattern to test (e.g., a particular instruction sequence, control flow pattern, or data dependency), add a test function to `tests/e2e/vuln_test.c`:
-
-1. **Add the test function** with a descriptive name and comment
-2. **Add it to the `main()` switch statement** so it can be invoked
-3. **Update the integration test** to use the new function
-
-Example: Adding a test for a new floating-point operation:
-
-```c
-// In vuln_test.c
-// Test N: Floating point comparison
-int test_fp_compare(double x) {
-    if (x > 3.14) {
-        return 1;
-    }
-    return 0;
-}
-
-// In main() switch:
-case N:
-    if (argc > 2) {
-        double x = atof(argv[2]);
-        printf("test_fp_compare(%f) = %d\n", x, test_fp_compare(x));
-    }
-    break;
-```
-
-Then add an integration test:
-
-```rust
-// In integration_tests.rs
-#[test]
-fn test_fp_operation() {
-    setup();
-    let result = r2_at_func(vuln_test_binary(), "test_fp_compare", "a:sla.json");
-    result.assert_ok();
-    assert!(result.contains("FloatCompare"), "Should show float comparison op");
-}
-```
-
-## Common Tasks
-
-### Add ESIL for new opcode
-
-```rust
-// In op_to_esil() in r2sleigh-lift/esil.rs:
-IntFoo { dst, a, b } => format!("{},{},FOO,{},=", vn(a), vn(b), vn(dst)),
-```
-
-### Add new architecture
-
-1. Enable feature in `sleigh-config`
-2. Add match arm in `get_disassembler()` in `main.rs`
-3. Add to supported list in error message
-4. **Add integration test** in `tests/e2e/integration_tests.rs` for the new architecture
-
-### Add SSA support for new opcode
-
-1. Add variant to `SSAOp` in `r2ssa/op.rs`
-2. Add conversion in `convert_op()` in `r2ssa/block.rs`
-3. Update `dst()` and `sources()` methods in `SSAOp`
-4. **Add integration test** in `tests/e2e/integration_tests.rs` to verify SSA conversion works
-
-### Debug P-code output
-
-```bash
-# JSON shows raw R2ILOp structure
-cargo run --features x86 -- disasm --arch x86-64 --bytes "..." --format json
-```
-
-### Debug SSA output
-
-```bash
-# In radare2
-r2 -qc 's entry0+4; a:sleigh.ssa' /bin/ls
-r2 -qc 's entry0+4; a:sleigh.defuse' /bin/ls
-```
+When writing direct decompiler tests, build `FunctionSSABlock` values directly rather than assuming a convenience constructor exists.
 
 ## File Quick Reference
 
-| File | Lines | What to edit for... |
-|------|-------|---------------------|
-| `r2il/opcode.rs` | ~650 | New IL opcodes |
-| `r2sleigh-lift/pcode.rs` | ~300 | P-code → R2ILOp translation |
-| `r2sleigh-lift/disasm.rs` | ~700 | Disassembler wrapper, register names |
-| `r2sleigh-lift/esil.rs` | ~200 | ESIL output formatting |
-| `r2sleigh-cli/main.rs` | ~400 | CLI commands |
-| `r2ssa/var.rs` | ~100 | SSA variable type |
-| `r2ssa/op.rs` | ~600 | SSA operations |
-| `r2ssa/block.rs` | ~500 | SSA conversion |
-| `r2ssa/defuse.rs` | ~200 | Def-use analysis |
-| `r2sym/executor.rs` | ~400 | R2IL interpreter for symbolic execution |
-| `r2sym/state.rs` | ~300 | Symbolic state (regs, mem, constraints) |
-| `r2sym/solver.rs` | ~200 | Z3 integration and model extraction |
-| `r2sym/path.rs` | ~200 | Path exploration and results |
-| `r2dec/structure.rs` | ~800 | Control-flow structuring (if/while/for/switch) |
-| `r2dec/fold.rs` | ~2500 | Expression folding, predicate simplification, identity elimination |
-| `r2dec/expr.rs` | ~500 | Expression builder (used for fallback paths) |
-| `r2dec/codegen.rs` | ~720 | C code generation with string escaping |
-| `r2dec/ast.rs` | ~720 | C AST types (CExpr, CStmt, CType, For) |
-| `r2dec/region.rs` | ~200 | Region analysis for control flow |
-| `r2dec/types.rs` | ~200 | Type inference |
-| `r2dec/variable.rs` | ~450 | Variable recovery with external signature support |
-| `r2dec/address.rs` | ~50 | Address parsing utilities (const:/ram:) |
-| `r2dec/analysis/mod.rs` | ~80 | Analysis context and PassEnv |
-| `r2dec/analysis/lower.rs` | ~400 | SSA to CExpr lowering with symbol resolution |
-| `r2dec/analysis/use_info.rs` | ~450 | Use counting and call argument analysis |
-| `r2dec/analysis/stack_info.rs` | ~200 | Stack variable detection |
-| `r2plugin/lib.rs` | ~4000 | C-ABI exports, JSON parsing, taint FFI |
-| `r2plugin/r_anal_sleigh.c` | ~2600 | radare2 RAnalPlugin wrapper, auto-taint post-analysis |
-| `tests/e2e/integration_tests.rs` | ~1600 | Integration tests (REQUIRED for new features) |
-| `tests/e2e/lib.rs` | ~200 | Test harness utilities |
-| `tests/e2e/vuln_test.c` | ~320 | Test binary source (add functions for new features) |
-
-## Testing Checklist
-
-Before committing changes:
-
-```bash
-# 1. Build succeeds
-cargo build --features x86
-
-# 2. Run unit tests
-cargo test --features x86
-
-# 3. Run integration tests (REQUIRED for new features)
-cd tests/e2e
-cargo test
-
-# 4. Test CLI
-cargo run --features x86 -- disasm --arch x86-64 --bytes "31c0000000000000000000000000000000" --format esil
-
-# 5. Test plugin (after make install in r2plugin/)
-r2 -qc 'a:sleigh.info' /bin/ls
-r2 -qc 's entry0+4; a:sleigh.ssa' /bin/ls
-```
-
-### Adding Integration Tests for New Features
-
-**CRITICAL**: When adding any new feature, you MUST add an integration test to prevent regression.
-
-1. **For new plugin commands**: Add test in `tests/e2e/integration_tests.rs` in the appropriate module
-2. **For new opcodes/operations**: Add test that exercises the opcode via `a:sla.json` or `a:sla.ssa`
-3. **For new analysis features**: Add test that validates the analysis output
-4. **If test binary is needed**: Add a test function to `tests/e2e/vuln_test.c` that exercises the feature
-
-Example: Adding a new plugin command `a:sla.newfeature`:
-
-```rust
-// In tests/e2e/integration_tests.rs
-mod new_feature {
-    use super::*;
-    
-    #[test]
-    fn new_feature_works() {
-        setup();
-        let result = r2_at_func(vuln_test_binary(), "main", "a:sla.newfeature");
-        result.assert_ok();
-        assert!(result.contains("expected_output"), "Should show expected output");
-    }
-}
-```
-
-If the feature needs a specific binary pattern, add to `vuln_test.c`:
-
-```c
-// In tests/e2e/vuln_test.c
-int test_new_feature(int x) {
-    // Pattern that exercises the new feature
-    return x * 2;
-}
-```
+| File | Edit this when... |
+|------|--------------------|
+| `crates/r2il/src/opcode.rs` | adding or changing IL ops |
+| `crates/r2sleigh-lift/src/disasm.rs` | changing P-code lifting or register naming |
+| `crates/r2sleigh-lift/src/esil.rs` | changing text or ESIL rendering |
+| `crates/r2sleigh-export/src/lib.rs` | changing shared export formatting or action plumbing |
+| `crates/r2sleigh-cli/src/main.rs` | changing CLI commands or action/format routing |
+| `crates/r2ssa/src/op.rs` | changing SSA operations |
+| `crates/r2ssa/src/block.rs` | changing SSA conversion |
+| `crates/r2ssa/src/function.rs` | function SSA / phi handling |
+| `crates/r2ssa/src/defuse.rs` | changing def-use analysis |
+| `crates/r2sym/src/` | changing symbolic execution or taint internals |
+| `crates/r2types/src/` | changing type inference |
+| `crates/r2dec/src/fold/` | changing decompiler folding and lowering |
+| `crates/r2dec/src/codegen.rs` | changing C output formatting |
+| `r2plugin/src/lib.rs` | changing plugin-side Rust logic and JSON payloads |
+| `r2plugin/r_anal_sleigh.c` | changing radare2 callbacks, command help, dispatch |
+| `tests/r2r/Makefile` | changing r2r harness setup or fixture linking |
+| `tests/r2r/db/extras/` | adding or updating snapshot regressions |
+| `tests/e2e/README.md` | checking when to use Rust E2E vs `r2r` |
+| `tests/e2e/integration_tests.rs` | legacy semantic/FFI coverage, not the default for new snapshots |
 
 ## Gotchas
 
-1. **16-byte minimum**: libsla reads 16 bytes for x86-64. Always pad input.
-2. **Unicode minus**: Use ASCII `-` (0x2D), not `−` (U+2212) in ESIL.
-3. **Feature flags**: `sleigh-config` features must match CLI features.
-4. **Rust 2024**: `#[no_mangle]` → `#[unsafe(no_mangle)]`
-5. **Width mismatches**: normalize widths and use explicit sign/zero-extend ops.
-6. **Const vs Unique**: Const is literal, Unique is temp SSA space (not memory).
-7. **Register aliasing**: overlapping regs need a deterministic policy in output.
-8. **Fallback paths**: Both `structure.rs` and `lib.rs` have fallback paths for decompilation; ensure symbol maps are wired to both.
-9. **Address parsing**: Use `address.rs::parse_address_from_var_name()` for consistent `const:`/`ram:` parsing.
-10. **Taint noise**: Stack/frame pointers are filtered out; check `is_noisy_taint_label()` in `r_anal_sleigh.c`.
+1. x86/x86-64 lifting still expects 16 bytes minimum.
+2. ESIL subtraction must use ASCII `-`, not Unicode minus.
+3. `Const` means literal; `Unique` means temporary SSA-like storage, not memory.
+4. Width mismatches usually need explicit sign/zero extension.
+5. Register aliasing needs deterministic policy in output and recovery.
+6. `#[no_mangle]` is now `#[unsafe(no_mangle)]` under Rust 2024.
+7. Plugin, CLI, and export crate feature matrices are not identical.
+8. Prefer `a:sla.cfg.json`, `a:sla.types`, and `jq`-normalized checks over raw pretty-printed output in snapshots.
+9. Use `r2dec/address.rs::parse_address_from_var_name()` for consistent `const:` / `ram:` parsing.
+10. Taint summaries intentionally filter noisy stack/frame-pointer labels.
+11. If you add a new fixture binary, remember both the build step and the `tests/r2r/bins/` symlink step.
 
-## Dependencies
+## Useful References
 
-| Crate | Purpose |
-|-------|---------|
-| `libsla` | Ghidra Sleigh bindings (P-code generation) |
-| `sleigh-config` | Pre-compiled .sla files |
-| `bincode` | Binary serialization |
-| `clap` | CLI argument parsing |
-| `thiserror` | Error derive macros |
-| `serde` | Serialization traits |
-| `serde_json` | JSON output |
-
-## Plugin Commands
-
-| Command | Output | Purpose |
-|---------|--------|---------|
-| `a:sla` | text | Status and help |
-| `a:sla.info` | text | Architecture info |
-| `a:sla.arch [name]` | text | Get/set architecture override |
-| `a:sla.json` | JSON | Raw r2il ops for current instruction |
-| `a:sla.regs` | JSON | Registers read/written |
-| `a:sla.mem` | JSON | Memory accesses |
-| `a:sla.vars` | JSON | All varnodes |
-| `a:sla.ssa` | JSON | SSA form for current function |
-| `a:sla.defuse` | JSON | Def-use analysis |
-| `a:sla.taint` | JSON | Taint analysis (sources → sinks) |
-| `a:sla.slice [var]` | JSON | Backward slice from variable |
-| `a:sla.dec` | text | Decompile function to C |
-| `a:sla.cfg` | JSON | Control flow graph |
-| `a:sla.sym.paths` | JSON | Symbolic execution paths |
-| `a:sla.sym.solve` | JSON | Solve for target address |
-
-**Note**: Commands use `a:sla` prefix (short for `a:sleigh`). Both work.
-
-### Auto-Analysis Integration
-
-During `aaaa`, the plugin automatically:
-- **Taint analysis**: Runs on functions with ≤200 blocks
-- **Taint comments**: Writes `sla.taint: hits=N calls=C stores=S labels=...` at block addresses
-- **Taint flags**: Creates `sla.taint.fcn_<addr>.blk_<addr>` for scripting
-- **Taint xrefs**: Adds `R_ANAL_REF_TYPE_DATA` from source blocks to sink blocks
-- **Noise filtering**: Filters out stack/frame pointers from taint labels
-- **User comment preservation**: Merges with existing comments at same address
-
-## r2dec Decompiler Architecture
-
-The decompiler (`r2dec`) converts SSA form to readable C code.
-
-### Decompilation Pipeline
-
-```
-SSAFunction → RegionAnalyzer → ControlFlowStructurer → FoldingContext → CodeGenerator → C code
-     ↓              ↓                    ↓                   ↓               ↓
-  SSA ops     Region tree         CStmt/CExpr        Optimized AST     String output
-                                      ↓
-                              LowerCtx (symbol resolution)
-                                      ↓
-                              PredicateSimplifier
-                                      ↓
-                              IdentityElimination
-```
-
-### Fallback Mechanism
-
-For large/complex functions, the decompiler uses a three-tier fallback:
-1. **Folded structuring** (primary): Full expression folding + control flow structuring
-2. **Unfolded structuring**: Minimal folding, more conservative
-3. **Linear emission**: Per-block statement output as last resort
-
-When fallback is used, output includes: `/* r2dec fallback: <reason> */`
-
-### Key Types in r2dec
-
-| Type | Location | Purpose |
-|------|----------|---------|
-| `CExpr` | `r2dec/ast.rs` | C expression AST (Binary, Unary, Var, Call, StringLit, etc.) |
-| `CStmt` | `r2dec/ast.rs` | C statement AST (If, While, For, Switch, Return, Block, etc.) |
-| `CType` | `r2dec/ast.rs` | C type representation (Int, Ptr, Struct, etc.) |
-| `CFunction` | `r2dec/ast.rs` | Complete function with params, locals, body |
-| `FoldingContext` | `r2dec/fold.rs` | Expression folding, predicate simplification, identity elimination |
-| `LowerCtx` | `r2dec/analysis/lower.rs` | SSA to CExpr lowering with symbol/string resolution |
-| `Region` | `r2dec/region.rs` | Control flow region (Block, IfThenElse, While, etc.) |
-| `CodeGenerator` | `r2dec/codegen.rs` | Converts AST to C string with pretty printing |
-| `ExternalFunctionSignature` | `r2dec/lib.rs` | Parsed radare2 function signature (afcfj) |
-| `ExternalStackVar` | `r2dec/lib.rs` | Parsed radare2 stack variable (afvj) |
-
-### Two SSABlock Types (Important!)
-
-There are **two different `SSABlock` types** in r2ssa:
-
-| Type | Location | Purpose |
-|------|----------|---------|
-| `SSABlock` | `r2ssa/block.rs` | Single instruction block (addr, size, ops) |
-| `FunctionSSABlock` | `r2ssa/function.rs` | Function block with phi nodes (addr, size, ops, phis) |
-
-**r2dec uses `FunctionSSABlock`** (re-exported as `r2ssa::FunctionSSABlock`).
-
-When writing tests for r2dec:
-```rust
-// DON'T use SSABlock::new() - it doesn't exist for FunctionSSABlock
-// DO create blocks directly:
-let block = FunctionSSABlock {
-    addr: 0x1000,
-    size: 4,
-    ops: vec![...],
-    phis: Vec::new(),
-};
-```
-
-### Expression Folding (fold.rs)
-
-The `FoldingContext` performs multiple optimizations:
-
-1. **Use-counting**: Tracks how many times each SSA variable is used
-2. **Single-use inlining**: Variables used only once get inlined at use site
-3. **Dead code elimination**: Unused CPU flags (CF, ZF, SF, etc.) are removed
-4. **Predicate simplification**: `!ZF && OF==SF` → `a > b`
-5. **Arithmetic identity elimination**: `x - 0`, `x + 0`, `x * 1` → `x`
-6. **Dead-temp assignment pruning**: Removes unused pure temporary assignments
-7. **Flag-only temp elimination**: Removes temps consumed only by flag ops
-
-**CPU flags that are auto-eliminated when unused**:
-- `cf`, `pf`, `af`, `zf`, `sf`, `of`, `df`, `tf`
-- Also versioned variants: `cf_1`, `zf_2`, etc.
-
-**Constant handling**: `const:xxx` → actual numeric values
-- `const:0x42` → `0x42`
-- `const:fffffffc` → `0xfffffffcU`
-
-**Symbol resolution** (via LowerCtx):
-- Function addresses → `printf`, `malloc`, etc.
-- String addresses → `"Usage: %s\n"` (with proper C escaping)
-- Global addresses → `obj.global_counter`, `sym.imported_func`
-
-### Adding Decompiler Support for New SSA Operations
-
-1. Add case to `FoldingContext::op_to_expr()` in `r2dec/fold.rs`
-2. Add case to `FoldingContext::op_to_stmt()` in `r2dec/fold.rs`
-3. Test with `r2 -qc 'aaa; s func; a:sla.dec' /path/to/binary`
-
-Example for a new binary op:
-```rust
-// In op_to_expr():
-SSAOp::IntFoo { a, b, .. } => self.binary_expr(BinaryOp::Foo, a, b),
-
-// In op_to_stmt():
-SSAOp::IntFoo { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Foo),
-```
-
-### Control Flow Structuring
-
-The `ControlFlowStructurer` converts region trees to C statements:
-
-| Region Type | C Output |
-|-------------|----------|
-| `Region::Block` | Statement sequence |
-| `Region::IfThenElse` | `if (cond) { ... } else { ... }` |
-| `Region::WhileLoop` | `while (cond) { ... }` or `for (init; cond; update) { ... }` |
-| `Region::DoWhileLoop` | `do { ... } while (cond);` |
-| `Region::Switch` | `switch (var) { case N: ... }` |
-| `Region::Irreducible` | Labels + gotos |
-
-**For-loop detection** (`try_rewrite_while_with_preheader_init`):
-- Detects `init; while(cond) { body; update }` patterns
-- Also handles `while(1) { if(cond) break; ... }` patterns
-- Converts to `CStmt::For` AST node
-
-**Switch detection**:
-- Detects cascaded `if-else` on same variable
-- Converts to `CStmt::Switch` with cases
-
-### Debugging Decompiler Output
-
-```bash
-# View decompiled C code
-r2 -qc 'aaa; s main; a:sla.dec' /path/to/binary
-
-# View SSA form (input to decompiler)
-r2 -qc 'aaa; s main; a:sla.ssa' /path/to/binary
-
-# View raw IL (before SSA)
-r2 -qc 'aaa; s main; a:sla.json' /path/to/binary
-```
-
-## Deep radare2 Integration
-
-The plugin provides callbacks that radare2 calls automatically during analysis.
-
-### Plugin Callbacks (in r_anal_sleigh.c)
-
-| Callback | When Called | Purpose |
-|----------|-------------|---------|
-| `sleigh_op` | `aaa`/analysis | Lift instructions to ESIL |
-| `sleigh_recover_vars` | `afva` | Provide SSA-derived variables |
-| `sleigh_analyze_fcn` | After `af` | Per-function SSA/analysis |
-| `sleigh_get_data_refs` | After `aar` | Provide def-use xrefs |
-| `sleigh_post_analysis` | End of `aaaa` | Taint analysis + xrefs for all functions |
-
-### Post-Analysis Taint Integration
-
-`sleigh_post_analysis` runs automatic taint analysis during `aaaa`:
-
-1. **Function iteration**: Processes all analyzed functions
-2. **Block limit**: Skips functions with >200 blocks (configurable via `SLEIGH_TAINT_MAX_BLOCKS`)
-3. **Taint execution**: Calls `r2taint_function_json()` for eligible functions
-4. **Per-block summaries**: Builds filtered summaries from sink_hits
-5. **Noise filtering**: Removes `input:rsp`, `input:rbp`, `input:ram:*` labels
-6. **Label ranking**: Sorts by "interestingness" (function args > memory > others)
-7. **Comment writing**: `sla.taint: hits=N calls=C stores=S labels=l1,l2,...`
-8. **Flag creation**: `sla.taint.fcn_<addr>.blk_<addr>`
-9. **Xref creation**: Source block → sink block with entry fallback
-10. **Idempotency**: Clears old taint artifacts before writing new ones
-
-### Variable Recovery (recover_vars)
-
-The plugin provides stack variables and register arguments to radare2's `afv` system.
-
-**Stack variable detection** (in `lib.rs`):
-1. Track `IntAdd`/`IntSub` with RBP/RSP as base
-2. Store address temps in `stack_addr_temps` map
-3. When `Store`/`Load` uses a tracked temp, emit stack variable
-
-**Register argument detection**:
-- Check sources with version 0 against arg register list
-- x86-64 arg regs: `rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9` (+ 32-bit aliases)
-- Set `RAnalVarProt.kind = R_ANAL_VAR_KIND_REG` and `delta = reg_index`
-
-**Important**: `RAnalVarProt.delta` means different things:
-- For `R_ANAL_VAR_KIND_REG`: register index from `r_reg_get()`
-- For `R_ANAL_VAR_KIND_SPV`/`BPV`: stack offset
-
-### Register Name Lookup
-
-When mapping register names to indices:
-```c
-// In r_anal_sleigh.c
-// radare2's anal->reg uses UPPERCASE names (e.g., "RDI" not "rdi")
-char *upper_reg = strdup(reg_name);
-for (char *p = upper_reg; *p; p++) *p = toupper(*p);
-RRegItem *ri = r_reg_get(anal->reg, upper_reg, R_REG_TYPE_GPR);
-prot->delta = ri->index;  // Use index, not offset
-```
-
-## Links
-
-- [radare2 ESIL docs](https://book.rada.re/disassembling/esil.html)
-- [Ghidra P-code reference](https://ghidra.re/courses/languages/html/pcoderef.html)
-- [libsla crate](https://crates.io/crates/libsla)
+- `README.md` for current build and testing quick-start
+- `tests/e2e/README.md` for the split between `r2r` and Rust E2E
+- `doc/` for IL, SSA, ESIL, decompiler, taint, symex, and type-system notes
+- radare2 ESIL docs: <https://book.rada.re/disassembling/esil.html>
+- Ghidra P-code reference: <https://ghidra.re/courses/languages/html/pcoderef.html>

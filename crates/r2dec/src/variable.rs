@@ -48,8 +48,10 @@ pub struct VariableRecovery {
     ptr_size: u32,
     /// Loop variable counter (i, j, k, ...).
     loop_var_idx: usize,
-    /// Return value register name.
-    ret_reg: String,
+    /// Return-value registers for the active ABI.
+    ret_regs: Vec<String>,
+    /// Ordered argument registers for the active ABI.
+    arg_regs: Vec<String>,
     /// Optional external signature metadata.
     external_signature: Option<ExternalFunctionSignature>,
     /// Optional external stack variables keyed by signed stack offset.
@@ -59,13 +61,32 @@ pub struct VariableRecovery {
 impl VariableRecovery {
     /// Create a new variable recovery context.
     pub fn new(sp_name: &str, fp_name: &str, ptr_size: u32) -> Self {
-        // Determine return register based on architecture
-        let ret_reg = if ptr_size == 64 {
-            "rax".to_string()
+        let (arg_regs, ret_regs) = if ptr_size == 64 {
+            (
+                vec![
+                    "rdi".to_string(),
+                    "rsi".to_string(),
+                    "rdx".to_string(),
+                    "rcx".to_string(),
+                    "r8".to_string(),
+                    "r9".to_string(),
+                ],
+                vec!["rax".to_string(), "eax".to_string()],
+            )
         } else {
-            "eax".to_string()
+            (vec![], vec!["eax".to_string()])
         };
+        Self::new_with_abi(sp_name, fp_name, ptr_size, arg_regs, ret_regs)
+    }
 
+    /// Create a new variable recovery context with explicit ABI registers.
+    pub fn new_with_abi(
+        sp_name: &str,
+        fp_name: &str,
+        ptr_size: u32,
+        arg_regs: Vec<String>,
+        ret_regs: Vec<String>,
+    ) -> Self {
         Self {
             vars: HashMap::new(),
             name_counters: HashMap::new(),
@@ -76,7 +97,8 @@ impl VariableRecovery {
             fp_name: fp_name.to_string(),
             ptr_size,
             loop_var_idx: 0,
-            ret_reg,
+            ret_regs,
+            arg_regs,
             external_signature: None,
             external_stack_vars: HashMap::new(),
         }
@@ -211,9 +233,10 @@ impl VariableRecovery {
                 // Track last assignment to return register
                 if let Some(dst) = op.dst() {
                     let name_lower = dst.name.to_lowercase();
-                    if name_lower.contains(&self.ret_reg)
-                        || name_lower.contains("eax")
-                        || name_lower.contains("rax")
+                    if self
+                        .ret_regs
+                        .iter()
+                        .any(|reg| name_lower.contains(&reg.to_ascii_lowercase()))
                     {
                         last_ret_var = Some(dst.clone());
                     }
@@ -364,15 +387,7 @@ impl VariableRecovery {
     /// Parameters are ordered by their CC position and stop at the first
     /// unused arg register (no gaps allowed).
     fn find_parameters(&mut self, func: &SSAFunction) {
-        // Ordered CC arg registers for the current architecture
-        let cc_arg_regs: Vec<&str> = if self.ptr_size == 64 {
-            vec!["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
-        } else {
-            // x86-32: args on stack, no register params
-            vec![]
-        };
-
-        if cc_arg_regs.is_empty() {
+        if self.arg_regs.is_empty() {
             return;
         }
 
@@ -384,7 +399,7 @@ impl VariableRecovery {
                 for src in op.sources() {
                     if src.version == 0 {
                         let name_lower = src.name.to_lowercase();
-                        for &cc_reg in &cc_arg_regs {
+                        for cc_reg in &self.arg_regs {
                             if name_lower.contains(cc_reg) {
                                 seen_v0
                                     .entry(cc_reg.to_string())
@@ -399,7 +414,7 @@ impl VariableRecovery {
                 for (_, src) in &phi.sources {
                     if src.version == 0 {
                         let name_lower = src.name.to_lowercase();
-                        for &cc_reg in &cc_arg_regs {
+                        for cc_reg in &self.arg_regs {
                             if name_lower.contains(cc_reg) {
                                 seen_v0
                                     .entry(cc_reg.to_string())
@@ -412,8 +427,8 @@ impl VariableRecovery {
         }
 
         // Emit parameters in CC order, stopping at the first gap
-        for (idx, &cc_reg) in cc_arg_regs.iter().enumerate() {
-            if let Some(var) = seen_v0.get(cc_reg) {
+        for (idx, cc_reg) in self.arg_regs.clone().into_iter().enumerate() {
+            if let Some(var) = seen_v0.get(&cc_reg) {
                 let mut name = format!("arg{}", idx + 1);
                 let mut ty = self.type_from_size(var.size);
                 self.apply_external_param_override(idx, &mut name, &mut ty);

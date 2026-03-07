@@ -12,14 +12,23 @@ pub(crate) struct UseScratch {
 }
 
 pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv<'_>) -> UseInfo {
+    analyze_with_definition_overrides(blocks, env, &HashMap::new())
+}
+
+pub(crate) fn analyze_with_definition_overrides(
+    blocks: &[SSABlock],
+    env: &PassEnv<'_>,
+    definition_overrides: &HashMap<String, CExpr>,
+) -> UseInfo {
     let mut scratch = UseScratch::default();
     scratch.info.type_hints = env.type_hints.clone();
+    seed_entry_param_aliases(&mut scratch, blocks, env);
 
     for block in blocks {
         count_uses_and_conditions(&mut scratch, block);
     }
     for block in blocks {
-        collect_definitions(&mut scratch, block, env);
+        collect_definitions(&mut scratch, block, env, definition_overrides);
     }
 
     analyze_call_args(&mut scratch, blocks, env);
@@ -27,6 +36,43 @@ pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv<'_>) -> UseInfo {
     build_formatted_defs(&mut scratch);
 
     scratch.info
+}
+
+fn seed_entry_param_aliases(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEnv<'_>) {
+    for block in blocks {
+        block.for_each_source(|src| {
+            let var = src.var;
+            if var.version != 0 {
+                return;
+            }
+            if let Some(alias) = env
+                .param_register_aliases
+                .get(&var.name.to_ascii_lowercase())
+            {
+                scratch
+                    .info
+                    .var_aliases
+                    .entry(var.display_name())
+                    .or_insert_with(|| alias.clone());
+            }
+        });
+        block.for_each_def(|def| {
+            let var = def.var;
+            if var.version != 0 {
+                return;
+            }
+            if let Some(alias) = env
+                .param_register_aliases
+                .get(&var.name.to_ascii_lowercase())
+            {
+                scratch
+                    .info
+                    .var_aliases
+                    .entry(var.display_name())
+                    .or_insert_with(|| alias.clone());
+            }
+        });
+    }
 }
 
 fn count_uses_and_conditions(scratch: &mut UseScratch, block: &SSABlock) {
@@ -42,7 +88,12 @@ fn count_uses_and_conditions(scratch: &mut UseScratch, block: &SSABlock) {
     }
 }
 
-fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv<'_>) {
+fn collect_definitions(
+    scratch: &mut UseScratch,
+    block: &SSABlock,
+    env: &PassEnv<'_>,
+    definition_overrides: &HashMap<String, CExpr>,
+) {
     for op in &block.ops {
         if let SSAOp::Copy { dst, src } = op {
             scratch
@@ -147,6 +198,10 @@ fn collect_definitions(scratch: &mut UseScratch, block: &SSABlock, env: &PassEnv
 
         if let Some(dst) = op.dst() {
             let key = dst.display_name();
+            if let Some(expr) = definition_overrides.get(&key).cloned() {
+                scratch.info.definitions.insert(key, expr);
+                continue;
+            }
             let expr = {
                 let lower = LowerCtx {
                     definitions: &scratch.info.definitions,
@@ -957,6 +1012,7 @@ mod tests {
         arg_regs: Vec<String>,
         caller_saved_regs: HashSet<String>,
         type_hints: HashMap<String, CType>,
+        param_register_aliases: HashMap<String, String>,
     }
 
     impl TestEnvFixture {
@@ -984,6 +1040,7 @@ mod tests {
                 strings: &self.strings,
                 symbols: &self.symbols,
                 arg_regs: &self.arg_regs,
+                param_register_aliases: &self.param_register_aliases,
                 caller_saved_regs: &self.caller_saved_regs,
                 type_hints: &self.type_hints,
                 type_oracle: None,

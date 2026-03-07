@@ -129,4 +129,53 @@ mod tests {
         );
         assert_eq!(simplified, expected);
     }
+
+    #[test]
+    fn simplify_condition_expr_collapses_nested_unsigned_truthy_scaffold() {
+        let ctx = FoldingContext::new(64);
+        let simplifier = PredicateSimplifier::new(&ctx);
+
+        let expr = CExpr::unary(
+            UnaryOp::Not,
+            CExpr::binary(
+                BinaryOp::Le,
+                CExpr::cast(CType::u64(), CExpr::IntLit(1)),
+                CExpr::cast(
+                    CType::u64(),
+                    CExpr::unary(
+                        UnaryOp::Not,
+                        CExpr::binary(
+                            BinaryOp::Le,
+                            CExpr::cast(CType::u64(), CExpr::IntLit(1)),
+                            CExpr::cast(CType::u64(), CExpr::Var("t1".to_string())),
+                        ),
+                    ),
+                ),
+            ),
+        );
+
+        let simplified = simplifier.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("t1".to_string()), CExpr::IntLit(0))
+        );
+    }
+
+    #[test]
+    fn simplify_condition_expr_collapses_boolean_zero_comparison() {
+        let ctx = FoldingContext::new(64);
+        let simplifier = PredicateSimplifier::new(&ctx);
+
+        let expr = CExpr::binary(
+            BinaryOp::Eq,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("t1".to_string()), CExpr::IntLit(0)),
+            CExpr::IntLit(0),
+        );
+
+        let simplified = simplifier.simplify_condition_expr(expr);
+        assert_eq!(
+            simplified,
+            CExpr::binary(BinaryOp::Eq, CExpr::Var("t1".to_string()), CExpr::IntLit(0))
+        );
+    }
 }

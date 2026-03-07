@@ -155,6 +155,7 @@ impl<'a> FoldingContext<'a> {
             strings: self.inputs.strings,
             symbols: self.inputs.symbols,
             arg_regs: &self.inputs.arch.arg_regs,
+            param_register_aliases: self.inputs.param_register_aliases,
             caller_saved_regs: &self.inputs.arch.caller_saved_regs,
             type_hints: &self.use_info().type_hints,
             type_oracle: self.inputs.type_oracle,
@@ -370,8 +371,8 @@ impl<'a> FoldingContext<'a> {
         self.state.analysis_ctx.use_info.type_hints = self.inputs.type_hints.clone();
         let env = self.to_pass_env();
         let mut use_info = analysis::UseInfo::analyze(blocks, &env);
-        let flag_info = analysis::FlagInfo::analyze(blocks, &use_info, &env);
         let mut stack_info = analysis::StackInfo::analyze(blocks, &use_info, &env);
+        let initial_stack_info = stack_info.clone();
 
         for (offset, ext_var) in self.inputs.external_stack_vars {
             if ext_var.name.is_empty() {
@@ -392,16 +393,60 @@ impl<'a> FoldingContext<'a> {
             }
         }
 
-        // Deterministically merge stack-derived alias refinements.
-        for (key, expr) in &stack_info.definition_overrides {
-            if self.is_stack_alias_expr(expr) {
-                use_info.definitions.insert(key.clone(), expr.clone());
-                use_info.formatted_defs.insert(
-                    analysis::utils::format_traced_name(key, &use_info.var_aliases),
-                    expr.clone(),
-                );
+        if !stack_info.definition_overrides.is_empty() {
+            use_info = analysis::UseInfo::analyze_with_definition_overrides(
+                blocks,
+                &env,
+                &stack_info.definition_overrides,
+            );
+            stack_info = analysis::StackInfo::analyze(blocks, &use_info, &env);
+            for (offset, alias) in &initial_stack_info.stack_arg_aliases {
+                stack_info.stack_arg_aliases.insert(*offset, alias.clone());
+                let should_replace = match stack_info.stack_vars.get(offset) {
+                    None => true,
+                    Some(existing) => should_replace_preserved_stack_alias(existing),
+                };
+                if should_replace {
+                    stack_info.stack_vars.insert(*offset, alias.clone());
+                }
             }
+            for (key, expr) in &initial_stack_info.definition_overrides {
+                let should_replace = match stack_info.definition_overrides.get(key) {
+                    None => true,
+                    Some(existing) => should_replace_preserved_stack_expr(existing, expr),
+                };
+                if should_replace {
+                    stack_info
+                        .definition_overrides
+                        .insert(key.clone(), expr.clone());
+                }
+            }
+            normalize_stack_definition_overrides(&mut stack_info);
+            for (offset, ext_var) in self.inputs.external_stack_vars {
+                if ext_var.name.is_empty() {
+                    continue;
+                }
+                let should_replace = match stack_info.stack_vars.get(offset) {
+                    None => true,
+                    Some(existing) => {
+                        existing.starts_with("local_")
+                            || existing.starts_with("stack_")
+                            || existing.starts_with("arg_")
+                            || existing == "saved_fp"
+                            || is_generic_arg_name(existing)
+                    }
+                };
+                if should_replace {
+                    stack_info.stack_vars.insert(*offset, ext_var.name.clone());
+                }
+            }
+            use_info = analysis::UseInfo::analyze_with_definition_overrides(
+                blocks,
+                &env,
+                &stack_info.definition_overrides,
+            );
         }
+        let flag_info = analysis::FlagInfo::analyze(blocks, &use_info, &env);
         self.state.analysis_ctx = analysis::AnalysisContext {
             use_info,
             flag_info,
@@ -1786,22 +1831,24 @@ impl<'a> FoldingContext<'a> {
             SSAOp::BoolXor { dst, a, b } => self.boolean_stmt(dst, BinaryOp::BitXor, a, b),
             SSAOp::BoolNot { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
-                let rhs =
-                    self.simplify_condition_expr(CExpr::unary(UnaryOp::Not, self.get_expr(src)));
+                let rhs = self.resolve_predicate_rhs_for_var(
+                    dst,
+                    CExpr::unary(UnaryOp::Not, self.get_expr(src)),
+                );
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let ty = type_from_size(dst.size);
                 let rhs =
-                    self.normalize_assignment_predicate_rhs(CExpr::cast(ty, self.get_expr(src)));
+                    self.resolve_predicate_rhs_for_var(dst, CExpr::cast(ty, self.get_expr(src)));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Trunc { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
                 let ty = type_from_size(dst.size);
                 let rhs =
-                    self.normalize_assignment_predicate_rhs(CExpr::cast(ty, self.get_expr(src)));
+                    self.resolve_predicate_rhs_for_var(dst, CExpr::cast(ty, self.get_expr(src)));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Piece { dst, hi, lo } => {
@@ -2008,7 +2055,7 @@ impl<'a> FoldingContext<'a> {
             op,
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
         ) {
-            self.normalize_assignment_predicate_rhs(rhs_raw)
+            self.resolve_predicate_rhs_for_var(dst, rhs_raw)
         } else {
             rhs_raw
         };
@@ -2018,11 +2065,10 @@ impl<'a> FoldingContext<'a> {
 
     fn boolean_stmt(&self, dst: &SSAVar, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> Option<CStmt> {
         let lhs = CExpr::Var(self.var_name(dst));
-        let rhs = self.normalize_assignment_predicate_rhs(CExpr::binary(
-            op,
-            self.get_expr(a),
-            self.get_expr(b),
-        ));
+        let rhs = self.resolve_predicate_rhs_for_var(
+            dst,
+            CExpr::binary(op, self.get_expr(a), self.get_expr(b)),
+        );
         self.assign_stmt(lhs, rhs)
     }
 }
@@ -2067,6 +2113,50 @@ pub(super) fn is_generic_arg_name(name: &str) -> bool {
         .strip_prefix("arg")
         .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
         .unwrap_or(false)
+}
+
+fn should_replace_preserved_stack_alias(existing: &str) -> bool {
+    existing.starts_with("local_") || existing.starts_with("stack_") || existing == "saved_fp"
+}
+
+fn should_replace_preserved_stack_expr(existing: &CExpr, preserved: &CExpr) -> bool {
+    match (existing, preserved) {
+        (CExpr::Var(existing_name), CExpr::Var(preserved_name)) => {
+            should_replace_preserved_stack_alias(existing_name)
+                && !should_replace_preserved_stack_alias(preserved_name)
+        }
+        _ => false,
+    }
+}
+
+fn normalize_stack_definition_overrides(stack_info: &mut analysis::StackInfo) {
+    let replacements: Vec<(String, CExpr)> = stack_info
+        .definition_overrides
+        .iter()
+        .filter_map(|(key, expr)| {
+            let CExpr::Var(name) = expr else {
+                return None;
+            };
+            let offset = if let Some(rest) = name.strip_prefix("local_") {
+                i64::from_str_radix(rest, 16).ok().map(|v| -v)
+            } else if let Some(rest) = name.strip_prefix("stack_") {
+                i64::from_str_radix(rest, 16).ok()
+            } else {
+                None
+            }?;
+            let preferred = stack_info.stack_vars.get(&offset)?;
+            if should_replace_preserved_stack_alias(name)
+                && !should_replace_preserved_stack_alias(preferred)
+            {
+                Some((key.clone(), CExpr::Var(preferred.clone())))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (key, expr) in replacements {
+        stack_info.definition_overrides.insert(key, expr);
+    }
 }
 
 fn normalize_callee_name(name: &str) -> String {
