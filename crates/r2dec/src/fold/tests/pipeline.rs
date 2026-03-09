@@ -1055,6 +1055,26 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_stack_var_prefers_semantic_offset_zero_alias_over_stack_placeholder() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.state
+            .analysis_ctx
+            .stack_info
+            .stack_vars
+            .insert(0, "stack_0".to_string());
+        ctx.set_external_stack_vars(HashMap::from([(
+            0,
+            ExternalStackVar {
+                name: "saved_rbp".to_string(),
+                ty: None,
+                base: Some("RBP".to_string()),
+            },
+        )]));
+
+        assert_eq!(ctx.resolve_stack_var(0), Some("saved_rbp".to_string()));
+    }
+
+    #[test]
     fn test_var_name_canonicalizes_stack_alias_from_external_offset_mirror() {
         let mut ctx = FoldingContext::new(64);
         ctx.state

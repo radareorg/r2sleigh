@@ -237,7 +237,11 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn canonicalize_stack_name(&self, name: &str) -> Option<String> {
-        let offset = if let Some(suffix) = name.strip_prefix("local_") {
+        let offset = if name == "saved_fp" {
+            Some(0)
+        } else if let Some(suffix) = name.strip_prefix("local_") {
+            i64::from_str_radix(suffix, 16).ok()
+        } else if let Some(suffix) = name.strip_prefix("stack_") {
             i64::from_str_radix(suffix, 16).ok()
         } else if let Some(suffix) = name.strip_prefix("arg_") {
             i64::from_str_radix(suffix, 16).ok().map(|v| -v)

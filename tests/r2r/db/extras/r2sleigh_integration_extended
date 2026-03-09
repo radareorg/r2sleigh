@@ -500,7 +500,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_struct_field
-a:sla.dec | jq -Rs 'contains("->field_") or contains("field_")'
+a:sla.dec | jq -Rs '(contains("thirteenth") or contains("first")) and contains("->") and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not)'
 EOF_CMDS
 RUN
 
@@ -617,7 +617,20 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_array_index_neg
-a:sla.dec | jq -Rs 'contains("test_array_index_neg") and contains("arr") and contains("[") and contains("]") and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
+a:sla.dec | jq -Rs 'contains("test_array_index_neg") and (contains("[-idx]") or contains("[0 - idx]") or contains("[-arg2]") or contains("[0 - arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_array_index_uses_real_index
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.test_array_index
+a:sla.dec | jq -Rs 'contains("test_array_index") and (contains("[idx]") or contains("[arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not)'
 EOF_CMDS
 RUN
 
@@ -630,7 +643,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_struct_array_index
-a:sla.dec | jq -Rs 'contains("test_struct_array_index") and contains("third") and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
+a:sla.dec | jq -Rs 'contains("test_struct_array_index") and contains("third") and contains("fourteenth") and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not) and (contains("*(rbp")|not)'
 EOF_CMDS
 RUN
 
