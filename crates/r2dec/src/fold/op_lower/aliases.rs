@@ -31,6 +31,7 @@ impl<'a> FoldingContext<'a> {
             if let Some((target, rhs)) = Self::assignment_target_and_rhs(&rewritten)
                 && self.is_ephemeral_ssa_target(target)
                 && self.expr_is_cheap_copy_rhs(rhs)
+                && self.prefers_visible_expr(&CExpr::Var(target.to_string()), rhs)
             {
                 aliases.insert(target.to_string(), rhs.clone());
             }
@@ -191,7 +192,11 @@ impl<'a> FoldingContext<'a> {
 
                 let rewritten = self.rewrite_expr_with_aliases(alias, aliases, depth + 1, visiting);
                 visiting.remove(&name);
-                rewritten
+                if self.prefers_visible_expr(&CExpr::Var(name.clone()), &rewritten) {
+                    rewritten
+                } else {
+                    CExpr::Var(name)
+                }
             }
             other => other.map_children(&mut |child| {
                 self.rewrite_expr_with_aliases(child, aliases, depth + 1, visiting)

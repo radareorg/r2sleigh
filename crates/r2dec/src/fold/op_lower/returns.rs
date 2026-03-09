@@ -1,6 +1,30 @@
 use super::*;
 
 impl<'a> FoldingContext<'a> {
+    fn preferred_return_candidate(
+        &self,
+        current: Option<CExpr>,
+        candidate: Option<CExpr>,
+    ) -> Option<CExpr> {
+        match (current, candidate) {
+            (None, other) => other,
+            (some @ Some(_), None) => some,
+            (Some(current_expr), Some(candidate_expr)) => {
+                let current_bad = self.expr_contains_generic_stack_alias(&current_expr)
+                    || self.is_uninitialized_return_reg(&current_expr);
+                let candidate_bad = self.expr_contains_generic_stack_alias(&candidate_expr)
+                    || self.is_uninitialized_return_reg(&candidate_expr);
+                if current_bad && !candidate_bad {
+                    return Some(candidate_expr);
+                }
+                if candidate_bad && !current_bad {
+                    return Some(current_expr);
+                }
+                self.choose_preferred_visible_expr(Some(current_expr), Some(candidate_expr))
+            }
+        }
+    }
+
     fn should_inline_in_return(&self, var_name: &str, depth: u32) -> bool {
         if depth > MAX_RETURN_INLINE_DEPTH {
             return false;
@@ -141,9 +165,7 @@ impl<'a> FoldingContext<'a> {
                 if self.lookup_predicate_expr(name).is_some() {
                     return self.simplify_condition_expr(CExpr::Var(name.clone()));
                 }
-                if let Some(inner) = self
-                    .lookup_definition(name)
-                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                if let Some(inner) = self.best_visible_definition(name)
                     && let CExpr::Var(inner_name) = inner
                 {
                     if inner_name.starts_with("arg") {
@@ -159,8 +181,7 @@ impl<'a> FoldingContext<'a> {
                 }
 
                 let resolved = self
-                    .lookup_definition(name)
-                    .or_else(|| self.formatted_defs_map().get(name).cloned())
+                    .best_visible_definition(name)
                     .map(|inner| self.expand_return_expr(&inner, depth + 1, visited))
                     .unwrap_or_else(|| CExpr::Var(name.clone()));
 
@@ -230,28 +251,28 @@ impl<'a> FoldingContext<'a> {
 
         let mut visited = HashSet::new();
         let root_name = var.display_name();
+        let unresolved = CExpr::Var(self.var_name(var));
         let root = self
-            .lookup_definition(&root_name)
-            .unwrap_or(CExpr::Var(root_name));
+            .preferred_return_candidate(
+                self.best_visible_definition(&root_name),
+                Some(unresolved.clone()),
+            )
+            .unwrap_or_else(|| unresolved.clone());
         let raw = self.expand_return_expr(&root, 0, &mut visited);
         let simplified = if self.is_predicate_like_expr(&raw) {
             self.simplify_condition_expr(raw)
         } else {
             raw
         };
-        self.sanitize_return_expr(simplified, root, CExpr::Var(self.var_name(var)))
+        self.sanitize_return_expr(simplified, root, unresolved)
     }
 
     fn sanitize_return_expr(&self, expr: CExpr, fallback: CExpr, unresolved: CExpr) -> CExpr {
-        if self.expr_contains_generic_stack_alias(&expr) {
-            if self.expr_contains_generic_stack_alias(&fallback) {
-                unresolved
-            } else {
-                fallback
-            }
-        } else {
-            expr
-        }
+        self.preferred_return_candidate(
+            self.preferred_return_candidate(Some(unresolved.clone()), Some(fallback)),
+            Some(expr),
+        )
+        .unwrap_or(unresolved)
     }
 
     fn expr_contains_generic_stack_alias(&self, expr: &CExpr) -> bool {
@@ -285,11 +306,8 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn sanitize_final_return_expr(&self, expr: CExpr, fallback: CExpr) -> CExpr {
-        if self.expr_contains_generic_stack_alias(&expr) {
-            fallback
-        } else {
-            expr
-        }
+        self.preferred_return_candidate(Some(fallback), Some(expr))
+            .unwrap_or_else(|| CExpr::Var("return".to_string()))
     }
 
     /// Convert an SSA variable to a C variable name.

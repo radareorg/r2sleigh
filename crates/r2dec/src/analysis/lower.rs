@@ -15,6 +15,7 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) condition_vars: &'a HashSet<String>,
     pub(crate) pinned: &'a HashSet<String>,
     pub(crate) var_aliases: &'a HashMap<String, String>,
+    pub(crate) type_hints: &'a HashMap<String, CType>,
     pub(crate) ptr_arith: &'a HashMap<String, PtrArith>,
     pub(crate) stack_slots: &'a HashMap<String, StackSlotProvenance>,
     pub(crate) forwarded_values: &'a HashMap<String, ValueProvenance>,
@@ -25,6 +26,12 @@ pub(crate) struct LowerCtx<'a> {
 }
 
 impl<'a> LowerCtx<'a> {
+    fn lookup_type_hint(&self, name: &str) -> Option<&CType> {
+        self.type_hints
+            .get(name)
+            .or_else(|| self.type_hints.get(&name.to_ascii_lowercase()))
+    }
+
     pub(crate) fn var_name(&self, var: &SSAVar) -> String {
         if var.is_const() {
             let val = parse_const_value(&var.name).unwrap_or(0);
@@ -460,7 +467,7 @@ impl<'a> LowerCtx<'a> {
             false
         };
 
-        let casted = if is_pointer_typed || Self::looks_like_pointer_expr(&addr_expr) {
+        let casted = if is_pointer_typed || self.looks_like_pointer_expr(&addr_expr) {
             addr_expr
         } else {
             let elem_ty = uint_type_from_size(elem_size);
@@ -469,15 +476,24 @@ impl<'a> LowerCtx<'a> {
         CExpr::Deref(Box::new(casted))
     }
 
-    fn looks_like_pointer_expr(expr: &CExpr) -> bool {
+    fn looks_like_pointer_expr(&self, expr: &CExpr) -> bool {
         match expr {
             CExpr::Cast { ty, .. } => matches!(ty, CType::Pointer(_)),
-            CExpr::Deref(_) | CExpr::Subscript { .. } | CExpr::PtrMember { .. } => true,
+            CExpr::Deref(_)
+            | CExpr::Subscript { .. }
+            | CExpr::Member { .. }
+            | CExpr::PtrMember { .. } => true,
             CExpr::Var(name) => {
                 let lower = name.to_ascii_lowercase();
-                lower.starts_with("arg") || lower.contains("ptr") || lower.contains("addr")
+                lower.starts_with("arg")
+                    || lower.contains("ptr")
+                    || lower.contains("addr")
+                    || self
+                        .lookup_type_hint(name)
+                        .map(|ty| matches!(ty, CType::Pointer(_) | CType::Struct(_)))
+                        .unwrap_or(false)
             }
-            CExpr::Paren(inner) => Self::looks_like_pointer_expr(inner),
+            CExpr::Paren(inner) => self.looks_like_pointer_expr(inner),
             _ => false,
         }
     }
@@ -683,7 +699,7 @@ impl<'a> LowerCtx<'a> {
         elem_ty: CType,
         is_sub: bool,
     ) -> Option<CExpr> {
-        if !Self::looks_like_pointer_expr(&base_expr)
+        if !self.looks_like_pointer_expr(&base_expr)
             || self.is_non_index_pointer_expr(&index_expr)
             || !self.is_semantic_index_expr(&index_expr)
             || base_expr == index_expr
@@ -714,7 +730,7 @@ impl<'a> LowerCtx<'a> {
                 .definitions
                 .get(name)
                 .map(|inner| self.normalize_pointer_base_expr(inner, depth + 1))
-                .filter(Self::looks_like_pointer_expr)
+                .filter(|inner| self.looks_like_pointer_expr(inner))
                 .unwrap_or_else(|| expr.clone()),
             CExpr::Paren(inner) => {
                 CExpr::Paren(Box::new(self.normalize_pointer_base_expr(inner, depth + 1)))
@@ -768,6 +784,10 @@ impl<'a> LowerCtx<'a> {
                 lower.contains("ptr")
                     || lower.contains("addr")
                     || self.stack_slots.contains_key(name)
+                    || self
+                        .lookup_type_hint(name)
+                        .map(|ty| matches!(ty, CType::Pointer(_) | CType::Struct(_)))
+                        .unwrap_or(false)
             }
             CExpr::Paren(inner) => self.is_non_index_pointer_expr(inner),
             CExpr::Unary { operand, .. } => self.is_non_index_pointer_expr(operand),
@@ -820,12 +840,14 @@ mod tests {
         strings: &'a HashMap<u64, String>,
         symbols: &'a HashMap<u64, String>,
     ) -> LowerCtx<'a> {
+        let type_hints = Box::leak(Box::new(HashMap::new()));
         LowerCtx {
             definitions,
             use_counts,
             condition_vars,
             pinned,
             var_aliases,
+            type_hints,
             ptr_arith,
             stack_slots,
             forwarded_values,

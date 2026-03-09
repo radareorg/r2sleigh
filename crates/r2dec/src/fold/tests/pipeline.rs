@@ -1434,6 +1434,29 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_definition_prefers_forwarded_semantic_value_over_register_artifact() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            "tmp:ret_1".to_string(),
+            CExpr::Var("rax_2".to_string()),
+        );
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            "src_1".to_string(),
+            CExpr::Var("arg1".to_string()),
+        );
+        ctx.state.analysis_ctx.use_info.forwarded_values.insert(
+            "tmp:ret_1".to_string(),
+            crate::analysis::ValueProvenance {
+                source: "src_1".to_string(),
+                stack_slot: None,
+            },
+        );
+
+        let resolved = ctx.lookup_definition("tmp:ret_1");
+        assert_eq!(resolved, Some(CExpr::Var("arg1".to_string())));
+    }
+
+    #[test]
     fn test_sf_surrogate_cycle_is_guarded() {
         let mut ctx = FoldingContext::new(64);
         ctx.state
@@ -1708,6 +1731,37 @@ mod tests {
                 } if matches!(left.as_ref(), CExpr::Cast { expr, .. } if matches!(expr.as_ref(), CExpr::Var(name) if name == "arg1"))
             ),
             "Cast(Var(...)) should be propagated as a cheap copy RHS"
+        );
+    }
+
+    #[test]
+    fn test_propagate_ephemeral_copies_keeps_semantic_member_base() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("tmp:base_1".to_string()),
+                CExpr::Var("rdx_2".to_string()),
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("eax_3".to_string()),
+                CExpr::PtrMember {
+                    base: Box::new(CExpr::Var("tmp:base_1".to_string())),
+                    member: "third".to_string(),
+                },
+            )),
+        ];
+
+        let propagated = ctx.propagate_ephemeral_copies(stmts);
+        let Some((_, rhs)) = FoldingContext::assignment_target_and_rhs(&propagated[1]) else {
+            panic!("expected assignment at propagated[1]");
+        };
+        assert!(
+            matches!(
+                rhs,
+                CExpr::PtrMember { base, .. }
+                    if matches!(base.as_ref(), CExpr::Var(name) if name == "tmp:base_1")
+            ),
+            "copy propagation must not rewrite semantic member bases back into transient registers"
         );
     }
 
@@ -2567,6 +2621,43 @@ mod tests {
         assert!(
             !matches!(expr, CExpr::Var(name) if name == "stack"),
             "plain stack placeholder must not survive in final return expressions"
+        );
+    }
+
+    #[test]
+    fn test_return_prefers_semantic_value_over_unresolved_return_register() {
+        let ret = make_var("RAX", 0, 8);
+        let block = make_block(vec![SSAOp::Return {
+            target: ret.clone(),
+        }]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .definitions
+            .insert(ret.display_name(), CExpr::Var("rax_0".to_string()));
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            "resolved_1".to_string(),
+            CExpr::Var("arg1".to_string()),
+        );
+        ctx.state.analysis_ctx.use_info.forwarded_values.insert(
+            ret.display_name(),
+            crate::analysis::ValueProvenance {
+                source: "resolved_1".to_string(),
+                stack_slot: None,
+            },
+        );
+        let stmts = ctx.fold_block(&block, block.addr);
+
+        let Some(CStmt::Return(Some(expr))) = stmts.last() else {
+            panic!("Expected trailing return statement");
+        };
+        assert_eq!(
+            expr,
+            &CExpr::Var("arg1".to_string()),
+            "return selection should prefer the semantic forwarded value over the unresolved return register"
         );
     }
 }

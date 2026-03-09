@@ -272,13 +272,16 @@ impl<'a> FoldingContext<'a> {
             } | CExpr::Paren(_)
                 | CExpr::Cast { .. }
         ) && let Some(alias) = self.resolve_stack_alias_from_addr_expr(&rewritten, 0)
+            && !super::op_lower::should_replace_preserved_stack_alias(&alias)
         {
             return CExpr::Var(alias);
         }
 
         match rewritten {
             CExpr::Deref(inner) => {
-                if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&inner, 0) {
+                if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&inner, 0)
+                    && !super::op_lower::should_replace_preserved_stack_alias(&alias)
+                {
                     return CExpr::Var(alias);
                 }
                 if let Some(var_name) = self.extract_known_stack_var_name(&inner) {

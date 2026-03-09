@@ -67,6 +67,18 @@ struct LowerFrame {
     with_call_args: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct VisibleExprQuality {
+    semantic_shapes: i32,
+    semantic_names: i32,
+    stable_pointer_shapes: i32,
+    generic_stack_penalty: i32,
+    transient_reg_penalty: i32,
+    temp_penalty: i32,
+    zero_offset_penalty: i32,
+    node_penalty: i32,
+}
+
 impl LowerFrame {
     fn for_expr() -> Self {
         Self {
@@ -1016,6 +1028,7 @@ impl<'a> FoldingContext<'a> {
         match expr {
             CExpr::Cast { ty, .. } => matches!(ty, CType::Pointer(_)),
             CExpr::Deref(_) => true,
+            CExpr::Subscript { .. } | CExpr::Member { .. } | CExpr::PtrMember { .. } => true,
             CExpr::Var(name) => {
                 if name.starts_with("arg") || name.contains("ptr") {
                     return true;
@@ -1254,6 +1267,152 @@ impl<'a> FoldingContext<'a> {
 
         let rendered = self.var_name(var);
         self.lookup_type_hint(&rendered).cloned()
+    }
+
+    pub(super) fn prefers_visible_expr(&self, current: &CExpr, candidate: &CExpr) -> bool {
+        self.visible_expr_quality(candidate) > self.visible_expr_quality(current)
+    }
+
+    pub(super) fn choose_preferred_visible_expr(
+        &self,
+        current: Option<CExpr>,
+        candidate: Option<CExpr>,
+    ) -> Option<CExpr> {
+        match (current, candidate) {
+            (None, other) => other,
+            (some @ Some(_), None) => some,
+            (Some(current_expr), Some(candidate_expr)) => {
+                if self.prefers_visible_expr(&current_expr, &candidate_expr) {
+                    Some(candidate_expr)
+                } else {
+                    Some(current_expr)
+                }
+            }
+        }
+    }
+
+    pub(super) fn best_visible_definition(&self, name: &str) -> Option<CExpr> {
+        self.choose_preferred_visible_expr(
+            self.lookup_definition(name),
+            self.formatted_defs_map().get(name).cloned(),
+        )
+    }
+
+    fn visible_expr_quality(&self, expr: &CExpr) -> VisibleExprQuality {
+        let mut quality = VisibleExprQuality::default();
+        self.accumulate_visible_expr_quality(expr, &mut quality, 0);
+        quality
+    }
+
+    fn accumulate_visible_expr_quality(
+        &self,
+        expr: &CExpr,
+        quality: &mut VisibleExprQuality,
+        depth: u32,
+    ) {
+        if depth > MAX_SIMPLE_EXPR_DEPTH {
+            return;
+        }
+
+        quality.node_penalty -= 1;
+        match expr {
+            CExpr::Var(name) => {
+                if should_replace_preserved_stack_alias(name) {
+                    quality.generic_stack_penalty -= 8;
+                } else if self.is_transient_visible_name(name) {
+                    quality.transient_reg_penalty -= 6;
+                } else if self.is_low_signal_visible_name(name) {
+                    quality.temp_penalty -= 4;
+                } else {
+                    quality.semantic_names += 3;
+                }
+            }
+            CExpr::Subscript { base, index } => {
+                quality.semantic_shapes += 6;
+                quality.stable_pointer_shapes += 2;
+                self.accumulate_visible_expr_quality(base, quality, depth + 1);
+                self.accumulate_visible_expr_quality(index, quality, depth + 1);
+            }
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                quality.semantic_shapes += 7;
+                quality.stable_pointer_shapes += 2;
+                self.accumulate_visible_expr_quality(base, quality, depth + 1);
+            }
+            CExpr::Deref(inner) | CExpr::AddrOf(inner) => {
+                quality.stable_pointer_shapes += 1;
+                self.accumulate_visible_expr_quality(inner, quality, depth + 1);
+            }
+            CExpr::Cast { expr: inner, .. }
+            | CExpr::Paren(inner)
+            | CExpr::Unary { operand: inner, .. } => {
+                self.accumulate_visible_expr_quality(inner, quality, depth + 1);
+            }
+            CExpr::Binary { op, left, right } => {
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                    && (self.literal_to_i64(left).is_some_and(|lit| lit == 0)
+                        || self.literal_to_i64(right).is_some_and(|lit| lit == 0))
+                {
+                    quality.zero_offset_penalty -= 4;
+                }
+                self.accumulate_visible_expr_quality(left, quality, depth + 1);
+                self.accumulate_visible_expr_quality(right, quality, depth + 1);
+            }
+            CExpr::Call { func, args } => {
+                self.accumulate_visible_expr_quality(func, quality, depth + 1);
+                for arg in args {
+                    self.accumulate_visible_expr_quality(arg, quality, depth + 1);
+                }
+            }
+            CExpr::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                self.accumulate_visible_expr_quality(cond, quality, depth + 1);
+                self.accumulate_visible_expr_quality(then_expr, quality, depth + 1);
+                self.accumulate_visible_expr_quality(else_expr, quality, depth + 1);
+            }
+            CExpr::Comma(exprs) => {
+                for inner in exprs {
+                    self.accumulate_visible_expr_quality(inner, quality, depth + 1);
+                }
+            }
+            CExpr::Sizeof(inner) => self.accumulate_visible_expr_quality(inner, quality, depth + 1),
+            CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(_)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_)
+            | CExpr::SizeofType(_) => {}
+        }
+    }
+
+    fn is_low_signal_visible_name(&self, name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower.starts_with("tmp:")
+            || lower.starts_with("const:")
+            || lower.starts_with("ram:")
+            || lower.starts_with("t")
+                && lower
+                    .trim_start_matches('t')
+                    .chars()
+                    .all(|ch| ch.is_ascii_digit())
+    }
+
+    fn is_transient_visible_name(&self, name: &str) -> bool {
+        if self.is_low_signal_visible_name(name) {
+            return false;
+        }
+
+        let lower = name.to_ascii_lowercase();
+        if is_cpu_flag(&lower) {
+            return true;
+        }
+
+        let base = lower.split('_').next().unwrap_or(lower.as_str());
+        self.inputs.arch.is_register_like_base_name(base)
+            && !Self::is_semantic_binding_name(base)
+            && self.arg_alias_for_rendered_name(name).is_none()
     }
 
     fn expr_type_hint(&self, expr: &CExpr) -> Option<CType> {
@@ -1559,16 +1718,13 @@ impl<'a> FoldingContext<'a> {
                     return None;
                 }
 
-                let resolved = self
-                    .lookup_definition(name)
-                    .or_else(|| self.formatted_defs_map().get(name).cloned())
-                    .and_then(|def| {
-                        if def == CExpr::Var(name.clone()) {
-                            return None;
-                        }
-                        self.resolve_return_expr_from_defs(&def, depth + 1, visited)
-                            .or(Some(def))
-                    });
+                let resolved = self.best_visible_definition(name).and_then(|def| {
+                    if def == CExpr::Var(name.clone()) {
+                        return None;
+                    }
+                    self.resolve_return_expr_from_defs(&def, depth + 1, visited)
+                        .or(Some(def))
+                });
 
                 visited.remove(name);
                 resolved
@@ -1582,25 +1738,26 @@ impl<'a> FoldingContext<'a> {
         target_expr: CExpr,
         last_ret_value: Option<CExpr>,
     ) -> CExpr {
+        let mut best = Some(target_expr.clone());
+        let mut visited = HashSet::new();
+        if let Some(resolved) = self.resolve_return_expr_from_defs(&target_expr, 0, &mut visited)
+            && resolved != target_expr
+        {
+            best = self.choose_preferred_visible_expr(best, Some(resolved));
+        }
+
         if let Some(last) = last_ret_value
             && (self.is_predicate_like_expr(&last)
                 || self.is_low_level_return_artifact(&target_expr)
-                || self.is_uninitialized_return_reg(&target_expr))
+                || self.is_uninitialized_return_reg(&target_expr)
+                || best
+                    .as_ref()
+                    .is_some_and(|current| self.prefers_visible_expr(current, &last)))
         {
-            return last;
+            best = self.choose_preferred_visible_expr(best, Some(last));
         }
 
-        if self.is_uninitialized_return_reg(&target_expr) {
-            let mut visited = HashSet::new();
-            if let Some(resolved) =
-                self.resolve_return_expr_from_defs(&target_expr, 0, &mut visited)
-                && resolved != target_expr
-            {
-                return resolved;
-            }
-        }
-
-        target_expr
+        best.unwrap_or(target_expr)
     }
 
     pub(super) fn lookup_definition(&self, name: &str) -> Option<CExpr> {
@@ -1617,45 +1774,43 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
 
-        if let Some(expr) = self.lookup_definition_raw(name) {
-            visited.remove(name);
-            return Some(expr);
-        }
+        let mut best = self.lookup_definition_raw(name);
 
         if let Some(prov) = self.forwarded_values_map().get(name) {
             let resolved = self
                 .lookup_definition_with_depth(&prov.source, depth + 1, visited)
                 .or_else(|| Some(self.expr_for_ssa_fallback_name(&prov.source)));
-            visited.remove(name);
-            return resolved;
+            best = self.choose_preferred_visible_expr(best, resolved);
         }
 
-        let resolved = self
+        let rendered = self
             .find_ssa_name_for_rendered_alias(name)
             .and_then(|ssa_name| self.lookup_definition_with_depth(&ssa_name, depth + 1, visited));
+        best = self.choose_preferred_visible_expr(best, rendered);
         visited.remove(name);
-        resolved
+        best
     }
 
     fn lookup_definition_raw(&self, name: &str) -> Option<CExpr> {
+        let mut best = None;
         if let Some(expr) = self.definitions_map().get(name) {
-            return Some(expr.clone());
+            best = self.choose_preferred_visible_expr(best, Some(expr.clone()));
         }
         let lower = name.to_lowercase();
         if let Some(expr) = self.definitions_map().get(&lower) {
-            return Some(expr.clone());
+            best = self.choose_preferred_visible_expr(best, Some(expr.clone()));
         }
         if let Some((base, version)) = name.rsplit_once('_') {
             let lower = format!("{}_{}", base.to_lowercase(), version);
             if let Some(expr) = self.definitions_map().get(&lower) {
-                return Some(expr.clone());
+                best = self.choose_preferred_visible_expr(best, Some(expr.clone()));
             }
             let upper = format!("{}_{}", base.to_uppercase(), version);
             if let Some(expr) = self.definitions_map().get(&upper) {
-                return Some(expr.clone());
+                best = self.choose_preferred_visible_expr(best, Some(expr.clone()));
             }
         }
-        None
+        best
     }
 
     fn find_ssa_name_for_rendered_alias(&self, name: &str) -> Option<String> {
@@ -1737,7 +1892,13 @@ impl<'a> FoldingContext<'a> {
             }
 
             if let SSAOp::Return { target } = op {
-                let target_expr = self.get_expr(target);
+                let unresolved = self.get_expr(target);
+                let target_expr = self
+                    .choose_preferred_visible_expr(
+                        Some(unresolved.clone()),
+                        self.best_visible_definition(&target.display_name()),
+                    )
+                    .unwrap_or(unresolved);
                 let expr = self.resolve_return_target_expr(target_expr, last_ret_value.clone());
                 let rewritten = self.rewrite_stack_expr(expr.clone());
                 let final_expr = self.sanitize_final_return_expr(rewritten, expr);
@@ -2359,7 +2520,7 @@ pub(super) fn is_generic_arg_name(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn should_replace_preserved_stack_alias(existing: &str) -> bool {
+pub(crate) fn should_replace_preserved_stack_alias(existing: &str) -> bool {
     existing == "stack"
         || existing.starts_with("local_")
         || existing.starts_with("stack_")

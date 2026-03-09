@@ -33,7 +33,7 @@ pub(crate) fn analyze_with_definition_overrides(
 
     analyze_call_args(&mut scratch, blocks, env);
     coalesce_variables(&mut scratch, blocks, env);
-    build_formatted_defs(&mut scratch);
+    build_formatted_defs(&mut scratch, env);
 
     scratch.info
 }
@@ -233,6 +233,7 @@ fn collect_definitions(
                     condition_vars: &scratch.info.condition_vars,
                     pinned: &scratch.info.pinned,
                     var_aliases: &scratch.info.var_aliases,
+                    type_hints: &scratch.info.type_hints,
                     ptr_arith: &scratch.info.ptr_arith,
                     stack_slots: &scratch.info.stack_slots,
                     forwarded_values: &scratch.info.forwarded_values,
@@ -276,7 +277,7 @@ fn invalidates_block_stack_values(
     }
 }
 
-fn build_formatted_defs(scratch: &mut UseScratch) {
+fn build_formatted_defs(scratch: &mut UseScratch, env: &PassEnv<'_>) {
     scratch.info.formatted_defs.clear();
     let mut defs: Vec<_> = scratch
         .info
@@ -291,7 +292,13 @@ fn build_formatted_defs(scratch: &mut UseScratch) {
         let formatted = utils::format_traced_name(&ssa_key, &scratch.info.var_aliases);
         match selected.get_mut(&formatted) {
             Some((winner_key, winner_expr))
-                if is_preferred_formatted_def(&ssa_key, winner_key.as_str()) =>
+                if is_preferred_formatted_def_candidate(
+                    &ssa_key,
+                    &expr,
+                    winner_key.as_str(),
+                    winner_expr,
+                    env,
+                ) =>
             {
                 *winner_key = ssa_key;
                 *winner_expr = expr;
@@ -310,6 +317,21 @@ fn build_formatted_defs(scratch: &mut UseScratch) {
     }
 }
 
+fn is_preferred_formatted_def_candidate(
+    candidate: &str,
+    candidate_expr: &CExpr,
+    incumbent: &str,
+    incumbent_expr: &CExpr,
+    env: &PassEnv<'_>,
+) -> bool {
+    let candidate_quality = formatted_def_expr_quality(candidate_expr, env);
+    let incumbent_quality = formatted_def_expr_quality(incumbent_expr, env);
+    if candidate_quality != incumbent_quality {
+        return candidate_quality > incumbent_quality;
+    }
+    is_preferred_formatted_def(candidate, incumbent)
+}
+
 fn is_preferred_formatted_def(candidate: &str, incumbent: &str) -> bool {
     let candidate_version = ssa_key_parts(candidate)
         .map(|(_, version)| version)
@@ -319,6 +341,110 @@ fn is_preferred_formatted_def(candidate: &str, incumbent: &str) -> bool {
         .unwrap_or(0);
     candidate_version > incumbent_version
         || (candidate_version == incumbent_version && candidate < incumbent)
+}
+
+fn formatted_def_expr_quality(expr: &CExpr, env: &PassEnv<'_>) -> (i32, i32, i32, i32, i32, i32) {
+    let mut quality = (0, 0, 0, 0, 0, 0);
+    accumulate_formatted_def_expr_quality(expr, env, &mut quality);
+    quality
+}
+
+fn accumulate_formatted_def_expr_quality(
+    expr: &CExpr,
+    env: &PassEnv<'_>,
+    quality: &mut (i32, i32, i32, i32, i32, i32),
+) {
+    match expr {
+        CExpr::Var(name) => {
+            if is_generic_stack_alias_name(name) {
+                quality.3 -= 8;
+            } else if is_low_signal_name(name) {
+                quality.5 -= 4;
+            } else if is_register_candidate_base(name, env) {
+                quality.4 -= 6;
+            } else {
+                quality.1 += 3;
+            }
+        }
+        CExpr::Subscript { base, index } => {
+            quality.0 += 6;
+            quality.2 += 2;
+            accumulate_formatted_def_expr_quality(base, env, quality);
+            accumulate_formatted_def_expr_quality(index, env, quality);
+        }
+        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+            quality.0 += 7;
+            quality.2 += 2;
+            accumulate_formatted_def_expr_quality(base, env, quality);
+        }
+        CExpr::Deref(inner) | CExpr::AddrOf(inner) => {
+            quality.2 += 1;
+            accumulate_formatted_def_expr_quality(inner, env, quality);
+        }
+        CExpr::Cast { expr: inner, .. }
+        | CExpr::Paren(inner)
+        | CExpr::Unary { operand: inner, .. }
+        | CExpr::Sizeof(inner) => accumulate_formatted_def_expr_quality(inner, env, quality),
+        CExpr::Binary { op, left, right } => {
+            if matches!(op, crate::ast::BinaryOp::Add | crate::ast::BinaryOp::Sub)
+                && (literal_zero(left) || literal_zero(right))
+            {
+                quality.5 -= 2;
+            }
+            accumulate_formatted_def_expr_quality(left, env, quality);
+            accumulate_formatted_def_expr_quality(right, env, quality);
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            accumulate_formatted_def_expr_quality(cond, env, quality);
+            accumulate_formatted_def_expr_quality(then_expr, env, quality);
+            accumulate_formatted_def_expr_quality(else_expr, env, quality);
+        }
+        CExpr::Call { func, args } => {
+            accumulate_formatted_def_expr_quality(func, env, quality);
+            for arg in args {
+                accumulate_formatted_def_expr_quality(arg, env, quality);
+            }
+        }
+        CExpr::Comma(exprs) => {
+            for inner in exprs {
+                accumulate_formatted_def_expr_quality(inner, env, quality);
+            }
+        }
+        CExpr::IntLit(_)
+        | CExpr::UIntLit(_)
+        | CExpr::FloatLit(_)
+        | CExpr::StringLit(_)
+        | CExpr::CharLit(_)
+        | CExpr::SizeofType(_) => {}
+    }
+}
+
+fn literal_zero(expr: &CExpr) -> bool {
+    matches!(expr, CExpr::IntLit(0) | CExpr::UIntLit(0))
+}
+
+fn is_generic_stack_alias_name(name: &str) -> bool {
+    name == "stack"
+        || name.starts_with("local_")
+        || name.starts_with("stack_")
+        || name == "saved_fp"
+}
+
+fn is_low_signal_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("tmp:")
+        || lower.starts_with("const:")
+        || lower.starts_with("ram:")
+        || lower.starts_with("reg:")
+        || lower.starts_with('t')
+            && lower
+                .trim_start_matches('t')
+                .chars()
+                .all(|ch| ch.is_ascii_digit())
 }
 
 fn ssa_key_parts(name: &str) -> Option<(&str, u32)> {
@@ -1054,6 +1180,7 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                         condition_vars: &scratch.info.condition_vars,
                         pinned: &scratch.info.pinned,
                         var_aliases: &scratch.info.var_aliases,
+                        type_hints: &scratch.info.type_hints,
                         ptr_arith: &scratch.info.ptr_arith,
                         stack_slots: &scratch.info.stack_slots,
                         forwarded_values: &scratch.info.forwarded_values,
@@ -1441,6 +1568,44 @@ mod tests {
                 source: stored.display_name(),
                 stack_slot: Some(-12),
             })
+        );
+    }
+
+    #[test]
+    fn formatted_defs_prefer_semantic_expr_over_register_artifact() {
+        let fixture = TestEnvFixture::new();
+        let mut scratch = UseScratch::default();
+        scratch
+            .info
+            .var_aliases
+            .insert("tmp:pick_1".to_string(), "picked".to_string());
+        scratch
+            .info
+            .var_aliases
+            .insert("tmp:pick_2".to_string(), "picked".to_string());
+        scratch
+            .info
+            .definitions
+            .insert("tmp:pick_1".to_string(), CExpr::Var("rdx_2".to_string()));
+        scratch.info.definitions.insert(
+            "tmp:pick_2".to_string(),
+            CExpr::Subscript {
+                base: Box::new(CExpr::cast(
+                    CType::ptr(CType::u32()),
+                    CExpr::Var("arr".to_string()),
+                )),
+                index: Box::new(CExpr::Var("idx".to_string())),
+            },
+        );
+
+        build_formatted_defs(&mut scratch, &fixture.env());
+
+        assert!(
+            matches!(
+                scratch.info.formatted_defs.get("picked"),
+                Some(CExpr::Subscript { .. })
+            ),
+            "formatted defs should keep the stronger semantic expression when aliases collide"
         );
     }
 
