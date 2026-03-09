@@ -880,18 +880,36 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn try_subscript_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
-        if let Some(ptr) = self.ptr_arith_map().get(&addr.display_name())
-            && let Some(sub) =
-                self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
-        {
-            return Some(sub);
+        let semantic_best = self.choose_preferred_visible_expr(
+            self.definitions_map()
+                .get(&addr.display_name())
+                .and_then(|expr| self.try_subscript_from_addr_expr(expr)),
+            self.best_visible_definition(&addr.display_name())
+                .and_then(|expr| self.try_subscript_from_addr_expr(&expr)),
+        );
+        if semantic_best.is_some() {
+            return semantic_best;
         }
-        let expr = self
-            .definitions_map()
-            .get(&addr.display_name())
-            .cloned()
-            .unwrap_or_else(|| addr_expr.clone());
-        self.try_subscript_from_addr_expr(&expr)
+
+        let mut best = self.try_subscript_from_addr_expr(addr_expr);
+        best = self.choose_preferred_visible_expr(
+            best,
+            self.definitions_map()
+                .get(&addr.display_name())
+                .and_then(|expr| self.try_subscript_from_addr_expr(expr)),
+        );
+        best = self.choose_preferred_visible_expr(
+            best,
+            self.best_visible_definition(&addr.display_name())
+                .and_then(|expr| self.try_subscript_from_addr_expr(&expr)),
+        );
+        if let Some(ptr) = self.ptr_arith_map().get(&addr.display_name()) {
+            best = self.choose_preferred_visible_expr(
+                best,
+                self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub),
+            );
+        }
+        best
     }
 
     fn try_subscript_from_addr_expr(&self, expr: &CExpr) -> Option<CExpr> {
@@ -923,15 +941,36 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn try_member_access_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
-        if let Some((base, offset)) = self.ptr_members_map().get(&addr.display_name()) {
-            return self.provenanced_member_expr(addr, base, *offset);
+        let semantic_best = self.choose_preferred_visible_expr(
+            self.definitions_map()
+                .get(&addr.display_name())
+                .and_then(|expr| self.try_member_access_from_addr_expr(Some(addr), expr)),
+            self.best_visible_definition(&addr.display_name())
+                .and_then(|expr| self.try_member_access_from_addr_expr(Some(addr), &expr)),
+        );
+        if semantic_best.is_some() {
+            return semantic_best;
         }
-        let expr = self
-            .definitions_map()
-            .get(&addr.display_name())
-            .cloned()
-            .unwrap_or_else(|| addr_expr.clone());
-        self.try_member_access_from_addr_expr(Some(addr), &expr)
+
+        let mut best = self.try_member_access_from_addr_expr(Some(addr), addr_expr);
+        best = self.choose_preferred_visible_expr(
+            best,
+            self.definitions_map()
+                .get(&addr.display_name())
+                .and_then(|expr| self.try_member_access_from_addr_expr(Some(addr), expr)),
+        );
+        best = self.choose_preferred_visible_expr(
+            best,
+            self.best_visible_definition(&addr.display_name())
+                .and_then(|expr| self.try_member_access_from_addr_expr(Some(addr), &expr)),
+        );
+        if let Some((base, offset)) = self.ptr_members_map().get(&addr.display_name()) {
+            best = self.choose_preferred_visible_expr(
+                best,
+                self.provenanced_member_expr(addr, base, *offset),
+            );
+        }
+        best
     }
 
     fn try_member_access_from_addr_expr(
@@ -939,8 +978,9 @@ impl<'a> FoldingContext<'a> {
         addr: Option<&SSAVar>,
         expr: &CExpr,
     ) -> Option<CExpr> {
-        let (base_expr, offset) = self.extract_base_const_offset(expr)?;
-        if offset == 0 || self.is_stackish_expr(&base_expr) {
+        let (base_expr_raw, offset) = self.extract_base_const_offset(expr)?;
+        let base_expr = self.normalize_pointer_base_expr(&base_expr_raw, 0);
+        if self.is_stackish_expr(&base_expr) {
             return None;
         }
         let oracle_member = self.oracle_member_name(addr, &base_expr, offset);
@@ -1104,11 +1144,21 @@ impl<'a> FoldingContext<'a> {
 
         match expr {
             CExpr::Var(name) => {
-                if let Some(inner) = self.lookup_definition(name) {
-                    let normalized = self.normalize_index_expr(&inner, depth + 1)?;
-                    if !self.is_non_index_pointer_expr(&normalized) {
-                        return Some(normalized);
-                    }
+                if !self.is_low_signal_visible_name(name)
+                    && !self.is_transient_visible_name(name)
+                    && !self.is_non_index_pointer_expr(expr)
+                    && self.is_semantic_index_expr(expr)
+                {
+                    return Some(expr.clone());
+                }
+                if let Some(inner) = self.lookup_definition(name)
+                    && let Some(normalized) = self.normalize_index_expr(&inner, depth + 1)
+                    && !self.is_non_index_pointer_expr(&normalized)
+                {
+                    return Some(normalized);
+                }
+                if self.lookup_definition(name).is_some() {
+                    return None;
                 }
                 if self.is_non_index_pointer_expr(expr) {
                     None
@@ -1135,9 +1185,15 @@ impl<'a> FoldingContext<'a> {
                 .lookup_definition(name)
                 .map(|inner| self.is_semantic_index_expr(&inner))
                 .unwrap_or_else(|| {
+                    let lower = name.to_ascii_lowercase();
+                    let stack_placeholder =
+                        lower == "stack" || lower == "saved_fp" || lower.starts_with("stack_");
                     !name.starts_with("const:")
                         && !name.starts_with("ram:")
-                        && self.stack_slots_map().get(name).is_none()
+                        && (!stack_placeholder
+                            && (self.stack_slots_map().get(name).is_none()
+                                || lower.starts_with("local_")
+                                || lower.starts_with("arg")))
                 }),
             CExpr::Unary { operand, .. } => self.is_semantic_index_expr(operand),
             CExpr::Binary { left, right, .. } => {
@@ -1199,10 +1255,6 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn provenanced_member_expr(&self, addr: &SSAVar, base: &SSAVar, offset: i64) -> Option<CExpr> {
-        if offset == 0 {
-            return None;
-        }
-
         let member =
             self.oracle_member_name(Some(addr), &self.expr_for_provenance(base), offset)?;
         let base_expr = if let Some(ptr) = self.ptr_arith_map().get(&base.display_name()) {
@@ -1213,7 +1265,10 @@ impl<'a> FoldingContext<'a> {
             } else {
                 self.normalize_pointer_base_expr(&self.expr_for_provenance(base), 0)
             }
-        } else if let Some(def) = self.lookup_definition(&base.display_name()) {
+        } else if let Some(def) = self.choose_preferred_visible_expr(
+            self.definitions_map().get(&base.display_name()).cloned(),
+            self.lookup_definition(&base.display_name()),
+        ) {
             if let Some(sub) = self.try_subscript_from_addr_expr(&def) {
                 sub
             } else {
@@ -1228,8 +1283,94 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn expr_for_provenance(&self, var: &SSAVar) -> CExpr {
-        self.lookup_definition(&var.display_name())
-            .unwrap_or_else(|| self.get_expr(var))
+        self.choose_preferred_visible_expr(
+            self.definitions_map().get(&var.display_name()).cloned(),
+            self.lookup_definition(&var.display_name()),
+        )
+        .unwrap_or_else(|| self.get_expr(var))
+    }
+
+    fn best_address_expr(&self, addr: &SSAVar, fallback: &CExpr) -> CExpr {
+        let mut best = Some(fallback.clone());
+        if let Some(ptr) = self.ptr_arith_map().get(&addr.display_name()) {
+            best = self.choose_preferred_address_expr(
+                addr,
+                best,
+                Some(self.ptr_arith_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)),
+            );
+        }
+        best = self.choose_preferred_address_expr(
+            addr,
+            best,
+            self.definitions_map().get(&addr.display_name()).cloned(),
+        );
+        best = self.choose_preferred_address_expr(
+            addr,
+            best,
+            self.best_visible_definition(&addr.display_name()),
+        );
+        best.unwrap_or_else(|| fallback.clone())
+    }
+
+    fn choose_preferred_address_expr(
+        &self,
+        addr: &SSAVar,
+        current: Option<CExpr>,
+        candidate: Option<CExpr>,
+    ) -> Option<CExpr> {
+        match (current, candidate) {
+            (None, other) => other,
+            (some @ Some(_), None) => some,
+            (Some(current_expr), Some(candidate_expr)) => {
+                let current_quality = self.address_expr_quality(addr, &current_expr);
+                let candidate_quality = self.address_expr_quality(addr, &candidate_expr);
+                if candidate_quality > current_quality {
+                    Some(candidate_expr)
+                } else if candidate_quality < current_quality {
+                    Some(current_expr)
+                } else {
+                    self.choose_preferred_visible_expr(Some(current_expr), Some(candidate_expr))
+                }
+            }
+        }
+    }
+
+    fn address_expr_quality(&self, addr: &SSAVar, expr: &CExpr) -> (i32, i32, VisibleExprQuality) {
+        let semantic_expr = self
+            .try_member_access_from_addr_expr(Some(addr), expr)
+            .map(|member| (3, member))
+            .or_else(|| self.try_subscript_from_addr_expr(expr).map(|sub| (2, sub)));
+        let semantic_shape = semantic_expr.as_ref().map(|(shape, _)| *shape).unwrap_or(0);
+        let zero_offset_penalty = if self.is_zero_offset_address_expr(expr) {
+            -2
+        } else {
+            0
+        };
+        (
+            semantic_shape,
+            zero_offset_penalty,
+            semantic_expr
+                .as_ref()
+                .map(|(_, semantic)| self.visible_expr_quality(semantic))
+                .unwrap_or_else(|| self.visible_expr_quality(expr)),
+        )
+    }
+
+    fn is_zero_offset_address_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                left,
+                right,
+            } => {
+                self.literal_to_i64(left).is_some_and(|lit| lit == 0)
+                    || self.literal_to_i64(right).is_some_and(|lit| lit == 0)
+            }
+            CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
+                self.is_zero_offset_address_expr(inner)
+            }
+            _ => false,
+        }
     }
 
     fn is_stackish_expr(&self, expr: &CExpr) -> bool {
@@ -1330,6 +1471,9 @@ impl<'a> FoldingContext<'a> {
             CExpr::Subscript { base, index } => {
                 quality.semantic_shapes += 6;
                 quality.stable_pointer_shapes += 2;
+                if self.is_non_index_pointer_expr(index) {
+                    quality.transient_reg_penalty -= 10;
+                }
                 self.accumulate_visible_expr_quality(base, quality, depth + 1);
                 self.accumulate_visible_expr_quality(index, quality, depth + 1);
             }
@@ -1352,7 +1496,7 @@ impl<'a> FoldingContext<'a> {
                     && (self.literal_to_i64(left).is_some_and(|lit| lit == 0)
                         || self.literal_to_i64(right).is_some_and(|lit| lit == 0))
                 {
-                    quality.zero_offset_penalty -= 4;
+                    quality.zero_offset_penalty -= 10;
                 }
                 self.accumulate_visible_expr_quality(left, quality, depth + 1);
                 self.accumulate_visible_expr_quality(right, quality, depth + 1);
@@ -1389,14 +1533,20 @@ impl<'a> FoldingContext<'a> {
 
     fn is_low_signal_visible_name(&self, name: &str) -> bool {
         let lower = name.to_ascii_lowercase();
+        let is_temp_family = |prefix: char| {
+            lower
+                .strip_prefix(prefix)
+                .and_then(|rest| {
+                    let (head, tail) = rest.split_once('_').unwrap_or((rest, ""));
+                    head.chars().all(|ch| ch.is_ascii_digit()).then_some(tail)
+                })
+                .is_some_and(|tail| tail.is_empty() || tail.chars().all(|ch| ch.is_ascii_digit()))
+        };
         lower.starts_with("tmp:")
             || lower.starts_with("const:")
             || lower.starts_with("ram:")
-            || lower.starts_with("t")
-                && lower
-                    .trim_start_matches('t')
-                    .chars()
-                    .all(|ch| ch.is_ascii_digit())
+            || is_temp_family('t')
+            || is_temp_family('v')
     }
 
     fn is_transient_visible_name(&self, name: &str) -> bool {
@@ -1627,6 +1777,13 @@ impl<'a> FoldingContext<'a> {
             }
             CExpr::Cast { expr: inner, .. } => self.extract_mul_const(inner, depth + 1),
             CExpr::Var(name) => {
+                if !self.is_low_signal_visible_name(name)
+                    && !self.is_transient_visible_name(name)
+                    && !self.is_non_index_pointer_expr(expr)
+                    && self.is_semantic_index_expr(expr)
+                {
+                    return Some((expr.clone(), 1));
+                }
                 if let Some(def) = self.lookup_definition(name) {
                     return self.extract_mul_const(&def, depth + 1);
                 }
@@ -1747,13 +1904,17 @@ impl<'a> FoldingContext<'a> {
         }
 
         if let Some(last) = last_ret_value
-            && (self.is_predicate_like_expr(&last)
-                || self.is_low_level_return_artifact(&target_expr)
-                || self.is_uninitialized_return_reg(&target_expr)
-                || best
-                    .as_ref()
-                    .is_some_and(|current| self.prefers_visible_expr(current, &last)))
+            && {
+                let last = self.resolve_return_candidate(&last);
+                self.is_predicate_like_expr(&last)
+                    || self.is_low_level_return_artifact(&target_expr)
+                    || self.is_uninitialized_return_reg(&target_expr)
+                    || best
+                        .as_ref()
+                        .is_some_and(|current| self.prefers_visible_expr(current, &last))
+            }
         {
+            let last = self.resolve_return_candidate(&last);
             best = self.choose_preferred_visible_expr(best, Some(last));
         }
 
@@ -1987,18 +2148,18 @@ impl<'a> FoldingContext<'a> {
                         } else if let Some(s) = self.lookup_string(address) {
                             CExpr::StringLit(s.clone())
                         } else {
-                            let addr_expr = self.get_expr(addr);
+                            let addr_expr = self.best_address_expr(addr, &self.get_expr(addr));
                             self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                         }
                     } else {
-                        let addr_expr = self.get_expr(addr);
+                        let addr_expr = self.best_address_expr(addr, &self.get_expr(addr));
                         self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                     }
                 } else if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
                     CExpr::Var(stack_var)
                 } else {
                     // Try to use stack variable name if this is a stack access
-                    let addr_expr = self.get_expr(addr);
+                    let addr_expr = self.best_address_expr(addr, &self.get_expr(addr));
                     if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                         CExpr::Var(stack_var)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
@@ -2022,18 +2183,18 @@ impl<'a> FoldingContext<'a> {
                         if let Some(sym) = self.lookup_symbol(address) {
                             CExpr::Var(sym.clone())
                         } else {
-                            let addr_expr = self.get_expr(addr);
+                            let addr_expr = self.best_address_expr(addr, &self.get_expr(addr));
                             self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                         }
                     } else {
-                        let addr_expr = self.get_expr(addr);
+                        let addr_expr = self.best_address_expr(addr, &self.get_expr(addr));
                         self.typed_deref_expr(addr, addr_expr, elem_ty.clone())
                     }
                 } else if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
                     CExpr::Var(stack_var)
                 } else {
                     // Try to use stack variable name if this is a stack access
-                    let addr_expr = self.get_expr(addr);
+                    let addr_expr = self.best_address_expr(addr, &self.get_expr(addr));
                     if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                         CExpr::Var(stack_var)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {

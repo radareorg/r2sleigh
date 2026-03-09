@@ -1,6 +1,76 @@
 use super::*;
 
 impl<'a> FoldingContext<'a> {
+    fn predicate_return_candidate(
+        &self,
+        expr: &CExpr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        if depth > MAX_PREDICATE_OPERAND_DEPTH {
+            return None;
+        }
+
+        match expr {
+            CExpr::Var(name) => {
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+
+                let candidate = self
+                    .lookup_predicate_expr(name)
+                    .map(|pred| self.simplify_condition_expr(pred))
+                    .or_else(|| {
+                        self.lookup_definition_raw(name).and_then(|def| {
+                            self.predicate_return_candidate(&def, depth + 1, visited)
+                                .or_else(|| {
+                                    self.is_assignment_predicate_expr(&def)
+                                        .then(|| self.simplify_condition_expr(def))
+                                })
+                        })
+                    });
+
+                visited.remove(name);
+                candidate
+            }
+            CExpr::Paren(inner) => self
+                .predicate_return_candidate(inner, depth + 1, visited)
+                .map(|resolved| CExpr::Paren(Box::new(resolved))),
+            CExpr::Cast { ty, expr: inner } => self
+                .predicate_return_candidate(inner, depth + 1, visited)
+                .map(|resolved| CExpr::cast(ty.clone(), resolved)),
+            _ => self
+                .is_assignment_predicate_expr(expr)
+                .then(|| self.simplify_condition_expr(expr.clone())),
+        }
+    }
+
+    pub(super) fn resolve_return_candidate(&self, expr: &CExpr) -> CExpr {
+        let mut best = expr.clone();
+        let mut visited = HashSet::new();
+        if let Some(predicate) = self.predicate_return_candidate(expr, 0, &mut visited)
+            && self.prefers_visible_expr(&best, &predicate)
+        {
+            best = predicate;
+        }
+
+        visited.clear();
+        if let Some(resolved) = self.resolve_return_expr_from_defs(expr, 0, &mut visited)
+            && self.prefers_visible_expr(&best, &resolved)
+        {
+            best = resolved;
+        }
+
+        if let CExpr::Var(name) = expr
+            && let Some(def) = self.best_visible_definition(name)
+            && self.prefers_visible_expr(&best, &def)
+        {
+            best = def;
+        }
+
+        best
+    }
+
     fn preferred_return_candidate(
         &self,
         current: Option<CExpr>,
@@ -10,6 +80,8 @@ impl<'a> FoldingContext<'a> {
             (None, other) => other,
             (some @ Some(_), None) => some,
             (Some(current_expr), Some(candidate_expr)) => {
+                let current_expr = self.resolve_return_candidate(&current_expr);
+                let candidate_expr = self.resolve_return_candidate(&candidate_expr);
                 let current_bad = self.expr_contains_generic_stack_alias(&current_expr)
                     || self.is_uninitialized_return_reg(&current_expr);
                 let candidate_bad = self.expr_contains_generic_stack_alias(&candidate_expr)
@@ -252,12 +324,23 @@ impl<'a> FoldingContext<'a> {
         let mut visited = HashSet::new();
         let root_name = var.display_name();
         let unresolved = CExpr::Var(self.var_name(var));
-        let root = self
+        let base_root = self
             .preferred_return_candidate(
                 self.best_visible_definition(&root_name),
                 Some(unresolved.clone()),
             )
             .unwrap_or_else(|| unresolved.clone());
+        let predicate_root = self.predicate_return_candidate(&unresolved, 0, &mut visited);
+        let root = self
+            .preferred_return_candidate(
+                self.choose_preferred_visible_expr(
+                    self.predicate_candidate_for_var(var),
+                    predicate_root,
+                ),
+                Some(base_root),
+            )
+            .unwrap_or_else(|| unresolved.clone());
+        let root = self.resolve_predicate_rhs_for_var(var, root);
         let raw = self.expand_return_expr(&root, 0, &mut visited);
         let simplified = if self.is_predicate_like_expr(&raw) {
             self.simplify_condition_expr(raw)
@@ -306,8 +389,11 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn sanitize_final_return_expr(&self, expr: CExpr, fallback: CExpr) -> CExpr {
-        self.preferred_return_candidate(Some(fallback), Some(expr))
-            .unwrap_or_else(|| CExpr::Var("return".to_string()))
+        self.preferred_return_candidate(
+            Some(self.resolve_return_candidate(&fallback)),
+            Some(self.resolve_return_candidate(&expr)),
+        )
+        .unwrap_or_else(|| CExpr::Var("return".to_string()))
     }
 
     /// Convert an SSA variable to a C variable name.

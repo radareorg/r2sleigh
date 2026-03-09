@@ -499,14 +499,15 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn try_subscript_from_var(&self, addr: &SSAVar, elem_size: u32) -> Option<CExpr> {
-        if let Some(ptr) = self.ptr_arith.get(&addr.display_name())
-            && let Some(sub) =
-                self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+        if let Some(expr) = self.definitions.get(&addr.display_name())
+            && let Some(sub) = self.try_subscript_from_addr_expr(expr, elem_size)
         {
             return Some(sub);
         }
-        let expr = self.definitions.get(&addr.display_name())?.clone();
-        self.try_subscript_from_addr_expr(&expr, elem_size)
+        if let Some(ptr) = self.ptr_arith.get(&addr.display_name()) {
+            return self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub);
+        }
+        None
     }
 
     fn try_subscript_from_addr_expr(&self, expr: &CExpr, elem_size: u32) -> Option<CExpr> {
@@ -649,6 +650,19 @@ impl<'a> LowerCtx<'a> {
                 self.extract_mul_const(inner, depth + 1)
             }
             CExpr::Var(name) => {
+                let lower = name.to_ascii_lowercase();
+                let semantic_visible_name = !lower.starts_with("tmp:")
+                    && !lower.starts_with("const:")
+                    && !lower.starts_with("ram:")
+                    && !lower.starts_with("local_")
+                    && !lower.starts_with('t')
+                    && !lower.starts_with('v');
+                if semantic_visible_name
+                    && !self.is_non_index_pointer_expr(expr)
+                    && self.is_semantic_index_expr(expr)
+                {
+                    return Some((expr.clone(), 1));
+                }
                 if let Some(inner) = self.definitions.get(name) {
                     self.extract_mul_const(inner, depth + 1)
                 } else if !self.is_non_index_pointer_expr(expr) && self.is_semantic_index_expr(expr)
@@ -677,9 +691,15 @@ impl<'a> LowerCtx<'a> {
                 .get(name)
                 .map(|inner| self.is_semantic_index_expr(inner))
                 .unwrap_or_else(|| {
+                    let lower = name.to_ascii_lowercase();
+                    let stack_placeholder =
+                        lower == "stack" || lower == "saved_fp" || lower.starts_with("stack_");
                     !name.starts_with("const:")
                         && !name.starts_with("ram:")
-                        && !self.stack_slots.contains_key(name)
+                        && (!stack_placeholder
+                            && (!self.stack_slots.contains_key(name)
+                                || lower.starts_with("local_")
+                                || lower.starts_with("arg")))
                 }),
             CExpr::Unary { operand, .. } => self.is_semantic_index_expr(operand),
             CExpr::Binary { left, right, .. } => {
@@ -750,11 +770,27 @@ impl<'a> LowerCtx<'a> {
 
         match expr {
             CExpr::Var(name) => {
-                if let Some(inner) = self.definitions.get(name) {
-                    let normalized = self.normalize_index_expr(inner, depth + 1)?;
-                    if !self.is_non_index_pointer_expr(&normalized) {
-                        return Some(normalized);
-                    }
+                let lower = name.to_ascii_lowercase();
+                let semantic_visible_name = !lower.starts_with("tmp:")
+                    && !lower.starts_with("const:")
+                    && !lower.starts_with("ram:")
+                    && !lower.starts_with("local_")
+                    && !lower.starts_with('t')
+                    && !lower.starts_with('v');
+                if semantic_visible_name
+                    && !self.is_non_index_pointer_expr(expr)
+                    && self.is_semantic_index_expr(expr)
+                {
+                    return Some(expr.clone());
+                }
+                if let Some(inner) = self.definitions.get(name)
+                    && let Some(normalized) = self.normalize_index_expr(inner, depth + 1)
+                    && !self.is_non_index_pointer_expr(&normalized)
+                {
+                    return Some(normalized);
+                }
+                if self.definitions.contains_key(name) {
+                    return None;
                 }
                 if self.is_non_index_pointer_expr(expr) {
                     None

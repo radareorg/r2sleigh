@@ -389,7 +389,7 @@ fn accumulate_formatted_def_expr_quality(
             if matches!(op, crate::ast::BinaryOp::Add | crate::ast::BinaryOp::Sub)
                 && (literal_zero(left) || literal_zero(right))
             {
-                quality.5 -= 2;
+                quality.5 -= 10;
             }
             accumulate_formatted_def_expr_quality(left, env, quality);
             accumulate_formatted_def_expr_quality(right, env, quality);
