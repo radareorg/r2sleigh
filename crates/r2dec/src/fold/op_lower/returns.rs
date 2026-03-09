@@ -1,6 +1,36 @@
 use super::*;
 
 impl<'a> FoldingContext<'a> {
+    pub(super) fn expr_contains_generic_stack_alias(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => should_replace_preserved_stack_alias(name),
+            CExpr::Paren(inner) => self.expr_contains_generic_stack_alias(inner),
+            CExpr::Cast { expr: inner, .. } => self.expr_contains_generic_stack_alias(inner),
+            CExpr::Unary { operand, .. } => self.expr_contains_generic_stack_alias(operand),
+            CExpr::Binary { left, right, .. } => {
+                self.expr_contains_generic_stack_alias(left)
+                    || self.expr_contains_generic_stack_alias(right)
+            }
+            CExpr::Deref(inner) | CExpr::AddrOf(inner) => {
+                self.expr_contains_generic_stack_alias(inner)
+            }
+            CExpr::Subscript { base, index } => {
+                self.expr_contains_generic_stack_alias(base)
+                    || self.expr_contains_generic_stack_alias(index)
+            }
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                self.expr_contains_generic_stack_alias(base)
+            }
+            CExpr::Call { func, args } => {
+                self.expr_contains_generic_stack_alias(func)
+                    || args
+                        .iter()
+                        .any(|arg| self.expr_contains_generic_stack_alias(arg))
+            }
+            _ => false,
+        }
+    }
+
     fn predicate_return_candidate(
         &self,
         expr: &CExpr,
@@ -62,6 +92,13 @@ impl<'a> FoldingContext<'a> {
         }
 
         if let CExpr::Var(name) = expr
+            && let Some(def) = self.lookup_definition(name)
+            && self.prefers_visible_expr(&best, &def)
+        {
+            best = def;
+        }
+
+        if let CExpr::Var(name) = expr
             && let Some(def) = self.best_visible_definition(name)
             && self.prefers_visible_expr(&best, &def)
         {
@@ -95,6 +132,15 @@ impl<'a> FoldingContext<'a> {
                 self.choose_preferred_visible_expr(Some(current_expr), Some(candidate_expr))
             }
         }
+    }
+
+    fn semantic_deref_candidate_for_name(&self, name: &str) -> Option<CExpr> {
+        let candidate = self.choose_preferred_visible_expr(
+            self.lookup_definition(name),
+            self.best_visible_definition(name),
+        )?;
+        self.try_member_access_from_addr_expr(None, &candidate)
+            .or_else(|| self.try_subscript_from_addr_expr(&candidate))
     }
 
     fn should_inline_in_return(&self, var_name: &str, depth: u32) -> bool {
@@ -237,23 +283,16 @@ impl<'a> FoldingContext<'a> {
                 if self.lookup_predicate_expr(name).is_some() {
                     return self.simplify_condition_expr(CExpr::Var(name.clone()));
                 }
-                if let Some(inner) = self.best_visible_definition(name)
-                    && let CExpr::Var(inner_name) = inner
-                {
-                    if inner_name.starts_with("arg") {
-                        return CExpr::Var(inner_name);
-                    }
-                    if let Some(alias) = self.arg_alias_for_rendered_name(&inner_name) {
-                        return CExpr::Var(alias);
-                    }
-                }
 
                 if !self.should_inline_in_return(name, depth) || !visited.insert(name.clone()) {
                     return CExpr::Var(name.clone());
                 }
 
                 let resolved = self
-                    .best_visible_definition(name)
+                    .choose_preferred_visible_expr(
+                        self.lookup_definition(name),
+                        self.best_visible_definition(name),
+                    )
                     .map(|inner| self.expand_return_expr(&inner, depth + 1, visited))
                     .unwrap_or_else(|| CExpr::Var(name.clone()));
 
@@ -265,6 +304,11 @@ impl<'a> FoldingContext<'a> {
                 }
             }
             CExpr::Deref(inner) => {
+                if let CExpr::Var(name) = inner.as_ref()
+                    && let Some(candidate) = self.semantic_deref_candidate_for_name(name)
+                {
+                    return candidate;
+                }
                 if let Some(stack_var) = self
                     .resolve_stack_alias_from_addr_expr(inner, 0)
                     .filter(|alias| !should_replace_preserved_stack_alias(alias))
@@ -324,11 +368,14 @@ impl<'a> FoldingContext<'a> {
         let mut visited = HashSet::new();
         let root_name = var.display_name();
         let unresolved = CExpr::Var(self.var_name(var));
-        let base_root = self
+        let semantic_root = self
             .preferred_return_candidate(
+                self.lookup_definition(&root_name),
                 self.best_visible_definition(&root_name),
-                Some(unresolved.clone()),
             )
+            .unwrap_or_else(|| unresolved.clone());
+        let base_root = self
+            .preferred_return_candidate(Some(semantic_root), Some(unresolved.clone()))
             .unwrap_or_else(|| unresolved.clone());
         let predicate_root = self.predicate_return_candidate(&unresolved, 0, &mut visited);
         let root = self
@@ -356,36 +403,6 @@ impl<'a> FoldingContext<'a> {
             Some(expr),
         )
         .unwrap_or(unresolved)
-    }
-
-    fn expr_contains_generic_stack_alias(&self, expr: &CExpr) -> bool {
-        match expr {
-            CExpr::Var(name) => should_replace_preserved_stack_alias(name),
-            CExpr::Paren(inner) => self.expr_contains_generic_stack_alias(inner),
-            CExpr::Cast { expr: inner, .. } => self.expr_contains_generic_stack_alias(inner),
-            CExpr::Unary { operand, .. } => self.expr_contains_generic_stack_alias(operand),
-            CExpr::Binary { left, right, .. } => {
-                self.expr_contains_generic_stack_alias(left)
-                    || self.expr_contains_generic_stack_alias(right)
-            }
-            CExpr::Deref(inner) | CExpr::AddrOf(inner) => {
-                self.expr_contains_generic_stack_alias(inner)
-            }
-            CExpr::Subscript { base, index } => {
-                self.expr_contains_generic_stack_alias(base)
-                    || self.expr_contains_generic_stack_alias(index)
-            }
-            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-                self.expr_contains_generic_stack_alias(base)
-            }
-            CExpr::Call { func, args } => {
-                self.expr_contains_generic_stack_alias(func)
-                    || args
-                        .iter()
-                        .any(|arg| self.expr_contains_generic_stack_alias(arg))
-            }
-            _ => false,
-        }
     }
 
     pub(super) fn sanitize_final_return_expr(&self, expr: CExpr, fallback: CExpr) -> CExpr {

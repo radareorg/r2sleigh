@@ -166,6 +166,8 @@ impl<'a> LowerCtx<'a> {
             SSAOp::Load { dst, addr, .. } => {
                 if let Some(sub) = self.try_subscript_from_var(addr, dst.size) {
                     sub
+                } else if let Some(member) = self.try_member_access_from_var(addr) {
+                    member
                 } else {
                     self.typed_deref_expr(addr, dst.size)
                 }
@@ -504,8 +506,25 @@ impl<'a> LowerCtx<'a> {
         {
             return Some(sub);
         }
+        let resolved = self.expr_for_ssa_name(&addr.display_name());
+        if let Some(sub) = self.try_subscript_from_addr_expr(&resolved, elem_size) {
+            return Some(sub);
+        }
         if let Some(ptr) = self.ptr_arith.get(&addr.display_name()) {
             return self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub);
+        }
+        None
+    }
+
+    fn try_member_access_from_var(&self, addr: &SSAVar) -> Option<CExpr> {
+        if let Some(expr) = self.definitions.get(&addr.display_name())
+            && let Some(member) = self.try_member_access_from_addr_expr(Some(addr), expr)
+        {
+            return Some(member);
+        }
+        let resolved = self.expr_for_ssa_name(&addr.display_name());
+        if let Some(member) = self.try_member_access_from_addr_expr(Some(addr), &resolved) {
+            return Some(member);
         }
         None
     }
@@ -516,6 +535,20 @@ impl<'a> LowerCtx<'a> {
         let base_expr = self.normalize_pointer_base_expr(&base_expr, 0);
         let index_expr = self.normalize_index_expr(&index_expr, 0)?;
         self.build_subscript_expr(base_expr, index_expr, elem_ty, is_sub)
+    }
+
+    fn try_member_access_from_addr_expr(
+        &self,
+        addr: Option<&SSAVar>,
+        expr: &CExpr,
+    ) -> Option<CExpr> {
+        let (base_expr_raw, offset) = self
+            .extract_base_const_offset(expr)
+            .or_else(|| Some((expr.clone(), 0)))?;
+        let base_expr = self.stable_member_base_expr(&base_expr_raw, 0)?;
+        let member = self.oracle_member_name(addr, &base_expr, offset)?;
+        self.is_semantic_member_base(&base_expr)
+            .then(|| self.member_access_expr(base_expr, member))
     }
 
     fn extract_base_index_scale(&self, expr: &CExpr) -> Option<(CExpr, CExpr, u32, bool)> {
@@ -538,7 +571,52 @@ impl<'a> LowerCtx<'a> {
             CExpr::Var(name) => self
                 .definitions
                 .get(name)
-                .and_then(|inner| self.extract_base_index_scale(inner)),
+                .and_then(|inner| self.extract_base_index_scale(inner))
+                .or_else(|| {
+                    let resolved = self.expr_for_ssa_name(name);
+                    (resolved != expr.clone())
+                        .then(|| self.extract_base_index_scale(&resolved))
+                        .flatten()
+                }),
+            _ => None,
+        }
+    }
+
+    fn extract_base_const_offset(&self, expr: &CExpr) -> Option<(CExpr, i64)> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => {
+                if let Some(off) = self.literal_to_i64(right) {
+                    return Some((left.as_ref().clone(), off));
+                }
+                if let Some(off) = self.literal_to_i64(left) {
+                    return Some((right.as_ref().clone(), off));
+                }
+                None
+            }
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => self
+                .literal_to_i64(right)
+                .map(|off| (left.as_ref().clone(), -off)),
+            CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
+                self.extract_base_const_offset(inner)
+            }
+            CExpr::Var(name) => self
+                .definitions
+                .get(name)
+                .and_then(|def| self.extract_base_const_offset(def))
+                .or_else(|| {
+                    let resolved = self.expr_for_ssa_name(name);
+                    (resolved != expr.clone())
+                        .then(|| self.extract_base_const_offset(&resolved))
+                        .flatten()
+                }),
             _ => None,
         }
     }
@@ -746,12 +824,16 @@ impl<'a> LowerCtx<'a> {
         }
 
         match expr {
-            CExpr::Var(name) => self
-                .definitions
-                .get(name)
-                .map(|inner| self.normalize_pointer_base_expr(inner, depth + 1))
-                .filter(|inner| self.looks_like_pointer_expr(inner))
-                .unwrap_or_else(|| expr.clone()),
+            CExpr::Var(name) => {
+                if let Some(inner) = self.definitions.get(name) {
+                    return self.normalize_pointer_base_expr(inner, depth + 1);
+                }
+                let resolved = self.expr_for_ssa_name(name);
+                if resolved != expr.clone() && self.looks_like_pointer_expr(&resolved) {
+                    return self.normalize_pointer_base_expr(&resolved, depth + 1);
+                }
+                expr.clone()
+            }
             CExpr::Paren(inner) => {
                 CExpr::Paren(Box::new(self.normalize_pointer_base_expr(inner, depth + 1)))
             }
@@ -785,6 +867,13 @@ impl<'a> LowerCtx<'a> {
                 }
                 if let Some(inner) = self.definitions.get(name)
                     && let Some(normalized) = self.normalize_index_expr(inner, depth + 1)
+                    && !self.is_non_index_pointer_expr(&normalized)
+                {
+                    return Some(normalized);
+                }
+                let resolved = self.expr_for_ssa_name(name);
+                if resolved != expr.clone()
+                    && let Some(normalized) = self.normalize_index_expr(&resolved, depth + 1)
                     && !self.is_non_index_pointer_expr(&normalized)
                 {
                     return Some(normalized);
@@ -828,6 +917,78 @@ impl<'a> LowerCtx<'a> {
             CExpr::Paren(inner) => self.is_non_index_pointer_expr(inner),
             CExpr::Unary { operand, .. } => self.is_non_index_pointer_expr(operand),
             _ => false,
+        }
+    }
+
+    fn is_semantic_member_base(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let lower = name.to_ascii_lowercase();
+                !lower.starts_with("tmp:")
+                    && !lower.starts_with('r')
+                    && !lower.starts_with('e')
+                    && !matches!(lower.as_str(), "stack" | "saved_fp")
+            }
+            CExpr::Subscript { .. } | CExpr::Member { .. } => true,
+            CExpr::Cast { expr, .. } | CExpr::Paren(expr) => self.is_semantic_member_base(expr),
+            _ => self.looks_like_pointer_expr(expr),
+        }
+    }
+
+    fn stable_member_base_expr(&self, expr: &CExpr, depth: u32) -> Option<CExpr> {
+        if depth > 1 {
+            return None;
+        }
+
+        let base_expr = self.normalize_pointer_base_expr(expr, 0);
+        if self.is_semantic_member_base(&base_expr) {
+            return Some(base_expr);
+        }
+
+        if let CExpr::Var(name) = expr
+            && let Some(candidate) = self.definitions.get(name)
+        {
+            let normalized = self.normalize_pointer_base_expr(candidate, 0);
+            if self.is_semantic_member_base(&normalized) {
+                return Some(normalized);
+            }
+        }
+
+        None
+    }
+
+    fn oracle_member_name(
+        &self,
+        addr: Option<&SSAVar>,
+        _base_expr: &CExpr,
+        offset: i64,
+    ) -> Option<String> {
+        if offset < 0 {
+            return None;
+        }
+        let oracle = self.type_oracle?;
+        let offset = offset as u64;
+
+        if let Some(addr) = addr
+            && offset == 0
+            && let Some(name) = oracle.field_name(oracle.type_of(addr), offset)
+        {
+            return Some(name.to_string());
+        }
+
+        None
+    }
+
+    fn member_access_expr(&self, base_expr: CExpr, member: String) -> CExpr {
+        match base_expr {
+            CExpr::Subscript { .. } | CExpr::Member { .. } => CExpr::Member {
+                base: Box::new(base_expr),
+                member,
+            },
+            _ => CExpr::PtrMember {
+                base: Box::new(base_expr),
+                member,
+            },
         }
     }
 }

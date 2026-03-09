@@ -2660,4 +2660,5 @@ mod tests {
             "return selection should prefer the semantic forwarded value over the unresolved return register"
         );
     }
+
 }

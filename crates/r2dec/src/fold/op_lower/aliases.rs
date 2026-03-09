@@ -1,6 +1,35 @@
 use super::*;
 
 impl<'a> FoldingContext<'a> {
+    fn alias_rewrite_keeps_semantics(&self, current: &CExpr, candidate: &CExpr) -> bool {
+        if self.expr_contains_generic_stack_alias(candidate)
+            || self.is_uninitialized_return_reg(candidate)
+        {
+            return false;
+        }
+
+        match current {
+            CExpr::Subscript { .. } | CExpr::Member { .. } | CExpr::PtrMember { .. } => {
+                matches!(
+                    candidate,
+                    CExpr::Subscript { .. } | CExpr::Member { .. } | CExpr::PtrMember { .. }
+                )
+            }
+            CExpr::Var(_) => true,
+            _ => true,
+        }
+    }
+
+    fn choose_alias_rewrite(&self, current: CExpr, candidate: CExpr) -> CExpr {
+        if self.prefers_visible_expr(&current, &candidate)
+            && self.alias_rewrite_keeps_semantics(&current, &candidate)
+        {
+            candidate
+        } else {
+            current
+        }
+    }
+
     pub(super) fn assignment_target_and_rhs(stmt: &CStmt) -> Option<(&str, &CExpr)> {
         let CStmt::Expr(CExpr::Binary {
             op: BinaryOp::Assign,
@@ -192,10 +221,60 @@ impl<'a> FoldingContext<'a> {
 
                 let rewritten = self.rewrite_expr_with_aliases(alias, aliases, depth + 1, visiting);
                 visiting.remove(&name);
-                if self.prefers_visible_expr(&CExpr::Var(name.clone()), &rewritten) {
-                    rewritten
+                self.choose_alias_rewrite(CExpr::Var(name), rewritten)
+            }
+            CExpr::Subscript { base, index } => {
+                let original_base = (*base).clone();
+                let original_index = (*index).clone();
+                let rewritten_base = self.rewrite_expr_with_aliases(
+                    original_base.clone(),
+                    aliases,
+                    depth + 1,
+                    visiting,
+                );
+                let rewritten_index = self.rewrite_expr_with_aliases(
+                    original_index.clone(),
+                    aliases,
+                    depth + 1,
+                    visiting,
+                );
+                let base = self.choose_alias_rewrite(original_base, rewritten_base);
+                let index = if self.is_non_index_pointer_expr(&rewritten_index) {
+                    original_index
                 } else {
-                    CExpr::Var(name)
+                    self.choose_alias_rewrite(original_index, rewritten_index)
+                };
+                CExpr::Subscript {
+                    base: Box::new(base),
+                    index: Box::new(index),
+                }
+            }
+            CExpr::Member { base, member } => {
+                let original_base = (*base).clone();
+                let rewritten_base = self.rewrite_expr_with_aliases(
+                    original_base.clone(),
+                    aliases,
+                    depth + 1,
+                    visiting,
+                );
+                let base = self.choose_alias_rewrite(original_base, rewritten_base);
+                CExpr::Member {
+                    base: Box::new(base),
+                    member,
+                }
+            }
+            CExpr::PtrMember { base, member } => {
+                let original_base = (*base).clone();
+                let rewritten_base = self.rewrite_expr_with_aliases(
+                    original_base.clone(),
+                    aliases,
+                    depth + 1,
+                    visiting,
+                );
+                let base = self.choose_alias_rewrite(original_base, rewritten_base);
+                CExpr::PtrMember {
+                    base: Box::new(base),
+                    member,
                 }
             }
             other => other.map_children(&mut |child| {

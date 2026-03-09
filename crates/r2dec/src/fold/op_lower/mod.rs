@@ -881,9 +881,14 @@ impl<'a> FoldingContext<'a> {
 
     fn try_subscript_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
         let semantic_best = self.choose_preferred_visible_expr(
+            self.lookup_definition(&addr.display_name())
+                .and_then(|expr| self.try_subscript_from_addr_expr(&expr)),
             self.definitions_map()
                 .get(&addr.display_name())
                 .and_then(|expr| self.try_subscript_from_addr_expr(expr)),
+        );
+        let semantic_best = self.choose_preferred_visible_expr(
+            semantic_best,
             self.best_visible_definition(&addr.display_name())
                 .and_then(|expr| self.try_subscript_from_addr_expr(&expr)),
         );
@@ -892,6 +897,11 @@ impl<'a> FoldingContext<'a> {
         }
 
         let mut best = self.try_subscript_from_addr_expr(addr_expr);
+        best = self.choose_preferred_visible_expr(
+            best,
+            self.lookup_definition(&addr.display_name())
+                .and_then(|expr| self.try_subscript_from_addr_expr(&expr)),
+        );
         best = self.choose_preferred_visible_expr(
             best,
             self.definitions_map()
@@ -942,9 +952,14 @@ impl<'a> FoldingContext<'a> {
 
     fn try_member_access_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
         let semantic_best = self.choose_preferred_visible_expr(
+            self.lookup_definition(&addr.display_name())
+                .and_then(|expr| self.try_member_access_from_addr_expr(Some(addr), &expr)),
             self.definitions_map()
                 .get(&addr.display_name())
                 .and_then(|expr| self.try_member_access_from_addr_expr(Some(addr), expr)),
+        );
+        let semantic_best = self.choose_preferred_visible_expr(
+            semantic_best,
             self.best_visible_definition(&addr.display_name())
                 .and_then(|expr| self.try_member_access_from_addr_expr(Some(addr), &expr)),
         );
@@ -953,6 +968,11 @@ impl<'a> FoldingContext<'a> {
         }
 
         let mut best = self.try_member_access_from_addr_expr(Some(addr), addr_expr);
+        best = self.choose_preferred_visible_expr(
+            best,
+            self.lookup_definition(&addr.display_name())
+                .and_then(|expr| self.try_member_access_from_addr_expr(Some(addr), &expr)),
+        );
         best = self.choose_preferred_visible_expr(
             best,
             self.definitions_map()
@@ -978,8 +998,10 @@ impl<'a> FoldingContext<'a> {
         addr: Option<&SSAVar>,
         expr: &CExpr,
     ) -> Option<CExpr> {
-        let (base_expr_raw, offset) = self.extract_base_const_offset(expr)?;
-        let base_expr = self.normalize_pointer_base_expr(&base_expr_raw, 0);
+        let (base_expr_raw, offset) = self
+            .extract_base_const_offset(expr)
+            .or_else(|| Some((expr.clone(), 0)))?;
+        let base_expr = self.stable_member_base_expr(&base_expr_raw, 0)?;
         if self.is_stackish_expr(&base_expr) {
             return None;
         }
@@ -989,6 +1011,32 @@ impl<'a> FoldingContext<'a> {
         }
 
         Some(self.member_access_expr(base_expr, oracle_member?))
+    }
+
+    fn stable_member_base_expr(&self, expr: &CExpr, depth: u32) -> Option<CExpr> {
+        if depth > 1 {
+            return None;
+        }
+
+        let base_expr = self.normalize_pointer_base_expr(expr, 0);
+        if self.is_semantic_member_base(&base_expr) && !self.is_transient_visible_expr(&base_expr) {
+            return Some(base_expr);
+        }
+
+        if let CExpr::Var(name) = expr {
+            let candidate = self.choose_preferred_visible_expr(
+                self.lookup_definition(name),
+                self.best_visible_definition(name),
+            )?;
+            let normalized = self.normalize_pointer_base_expr(&candidate, 0);
+            if self.is_semantic_member_base(&normalized)
+                && !self.is_transient_visible_expr(&normalized)
+            {
+                return Some(normalized);
+            }
+        }
+
+        None
     }
 
     fn extract_base_const_offset(&self, expr: &CExpr) -> Option<(CExpr, i64)> {
@@ -1044,6 +1092,13 @@ impl<'a> FoldingContext<'a> {
             if let Some(name) = oracle.field_name(base_ty, offset) {
                 return Some(name.to_string());
             }
+        }
+
+        if let Some(addr) = addr
+            && offset == 0
+            && let Some(name) = oracle.field_name(oracle.type_of(addr), offset)
+        {
+            return Some(name.to_string());
         }
 
         if let CExpr::Var(base_name) = base_expr {
@@ -1241,6 +1296,18 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    fn is_transient_visible_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                self.is_transient_visible_name(name) || self.is_low_signal_visible_name(name)
+            }
+            CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
+                self.is_transient_visible_expr(inner)
+            }
+            _ => false,
+        }
+    }
+
     fn member_access_expr(&self, base_expr: CExpr, member: String) -> CExpr {
         match base_expr {
             CExpr::Subscript { .. } | CExpr::Member { .. } => CExpr::Member {
@@ -1299,6 +1366,11 @@ impl<'a> FoldingContext<'a> {
                 Some(self.ptr_arith_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)),
             );
         }
+        best = self.choose_preferred_address_expr(
+            addr,
+            best,
+            self.lookup_definition(&addr.display_name()),
+        );
         best = self.choose_preferred_address_expr(
             addr,
             best,
@@ -1683,8 +1755,8 @@ impl<'a> FoldingContext<'a> {
                 .extract_base_index_from_add(left, right)
                 .map(|(b, i, s)| (b, i, s, true)),
             CExpr::Var(name) => {
-                if let Some(def) = self.definitions_map().get(name) {
-                    self.extract_base_index_scale(def)
+                if let Some(def) = self.lookup_definition(name) {
+                    self.extract_base_index_scale(&def)
                 } else {
                     None
                 }
