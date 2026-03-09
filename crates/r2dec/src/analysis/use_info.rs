@@ -224,11 +224,47 @@ fn collect_definitions(
 
 fn build_formatted_defs(scratch: &mut UseScratch) {
     scratch.info.formatted_defs.clear();
-    let defs = scratch.info.definitions.clone();
+    let mut defs: Vec<_> = scratch
+        .info
+        .definitions
+        .iter()
+        .map(|(ssa_key, expr)| (ssa_key.clone(), expr.clone()))
+        .collect();
+    defs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut selected: HashMap<String, (String, CExpr)> = HashMap::new();
     for (ssa_key, expr) in defs {
         let formatted = utils::format_traced_name(&ssa_key, &scratch.info.var_aliases);
+        match selected.get_mut(&formatted) {
+            Some((winner_key, winner_expr))
+                if is_preferred_formatted_def(&ssa_key, winner_key.as_str()) =>
+            {
+                *winner_key = ssa_key;
+                *winner_expr = expr;
+            }
+            None => {
+                selected.insert(formatted, (ssa_key, expr));
+            }
+            Some(_) => {}
+        }
+    }
+
+    let mut formatted_keys: Vec<_> = selected.into_iter().collect();
+    formatted_keys.sort_by(|a, b| a.0.cmp(&b.0));
+    for (formatted, (_, expr)) in formatted_keys {
         scratch.info.formatted_defs.insert(formatted, expr);
     }
+}
+
+fn is_preferred_formatted_def(candidate: &str, incumbent: &str) -> bool {
+    let candidate_version = ssa_key_parts(candidate)
+        .map(|(_, version)| version)
+        .unwrap_or(0);
+    let incumbent_version = ssa_key_parts(incumbent)
+        .map(|(_, version)| version)
+        .unwrap_or(0);
+    candidate_version > incumbent_version
+        || (candidate_version == incumbent_version && candidate < incumbent)
 }
 
 fn ssa_key_parts(name: &str) -> Option<(&str, u32)> {
@@ -493,6 +529,34 @@ fn pair_key(a: &str, b: &str) -> (String, String) {
     }
 }
 
+fn sort_members_by_version(members: &mut [String], version_by_name: &HashMap<String, u32>) {
+    members.sort_by(|a, b| {
+        version_by_name
+            .get(a)
+            .copied()
+            .unwrap_or(u32::MAX)
+            .cmp(&version_by_name.get(b).copied().unwrap_or(u32::MAX))
+            .then_with(|| a.cmp(b))
+    });
+}
+
+fn alias_class_sort_key(
+    class: &[String],
+    version_by_name: &HashMap<String, u32>,
+) -> (bool, u32, String) {
+    let has_zero = class
+        .iter()
+        .any(|name| version_by_name.get(name) == Some(&0));
+    let min_version = class
+        .iter()
+        .filter_map(|name| version_by_name.get(name))
+        .copied()
+        .min()
+        .unwrap_or(u32::MAX);
+    let smallest_member = class.iter().min().cloned().unwrap_or_default();
+    (!has_zero, min_version, smallest_member)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pair_interferes(
     a: &str,
@@ -585,8 +649,14 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
         });
     }
 
+    let mut bases: Vec<_> = reg_versions.keys().cloned().collect();
+    bases.sort();
+
     let mut uf_parent: HashMap<String, String> = HashMap::new();
-    for versions in reg_versions.values() {
+    for base in &bases {
+        let Some(versions) = reg_versions.get(base) else {
+            continue;
+        };
         for (name, _) in versions {
             uf_parent
                 .entry(name.clone())
@@ -598,7 +668,10 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
     // If the estimated pair/block work is too large, skip this optional pass
     // and leave original SSA naming intact.
     let mut estimated_pairs = 0usize;
-    for versions in reg_versions.values() {
+    for base in &bases {
+        let Some(versions) = reg_versions.get(base) else {
+            continue;
+        };
         let mut seen = HashSet::new();
         for (name, _) in versions {
             seen.insert(name);
@@ -614,7 +687,10 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
     }
 
     let mut key_to_base: HashMap<String, String> = HashMap::new();
-    for (base, versions) in &reg_versions {
+    for base in &bases {
+        let Some(versions) = reg_versions.get(base) else {
+            continue;
+        };
         for (name, _) in versions {
             key_to_base.insert(name.clone(), base.clone());
         }
@@ -747,13 +823,16 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
 
     let mut interference_cache: HashMap<(String, String), bool> = HashMap::new();
 
-    for (base, versions) in &reg_versions {
+    for base in &bases {
+        let Some(versions) = reg_versions.get(base) else {
+            continue;
+        };
         if *base == env.sp_name || *base == env.fp_name {
             continue;
         }
         let mut unique: Vec<(String, u32)> = versions.clone();
-        unique.sort_by_key(|(_, v)| *v);
-        unique.dedup_by_key(|(k, _)| k.clone());
+        unique.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        unique.dedup_by(|a, b| a.0 == b.0);
         if unique.len() <= 1 {
             continue;
         }
@@ -770,10 +849,14 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
             .collect();
         let mut alias_classes: Vec<Vec<String>> = Vec::new();
 
-        for members in groups.values() {
+        let mut roots: Vec<_> = groups.keys().cloned().collect();
+        roots.sort();
+        for root in roots {
+            let Some(members) = groups.get(&root) else {
+                continue;
+            };
             let mut sorted_members = members.clone();
-            sorted_members
-                .sort_by_key(|name| version_by_name.get(name).copied().unwrap_or(u32::MAX));
+            sort_members_by_version(&mut sorted_members, &version_by_name);
 
             let mut classes: Vec<Vec<String>> = Vec::new();
             for member in sorted_members {
@@ -809,6 +892,13 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
                     classes.push(vec![member]);
                 }
             }
+            for class in &mut classes {
+                sort_members_by_version(class, &version_by_name);
+            }
+            classes.sort_by(|a, b| {
+                alias_class_sort_key(a, &version_by_name)
+                    .cmp(&alias_class_sort_key(b, &version_by_name))
+            });
             alias_classes.extend(classes);
         }
 
@@ -846,6 +936,7 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
                     if !has_interference {
                         let rhs = alias_classes.remove(j);
                         alias_classes[i].extend(rhs);
+                        sort_members_by_version(&mut alias_classes[i], &version_by_name);
                         merged = true;
                         break 'outer;
                     }
@@ -853,24 +944,12 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
             }
         }
 
+        for class in &mut alias_classes {
+            sort_members_by_version(class, &version_by_name);
+        }
         alias_classes.sort_by(|a, b| {
-            let a_has_zero = a.iter().any(|name| version_by_name.get(name) == Some(&0));
-            let b_has_zero = b.iter().any(|name| version_by_name.get(name) == Some(&0));
-            b_has_zero.cmp(&a_has_zero).then_with(|| {
-                let a_min = a
-                    .iter()
-                    .filter_map(|name| version_by_name.get(name))
-                    .copied()
-                    .min()
-                    .unwrap_or(u32::MAX);
-                let b_min = b
-                    .iter()
-                    .filter_map(|name| version_by_name.get(name))
-                    .copied()
-                    .min()
-                    .unwrap_or(u32::MAX);
-                a_min.cmp(&b_min)
-            })
+            alias_class_sort_key(a, &version_by_name)
+                .cmp(&alias_class_sort_key(b, &version_by_name))
         });
 
         for (idx, class) in alias_classes.iter().enumerate() {
@@ -1053,6 +1132,11 @@ mod tests {
         analyze(&blocks, &fixture.env()).var_aliases
     }
 
+    fn analyze_info(blocks: Vec<SSABlock>) -> UseInfo {
+        let fixture = TestEnvFixture::new();
+        analyze(&blocks, &fixture.env())
+    }
+
     #[test]
     fn coalesces_non_interfering_register_versions_in_same_block() {
         let edi_0 = mk("EDI", 0, 4);
@@ -1218,5 +1302,46 @@ mod tests {
         assert!(!aliases.contains_key(&rsp_1.display_name()));
         assert!(!aliases.contains_key(&local_4_1.display_name()));
         assert_eq!(aliases.get("RAX_1"), Some(&"rax".to_string()));
+    }
+
+    #[test]
+    fn formatted_defs_keep_latest_ssa_version_for_colliding_visible_name() {
+        let eax_1 = mk("EAX", 1, 4);
+        let eax_2 = mk("EAX", 2, 4);
+        let block = SSABlock {
+            addr: 0x1000,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::Copy {
+                    dst: eax_1.clone(),
+                    src: SSAVar::constant(1, 4),
+                },
+                SSAOp::Copy {
+                    dst: eax_2.clone(),
+                    src: SSAVar::constant(2, 4),
+                },
+                SSAOp::Return { target: eax_2 },
+            ],
+        };
+
+        let info = analyze_info(vec![block]);
+        assert_eq!(info.var_aliases.get("EAX_1"), Some(&"eax".to_string()));
+        assert_eq!(info.var_aliases.get("EAX_2"), Some(&"eax".to_string()));
+        assert_eq!(info.formatted_defs.get("eax"), Some(&CExpr::IntLit(2)));
+    }
+
+    #[test]
+    fn alias_class_sort_key_uses_lex_smallest_member_as_final_tiebreaker() {
+        let versions = HashMap::from([
+            ("eax_beta_7".to_string(), 7),
+            ("eax_gamma_7".to_string(), 7),
+            ("eax_alpha_7".to_string(), 7),
+            ("eax_delta_7".to_string(), 7),
+        ]);
+        let left = vec!["eax_beta_7".to_string(), "eax_gamma_7".to_string()];
+        let right = vec!["eax_alpha_7".to_string(), "eax_delta_7".to_string()];
+
+        assert!(alias_class_sort_key(&right, &versions) < alias_class_sort_key(&left, &versions));
     }
 }

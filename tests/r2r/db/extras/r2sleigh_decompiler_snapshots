@@ -23,3 +23,25 @@ s sym.test_bool_carrier_chain
 a:sla.dec | awk "BEGIN{saw=0} /^[[:space:]]*eax(_[0-9]+)? = .*;$/ { print \"    <carrier_assign>\"; next } /^[[:space:]]*local_4 = eax(_[0-9]+)?;$/ { print \"    <carrier_store>\"; next } /^[[:space:]]*return .*;$/ { if (saw) print \"        <false_branch_return>\"; else { print \"        <true_branch_return>\"; saw=1 } next } { print }"
 EOF_CMDS
 RUN
+
+NAME=decompiler_complex_check_stable_header_and_local_prefix
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+int32_t dbg.complex_check(int32_t a, int32_t b)
+{
+    local_14 = a;
+    local_18 = b;
+    eax = local_18 + local_14;
+    local_4 = eax;
+    eax = local_14 - arg2;
+    local_8 = eax;
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.complex_check
+s sym.complex_check
+s sym._complex_check
+a:sla.dec | sed -n '1,8p'
+EOF_CMDS
+RUN
