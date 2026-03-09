@@ -3,6 +3,7 @@
 R2R_JOBS ?= 4
 R2R_TIMEOUT ?= 120
 R2R_TMPDIR ?= /tmp/r2sleigh-r2r-tmp
+R2R_PLUGIN_DIR ?= $(R2R_TMPDIR)/plugins
 R2R_RUST_FEATURES ?= all-archs
 
 .PHONY: all ensure-tools build-bins link-bins install-plugin run
@@ -31,10 +32,13 @@ link-bins: build-bins
 	@if [ -f ../e2e/sym_test ]; then ln -sf ../../e2e/sym_test bins/sym_test; fi
 
 install-plugin:
-	$(MAKE) -C ../../r2plugin RUST_FEATURES=$(R2R_RUST_FEATURES) install
+	@mkdir -p "$(R2R_PLUGIN_DIR)"
+	$(MAKE) -C ../../r2plugin RUST_FEATURES=$(R2R_RUST_FEATURES) R2_PLUGIN_DIR="$(abspath $(R2R_PLUGIN_DIR))" install
 
-run: ensure-tools link-bins install-plugin
+run: ensure-tools link-bins
 	@rm -rf "$(R2R_TMPDIR)"
-	@mkdir -p "$(R2R_TMPDIR)"
+	@mkdir -p "$(R2R_TMPDIR)" "$(R2R_PLUGIN_DIR)"
+	@$(MAKE) install-plugin R2R_PLUGIN_DIR="$(R2R_PLUGIN_DIR)"
 	TMPDIR="$(R2R_TMPDIR)" TMP="$(R2R_TMPDIR)" TEMP="$(R2R_TMPDIR)" \
+		R2_USER_PLUGINS="$(abspath $(R2R_PLUGIN_DIR))" \
 		r2r -t $(R2R_TIMEOUT) -j $(R2R_JOBS) -L db/extras
