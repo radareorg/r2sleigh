@@ -157,9 +157,7 @@ impl<'a> LowerCtx<'a> {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
             SSAOp::Load { dst, addr, .. } => {
-                if let Some(ptr) = self.ptr_arith.get(&addr.display_name()) {
-                    self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
-                } else if let Some(sub) = self.try_subscript_from_var(addr, dst.size) {
+                if let Some(sub) = self.try_subscript_from_var(addr, dst.size) {
                     sub
                 } else {
                     self.typed_deref_expr(addr, dst.size)
@@ -435,7 +433,7 @@ impl<'a> LowerCtx<'a> {
         index: &SSAVar,
         element_size: u32,
         is_sub: bool,
-    ) -> CExpr {
+    ) -> Option<CExpr> {
         let elem_ty = if let Some(oracle) = self.type_oracle {
             let base_ty = oracle.type_of(base);
             if oracle.is_array(base_ty) || oracle.is_pointer(base_ty) {
@@ -446,16 +444,11 @@ impl<'a> LowerCtx<'a> {
         } else {
             uint_type_from_size(element_size)
         };
-        let base_expr = CExpr::cast(CType::ptr(elem_ty), self.get_expr(base));
-        let index_expr = if is_sub {
-            CExpr::unary(UnaryOp::Neg, self.get_expr(index))
-        } else {
-            self.get_expr(index)
-        };
-        CExpr::Subscript {
-            base: Box::new(base_expr),
-            index: Box::new(index_expr),
-        }
+        let base_expr =
+            self.normalize_pointer_base_expr(&self.expr_for_ssa_name(&base.display_name()), 0);
+        let index_expr =
+            self.normalize_index_expr(&self.expr_for_ssa_name(&index.display_name()), 0)?;
+        self.build_subscript_expr(base_expr, index_expr, elem_ty, is_sub)
     }
 
     fn typed_deref_expr(&self, addr: &SSAVar, elem_size: u32) -> CExpr {
@@ -490,6 +483,12 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn try_subscript_from_var(&self, addr: &SSAVar, elem_size: u32) -> Option<CExpr> {
+        if let Some(ptr) = self.ptr_arith.get(&addr.display_name())
+            && let Some(sub) =
+                self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+        {
+            return Some(sub);
+        }
         let expr = self.definitions.get(&addr.display_name())?.clone();
         self.try_subscript_from_addr_expr(&expr, elem_size)
     }
@@ -497,17 +496,9 @@ impl<'a> LowerCtx<'a> {
     fn try_subscript_from_addr_expr(&self, expr: &CExpr, elem_size: u32) -> Option<CExpr> {
         let (base_expr, index_expr, _scale, is_sub) = self.extract_base_index_scale(expr)?;
         let elem_ty = uint_type_from_size(elem_size);
-        let base_cast = CExpr::cast(CType::ptr(elem_ty), base_expr);
-        let index_final = if is_sub {
-            CExpr::unary(UnaryOp::Neg, index_expr)
-        } else {
-            index_expr
-        };
-
-        Some(CExpr::Subscript {
-            base: Box::new(base_cast),
-            index: Box::new(index_final),
-        })
+        let base_expr = self.normalize_pointer_base_expr(&base_expr, 0);
+        let index_expr = self.normalize_index_expr(&index_expr, 0)?;
+        self.build_subscript_expr(base_expr, index_expr, elem_ty, is_sub)
     }
 
     fn extract_base_index_scale(&self, expr: &CExpr) -> Option<(CExpr, CExpr, u32, bool)> {
@@ -630,6 +621,103 @@ impl<'a> LowerCtx<'a> {
             CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
                 self.is_semantic_index_expr(inner)
             }
+            _ => false,
+        }
+    }
+
+    fn build_subscript_expr(
+        &self,
+        base_expr: CExpr,
+        index_expr: CExpr,
+        elem_ty: CType,
+        is_sub: bool,
+    ) -> Option<CExpr> {
+        if !Self::looks_like_pointer_expr(&base_expr)
+            || self.is_non_index_pointer_expr(&index_expr)
+            || !self.is_semantic_index_expr(&index_expr)
+            || base_expr == index_expr
+        {
+            return None;
+        }
+
+        let base_cast = CExpr::cast(CType::ptr(elem_ty), base_expr);
+        let index_final = if is_sub {
+            CExpr::unary(UnaryOp::Neg, index_expr)
+        } else {
+            index_expr
+        };
+
+        Some(CExpr::Subscript {
+            base: Box::new(base_cast),
+            index: Box::new(index_final),
+        })
+    }
+
+    fn normalize_pointer_base_expr(&self, expr: &CExpr, depth: u32) -> CExpr {
+        if depth > 4 {
+            return expr.clone();
+        }
+
+        match expr {
+            CExpr::Var(name) => self
+                .definitions
+                .get(name)
+                .map(|inner| self.normalize_pointer_base_expr(inner, depth + 1))
+                .filter(Self::looks_like_pointer_expr)
+                .unwrap_or_else(|| expr.clone()),
+            CExpr::Paren(inner) => CExpr::Paren(Box::new(self.normalize_pointer_base_expr(
+                inner,
+                depth + 1,
+            ))),
+            CExpr::Cast { ty, expr: inner } => CExpr::Cast {
+                ty: ty.clone(),
+                expr: Box::new(self.normalize_pointer_base_expr(inner, depth + 1)),
+            },
+            _ => expr.clone(),
+        }
+    }
+
+    fn normalize_index_expr(&self, expr: &CExpr, depth: u32) -> Option<CExpr> {
+        if depth > 4 {
+            return self.is_semantic_index_expr(expr).then_some(expr.clone());
+        }
+
+        match expr {
+            CExpr::Var(name) => {
+                if let Some(inner) = self.definitions.get(name) {
+                    let normalized = self.normalize_index_expr(inner, depth + 1)?;
+                    if !self.is_non_index_pointer_expr(&normalized) {
+                        return Some(normalized);
+                    }
+                }
+                self.is_semantic_index_expr(expr).then_some(expr.clone())
+            }
+            CExpr::Paren(inner) => self
+                .normalize_index_expr(inner, depth + 1)
+                .map(|normalized| CExpr::Paren(Box::new(normalized))),
+            CExpr::Cast { ty, expr: inner } => {
+                self.normalize_index_expr(inner, depth + 1)
+                    .map(|normalized| CExpr::cast(ty.clone(), normalized))
+            }
+            CExpr::Unary { op, operand } => self
+                .normalize_index_expr(operand, depth + 1)
+                .map(|normalized| CExpr::unary(*op, normalized)),
+            _ => self.is_semantic_index_expr(expr).then_some(expr.clone()),
+        }
+    }
+
+    fn is_non_index_pointer_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Cast { ty, .. } => matches!(ty, CType::Pointer(_)),
+            CExpr::Deref(_) | CExpr::Subscript { .. } | CExpr::PtrMember { .. } => true,
+            CExpr::Var(name) => {
+                let lower = name.to_ascii_lowercase();
+                lower.contains("ptr")
+                    || lower.contains("addr")
+                    || self.stack_slots.contains_key(name)
+            }
+            CExpr::Paren(inner) => self.is_non_index_pointer_expr(inner),
+            CExpr::Unary { operand, .. } => self.is_non_index_pointer_expr(operand),
             _ => false,
         }
     }
@@ -1164,6 +1252,79 @@ mod tests {
         assert!(
             !matches!(expr, CExpr::PtrMember { .. }),
             "unstable alias-expanded bases must not become pointer member syntax"
+        );
+    }
+
+    #[test]
+    fn ptr_arith_prefers_expression_recovered_real_index_over_pointer_local() {
+        let fn_map = HashMap::new();
+        let str_map = HashMap::new();
+        let sym_map = HashMap::new();
+        let use_counts = HashMap::new();
+        let condition_vars = HashSet::new();
+        let pinned = HashSet::new();
+        let var_aliases = HashMap::new();
+        let stack_slots = HashMap::new();
+        let forwarded_values = HashMap::new();
+        let addr = SSAVar::new("tmp:addr", 1, 8);
+        let arr = SSAVar::new("arg1", 0, 8);
+        let ptr_local = SSAVar::new("tmp:arr_local", 1, 8);
+        let ptr_arith = HashMap::from([(
+            addr.display_name(),
+            PtrArith {
+                base: arr.clone(),
+                index: ptr_local,
+                element_size: 4,
+                is_sub: false,
+            },
+        )]);
+        let definitions = HashMap::from([
+            ("tmp:arr_local_1".to_string(), CExpr::Var("local_8".to_string())),
+            ("local_8".to_string(), CExpr::Var("arg1".to_string())),
+            ("local_c".to_string(), CExpr::Var("arg2".to_string())),
+            (
+                addr.display_name(),
+                CExpr::binary(
+                    BinaryOp::Add,
+                    CExpr::Var("local_8".to_string()),
+                    CExpr::binary(
+                        BinaryOp::Mul,
+                        CExpr::Var("local_c".to_string()),
+                        CExpr::IntLit(4),
+                    ),
+                ),
+            ),
+        ]);
+        let ctx = make_ctx(
+            &definitions,
+            &use_counts,
+            &condition_vars,
+            &pinned,
+            &var_aliases,
+            &ptr_arith,
+            &stack_slots,
+            &forwarded_values,
+            &fn_map,
+            &str_map,
+            &sym_map,
+        );
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst: SSAVar::new("tmp:5007", 1, 4),
+            space: "ram".to_string(),
+            addr,
+        });
+
+        let CExpr::Subscript { base, index } = expr else {
+            panic!("expected subscript expression");
+        };
+        assert!(
+            matches!(base.as_ref(), CExpr::Cast { expr, .. } if matches!(expr.as_ref(), CExpr::Var(name) if name == "arg1")),
+            "subscript base should normalize back to the semantic pointer source"
+        );
+        assert!(
+            matches!(index.as_ref(), CExpr::Var(name) if name == "arg2"),
+            "subscript index should use the semantic index source, not the pointer local alias: {index:?}"
         );
     }
 }

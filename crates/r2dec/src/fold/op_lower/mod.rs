@@ -860,21 +860,21 @@ impl<'a> FoldingContext<'a> {
         index: &SSAVar,
         element_size: u32,
         is_sub: bool,
-    ) -> CExpr {
+    ) -> Option<CExpr> {
         let elem_ty = self.infer_subscript_elem_type(base, element_size);
-        let base_expr = CExpr::cast(CType::ptr(elem_ty), self.get_expr(base));
-        let index_expr = if is_sub {
-            CExpr::unary(UnaryOp::Neg, self.get_expr(index))
-        } else {
-            self.get_expr(index)
-        };
-        CExpr::Subscript {
-            base: Box::new(base_expr),
-            index: Box::new(index_expr),
-        }
+        let base_expr =
+            self.normalize_pointer_base_expr(&self.expr_for_provenance(base), 0);
+        let index_expr = self.normalize_index_expr(&self.expr_for_provenance(index), 0)?;
+        self.build_subscript_expr(base_expr, index_expr, elem_ty, is_sub)
     }
 
     fn try_subscript_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
+        if let Some(ptr) = self.ptr_arith_map().get(&addr.display_name())
+            && let Some(sub) =
+                self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+        {
+            return Some(sub);
+        }
         let expr = self
             .definitions_map()
             .get(&addr.display_name())
@@ -891,17 +891,9 @@ impl<'a> FoldingContext<'a> {
         }
 
         let elem_ty = uint_type_from_size(elem_size);
-        let base_cast = CExpr::cast(CType::ptr(elem_ty), base_expr);
-        let index_final = if is_sub {
-            CExpr::unary(UnaryOp::Neg, index_expr)
-        } else {
-            index_expr
-        };
-
-        Some(CExpr::Subscript {
-            base: Box::new(base_cast),
-            index: Box::new(index_final),
-        })
+        let base_expr = self.normalize_pointer_base_expr(&base_expr, 0);
+        let index_expr = self.normalize_index_expr(&index_expr, 0)?;
+        self.build_subscript_expr(base_expr, index_expr, elem_ty, is_sub)
     }
 
     fn infer_subscript_elem_type(&self, base: &SSAVar, element_size: u32) -> CType {
@@ -920,6 +912,9 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn try_member_access_from_expr(&self, addr: &SSAVar, addr_expr: &CExpr) -> Option<CExpr> {
+        if let Some((base, offset)) = self.ptr_members_map().get(&addr.display_name()) {
+            return self.provenanced_member_expr(addr, base, *offset);
+        }
         let expr = self
             .definitions_map()
             .get(&addr.display_name())
@@ -938,22 +933,11 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
         let oracle_member = self.oracle_member_name(addr, &base_expr, offset);
-        if oracle_member.is_none() && !self.looks_like_pointer(&base_expr) {
+        if oracle_member.is_none() || !self.is_semantic_member_base(&base_expr) {
             return None;
         }
 
-        let member = if let Some(name) = oracle_member {
-            name
-        } else if offset < 0 {
-            format!("field_neg_{:x}", (-offset) as u64)
-        } else {
-            format!("field_{:x}", offset as u64)
-        };
-
-        Some(CExpr::PtrMember {
-            base: Box::new(base_expr),
-            member,
-        })
+        Some(self.member_access_expr(base_expr, oracle_member?))
     }
 
     fn extract_base_const_offset(&self, expr: &CExpr) -> Option<(CExpr, i64)> {
@@ -1026,10 +1010,6 @@ impl<'a> FoldingContext<'a> {
             }
         }
 
-        if let Some(name) = oracle.field_name_any(offset) {
-            return Some(name.to_string());
-        }
-
         None
     }
 
@@ -1053,6 +1033,176 @@ impl<'a> FoldingContext<'a> {
             } => self.looks_like_pointer(left) || self.looks_like_pointer(right),
             _ => false,
         }
+    }
+
+    fn build_subscript_expr(
+        &self,
+        base_expr: CExpr,
+        index_expr: CExpr,
+        elem_ty: CType,
+        is_sub: bool,
+    ) -> Option<CExpr> {
+        if !self.looks_like_pointer(&base_expr)
+            || self.is_non_index_pointer_expr(&index_expr)
+            || !self.is_semantic_index_expr(&index_expr)
+            || base_expr == index_expr
+        {
+            return None;
+        }
+
+        let base_cast = CExpr::cast(CType::ptr(elem_ty), base_expr);
+        let index_final = if is_sub {
+            CExpr::unary(UnaryOp::Neg, index_expr)
+        } else {
+            index_expr
+        };
+
+        Some(CExpr::Subscript {
+            base: Box::new(base_cast),
+            index: Box::new(index_final),
+        })
+    }
+
+    fn normalize_pointer_base_expr(&self, expr: &CExpr, depth: u32) -> CExpr {
+        if depth > 4 {
+            return expr.clone();
+        }
+
+        match expr {
+            CExpr::Var(name) => self
+                .lookup_definition(name)
+                .map(|inner| self.normalize_pointer_base_expr(&inner, depth + 1))
+                .filter(|inner| self.looks_like_pointer(inner))
+                .unwrap_or_else(|| expr.clone()),
+            CExpr::Paren(inner) => {
+                CExpr::Paren(Box::new(self.normalize_pointer_base_expr(inner, depth + 1)))
+            }
+            CExpr::Cast { ty, expr: inner } => CExpr::Cast {
+                ty: ty.clone(),
+                expr: Box::new(self.normalize_pointer_base_expr(inner, depth + 1)),
+            },
+            _ => expr.clone(),
+        }
+    }
+
+    fn normalize_index_expr(&self, expr: &CExpr, depth: u32) -> Option<CExpr> {
+        if depth > 4 {
+            return self.is_semantic_index_expr(expr).then_some(expr.clone());
+        }
+
+        match expr {
+            CExpr::Var(name) => {
+                if let Some(inner) = self.lookup_definition(name) {
+                    let normalized = self.normalize_index_expr(&inner, depth + 1)?;
+                    if !self.is_non_index_pointer_expr(&normalized) {
+                        return Some(normalized);
+                    }
+                }
+                self.is_semantic_index_expr(expr).then_some(expr.clone())
+            }
+            CExpr::Paren(inner) => self
+                .normalize_index_expr(inner, depth + 1)
+                .map(|normalized| CExpr::Paren(Box::new(normalized))),
+            CExpr::Cast { ty, expr: inner } => self
+                .normalize_index_expr(inner, depth + 1)
+                .map(|normalized| CExpr::cast(ty.clone(), normalized)),
+            CExpr::Unary { op, operand } => self
+                .normalize_index_expr(operand, depth + 1)
+                .map(|normalized| CExpr::unary(*op, normalized)),
+            _ => self.is_semantic_index_expr(expr).then_some(expr.clone()),
+        }
+    }
+
+    fn is_semantic_index_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => self
+                .lookup_definition(name)
+                .map(|inner| self.is_semantic_index_expr(&inner))
+                .unwrap_or_else(|| {
+                    !name.starts_with("const:")
+                        && !name.starts_with("ram:")
+                        && self.stack_slots_map().get(name).is_none()
+                }),
+            CExpr::Unary { operand, .. } => self.is_semantic_index_expr(operand),
+            CExpr::Binary { left, right, .. } => {
+                self.is_semantic_index_expr(left) || self.is_semantic_index_expr(right)
+            }
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.is_semantic_index_expr(inner)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_non_index_pointer_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Cast { ty, .. } => matches!(ty, CType::Pointer(_)),
+            CExpr::Deref(_) | CExpr::Subscript { .. } | CExpr::PtrMember { .. } => true,
+            CExpr::Var(name) => {
+                let lower = name.to_ascii_lowercase();
+                lower.contains("ptr")
+                    || lower.contains("addr")
+                    || self.stack_slots_map().get(name).is_some()
+            }
+            CExpr::Paren(inner) => self.is_non_index_pointer_expr(inner),
+            CExpr::Unary { operand, .. } => self.is_non_index_pointer_expr(operand),
+            _ => false,
+        }
+    }
+
+    fn is_semantic_member_base(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let lower = name.to_ascii_lowercase();
+                !self.inputs.arch.is_stack_base_name(&lower)
+                    && !lower.starts_with('r')
+                    && !lower.starts_with('e')
+                    && !lower.starts_with("tmp:")
+            }
+            CExpr::Subscript { .. } | CExpr::Member { .. } => true,
+            CExpr::Cast { expr, .. } | CExpr::Paren(expr) => self.is_semantic_member_base(expr),
+            _ => self.looks_like_pointer(expr),
+        }
+    }
+
+    fn member_access_expr(&self, base_expr: CExpr, member: String) -> CExpr {
+        match base_expr {
+            CExpr::Subscript { .. } | CExpr::Member { .. } => CExpr::Member {
+                base: Box::new(base_expr),
+                member,
+            },
+            _ => CExpr::PtrMember {
+                base: Box::new(base_expr),
+                member,
+            },
+        }
+    }
+
+    fn provenanced_member_expr(&self, addr: &SSAVar, base: &SSAVar, offset: i64) -> Option<CExpr> {
+        if offset == 0 {
+            return None;
+        }
+
+        let member = self.oracle_member_name(Some(addr), &self.expr_for_provenance(base), offset)?;
+        let base_expr = if let Some(ptr) = self.ptr_arith_map().get(&base.display_name()) {
+            if let Some(sub) =
+                self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+            {
+                sub
+            } else {
+                self.normalize_pointer_base_expr(&self.expr_for_provenance(base), 0)
+            }
+        } else {
+            self.normalize_pointer_base_expr(&self.expr_for_provenance(base), 0)
+        };
+
+        self.is_semantic_member_base(&base_expr)
+            .then(|| self.member_access_expr(base_expr, member))
+    }
+
+    fn expr_for_provenance(&self, var: &SSAVar) -> CExpr {
+        self.lookup_definition(&var.display_name())
+            .unwrap_or_else(|| self.get_expr(var))
     }
 
     fn is_stackish_expr(&self, expr: &CExpr) -> bool {
@@ -1637,11 +1787,8 @@ impl<'a> FoldingContext<'a> {
                 } else {
                     // Try to use stack variable name if this is a stack access
                     let addr_expr = self.get_expr(addr);
-                    let addr_key = addr.display_name();
                     if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                         CExpr::Var(stack_var)
-                    } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
-                        self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                         sub
                     } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr)
@@ -1675,11 +1822,8 @@ impl<'a> FoldingContext<'a> {
                 } else {
                     // Try to use stack variable name if this is a stack access
                     let addr_expr = self.get_expr(addr);
-                    let addr_key = addr.display_name();
                     if let Some(stack_var) = self.simplify_stack_access(&addr_expr) {
                         CExpr::Var(stack_var)
-                    } else if let Some(ptr) = self.ptr_arith_map().get(&addr_key) {
-                        self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
                     } else if let Some(sub) = self.try_subscript_from_expr(addr, &addr_expr) {
                         sub
                     } else if let Some(member) = self.try_member_access_from_expr(addr, &addr_expr)

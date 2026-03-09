@@ -454,10 +454,10 @@ mod tests {
             space: "ram".to_string(),
             addr,
         });
-        let CExpr::PtrMember { member, .. } = expr else {
-            panic!("expected pointer member access");
-        };
-        assert_eq!(member, "field_30");
+        assert!(
+            !matches!(expr, CExpr::PtrMember { .. } | CExpr::Member { .. }),
+            "member syntax should not be invented without oracle-backed field names"
+        );
     }
 
     #[test]
@@ -2300,6 +2300,34 @@ mod tests {
         assert!(
             matches!(expr, CExpr::Var(name) if name.eq_ignore_ascii_case("rax_0") || name.eq_ignore_ascii_case("rax")),
             "Return register should remain unresolved when no better return value can be derived"
+        );
+    }
+
+    #[test]
+    fn test_return_does_not_collapse_to_generic_stack_alias() {
+        let ret = make_var("tmp:ret", 1, 8);
+        let block = make_block(vec![SSAOp::Return {
+            target: ret.clone(),
+        }]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            ret.display_name(),
+            CExpr::Deref(Box::new(CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("rbp".to_string()),
+                CExpr::IntLit(0),
+            ))),
+        );
+        ctx.analyze_block(&block);
+        let stmts = ctx.fold_block(&block, block.addr);
+
+        let Some(CStmt::Return(Some(expr))) = stmts.last() else {
+            panic!("Expected trailing return statement");
+        };
+        assert!(
+            !matches!(expr, CExpr::Var(name) if name == "stack_0" || name == "saved_fp"),
+            "Generic stack placeholders must not leak into visible return expressions"
         );
     }
 }

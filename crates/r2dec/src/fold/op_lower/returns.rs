@@ -97,14 +97,19 @@ impl<'a> FoldingContext<'a> {
                 ) && self.is_return_inline_candidate(left, depth + 1)
                     && self.is_return_inline_candidate(right, depth + 1)
             }
-            CExpr::Deref(inner) => self.resolve_stack_alias_from_addr_expr(inner, 0).is_some(),
+            CExpr::Deref(inner) => self
+                .resolve_stack_alias_from_addr_expr(inner, 0)
+                .filter(|alias| !should_replace_preserved_stack_alias(alias))
+                .is_some(),
             _ => false,
         }
     }
 
     pub(crate) fn stack_alias_from_deref_expr(&self, expr: &CExpr) -> Option<String> {
         match expr {
-            CExpr::Deref(inner) => self.resolve_stack_alias_from_addr_expr(inner, 0),
+            CExpr::Deref(inner) => self
+                .resolve_stack_alias_from_addr_expr(inner, 0)
+                .filter(|alias| !should_replace_preserved_stack_alias(alias)),
             CExpr::Paren(inner) => self.stack_alias_from_deref_expr(inner),
             CExpr::Cast { expr: inner, .. } => self.stack_alias_from_deref_expr(inner),
             _ => None,
@@ -167,7 +172,10 @@ impl<'a> FoldingContext<'a> {
                 }
             }
             CExpr::Deref(inner) => {
-                if let Some(stack_var) = self.resolve_stack_alias_from_addr_expr(inner, 0) {
+                if let Some(stack_var) = self
+                    .resolve_stack_alias_from_addr_expr(inner, 0)
+                    .filter(|alias| !should_replace_preserved_stack_alias(alias))
+                {
                     CExpr::Var(stack_var)
                 } else {
                     let expanded_inner = self.expand_return_expr(inner, depth + 1, visited);
