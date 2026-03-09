@@ -118,6 +118,12 @@ impl<'a> FoldingContext<'a> {
     pub(crate) fn ptr_members_map(&self) -> &HashMap<String, (SSAVar, i64)> {
         &self.use_info().ptr_members
     }
+    pub(crate) fn stack_slots_map(&self) -> &HashMap<String, analysis::StackSlotProvenance> {
+        &self.use_info().stack_slots
+    }
+    pub(crate) fn forwarded_values_map(&self) -> &HashMap<String, analysis::ValueProvenance> {
+        &self.use_info().forwarded_values
+    }
     pub(crate) fn condition_vars_set(&self) -> &HashSet<String> {
         &self.use_info().condition_vars
     }
@@ -1401,6 +1407,40 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn lookup_definition(&self, name: &str) -> Option<CExpr> {
+        self.lookup_definition_with_depth(name, 0, &mut HashSet::new())
+    }
+
+    fn lookup_definition_with_depth(
+        &self,
+        name: &str,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        if depth > MAX_SIMPLE_EXPR_DEPTH || !visited.insert(name.to_string()) {
+            return None;
+        }
+
+        if let Some(expr) = self.lookup_definition_raw(name) {
+            visited.remove(name);
+            return Some(expr);
+        }
+
+        if let Some(prov) = self.forwarded_values_map().get(name) {
+            let resolved = self
+                .lookup_definition_with_depth(&prov.source, depth + 1, visited)
+                .or_else(|| Some(self.expr_for_ssa_fallback_name(&prov.source)));
+            visited.remove(name);
+            return resolved;
+        }
+
+        let resolved = self
+            .find_ssa_name_for_rendered_alias(name)
+            .and_then(|ssa_name| self.lookup_definition_with_depth(&ssa_name, depth + 1, visited));
+        visited.remove(name);
+        resolved
+    }
+
+    fn lookup_definition_raw(&self, name: &str) -> Option<CExpr> {
         if let Some(expr) = self.definitions_map().get(name) {
             return Some(expr.clone());
         }
@@ -1418,15 +1458,24 @@ impl<'a> FoldingContext<'a> {
                 return Some(expr.clone());
             }
         }
-        if let Some((ssa_name, _)) = self
-            .var_aliases_map()
+        None
+    }
+
+    fn find_ssa_name_for_rendered_alias(&self, name: &str) -> Option<String> {
+        self.var_aliases_map()
             .iter()
             .find(|(_, alias)| alias.eq_ignore_ascii_case(name))
-            && let Some(expr) = self.definitions_map().get(ssa_name)
-        {
-            return Some(expr.clone());
+            .map(|(ssa_name, _)| ssa_name.clone())
+    }
+
+    fn expr_for_ssa_fallback_name(&self, ssa_name: &str) -> CExpr {
+        if parse_const_value(ssa_name).is_some() {
+            return CExpr::Var(ssa_name.to_string());
         }
-        None
+        if let Some(alias) = self.var_aliases_map().get(ssa_name) {
+            return CExpr::Var(alias.clone());
+        }
+        CExpr::Var(ssa_name.to_string())
     }
 
     fn scale_to_elem_size(&self, scale: i64) -> Option<u32> {

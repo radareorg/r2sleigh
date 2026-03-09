@@ -21,8 +21,12 @@ impl<'a> FoldingContext<'a> {
             return Some(0);
         }
 
-        // Check if this variable was defined as fp/sp + offset
         let key = var.display_name();
+        if let Some(slot) = self.stack_slots_map().get(&key) {
+            return Some(slot.offset);
+        }
+
+        // Check if this variable was defined as fp/sp + offset
         if let Some(expr) = self.definitions_map().get(&key) {
             return self.extract_offset_from_expr(expr);
         }

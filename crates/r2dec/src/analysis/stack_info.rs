@@ -90,11 +90,23 @@ fn analyze_stack_vars(
                     }
                 }
                 SSAOp::Load { dst, addr, .. } => {
-                    if let Some(stack_var_name) = stack_var_for_addr_var(
+                    if let Some(expr) = forwarded_expr_for_value(
+                        dst.display_name().as_str(),
+                        &merged_defs,
+                        use_info,
+                        env,
+                    ) {
+                        scratch
+                            .info
+                            .definition_overrides
+                            .insert(dst.display_name(), expr.clone());
+                        merged_defs.insert(dst.display_name(), expr);
+                    } else if let Some(stack_var_name) = stack_var_for_addr_var(
                         addr,
                         &merged_defs,
                         &scratch.info.stack_vars,
                         &use_info.var_aliases,
+                        &use_info.stack_slots,
                         env,
                     ) {
                         let expr = CExpr::Var(stack_var_name);
@@ -142,8 +154,6 @@ fn get_or_create_stack_var(scratch: &mut StackScratch, offset: i64) -> String {
 
     let name = if offset < 0 {
         format!("local_{:x}", (-offset) as u64)
-    } else if offset == 0 {
-        "saved_fp".to_string()
     } else {
         format!("stack_{:x}", offset as u64)
     };
@@ -157,12 +167,17 @@ fn stack_var_for_addr_var(
     definitions: &HashMap<String, CExpr>,
     stack_vars: &HashMap<i64, String>,
     var_aliases: &HashMap<String, String>,
+    stack_slots: &HashMap<String, super::StackSlotProvenance>,
     env: &PassEnv<'_>,
 ) -> Option<String> {
     let addr_key = addr.display_name();
-    let offset_backed =
-        utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
-            .and_then(|offset| stack_vars.get(&offset).cloned());
+    let offset_backed = stack_slots
+        .get(&addr_key)
+        .map(|slot| slot.offset)
+        .or_else(|| {
+            utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
+        })
+        .and_then(|offset| stack_vars.get(&offset).cloned());
     if let Some(alias) = resolve_stack_alias_from_addr_expr(
         &CExpr::Var(addr_key.clone()),
         definitions,
@@ -187,6 +202,8 @@ fn stack_var_for_addr_var(
         pinned: &empty_names,
         var_aliases,
         ptr_arith: &empty_ptrs,
+        stack_slots,
+        forwarded_values: &HashMap::new(),
         function_names: env.function_names,
         strings: env.strings,
         symbols: env.symbols,
@@ -246,6 +263,33 @@ fn parse_generic_stack_name_offset(name: &str) -> Option<i64> {
         return i64::from_str_radix(rest, 16).ok();
     }
     None
+}
+
+fn forwarded_expr_for_value(
+    value_key: &str,
+    definitions: &HashMap<String, CExpr>,
+    use_info: &UseInfo,
+    env: &PassEnv<'_>,
+) -> Option<CExpr> {
+    let prov = use_info.forwarded_values.get(value_key)?;
+    let empty_counts: HashMap<String, usize> = HashMap::new();
+    let empty_names: HashSet<String> = HashSet::new();
+    let empty_ptrs: HashMap<String, crate::fold::PtrArith> = HashMap::new();
+    let lower = LowerCtx {
+        definitions,
+        use_counts: &empty_counts,
+        condition_vars: &empty_names,
+        pinned: &empty_names,
+        var_aliases: &use_info.var_aliases,
+        ptr_arith: &empty_ptrs,
+        stack_slots: &use_info.stack_slots,
+        forwarded_values: &use_info.forwarded_values,
+        function_names: env.function_names,
+        strings: env.strings,
+        symbols: env.symbols,
+        type_oracle: env.type_oracle,
+    };
+    Some(lower.expr_for_ssa_name(&prov.source))
 }
 
 fn resolve_stack_alias_from_addr_expr(

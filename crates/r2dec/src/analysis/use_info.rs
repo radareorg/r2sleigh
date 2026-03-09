@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAOp;
 
-use super::{PassEnv, UseInfo, lower::LowerCtx, utils};
+use super::{PassEnv, StackSlotProvenance, UseInfo, ValueProvenance, lower::LowerCtx, utils};
 use crate::ast::CExpr;
 use crate::fold::{PtrArith, SSABlock};
 
@@ -94,6 +94,8 @@ fn collect_definitions(
     env: &PassEnv<'_>,
     definition_overrides: &HashMap<String, CExpr>,
 ) {
+    let mut block_stack_values: HashMap<i64, String> = HashMap::new();
+
     for op in &block.ops {
         if let SSAOp::Copy { dst, src } = op {
             scratch
@@ -103,35 +105,57 @@ fn collect_definitions(
         }
 
         if let SSAOp::Store { addr, val, .. } = op {
-            let addr_key = utils::normalize_stack_address(
+            let offset = utils::extract_stack_offset_from_var(
                 addr,
                 &scratch.info.definitions,
                 env.fp_name,
                 env.sp_name,
             );
-            scratch
-                .info
-                .memory_stores
-                .insert(addr_key, val.display_name());
+            if let Some(offset) = offset {
+                let addr_key = format!("stack:{}", offset);
+                scratch
+                    .info
+                    .memory_stores
+                    .insert(addr_key, val.display_name());
+                scratch
+                    .info
+                    .stack_slots
+                    .insert(addr.display_name(), StackSlotProvenance { offset });
+                block_stack_values.insert(offset, val.display_name());
+            } else {
+                block_stack_values.clear();
+            }
         }
 
-        if let SSAOp::Load { dst, addr, .. } = op {
-            let addr_key = utils::normalize_stack_address(
+        if let SSAOp::Load { dst, addr, .. } = op
+            && let Some(offset) = utils::extract_stack_offset_from_var(
                 addr,
                 &scratch.info.definitions,
                 env.fp_name,
                 env.sp_name,
-            );
-            if let Some(stored_val) = scratch.info.memory_stores.get(&addr_key).cloned() {
+            )
+        {
+            scratch
+                .info
+                .stack_slots
+                .insert(addr.display_name(), StackSlotProvenance { offset });
+            scratch
+                .info
+                .stack_slots
+                .insert(dst.display_name(), StackSlotProvenance { offset });
+
+            if let Some(stored_val) = block_stack_values.get(&offset).cloned() {
                 scratch
                     .info
                     .copy_sources
-                    .insert(dst.display_name(), stored_val);
-            } else {
-                scratch
-                    .info
-                    .copy_sources
-                    .insert(dst.display_name(), format!("*{}", addr.display_name()));
+                    .insert(dst.display_name(), stored_val.clone());
+                scratch.info.forwarded_values.insert(
+                    dst.display_name(),
+                    ValueProvenance {
+                        source: stored_val,
+                        stack_slot: Some(offset),
+                    },
+                );
             }
         }
 
@@ -210,15 +234,45 @@ fn collect_definitions(
                     pinned: &scratch.info.pinned,
                     var_aliases: &scratch.info.var_aliases,
                     ptr_arith: &scratch.info.ptr_arith,
+                    stack_slots: &scratch.info.stack_slots,
+                    forwarded_values: &scratch.info.forwarded_values,
                     function_names: env.function_names,
                     strings: env.strings,
                     symbols: env.symbols,
                     type_oracle: env.type_oracle,
                 };
-                lower.op_to_expr(op)
+                if let Some(prov) = scratch.info.forwarded_values.get(&key) {
+                    lower.expr_for_ssa_name(&prov.source)
+                } else {
+                    lower.op_to_expr(op)
+                }
             };
             scratch.info.definitions.insert(key, expr);
         }
+
+        if invalidates_block_stack_values(op, &scratch.info.definitions, env) {
+            block_stack_values.clear();
+        }
+    }
+}
+
+fn invalidates_block_stack_values(
+    op: &SSAOp,
+    definitions: &HashMap<String, CExpr>,
+    env: &PassEnv<'_>,
+) -> bool {
+    match op {
+        SSAOp::Store { addr, .. } => {
+            utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
+                .is_none()
+        }
+        SSAOp::Call { .. }
+        | SSAOp::CallInd { .. }
+        | SSAOp::CallOther { .. }
+        | SSAOp::StoreConditional { .. }
+        | SSAOp::AtomicCAS { .. }
+        | SSAOp::StoreGuarded { .. } => true,
+        _ => false,
     }
 }
 
@@ -1001,6 +1055,8 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                         pinned: &scratch.info.pinned,
                         var_aliases: &scratch.info.var_aliases,
                         ptr_arith: &scratch.info.ptr_arith,
+                        stack_slots: &scratch.info.stack_slots,
+                        forwarded_values: &scratch.info.forwarded_values,
                         function_names: env.function_names,
                         strings: env.strings,
                         symbols: env.symbols,
@@ -1135,6 +1191,15 @@ mod tests {
     fn analyze_info(blocks: Vec<SSABlock>) -> UseInfo {
         let fixture = TestEnvFixture::new();
         analyze(&blocks, &fixture.env())
+    }
+
+    fn single_block(ops: Vec<SSAOp>) -> SSABlock {
+        SSABlock {
+            addr: 0x1000,
+            size: 4,
+            phis: Vec::new(),
+            ops,
+        }
     }
 
     #[test]
@@ -1343,5 +1408,122 @@ mod tests {
         let right = vec!["eax_alpha_7".to_string(), "eax_delta_7".to_string()];
 
         assert!(alias_class_sort_key(&right, &versions) < alias_class_sort_key(&left, &versions));
+    }
+
+    #[test]
+    fn forwards_same_slot_stack_store_and_load_within_block() {
+        let rbp_1 = mk("RBP", 1, 8);
+        let addr = mk("tmp:stackaddr", 1, 8);
+        let stored = mk("ESI", 0, 4);
+        let loaded = mk("tmp:load", 1, 4);
+
+        let info = analyze_info(vec![single_block(vec![
+            SSAOp::IntAdd {
+                dst: addr.clone(),
+                a: rbp_1,
+                b: SSAVar::constant(0xffff_ffff_ffff_fff4, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: addr.clone(),
+                val: stored.clone(),
+            },
+            SSAOp::Load {
+                dst: loaded.clone(),
+                space: "ram".to_string(),
+                addr,
+            },
+        ])]);
+
+        assert_eq!(
+            info.forwarded_values.get(&loaded.display_name()),
+            Some(&ValueProvenance {
+                source: stored.display_name(),
+                stack_slot: Some(-12),
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_store_blocks_stack_forwarding() {
+        let rbp_1 = mk("RBP", 1, 8);
+        let slot_addr = mk("tmp:slotaddr", 1, 8);
+        let unknown_addr = mk("RAX", 1, 8);
+        let stored = mk("ESI", 0, 4);
+        let loaded = mk("tmp:load", 1, 4);
+
+        let info = analyze_info(vec![single_block(vec![
+            SSAOp::IntAdd {
+                dst: slot_addr.clone(),
+                a: rbp_1,
+                b: SSAVar::constant(0xffff_ffff_ffff_fff4, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: slot_addr.clone(),
+                val: stored,
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: unknown_addr,
+                val: SSAVar::constant(0x41, 1),
+            },
+            SSAOp::Load {
+                dst: loaded.clone(),
+                space: "ram".to_string(),
+                addr: slot_addr,
+            },
+        ])]);
+
+        assert!(
+            !info.forwarded_values.contains_key(&loaded.display_name()),
+            "unknown memory stores must invalidate same-slot forwarding"
+        );
+    }
+
+    #[test]
+    fn does_not_forward_stack_values_across_block_boundaries() {
+        let rbp_1 = mk("RBP", 1, 8);
+        let slot_addr_1 = mk("tmp:slotaddr", 1, 8);
+        let slot_addr_2 = mk("tmp:slotaddr", 2, 8);
+        let stored = mk("ESI", 0, 4);
+        let loaded = mk("tmp:load", 1, 4);
+
+        let info = analyze_info(vec![
+            single_block(vec![
+                SSAOp::IntAdd {
+                    dst: slot_addr_1.clone(),
+                    a: rbp_1.clone(),
+                    b: SSAVar::constant(0xffff_ffff_ffff_fff4, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: slot_addr_1,
+                    val: stored,
+                },
+            ]),
+            SSABlock {
+                addr: 0x1100,
+                size: 4,
+                phis: Vec::new(),
+                ops: vec![
+                    SSAOp::IntAdd {
+                        dst: slot_addr_2.clone(),
+                        a: rbp_1,
+                        b: SSAVar::constant(0xffff_ffff_ffff_fff4, 8),
+                    },
+                    SSAOp::Load {
+                        dst: loaded.clone(),
+                        space: "ram".to_string(),
+                        addr: slot_addr_2,
+                    },
+                ],
+            },
+        ]);
+
+        assert!(
+            !info.forwarded_values.contains_key(&loaded.display_name()),
+            "forwarding should stay block-local unless dominance is proven explicitly"
+        );
     }
 }

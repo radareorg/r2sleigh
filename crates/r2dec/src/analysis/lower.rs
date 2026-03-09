@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use r2ssa::{SSAOp, SSAVar};
 use r2types::TypeOracle;
 
-use super::utils::parse_const_value;
+use super::utils::{format_traced_name, parse_const_value};
+use super::{StackSlotProvenance, ValueProvenance};
 use crate::address::parse_address_from_var_name;
 use crate::ast::{BinaryOp, CExpr, CType, UnaryOp};
 use crate::fold::PtrArith;
@@ -15,6 +16,8 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) pinned: &'a HashSet<String>,
     pub(crate) var_aliases: &'a HashMap<String, String>,
     pub(crate) ptr_arith: &'a HashMap<String, PtrArith>,
+    pub(crate) stack_slots: &'a HashMap<String, StackSlotProvenance>,
+    pub(crate) forwarded_values: &'a HashMap<String, ValueProvenance>,
     pub(crate) function_names: &'a HashMap<u64, String>,
     pub(crate) strings: &'a HashMap<u64, String>,
     pub(crate) symbols: &'a HashMap<u64, String>,
@@ -86,6 +89,12 @@ impl<'a> LowerCtx<'a> {
         }
 
         let key = var.display_name();
+        if let Some(prov) = self.forwarded_values.get(&key)
+            && depth < 8
+            && visited.insert(format!("prov:{key}"))
+        {
+            return self.expr_for_ssa_name_with_depth(&prov.source, depth + 1, visited);
+        }
         if depth < 8
             && self.should_inline(&key)
             && visited.insert(key.clone())
@@ -97,12 +106,65 @@ impl<'a> LowerCtx<'a> {
         CExpr::Var(self.var_name(var))
     }
 
+    pub(crate) fn expr_for_ssa_name(&self, name: &str) -> CExpr {
+        self.expr_for_ssa_name_with_depth(name, 0, &mut HashSet::new())
+    }
+
+    fn expr_for_ssa_name_with_depth(
+        &self,
+        name: &str,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> CExpr {
+        if depth > 8 {
+            return CExpr::Var(format_traced_name(name, self.var_aliases));
+        }
+
+        if let Some(val) = parse_const_value(name) {
+            return if val > 0x7fffffff {
+                CExpr::UIntLit(val)
+            } else {
+                CExpr::IntLit(val as i64)
+            };
+        }
+
+        if let Some(addr) = parse_address_from_var_name(name)
+            && let Some(expr) = self.resolve_addr_literal(addr)
+        {
+            return expr;
+        }
+
+        if let Some(prov) = self.forwarded_values.get(name)
+            && visited.insert(format!("prov:{name}"))
+        {
+            return self.expr_for_ssa_name_with_depth(&prov.source, depth + 1, visited);
+        }
+
+        if let Some(expr) = self.definitions.get(name)
+            && visited.insert(name.to_string())
+        {
+            return expr.clone();
+        }
+
+        if let Some(alias) = self.var_aliases.get(name) {
+            return CExpr::Var(alias.clone());
+        }
+
+        CExpr::Var(format_traced_name(name, self.var_aliases))
+    }
+
     pub(crate) fn op_to_expr(&self, op: &SSAOp) -> CExpr {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
             SSAOp::Load { dst, addr, .. } => {
-                if let Some(ptr) = self.ptr_arith.get(&addr.display_name()) {
+                if let Some(stack_var) = self.stack_var_name_for_addr(addr) {
+                    CExpr::Var(stack_var)
+                } else if let Some(ptr) = self.ptr_arith.get(&addr.display_name()) {
                     self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
+                } else if let Some(sub) = self.try_subscript_from_var(addr, dst.size) {
+                    sub
+                } else if let Some(member) = self.try_member_access_from_var(addr) {
+                    member
                 } else {
                     self.typed_deref_expr(addr, dst.size)
                 }
@@ -402,6 +464,12 @@ impl<'a> LowerCtx<'a> {
 
     fn typed_deref_expr(&self, addr: &SSAVar, elem_size: u32) -> CExpr {
         let addr_expr = self.get_expr(addr);
+        if let Some(sub) = self.try_subscript_from_addr_expr(&addr_expr, elem_size) {
+            return sub;
+        }
+        if let Some(member) = self.try_member_access_from_addr_expr(&addr_expr) {
+            return member;
+        }
         let addr_ty = self.type_oracle.map(|oracle| oracle.type_of(addr));
         let is_pointer_typed = if let (Some(oracle), Some(ty)) = (self.type_oracle, addr_ty) {
             oracle.is_pointer(ty) || oracle.is_array(ty)
@@ -427,6 +495,246 @@ impl<'a> LowerCtx<'a> {
                 lower.starts_with("arg") || lower.contains("ptr") || lower.contains("addr")
             }
             CExpr::Paren(inner) => Self::looks_like_pointer_expr(inner),
+            _ => false,
+        }
+    }
+
+    fn stack_var_name_for_addr(&self, addr: &SSAVar) -> Option<String> {
+        let slot = self.stack_slots.get(&addr.display_name())?;
+        Some(if slot.offset < 0 {
+            format!("local_{:x}", (-slot.offset) as u64)
+        } else {
+            format!("stack_{:x}", slot.offset as u64)
+        })
+    }
+
+    fn try_subscript_from_var(&self, addr: &SSAVar, elem_size: u32) -> Option<CExpr> {
+        let expr = self
+            .definitions
+            .get(&addr.display_name())
+            .cloned()
+            .unwrap_or_else(|| self.get_expr(addr));
+        self.try_subscript_from_addr_expr(&expr, elem_size)
+    }
+
+    fn try_subscript_from_addr_expr(&self, expr: &CExpr, elem_size: u32) -> Option<CExpr> {
+        let (base_expr, index_expr, _scale, is_sub) = self.extract_base_index_scale(expr)?;
+        let elem_ty = uint_type_from_size(elem_size);
+        let base_cast = CExpr::cast(CType::ptr(elem_ty), base_expr);
+        let index_final = if is_sub {
+            CExpr::unary(UnaryOp::Neg, index_expr)
+        } else {
+            index_expr
+        };
+
+        Some(CExpr::Subscript {
+            base: Box::new(base_cast),
+            index: Box::new(index_final),
+        })
+    }
+
+    fn try_member_access_from_var(&self, addr: &SSAVar) -> Option<CExpr> {
+        let expr = self
+            .definitions
+            .get(&addr.display_name())
+            .cloned()
+            .unwrap_or_else(|| self.get_expr(addr));
+        self.try_member_access_from_addr_expr(&expr)
+    }
+
+    fn try_member_access_from_addr_expr(&self, expr: &CExpr) -> Option<CExpr> {
+        let (base_expr, offset) = self.extract_base_const_offset(expr)?;
+        if offset == 0 || self.is_stackish_expr(&base_expr) {
+            return None;
+        }
+
+        let base_expr = if let Some(sub) = self.try_subscript_from_addr_expr(&base_expr, 1) {
+            sub
+        } else {
+            base_expr
+        };
+
+        let member = self
+            .type_oracle
+            .and_then(|oracle| {
+                (offset >= 0)
+                    .then_some(offset as u64)
+                    .and_then(|off| oracle.field_name_any(off))
+            })
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| {
+                if offset < 0 {
+                    format!("field_neg_{:x}", (-offset) as u64)
+                } else {
+                    format!("field_{:x}", offset as u64)
+                }
+            });
+
+        Some(CExpr::PtrMember {
+            base: Box::new(base_expr),
+            member,
+        })
+    }
+
+    fn extract_base_index_scale(&self, expr: &CExpr) -> Option<(CExpr, CExpr, u32, bool)> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => self.extract_base_index_from_add(left, right),
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => self
+                .extract_base_index_from_add(left, right)
+                .map(|(base, index, scale, is_sub)| (base, index, scale, !is_sub)),
+            CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
+                self.extract_base_index_scale(inner)
+            }
+            CExpr::Var(name) => self
+                .definitions
+                .get(name)
+                .and_then(|inner| self.extract_base_index_scale(inner)),
+            _ => None,
+        }
+    }
+
+    fn extract_base_index_from_add(
+        &self,
+        left: &CExpr,
+        right: &CExpr,
+    ) -> Option<(CExpr, CExpr, u32, bool)> {
+        if let Some((index, scale)) = self.extract_mul_const(right, 0) {
+            let elem_size = self.scale_to_elem_size(scale)?;
+            return Some((left.clone(), index, elem_size, scale < 0));
+        }
+        if let Some((index, scale)) = self.extract_mul_const(left, 0) {
+            let elem_size = self.scale_to_elem_size(scale)?;
+            return Some((right.clone(), index, elem_size, scale < 0));
+        }
+        let right_resolved = self.resolve_once(right).unwrap_or_else(|| right.clone());
+        if matches!(
+            right_resolved,
+            CExpr::Var(_) | CExpr::Cast { .. } | CExpr::Binary { .. } | CExpr::Unary { .. }
+        ) {
+            return Some((left.clone(), right_resolved, 1, false));
+        }
+        None
+    }
+
+    fn scale_to_elem_size(&self, scale: i64) -> Option<u32> {
+        let abs = scale.checked_abs()? as u64;
+        if abs == 0 {
+            return None;
+        }
+        u32::try_from(abs).ok()
+    }
+
+    fn extract_mul_const(&self, expr: &CExpr, depth: u32) -> Option<(CExpr, i64)> {
+        if depth > 8 {
+            return None;
+        }
+
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Mul,
+                left,
+                right,
+            } => {
+                if let Some(scale) = self.literal_to_i64(right) {
+                    return Some((left.as_ref().clone(), scale));
+                }
+                if let Some(scale) = self.literal_to_i64(left) {
+                    return Some((right.as_ref().clone(), scale));
+                }
+                None
+            }
+            CExpr::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => self
+                .extract_mul_const(operand, depth + 1)
+                .map(|(expr, scale)| (expr, -scale))
+                .or_else(|| Some((operand.as_ref().clone(), -1))),
+            CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
+                self.extract_mul_const(inner, depth + 1)
+            }
+            CExpr::Var(name) => self
+                .definitions
+                .get(name)
+                .and_then(|inner| self.extract_mul_const(inner, depth + 1)),
+            _ => None,
+        }
+    }
+
+    fn extract_base_const_offset(&self, expr: &CExpr) -> Option<(CExpr, i64)> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => {
+                if let Some(off) = self.literal_to_i64(right) {
+                    return Some((left.as_ref().clone(), off));
+                }
+                if let Some(off) = self.literal_to_i64(left) {
+                    return Some((right.as_ref().clone(), off));
+                }
+                None
+            }
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } => self
+                .literal_to_i64(right)
+                .map(|off| (left.as_ref().clone(), -off)),
+            CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
+                self.extract_base_const_offset(inner)
+            }
+            CExpr::Var(name) => self
+                .definitions
+                .get(name)
+                .and_then(|inner| self.extract_base_const_offset(inner)),
+            _ => None,
+        }
+    }
+
+    fn resolve_once(&self, expr: &CExpr) -> Option<CExpr> {
+        if let CExpr::Var(name) = expr {
+            self.definitions.get(name).cloned()
+        } else {
+            None
+        }
+    }
+
+    fn literal_to_i64(&self, expr: &CExpr) -> Option<i64> {
+        match expr {
+            CExpr::IntLit(v) => Some(*v),
+            CExpr::UIntLit(v) => i64::try_from(*v).ok(),
+            _ => None,
+        }
+    }
+
+    fn is_stackish_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                let lower = name.to_ascii_lowercase();
+                lower.contains("rsp")
+                    || lower.contains("rbp")
+                    || lower.starts_with("local_")
+                    || lower.starts_with("stack_")
+                    || lower == "saved_fp"
+            }
+            CExpr::Unary { operand, .. } => self.is_stackish_expr(operand),
+            CExpr::Binary { left, right, .. } => {
+                self.is_stackish_expr(left) || self.is_stackish_expr(right)
+            }
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } | CExpr::Deref(inner) => {
+                self.is_stackish_expr(inner)
+            }
             _ => false,
         }
     }
@@ -470,6 +778,8 @@ mod tests {
         pinned: &'a HashSet<String>,
         var_aliases: &'a HashMap<String, String>,
         ptr_arith: &'a HashMap<String, PtrArith>,
+        stack_slots: &'a HashMap<String, StackSlotProvenance>,
+        forwarded_values: &'a HashMap<String, ValueProvenance>,
         function_names: &'a HashMap<u64, String>,
         strings: &'a HashMap<u64, String>,
         symbols: &'a HashMap<u64, String>,
@@ -481,6 +791,8 @@ mod tests {
             pinned,
             var_aliases,
             ptr_arith,
+            stack_slots,
+            forwarded_values,
             function_names,
             strings,
             symbols,
@@ -508,6 +820,8 @@ mod tests {
         let pinned = HashSet::new();
         let var_aliases = HashMap::new();
         let ptr_arith = HashMap::new();
+        let stack_slots = HashMap::new();
+        let forwarded_values = HashMap::new();
         let ctx = make_ctx(
             &definitions,
             &use_counts,
@@ -515,6 +829,8 @@ mod tests {
             &pinned,
             &var_aliases,
             &ptr_arith,
+            &stack_slots,
+            &forwarded_values,
             &fn_map,
             &str_map,
             &sym_map,
@@ -553,6 +869,8 @@ mod tests {
         let pinned = HashSet::new();
         let var_aliases = HashMap::new();
         let ptr_arith = HashMap::new();
+        let stack_slots = HashMap::new();
+        let forwarded_values = HashMap::new();
         let ctx = make_ctx(
             &definitions,
             &use_counts,
@@ -560,6 +878,8 @@ mod tests {
             &pinned,
             &var_aliases,
             &ptr_arith,
+            &stack_slots,
+            &forwarded_values,
             &fn_map,
             &str_map,
             &sym_map,
@@ -581,6 +901,8 @@ mod tests {
         let pinned = HashSet::new();
         let var_aliases = HashMap::new();
         let ptr_arith = HashMap::new();
+        let stack_slots = HashMap::new();
+        let forwarded_values = HashMap::new();
         let ctx = make_ctx(
             &definitions,
             &use_counts,
@@ -588,6 +910,8 @@ mod tests {
             &pinned,
             &var_aliases,
             &ptr_arith,
+            &stack_slots,
+            &forwarded_values,
             &fn_map,
             &str_map,
             &sym_map,
@@ -611,6 +935,8 @@ mod tests {
         let pinned = HashSet::new();
         let var_aliases = HashMap::new();
         let ptr_arith = HashMap::new();
+        let stack_slots = HashMap::new();
+        let forwarded_values = HashMap::new();
         let ctx = make_ctx(
             &definitions,
             &use_counts,
@@ -618,6 +944,8 @@ mod tests {
             &pinned,
             &var_aliases,
             &ptr_arith,
+            &stack_slots,
+            &forwarded_values,
             &fn_map,
             &str_map,
             &sym_map,
@@ -654,6 +982,8 @@ mod tests {
         let pinned = HashSet::new();
         let var_aliases = HashMap::new();
         let ptr_arith = HashMap::new();
+        let stack_slots = HashMap::new();
+        let forwarded_values = HashMap::new();
         let ctx = make_ctx(
             &definitions,
             &use_counts,
@@ -661,6 +991,8 @@ mod tests {
             &pinned,
             &var_aliases,
             &ptr_arith,
+            &stack_slots,
+            &forwarded_values,
             &fn_map,
             &str_map,
             &sym_map,
@@ -684,5 +1016,105 @@ mod tests {
             ),
             "pointer-like address expressions should not be re-cast"
         );
+    }
+
+    #[test]
+    fn load_preserves_negative_index_subscript_shape() {
+        let fn_map = HashMap::new();
+        let str_map = HashMap::new();
+        let sym_map = HashMap::new();
+        let use_counts = HashMap::new();
+        let condition_vars = HashSet::new();
+        let pinned = HashSet::new();
+        let var_aliases = HashMap::new();
+        let ptr_arith = HashMap::new();
+        let stack_slots = HashMap::new();
+        let forwarded_values = HashMap::new();
+        let definitions = HashMap::from([(
+            "tmp:addr_1".to_string(),
+            CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("arg1".to_string()),
+                CExpr::binary(
+                    BinaryOp::Mul,
+                    CExpr::Cast {
+                        ty: CType::Int(64),
+                        expr: Box::new(CExpr::unary(UnaryOp::Neg, CExpr::Var("arg2".to_string()))),
+                    },
+                    CExpr::IntLit(4),
+                ),
+            ),
+        )]);
+        let ctx = make_ctx(
+            &definitions,
+            &use_counts,
+            &condition_vars,
+            &pinned,
+            &var_aliases,
+            &ptr_arith,
+            &stack_slots,
+            &forwarded_values,
+            &fn_map,
+            &str_map,
+            &sym_map,
+        );
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst: SSAVar::new("tmp:5002", 1, 4),
+            space: "ram".to_string(),
+            addr: SSAVar::new("tmp:addr", 1, 8),
+        });
+
+        let CExpr::Subscript { base, index } = expr else {
+            panic!("expected subscript expression");
+        };
+        assert!(matches!(base.as_ref(), CExpr::Cast { .. }));
+        assert!(
+            matches!(
+                index.as_ref(),
+                CExpr::Cast { expr, .. }
+                    if matches!(expr.as_ref(), CExpr::Unary { op: UnaryOp::Neg, .. })
+            ),
+            "negative index shape should survive lowering"
+        );
+    }
+
+    #[test]
+    fn load_prefers_stack_slot_alias_over_generic_deref() {
+        let fn_map = HashMap::new();
+        let str_map = HashMap::new();
+        let sym_map = HashMap::new();
+        let definitions = HashMap::new();
+        let use_counts = HashMap::new();
+        let condition_vars = HashSet::new();
+        let pinned = HashSet::new();
+        let var_aliases = HashMap::new();
+        let ptr_arith = HashMap::new();
+        let stack_slots = HashMap::from([(
+            "tmp:stackaddr_1".to_string(),
+            StackSlotProvenance { offset: -0x18 },
+        )]);
+        let forwarded_values = HashMap::new();
+        let ctx = make_ctx(
+            &definitions,
+            &use_counts,
+            &condition_vars,
+            &pinned,
+            &var_aliases,
+            &ptr_arith,
+            &stack_slots,
+            &forwarded_values,
+            &fn_map,
+            &str_map,
+            &sym_map,
+        );
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst: SSAVar::new("tmp:5003", 1, 4),
+            space: "ram".to_string(),
+            addr: SSAVar::new("tmp:stackaddr", 1, 8),
+        });
+
+        assert_eq!(expr, CExpr::Var("local_18".to_string()));
     }
 }

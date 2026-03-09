@@ -302,6 +302,7 @@ fn extract_offset_from_expr_with_defs(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn normalize_stack_address(
     addr: &SSAVar,
     definitions: &HashMap<String, CExpr>,

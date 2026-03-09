@@ -608,6 +608,32 @@ a:sla.dec | jq -Rs 'contains("if (") and contains("return")'
 EOF_CMDS
 RUN
 
+NAME=dec_array_index_neg_preserves_subscript_shape
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.test_array_index_neg
+a:sla.dec | jq -Rs 'contains("test_array_index_neg") and contains("arr") and contains("[") and contains("]") and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_struct_array_index_keeps_member_write_shape
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.test_struct_array_index
+a:sla.dec | jq -Rs 'contains("test_struct_array_index") and contains("third") and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
+EOF_CMDS
+RUN
+
 NAME=dec_tail_return_guard_shape
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true

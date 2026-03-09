@@ -57,6 +57,8 @@ pub(crate) struct UseInfo {
     pub(crate) consumed_by_call: HashSet<String>,
     pub(crate) var_aliases: HashMap<String, String>,
     pub(crate) type_hints: HashMap<String, CType>,
+    pub(crate) stack_slots: HashMap<String, StackSlotProvenance>,
+    pub(crate) forwarded_values: HashMap<String, ValueProvenance>,
 }
 
 #[allow(dead_code)]
@@ -92,6 +94,19 @@ pub(crate) struct StackInfo {
     pub(crate) stack_vars: HashMap<i64, String>,
     pub(crate) stack_arg_aliases: HashMap<i64, String>,
     pub(crate) definition_overrides: HashMap<String, CExpr>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StackSlotProvenance {
+    pub(crate) offset: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValueProvenance {
+    pub(crate) source: String,
+    pub(crate) stack_slot: Option<i64>,
 }
 
 impl UseInfo {
