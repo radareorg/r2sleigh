@@ -259,7 +259,36 @@ impl<'a> FoldingContext<'a> {
             CExpr::Var(name) => should_replace_preserved_stack_alias(name),
             CExpr::Paren(inner) => self.expr_contains_generic_stack_alias(inner),
             CExpr::Cast { expr: inner, .. } => self.expr_contains_generic_stack_alias(inner),
+            CExpr::Unary { operand, .. } => self.expr_contains_generic_stack_alias(operand),
+            CExpr::Binary { left, right, .. } => {
+                self.expr_contains_generic_stack_alias(left)
+                    || self.expr_contains_generic_stack_alias(right)
+            }
+            CExpr::Deref(inner) | CExpr::AddrOf(inner) => {
+                self.expr_contains_generic_stack_alias(inner)
+            }
+            CExpr::Subscript { base, index } => {
+                self.expr_contains_generic_stack_alias(base)
+                    || self.expr_contains_generic_stack_alias(index)
+            }
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                self.expr_contains_generic_stack_alias(base)
+            }
+            CExpr::Call { func, args } => {
+                self.expr_contains_generic_stack_alias(func)
+                    || args
+                        .iter()
+                        .any(|arg| self.expr_contains_generic_stack_alias(arg))
+            }
             _ => false,
+        }
+    }
+
+    pub(super) fn sanitize_final_return_expr(&self, expr: CExpr, fallback: CExpr) -> CExpr {
+        if self.expr_contains_generic_stack_alias(&expr) {
+            fallback
+        } else {
+            expr
         }
     }
 

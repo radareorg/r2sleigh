@@ -571,6 +571,110 @@ mod tests {
     }
 
     #[test]
+    fn test_subscript_reconstructs_shift_scaled_index_expression() {
+        let addr = make_var("tmp:9500", 1, 8);
+        let dst = make_var("tmp:9501", 1, 4);
+        let mut ctx = FoldingContext::new(64);
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .type_hints
+            .insert("arg1".to_string(), CType::ptr(CType::Int(32)));
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .type_hints
+            .insert("arg2".to_string(), CType::Int(32));
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            addr.display_name(),
+            CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("arg1".to_string()),
+                CExpr::binary(
+                    BinaryOp::Shl,
+                    CExpr::Var("arg2".to_string()),
+                    CExpr::IntLit(2),
+                ),
+            ),
+        );
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst,
+            space: "ram".to_string(),
+            addr,
+        });
+        let CExpr::Subscript { index, .. } = expr else {
+            panic!("expected subscript expression");
+        };
+        assert!(
+            matches!(index.as_ref(), CExpr::Var(name) if name == "arg2"),
+            "shift-scaled index must preserve the semantic scalar index"
+        );
+    }
+
+    #[test]
+    fn test_member_access_reconstructs_combined_struct_array_index_scale() {
+        let base = make_var("tmp:9600", 1, 8);
+        let addr = make_var("tmp:9601", 1, 8);
+        let dst = make_var("tmp:9602", 1, 4);
+        let mut ctx = FoldingContext::new(64);
+        ctx.state.analysis_ctx.use_info.ptr_members.insert(
+            addr.display_name(),
+            (base.clone(), 8),
+        );
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            base.display_name(),
+            CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("arr".to_string()),
+                CExpr::binary(
+                    BinaryOp::Shl,
+                    CExpr::binary(
+                        BinaryOp::Sub,
+                        CExpr::binary(
+                            BinaryOp::Shl,
+                            CExpr::Var("idx".to_string()),
+                            CExpr::IntLit(3),
+                        ),
+                        CExpr::Var("idx".to_string()),
+                    ),
+                    CExpr::IntLit(3),
+                ),
+            ),
+        );
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .type_hints
+            .insert("arr".to_string(), CType::ptr(CType::Struct("DemoStruct".to_string())));
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .type_hints
+            .insert("idx".to_string(), CType::Int(32));
+        let oracle = make_oracle_for_member(base.clone(), 8, "third");
+        ctx.set_type_oracle(Some(&oracle));
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst,
+            space: "ram".to_string(),
+            addr,
+        });
+
+        let (CExpr::Member { base, member } | CExpr::PtrMember { base, member }) = expr else {
+            panic!("expected member expression");
+        };
+        assert_eq!(member, "third");
+        let CExpr::Subscript { index, .. } = base.as_ref() else {
+            panic!("expected semantic subscript base, got {base:?}");
+        };
+        assert!(
+            matches!(index.as_ref(), CExpr::Var(name) if name == "idx"),
+            "combined shift/sub scale should still recover the real struct-array index, got {index:?}"
+        );
+    }
+
+    #[test]
     fn test_load_generic_deref_inserts_minimal_pointer_cast() {
         let addr = make_var("tmp:9300", 1, 8);
         let dst = make_var("tmp:9301", 1, 4);

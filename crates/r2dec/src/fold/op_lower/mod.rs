@@ -862,8 +862,7 @@ impl<'a> FoldingContext<'a> {
         is_sub: bool,
     ) -> Option<CExpr> {
         let elem_ty = self.infer_subscript_elem_type(base, element_size);
-        let base_expr =
-            self.normalize_pointer_base_expr(&self.expr_for_provenance(base), 0);
+        let base_expr = self.normalize_pointer_base_expr(&self.expr_for_provenance(base), 0);
         let index_expr = self.normalize_index_expr(&self.expr_for_provenance(index), 0)?;
         self.build_subscript_expr(base_expr, index_expr, elem_ty, is_sub)
     }
@@ -1098,7 +1097,11 @@ impl<'a> FoldingContext<'a> {
                         return Some(normalized);
                     }
                 }
-                self.is_semantic_index_expr(expr).then_some(expr.clone())
+                if self.is_non_index_pointer_expr(expr) {
+                    None
+                } else {
+                    self.is_semantic_index_expr(expr).then_some(expr.clone())
+                }
             }
             CExpr::Paren(inner) => self
                 .normalize_index_expr(inner, depth + 1)
@@ -1187,7 +1190,8 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
 
-        let member = self.oracle_member_name(Some(addr), &self.expr_for_provenance(base), offset)?;
+        let member =
+            self.oracle_member_name(Some(addr), &self.expr_for_provenance(base), offset)?;
         let base_expr = if let Some(ptr) = self.ptr_arith_map().get(&base.display_name()) {
             if let Some(sub) =
                 self.ptr_subscript_expr(&ptr.base, &ptr.index, ptr.element_size, ptr.is_sub)
@@ -1395,23 +1399,7 @@ impl<'a> FoldingContext<'a> {
                 .scale_to_elem_size(scale)
                 .map(|s| (right.clone(), index, s));
         }
-        // Fallback: base + index (scale = 1)
-        let right_resolved = self.resolve_once(right).unwrap_or_else(|| right.clone());
-        if matches!(
-            right_resolved,
-            CExpr::Var(_) | CExpr::Cast { .. } | CExpr::Binary { .. }
-        ) {
-            return Some((left.clone(), right_resolved, 1));
-        }
         None
-    }
-
-    fn resolve_once(&self, expr: &CExpr) -> Option<CExpr> {
-        if let CExpr::Var(name) = expr {
-            self.lookup_definition(name)
-        } else {
-            None
-        }
     }
 
     fn extract_mul_const(&self, expr: &CExpr, depth: u32) -> Option<(CExpr, i64)> {
@@ -1433,12 +1421,61 @@ impl<'a> FoldingContext<'a> {
                 }
                 None
             }
+            CExpr::Binary {
+                op: BinaryOp::Shl,
+                left,
+                right,
+            } => {
+                let shift = self.literal_to_i64(right)?;
+                if !(0..=62).contains(&shift) {
+                    return None;
+                }
+                let scale = 1_i64.checked_shl(shift as u32)?;
+                self.extract_mul_const(left, depth + 1)
+                    .and_then(|(inner, inner_scale)| {
+                        inner_scale
+                            .checked_mul(scale)
+                            .map(|combined| (inner, combined))
+                    })
+                    .or_else(|| {
+                        let index = left.as_ref().clone();
+                        self.is_semantic_index_expr(&index)
+                            .then_some((index, scale))
+                    })
+            }
+            CExpr::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                left,
+                right,
+            } => {
+                let (left_expr, left_scale) = self.extract_mul_const(left, depth + 1)?;
+                let (right_expr, right_scale) = self.extract_mul_const(right, depth + 1)?;
+                let left_norm = self.normalize_index_expr(&left_expr, 0)?;
+                let right_norm = self.normalize_index_expr(&right_expr, 0)?;
+                if left_norm != right_norm {
+                    return None;
+                }
+                let combined = match expr {
+                    CExpr::Binary {
+                        op: BinaryOp::Add, ..
+                    } => left_scale.checked_add(right_scale)?,
+                    CExpr::Binary {
+                        op: BinaryOp::Sub, ..
+                    } => left_scale.checked_sub(right_scale)?,
+                    _ => unreachable!(),
+                };
+                (combined != 0).then_some((left_norm, combined))
+            }
             CExpr::Cast { expr: inner, .. } => self.extract_mul_const(inner, depth + 1),
             CExpr::Var(name) => {
                 if let Some(def) = self.lookup_definition(name) {
                     return self.extract_mul_const(&def, depth + 1);
                 }
-                None
+                if !self.is_non_index_pointer_expr(expr) && self.is_semantic_index_expr(expr) {
+                    Some((expr.clone(), 1))
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -1702,7 +1739,9 @@ impl<'a> FoldingContext<'a> {
             if let SSAOp::Return { target } = op {
                 let target_expr = self.get_expr(target);
                 let expr = self.resolve_return_target_expr(target_expr, last_ret_value.clone());
-                stmts.push(CStmt::Return(Some(self.rewrite_stack_expr(expr))));
+                let rewritten = self.rewrite_stack_expr(expr.clone());
+                let final_expr = self.sanitize_final_return_expr(rewritten, expr);
+                stmts.push(CStmt::Return(Some(final_expr)));
                 break;
             }
 
@@ -1749,7 +1788,9 @@ impl<'a> FoldingContext<'a> {
             && !stmts.iter().any(|stmt| matches!(stmt, CStmt::Return(_)))
             && let Some(expr) = last_ret_value
         {
-            stmts.push(CStmt::Return(Some(self.rewrite_stack_expr(expr))));
+            let rewritten = self.rewrite_stack_expr(expr.clone());
+            let final_expr = self.sanitize_final_return_expr(rewritten, expr);
+            stmts.push(CStmt::Return(Some(final_expr)));
         }
 
         let stmts = self.propagate_ephemeral_copies(stmts);

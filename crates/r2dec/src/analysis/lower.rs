@@ -577,6 +577,51 @@ impl<'a> LowerCtx<'a> {
                 }
                 None
             }
+            CExpr::Binary {
+                op: BinaryOp::Shl,
+                left,
+                right,
+            } => {
+                let shift = self.literal_to_i64(right)?;
+                if !(0..=62).contains(&shift) {
+                    return None;
+                }
+                let scale = 1_i64.checked_shl(shift as u32)?;
+                self.extract_mul_const(left, depth + 1)
+                    .and_then(|(inner, inner_scale)| {
+                        inner_scale
+                            .checked_mul(scale)
+                            .map(|combined| (inner, combined))
+                    })
+                    .or_else(|| {
+                        let index = left.as_ref().clone();
+                        self.is_semantic_index_expr(&index)
+                            .then_some((index, scale))
+                    })
+            }
+            CExpr::Binary {
+                op: BinaryOp::Add | BinaryOp::Sub,
+                left,
+                right,
+            } => {
+                let (left_expr, left_scale) = self.extract_mul_const(left, depth + 1)?;
+                let (right_expr, right_scale) = self.extract_mul_const(right, depth + 1)?;
+                let left_norm = self.normalize_index_expr(&left_expr, 0)?;
+                let right_norm = self.normalize_index_expr(&right_expr, 0)?;
+                if left_norm != right_norm {
+                    return None;
+                }
+                let combined = match expr {
+                    CExpr::Binary {
+                        op: BinaryOp::Add, ..
+                    } => left_scale.checked_add(right_scale)?,
+                    CExpr::Binary {
+                        op: BinaryOp::Sub, ..
+                    } => left_scale.checked_sub(right_scale)?,
+                    _ => unreachable!(),
+                };
+                (combined != 0).then_some((left_norm, combined))
+            }
             CExpr::Unary {
                 op: UnaryOp::Neg,
                 operand,
@@ -587,10 +632,16 @@ impl<'a> LowerCtx<'a> {
             CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
                 self.extract_mul_const(inner, depth + 1)
             }
-            CExpr::Var(name) => self
-                .definitions
-                .get(name)
-                .and_then(|inner| self.extract_mul_const(inner, depth + 1)),
+            CExpr::Var(name) => {
+                if let Some(inner) = self.definitions.get(name) {
+                    self.extract_mul_const(inner, depth + 1)
+                } else if !self.is_non_index_pointer_expr(expr) && self.is_semantic_index_expr(expr)
+                {
+                    Some((expr.clone(), 1))
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -665,10 +716,9 @@ impl<'a> LowerCtx<'a> {
                 .map(|inner| self.normalize_pointer_base_expr(inner, depth + 1))
                 .filter(Self::looks_like_pointer_expr)
                 .unwrap_or_else(|| expr.clone()),
-            CExpr::Paren(inner) => CExpr::Paren(Box::new(self.normalize_pointer_base_expr(
-                inner,
-                depth + 1,
-            ))),
+            CExpr::Paren(inner) => {
+                CExpr::Paren(Box::new(self.normalize_pointer_base_expr(inner, depth + 1)))
+            }
             CExpr::Cast { ty, expr: inner } => CExpr::Cast {
                 ty: ty.clone(),
                 expr: Box::new(self.normalize_pointer_base_expr(inner, depth + 1)),
@@ -690,15 +740,18 @@ impl<'a> LowerCtx<'a> {
                         return Some(normalized);
                     }
                 }
-                self.is_semantic_index_expr(expr).then_some(expr.clone())
+                if self.is_non_index_pointer_expr(expr) {
+                    None
+                } else {
+                    self.is_semantic_index_expr(expr).then_some(expr.clone())
+                }
             }
             CExpr::Paren(inner) => self
                 .normalize_index_expr(inner, depth + 1)
                 .map(|normalized| CExpr::Paren(Box::new(normalized))),
-            CExpr::Cast { ty, expr: inner } => {
-                self.normalize_index_expr(inner, depth + 1)
-                    .map(|normalized| CExpr::cast(ty.clone(), normalized))
-            }
+            CExpr::Cast { ty, expr: inner } => self
+                .normalize_index_expr(inner, depth + 1)
+                .map(|normalized| CExpr::cast(ty.clone(), normalized)),
             CExpr::Unary { op, operand } => self
                 .normalize_index_expr(operand, depth + 1)
                 .map(|normalized| CExpr::unary(*op, normalized)),
@@ -1279,7 +1332,10 @@ mod tests {
             },
         )]);
         let definitions = HashMap::from([
-            ("tmp:arr_local_1".to_string(), CExpr::Var("local_8".to_string())),
+            (
+                "tmp:arr_local_1".to_string(),
+                CExpr::Var("local_8".to_string()),
+            ),
             ("local_8".to_string(), CExpr::Var("arg1".to_string())),
             ("local_c".to_string(), CExpr::Var("arg2".to_string())),
             (
