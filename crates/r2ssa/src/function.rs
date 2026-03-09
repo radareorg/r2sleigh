@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use r2il::{ArchSpec, R2ILBlock};
+use r2il::{ArchSpec, PointerHint, R2ILBlock, ScalarKind, StorageClass, Varnode, VarnodeMetadata};
 use serde::{Deserialize, Serialize};
 
 use crate::cfg::{CFG, CFGEdge};
@@ -39,6 +39,8 @@ pub struct SSAFunction {
     blocks: HashMap<u64, SSABlock>,
     /// Block addresses in reverse postorder.
     block_order: Vec<u64>,
+    /// Semantic metadata hints keyed by canonical SSA base variable name.
+    semantic_var_hints: HashMap<String, VarnodeMetadata>,
 }
 
 /// A basic block in SSA form.
@@ -99,6 +101,133 @@ pub struct DefRef<'a> {
     pub site: DefSite,
 }
 
+fn pointer_hint_rank(hint: PointerHint) -> u8 {
+    match hint {
+        PointerHint::Unknown => 0,
+        PointerHint::PointerLike => 1,
+        PointerHint::CodePointer => 2,
+    }
+}
+
+fn scalar_kind_rank(kind: ScalarKind) -> u8 {
+    match kind {
+        ScalarKind::Unknown => 0,
+        ScalarKind::Bitvector => 1,
+        ScalarKind::Bool | ScalarKind::SignedInt | ScalarKind::UnsignedInt | ScalarKind::Float => 2,
+    }
+}
+
+fn storage_class_rank(class: StorageClass) -> u8 {
+    match class {
+        StorageClass::Unknown => 0,
+        StorageClass::Register => 1,
+        StorageClass::Stack
+        | StorageClass::Heap
+        | StorageClass::Global
+        | StorageClass::ThreadLocal
+        | StorageClass::ConstData
+        | StorageClass::Volatile => 2,
+    }
+}
+
+fn merge_ranked_hint<T: Copy>(dst: &mut Option<T>, src: Option<T>, rank: impl Fn(T) -> u8) {
+    let Some(src_val) = src else {
+        return;
+    };
+    match *dst {
+        Some(dst_val) if rank(dst_val) >= rank(src_val) => {}
+        _ => *dst = Some(src_val),
+    }
+}
+
+fn merge_varnode_metadata(dst: &mut VarnodeMetadata, src: &VarnodeMetadata) {
+    merge_ranked_hint(
+        &mut dst.storage_class,
+        src.storage_class,
+        storage_class_rank,
+    );
+    merge_ranked_hint(&mut dst.pointer_hint, src.pointer_hint, pointer_hint_rank);
+    merge_ranked_hint(&mut dst.scalar_kind, src.scalar_kind, scalar_kind_rank);
+
+    if dst.float_encoding.is_none() {
+        dst.float_encoding = src.float_encoding;
+    }
+    if dst.endianness.is_none() {
+        dst.endianness = src.endianness;
+    }
+    if dst.permissions.is_none() {
+        dst.permissions = src.permissions;
+    }
+    if dst.valid_range.is_none() {
+        dst.valid_range = src.valid_range;
+    }
+    if dst.bank_id.is_none() {
+        dst.bank_id = src.bank_id.clone();
+    }
+    if dst.segment_id.is_none() {
+        dst.segment_id = src.segment_id.clone();
+    }
+}
+
+fn normalized_varnode_metadata(meta: &VarnodeMetadata) -> Option<VarnodeMetadata> {
+    let mut out = meta.clone();
+    if matches!(out.storage_class, Some(StorageClass::Unknown)) {
+        out.storage_class = None;
+    }
+    if matches!(out.pointer_hint, Some(PointerHint::Unknown)) {
+        out.pointer_hint = None;
+    }
+    if matches!(out.scalar_kind, Some(ScalarKind::Unknown)) {
+        out.scalar_kind = None;
+    }
+
+    let has_hint = out.storage_class.is_some()
+        || out.pointer_hint.is_some()
+        || out.scalar_kind.is_some()
+        || out.float_encoding.is_some()
+        || out.endianness.is_some()
+        || out.permissions.is_some()
+        || out.valid_range.is_some()
+        || out.bank_id.is_some()
+        || out.segment_id.is_some();
+
+    has_hint.then_some(out)
+}
+
+fn collect_semantic_var_hints(
+    blocks: &[R2ILBlock],
+    reg_names: Option<&crate::naming::RegisterNameMap>,
+) -> HashMap<String, VarnodeMetadata> {
+    let mut hints: HashMap<String, VarnodeMetadata> = HashMap::new();
+
+    let mut collect_var = |vn: &Varnode| {
+        let Some(meta) = vn.meta.as_ref() else {
+            return;
+        };
+        let Some(meta) = normalized_varnode_metadata(meta) else {
+            return;
+        };
+        let key = crate::naming::varnode_to_name(vn, reg_names).to_ascii_lowercase();
+        hints
+            .entry(key)
+            .and_modify(|existing| merge_varnode_metadata(existing, &meta))
+            .or_insert(meta);
+    };
+
+    for block in blocks {
+        for op in &block.ops {
+            if let Some(dst) = op.output() {
+                collect_var(dst);
+            }
+            for src in op.inputs() {
+                collect_var(src);
+            }
+        }
+    }
+
+    hints
+}
+
 impl SSAFunction {
     /// Build an SSA function from a sequence of r2il blocks.
     pub fn from_blocks(blocks: &[R2ILBlock]) -> Option<Self> {
@@ -144,6 +273,7 @@ impl SSAFunction {
 
         let reg_names = arch.map(build_register_name_map);
         let reg_names_ref = reg_names.as_ref();
+        let semantic_var_hints = collect_semantic_var_hints(blocks, reg_names_ref);
 
         // Collect variable definitions and sizes
         let (defs, var_sizes) = collect_defs_from_cfg_with_names(&cfg, reg_names_ref);
@@ -203,6 +333,7 @@ impl SSAFunction {
             domtree,
             blocks: ssa_blocks,
             block_order: renamed.block_order,
+            semantic_var_hints,
         })
     }
 
@@ -242,6 +373,16 @@ impl SSAFunction {
     /// Get block addresses in reverse postorder.
     pub fn block_addrs(&self) -> &[u64] {
         &self.block_order
+    }
+
+    /// Look up semantic metadata hints for an SSA variable.
+    pub fn semantic_var_metadata(&self, var: &SSAVar) -> Option<&VarnodeMetadata> {
+        self.semantic_var_metadata_by_name(&var.name)
+    }
+
+    /// Look up semantic metadata hints by canonical SSA base variable name.
+    pub fn semantic_var_metadata_by_name(&self, name: &str) -> Option<&VarnodeMetadata> {
+        self.semantic_var_hints.get(&name.to_ascii_lowercase())
     }
 
     /// Get the number of blocks.
@@ -629,7 +770,7 @@ impl SSABlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r2il::{R2ILOp, SpaceId, Varnode};
+    use r2il::{PointerHint, R2ILOp, SpaceId, Varnode, VarnodeMetadata};
 
     fn make_const(val: u64, size: u32) -> Varnode {
         Varnode {
@@ -924,6 +1065,33 @@ mod tests {
         assert!(!func.block_addrs().contains(&0x1004));
         assert!(func.get_block(0x1004).is_none());
         assert_eq!(func.idom(0x1008), Some(0x1000));
+    }
+
+    #[test]
+    fn test_semantic_var_metadata_is_collected_from_source_blocks() {
+        let mut src = make_reg(0x10, 8);
+        src.set_meta(VarnodeMetadata {
+            pointer_hint: Some(PointerHint::PointerLike),
+            ..Default::default()
+        });
+
+        let blocks = vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![R2ILOp::Copy {
+                dst: make_reg(0, 8),
+                src,
+            }],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }];
+
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+        let meta = func
+            .semantic_var_metadata_by_name("reg:10")
+            .expect("expected semantic metadata for source register");
+
+        assert_eq!(meta.pointer_hint, Some(PointerHint::PointerLike));
     }
 
     #[test]
