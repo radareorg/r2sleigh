@@ -257,8 +257,12 @@ fn build_formatted_defs(scratch: &mut UseScratch) {
 }
 
 fn is_preferred_formatted_def(candidate: &str, incumbent: &str) -> bool {
-    let candidate_version = ssa_key_parts(candidate).map(|(_, version)| version).unwrap_or(0);
-    let incumbent_version = ssa_key_parts(incumbent).map(|(_, version)| version).unwrap_or(0);
+    let candidate_version = ssa_key_parts(candidate)
+        .map(|(_, version)| version)
+        .unwrap_or(0);
+    let incumbent_version = ssa_key_parts(incumbent)
+        .map(|(_, version)| version)
+        .unwrap_or(0);
     candidate_version > incumbent_version
         || (candidate_version == incumbent_version && candidate < incumbent)
 }
@@ -525,10 +529,7 @@ fn pair_key(a: &str, b: &str) -> (String, String) {
     }
 }
 
-fn sort_members_by_version(
-    members: &mut [String],
-    version_by_name: &HashMap<String, u32>,
-) {
+fn sort_members_by_version(members: &mut [String], version_by_name: &HashMap<String, u32>) {
     members.sort_by(|a, b| {
         version_by_name
             .get(a)
@@ -543,7 +544,9 @@ fn alias_class_sort_key(
     class: &[String],
     version_by_name: &HashMap<String, u32>,
 ) -> (bool, u32, String) {
-    let has_zero = class.iter().any(|name| version_by_name.get(name) == Some(&0));
+    let has_zero = class
+        .iter()
+        .any(|name| version_by_name.get(name) == Some(&0));
     let min_version = class
         .iter()
         .filter_map(|name| version_by_name.get(name))
@@ -892,7 +895,10 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
             for class in &mut classes {
                 sort_members_by_version(class, &version_by_name);
             }
-            classes.sort_by(|a, b| alias_class_sort_key(a, &version_by_name).cmp(&alias_class_sort_key(b, &version_by_name)));
+            classes.sort_by(|a, b| {
+                alias_class_sort_key(a, &version_by_name)
+                    .cmp(&alias_class_sort_key(b, &version_by_name))
+            });
             alias_classes.extend(classes);
         }
 
@@ -942,7 +948,8 @@ fn coalesce_variables(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassE
             sort_members_by_version(class, &version_by_name);
         }
         alias_classes.sort_by(|a, b| {
-            alias_class_sort_key(a, &version_by_name).cmp(&alias_class_sort_key(b, &version_by_name))
+            alias_class_sort_key(a, &version_by_name)
+                .cmp(&alias_class_sort_key(b, &version_by_name))
         });
 
         for (idx, class) in alias_classes.iter().enumerate() {

@@ -31,6 +31,34 @@ pub struct VarInfo {
     param_ordinal: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct VarAttrs {
+    is_param: bool,
+    is_local: bool,
+    stack_offset: Option<i64>,
+    param_ordinal: Option<usize>,
+}
+
+impl VarAttrs {
+    const fn local(stack_offset: i64) -> Self {
+        Self {
+            is_param: false,
+            is_local: true,
+            stack_offset: Some(stack_offset),
+            param_ordinal: None,
+        }
+    }
+
+    const fn param(param_ordinal: usize) -> Self {
+        Self {
+            is_param: true,
+            is_local: false,
+            stack_offset: None,
+            param_ordinal: Some(param_ordinal),
+        }
+    }
+}
+
 /// Variable recovery and naming context.
 pub struct VariableRecovery {
     /// All recovered variables.
@@ -208,7 +236,7 @@ impl VariableRecovery {
                     if increment_vars.contains(&base) && dst.size == 32 {
                         let name = self.next_loop_var();
                         let ty = self.type_from_size(dst.size);
-                        self.insert_var_info(dst.clone(), name, ty, false, false, None, None);
+                        self.insert_var_info(dst.clone(), name, ty, VarAttrs::default());
                     }
                 }
             }
@@ -252,7 +280,7 @@ impl VariableRecovery {
             {
                 let name = self.make_unique_var_name("result".to_string());
                 let ty = self.type_from_size(ret_var.size);
-                self.insert_var_info(ret_var.clone(), name, ty, false, false, None, None);
+                self.insert_var_info(ret_var.clone(), name, ty, VarAttrs::default());
             }
         }
     }
@@ -298,30 +326,14 @@ impl VariableRecovery {
                         if let Some(offset) = self.get_stack_offset(addr) {
                             let name = self.gen_stack_var_name(offset);
                             let ty = self.type_from_size(dst.size);
-                            self.insert_var_info(
-                                dst.clone(),
-                                name,
-                                ty,
-                                false,
-                                true,
-                                Some(offset),
-                                None,
-                            );
+                            self.insert_var_info(dst.clone(), name, ty, VarAttrs::local(offset));
                         }
                     }
                     SSAOp::Store { addr, val, .. } => {
                         if let Some(offset) = self.get_stack_offset(addr) {
                             let name = self.gen_stack_var_name(offset);
                             let ty = self.type_from_size(val.size);
-                            self.insert_var_info(
-                                val.clone(),
-                                name,
-                                ty,
-                                false,
-                                true,
-                                Some(offset),
-                                None,
-                            );
+                            self.insert_var_info(val.clone(), name, ty, VarAttrs::local(offset));
                         }
                     }
                     _ => {}
@@ -421,7 +433,7 @@ impl VariableRecovery {
                 let mut ty = self.type_from_size(var.size);
                 self.apply_external_param_override(idx, &mut name, &mut ty);
                 let name = self.make_unique_param_name(name);
-                self.insert_var_info(var.clone(), name, ty, true, false, None, Some(idx));
+                self.insert_var_info(var.clone(), name, ty, VarAttrs::param(idx));
             } else {
                 // No gap: stop at first unused arg register
                 break;
@@ -510,31 +522,14 @@ impl VariableRecovery {
                 {
                     let name = self.gen_var_name(dst);
                     let ty = self.type_from_size(dst.size);
-                    self.insert_var_info(dst.clone(), name, ty, false, false, None, None);
+                    self.insert_var_info(dst.clone(), name, ty, VarAttrs::default());
                 }
             }
         }
     }
 
-    fn insert_var_info(
-        &mut self,
-        ssa_var: SSAVar,
-        name: String,
-        ty: CType,
-        is_param: bool,
-        is_local: bool,
-        stack_offset: Option<i64>,
-        param_ordinal: Option<usize>,
-    ) {
-        let info = self.make_var_info(
-            ssa_var.clone(),
-            name,
-            ty,
-            is_param,
-            is_local,
-            stack_offset,
-            param_ordinal,
-        );
+    fn insert_var_info(&mut self, ssa_var: SSAVar, name: String, ty: CType, attrs: VarAttrs) {
+        let info = self.make_var_info(ssa_var.clone(), name, ty, attrs);
         self.vars.insert(ssa_var, info);
     }
 
@@ -543,10 +538,7 @@ impl VariableRecovery {
         ssa_var: SSAVar,
         name: String,
         ty: CType,
-        is_param: bool,
-        is_local: bool,
-        stack_offset: Option<i64>,
-        param_ordinal: Option<usize>,
+        attrs: VarAttrs,
     ) -> VarInfo {
         let order_index = self.next_order_index;
         self.next_order_index += 1;
@@ -554,11 +546,11 @@ impl VariableRecovery {
             ssa_var,
             name,
             ty,
-            is_param,
-            is_local,
-            stack_offset,
+            is_param: attrs.is_param,
+            is_local: attrs.is_local,
+            stack_offset: attrs.stack_offset,
             order_index,
-            param_ordinal,
+            param_ordinal: attrs.param_ordinal,
         }
     }
 
@@ -832,22 +824,20 @@ mod tests {
             second.clone(),
             "aaa_second".to_string(),
             CType::Int(64),
-            true,
-            false,
-            None,
-            Some(1),
+            VarAttrs::param(1),
         );
         vr.insert_var_info(
             first.clone(),
             "zzz_first".to_string(),
             CType::Int(64),
-            true,
-            false,
-            None,
-            Some(0),
+            VarAttrs::param(0),
         );
 
-        let names: Vec<_> = vr.parameters().into_iter().map(|info| info.name.clone()).collect();
+        let names: Vec<_> = vr
+            .parameters()
+            .into_iter()
+            .map(|info| info.name.clone())
+            .collect();
         assert_eq!(names, vec!["zzz_first", "aaa_second"]);
     }
 
@@ -863,46 +853,44 @@ mod tests {
             local_c.clone(),
             "slot".to_string(),
             CType::Int(32),
-            false,
-            true,
-            Some(8),
-            None,
+            VarAttrs::local(8),
         );
         vr.insert_var_info(
             local_b.clone(),
             "slot".to_string(),
             CType::Int(32),
-            false,
-            true,
-            Some(8),
-            None,
+            VarAttrs::local(8),
         );
         vr.insert_var_info(
             local_a.clone(),
             "alpha".to_string(),
             CType::Int(32),
-            false,
-            true,
-            Some(4),
-            None,
+            VarAttrs::local(4),
         );
         vr.insert_var_info(
             temp.clone(),
             "zeta".to_string(),
             CType::Int(32),
-            false,
-            true,
-            None,
-            None,
+            VarAttrs {
+                is_local: true,
+                ..VarAttrs::default()
+            },
         );
 
-        let names: Vec<_> = vr.locals().into_iter().map(|info| info.name.clone()).collect();
+        let names: Vec<_> = vr
+            .locals()
+            .into_iter()
+            .map(|info| info.name.clone())
+            .collect();
         let ssa_names: Vec<_> = vr
             .locals()
             .into_iter()
             .map(|info| info.ssa_var.display_name())
             .collect();
         assert_eq!(names, vec!["alpha", "slot", "slot", "zeta"]);
-        assert_eq!(ssa_names, vec!["tmp:a_1", "tmp:b_1", "tmp:c_1", "tmp:no_offset_1"]);
+        assert_eq!(
+            ssa_names,
+            vec!["tmp:a_1", "tmp:b_1", "tmp:c_1", "tmp:no_offset_1"]
+        );
     }
 }
