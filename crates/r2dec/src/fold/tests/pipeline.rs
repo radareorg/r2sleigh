@@ -1743,6 +1743,137 @@ mod tests {
     }
 
     #[test]
+    fn test_simplify_direct_zf_and_not_zf_from_compare_provenance() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.state.analysis_ctx.flag_info.compare_provenance.insert(
+            "ZF_7".to_string(),
+            crate::analysis::FlagCompareProvenance {
+                lhs: "result".to_string(),
+                rhs: "25".to_string(),
+                kind: crate::analysis::FlagCompareKind::Equality,
+            },
+        );
+
+        let eq = ctx.simplify_condition_expr(CExpr::Var("zf_7".to_string()));
+        let ne = ctx.simplify_condition_expr(CExpr::unary(
+            UnaryOp::Not,
+            CExpr::Var("zf_7".to_string()),
+        ));
+
+        assert_eq!(
+            eq,
+            CExpr::binary(BinaryOp::Eq, CExpr::Var("result".to_string()), CExpr::IntLit(25))
+        );
+        assert_eq!(
+            ne,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("result".to_string()), CExpr::IntLit(25))
+        );
+    }
+
+    #[test]
+    fn test_simplify_unsigned_relations_from_cf_and_zf_provenance() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.state.analysis_ctx.flag_info.compare_provenance.insert(
+            "CF_1".to_string(),
+            crate::analysis::FlagCompareProvenance {
+                lhs: "x".to_string(),
+                rhs: "10".to_string(),
+                kind: crate::analysis::FlagCompareKind::UnsignedLess,
+            },
+        );
+        ctx.state.analysis_ctx.flag_info.compare_provenance.insert(
+            "ZF_1".to_string(),
+            crate::analysis::FlagCompareProvenance {
+                lhs: "x".to_string(),
+                rhs: "10".to_string(),
+                kind: crate::analysis::FlagCompareKind::Equality,
+            },
+        );
+
+        let lt = ctx.simplify_condition_expr(CExpr::Var("cf_1".to_string()));
+        let ge = ctx.simplify_condition_expr(CExpr::unary(
+            UnaryOp::Not,
+            CExpr::Var("cf_1".to_string()),
+        ));
+        let le = ctx.simplify_condition_expr(CExpr::binary(
+            BinaryOp::Or,
+            CExpr::Var("cf_1".to_string()),
+            CExpr::Var("zf_1".to_string()),
+        ));
+        let gt = ctx.simplify_condition_expr(CExpr::binary(
+            BinaryOp::And,
+            CExpr::unary(UnaryOp::Not, CExpr::Var("cf_1".to_string())),
+            CExpr::unary(UnaryOp::Not, CExpr::Var("zf_1".to_string())),
+        ));
+
+        assert_eq!(
+            lt,
+            CExpr::binary(BinaryOp::Lt, CExpr::Var("x".to_string()), CExpr::IntLit(10))
+        );
+        assert_eq!(
+            ge,
+            CExpr::binary(BinaryOp::Ge, CExpr::Var("x".to_string()), CExpr::IntLit(10))
+        );
+        assert_eq!(
+            le,
+            CExpr::binary(BinaryOp::Le, CExpr::Var("x".to_string()), CExpr::IntLit(10))
+        );
+        assert_eq!(
+            gt,
+            CExpr::binary(BinaryOp::Gt, CExpr::Var("x".to_string()), CExpr::IntLit(10))
+        );
+    }
+
+    #[test]
+    fn test_compare_flag_copy_chain_keeps_relation_and_not_tmp_scaffold() {
+        let edi_0 = make_var("EDI", 0, 4);
+        let sub = make_var("tmp:9300", 1, 4);
+        let zf_1 = make_var("ZF", 1, 1);
+        let alias = make_var("tmp:9301", 1, 1);
+        let cond = make_var("tmp:9302", 1, 1);
+        let const_25 = make_var("const:25", 0, 4);
+        let const_0 = make_var("const:0", 0, 4);
+
+        let block = make_block(vec![
+            SSAOp::IntSub {
+                dst: sub.clone(),
+                a: edi_0,
+                b: const_25,
+            },
+            SSAOp::IntEqual {
+                dst: zf_1.clone(),
+                a: sub,
+                b: const_0,
+            },
+            SSAOp::Copy {
+                dst: alias.clone(),
+                src: zf_1,
+            },
+            SSAOp::BoolNot {
+                dst: cond.clone(),
+                src: alias,
+            },
+        ]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.analyze_block(&block);
+        let rhs = ctx.resolve_predicate_rhs_for_var(&cond, ctx.get_expr(&cond));
+
+        assert_eq!(
+            rhs,
+            CExpr::binary(BinaryOp::Ne, CExpr::Var("arg1".to_string()), CExpr::IntLit(25))
+        );
+        assert!(
+            !expr_contains_flag_artifact(&rhs),
+            "predicate copy chain should collapse to the recovered comparison"
+        );
+        assert!(
+            !expr_contains_sub_zero_cmp_scaffold(&rhs),
+            "predicate copy chain should not preserve cmp-zero subtraction scaffolds"
+        );
+    }
+
+    #[test]
     fn test_signed_canonicalization_mismatch_does_not_collapse() {
         let mut ctx = FoldingContext::new(64);
         ctx.state

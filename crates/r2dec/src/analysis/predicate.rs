@@ -18,11 +18,7 @@ impl<'a, 'o> PredicateSimplifier<'a, 'o> {
 
         let mut current = expr;
         for _ in 0..MAX_SIMPLIFY_PASSES {
-            let mut visited = HashSet::new();
-            let expanded = self.ctx.expand_predicate_vars(&current, 0, &mut visited);
-            let normalized = normalize_expr(self.ctx, expanded, NormalizeMode::Predicate);
-            let reconstructed = self.reconstruct_condition_tree(normalized);
-            let next = normalize_expr(self.ctx, reconstructed, NormalizeMode::Predicate);
+            let next = self.simplify_condition_pass(current.clone());
             if next == current {
                 return next;
             }
@@ -30,6 +26,13 @@ impl<'a, 'o> PredicateSimplifier<'a, 'o> {
         }
 
         current
+    }
+
+    fn simplify_condition_pass(&self, expr: CExpr) -> CExpr {
+        let mut visited = HashSet::new();
+        let expanded = self.ctx.expand_predicate_vars(&expr, 0, &mut visited);
+        let reconstructed = self.reconstruct_condition_tree(expanded);
+        normalize_expr(self.ctx, reconstructed, NormalizeMode::Predicate)
     }
 
     fn reconstruct_condition_tree(&self, expr: CExpr) -> CExpr {

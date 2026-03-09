@@ -63,9 +63,27 @@ pub(crate) struct UseInfo {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct FlagInfo {
     pub(crate) flag_origins: HashMap<String, (String, String)>,
+    pub(crate) compare_provenance: HashMap<String, FlagCompareProvenance>,
     pub(crate) sub_results: HashMap<String, (String, String)>,
     pub(crate) flag_only_values: HashSet<String>,
     pub(crate) predicate_exprs: HashMap<String, CExpr>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlagCompareKind {
+    Equality,
+    UnsignedLess,
+    SignedNegative,
+    Overflow,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FlagCompareProvenance {
+    pub(crate) lhs: String,
+    pub(crate) rhs: String,
+    pub(crate) kind: FlagCompareKind,
 }
 
 #[allow(dead_code)]

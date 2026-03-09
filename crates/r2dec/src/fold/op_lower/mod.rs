@@ -2000,10 +2000,10 @@ impl<'a> FoldingContext<'a> {
             }
             SSAOp::Cast { dst, src } => {
                 let lhs = CExpr::Var(self.var_name(dst));
-                let rhs = self.normalize_assignment_predicate_rhs(CExpr::cast(
-                    type_from_size(dst.size),
-                    self.get_expr(src),
-                ));
+                let rhs = self.resolve_predicate_rhs_for_var(
+                    dst,
+                    CExpr::cast(type_from_size(dst.size), self.get_expr(src)),
+                );
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Return { target } => Some(CStmt::Return(Some(

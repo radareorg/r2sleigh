@@ -1053,4 +1053,53 @@ mod tests {
             "local declaration order should be stable across builds"
         );
     }
+
+    #[test]
+    fn decompile_is_stable_for_predicate_heavy_return() {
+        let arch = test_arch_for_decompile();
+        let func = ssa_from_ops(
+            vec![
+                R2ILOp::IntSub {
+                    dst: Varnode::unique(0x20, 4),
+                    a: Varnode::register(0x10, 8),
+                    b: Varnode::constant(19, 4),
+                },
+                R2ILOp::IntEqual {
+                    dst: Varnode::unique(0x21, 1),
+                    a: Varnode::unique(0x20, 4),
+                    b: Varnode::constant(0, 4),
+                },
+                R2ILOp::BoolNot {
+                    dst: Varnode::unique(0x22, 1),
+                    src: Varnode::unique(0x21, 1),
+                },
+                R2ILOp::IntZExt {
+                    dst: Varnode::register(0x00, 8),
+                    src: Varnode::unique(0x22, 1),
+                },
+                R2ILOp::Return {
+                    target: Varnode::register(0x00, 8),
+                },
+            ],
+            &arch,
+        );
+
+        let decompiler = Decompiler::new(DecompilerConfig::x86_64());
+        let first = decompiler.decompile(&func);
+        let second = decompiler.decompile(&func);
+
+        assert_eq!(first, second, "predicate-heavy text should be byte-stable");
+        assert!(
+            first.contains("return (int64_t)(arg1 !="),
+            "decompiled predicate should use a direct comparison"
+        );
+        assert!(
+            !first.contains("0 != 0"),
+            "decompiled predicate must not collapse into a dead boolean"
+        );
+        assert!(
+            !first.contains("zf_"),
+            "decompiled predicate should not leak flag temporaries"
+        );
+    }
 }

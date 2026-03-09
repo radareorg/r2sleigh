@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::SSAOp;
 
-use super::{FlagInfo, PassEnv, UseInfo, utils};
+use super::{FlagCompareKind, FlagCompareProvenance, FlagInfo, PassEnv, UseInfo, utils};
 use crate::ast::{BinaryOp, CExpr, UnaryOp};
 use crate::fold::SSABlock;
 
@@ -38,13 +38,7 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
     for op in &block.ops {
         if let SSAOp::IntSub { dst, a, b } = op {
             let dst_key = dst.display_name();
-            let a_name =
-                utils::trace_ssa_var_to_source(a, &use_info.copy_sources, &use_info.var_aliases);
-            let b_name = if b.is_const() {
-                format_compare_operand(&b.name)
-            } else {
-                utils::trace_ssa_var_to_source(b, &use_info.copy_sources, &use_info.var_aliases)
-            };
+            let (a_name, b_name) = trace_compare_operands(a, b, use_info);
             scratch.info.sub_results.insert(dst_key, (a_name, b_name));
         }
 
@@ -56,10 +50,13 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
             {
                 let a_key = a.display_name();
                 if let Some((orig_a, orig_b)) = scratch.info.sub_results.get(&a_key).cloned() {
-                    scratch
-                        .info
-                        .flag_origins
-                        .insert(dst.display_name(), (orig_a, orig_b));
+                    record_flag_compare_provenance(
+                        scratch,
+                        dst.display_name(),
+                        orig_a,
+                        orig_b,
+                        FlagCompareKind::Equality,
+                    );
                 }
             }
         }
@@ -72,10 +69,13 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
             {
                 let a_key = a.display_name();
                 if let Some((orig_a, orig_b)) = scratch.info.sub_results.get(&a_key).cloned() {
-                    scratch
-                        .info
-                        .flag_origins
-                        .insert(dst.display_name(), (orig_a, orig_b));
+                    record_flag_compare_provenance(
+                        scratch,
+                        dst.display_name(),
+                        orig_a,
+                        orig_b,
+                        FlagCompareKind::SignedNegative,
+                    );
                 }
             }
         }
@@ -83,40 +83,28 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
         if let SSAOp::IntSBorrow { dst, a, b } = op {
             let dst_name = dst.name.to_lowercase();
             if dst_name.contains("of") {
-                let a_name = utils::trace_ssa_var_to_source(
-                    a,
-                    &use_info.copy_sources,
-                    &use_info.var_aliases,
+                let (a_name, b_name) = trace_compare_operands(a, b, use_info);
+                record_flag_compare_provenance(
+                    scratch,
+                    dst.display_name(),
+                    a_name,
+                    b_name,
+                    FlagCompareKind::Overflow,
                 );
-                let b_name = if b.is_const() {
-                    format_compare_operand(&b.name)
-                } else {
-                    utils::trace_ssa_var_to_source(b, &use_info.copy_sources, &use_info.var_aliases)
-                };
-                scratch
-                    .info
-                    .flag_origins
-                    .insert(dst.display_name(), (a_name, b_name));
             }
         }
 
         if let SSAOp::IntLess { dst, a, b } = op {
             let dst_name = dst.name.to_lowercase();
             if dst_name.contains("cf") {
-                let a_name = utils::trace_ssa_var_to_source(
-                    a,
-                    &use_info.copy_sources,
-                    &use_info.var_aliases,
+                let (a_name, b_name) = trace_compare_operands(a, b, use_info);
+                record_flag_compare_provenance(
+                    scratch,
+                    dst.display_name(),
+                    a_name,
+                    b_name,
+                    FlagCompareKind::UnsignedLess,
                 );
-                let b_name = if b.is_const() {
-                    format_compare_operand(&b.name)
-                } else {
-                    utils::trace_ssa_var_to_source(b, &use_info.copy_sources, &use_info.var_aliases)
-                };
-                scratch
-                    .info
-                    .flag_origins
-                    .insert(dst.display_name(), (a_name, b_name));
             }
         }
 
@@ -145,21 +133,29 @@ fn analyze_comparison_patterns(scratch: &mut FlagScratch, block: &SSABlock, use_
                 predicate_operand_expr(a, scratch),
                 predicate_operand_expr(b, scratch),
             )),
-            SSAOp::IntEqual { a, b, .. } => Some(CExpr::binary(
-                BinaryOp::Eq,
-                predicate_operand_expr(a, scratch),
-                predicate_operand_expr(b, scratch),
-            )),
+            SSAOp::IntEqual { dst, a, b } => {
+                predicate_expr_for_compare_flag(dst.display_name(), scratch).or_else(|| {
+                    Some(CExpr::binary(
+                        BinaryOp::Eq,
+                        predicate_operand_expr(a, scratch),
+                        predicate_operand_expr(b, scratch),
+                    ))
+                })
+            }
             SSAOp::IntNotEqual { a, b, .. } => Some(CExpr::binary(
                 BinaryOp::Ne,
                 predicate_operand_expr(a, scratch),
                 predicate_operand_expr(b, scratch),
             )),
-            SSAOp::IntLess { a, b, .. } | SSAOp::IntSLess { a, b, .. } => Some(CExpr::binary(
-                BinaryOp::Lt,
-                predicate_operand_expr(a, scratch),
-                predicate_operand_expr(b, scratch),
-            )),
+            SSAOp::IntLess { dst, a, b } | SSAOp::IntSLess { dst, a, b } => {
+                predicate_expr_for_compare_flag(dst.display_name(), scratch).or_else(|| {
+                    Some(CExpr::binary(
+                        BinaryOp::Lt,
+                        predicate_operand_expr(a, scratch),
+                        predicate_operand_expr(b, scratch),
+                    ))
+                })
+            }
             SSAOp::IntLessEqual { a, b, .. } | SSAOp::IntSLessEqual { a, b, .. } => {
                 Some(CExpr::binary(
                     BinaryOp::Le,
@@ -196,6 +192,45 @@ fn predicate_passthrough_expr(src: &r2ssa::SSAVar, scratch: &FlagScratch) -> Opt
         return Some(CExpr::Var(src.display_name()));
     }
     None
+}
+
+fn trace_compare_operands(
+    a: &r2ssa::SSAVar,
+    b: &r2ssa::SSAVar,
+    use_info: &UseInfo,
+) -> (String, String) {
+    let a_name = utils::trace_ssa_var_to_source(a, &use_info.copy_sources, &use_info.var_aliases);
+    let b_name = if b.is_const() {
+        format_compare_operand(&b.name)
+    } else {
+        utils::trace_ssa_var_to_source(b, &use_info.copy_sources, &use_info.var_aliases)
+    };
+    (a_name, b_name)
+}
+
+fn record_flag_compare_provenance(
+    scratch: &mut FlagScratch,
+    dst_key: String,
+    lhs: String,
+    rhs: String,
+    kind: FlagCompareKind,
+) {
+    scratch
+        .info
+        .flag_origins
+        .insert(dst_key.clone(), (lhs.clone(), rhs.clone()));
+    scratch
+        .info
+        .compare_provenance
+        .insert(dst_key, FlagCompareProvenance { lhs, rhs, kind });
+}
+
+fn predicate_expr_for_compare_flag(dst_key: String, scratch: &FlagScratch) -> Option<CExpr> {
+    scratch
+        .info
+        .compare_provenance
+        .contains_key(&dst_key)
+        .then_some(CExpr::Var(dst_key))
 }
 
 fn predicate_operand_expr(src: &r2ssa::SSAVar, scratch: &FlagScratch) -> CExpr {
