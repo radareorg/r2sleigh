@@ -133,6 +133,9 @@ impl<'a> FoldingContext<'a> {
                 if let Some(alias) = self.arg_alias_for_rendered_name(name) {
                     return CExpr::Var(alias);
                 }
+                if self.lookup_predicate_expr(name).is_some() {
+                    return self.simplify_condition_expr(CExpr::Var(name.clone()));
+                }
                 if let Some(inner) = self
                     .lookup_definition(name)
                     .or_else(|| self.formatted_defs_map().get(name).cloned())

@@ -9,7 +9,7 @@ int32_t dbg.test_bool_carrier_chain(int32_t arg1, int32_t arg2)
     <carrier_assign>
     <carrier_store>
     local_10 = (int64_t)local_4;
-    if (0 != 0) {
+    if (arg1 != arg2) {
         <true_branch_return>
     } else {
         <false_branch_return>

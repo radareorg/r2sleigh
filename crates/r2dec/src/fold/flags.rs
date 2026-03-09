@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use r2ssa::{SSAOp, SSAVar};
 
 use crate::analysis;
+use crate::analysis::{FlagCompareKind, FlagCompareProvenance};
 use crate::ast::{BinaryOp, CExpr, CType, UnaryOp};
 
 use super::context::FoldingContext;
@@ -37,6 +38,12 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn predicate_exprs_map(&self) -> &std::collections::HashMap<String, CExpr> {
         &self.state.analysis_ctx.flag_info.predicate_exprs
+    }
+
+    pub(super) fn flag_compare_provenance_map(
+        &self,
+    ) -> &std::collections::HashMap<String, FlagCompareProvenance> {
+        &self.state.analysis_ctx.flag_info.compare_provenance
     }
 
     pub(super) fn lookup_predicate_expr(&self, name: &str) -> Option<CExpr> {
@@ -292,6 +299,17 @@ impl<'a> FoldingContext<'a> {
                     CExpr::binary(BinaryOp::And, *left, *right)
                 }
             }
+            CExpr::Binary {
+                op: BinaryOp::Or,
+                left,
+                right,
+            } => {
+                if let Some(le) = self.rewrite_le_from_lt_or_eq(left.as_ref(), right.as_ref()) {
+                    le
+                } else {
+                    CExpr::binary(BinaryOp::Or, *left, *right)
+                }
+            }
             CExpr::Unary {
                 op: UnaryOp::Not,
                 operand,
@@ -361,7 +379,51 @@ impl<'a> FoldingContext<'a> {
             return Some(CExpr::binary(BinaryOp::Gt, a, CExpr::IntLit(0)));
         }
 
+        if let (Some((ne_lhs, ne_rhs)), Some((ge_lhs, ge_rhs))) = (
+            self.extract_cmp_operands(left, BinaryOp::Ne),
+            self.extract_cmp_operands(right, BinaryOp::Ge),
+        ) && ((ne_lhs == ge_lhs && ne_rhs == ge_rhs) || (ne_lhs == ge_rhs && ne_rhs == ge_lhs))
+        {
+            return Some(CExpr::binary(BinaryOp::Gt, ge_lhs, ge_rhs));
+        }
+
+        if let (Some((ge_lhs, ge_rhs)), Some((ne_lhs, ne_rhs))) = (
+            self.extract_cmp_operands(left, BinaryOp::Ge),
+            self.extract_cmp_operands(right, BinaryOp::Ne),
+        ) && ((ne_lhs == ge_lhs && ne_rhs == ge_rhs) || (ne_lhs == ge_rhs && ne_rhs == ge_lhs))
+        {
+            return Some(CExpr::binary(BinaryOp::Gt, ge_lhs, ge_rhs));
+        }
+
         None
+    }
+
+    pub(super) fn rewrite_le_from_lt_or_eq(&self, left: &CExpr, right: &CExpr) -> Option<CExpr> {
+        let (lt_lhs, lt_rhs) = self.extract_cmp_operands(left, BinaryOp::Lt)?;
+        let (eq_lhs, eq_rhs) = self.extract_cmp_operands(right, BinaryOp::Eq)?;
+
+        if (lt_lhs == eq_lhs && lt_rhs == eq_rhs) || (lt_lhs == eq_rhs && lt_rhs == eq_lhs) {
+            return Some(CExpr::binary(BinaryOp::Le, lt_lhs, lt_rhs));
+        }
+
+        None
+    }
+
+    pub(super) fn extract_cmp_operands(
+        &self,
+        expr: &CExpr,
+        op: BinaryOp,
+    ) -> Option<(CExpr, CExpr)> {
+        match expr {
+            CExpr::Binary {
+                op: expr_op,
+                left,
+                right,
+            } if *expr_op == op => Some((left.as_ref().clone(), right.as_ref().clone())),
+            CExpr::Paren(inner) => self.extract_cmp_operands(inner, op),
+            CExpr::Cast { expr: inner, .. } => self.extract_cmp_operands(inner, op),
+            _ => None,
+        }
     }
 
     pub(super) fn extract_cmp_zero_operand(&self, expr: &CExpr, op: BinaryOp) -> Option<CExpr> {
@@ -1019,6 +1081,12 @@ impl<'a> FoldingContext<'a> {
                 operand,
             } => {
                 if let CExpr::Var(flag_name) = operand.as_ref() {
+                    if let Some(prov) = self.lookup_flag_compare_provenance(flag_name)
+                        && let Some(expr) = self.compare_provenance_expr(&prov)
+                    {
+                        return Some(self.negate_condition_expr(expr));
+                    }
+
                     let flag_lower = flag_name.to_lowercase();
                     if flag_lower.contains("zf") {
                         // !ZF means a != b
@@ -1130,6 +1198,12 @@ impl<'a> FoldingContext<'a> {
 
             // Pattern: ZF directly means "equal"
             CExpr::Var(flag_name) => {
+                if let Some(prov) = self.lookup_flag_compare_provenance(flag_name)
+                    && let Some(expr) = self.compare_provenance_expr(&prov)
+                {
+                    return Some(expr);
+                }
+
                 let flag_lower = flag_name.to_lowercase();
                 if flag_lower.contains("zf")
                     && let Some((left, right)) = self.lookup_flag_origin(flag_name)
@@ -1523,14 +1597,14 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn compare_tuple_from_flag_origin(&self, flag_name: &str) -> Option<CompareTuple> {
-        let (lhs_name, rhs_name) = self.lookup_flag_origin(flag_name)?;
+        let prov = self.lookup_flag_compare_provenance(flag_name)?;
         let lhs = self.resolve_predicate_operand(
-            &self.origin_name_to_expr(&lhs_name),
+            &self.origin_name_to_expr(&prov.lhs),
             0,
             &mut HashSet::new(),
         );
         let rhs = self.resolve_predicate_operand(
-            &self.origin_name_to_expr(&rhs_name),
+            &self.origin_name_to_expr(&prov.rhs),
             0,
             &mut HashSet::new(),
         );
@@ -1538,7 +1612,12 @@ impl<'a> FoldingContext<'a> {
         Some(self.normalize_compare_tuple(CompareTuple {
             lhs,
             rhs,
-            context: CompareContext::SignedNegative,
+            context: match prov.kind {
+                FlagCompareKind::Equality => CompareContext::Eq,
+                FlagCompareKind::UnsignedLess
+                | FlagCompareKind::SignedNegative
+                | FlagCompareKind::Overflow => CompareContext::SignedNegative,
+            },
         }))
     }
 
@@ -1808,6 +1887,10 @@ impl<'a> FoldingContext<'a> {
 
     /// Look up the original comparison operands for a flag variable.
     pub(super) fn lookup_flag_origin(&self, flag_name: &str) -> Option<(String, String)> {
+        if let Some(prov) = self.lookup_flag_compare_provenance(flag_name) {
+            return Some((prov.lhs, prov.rhs));
+        }
+
         let (flag_base, flag_version) = parse_flag_name(flag_name)?;
 
         // Try exact match first (case-insensitive) including version.
@@ -1840,6 +1923,61 @@ impl<'a> FoldingContext<'a> {
         }
 
         None
+    }
+
+    pub(super) fn lookup_flag_compare_provenance(
+        &self,
+        flag_name: &str,
+    ) -> Option<FlagCompareProvenance> {
+        let (flag_base, flag_version) = parse_flag_name(flag_name)?;
+
+        for (key, prov) in self.flag_compare_provenance_map() {
+            if let Some((key_base, key_version)) = parse_flag_name(key)
+                && key_base == flag_base
+                && key_version == flag_version
+            {
+                return Some(prov.clone());
+            }
+        }
+
+        let candidates: Vec<FlagCompareProvenance> = self
+            .flag_compare_provenance_map()
+            .iter()
+            .filter_map(|(key, prov)| {
+                let (key_base, _) = parse_flag_name(key)?;
+                (key_base == flag_base).then_some(prov.clone())
+            })
+            .collect();
+
+        if candidates.len() == 1 {
+            return candidates.into_iter().next();
+        }
+
+        None
+    }
+
+    pub(super) fn compare_provenance_expr(&self, prov: &FlagCompareProvenance) -> Option<CExpr> {
+        let lhs = self.resolve_predicate_operand(
+            &self.origin_name_to_expr(&prov.lhs),
+            0,
+            &mut HashSet::new(),
+        );
+        let rhs = self.resolve_predicate_operand(
+            &self.origin_name_to_expr(&prov.rhs),
+            0,
+            &mut HashSet::new(),
+        );
+
+        match prov.kind {
+            FlagCompareKind::Equality => Some(CExpr::binary(BinaryOp::Eq, lhs, rhs)),
+            FlagCompareKind::UnsignedLess => Some(CExpr::binary(BinaryOp::Lt, lhs, rhs)),
+            FlagCompareKind::SignedNegative => Some(CExpr::binary(
+                BinaryOp::Lt,
+                CExpr::binary(BinaryOp::Sub, lhs, rhs),
+                CExpr::IntLit(0),
+            )),
+            FlagCompareKind::Overflow => None,
+        }
     }
 }
 
