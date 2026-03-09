@@ -234,10 +234,32 @@ impl<'a> FoldingContext<'a> {
             .lookup_definition(&root_name)
             .unwrap_or(CExpr::Var(root_name));
         let raw = self.expand_return_expr(&root, 0, &mut visited);
-        if self.is_predicate_like_expr(&raw) {
+        let simplified = if self.is_predicate_like_expr(&raw) {
             self.simplify_condition_expr(raw)
         } else {
             raw
+        };
+        self.sanitize_return_expr(simplified, root, CExpr::Var(self.var_name(var)))
+    }
+
+    fn sanitize_return_expr(&self, expr: CExpr, fallback: CExpr, unresolved: CExpr) -> CExpr {
+        if self.expr_contains_generic_stack_alias(&expr) {
+            if self.expr_contains_generic_stack_alias(&fallback) {
+                unresolved
+            } else {
+                fallback
+            }
+        } else {
+            expr
+        }
+    }
+
+    fn expr_contains_generic_stack_alias(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => should_replace_preserved_stack_alias(name),
+            CExpr::Paren(inner) => self.expr_contains_generic_stack_alias(inner),
+            CExpr::Cast { expr: inner, .. } => self.expr_contains_generic_stack_alias(inner),
+            _ => false,
         }
     }
 

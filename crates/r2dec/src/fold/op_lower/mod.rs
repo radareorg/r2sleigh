@@ -1143,6 +1143,10 @@ impl<'a> FoldingContext<'a> {
                 lower.contains("ptr")
                     || lower.contains("addr")
                     || self.stack_slots_map().get(name).is_some()
+                    || self
+                        .lookup_type_hint(name)
+                        .map(|ty| matches!(ty, CType::Pointer(_) | CType::Struct(_)))
+                        .unwrap_or(false)
             }
             CExpr::Paren(inner) => self.is_non_index_pointer_expr(inner),
             CExpr::Unary { operand, .. } => self.is_non_index_pointer_expr(operand),
@@ -1191,6 +1195,12 @@ impl<'a> FoldingContext<'a> {
                 sub
             } else {
                 self.normalize_pointer_base_expr(&self.expr_for_provenance(base), 0)
+            }
+        } else if let Some(def) = self.lookup_definition(&base.display_name()) {
+            if let Some(sub) = self.try_subscript_from_addr_expr(&def) {
+                sub
+            } else {
+                self.normalize_pointer_base_expr(&def, 0)
             }
         } else {
             self.normalize_pointer_base_expr(&self.expr_for_provenance(base), 0)
@@ -2309,7 +2319,10 @@ pub(super) fn is_generic_arg_name(name: &str) -> bool {
 }
 
 fn should_replace_preserved_stack_alias(existing: &str) -> bool {
-    existing.starts_with("local_") || existing.starts_with("stack_") || existing == "saved_fp"
+    existing == "stack"
+        || existing.starts_with("local_")
+        || existing.starts_with("stack_")
+        || existing == "saved_fp"
 }
 
 fn should_replace_preserved_stack_expr(existing: &CExpr, preserved: &CExpr) -> bool {

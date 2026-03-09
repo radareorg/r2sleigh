@@ -461,6 +461,116 @@ mod tests {
     }
 
     #[test]
+    fn test_subscript_rejects_pointer_typed_local_as_index_and_uses_scalar_index() {
+        let arr = make_var("arg1", 0, 8);
+        let addr = make_var("tmp:9300", 1, 8);
+        let load = make_var("tmp:9301", 1, 4);
+        let bogus_index = make_var("tmp:9302", 1, 8);
+        let real_index = make_var("tmp:9303", 1, 4);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.state.analysis_ctx.use_info.ptr_arith.insert(
+            addr.display_name(),
+            PtrArith {
+                base: arr.clone(),
+                index: bogus_index.clone(),
+                element_size: 4,
+                is_sub: false,
+            },
+        );
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            bogus_index.display_name(),
+            CExpr::Var("local_8".to_string()),
+        );
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            addr.display_name(),
+            CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("arg1".to_string()),
+                CExpr::binary(
+                    BinaryOp::Mul,
+                    CExpr::Var("local_c".to_string()),
+                    CExpr::IntLit(4),
+                ),
+            ),
+        );
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .type_hints
+            .insert("local_8".to_string(), CType::ptr(CType::Int(32)));
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .type_hints
+            .insert("local_c".to_string(), CType::Int(32));
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            real_index.display_name(),
+            CExpr::Var("local_c".to_string()),
+        );
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst: load,
+            space: "ram".to_string(),
+            addr,
+        });
+        let CExpr::Subscript { index, .. } = expr else {
+            panic!("expected subscript expression");
+        };
+        assert!(
+            matches!(index.as_ref(), CExpr::Var(name) if name == "local_c"),
+            "typed pointer locals must not survive as subscript indices"
+        );
+    }
+
+    #[test]
+    fn test_member_access_uses_subscript_base_when_base_has_generic_ptr_arith_definition() {
+        let idx = make_var("arg2", 0, 4);
+        let base = make_var("tmp:9400", 1, 8);
+        let addr = make_var("tmp:9401", 1, 8);
+        let dst = make_var("tmp:9402", 1, 4);
+        let mut ctx = FoldingContext::new(64);
+        ctx.state.analysis_ctx.use_info.ptr_members.insert(
+            addr.display_name(),
+            (base.clone(), 8),
+        );
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            base.display_name(),
+            CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("arg1".to_string()),
+                CExpr::binary(
+                    BinaryOp::Mul,
+                    CExpr::Var("arg2".to_string()),
+                    CExpr::IntLit(56),
+                ),
+            ),
+        );
+        ctx.state.analysis_ctx.use_info.type_hints.insert(
+            base.display_name(),
+            CType::ptr(CType::Struct("DemoStruct".to_string())),
+        );
+        let oracle = make_oracle_for_member(base.clone(), 8, "third");
+        ctx.set_type_oracle(Some(&oracle));
+
+        let expr = ctx.op_to_expr(&SSAOp::Load {
+            dst,
+            space: "ram".to_string(),
+            addr,
+        });
+
+        let (CExpr::Member { base, member } | CExpr::PtrMember { base, member }) = expr else {
+            panic!("expected member expression");
+        };
+        assert_eq!(member, "third");
+        assert!(
+            matches!(base.as_ref(), CExpr::Subscript { .. }),
+            "generic ptr-arith base should normalize to subscript before member rendering"
+        );
+        let _ = idx;
+    }
+
+    #[test]
     fn test_load_generic_deref_inserts_minimal_pointer_cast() {
         let addr = make_var("tmp:9300", 1, 8);
         let dst = make_var("tmp:9301", 1, 4);
@@ -2328,6 +2438,31 @@ mod tests {
         assert!(
             !matches!(expr, CExpr::Var(name) if name == "stack_0" || name == "saved_fp"),
             "Generic stack placeholders must not leak into visible return expressions"
+        );
+    }
+
+    #[test]
+    fn test_return_does_not_collapse_to_plain_stack_alias() {
+        let ret = make_var("tmp:ret2", 1, 8);
+        let block = make_block(vec![SSAOp::Return {
+            target: ret.clone(),
+        }]);
+
+        let mut ctx = FoldingContext::new(64);
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .definitions
+            .insert(ret.display_name(), CExpr::Var("stack".to_string()));
+        ctx.analyze_block(&block);
+        let stmts = ctx.fold_block(&block, block.addr);
+
+        let Some(CStmt::Return(Some(expr))) = stmts.last() else {
+            panic!("Expected trailing return statement");
+        };
+        assert!(
+            !matches!(expr, CExpr::Var(name) if name == "stack"),
+            "plain stack placeholder must not survive in final return expressions"
         );
     }
 }
