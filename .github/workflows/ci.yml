@@ -106,11 +106,20 @@ jobs:
           R2R_OFFLINE: "1"
         run: make -C tests/r2r run
 
+  # ── Rust E2E / integration tests ────────────────────────────────────
+  e2e:
+    name: Rust E2E Tests
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run Rust E2E tests
+        run: cargo e2e-test
+
   # ── Release build check ────────────────────────────────────────────
   release:
     name: Release Build
     runs-on: self-hosted
-    needs: [quality, r2r]
+    needs: [quality, r2r, e2e]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v6
