@@ -668,10 +668,8 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let mut then_stmt = self.structure_region(then_region);
         let mut else_stmt = self.structure_region(else_region);
 
-        then_stmt =
-            self.append_merged_slot_return_if_needed(then_stmt, then_pred, summary.slot_offset)?;
-        else_stmt =
-            self.append_merged_slot_return_if_needed(else_stmt, else_pred, summary.slot_offset)?;
+        then_stmt = self.append_merged_slot_return_if_needed(then_stmt, then_pred, summary)?;
+        else_stmt = self.append_merged_slot_return_if_needed(else_stmt, else_pred, summary)?;
 
         let if_stmt = CStmt::If {
             cond: self.get_branch_condition(cond_block),
@@ -705,14 +703,20 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         &self,
         stmt: CStmt,
         pred_addr: u64,
-        slot_offset: i64,
+        summary: &crate::analysis::FrameSlotMergeSummary,
     ) -> Option<CStmt> {
         if Self::single_terminator_stmt(&stmt).is_some() {
             return Some(stmt);
         }
-        let expr = self
-            .fold_ctx
-            .merged_return_candidate_for_block_slot(pred_addr, slot_offset)?;
+        let mut visited = std::collections::HashSet::new();
+        let expr = summary
+            .incoming
+            .get(&pred_addr)
+            .and_then(|value| self.fold_ctx.render_semantic_value(value, 0, &mut visited))
+            .or_else(|| {
+                self.fold_ctx
+                    .merged_return_candidate_for_block_slot(pred_addr, summary.slot_offset)
+            })?;
         let mut stmts = Vec::new();
         Self::append_stmt_body_flat(&mut stmts, stmt);
         stmts.push(CStmt::Return(Some(expr)));

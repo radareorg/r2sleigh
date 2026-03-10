@@ -170,7 +170,7 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn semantic_deref_candidate_for_name(&self, name: &str) -> Option<CExpr> {
         let mut visited = HashSet::new();
-        self.render_memory_access_by_name(name, 0, 0, &mut visited)
+        self.render_authoritative_memory_access_by_name(name, 0, 0, &mut visited)
     }
 
     fn should_inline_in_return(&self, var_name: &str, depth: u32) -> bool {
@@ -363,15 +363,14 @@ impl<'a> FoldingContext<'a> {
                     CExpr::Var(stack_var)
                 } else {
                     let expanded_inner = self.expand_return_expr(inner, depth + 1, visited);
-                    if let Some(sub) = self.try_subscript_from_addr_expr(&expanded_inner) {
-                        sub
-                    } else if let Some(member) =
-                        self.try_member_access_from_addr_expr(None, &expanded_inner)
-                    {
-                        member
-                    } else {
-                        CExpr::Deref(Box::new(expanded_inner))
-                    }
+                    let mut semantic_visited = HashSet::new();
+                    self.render_memory_access_from_visible_expr(
+                        &expanded_inner,
+                        0,
+                        depth + 1,
+                        &mut semantic_visited,
+                    )
+                    .unwrap_or_else(|| CExpr::Deref(Box::new(expanded_inner)))
                 }
             }
             CExpr::Binary { op, left, right } => {

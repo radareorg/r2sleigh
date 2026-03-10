@@ -4664,6 +4664,12 @@ pub(crate) fn enrich_decompiler_type_context(
         );
     }
 
+    prefer_stronger_local_struct_overrides(
+        &struct_decls,
+        &mut slot_type_overrides,
+        &slot_field_profiles,
+    );
+
     merge_local_structs_into_type_db(&mut type_db, &struct_decls);
     let signature =
         merge_slot_type_overrides_into_signature(signature, &slot_type_overrides, ptr_bits);
@@ -4677,6 +4683,91 @@ fn struct_fields_signature(fields: &[StructFieldCandidateJson]) -> Vec<(u64, Str
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     out
+}
+
+fn parse_struct_ptr_type_name(ty: &str) -> Option<String> {
+    ty.trim()
+        .strip_prefix("struct ")
+        .and_then(|rest| rest.strip_suffix(" *"))
+        .map(str::to_string)
+}
+
+fn local_struct_profile_score(
+    decl: &StructDeclCandidateJson,
+    profile: &std::collections::BTreeMap<u64, String>,
+) -> Option<(usize, usize, usize, i32)> {
+    if decl.source != "local_inferred" || profile.is_empty() {
+        return None;
+    }
+
+    let field_map = decl
+        .fields
+        .iter()
+        .map(|field| (field.offset, field.field_type.to_ascii_lowercase()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let mut offset_matches = 0usize;
+    let mut typed_matches = 0usize;
+    for (offset, ty) in profile {
+        let Some(field_ty) = field_map.get(offset) else {
+            continue;
+        };
+        offset_matches += 1;
+        if field_ty == &ty.to_ascii_lowercase() {
+            typed_matches += 1;
+        }
+    }
+
+    (offset_matches > 0).then_some((
+        offset_matches,
+        typed_matches,
+        decl.fields.len(),
+        i32::from(decl.confidence),
+    ))
+}
+
+pub(crate) fn prefer_stronger_local_struct_overrides(
+    struct_decls: &[StructDeclCandidateJson],
+    slot_type_overrides: &mut std::collections::HashMap<usize, String>,
+    slot_field_profiles: &std::collections::HashMap<usize, std::collections::BTreeMap<u64, String>>,
+) {
+    for (slot, ty) in slot_type_overrides.iter_mut() {
+        let Some(profile) = slot_field_profiles.get(slot) else {
+            continue;
+        };
+        if profile.is_empty() {
+            continue;
+        }
+
+        let current_name = parse_struct_ptr_type_name(ty);
+        let current_decl = current_name.as_ref().and_then(|name| {
+            struct_decls
+                .iter()
+                .find(|decl| decl.name.eq_ignore_ascii_case(name))
+        });
+        if current_decl.is_some_and(|decl| decl.source == "external_type_db") {
+            continue;
+        }
+
+        let current_score = current_decl.and_then(|decl| local_struct_profile_score(decl, profile));
+        let best_local = struct_decls
+            .iter()
+            .filter_map(|decl| {
+                local_struct_profile_score(decl, profile).map(|score| (score, decl.name.clone()))
+            })
+            .max_by(|(left_score, left_name), (right_score, right_name)| {
+                left_score
+                    .cmp(right_score)
+                    .then_with(|| left_name.cmp(right_name))
+            });
+
+        let Some((best_score, best_name)) = best_local else {
+            continue;
+        };
+        if current_score.is_none_or(|score| best_score > score) {
+            *ty = format!("struct {} *", best_name);
+        }
+    }
 }
 
 fn structurally_compatible(local_fields: &[(u64, String)], ext_fields: &[(u64, String)]) -> bool {
@@ -7152,6 +7243,127 @@ mod integration_tests {
 
     #[test]
     #[cfg(feature = "arm")]
+    fn enrich_decompiler_type_context_prefers_stronger_local_struct_with_offset_zero_field() {
+        let arch = ArchSpec::new("aarch64");
+        let block = r2ssa::SSABlock {
+            addr: 0x100000bb4,
+            size: 52,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("const:30", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W8", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 2, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    src: r2ssa::SSAVar::new("X9", 2, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                },
+            ],
+        };
+
+        let (signature, type_db) = enrich_decompiler_type_context(
+            &[block],
+            Some(&arch),
+            64,
+            Some(r2dec::ExternalFunctionSignature {
+                ret_type: Some(r2dec::CType::Int(64)),
+                params: vec![
+                    r2dec::ExternalFunctionParam {
+                        name: "arg1".to_string(),
+                        ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                    },
+                    r2dec::ExternalFunctionParam {
+                        name: "arg2".to_string(),
+                        ty: Some(r2dec::CType::Int(32)),
+                    },
+                ],
+            }),
+            r2types::ExternalTypeDb::default(),
+        );
+
+        let struct_name = signature
+            .and_then(|sig| sig.params.first().and_then(|param| param.ty.clone()))
+            .and_then(|ty| match ty {
+                r2dec::CType::Pointer(inner) => match *inner {
+                    r2dec::CType::Struct(name) => Some(name),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("expected arg0 to resolve to pointer-to-struct");
+
+        let key = struct_name.to_ascii_lowercase();
+        let st = type_db
+            .structs
+            .get(&key)
+            .expect("resolved struct in type db");
+        assert!(
+            st.fields.contains_key(&0),
+            "chosen struct override should retain offset-0 field, got {st:?}"
+        );
+        assert!(
+            st.fields.contains_key(&0x30),
+            "chosen struct override should retain offset-0x30 field, got {st:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
     fn infer_structs_from_ssa_recovers_arm64_indexed_struct_fields() {
         let arch = ArchSpec::new("aarch64");
         let block = r2ssa::SSABlock {
@@ -7755,7 +7967,25 @@ mod integration_tests {
     #[test]
     fn infer_structs_from_ssa_recovers_observed_live_arm64_struct_array_index_pattern() {
         let arch = ArchSpec::new("aarch64");
-        let block = observed_live_arm64_struct_array_index_block_full();
+        let mut block = observed_live_arm64_struct_array_index_block_full();
+        block.ops.extend([
+            r2ssa::SSAOp::IntAdd {
+                dst: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+                a: r2ssa::SSAVar::new("X8", 4, 8),
+                b: r2ssa::SSAVar::new("X9", 7, 8),
+            },
+            r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("X0", 1, 8),
+                src: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+            },
+            r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("PC", 1, 8),
+                src: r2ssa::SSAVar::new("X30", 0, 8),
+            },
+            r2ssa::SSAOp::Return {
+                target: r2ssa::SSAVar::new("PC", 1, 8),
+            },
+        ]);
 
         let mut diagnostics = TypeWritebackDiagnosticsJson::default();
         let (struct_decls, slot_types, slot_fields) =
@@ -7906,6 +8136,84 @@ mod integration_tests {
         assert!(
             output.contains("f_8") && !output.contains("*(arg1 +"),
             "expected indexed-member store rendering in decompiled output, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn enrich_decompiler_type_context_drives_observed_live_arm64_struct_array_decompile() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let arch = ArchSpec::new("aarch64");
+        let mut block = observed_live_arm64_struct_array_index_block_full();
+        block.ops.extend([
+            r2ssa::SSAOp::IntAdd {
+                dst: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+                a: r2ssa::SSAVar::new("X8", 4, 8),
+                b: r2ssa::SSAVar::new("X9", 7, 8),
+            },
+            r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("X0", 1, 8),
+                src: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+            },
+            r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("PC", 1, 8),
+                src: r2ssa::SSAVar::new("X30", 0, 8),
+            },
+            r2ssa::SSAOp::Return {
+                target: r2ssa::SSAVar::new("PC", 1, 8),
+            },
+        ]);
+        let signature = Some(r2dec::ExternalFunctionSignature {
+            ret_type: Some(r2dec::CType::Int(64)),
+            params: vec![
+                r2dec::ExternalFunctionParam {
+                    name: "arg1".to_string(),
+                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                },
+                r2dec::ExternalFunctionParam {
+                    name: "arg2".to_string(),
+                    ty: Some(r2dec::CType::Int(32)),
+                },
+                r2dec::ExternalFunctionParam {
+                    name: "arg3".to_string(),
+                    ty: Some(r2dec::CType::Int(32)),
+                },
+            ],
+        });
+
+        let (signature, type_db) = enrich_decompiler_type_context(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            64,
+            signature,
+            r2types::ExternalTypeDb::default(),
+        );
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_struct_array_index");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        decompiler.set_function_signature(signature);
+        decompiler.set_external_type_db(type_db);
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("[arg2].f_8"),
+            "expected indexed-member store rendering in decompiled output, got:\n{output}"
+        );
+        assert!(
+            output.contains("[arg2].f_34"),
+            "expected indexed-member load rendering in decompiled output, got:\n{output}"
+        );
+        assert!(
+            !output.contains("*(arg1 +") && !output.contains("*(((uint8_t*)arg1) +"),
+            "expected semantic indexed-member rendering without raw pointer math, got:\n{output}"
         );
     }
 }

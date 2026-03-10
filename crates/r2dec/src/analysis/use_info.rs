@@ -1033,6 +1033,15 @@ fn semantic_addr_for_var(
 ) -> Option<NormalizedAddr> {
     let key = var.display_name();
     let ptr_bytes = env.ptr_size.div_ceil(8).max(1);
+    let lower_name = var.name.to_ascii_lowercase();
+    if lower_name == env.sp_name || lower_name == env.fp_name {
+        return Some(NormalizedAddr {
+            base: BaseRef::StackSlot(0),
+            index: None,
+            scale_bytes: 0,
+            offset_bytes: 0,
+        });
+    }
     let is_ptr_sized_entry_arg_root = |root: &SSAVar| {
         root.version == 0
             && root.size == ptr_bytes
@@ -3125,6 +3134,317 @@ mod tests {
             "field addr semantic value = {:?}",
             info.semantic_values.get(&field_addr.display_name())
         );
+    }
+
+    #[test]
+    fn semantic_values_capture_observed_live_arm64_struct_array_loads() {
+        let mut fixture = TestEnvFixture {
+            sp_name: "sp".to_string(),
+            fp_name: "fp".to_string(),
+            arg_regs: vec!["x0".to_string(), "x1".to_string(), "x2".to_string()],
+            ..Default::default()
+        };
+        fixture
+            .param_register_aliases
+            .insert("x0".to_string(), "arg1".to_string());
+        fixture
+            .param_register_aliases
+            .insert("x1".to_string(), "arg2".to_string());
+        fixture.type_hints.insert(
+            "arg1".to_string(),
+            CType::ptr(CType::Struct("demo_layout".to_string())),
+        );
+        fixture
+            .type_hints
+            .insert("arg2".to_string(), CType::Int(32));
+        let env = fixture.env();
+
+        let sp0 = mk("SP", 0, 8);
+        let sp1 = mk("SP", 1, 8);
+        let x0 = mk("X0", 0, 8);
+        let w1 = mk("W1", 0, 4);
+        let w2 = mk("W2", 0, 4);
+        let slot_base = mk("tmp:6500", 1, 8);
+        let slot_idx = mk("tmp:6400", 1, 8);
+        let slot_v = mk("tmp:6780", 1, 8);
+        let reload_v = mk("tmp:6780", 2, 8);
+        let loaded_v = mk("tmp:24c00", 1, 4);
+        let zext_v = mk("X8", 1, 8);
+        let reload_base_addr = mk("tmp:6500", 2, 8);
+        let reload_base = mk("X9", 1, 8);
+        let reload_idx_addr = mk("tmp:6400", 2, 8);
+        let reload_idx = mk("tmp:26b00", 1, 4);
+        let sext_idx = mk("X10", 1, 8);
+        let scaled_idx = mk("X10", 2, 8);
+        let copied_scale = mk("tmp:12380", 1, 8);
+        let sum_addr = mk("tmp:12480", 1, 8);
+        let copied_sum = mk("X9", 2, 8);
+        let store_addr = mk("tmp:6400", 3, 8);
+        let reload_base_addr_2 = mk("tmp:6500", 3, 8);
+        let reload_base_2 = mk("X8", 2, 8);
+        let reload_idx_addr_2 = mk("tmp:6400", 4, 8);
+        let reload_idx_2 = mk("tmp:26b00", 2, 4);
+        let sext_idx_2 = mk("X9", 3, 8);
+        let scaled_idx_2 = mk("X9", 4, 8);
+        let copied_scale_2 = mk("tmp:12380", 2, 8);
+        let sum_addr_2 = mk("tmp:12480", 2, 8);
+        let copied_sum_2 = mk("X8", 3, 8);
+        let load_addr_8 = mk("tmp:6400", 5, 8);
+        let load_8 = mk("tmp:24c00", 2, 4);
+        let zext_8 = mk("X8", 4, 8);
+        let reload_base_addr_3 = mk("tmp:6500", 4, 8);
+        let reload_base_3 = mk("X9", 5, 8);
+        let reload_idx_addr_3 = mk("tmp:6400", 6, 8);
+        let reload_idx_3 = mk("tmp:26b00", 3, 4);
+        let sext_idx_3 = mk("X10", 3, 8);
+        let scaled_idx_3 = mk("X10", 4, 8);
+        let copied_scale_3 = mk("tmp:12380", 3, 8);
+        let sum_addr_3 = mk("tmp:12480", 3, 8);
+        let copied_sum_3 = mk("X9", 6, 8);
+        let load_addr_34 = mk("tmp:6400", 7, 8);
+        let load_34 = mk("tmp:24c00", 3, 4);
+        let zext_34 = mk("X9", 7, 8);
+
+        let block = single_block(vec![
+            SSAOp::IntSub {
+                dst: sp1.clone(),
+                a: sp0,
+                b: SSAVar::constant(0x10, 8),
+            },
+            SSAOp::IntAdd {
+                dst: slot_base.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: slot_base,
+                val: x0.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: slot_idx.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(4, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: slot_idx,
+                val: w1.clone(),
+            },
+            SSAOp::Copy {
+                dst: slot_v.clone(),
+                src: sp1.clone(),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: slot_v,
+                val: w2,
+            },
+            SSAOp::Copy {
+                dst: reload_v.clone(),
+                src: sp1.clone(),
+            },
+            SSAOp::Load {
+                dst: loaded_v.clone(),
+                space: "ram".to_string(),
+                addr: reload_v,
+            },
+            SSAOp::IntZExt {
+                dst: zext_v,
+                src: loaded_v,
+            },
+            SSAOp::IntAdd {
+                dst: reload_base_addr.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Load {
+                dst: reload_base.clone(),
+                space: "ram".to_string(),
+                addr: reload_base_addr,
+            },
+            SSAOp::IntAdd {
+                dst: reload_idx_addr.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(4, 8),
+            },
+            SSAOp::Load {
+                dst: reload_idx.clone(),
+                space: "ram".to_string(),
+                addr: reload_idx_addr,
+            },
+            SSAOp::IntSExt {
+                dst: sext_idx.clone(),
+                src: reload_idx,
+            },
+            SSAOp::IntMult {
+                dst: scaled_idx.clone(),
+                a: sext_idx,
+                b: SSAVar::constant(0x38, 8),
+            },
+            SSAOp::Copy {
+                dst: copied_scale.clone(),
+                src: scaled_idx,
+            },
+            SSAOp::IntAdd {
+                dst: sum_addr.clone(),
+                a: reload_base,
+                b: copied_scale.clone(),
+            },
+            SSAOp::Copy {
+                dst: copied_sum.clone(),
+                src: sum_addr,
+            },
+            SSAOp::IntAdd {
+                dst: store_addr.clone(),
+                a: copied_sum,
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: store_addr,
+                val: mk("W8", 0, 4),
+            },
+            SSAOp::IntAdd {
+                dst: reload_base_addr_2.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Load {
+                dst: reload_base_2.clone(),
+                space: "ram".to_string(),
+                addr: reload_base_addr_2,
+            },
+            SSAOp::IntAdd {
+                dst: reload_idx_addr_2.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(4, 8),
+            },
+            SSAOp::Load {
+                dst: reload_idx_2.clone(),
+                space: "ram".to_string(),
+                addr: reload_idx_addr_2,
+            },
+            SSAOp::IntSExt {
+                dst: sext_idx_2.clone(),
+                src: reload_idx_2,
+            },
+            SSAOp::IntMult {
+                dst: scaled_idx_2.clone(),
+                a: sext_idx_2,
+                b: SSAVar::constant(0x38, 8),
+            },
+            SSAOp::Copy {
+                dst: copied_scale_2.clone(),
+                src: scaled_idx_2,
+            },
+            SSAOp::IntAdd {
+                dst: sum_addr_2.clone(),
+                a: reload_base_2,
+                b: copied_scale_2.clone(),
+            },
+            SSAOp::Copy {
+                dst: copied_sum_2.clone(),
+                src: sum_addr_2,
+            },
+            SSAOp::IntAdd {
+                dst: load_addr_8.clone(),
+                a: copied_sum_2,
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Load {
+                dst: load_8.clone(),
+                space: "ram".to_string(),
+                addr: load_addr_8,
+            },
+            SSAOp::IntZExt {
+                dst: zext_8,
+                src: load_8.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: reload_base_addr_3.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Load {
+                dst: reload_base_3.clone(),
+                space: "ram".to_string(),
+                addr: reload_base_addr_3,
+            },
+            SSAOp::IntAdd {
+                dst: reload_idx_addr_3.clone(),
+                a: sp1,
+                b: SSAVar::constant(4, 8),
+            },
+            SSAOp::Load {
+                dst: reload_idx_3.clone(),
+                space: "ram".to_string(),
+                addr: reload_idx_addr_3,
+            },
+            SSAOp::IntSExt {
+                dst: sext_idx_3.clone(),
+                src: reload_idx_3,
+            },
+            SSAOp::IntMult {
+                dst: scaled_idx_3.clone(),
+                a: sext_idx_3,
+                b: SSAVar::constant(0x38, 8),
+            },
+            SSAOp::Copy {
+                dst: copied_scale_3.clone(),
+                src: scaled_idx_3,
+            },
+            SSAOp::IntAdd {
+                dst: sum_addr_3.clone(),
+                a: reload_base_3,
+                b: copied_scale_3.clone(),
+            },
+            SSAOp::Copy {
+                dst: copied_sum_3.clone(),
+                src: sum_addr_3,
+            },
+            SSAOp::IntAdd {
+                dst: load_addr_34.clone(),
+                a: copied_sum_3,
+                b: SSAVar::constant(0x34, 8),
+            },
+            SSAOp::Load {
+                dst: load_34.clone(),
+                space: "ram".to_string(),
+                addr: load_addr_34,
+            },
+            SSAOp::IntZExt {
+                dst: zext_34,
+                src: load_34.clone(),
+            },
+        ]);
+
+        let info = analyze(&[block], &env);
+
+        for name in [
+            (load_8.display_name(), 8_i64),
+            (load_34.display_name(), 0x34_i64),
+        ]
+        .into_iter()
+        .map(|(name, _offset)| name)
+        {
+            assert!(
+                matches!(
+                    info.semantic_values.get(&name),
+                    Some(SemanticValue::Load {
+                        addr: NormalizedAddr {
+                            base: BaseRef::Value(value_ref),
+                            index: Some(_),
+                            scale_bytes: 0x38,
+                            offset_bytes,
+                        },
+                        size: 4,
+                    }) if value_ref.var == x0
+                ),
+                "semantic load shape for {name} = {:?}",
+                info.semantic_values.get(&name)
+            );
+        }
     }
 
     #[test]

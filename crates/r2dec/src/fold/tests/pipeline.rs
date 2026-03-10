@@ -1135,6 +1135,126 @@ mod tests {
     }
 
     #[test]
+    fn test_render_memory_access_from_visible_expr_recovers_indexed_member_from_raw_pointer_math() {
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(
+            [("x0".to_string(), "arg1".to_string()), ("x1".to_string(), "arg2".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        ctx.set_type_hints(
+            [
+                (
+                    "arg1".to_string(),
+                    CType::ptr(CType::Struct("demo_layout".to_string())),
+                ),
+                ("arg2".to_string(), CType::Int(32)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        ctx.inputs.external_type_db = Box::leak(Box::new(ExternalTypeDb {
+            structs: [(
+                "demo_layout".to_string(),
+                ExternalStruct {
+                    name: "demo_layout".to_string(),
+                    fields: [
+                        (
+                            8,
+                            ExternalField {
+                                name: "third".to_string(),
+                                offset: 8,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                        (
+                            0x34,
+                            ExternalField {
+                                name: "fourteenth".to_string(),
+                                offset: 0x34,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }));
+
+        let addr = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Var("arg1".to_string()),
+                CExpr::binary(
+                    BinaryOp::Mul,
+                    CExpr::Var("arg2".to_string()),
+                    CExpr::IntLit(56),
+                ),
+            ),
+            CExpr::IntLit(8),
+        );
+
+        let shape = ctx
+            .normalized_addr_from_visible_expr(&addr, 0)
+            .expect("raw pointer math should normalize to an indexed address");
+        assert_eq!(shape.offset_bytes, 8);
+        assert!(shape.index.is_some(), "expected recovered index, got {shape:?}");
+
+        let shape_depth_one = ctx
+            .normalized_addr_from_visible_expr(&addr, 1)
+            .expect("raw pointer math should normalize at nonzero recursion depth");
+        assert_eq!(shape_depth_one.offset_bytes, 8);
+        assert!(
+            shape_depth_one.index.is_some(),
+            "expected recovered index at depth one, got {shape_depth_one:?}"
+        );
+
+        let mut render_visited = HashSet::new();
+        let direct = ctx
+            .render_access_expr_from_addr(&shape, 4, 0, &mut render_visited)
+            .expect("normalized indexed address should render");
+        assert!(
+            matches!(direct, CExpr::Member { .. } | CExpr::PtrMember { .. }),
+            "expected direct indexed-member render, got {direct:?}"
+        );
+
+        let mut render_zero_visited = HashSet::new();
+        let direct_zero = ctx
+            .render_access_expr_from_addr(&shape, 0, 0, &mut render_zero_visited)
+            .expect("normalized indexed address should render even without explicit elem_size");
+        assert!(
+            matches!(direct_zero, CExpr::Member { .. } | CExpr::PtrMember { .. }),
+            "expected zero-sized direct indexed-member render, got {direct_zero:?}"
+        );
+
+        let mut direct_visible_visited = HashSet::new();
+        let direct_visible = ctx
+            .render_memory_access_from_visible_expr(&addr, 0, 0, &mut direct_visible_visited)
+            .expect("raw visible pointer math should render through memory renderer");
+        assert!(
+            matches!(direct_visible, CExpr::Member { .. } | CExpr::PtrMember { .. }),
+            "expected visible raw pointer math to render as indexed-member, got {direct_visible:?}"
+        );
+
+        let mut visited = HashSet::new();
+        let rendered = ctx.semanticize_visible_expr(&CExpr::Deref(Box::new(addr)), 0, &mut visited);
+        let rendered_text = format!("{rendered:?}");
+        assert!(
+            matches!(rendered, CExpr::Member { .. } | CExpr::PtrMember { .. }),
+            "expected indexed-member render, got {rendered:?}"
+        );
+        assert!(
+            rendered_text.contains("third") && rendered_text.contains("arg1"),
+            "expected layout-backed indexed member render, got {rendered:?}"
+        );
+    }
+
+    #[test]
     fn test_load_generic_deref_inserts_minimal_pointer_cast() {
         let addr = make_var("tmp:9300", 1, 8);
         let dst = make_var("tmp:9301", 1, 4);

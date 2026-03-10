@@ -239,60 +239,9 @@ impl<'a> FoldingContext<'a> {
                 visiting.remove(&name);
                 self.choose_alias_rewrite(CExpr::Var(name), rewritten)
             }
-            CExpr::Subscript { base, index } => {
-                let original_base = (*base).clone();
-                let original_index = (*index).clone();
-                let rewritten_base = self.rewrite_expr_with_aliases(
-                    original_base.clone(),
-                    aliases,
-                    depth + 1,
-                    visiting,
-                );
-                let rewritten_index = self.rewrite_expr_with_aliases(
-                    original_index.clone(),
-                    aliases,
-                    depth + 1,
-                    visiting,
-                );
-                let base = self.choose_alias_rewrite(original_base, rewritten_base);
-                let index = if self.is_non_index_pointer_expr(&rewritten_index) {
-                    original_index
-                } else {
-                    self.choose_alias_rewrite(original_index, rewritten_index)
-                };
-                CExpr::Subscript {
-                    base: Box::new(base),
-                    index: Box::new(index),
-                }
-            }
-            CExpr::Member { base, member } => {
-                let original_base = (*base).clone();
-                let rewritten_base = self.rewrite_expr_with_aliases(
-                    original_base.clone(),
-                    aliases,
-                    depth + 1,
-                    visiting,
-                );
-                let base = self.choose_alias_rewrite(original_base, rewritten_base);
-                CExpr::Member {
-                    base: Box::new(base),
-                    member,
-                }
-            }
-            CExpr::PtrMember { base, member } => {
-                let original_base = (*base).clone();
-                let rewritten_base = self.rewrite_expr_with_aliases(
-                    original_base.clone(),
-                    aliases,
-                    depth + 1,
-                    visiting,
-                );
-                let base = self.choose_alias_rewrite(original_base, rewritten_base);
-                CExpr::PtrMember {
-                    base: Box::new(base),
-                    member,
-                }
-            }
+            CExpr::Subscript { base, index } => CExpr::Subscript { base, index },
+            CExpr::Member { base, member } => CExpr::Member { base, member },
+            CExpr::PtrMember { base, member } => CExpr::PtrMember { base, member },
             other => other.map_children(&mut |child| {
                 self.rewrite_expr_with_aliases(child, aliases, depth + 1, visiting)
             }),

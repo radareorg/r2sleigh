@@ -302,6 +302,11 @@ fn build_function_analysis_artifact_from_analysis(
         &slot_field_profiles,
         &external_structs,
     );
+    crate::prefer_stronger_local_struct_overrides(
+        &struct_decls,
+        &mut slot_type_overrides,
+        &slot_field_profiles,
+    );
 
     {
         let mut seen = std::collections::HashSet::new();
@@ -519,6 +524,11 @@ pub(crate) fn build_detached_function_analysis_artifact(
         &mut slot_type_overrides,
         &slot_field_profiles,
         &external_structs,
+    );
+    crate::prefer_stronger_local_struct_overrides(
+        &struct_decls,
+        &mut slot_type_overrides,
+        &slot_field_profiles,
     );
     {
         let mut seen = std::collections::HashSet::new();

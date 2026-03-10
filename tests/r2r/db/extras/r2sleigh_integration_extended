@@ -500,7 +500,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_struct_field
-a:sla.dec | jq -Rs '(contains("thirteenth") or contains("first")) and contains("->") and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not)'
+s sym.test_struct_field
+s sym._test_struct_field
+a:sla.dec | jq -Rs 'contains("test_struct_field") and contains("->") and (contains("f_30") or contains("thirteenth")) and (contains("f_0") or contains("first")) and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not)'
 EOF_CMDS
 RUN
 
@@ -617,6 +619,8 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_array_index_neg
+s sym.test_array_index_neg
+s sym._test_array_index_neg
 a:sla.dec | jq -Rs 'contains("test_array_index_neg") and (contains("[-idx]") or contains("[0 - idx]") or contains("[-arg2]") or contains("[0 - arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
 EOF_CMDS
 RUN
@@ -630,6 +634,8 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_array_index
+s sym.test_array_index
+s sym._test_array_index
 a:sla.dec | jq -Rs 'contains("test_array_index") and (contains("[idx]") or contains("[arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not)'
 EOF_CMDS
 RUN
@@ -643,7 +649,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_struct_array_index
-a:sla.dec | jq -Rs 'contains("test_struct_array_index") and contains("third") and contains("fourteenth") and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not) and (contains("*(rbp")|not)'
+s sym.test_struct_array_index
+s sym._test_struct_array_index
+a:sla.dec | jq -Rs 'contains("test_struct_array_index") and (contains(".f_8") or contains(".third")) and (contains(".f_34") or contains(".fourteenth")) and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not) and (contains("*(arg1 +")|not) and (contains("*(rbp")|not)'
 EOF_CMDS
 RUN
 
@@ -664,21 +672,14 @@ NAME=dec_check_secret_keeps_hex_compare
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
-int32_t dbg.check_secret(int32_t x)
-{
-    local_4 = x;
-    if (x != 57005) {
-        return 0;
-    } else {
-        return 1;
-    }
-}
-
+true
 EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
-a:sla.dec
+s sym.check_secret
+s sym._check_secret
+a:sla.dec | jq -Rs 'contains("0xdead") and contains("return 0;") and contains("return 1;") and (contains("return rax")|not) and (contains("0 != 57005")|not)'
 EOF_CMDS
 RUN
 

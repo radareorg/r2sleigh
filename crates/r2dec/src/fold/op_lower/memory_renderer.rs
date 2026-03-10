@@ -1,0 +1,143 @@
+use std::collections::HashSet;
+
+use r2ssa::SSAVar;
+
+use super::*;
+
+impl<'a> FoldingContext<'a> {
+    pub(super) fn render_authoritative_memory_access_by_name(
+        &self,
+        name: &str,
+        elem_size: u32,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        self.render_memory_access_by_name(name, elem_size, depth, visited)
+            .or_else(|| {
+                self.lookup_definition(name).and_then(|expr| {
+                    self.render_memory_access_from_visible_expr(&expr, elem_size, depth, visited)
+                })
+            })
+            .or_else(|| {
+                self.definitions_map().get(name).and_then(|expr| {
+                    self.render_memory_access_from_visible_expr(expr, elem_size, depth, visited)
+                })
+            })
+    }
+
+    pub(super) fn render_canonical_load_expr(
+        &self,
+        dst: &SSAVar,
+        addr: &SSAVar,
+        elem_ty: CType,
+    ) -> CExpr {
+        let fallback_addr_expr = self
+            .lookup_definition(&addr.display_name())
+            .or_else(|| self.definitions_map().get(&addr.display_name()).cloned())
+            .unwrap_or_else(|| self.get_expr(addr));
+
+        let mut semantic_visited = HashSet::new();
+        let mut best = self.choose_preferred_visible_expr(
+            self.render_authoritative_memory_access_by_name(
+                &dst.display_name(),
+                dst.size,
+                0,
+                &mut semantic_visited,
+            ),
+            self.render_authoritative_memory_access_by_name(
+                &addr.display_name(),
+                dst.size,
+                0,
+                &mut semantic_visited,
+            ),
+        );
+        best = self.choose_preferred_visible_expr(
+            best,
+            self.render_memory_access_from_visible_expr(
+                &fallback_addr_expr,
+                dst.size,
+                0,
+                &mut semantic_visited,
+            ),
+        );
+        if let Some(expr) = best {
+            return expr;
+        }
+
+        if addr.name.starts_with("ram:")
+            && let Some(address) = extract_call_address(&addr.name)
+        {
+            if let Some(sym) = self.lookup_symbol(address) {
+                return CExpr::Var(sym.clone());
+            }
+            if let Some(name) = self.lookup_function(address) {
+                return CExpr::Var(name.clone());
+            }
+            if let Some(s) = self.lookup_string(address) {
+                return CExpr::StringLit(s.clone());
+            }
+        }
+
+        if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
+            return CExpr::Var(stack_var);
+        }
+
+        self.typed_deref_expr(addr, fallback_addr_expr, elem_ty)
+    }
+
+    pub(super) fn render_canonical_store_target_expr(
+        &self,
+        addr: &SSAVar,
+        value_size: u32,
+        elem_ty: CType,
+    ) -> CExpr {
+        let fallback_addr_expr = self
+            .lookup_definition(&addr.display_name())
+            .or_else(|| self.definitions_map().get(&addr.display_name()).cloned())
+            .unwrap_or_else(|| self.get_expr(addr));
+
+        let mut semantic_visited = HashSet::new();
+        let mut best = self.render_authoritative_memory_access_by_name(
+            &addr.display_name(),
+            value_size,
+            0,
+            &mut semantic_visited,
+        );
+        best = self.choose_preferred_visible_expr(
+            best,
+            self.render_memory_access_from_visible_expr(
+                &fallback_addr_expr,
+                value_size,
+                0,
+                &mut semantic_visited,
+            ),
+        );
+        if let Some(expr) = best {
+            return expr;
+        }
+
+        if addr.name.starts_with("ram:")
+            && let Some(address) = extract_call_address(&addr.name)
+            && let Some(sym) = self.lookup_symbol(address)
+        {
+            return CExpr::Var(sym.clone());
+        }
+
+        if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
+            return CExpr::Var(stack_var);
+        }
+
+        self.typed_deref_expr(addr, fallback_addr_expr, elem_ty)
+    }
+
+    pub(super) fn render_memory_access_from_visible_expr(
+        &self,
+        expr: &CExpr,
+        elem_size: u32,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        let addr = self.normalized_addr_from_visible_expr(expr, depth + 1)?;
+        self.render_access_expr_from_addr(&addr, elem_size, depth + 1, visited)
+    }
+}
