@@ -8448,4 +8448,245 @@ mod integration_tests {
             "dead synthetic stack argument spills should not leak into final output, got:\n{output}"
         );
     }
+
+    #[test]
+    fn live_arm64_main_atoi_arg_keeps_semantic_root() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = r2ssa::SSABlock {
+            addr: 0x100001000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:200", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:178", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                    val: r2ssa::SSAVar::new("X1", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:slot", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:178", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:slot", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:arg", 1, 8),
+                    a: r2ssa::SSAVar::new("X8", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X0", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:arg", 1, 8),
+                },
+                r2ssa::SSAOp::Call {
+                    target: r2ssa::SSAVar::new("const:401040", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X0", 2, 8),
+                    src: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("X30", 0, 8),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        };
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._main");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        decompiler.set_function_signature(Some(r2dec::ExternalFunctionSignature {
+            ret_type: Some(r2dec::CType::Int(64)),
+            params: vec![
+                r2dec::ExternalFunctionParam {
+                    name: "arg1".to_string(),
+                    ty: Some(r2dec::CType::Int(32)),
+                },
+                r2dec::ExternalFunctionParam {
+                    name: "arg2".to_string(),
+                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(Box::new(
+                        r2dec::CType::Int(8),
+                    ))))),
+                },
+            ],
+        }));
+        decompiler.set_function_names(HashMap::from([(0x401040, "sym.imp.atoi".to_string())]));
+        decompiler.set_known_function_signatures(HashMap::from([(
+            "sym.imp.atoi".to_string(),
+            r2dec::types::FunctionType {
+                return_type: r2dec::CType::Int(32),
+                params: vec![r2dec::CType::ptr(r2dec::CType::Int(8))],
+                variadic: false,
+            },
+        )]));
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("sym.imp.atoi("),
+            "expected imported atoi call, got:\n{output}"
+        );
+        assert!(
+            output.contains("arg2")
+                && !output.contains("stack_")
+                && !output.contains("&stack"),
+            "expected semantic argv-rooted atoi arg without stack placeholders, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_arm64_main_printf_format_arg_keeps_string_literal() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = r2ssa::SSABlock {
+            addr: 0x100001100,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    src: r2ssa::SSAVar::new("const:100002000", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("X0", 1, 8),
+                    a: r2ssa::SSAVar::new("X8", 1, 8),
+                    b: r2ssa::SSAVar::new("const:292", 0, 8),
+                },
+                r2ssa::SSAOp::Call {
+                    target: r2ssa::SSAVar::new("const:401030", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X0", 2, 8),
+                    src: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("X30", 0, 8),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        };
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._main");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        decompiler.set_function_names(HashMap::from([(0x401030, "sym.imp.printf".to_string())]));
+        decompiler.set_known_function_signatures(HashMap::from([(
+            "sym.imp.printf".to_string(),
+            r2dec::types::FunctionType {
+                return_type: r2dec::CType::Int(32),
+                params: vec![r2dec::CType::ptr(r2dec::CType::Int(8))],
+                variadic: true,
+            },
+        )]));
+        decompiler.set_strings(HashMap::from([(
+            0x100002292,
+            "usage: vuln_test <n>\\n".to_string(),
+        )]));
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("\"usage: vuln_test <n>\\\\n\""),
+            "expected string literal printf arg, got:\n{output}"
+        );
+        assert!(
+            !output.contains("0x100002000") && !output.contains("292"),
+            "raw const-add format pointer should not survive, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_x86_main_printf_format_arg_keeps_string_literal() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = r2ssa::SSABlock {
+            addr: 0x401000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("RDI", 1, 8),
+                    src: r2ssa::SSAVar::new("const:40229e", 0, 8),
+                },
+                r2ssa::SSAOp::Call {
+                    target: r2ssa::SSAVar::new("const:401030", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("RAX", 1, 8),
+                    src: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("RIP", 0, 8),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        };
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("dbg.main");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
+        decompiler.set_function_names(HashMap::from([(0x401030, "sym.imp.printf".to_string())]));
+        decompiler.set_known_function_signatures(HashMap::from([(
+            "sym.imp.printf".to_string(),
+            r2dec::types::FunctionType {
+                return_type: r2dec::CType::Int(32),
+                params: vec![r2dec::CType::ptr(r2dec::CType::Int(8))],
+                variadic: true,
+            },
+        )]));
+        decompiler.set_strings(HashMap::from([(
+            0x40229e,
+            "Unknown test: %d\\n".to_string(),
+        )]));
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("\"Unknown test: %d\\\\n\""),
+            "expected x86 string literal printf arg, got:\n{output}"
+        );
+        assert!(
+            !output.contains("printf(0x") && !output.contains("atoi(*rax)"),
+            "x86 imported-call rendering must not regress to raw literal or deref arg, got:\n{output}"
+        );
+    }
 }

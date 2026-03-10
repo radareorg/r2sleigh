@@ -49,6 +49,7 @@ fn analyze_stack_vars(
                             val,
                             &use_info.copy_sources,
                             &use_info.var_aliases,
+                            env.param_register_aliases,
                         ) {
                             set_stack_arg_alias(scratch, offset, arg_alias);
                         }

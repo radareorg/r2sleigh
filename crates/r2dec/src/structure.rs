@@ -705,9 +705,6 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         pred_addr: u64,
         summary: &crate::analysis::FrameSlotMergeSummary,
     ) -> Option<CStmt> {
-        if Self::single_terminator_stmt(&stmt).is_some() {
-            return Some(stmt);
-        }
         let mut visited = std::collections::HashSet::new();
         let expr = summary
             .incoming
@@ -717,6 +714,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 self.fold_ctx
                     .merged_return_candidate_for_block_slot(pred_addr, summary.slot_offset)
             })?;
+        if let Some(rewritten) = self.rewrite_trailing_return_with_merged_expr(&stmt, &expr) {
+            return Some(rewritten);
+        }
+        if Self::single_terminator_stmt(&stmt).is_some() {
+            return Some(stmt);
+        }
         let mut stmts = Vec::new();
         Self::append_stmt_body_flat(&mut stmts, stmt);
         stmts.push(CStmt::Return(Some(expr)));
@@ -725,6 +728,28 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         } else {
             CStmt::Block(stmts)
         })
+    }
+
+    fn rewrite_trailing_return_with_merged_expr(&self, stmt: &CStmt, merged: &CExpr) -> Option<CStmt> {
+        match stmt {
+            CStmt::Return(Some(current)) => {
+                let current_bad = self.fold_ctx.expr_contains_generic_stack_alias(current)
+                    || self.fold_ctx.is_uninitialized_return_reg(current);
+                if current_bad || self.fold_ctx.prefers_visible_expr(current, merged) {
+                    Some(CStmt::Return(Some(merged.clone())))
+                } else {
+                    None
+                }
+            }
+            CStmt::Block(stmts) => {
+                let (last, prefix) = stmts.split_last()?;
+                let rewritten_tail = self.rewrite_trailing_return_with_merged_expr(last, merged)?;
+                let mut rebuilt = prefix.to_vec();
+                rebuilt.push(rewritten_tail);
+                Some(CStmt::Block(rebuilt))
+            }
+            _ => None,
+        }
     }
 
     fn rewrite_block_tail_guard_clauses(stmts: Vec<CStmt>) -> Vec<CStmt> {

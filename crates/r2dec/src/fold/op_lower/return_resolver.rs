@@ -8,7 +8,7 @@ impl<'a> FoldingContext<'a> {
         self.choose_preferred_visible_expr(Some(raw), Some(semanticized))
     }
 
-    pub(super) fn expr_contains_generic_stack_alias(&self, expr: &CExpr) -> bool {
+    pub(crate) fn expr_contains_generic_stack_alias(&self, expr: &CExpr) -> bool {
         match expr {
             CExpr::Var(name) => should_replace_preserved_stack_alias(name),
             CExpr::Paren(inner) => self.expr_contains_generic_stack_alias(inner),

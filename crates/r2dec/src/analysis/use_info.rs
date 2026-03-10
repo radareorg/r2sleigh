@@ -6,7 +6,7 @@ use super::{
     BaseRef, FrameSlotMergeSummary, NormalizedAddr, PassEnv, ScalarValue, SemanticValue,
     StackSlotProvenance, UseInfo, ValueProvenance, ValueRef, lower::LowerCtx, utils,
 };
-use crate::ast::CExpr;
+use crate::ast::{BinaryOp, CExpr};
 use crate::fold::{PtrArith, SSABlock};
 
 #[derive(Debug, Default)]
@@ -570,7 +570,7 @@ fn merged_slot_store_value_for_pred(
     slot_offset: i64,
     env: &PassEnv<'_>,
 ) -> Option<SemanticValue> {
-    for op in block.ops.iter().rev() {
+    for (idx, op) in block.ops.iter().enumerate().rev() {
         if let SSAOp::Store { addr, val, .. } = op
             && utils::extract_stack_offset_from_var(
                 addr,
@@ -579,10 +579,71 @@ fn merged_slot_store_value_for_pred(
                 env.sp_name,
             ) == Some(slot_offset)
         {
-            return semantic_stack_store_value(info, val, env);
+            let base = semantic_stack_store_value(info, val, env);
+            let family = same_register_family_semantic_value_before(info, block, idx, val, env);
+            return match (base, family) {
+                (Some(base), Some(family))
+                    if should_prefer_same_family_store_value(&base, &family) =>
+                {
+                    Some(family)
+                }
+                (Some(base), _) => Some(base),
+                (None, other) => other,
+            };
         }
     }
     None
+}
+
+fn same_register_family_semantic_value_before(
+    info: &UseInfo,
+    block: &SSABlock,
+    store_idx: usize,
+    var: &SSAVar,
+    env: &PassEnv<'_>,
+) -> Option<SemanticValue> {
+    let family = register_family_name(&var.name)?;
+    let mut best = None;
+
+    for op in block.ops[..store_idx].iter().rev() {
+        let Some(dst) = op.dst() else {
+            continue;
+        };
+        let Some(dst_family) = register_family_name(&dst.name) else {
+            continue;
+        };
+        if dst_family != family {
+            continue;
+        }
+        let Some(candidate) = semantic_stack_store_value(info, dst, env) else {
+            continue;
+        };
+        best = match best {
+            Some(current) if semantic_value_rank(&current) > semantic_value_rank(&candidate) => {
+                Some(current)
+            }
+            _ => Some(candidate),
+        };
+        if matches!(best, Some(SemanticValue::Scalar(ScalarValue::Expr(_)))) {
+            break;
+        }
+    }
+
+    best
+}
+
+fn register_family_name(name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    let lower = lower
+        .rsplit_once('_')
+        .map(|(base, _)| base.to_string())
+        .unwrap_or(lower);
+    let rest = lower
+        .strip_prefix('x')
+        .or_else(|| lower.strip_prefix('w'))
+        .or_else(|| lower.strip_prefix('r'))
+        .or_else(|| lower.strip_prefix('e'))?;
+    (!rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())).then(|| rest.to_string())
 }
 
 fn collect_semantic_values(scratch: &mut UseScratch, op: &SSAOp, env: &PassEnv<'_>) {
@@ -1198,6 +1259,25 @@ fn semantic_value_rank(value: &SemanticValue) -> i32 {
         SemanticValue::Scalar(ScalarValue::Root(_)) => 45,
         SemanticValue::Address(addr) => normalized_addr_rank(addr),
         SemanticValue::Load { addr, .. } => normalized_addr_rank(addr) + 10,
+    }
+}
+
+fn should_prefer_same_family_store_value(base: &SemanticValue, family: &SemanticValue) -> bool {
+    match (base, family) {
+        (
+            SemanticValue::Scalar(ScalarValue::Root(_)),
+            SemanticValue::Scalar(ScalarValue::Expr(
+                CExpr::IntLit(_)
+                    | CExpr::UIntLit(_)
+                    | CExpr::FloatLit(_)
+                    | CExpr::CharLit(_)
+                    | CExpr::StringLit(_)
+            )),
+        ) => true,
+        (SemanticValue::Scalar(ScalarValue::Root(_)), _) => {
+            semantic_value_rank(family) > semantic_value_rank(base)
+        }
+        _ => false,
     }
 }
 
@@ -2236,7 +2316,12 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                 continue;
             }
 
-            let mut found_regs: HashMap<String, (CExpr, String)> = HashMap::new();
+            let producer_map = ops[..call_idx]
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, op)| op.dst().map(|dst| (dst.display_name(), idx)))
+                .collect::<HashMap<_, _>>();
+            let mut found_regs: HashMap<String, (i32, String)> = HashMap::new();
             let mut i = call_idx;
             while i > 0 {
                 i -= 1;
@@ -2284,18 +2369,47 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
 
                 let dst_base = dst_var.name.to_lowercase();
                 let dst_key = dst_var.display_name();
-                found_regs.insert(dst_base.clone(), (expr, dst_key));
+                let candidate_score = call_arg_expr_score(&expr, env);
+                match found_regs.get(&dst_base) {
+                    Some((score, _)) if *score >= candidate_score => {}
+                    _ => {
+                        found_regs.insert(dst_base.clone(), (candidate_score, dst_key));
+                    }
+                }
             }
 
             let mut args = Vec::new();
             let mut consumed_keys = Vec::new();
             for reg in env.arg_regs {
-                if let Some((expr, dst_key)) = found_regs.remove(reg) {
-                    args.push(expr);
+                if let Some((_, dst_key)) = found_regs.remove(reg) {
+                    args.push(CExpr::Var(dst_key.clone()));
                     consumed_keys.push(dst_key);
                 } else {
                     break;
                 }
+            }
+
+            let lower = LowerCtx {
+                definitions: &scratch.info.definitions,
+                semantic_values: &scratch.info.semantic_values,
+                use_counts: &scratch.info.use_counts,
+                condition_vars: &scratch.info.condition_vars,
+                pinned: &scratch.info.pinned,
+                var_aliases: &scratch.info.var_aliases,
+                type_hints: &scratch.info.type_hints,
+                ptr_arith: &scratch.info.ptr_arith,
+                stack_slots: &scratch.info.stack_slots,
+                forwarded_values: &scratch.info.forwarded_values,
+                function_names: env.function_names,
+                strings: env.strings,
+                symbols: env.symbols,
+                type_oracle: env.type_oracle,
+            };
+            let stack_args =
+                collect_immediate_stack_call_args(ops, call_idx, &producer_map, &lower, env);
+            for (_, expr, key) in &stack_args {
+                args.push(expr.clone());
+                consumed_keys.push(key.clone());
             }
 
             if !args.is_empty() {
@@ -2332,6 +2446,373 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
             }
         }
     }
+}
+
+fn collect_immediate_stack_call_args(
+    ops: &[SSAOp],
+    call_idx: usize,
+    producers: &HashMap<String, usize>,
+    _lower: &LowerCtx<'_>,
+    env: &PassEnv<'_>,
+) -> Vec<(i64, CExpr, String)> {
+    let uses_arm64_arg_regs = env
+        .arg_regs
+        .first()
+        .is_some_and(|reg| reg.starts_with('x') || reg.starts_with('w'));
+    if !uses_arm64_arg_regs {
+        return Vec::new();
+    }
+
+    let mut args = Vec::new();
+    let mut seen_offsets = HashSet::new();
+    let mut collecting = false;
+
+    let mut i = call_idx;
+    while i > 0 {
+        i -= 1;
+        let prev = &ops[i];
+        if matches!(prev, SSAOp::Call { .. } | SSAOp::CallInd { .. }) {
+            break;
+        }
+
+        match prev {
+            SSAOp::Store { addr, val, .. } => {
+                let Some(offset) =
+                    call_stack_arg_offset(ops, producers, addr, env, 0).filter(|off| *off >= 0)
+                else {
+                    if collecting {
+                        break;
+                    }
+                    continue;
+                };
+                if seen_offsets.insert(offset) {
+                    let key = val.display_name();
+                    args.push((offset, CExpr::Var(key.clone()), key));
+                }
+                collecting = true;
+            }
+            SSAOp::IntAdd { .. }
+            | SSAOp::IntSub { .. }
+            | SSAOp::Copy { .. }
+            | SSAOp::IntZExt { .. }
+            | SSAOp::IntSExt { .. }
+            | SSAOp::Trunc { .. }
+            | SSAOp::Cast { .. }
+            | SSAOp::Subpiece { .. } => {
+                if !collecting {
+                    continue;
+                }
+            }
+            _ => {
+                if collecting {
+                    break;
+                }
+            }
+        }
+    }
+
+    args.sort_by_key(|(offset, _, _)| *offset);
+    args
+}
+
+fn call_stack_arg_offset(
+    ops: &[SSAOp],
+    producers: &HashMap<String, usize>,
+    addr: &SSAVar,
+    env: &PassEnv<'_>,
+    depth: u32,
+) -> Option<i64> {
+    if depth > 8 {
+        return None;
+    }
+
+    let addr_name = addr.name.to_ascii_lowercase();
+    if addr_name == env.sp_name {
+        return Some(0);
+    }
+
+    let producer_idx = producers.get(&addr.display_name())?;
+    match &ops[*producer_idx] {
+        SSAOp::IntAdd { a, b, .. } => stack_slot_offset_from_add_sub(a, b, false, env),
+        SSAOp::IntSub { a, b, .. } => stack_slot_offset_from_add_sub(a, b, true, env),
+        SSAOp::Copy { src, .. }
+        | SSAOp::IntZExt { src, .. }
+        | SSAOp::IntSExt { src, .. }
+        | SSAOp::Trunc { src, .. }
+        | SSAOp::Cast { src, .. }
+        | SSAOp::Subpiece { src, .. } => call_stack_arg_offset(ops, producers, src, env, depth + 1),
+        _ => None,
+    }
+}
+
+fn call_arg_expr_score(expr: &CExpr, env: &PassEnv<'_>) -> i32 {
+    let mut score = 0;
+    if call_arg_expr_resolves_to_literal(expr, env, 0) {
+        score += 100;
+    }
+    score += call_arg_expr_semantic_weight(expr, 0);
+    if call_arg_expr_contains_stack_placeholder(expr, 0) {
+        score -= 80;
+    }
+    if call_arg_expr_contains_transient_name(expr, 0) {
+        score -= 20;
+    }
+    score
+}
+
+fn call_arg_expr_semantic_weight(expr: &CExpr, depth: u32) -> i32 {
+    if depth > 8 {
+        return 0;
+    }
+    match expr {
+        CExpr::StringLit(_) => 80,
+        CExpr::Subscript { base, index } => {
+            40 + call_arg_expr_semantic_weight(base, depth + 1)
+                + call_arg_expr_semantic_weight(index, depth + 1)
+        }
+        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+            45 + call_arg_expr_semantic_weight(base, depth + 1)
+        }
+        CExpr::Deref(inner) | CExpr::AddrOf(inner) => {
+            20 + call_arg_expr_semantic_weight(inner, depth + 1)
+        }
+        CExpr::Cast { expr: inner, .. } | CExpr::Paren(inner) => {
+            call_arg_expr_semantic_weight(inner, depth + 1)
+        }
+        CExpr::Unary { operand, .. } => call_arg_expr_semantic_weight(operand, depth + 1),
+        CExpr::Binary { left, right, .. } => {
+            10 + call_arg_expr_semantic_weight(left, depth + 1)
+                + call_arg_expr_semantic_weight(right, depth + 1)
+        }
+        CExpr::Var(name) => {
+            if is_call_arg_placeholder_name(name) {
+                -20
+            } else if is_call_arg_transient_name(name) {
+                -10
+            } else {
+                25
+            }
+        }
+        CExpr::Call { func, args } => {
+            call_arg_expr_semantic_weight(func, depth + 1)
+                + args
+                    .iter()
+                    .map(|arg| call_arg_expr_semantic_weight(arg, depth + 1))
+                    .sum::<i32>()
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            call_arg_expr_semantic_weight(cond, depth + 1)
+                + call_arg_expr_semantic_weight(then_expr, depth + 1)
+                + call_arg_expr_semantic_weight(else_expr, depth + 1)
+        }
+        CExpr::Comma(items) => items
+            .iter()
+            .map(|item| call_arg_expr_semantic_weight(item, depth + 1))
+            .sum(),
+        CExpr::IntLit(_) | CExpr::UIntLit(_) | CExpr::FloatLit(_) | CExpr::CharLit(_) => 5,
+        CExpr::Sizeof(_) | CExpr::SizeofType(_) => 0,
+    }
+}
+
+fn call_arg_expr_contains_stack_placeholder(expr: &CExpr, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match expr {
+        CExpr::Var(name) => is_call_arg_placeholder_name(name),
+        CExpr::Deref(inner)
+        | CExpr::AddrOf(inner)
+        | CExpr::Paren(inner)
+        | CExpr::Cast { expr: inner, .. }
+        | CExpr::Unary { operand: inner, .. }
+        | CExpr::Sizeof(inner) => call_arg_expr_contains_stack_placeholder(inner, depth + 1),
+        CExpr::Binary { left, right, .. } => {
+            call_arg_expr_contains_stack_placeholder(left, depth + 1)
+                || call_arg_expr_contains_stack_placeholder(right, depth + 1)
+        }
+        CExpr::Subscript { base, index } => {
+            call_arg_expr_contains_stack_placeholder(base, depth + 1)
+                || call_arg_expr_contains_stack_placeholder(index, depth + 1)
+        }
+        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+            call_arg_expr_contains_stack_placeholder(base, depth + 1)
+        }
+        CExpr::Call { func, args } => {
+            call_arg_expr_contains_stack_placeholder(func, depth + 1)
+                || args
+                    .iter()
+                    .any(|arg| call_arg_expr_contains_stack_placeholder(arg, depth + 1))
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            call_arg_expr_contains_stack_placeholder(cond, depth + 1)
+                || call_arg_expr_contains_stack_placeholder(then_expr, depth + 1)
+                || call_arg_expr_contains_stack_placeholder(else_expr, depth + 1)
+        }
+        CExpr::Comma(items) => items
+            .iter()
+            .any(|item| call_arg_expr_contains_stack_placeholder(item, depth + 1)),
+        CExpr::IntLit(_)
+        | CExpr::UIntLit(_)
+        | CExpr::FloatLit(_)
+        | CExpr::StringLit(_)
+        | CExpr::CharLit(_)
+        | CExpr::SizeofType(_) => false,
+    }
+}
+
+fn call_arg_expr_contains_transient_name(expr: &CExpr, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match expr {
+        CExpr::Var(name) => is_call_arg_transient_name(name),
+        CExpr::Deref(inner)
+        | CExpr::AddrOf(inner)
+        | CExpr::Paren(inner)
+        | CExpr::Cast { expr: inner, .. }
+        | CExpr::Unary { operand: inner, .. }
+        | CExpr::Sizeof(inner) => call_arg_expr_contains_transient_name(inner, depth + 1),
+        CExpr::Binary { left, right, .. } => {
+            call_arg_expr_contains_transient_name(left, depth + 1)
+                || call_arg_expr_contains_transient_name(right, depth + 1)
+        }
+        CExpr::Subscript { base, index } => {
+            call_arg_expr_contains_transient_name(base, depth + 1)
+                || call_arg_expr_contains_transient_name(index, depth + 1)
+        }
+        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+            call_arg_expr_contains_transient_name(base, depth + 1)
+        }
+        CExpr::Call { func, args } => {
+            call_arg_expr_contains_transient_name(func, depth + 1)
+                || args
+                    .iter()
+                    .any(|arg| call_arg_expr_contains_transient_name(arg, depth + 1))
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            call_arg_expr_contains_transient_name(cond, depth + 1)
+                || call_arg_expr_contains_transient_name(then_expr, depth + 1)
+                || call_arg_expr_contains_transient_name(else_expr, depth + 1)
+        }
+        CExpr::Comma(items) => items
+            .iter()
+            .any(|item| call_arg_expr_contains_transient_name(item, depth + 1)),
+        CExpr::IntLit(_)
+        | CExpr::UIntLit(_)
+        | CExpr::FloatLit(_)
+        | CExpr::StringLit(_)
+        | CExpr::CharLit(_)
+        | CExpr::SizeofType(_) => false,
+    }
+}
+
+fn call_arg_expr_resolves_to_literal(expr: &CExpr, env: &PassEnv<'_>, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+
+    let addr = match expr {
+        CExpr::IntLit(value) => (*value >= 0).then_some(*value as u64),
+        CExpr::UIntLit(value) => Some(*value),
+        CExpr::Paren(inner) | CExpr::AddrOf(inner) => {
+            return call_arg_expr_resolves_to_literal(inner, env, depth + 1);
+        }
+        CExpr::Cast { expr: inner, .. } => return call_arg_expr_resolves_to_literal(inner, env, depth + 1),
+        CExpr::Binary {
+            op: BinaryOp::Add,
+            left,
+            right,
+        } => match (
+            call_arg_expr_literal_value(left, depth + 1),
+            call_arg_expr_literal_value(right, depth + 1),
+        ) {
+            (Some(a), Some(b)) => a.checked_add(b),
+            _ => None,
+        },
+        CExpr::Binary {
+            op: BinaryOp::Sub,
+            left,
+            right,
+        } => match (
+            call_arg_expr_literal_value(left, depth + 1),
+            call_arg_expr_literal_value(right, depth + 1),
+        ) {
+            (Some(a), Some(b)) => a.checked_sub(b),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    addr.is_some_and(|value| {
+        env.function_names.contains_key(&value)
+            || env.strings.contains_key(&value)
+            || env.symbols.contains_key(&value)
+    })
+}
+
+fn call_arg_expr_literal_value(expr: &CExpr, depth: u32) -> Option<u64> {
+    if depth > 8 {
+        return None;
+    }
+    match expr {
+        CExpr::IntLit(value) => (*value >= 0).then_some(*value as u64),
+        CExpr::UIntLit(value) => Some(*value),
+        CExpr::Paren(inner) | CExpr::AddrOf(inner) => call_arg_expr_literal_value(inner, depth + 1),
+        CExpr::Cast { expr: inner, .. } => call_arg_expr_literal_value(inner, depth + 1),
+        CExpr::Binary {
+            op: BinaryOp::Add,
+            left,
+            right,
+        } => call_arg_expr_literal_value(left, depth + 1)?
+            .checked_add(call_arg_expr_literal_value(right, depth + 1)?),
+        CExpr::Binary {
+            op: BinaryOp::Sub,
+            left,
+            right,
+        } => call_arg_expr_literal_value(left, depth + 1)?
+            .checked_sub(call_arg_expr_literal_value(right, depth + 1)?),
+        _ => None,
+    }
+}
+
+fn is_call_arg_placeholder_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "stack"
+        || lower == "saved_fp"
+        || lower.starts_with("stack_")
+        || lower.starts_with("local_")
+}
+
+fn is_call_arg_transient_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("tmp:")
+        || lower.starts_with("ram:")
+        || lower.starts_with("const:")
+        || utils::is_cpu_flag(&lower)
+        || lower.starts_with("eax")
+        || lower.starts_with("rax")
+        || lower.starts_with("ecx")
+        || lower.starts_with("rcx")
+        || lower.starts_with("edx")
+        || lower.starts_with("rdx")
+        || lower.starts_with("esi")
+        || lower.starts_with("rsi")
+        || lower.starts_with("edi")
+        || lower.starts_with("rdi")
+        || lower.starts_with('x')
+        || lower.starts_with('w')
 }
 
 fn is_call_arg_producer(op: &SSAOp) -> bool {
@@ -2452,6 +2933,86 @@ mod tests {
             phis: Vec::new(),
             ops,
         }
+    }
+
+    #[test]
+    fn call_arg_ranking_prefers_literalish_expression_over_stack_placeholder() {
+        let mut fixture = TestEnvFixture::default();
+        fixture
+            .strings
+            .insert(0x1000_229e, "Unknown test: %d\\n".to_string());
+        let env = fixture.env();
+        let literalish = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::UIntLit(0x1000_2000),
+            CExpr::IntLit(0x29e),
+        );
+        let stacky = CExpr::Deref(Box::new(CExpr::binary(
+            BinaryOp::Add,
+            CExpr::Var("stack_178".to_string()),
+            CExpr::IntLit(160),
+        )));
+
+        assert!(
+            call_arg_expr_score(&literalish, &env) > call_arg_expr_score(&stacky, &env),
+            "literal-capable const-add should outrank stack placeholder chain"
+        );
+    }
+
+    #[test]
+    fn call_arg_collection_includes_immediate_stack_call_args() {
+        let fixture = TestEnvFixture {
+            sp_name: "sp".to_string(),
+            fp_name: "x29".to_string(),
+            arg_regs: vec!["x0".to_string(), "x1".to_string()],
+            ..Default::default()
+        };
+
+        let sp = mk("SP", 0, 8);
+        let x0 = mk("X0", 1, 8);
+        let x8 = mk("X8", 1, 8);
+        let x9 = mk("X9", 1, 8);
+        let arg8 = mk("tmp:arg8", 1, 8);
+        let block = single_block(vec![
+            SSAOp::Copy {
+                dst: x0.clone(),
+                src: mk("const:100002000", 0, 8),
+            },
+            SSAOp::Copy {
+                dst: x8.clone(),
+                src: mk("W2", 0, 4),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: sp.clone(),
+                val: x8.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: arg8.clone(),
+                a: sp.clone(),
+                b: mk("const:8", 0, 8),
+            },
+            SSAOp::Copy {
+                dst: x9.clone(),
+                src: mk("W3", 0, 4),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: arg8.clone(),
+                val: x9.clone(),
+            },
+            SSAOp::Call {
+                target: mk("ram:10000259c", 0, 8),
+            },
+        ]);
+
+        let info = analyze(&[block], &fixture.env());
+        let args = info.call_args.get(&(0x1000, 6)).expect("call args");
+        assert_eq!(args.len(), 3, "x0 plus two stack-spilled call args should be collected");
+        assert!(
+            args[1] != args[2],
+            "stack arg ordering should preserve distinct offsets, got {args:?}"
+        );
     }
 
     #[test]

@@ -188,6 +188,22 @@ impl<'a> FoldingContext<'a> {
                 if let Some(stripped) = name.strip_prefix('&') {
                     return Some(stripped.to_string());
                 }
+                let parsed_offset = if name == "saved_fp" {
+                    Some(0)
+                } else if let Some(suffix) = name.strip_prefix("local_") {
+                    i64::from_str_radix(suffix, 16).ok().map(|v| -v)
+                } else if let Some(suffix) = name.strip_prefix("stack_") {
+                    i64::from_str_radix(suffix, 16).ok()
+                } else if let Some(suffix) = name.strip_prefix("arg_") {
+                    i64::from_str_radix(suffix, 16).ok().map(|v| -v)
+                } else {
+                    None
+                };
+                if let Some(offset) = parsed_offset
+                    && let Some(alias) = self.resolve_stack_var(offset)
+                {
+                    return Some(alias);
+                }
                 self.lookup_definition(name)
                     .and_then(|inner| self.resolve_stack_alias_from_addr_expr(&inner, depth + 1))
             }
@@ -263,6 +279,14 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn rewrite_stack_expr(&self, expr: CExpr) -> CExpr {
         let rewritten = expr.map_children(&mut |child| self.rewrite_stack_expr(child));
+
+        if let CExpr::Var(name) = &rewritten
+            && let Some(alias) = self.resolve_stack_alias_from_addr_expr(&CExpr::Var(name.clone()), 0)
+            && alias != *name
+            && !super::op_lower::should_replace_preserved_stack_alias(&alias)
+        {
+            return CExpr::Var(alias);
+        }
 
         if matches!(
             rewritten,
