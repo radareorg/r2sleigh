@@ -1374,9 +1374,7 @@ impl<'a> FoldingContext<'a> {
             return Some(field);
         }
 
-        self.inputs
-            .type_oracle
-            .and_then(|oracle| oracle.field_name_any(offset).map(|field| field.to_string()))
+        None
     }
 
     fn field_name_from_type_hint_for_var(&self, var: &SSAVar, offset: u64) -> Option<String> {
@@ -1496,9 +1494,12 @@ impl<'a> FoldingContext<'a> {
                 .unwrap_or(index_expr);
             let elem_ty =
                 self.infer_elem_type_from_base_ref(&effective_addr.base, scale.max(elem_size));
-            let base_cast = CExpr::cast(
+            let normalized_base = self.normalize_pointer_base_expr(&base_expr, 0);
+            let base_source_ty = self.expr_type_hint(&normalized_base);
+            let base_cast = self.cast_expr_if_needed(
+                normalized_base,
                 CType::ptr(elem_ty),
-                self.normalize_pointer_base_expr(&base_expr, 0),
+                base_source_ty.as_ref(),
             );
             let index_final = if effective_addr.scale_bytes < 0 {
                 CExpr::unary(UnaryOp::Neg, index_expr)
@@ -1870,6 +1871,7 @@ impl<'a> FoldingContext<'a> {
         }
         let (base, version) = name.rsplit_once('_')?;
         let version = version.parse::<u32>().ok()?;
+        let base = base.to_ascii_lowercase();
         let size = self
             .lookup_type_hint(name)
             .and_then(|ty| ty.bits())

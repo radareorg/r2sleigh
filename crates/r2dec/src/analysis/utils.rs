@@ -15,6 +15,12 @@ pub(crate) fn is_cpu_flag(name: &str) -> bool {
             | "zf"
             | "sf"
             | "of"
+            | "cy"
+            | "zr"
+            | "ng"
+            | "ov"
+            | "nf"
+            | "vf"
             | "df"
             | "tf"
             | "if"
@@ -26,6 +32,10 @@ pub(crate) fn is_cpu_flag(name: &str) -> bool {
             | "vif"
             | "vip"
             | "id"
+            | "tmpcy"
+            | "tmpzr"
+            | "tmpng"
+            | "tmpov"
     ) {
         return true;
     }
@@ -36,6 +46,16 @@ pub(crate) fn is_cpu_flag(name: &str) -> bool {
         || name.starts_with("zf_")
         || name.starts_with("sf_")
         || name.starts_with("of_")
+        || name.starts_with("cy_")
+        || name.starts_with("zr_")
+        || name.starts_with("ng_")
+        || name.starts_with("ov_")
+        || name.starts_with("nf_")
+        || name.starts_with("vf_")
+        || name.starts_with("tmpcy_")
+        || name.starts_with("tmpzr_")
+        || name.starts_with("tmpng_")
+        || name.starts_with("tmpov_")
 }
 
 pub(crate) fn parse_const_value(name: &str) -> Option<u64> {

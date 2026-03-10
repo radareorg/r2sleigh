@@ -1,6 +1,17 @@
 use super::*;
 
 impl<'a> FoldingContext<'a> {
+    fn is_prunable_dead_binding_target(&self, name: &str) -> bool {
+        if self.is_ephemeral_ssa_target(name) {
+            return true;
+        }
+        let lower = name.to_ascii_lowercase();
+        lower == "stack"
+            || lower == "saved_fp"
+            || lower.starts_with("stack_")
+            || lower.starts_with("local_")
+    }
+
     fn semantic_var_requires_structured_candidate(&self, name: &str) -> bool {
         match self.lookup_semantic_value(name) {
             Some(crate::analysis::SemanticValue::Address(addr))
@@ -447,9 +458,12 @@ impl<'a> FoldingContext<'a> {
             let (reads, def) = self.stmt_reads_and_def(&stmt);
 
             let drop_stmt = if let Some((target, rhs)) = Self::assignment_target_and_rhs(&stmt) {
-                let dead_ephemeral = self.is_ephemeral_ssa_target(target)
+                let target_lower = target.to_ascii_lowercase();
+                let dead_ephemeral = self.is_prunable_dead_binding_target(target)
                     && !live.contains(target)
                     && self.expr_is_pure(rhs);
+                let dead_flag_artifact =
+                    is_cpu_flag(&target_lower) && !live.contains(target) && self.expr_is_pure(rhs);
 
                 let dead_phi_copy = if self.is_ephemeral_ssa_target(target) {
                     if let CExpr::Var(src) = rhs {
@@ -467,7 +481,7 @@ impl<'a> FoldingContext<'a> {
                     false
                 };
 
-                dead_ephemeral || dead_phi_copy
+                dead_ephemeral || dead_flag_artifact || dead_phi_copy
             } else {
                 false
             };

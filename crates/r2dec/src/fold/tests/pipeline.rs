@@ -7,7 +7,7 @@ mod tests {
     use r2il::{R2ILBlock, R2ILOp, Varnode};
     use r2types::{
         ExternalField, ExternalStruct, ExternalTypeDb, Signedness, SolvedTypes,
-        SolverDiagnostics, TypeArena,
+        SolverDiagnostics, StructShape, TypeArena, TypeId, TypeOracle,
     };
 
     fn make_var(name: &str, version: u32, size: u32) -> SSAVar {
@@ -316,8 +316,20 @@ mod tests {
         assert!(is_cpu_flag("zf"));
         assert!(is_cpu_flag("sf"));
         assert!(is_cpu_flag("cf_1"));
+        assert!(is_cpu_flag("ng"));
+        assert!(is_cpu_flag("zr"));
+        assert!(is_cpu_flag("tmpng"));
+        assert!(is_cpu_flag("tmpzr_1"));
         assert!(!is_cpu_flag("rax"));
         assert!(!is_cpu_flag("rbp"));
+    }
+
+    #[test]
+    fn test_arm64_registers_are_treated_as_register_like_artifacts() {
+        let ctx = FoldingContext::new(64);
+        assert!(ctx.inputs.arch.is_register_like_base_name("x8"));
+        assert!(ctx.inputs.arch.is_register_like_base_name("w9"));
+        assert!(ctx.inputs.arch.is_register_like_base_name("x30"));
     }
 
     #[test]
@@ -524,24 +536,46 @@ mod tests {
     fn test_get_return_expr_semanticizes_raw_member_derefs_from_typed_base() {
         let base = make_var("arg1", 0, 8);
         let ret = make_var("tmp:9300", 1, 8);
-        let mut arena = TypeArena::default();
-        let i32_ty = arena.int(32, Signedness::Signed);
-        let st = arena.struct_named_or_existing("DemoStruct");
-        let st = arena.struct_with_field(st, 0, Some("first".to_string()), i32_ty);
-        let st = arena.struct_with_field(st, 0x30, Some("thirteenth".to_string()), i32_ty);
-        let ptr = arena.ptr(st);
-        let mut var_types = HashMap::new();
-        var_types.insert(base.clone(), ptr);
-        let top_id = arena.top();
-        let oracle = SolvedTypes {
-            arena,
-            var_types,
-            diagnostics: SolverDiagnostics::default(),
-            top_id,
-        };
-
         let mut ctx = FoldingContext::new(64);
-        ctx.set_type_oracle(Some(&oracle));
+        ctx.set_type_hints(
+            [(
+                base.display_name(),
+                CType::ptr(CType::Struct("DemoStruct".to_string())),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        ctx.inputs.external_type_db = Box::leak(Box::new(ExternalTypeDb {
+            structs: [(
+                "demostruct".to_string(),
+                ExternalStruct {
+                    name: "DemoStruct".to_string(),
+                    fields: [
+                        (
+                            0,
+                            ExternalField {
+                                name: "first".to_string(),
+                                offset: 0,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                        (
+                            0x30,
+                            ExternalField {
+                                name: "thirteenth".to_string(),
+                                offset: 0x30,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }));
         ctx.state.analysis_ctx.use_info.definitions.insert(
             ret.display_name(),
             CExpr::binary(
@@ -571,26 +605,52 @@ mod tests {
 
     #[test]
     fn test_get_return_expr_semanticizes_raw_member_derefs_from_visible_arg_alias() {
-        let base_ssa = make_var("X0", 0, 8);
         let ret = make_var("tmp:9301", 1, 8);
-        let mut arena = TypeArena::default();
-        let i32_ty = arena.int(32, Signedness::Signed);
-        let st = arena.struct_named_or_existing("DemoStruct");
-        let st = arena.struct_with_field(st, 0, Some("first".to_string()), i32_ty);
-        let st = arena.struct_with_field(st, 0x30, Some("thirteenth".to_string()), i32_ty);
-        let ptr = arena.ptr(st);
-        let mut var_types = HashMap::new();
-        var_types.insert(base_ssa, ptr);
-        let top_id = arena.top();
-        let oracle = SolvedTypes {
-            arena,
-            var_types,
-            diagnostics: SolverDiagnostics::default(),
-            top_id,
-        };
-
         let mut ctx = FoldingContext::new(64);
-        ctx.set_type_oracle(Some(&oracle));
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(
+            [("rdi".to_string(), "arg1".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        ctx.set_type_hints(
+            [(
+                "arg1".to_string(),
+                CType::ptr(CType::Struct("DemoStruct".to_string())),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        ctx.inputs.external_type_db = Box::leak(Box::new(ExternalTypeDb {
+            structs: [(
+                "demostruct".to_string(),
+                ExternalStruct {
+                    name: "DemoStruct".to_string(),
+                    fields: [
+                        (
+                            0,
+                            ExternalField {
+                                name: "first".to_string(),
+                                offset: 0,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                        (
+                            0x30,
+                            ExternalField {
+                                name: "thirteenth".to_string(),
+                                offset: 0x30,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }));
         ctx.state.analysis_ctx.use_info.definitions.insert(
             ret.display_name(),
             CExpr::binary(
@@ -1251,6 +1311,71 @@ mod tests {
         assert!(
             rendered_text.contains("third") && rendered_text.contains("arg1"),
             "expected layout-backed indexed member render, got {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_plain_indexed_load_does_not_upgrade_from_unrelated_field_name_any() {
+        struct FieldNameAnyOnlyOracle;
+
+        impl TypeOracle for FieldNameAnyOnlyOracle {
+            fn type_of(&self, _var: &SSAVar) -> TypeId {
+                0
+            }
+
+            fn struct_shape(&self, _ty: TypeId) -> Option<&StructShape> {
+                None
+            }
+
+            fn is_pointer(&self, _ty: TypeId) -> bool {
+                false
+            }
+
+            fn is_array(&self, _ty: TypeId) -> bool {
+                false
+            }
+
+            fn field_name(&self, _ty: TypeId, _offset: u64) -> Option<&str> {
+                None
+            }
+
+            fn field_name_any(&self, offset: u64) -> Option<&str> {
+                (offset == 0).then_some("p0")
+            }
+        }
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(
+            [("x0".to_string(), "arg1".to_string()), ("x1".to_string(), "arg2".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        let oracle = FieldNameAnyOnlyOracle;
+        ctx.set_type_oracle(Some(&oracle));
+
+        let addr = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::Var("arg1".to_string()),
+            CExpr::binary(
+                BinaryOp::Mul,
+                CExpr::Var("arg2".to_string()),
+                CExpr::IntLit(4),
+            ),
+        );
+
+        let mut visited = HashSet::new();
+        let rendered = ctx
+            .render_memory_access_from_visible_expr(&addr, 4, 0, &mut visited)
+            .expect("plain indexed pointer math should still render");
+
+        assert!(
+            matches!(rendered, CExpr::Subscript { .. }),
+            "expected plain subscript, got {rendered:?}"
+        );
+        let rendered_text = format!("{rendered:?}");
+        assert!(
+            !rendered_text.contains("p0"),
+            "field_name_any fallback must not manufacture placeholder member access, got {rendered:?}"
         );
     }
 
@@ -2150,6 +2275,110 @@ mod tests {
             2,
             "Assignment with side-effecting RHS should not be pruned"
         );
+    }
+
+    #[test]
+    fn test_prune_dead_temp_assignments_removes_dead_flag_artifacts() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("tmpng_1".to_string()),
+                CExpr::binary(
+                    BinaryOp::Lt,
+                    CExpr::Var("sp".to_string()),
+                    CExpr::IntLit(0),
+                ),
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("tmpzr_1".to_string()),
+                CExpr::binary(
+                    BinaryOp::Eq,
+                    CExpr::Var("sp".to_string()),
+                    CExpr::IntLit(0),
+                ),
+            )),
+            CStmt::Return(Some(CExpr::Subscript {
+                base: Box::new(CExpr::cast(
+                    CType::ptr(CType::UInt(32)),
+                    CExpr::Var("arg1".to_string()),
+                )),
+                index: Box::new(CExpr::Var("arg2".to_string())),
+            })),
+        ];
+
+        let pruned = ctx.prune_dead_temp_assignments(stmts);
+        assert_eq!(
+            pruned.len(),
+            1,
+            "Dead pure flag/temp assignments should be removed from final output"
+        );
+        assert!(
+            matches!(pruned[0], CStmt::Return(_)),
+            "Return should be preserved after pruning dead flag artifacts"
+        );
+    }
+
+    #[test]
+    fn test_prune_dead_temp_assignments_removes_dead_stack_artifacts() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("stack_8".to_string()),
+                CExpr::Var("arg1".to_string()),
+            )),
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("stack".to_string()),
+                CExpr::Var("arg2".to_string()),
+            )),
+            CStmt::Return(Some(CExpr::Subscript {
+                base: Box::new(CExpr::cast(
+                    CType::ptr(CType::UInt(32)),
+                    CExpr::Var("arg1".to_string()),
+                )),
+                index: Box::new(CExpr::Var("arg2".to_string())),
+            })),
+        ];
+
+        let pruned = ctx.prune_dead_temp_assignments(stmts);
+        assert_eq!(
+            pruned.len(),
+            1,
+            "Dead synthetic stack/local bindings should not leak into final output"
+        );
+        assert!(matches!(pruned[0], CStmt::Return(_)));
+    }
+
+    #[test]
+    fn test_prune_dead_temp_assignments_removes_dead_arm64_register_assignment() {
+        let ctx = FoldingContext::new(64);
+        let stmts = vec![
+            CStmt::Expr(CExpr::assign(
+                CExpr::Var("x8".to_string()),
+                CExpr::Member {
+                    base: Box::new(CExpr::Var("arg1".to_string())),
+                    member: "f_30".to_string(),
+                },
+            )),
+            CStmt::Return(Some(CExpr::binary(
+                BinaryOp::Add,
+                CExpr::Member {
+                    base: Box::new(CExpr::Var("arg1".to_string())),
+                    member: "f_30".to_string(),
+                },
+                CExpr::Member {
+                    base: Box::new(CExpr::Var("arg1".to_string())),
+                    member: "f_0".to_string(),
+                },
+            ))),
+        ];
+
+        let pruned = ctx.prune_dead_temp_assignments(stmts);
+        assert_eq!(
+            pruned.len(),
+            1,
+            "Dead arm64 register artifacts should not survive final output"
+        );
+        assert!(matches!(pruned[0], CStmt::Return(_)));
     }
 
     #[test]

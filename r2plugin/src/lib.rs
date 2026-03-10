@@ -7661,6 +7661,120 @@ mod integration_tests {
         }
     }
 
+    fn live_arm64_array_index_block(is_negative: bool) -> r2ssa::SSABlock {
+        let addr_op = if is_negative {
+            r2ssa::SSAOp::IntSub {
+                dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                a: r2ssa::SSAVar::new("X8", 1, 8),
+                b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+            }
+        } else {
+            r2ssa::SSAOp::IntAdd {
+                dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                a: r2ssa::SSAVar::new("X8", 1, 8),
+                b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+            }
+        };
+
+        r2ssa::SSABlock {
+            addr: 0x100000d80,
+            size: 72,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::IntCarry {
+                    dst: r2ssa::SSAVar::new("TMPCY", 1, 1),
+                    a: r2ssa::SSAVar::new("X8", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                r2ssa::SSAOp::IntSCarry {
+                    dst: r2ssa::SSAVar::new("TMPOV", 1, 1),
+                    a: r2ssa::SSAVar::new("X8", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                addr_op,
+                r2ssa::SSAOp::IntSLess {
+                    dst: r2ssa::SSAVar::new("TMPNG", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("TMPZR", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("W8", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                },
+                r2ssa::SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X0", 1, 8),
+                    src: r2ssa::SSAVar::new("W8", 1, 4),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("X30", 0, 8),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        }
+    }
+
     fn observed_live_arm64_struct_array_index_block_full() -> r2ssa::SSABlock {
         r2ssa::SSABlock {
             addr: 0x100000e40,
@@ -8137,6 +8251,10 @@ mod integration_tests {
             output.contains("f_8") && !output.contains("*(arg1 +"),
             "expected indexed-member store rendering in decompiled output, got:\n{output}"
         );
+        assert!(
+            !output.contains("\nx8 =") && !output.contains("\nstack_"),
+            "dead register or stack artifacts should not leak into decompiled output, got:\n{output}"
+        );
     }
 
     #[test]
@@ -8214,6 +8332,120 @@ mod integration_tests {
         assert!(
             !output.contains("*(arg1 +") && !output.contains("*(((uint8_t*)arg1) +"),
             "expected semantic indexed-member rendering without raw pointer math, got:\n{output}"
+        );
+        assert!(
+            !output.contains("\nx8 =") && !output.contains("\nstack_"),
+            "dead register or stack artifacts should not leak into decompiled output, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_arm64_array_index_decompile_keeps_plain_subscript_without_flag_noise() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = live_arm64_array_index_block(false);
+        let signature = Some(r2dec::ExternalFunctionSignature {
+            ret_type: Some(r2dec::CType::Int(64)),
+            params: vec![
+                r2dec::ExternalFunctionParam {
+                    name: "arg1".to_string(),
+                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                },
+                r2dec::ExternalFunctionParam {
+                    name: "arg2".to_string(),
+                    ty: Some(r2dec::CType::Int(32)),
+                },
+            ],
+        });
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_array_index");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        decompiler.set_function_signature(signature);
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("[arg2]"),
+            "expected plain subscript rendering, got:\n{output}"
+        );
+        assert!(
+            !output.contains(".p0"),
+            "plain indexed load must not upgrade to a fake member, got:\n{output}"
+        );
+        assert!(
+            !output.contains("tmpng")
+                && !output.contains("tmpzr")
+                && !output.contains("TMPCY")
+                && !output.contains("TMPOV"),
+            "dead arm64 flag temps should not leak into final output, got:\n{output}"
+        );
+        assert!(
+            !output.contains("stack_8 =")
+                && !output.contains("stack_4 =")
+                && !output.contains("stack ="),
+            "dead synthetic stack argument spills should not leak into final output, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_arm64_array_index_neg_decompile_keeps_negative_subscript_without_flag_noise() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = live_arm64_array_index_block(true);
+        let signature = Some(r2dec::ExternalFunctionSignature {
+            ret_type: Some(r2dec::CType::Int(64)),
+            params: vec![
+                r2dec::ExternalFunctionParam {
+                    name: "arg1".to_string(),
+                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                },
+                r2dec::ExternalFunctionParam {
+                    name: "arg2".to_string(),
+                    ty: Some(r2dec::CType::Int(32)),
+                },
+            ],
+        });
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_array_index_neg");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        decompiler.set_function_signature(signature);
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("[0 - arg2]") || output.contains("[-arg2]"),
+            "expected negative subscript rendering, got:\n{output}"
+        );
+        assert!(
+            !output.contains("[-0]"),
+            "negative index must preserve the scalar index, got:\n{output}"
+        );
+        assert!(
+            !output.contains("tmpng")
+                && !output.contains("tmpzr")
+                && !output.contains("TMPCY")
+                && !output.contains("TMPOV"),
+            "dead arm64 flag temps should not leak into final output, got:\n{output}"
+        );
+        assert!(
+            !output.contains("stack_8 =")
+                && !output.contains("stack_4 =")
+                && !output.contains("stack ="),
+            "dead synthetic stack argument spills should not leak into final output, got:\n{output}"
         );
     }
 }
