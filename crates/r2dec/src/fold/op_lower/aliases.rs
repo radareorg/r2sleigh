@@ -1,6 +1,16 @@
 use super::*;
 
 impl<'a> FoldingContext<'a> {
+    fn semantic_var_requires_structured_candidate(&self, name: &str) -> bool {
+        match self.lookup_semantic_value(name) {
+            Some(crate::analysis::SemanticValue::Address(addr))
+            | Some(crate::analysis::SemanticValue::Load { addr, .. }) => {
+                addr.index.is_some() || addr.offset_bytes != 0
+            }
+            _ => false,
+        }
+    }
+
     fn alias_rewrite_keeps_semantics(&self, current: &CExpr, candidate: &CExpr) -> bool {
         if self.expr_contains_generic_stack_alias(candidate)
             || self.is_uninitialized_return_reg(candidate)
@@ -9,6 +19,12 @@ impl<'a> FoldingContext<'a> {
         }
 
         match current {
+            CExpr::Var(name) if self.semantic_var_requires_structured_candidate(name) => {
+                matches!(
+                    candidate,
+                    CExpr::Subscript { .. } | CExpr::Member { .. } | CExpr::PtrMember { .. }
+                )
+            }
             CExpr::Subscript { .. } | CExpr::Member { .. } | CExpr::PtrMember { .. } => {
                 matches!(
                     candidate,

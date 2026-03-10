@@ -150,17 +150,28 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 cond_block,
                 then_region,
                 else_region,
-                merge_block: _,
+                merge_block,
             } => {
+                if let Some(rewritten) = self.try_structure_if_else_with_slot_merge_returns(
+                    *cond_block,
+                    then_region,
+                    else_region.as_deref(),
+                    *merge_block,
+                ) {
+                    return rewritten;
+                }
                 let cond = self.get_branch_condition(*cond_block);
                 let then_stmt = self.structure_region(then_region);
                 let else_stmt = else_region.as_ref().map(|r| self.structure_region(r));
                 let if_stmt = CStmt::if_stmt(cond, then_stmt, else_stmt);
                 let mut prefix = self.structure_block_prefix_stmts(*cond_block);
-                if prefix.is_empty() {
-                    if_stmt
+                prefix.push(if_stmt);
+                if let Some(merge_addr) = merge_block {
+                    Self::append_stmt_body_flat(&mut prefix, self.structure_block(*merge_addr));
+                }
+                if prefix.len() == 1 {
+                    prefix.into_iter().next().unwrap_or(CStmt::Empty)
                 } else {
-                    prefix.push(if_stmt);
                     CStmt::Block(prefix)
                 }
             }
@@ -181,7 +192,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 switch_block,
                 cases,
                 default,
-                merge_block: _,
+                merge_block,
             } => {
                 // Get the switch expression from the block
                 let switch_expr = self.get_switch_expression(*switch_block);
@@ -209,10 +220,13 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 };
 
                 let mut prefix = self.structure_block_prefix_stmts(*switch_block);
-                if prefix.is_empty() {
-                    switch_stmt
+                prefix.push(switch_stmt);
+                if let Some(merge_addr) = merge_block {
+                    Self::append_stmt_body_flat(&mut prefix, self.structure_block(*merge_addr));
+                }
+                if prefix.len() == 1 {
+                    prefix.into_iter().next().unwrap_or(CStmt::Empty)
                 } else {
-                    prefix.push(switch_stmt);
                     CStmt::Block(prefix)
                 }
             }
@@ -440,6 +454,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     .filter(|s| !matches!(s, CStmt::Empty))
                     .collect();
                 let cleaned = Self::rewrite_block_tail_guard_clauses(cleaned);
+                let cleaned = Self::truncate_dead_straight_line_tail(cleaned);
                 let rewritten = Self::rewrite_block_loops_to_for(cleaned);
                 if rewritten.is_empty() {
                     CStmt::Empty
@@ -627,6 +642,85 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
     }
 
+    fn try_structure_if_else_with_slot_merge_returns(
+        &mut self,
+        cond_block: u64,
+        then_region: &Region,
+        else_region: Option<&Region>,
+        merge_block: Option<u64>,
+    ) -> Option<CStmt> {
+        let merge_block = merge_block?;
+        let else_region = else_region?;
+
+        let summaries = self
+            .fold_ctx
+            .frame_slot_merges_map()
+            .values()
+            .filter(|summary| summary.merge_block_addr == merge_block)
+            .collect::<Vec<_>>();
+        let [summary] = summaries.as_slice() else {
+            return None;
+        };
+
+        let then_pred = self.unique_region_predecessor_to_merge(then_region, merge_block)?;
+        let else_pred = self.unique_region_predecessor_to_merge(else_region, merge_block)?;
+
+        let mut then_stmt = self.structure_region(then_region);
+        let mut else_stmt = self.structure_region(else_region);
+
+        then_stmt = self.append_merged_slot_return_if_needed(then_stmt, then_pred, summary.slot_offset)?;
+        else_stmt = self.append_merged_slot_return_if_needed(else_stmt, else_pred, summary.slot_offset)?;
+
+        let if_stmt = CStmt::If {
+            cond: self.get_branch_condition(cond_block),
+            then_body: Box::new(then_stmt),
+            else_body: Some(Box::new(else_stmt)),
+        };
+        let mut prefix = self.structure_block_prefix_stmts(cond_block);
+        prefix.push(if_stmt);
+        Some(if prefix.len() == 1 {
+            prefix.into_iter().next().unwrap_or(CStmt::Empty)
+        } else {
+            CStmt::Block(prefix)
+        })
+    }
+
+    fn unique_region_predecessor_to_merge(&self, region: &Region, merge_block: u64) -> Option<u64> {
+        let mut candidates = region
+            .blocks()
+            .into_iter()
+            .filter(|addr| self.func.successors(*addr).contains(&merge_block))
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        match candidates.as_slice() {
+            [pred] => Some(*pred),
+            _ => None,
+        }
+    }
+
+    fn append_merged_slot_return_if_needed(
+        &self,
+        stmt: CStmt,
+        pred_addr: u64,
+        slot_offset: i64,
+    ) -> Option<CStmt> {
+        if Self::single_terminator_stmt(&stmt).is_some() {
+            return Some(stmt);
+        }
+        let expr = self
+            .fold_ctx
+            .merged_return_candidate_for_block_slot(pred_addr, slot_offset)?;
+        let mut stmts = Vec::new();
+        Self::append_stmt_body_flat(&mut stmts, stmt);
+        stmts.push(CStmt::Return(Some(expr)));
+        Some(if stmts.len() == 1 {
+            stmts.into_iter().next().unwrap_or(CStmt::Empty)
+        } else {
+            CStmt::Block(stmts)
+        })
+    }
+
     fn rewrite_block_tail_guard_clauses(stmts: Vec<CStmt>) -> Vec<CStmt> {
         let mut rewritten = Vec::with_capacity(stmts.len());
         let mut i = 0;
@@ -654,6 +748,27 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
 
             rewritten.push(stmts[i].clone());
             i += 1;
+        }
+        rewritten
+    }
+
+    fn truncate_dead_straight_line_tail(stmts: Vec<CStmt>) -> Vec<CStmt> {
+        let mut rewritten = Vec::with_capacity(stmts.len());
+        let mut terminated = false;
+        for stmt in stmts {
+            match stmt {
+                CStmt::Label(_) => {
+                    terminated = false;
+                    rewritten.push(stmt);
+                }
+                other => {
+                    if terminated {
+                        continue;
+                    }
+                    terminated = Self::stmt_is_unconditional_terminator(&other);
+                    rewritten.push(other);
+                }
+            }
         }
         rewritten
     }

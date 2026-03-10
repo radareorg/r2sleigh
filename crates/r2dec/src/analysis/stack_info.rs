@@ -195,8 +195,10 @@ fn stack_var_for_addr_var(
     let empty_counts: HashMap<String, usize> = HashMap::new();
     let empty_names: HashSet<String> = HashSet::new();
     let empty_ptrs: HashMap<String, crate::fold::PtrArith> = HashMap::new();
+    let empty_semantic_values: HashMap<String, crate::analysis::SemanticValue> = HashMap::new();
     let lower = LowerCtx {
         definitions,
+        semantic_values: &empty_semantic_values,
         use_counts: &empty_counts,
         condition_vars: &empty_names,
         pinned: &empty_names,
@@ -278,6 +280,7 @@ fn forwarded_expr_for_value(
     let empty_ptrs: HashMap<String, crate::fold::PtrArith> = HashMap::new();
     let lower = LowerCtx {
         definitions,
+        semantic_values: &use_info.semantic_values,
         use_counts: &empty_counts,
         condition_vars: &empty_names,
         pinned: &empty_names,

@@ -77,6 +77,17 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn resolve_return_candidate(&self, expr: &CExpr) -> CExpr {
         let mut best = expr.clone();
+        let mut has_semantic_root = false;
+        if let CExpr::Var(name) = expr {
+            let mut semantic_visited = HashSet::new();
+            if let Some(semantic) = self.render_semantic_value_by_name(name, 0, &mut semantic_visited)
+            {
+                has_semantic_root = true;
+                if self.prefers_visible_expr(&best, &semantic) {
+                    best = semantic;
+                }
+            }
+        }
         let mut visited = HashSet::new();
         if let Some(predicate) = self.predicate_return_candidate(expr, 0, &mut visited)
             && self.prefers_visible_expr(&best, &predicate)
@@ -91,14 +102,16 @@ impl<'a> FoldingContext<'a> {
             best = resolved;
         }
 
-        if let CExpr::Var(name) = expr
+        if !has_semantic_root
+            && let CExpr::Var(name) = expr
             && let Some(def) = self.lookup_definition(name)
             && self.prefers_visible_expr(&best, &def)
         {
             best = def;
         }
 
-        if let CExpr::Var(name) = expr
+        if !has_semantic_root
+            && let CExpr::Var(name) = expr
             && let Some(def) = self.best_visible_definition(name)
             && self.prefers_visible_expr(&best, &def)
         {
@@ -108,7 +121,7 @@ impl<'a> FoldingContext<'a> {
         best
     }
 
-    fn preferred_return_candidate(
+    pub(super) fn preferred_return_candidate(
         &self,
         current: Option<CExpr>,
         candidate: Option<CExpr>,
@@ -134,13 +147,29 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn semantic_deref_candidate_for_name(&self, name: &str) -> Option<CExpr> {
-        let candidate = self.choose_preferred_visible_expr(
-            self.lookup_definition(name),
-            self.best_visible_definition(name),
-        )?;
-        self.try_member_access_from_addr_expr(None, &candidate)
-            .or_else(|| self.try_subscript_from_addr_expr(&candidate))
+    pub(crate) fn merged_return_candidate_for_block_slot(
+        &self,
+        block_addr: u64,
+        slot_offset: i64,
+    ) -> Option<CExpr> {
+        let mut best = None;
+        for summary in self.frame_slot_merges_map().values() {
+            if summary.slot_offset != slot_offset {
+                continue;
+            }
+            let Some(value) = summary.incoming.get(&block_addr) else {
+                continue;
+            };
+            let mut visited = HashSet::new();
+            let rendered = self.render_semantic_value(value, 0, &mut visited);
+            best = self.preferred_return_candidate(best, rendered);
+        }
+        best
+    }
+
+    pub(super) fn semantic_deref_candidate_for_name(&self, name: &str) -> Option<CExpr> {
+        let mut visited = HashSet::new();
+        self.render_memory_access_by_name(name, 0, 0, &mut visited)
     }
 
     fn should_inline_in_return(&self, var_name: &str, depth: u32) -> bool {
@@ -284,6 +313,23 @@ impl<'a> FoldingContext<'a> {
                     return self.simplify_condition_expr(CExpr::Var(name.clone()));
                 }
 
+                let mut semantic_visited = HashSet::new();
+                if let Some(semantic) =
+                    self.render_semantic_value_by_name(name, 0, &mut semantic_visited)
+                    && self.prefers_visible_expr(&CExpr::Var(name.clone()), &semantic)
+                {
+                    if !visited.insert(name.clone()) {
+                        return semantic;
+                    }
+                    let resolved = self.expand_return_expr(&semantic, depth + 1, visited);
+                    visited.remove(name);
+                    return if self.is_predicate_like_expr(&resolved) {
+                        self.simplify_condition_expr(resolved)
+                    } else {
+                        resolved
+                    };
+                }
+
                 if !self.should_inline_in_return(name, depth) || !visited.insert(name.clone()) {
                     return CExpr::Var(name.clone());
                 }
@@ -368,14 +414,26 @@ impl<'a> FoldingContext<'a> {
         let mut visited = HashSet::new();
         let root_name = var.display_name();
         let unresolved = CExpr::Var(self.var_name(var));
+        let mut semantic_visited = HashSet::new();
         let semantic_root = self
             .preferred_return_candidate(
+                self.render_semantic_value_by_name(&root_name, 0, &mut semantic_visited),
                 self.lookup_definition(&root_name),
-                self.best_visible_definition(&root_name),
             )
+            .and_then(|expr| {
+                self.preferred_return_candidate(
+                    Some(expr),
+                    self.best_visible_definition(&root_name),
+                )
+            })
+            .or_else(|| self.lookup_definition(&root_name))
+            .or_else(|| self.best_visible_definition(&root_name))
             .unwrap_or_else(|| unresolved.clone());
         let base_root = self
-            .preferred_return_candidate(Some(semantic_root), Some(unresolved.clone()))
+            .preferred_return_candidate(
+                Some(semantic_root),
+                Some(unresolved.clone()),
+            )
             .unwrap_or_else(|| unresolved.clone());
         let predicate_root = self.predicate_return_candidate(&unresolved, 0, &mut visited);
         let root = self
@@ -389,6 +447,8 @@ impl<'a> FoldingContext<'a> {
             .unwrap_or_else(|| unresolved.clone());
         let root = self.resolve_predicate_rhs_for_var(var, root);
         let raw = self.expand_return_expr(&root, 0, &mut visited);
+        let mut semantic_visited = HashSet::new();
+        let raw = self.semanticize_visible_expr(&raw, 0, &mut semantic_visited);
         let simplified = if self.is_predicate_like_expr(&raw) {
             self.simplify_condition_expr(raw)
         } else {

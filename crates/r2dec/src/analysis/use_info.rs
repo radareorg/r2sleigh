@@ -1,14 +1,26 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use r2ssa::SSAOp;
+use r2ssa::{SSAFunction, SSAOp, SSAVar};
 
-use super::{PassEnv, StackSlotProvenance, UseInfo, ValueProvenance, lower::LowerCtx, utils};
+use super::{
+    BaseRef, FrameSlotMergeSummary, NormalizedAddr, PassEnv, ScalarValue, SemanticValue,
+    StackSlotProvenance, UseInfo, ValueProvenance, ValueRef, lower::LowerCtx, utils,
+};
 use crate::ast::CExpr;
 use crate::fold::{PtrArith, SSABlock};
 
 #[derive(Debug, Default)]
 pub(crate) struct UseScratch {
     pub(crate) info: UseInfo,
+    producers: HashMap<String, SSAOp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LocalStructFieldAccessProfile {
+    pub(crate) arg_index: usize,
+    pub(crate) field_offset: u64,
+    pub(crate) access_size: u32,
+    pub(crate) is_write: bool,
 }
 
 pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv<'_>) -> UseInfo {
@@ -36,6 +48,208 @@ pub(crate) fn analyze_with_definition_overrides(
     build_formatted_defs(&mut scratch, env);
 
     scratch.info
+}
+
+pub(crate) fn populate_frame_slot_merges(
+    info: &mut UseInfo,
+    func: &SSAFunction,
+    env: &PassEnv<'_>,
+) {
+    info.frame_slot_merges.clear();
+
+    for block in func.blocks() {
+        let preds = func.predecessors(block.addr);
+        if preds.len() < 2 {
+            continue;
+        }
+
+        for op in &block.ops {
+            let SSAOp::Load { dst, addr, .. } = op else {
+                continue;
+            };
+            let Some(slot_offset) =
+                utils::extract_stack_offset_from_var(addr, &info.definitions, env.fp_name, env.sp_name)
+            else {
+                continue;
+            };
+
+            let mut incoming = BTreeMap::new();
+            let mut complete = true;
+            for pred_addr in &preds {
+                let Some(pred_block) = func.get_block(*pred_addr) else {
+                    complete = false;
+                    break;
+                };
+                let Some(value) =
+                    merged_slot_store_value_for_pred(info, pred_block, slot_offset, env)
+                else {
+                    complete = false;
+                    break;
+                };
+                incoming.insert(*pred_addr, value);
+            }
+
+            if !complete || incoming.len() != preds.len() {
+                continue;
+            }
+
+            info.frame_slot_merges.insert(
+                dst.display_name(),
+                FrameSlotMergeSummary {
+                    slot_offset,
+                    merge_block_addr: block.addr,
+                    load_name: dst.display_name(),
+                    incoming,
+                },
+            );
+        }
+    }
+}
+
+pub(crate) fn collect_local_struct_field_access_profiles(
+    info: &UseInfo,
+    func: &SSAFunction,
+    env: &PassEnv<'_>,
+    arg_slot_map: &HashMap<String, usize>,
+) -> Vec<LocalStructFieldAccessProfile> {
+    let mut out = Vec::new();
+
+    for block in func.blocks() {
+        for op in &block.ops {
+            match op {
+                SSAOp::Load { dst, addr, .. } => {
+                    if let Some(profile) = struct_field_access_profile_for_addr(
+                        info,
+                        addr,
+                        dst.size,
+                        false,
+                        env,
+                        arg_slot_map,
+                    ) {
+                        out.push(profile);
+                    }
+                }
+                SSAOp::Store { addr, val, .. } => {
+                    if let Some(profile) = struct_field_access_profile_for_addr(
+                        info,
+                        addr,
+                        val.size,
+                        true,
+                        env,
+                        arg_slot_map,
+                    ) {
+                        out.push(profile);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    out.sort_by(|a, b| {
+        a.arg_index
+            .cmp(&b.arg_index)
+            .then_with(|| a.field_offset.cmp(&b.field_offset))
+            .then_with(|| a.access_size.cmp(&b.access_size))
+            .then_with(|| a.is_write.cmp(&b.is_write))
+    });
+    out.dedup();
+    out
+}
+
+fn struct_field_access_profile_for_addr(
+    info: &UseInfo,
+    addr: &SSAVar,
+    access_size: u32,
+    is_write: bool,
+    env: &PassEnv<'_>,
+    arg_slot_map: &HashMap<String, usize>,
+) -> Option<LocalStructFieldAccessProfile> {
+    let shape = semantic_addr_for_var(info, addr, env)?;
+    if shape.offset_bytes <= 0 {
+        return None;
+    }
+
+    let BaseRef::Value(base_ref) = &shape.base else {
+        return None;
+    };
+    let arg_index = arg_slot_for_value_ref(info, base_ref, env, arg_slot_map, 0)?;
+
+    Some(LocalStructFieldAccessProfile {
+        arg_index,
+        field_offset: shape.offset_bytes as u64,
+        access_size,
+        is_write,
+    })
+}
+
+fn arg_slot_for_value_ref(
+    info: &UseInfo,
+    value_ref: &ValueRef,
+    env: &PassEnv<'_>,
+    arg_slot_map: &HashMap<String, usize>,
+    depth: u32,
+) -> Option<usize> {
+    if depth > 8 {
+        return None;
+    }
+
+    let key = value_ref.var.name.to_ascii_lowercase();
+    if value_ref.var.version == 0
+        && let Some(slot) = arg_slot_map.get(&key).copied()
+    {
+        return Some(slot);
+    }
+
+    let display = value_ref.var.display_name();
+    if let Some(value) = info.semantic_values.get(&display) {
+        match value {
+            SemanticValue::Scalar(ScalarValue::Root(root)) => {
+                if root.var != value_ref.var {
+                    return arg_slot_for_value_ref(info, root, env, arg_slot_map, depth + 1);
+                }
+            }
+            SemanticValue::Address(NormalizedAddr {
+                base: BaseRef::Value(root),
+                ..
+            }) => {
+                if root.var != value_ref.var {
+                    return arg_slot_for_value_ref(info, root, env, arg_slot_map, depth + 1);
+                }
+            }
+            SemanticValue::Load {
+                addr:
+                    NormalizedAddr {
+                        base: BaseRef::Value(root),
+                        ..
+                    },
+                ..
+            } => {
+                if root.var != value_ref.var {
+                    return arg_slot_for_value_ref(info, root, env, arg_slot_map, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(prov) = info.forwarded_values.get(&display)
+        && let Some(source_var) = &prov.source_var
+        && *source_var != value_ref.var
+    {
+        return arg_slot_for_value_ref(info, &ValueRef::from(source_var), env, arg_slot_map, depth + 1);
+    }
+
+    if let Some(alias) = env.param_register_aliases.get(&key)
+        && let Some(slot) = alias
+            .strip_prefix("arg")
+            .and_then(|suffix| suffix.parse::<usize>().ok())
+            .and_then(|idx| idx.checked_sub(1))
+    {
+        return Some(slot);
+    }
+
+    None
 }
 
 fn seed_entry_param_aliases(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEnv<'_>) {
@@ -94,7 +308,8 @@ fn collect_definitions(
     env: &PassEnv<'_>,
     definition_overrides: &HashMap<String, CExpr>,
 ) {
-    let mut block_stack_values: HashMap<i64, String> = HashMap::new();
+    let mut block_stack_values: HashMap<i64, SSAVar> = HashMap::new();
+    let mut block_stack_semantic_values: HashMap<i64, SemanticValue> = HashMap::new();
 
     for op in &block.ops {
         if let SSAOp::Copy { dst, src } = op {
@@ -121,7 +336,12 @@ fn collect_definitions(
                     .info
                     .stack_slots
                     .insert(addr.display_name(), StackSlotProvenance { offset });
-                block_stack_values.insert(offset, val.display_name());
+                block_stack_values.insert(offset, val.clone());
+                if let Some(value) = semantic_stack_store_value(&scratch.info, val, env) {
+                    block_stack_semantic_values.insert(offset, value);
+                } else {
+                    block_stack_semantic_values.remove(&offset);
+                }
             } else {
                 block_stack_values.clear();
             }
@@ -148,14 +368,18 @@ fn collect_definitions(
                 scratch
                     .info
                     .copy_sources
-                    .insert(dst.display_name(), stored_val.clone());
+                    .insert(dst.display_name(), stored_val.display_name());
                 scratch.info.forwarded_values.insert(
                     dst.display_name(),
                     ValueProvenance {
-                        source: stored_val,
+                        source: stored_val.display_name(),
+                        source_var: Some(stored_val),
                         stack_slot: Some(offset),
                     },
                 );
+            }
+            if let Some(value) = block_stack_semantic_values.get(&offset).cloned() {
+                insert_semantic_value(&mut scratch.info, dst.display_name(), value);
             }
         }
 
@@ -224,11 +448,11 @@ fn collect_definitions(
             let key = dst.display_name();
             if let Some(expr) = definition_overrides.get(&key).cloned() {
                 scratch.info.definitions.insert(key, expr);
-                continue;
-            }
-            let expr = {
+            } else {
+                let expr = {
                 let lower = LowerCtx {
                     definitions: &scratch.info.definitions,
+                    semantic_values: &scratch.info.semantic_values,
                     use_counts: &scratch.info.use_counts,
                     condition_vars: &scratch.info.condition_vars,
                     pinned: &scratch.info.pinned,
@@ -247,14 +471,761 @@ fn collect_definitions(
                 } else {
                     lower.op_to_expr(op)
                 }
-            };
-            scratch.info.definitions.insert(key, expr);
+                };
+                scratch.info.definitions.insert(key, expr);
+            }
+        }
+
+        collect_semantic_values(scratch, op, env);
+        if let Some(dst) = op.dst() {
+            scratch.producers.insert(dst.display_name(), op.clone());
         }
 
         if invalidates_block_stack_values(op, &scratch.info.definitions, env) {
             block_stack_values.clear();
         }
+        if invalidates_semantic_stack_values(op) {
+            block_stack_semantic_values.clear();
+        }
     }
+}
+
+fn semantic_stack_store_value(
+    info: &UseInfo,
+    var: &SSAVar,
+    env: &PassEnv<'_>,
+) -> Option<SemanticValue> {
+    if semantic_var_is_pointer_like(info, var, env) {
+        let addr = semantic_addr_for_var(info, var, env)
+            .unwrap_or_else(|| normalized_addr_from_base_var(var));
+        if is_authoritative_addr(&addr) {
+            return Some(SemanticValue::Address(addr));
+        }
+    }
+    semantic_source_value_for_var(info, var)
+}
+
+fn merged_slot_store_value_for_pred(
+    info: &UseInfo,
+    block: &SSABlock,
+    slot_offset: i64,
+    env: &PassEnv<'_>,
+) -> Option<SemanticValue> {
+    for op in block.ops.iter().rev() {
+        if let SSAOp::Store { addr, val, .. } = op
+            && utils::extract_stack_offset_from_var(addr, &info.definitions, env.fp_name, env.sp_name)
+                == Some(slot_offset)
+        {
+            return semantic_stack_store_value(info, val, env);
+        }
+    }
+    None
+}
+
+fn collect_semantic_values(scratch: &mut UseScratch, op: &SSAOp, env: &PassEnv<'_>) {
+    match op {
+        SSAOp::Copy { dst, src } => {
+            if semantic_var_is_pointer_like(&scratch.info, src, env)
+                && let Some(addr) = semantic_addr_for_var(&scratch.info, src, env)
+                && is_authoritative_addr(&addr)
+            {
+                insert_semantic_value(
+                    &mut scratch.info,
+                    dst.display_name(),
+                    SemanticValue::Address(addr),
+                );
+                return;
+            }
+            if let Some(value) = semantic_source_value_for_var(&scratch.info, src) {
+                insert_semantic_value(&mut scratch.info, dst.display_name(), value);
+            }
+        }
+        SSAOp::IntZExt { dst, src }
+        | SSAOp::IntSExt { dst, src }
+        | SSAOp::Trunc { dst, src }
+        | SSAOp::Cast { dst, src }
+        | SSAOp::Subpiece { dst, src, .. } => {
+            if semantic_var_is_pointer_like(&scratch.info, src, env)
+                && let Some(addr) = semantic_addr_for_var(&scratch.info, src, env)
+                && is_authoritative_addr(&addr)
+            {
+                insert_semantic_value(
+                    &mut scratch.info,
+                    dst.display_name(),
+                    SemanticValue::Address(addr),
+                );
+                return;
+            }
+            if let Some(value) = semantic_source_value_for_var(&scratch.info, src) {
+                insert_semantic_value(&mut scratch.info, dst.display_name(), value);
+            }
+        }
+        SSAOp::Phi { dst, sources } => {
+            let mut selected: Option<SemanticValue> = None;
+            for src in sources {
+                let Some(value) = semantic_source_value_for_var(&scratch.info, src) else {
+                    selected = None;
+                    break;
+                };
+                selected = match selected {
+                    None => Some(value),
+                    Some(prev) if prev == value => Some(prev),
+                    Some(_) => None,
+                };
+                if selected.is_none() {
+                    break;
+                }
+            }
+            if let Some(value) = selected {
+                insert_semantic_value(&mut scratch.info, dst.display_name(), value);
+            }
+        }
+        SSAOp::PtrAdd {
+            dst,
+            base,
+            index,
+            element_size,
+        } => {
+            let mut addr = semantic_addr_for_var(&scratch.info, base, env)
+                .unwrap_or_else(|| normalized_addr_from_base_var(base));
+            if addr.index.is_none() || addr.index.as_ref().is_some_and(|existing| existing == &ValueRef::from(index))
+            {
+                addr.index = Some(ValueRef::from(index));
+                addr.scale_bytes = i64::from(*element_size);
+            }
+            insert_semantic_value(
+                &mut scratch.info,
+                dst.display_name(),
+                SemanticValue::Address(addr),
+            );
+        }
+        SSAOp::PtrSub {
+            dst,
+            base,
+            index,
+            element_size,
+        } => {
+            let mut addr = semantic_addr_for_var(&scratch.info, base, env)
+                .unwrap_or_else(|| normalized_addr_from_base_var(base));
+            if addr.index.is_none() || addr.index.as_ref().is_some_and(|existing| existing == &ValueRef::from(index))
+            {
+                addr.index = Some(ValueRef::from(index));
+                addr.scale_bytes = -i64::from(*element_size);
+            }
+            insert_semantic_value(
+                &mut scratch.info,
+                dst.display_name(),
+                SemanticValue::Address(addr),
+            );
+        }
+        SSAOp::Load { dst, addr, .. } => {
+            if let Some(prov) = scratch.info.forwarded_values.get(&dst.display_name())
+                && let Some(value) = semantic_source_value_from_provenance(&scratch.info, prov, env)
+            {
+                insert_semantic_value(&mut scratch.info, dst.display_name(), value);
+                return;
+            }
+            if let Some(shape) = semantic_addr_for_var(&scratch.info, addr, env) {
+                let addr_key = addr.display_name();
+                insert_semantic_value(
+                    &mut scratch.info,
+                    addr_key,
+                    SemanticValue::Address(shape.clone()),
+                );
+                insert_semantic_value(
+                    &mut scratch.info,
+                    dst.display_name(),
+                    SemanticValue::Load { addr: shape, size: dst.size },
+                );
+            }
+        }
+        SSAOp::IntAdd { dst, a, b } => {
+            if let Some(addr) =
+                semantic_addr_from_add_sub(&scratch.info, &scratch.producers, a, b, false, env)
+            {
+                insert_semantic_value(
+                    &mut scratch.info,
+                    dst.display_name(),
+                    SemanticValue::Address(addr),
+                );
+            } else if let Some(addr) = semantic_addr_for_var(&scratch.info, dst, env)
+                && is_authoritative_addr(&addr)
+            {
+                insert_semantic_value(
+                    &mut scratch.info,
+                    dst.display_name(),
+                    SemanticValue::Address(addr),
+                );
+            }
+        }
+        SSAOp::IntSub { dst, a, b } => {
+            if let Some(addr) =
+                semantic_addr_from_add_sub(&scratch.info, &scratch.producers, a, b, true, env)
+            {
+                insert_semantic_value(
+                    &mut scratch.info,
+                    dst.display_name(),
+                    SemanticValue::Address(addr),
+                );
+            } else if let Some(addr) = semantic_addr_for_var(&scratch.info, dst, env)
+                && is_authoritative_addr(&addr)
+            {
+                insert_semantic_value(
+                    &mut scratch.info,
+                    dst.display_name(),
+                    SemanticValue::Address(addr),
+                );
+            }
+        }
+        SSAOp::Store { addr, .. } => {
+            if let Some(shape) = semantic_addr_for_var(&scratch.info, addr, env) {
+                insert_semantic_value(
+                    &mut scratch.info,
+                    addr.display_name(),
+                    SemanticValue::Address(shape),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn semantic_addr_from_add_sub(
+    info: &UseInfo,
+    producers: &HashMap<String, SSAOp>,
+    a: &SSAVar,
+    b: &SSAVar,
+    is_sub: bool,
+    env: &PassEnv<'_>,
+) -> Option<NormalizedAddr> {
+    if let Some(offset) = stack_slot_offset_from_add_sub(a, b, is_sub, env) {
+        return Some(NormalizedAddr {
+            base: BaseRef::StackSlot(offset),
+            index: None,
+            scale_bytes: 0,
+            offset_bytes: 0,
+        });
+    }
+
+    if let Some(offset) = utils::parse_const_offset(b)
+        && let Some(base) = semantic_addr_for_var(info, a, env)
+    {
+        return add_addr_offset(base, if is_sub { -offset } else { offset });
+    }
+    if !is_sub
+        && let Some(offset) = utils::parse_const_offset(a)
+        && let Some(base) = semantic_addr_for_var(info, b, env)
+    {
+        return add_addr_offset(base, offset);
+    }
+
+    if let Some((index, scale)) = recover_scaled_index_from_var(info, producers, b, env, 0) {
+        let signed_scale = if is_sub {
+            scale.checked_neg()?
+        } else {
+            scale
+        };
+        let base = semantic_addr_for_var(info, a, env).unwrap_or_else(|| normalized_addr_from_base_var(a));
+        return compose_indexed_addr(base, index, signed_scale);
+    }
+
+    if !is_sub
+        && let Some((index, scale)) = recover_scaled_index_from_var(info, producers, a, env, 0)
+    {
+        let base = semantic_addr_for_var(info, b, env).unwrap_or_else(|| normalized_addr_from_base_var(b));
+        return compose_indexed_addr(base, index, scale);
+    }
+
+    None
+}
+
+fn stack_slot_offset_from_add_sub(
+    a: &SSAVar,
+    b: &SSAVar,
+    is_sub: bool,
+    env: &PassEnv<'_>,
+) -> Option<i64> {
+    let a_name = a.name.to_ascii_lowercase();
+    let b_name = b.name.to_ascii_lowercase();
+    if (a_name == env.fp_name || a_name == env.sp_name)
+        && let Some(offset) = utils::parse_const_offset(b)
+    {
+        return Some(if is_sub { -offset } else { offset });
+    }
+    if !is_sub
+        && (b_name == env.fp_name || b_name == env.sp_name)
+        && let Some(offset) = utils::parse_const_offset(a)
+    {
+        return Some(offset);
+    }
+    None
+}
+
+fn recover_scaled_index_from_var(
+    info: &UseInfo,
+    producers: &HashMap<String, SSAOp>,
+    var: &SSAVar,
+    env: &PassEnv<'_>,
+    depth: u32,
+) -> Option<(SSAVar, i64)> {
+    if depth > 8 || var.is_const() || semantic_var_is_pointer_like(info, var, env) {
+        return None;
+    }
+
+    let key = var.display_name();
+    let op = producers.get(&key);
+    match op {
+        Some(SSAOp::Copy { src, .. })
+        | Some(SSAOp::IntZExt { src, .. })
+        | Some(SSAOp::IntSExt { src, .. })
+        | Some(SSAOp::Trunc { src, .. })
+        | Some(SSAOp::Cast { src, .. })
+        | Some(SSAOp::Subpiece { src, .. }) => {
+            recover_scaled_index_from_var(info, producers, src, env, depth + 1)
+        }
+        Some(SSAOp::IntMult { a, b, .. }) => {
+            if let Some(scale) = utils::parse_const_offset(a) {
+                let (inner, inner_scale) =
+                    recover_scaled_index_from_var(info, producers, b, env, depth + 1)?;
+                return inner_scale.checked_mul(scale).map(|s| (inner, s));
+            }
+            if let Some(scale) = utils::parse_const_offset(b) {
+                let (inner, inner_scale) =
+                    recover_scaled_index_from_var(info, producers, a, env, depth + 1)?;
+                return inner_scale.checked_mul(scale).map(|s| (inner, s));
+            }
+            None
+        }
+        Some(SSAOp::IntLeft { a, b, .. }) => {
+            let shift = utils::parse_const_offset(b)?;
+            let scale = 1_i64.checked_shl(shift as u32)?;
+            let (inner, inner_scale) =
+                recover_scaled_index_from_var(info, producers, a, env, depth + 1)?;
+            inner_scale.checked_mul(scale).map(|s| (inner, s))
+        }
+        Some(SSAOp::IntAdd { a, b, .. }) => {
+            let (left, left_scale) =
+                recover_scaled_index_from_var(info, producers, a, env, depth + 1)?;
+            let (right, right_scale) =
+                recover_scaled_index_from_var(info, producers, b, env, depth + 1)?;
+            (left == right)
+                .then_some(())
+                .and_then(|_| left_scale.checked_add(right_scale).map(|scale| (left, scale)))
+        }
+        Some(SSAOp::IntSub { a, b, .. }) => {
+            if semantic_var_resolves_to_zero(info, producers, a, depth + 1) {
+                let (inner, inner_scale) =
+                    recover_scaled_index_from_var(info, producers, b, env, depth + 1)?;
+                return inner_scale.checked_neg().map(|scale| (inner, scale));
+            }
+            if semantic_var_resolves_to_zero(info, producers, b, depth + 1) {
+                return recover_scaled_index_from_var(info, producers, a, env, depth + 1);
+            }
+            let (left, left_scale) =
+                recover_scaled_index_from_var(info, producers, a, env, depth + 1)?;
+            let (right, right_scale) =
+                recover_scaled_index_from_var(info, producers, b, env, depth + 1)?;
+            (left == right)
+                .then_some(())
+                .and_then(|_| left_scale.checked_sub(right_scale).map(|scale| (left, scale)))
+        }
+        Some(SSAOp::IntNegate { src, .. }) => recover_scaled_index_from_var(
+            info,
+            producers,
+            src,
+            env,
+            depth + 1,
+        )
+        .and_then(|(inner, scale)| scale.checked_neg().map(|neg| (inner, neg))),
+        _ => Some((var.clone(), 1)),
+    }
+}
+
+fn semantic_var_resolves_to_zero(
+    info: &UseInfo,
+    producers: &HashMap<String, SSAOp>,
+    var: &SSAVar,
+    depth: u32,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+
+    if utils::parse_const_value(&var.name) == Some(0) {
+        return true;
+    }
+
+    match semantic_source_value_for_var(info, var) {
+        Some(SemanticValue::Scalar(ScalarValue::Expr(CExpr::IntLit(0) | CExpr::UIntLit(0)))) => {
+            return true;
+        }
+        Some(SemanticValue::Scalar(ScalarValue::Root(root))) if root.var != *var => {
+            return semantic_var_resolves_to_zero(info, producers, &root.var, depth + 1);
+        }
+        _ => {}
+    }
+
+    let key = var.display_name();
+    match producers.get(&key) {
+        Some(SSAOp::Copy { src, .. })
+        | Some(SSAOp::IntZExt { src, .. })
+        | Some(SSAOp::IntSExt { src, .. })
+        | Some(SSAOp::Trunc { src, .. })
+        | Some(SSAOp::Cast { src, .. })
+        | Some(SSAOp::Subpiece { src, .. }) => {
+            semantic_var_resolves_to_zero(info, producers, src, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+fn semantic_var_is_pointer_like(info: &UseInfo, var: &SSAVar, env: &PassEnv<'_>) -> bool {
+    let key = var.display_name();
+    let lower_name = var.name.to_ascii_lowercase();
+    if lower_name == env.fp_name || lower_name == env.sp_name {
+        return true;
+    }
+    if let Some(value) = info.semantic_values.get(&key) {
+        match value {
+            SemanticValue::Address(_) => return true,
+            SemanticValue::Scalar(ScalarValue::Root(root)) if root.var != *var => {
+                return semantic_var_is_pointer_like(info, &root.var, env);
+            }
+            _ => {}
+        }
+    }
+    if let Some(prov) = info.forwarded_values.get(&key)
+        && let Some(source_var) = &prov.source_var
+        && source_var != var
+        && semantic_var_is_pointer_like(info, source_var, env)
+    {
+        return true;
+    }
+    if info.ptr_arith.contains_key(&key) || info.ptr_members.contains_key(&key) {
+        return true;
+    }
+    if let Some(oracle) = env.type_oracle {
+        let ty = oracle.type_of(var);
+        if oracle.is_pointer(ty) || oracle.is_array(ty) {
+            return true;
+        }
+    }
+    semantic_type_hint_names(info, var, env)
+        .into_iter()
+        .find_map(|name| {
+            info.type_hints
+                .get(&name)
+                .or_else(|| info.type_hints.get(&name.to_ascii_lowercase()))
+                .or_else(|| env.type_hints.get(&name))
+                .or_else(|| env.type_hints.get(&name.to_ascii_lowercase()))
+        })
+        .map(|ty| {
+            matches!(
+                ty,
+                crate::ast::CType::Pointer(_)
+                    | crate::ast::CType::Struct(_)
+                    | crate::ast::CType::Array(_, _)
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn semantic_type_hint_names(info: &UseInfo, var: &SSAVar, env: &PassEnv<'_>) -> Vec<String> {
+    let mut names = Vec::new();
+    let push_unique = |names: &mut Vec<String>, name: String| {
+        if !names.iter().any(|existing| existing.eq_ignore_ascii_case(&name)) {
+            names.push(name);
+        }
+    };
+
+    let key = var.display_name();
+    push_unique(&mut names, key.clone());
+    push_unique(&mut names, key.to_ascii_lowercase());
+
+    if let Some(alias) = info.var_aliases.get(&key) {
+        push_unique(&mut names, alias.clone());
+        push_unique(&mut names, alias.to_ascii_lowercase());
+    }
+
+    if let Some(alias) = env.param_register_aliases.get(&var.name.to_ascii_lowercase()) {
+        push_unique(&mut names, alias.clone());
+        push_unique(&mut names, alias.to_ascii_lowercase());
+    }
+
+    let root = resolve_copy_root_name(info, &key);
+    if root != key {
+        push_unique(&mut names, root.clone());
+        push_unique(&mut names, root.to_ascii_lowercase());
+        if let Some(alias) = info.var_aliases.get(&root) {
+            push_unique(&mut names, alias.clone());
+            push_unique(&mut names, alias.to_ascii_lowercase());
+        }
+    }
+
+    names
+}
+
+fn normalized_addr_from_base_var(var: &SSAVar) -> NormalizedAddr {
+    NormalizedAddr {
+        base: BaseRef::Value(ValueRef::from(var)),
+        index: None,
+        scale_bytes: 0,
+        offset_bytes: 0,
+    }
+}
+
+fn add_addr_offset(mut addr: NormalizedAddr, delta: i64) -> Option<NormalizedAddr> {
+    addr.offset_bytes = addr.offset_bytes.checked_add(delta)?;
+    Some(addr)
+}
+
+fn compose_indexed_addr(
+    mut addr: NormalizedAddr,
+    index: SSAVar,
+    signed_scale: i64,
+) -> Option<NormalizedAddr> {
+    match &addr.index {
+        None => {
+            addr.index = Some(ValueRef::from(index));
+            addr.scale_bytes = signed_scale;
+            Some(addr)
+        }
+        Some(existing) if existing.var == index => {
+            addr.scale_bytes = addr.scale_bytes.checked_add(signed_scale)?;
+            Some(addr)
+        }
+        Some(_) => None,
+    }
+}
+
+fn semantic_addr_for_var(
+    info: &UseInfo,
+    var: &SSAVar,
+    env: &PassEnv<'_>,
+) -> Option<NormalizedAddr> {
+    let key = var.display_name();
+    let ptr_bytes = env.ptr_size.div_ceil(8).max(1);
+    let is_ptr_sized_entry_arg_root = |root: &SSAVar| {
+        root.version == 0
+            && root.size == ptr_bytes
+            && env
+                .param_register_aliases
+                .contains_key(&root.name.to_ascii_lowercase())
+    };
+
+    if let Some(SemanticValue::Address(addr)) = info.semantic_values.get(&key) {
+        return Some(addr.clone());
+    }
+
+    if let Some(SemanticValue::Scalar(ScalarValue::Root(root))) = info.semantic_values.get(&key)
+        && (semantic_var_is_pointer_like(info, &root.var, env)
+            || is_ptr_sized_entry_arg_root(&root.var))
+    {
+        return semantic_addr_for_var(info, &root.var, env)
+            .or_else(|| Some(normalized_addr_from_base_var(&root.var)));
+    }
+    if let Some(SemanticValue::Scalar(ScalarValue::Expr(CExpr::Var(alias)))) =
+        info.semantic_values.get(&key)
+        && var.size == ptr_bytes
+        && let Some(slot) = alias
+            .strip_prefix("arg")
+            .and_then(|suffix| suffix.parse::<usize>().ok())
+            .and_then(|idx| idx.checked_sub(1))
+        && let Some(reg_name) = env.arg_regs.get(slot)
+    {
+        return Some(normalized_addr_from_base_var(&SSAVar::new(
+            reg_name,
+            0,
+            ptr_bytes,
+        )));
+    }
+
+    if let Some(prov) = info.forwarded_values.get(&key)
+        && let Some(source_var) = &prov.source_var
+    {
+        let lower = source_var.name.to_ascii_lowercase();
+        let is_ptr_sized_entry_arg_root = prov.stack_slot.is_some()
+            && is_ptr_sized_entry_arg_root(source_var)
+            && var.size == ptr_bytes
+            && env.param_register_aliases.contains_key(&lower);
+        if semantic_var_is_pointer_like(info, source_var, env) || is_ptr_sized_entry_arg_root {
+            return semantic_addr_for_var(info, source_var, env)
+                .or_else(|| Some(normalized_addr_from_base_var(source_var)));
+        }
+    }
+
+    if let Some(slot) = info.stack_slots.get(&key) {
+        return Some(NormalizedAddr {
+            base: BaseRef::StackSlot(slot.offset),
+            index: None,
+            scale_bytes: 0,
+            offset_bytes: 0,
+        });
+    }
+
+    if let Some(ptr) = info.ptr_arith.get(&key) {
+        let base = semantic_addr_for_var(info, &ptr.base, env)
+            .unwrap_or_else(|| normalized_addr_from_base_var(&ptr.base));
+        return compose_indexed_addr(
+            base,
+            ptr.index.clone(),
+            if ptr.is_sub {
+                -i64::from(ptr.element_size)
+            } else {
+                i64::from(ptr.element_size)
+            },
+        );
+    }
+
+    if let Some((base, offset)) = info.ptr_members.get(&key) {
+        let base = semantic_addr_for_var(info, base, env)
+            .unwrap_or_else(|| normalized_addr_from_base_var(base));
+        return add_addr_offset(base, *offset);
+    }
+
+    if let Some(oracle) = env.type_oracle
+        && oracle.field_name(oracle.type_of(var), 0).is_some()
+    {
+        return Some(NormalizedAddr {
+            base: BaseRef::Value(ValueRef::from(var)),
+            index: None,
+            scale_bytes: 0,
+            offset_bytes: 0,
+        });
+    }
+
+    info.definitions
+        .get(&key)
+        .cloned()
+        .map(|expr| NormalizedAddr {
+            base: BaseRef::Raw(expr),
+            index: None,
+            scale_bytes: 0,
+            offset_bytes: 0,
+        })
+}
+
+fn semantic_value_rank(value: &SemanticValue) -> i32 {
+    match value {
+        SemanticValue::Unknown => 0,
+        SemanticValue::Scalar(ScalarValue::Expr(_)) => 40,
+        SemanticValue::Scalar(ScalarValue::Root(_)) => 45,
+        SemanticValue::Address(addr) => normalized_addr_rank(addr),
+        SemanticValue::Load { addr, .. } => normalized_addr_rank(addr) + 10,
+    }
+}
+
+fn normalized_addr_rank(addr: &NormalizedAddr) -> i32 {
+    let base_rank = match addr.base {
+        BaseRef::Raw(_) => 5,
+        BaseRef::StackSlot(_) => 10,
+        BaseRef::Value(_) => 50,
+    };
+    let index_bonus = if addr.index.is_some() { 30 } else { 0 };
+    let offset_bonus = if addr.offset_bytes != 0 { 20 } else { 0 };
+    base_rank + index_bonus + offset_bonus
+}
+
+fn is_authoritative_addr(addr: &NormalizedAddr) -> bool {
+    !matches!(addr.base, BaseRef::Raw(_))
+}
+
+fn insert_semantic_value(info: &mut UseInfo, key: String, candidate: SemanticValue) {
+    match info.semantic_values.get(&key) {
+        Some(current) if semantic_value_rank(current) > semantic_value_rank(&candidate) => {}
+        _ => {
+            info.semantic_values.insert(key, candidate);
+        }
+    }
+}
+
+fn semantic_source_value_for_var(info: &UseInfo, var: &SSAVar) -> Option<SemanticValue> {
+    if let Some(value) = info.semantic_values.get(&var.display_name()).cloned() {
+        return Some(value);
+    }
+    if var.is_const() {
+        let value = utils::parse_const_value(&var.name)?;
+        let expr = if value > 0x7fff_ffff {
+            CExpr::UIntLit(value)
+        } else {
+            CExpr::IntLit(value as i64)
+        };
+        return Some(SemanticValue::Scalar(ScalarValue::Expr(expr)));
+    }
+    let lower = var.name.to_ascii_lowercase();
+    if lower == "stack"
+        || lower == "saved_fp"
+        || lower.starts_with("stack_")
+        || var.name.starts_with("tmp:")
+        || var.name.starts_with("ram:")
+    {
+        return None;
+    }
+    Some(SemanticValue::Scalar(ScalarValue::Root(ValueRef::from(var))))
+}
+
+fn semantic_source_value_from_provenance(
+    info: &UseInfo,
+    provenance: &ValueProvenance,
+    env: &PassEnv<'_>,
+) -> Option<SemanticValue> {
+    if let Some(source_var) = &provenance.source_var {
+        if semantic_var_is_pointer_like(info, source_var, env) {
+            return Some(SemanticValue::Address(
+                semantic_addr_for_var(info, source_var, env)
+                    .unwrap_or_else(|| normalized_addr_from_base_var(source_var)),
+            ));
+        }
+        if let Some(value) = semantic_source_value_for_var(info, source_var) {
+            return Some(value);
+        }
+    }
+    semantic_or_scalar_source_value(info, &provenance.source)
+}
+
+fn semantic_or_scalar_source_value(info: &UseInfo, source_name: &str) -> Option<SemanticValue> {
+    if let Some(value) = info.semantic_values.get(source_name).cloned() {
+        return Some(value);
+    }
+
+    let root = resolve_copy_root_name(info, source_name);
+    if let Some(value) = info.semantic_values.get(&root).cloned() {
+        return Some(value);
+    }
+
+    if let Some(value) = utils::parse_const_value(&root) {
+        let expr = if value > 0x7fff_ffff {
+            CExpr::UIntLit(value)
+        } else {
+            CExpr::IntLit(value as i64)
+        };
+        return Some(SemanticValue::Scalar(ScalarValue::Expr(expr)));
+    }
+
+    let rendered = utils::format_traced_name(&root, &info.var_aliases);
+    let lower = rendered.to_ascii_lowercase();
+    if root.starts_with("tmp:")
+        || root.starts_with("ram:")
+        || lower == "stack"
+        || lower == "saved_fp"
+        || lower.starts_with("stack_")
+    {
+        return None;
+    }
+
+    Some(SemanticValue::Scalar(ScalarValue::Expr(CExpr::Var(rendered))))
+}
+
+fn resolve_copy_root_name(info: &UseInfo, name: &str) -> String {
+    let mut current = name.to_string();
+    let mut seen = HashSet::new();
+    while seen.insert(current.clone()) {
+        let Some(next) = info.copy_sources.get(&current).cloned() else {
+            break;
+        };
+        current = next;
+    }
+    current
 }
 
 fn invalidates_block_stack_values(
@@ -275,6 +1246,18 @@ fn invalidates_block_stack_values(
         | SSAOp::StoreGuarded { .. } => true,
         _ => false,
     }
+}
+
+fn invalidates_semantic_stack_values(op: &SSAOp) -> bool {
+    matches!(
+        op,
+        SSAOp::Call { .. }
+            | SSAOp::CallInd { .. }
+            | SSAOp::CallOther { .. }
+            | SSAOp::StoreConditional { .. }
+            | SSAOp::AtomicCAS { .. }
+            | SSAOp::StoreGuarded { .. }
+    )
 }
 
 fn build_formatted_defs(scratch: &mut UseScratch, env: &PassEnv<'_>) {
@@ -1176,6 +2159,7 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                 let src_expr = {
                     let lower = LowerCtx {
                         definitions: &scratch.info.definitions,
+                        semantic_values: &scratch.info.semantic_values,
                         use_counts: &scratch.info.use_counts,
                         condition_vars: &scratch.info.condition_vars,
                         pinned: &scratch.info.pinned,
@@ -1266,7 +2250,7 @@ mod tests {
         SSAVar::new(name, version, size)
     }
 
-    #[derive(Default)]
+    #[derive(Debug)]
     struct TestEnvFixture {
         function_names: HashMap<u64, String>,
         strings: HashMap<u64, String>,
@@ -1275,6 +2259,24 @@ mod tests {
         caller_saved_regs: HashSet<String>,
         type_hints: HashMap<String, CType>,
         param_register_aliases: HashMap<String, String>,
+        sp_name: String,
+        fp_name: String,
+    }
+
+    impl Default for TestEnvFixture {
+        fn default() -> Self {
+            Self {
+                function_names: HashMap::new(),
+                strings: HashMap::new(),
+                symbols: HashMap::new(),
+                arg_regs: Vec::new(),
+                caller_saved_regs: HashSet::new(),
+                type_hints: HashMap::new(),
+                param_register_aliases: HashMap::new(),
+                sp_name: "rsp".to_string(),
+                fp_name: "rbp".to_string(),
+            }
+        }
     }
 
     impl TestEnvFixture {
@@ -1295,8 +2297,8 @@ mod tests {
         fn env(&self) -> PassEnv<'_> {
             PassEnv {
                 ptr_size: 64,
-                sp_name: "rsp",
-                fp_name: "rbp",
+                sp_name: &self.sp_name,
+                fp_name: &self.fp_name,
                 ret_reg_name: "rax",
                 function_names: &self.function_names,
                 strings: &self.strings,
@@ -1566,6 +2568,7 @@ mod tests {
             info.forwarded_values.get(&loaded.display_name()),
             Some(&ValueProvenance {
                 source: stored.display_name(),
+                source_var: Some(stored.clone()),
                 stack_slot: Some(-12),
             })
         );
@@ -1690,5 +2693,511 @@ mod tests {
             !info.forwarded_values.contains_key(&loaded.display_name()),
             "forwarding should stay block-local unless dominance is proven explicitly"
         );
+    }
+
+    #[test]
+    fn semantic_values_capture_ptr_add_load_shape() {
+        let arr = mk("RDI", 0, 8);
+        let idx = mk("ESI", 0, 4);
+        let addr = mk("tmp:ptr", 1, 8);
+        let loaded = mk("tmp:load", 1, 4);
+
+        let info = analyze_info(vec![single_block(vec![
+            SSAOp::PtrAdd {
+                dst: addr.clone(),
+                base: arr.clone(),
+                index: idx.clone(),
+                element_size: 4,
+            },
+            SSAOp::Load {
+                dst: loaded.clone(),
+                space: "ram".to_string(),
+                addr: addr.clone(),
+            },
+        ])]);
+
+        assert!(matches!(
+            info.semantic_values.get(&addr.display_name()),
+            Some(SemanticValue::Address(NormalizedAddr {
+                index: Some(index),
+                scale_bytes: 4,
+                offset_bytes: 0,
+                ..
+            })) if index.var == idx
+        ));
+        assert!(matches!(
+            info.semantic_values.get(&loaded.display_name()),
+            Some(SemanticValue::Load {
+                addr: NormalizedAddr {
+                    index: Some(index),
+                    scale_bytes: 4,
+                    offset_bytes: 0,
+                    ..
+                },
+                size: 4,
+            }) if index.var == idx
+        ));
+    }
+
+    #[test]
+    fn semantic_values_propagate_copies_of_memory_values() {
+        let arr = mk("RDI", 0, 8);
+        let idx = mk("ESI", 0, 4);
+        let addr = mk("tmp:ptr", 1, 8);
+        let loaded = mk("tmp:load", 1, 4);
+        let copied = mk("tmp:copy", 1, 4);
+
+        let info = analyze_info(vec![single_block(vec![
+            SSAOp::PtrAdd {
+                dst: addr.clone(),
+                base: arr,
+                index: idx,
+                element_size: 4,
+            },
+            SSAOp::Load {
+                dst: loaded.clone(),
+                space: "ram".to_string(),
+                addr,
+            },
+            SSAOp::Copy {
+                dst: copied.clone(),
+                src: loaded.clone(),
+            },
+        ])]);
+
+        assert_eq!(
+            info.semantic_values.get(&copied.display_name()),
+            info.semantic_values.get(&loaded.display_name())
+        );
+    }
+
+    #[test]
+    fn semantic_values_keep_indexed_load_shape_through_stack_reload_and_return_copy_chain() {
+        let rbp = mk("RBP", 1, 8);
+        let arr = mk("RDI", 0, 8);
+        let idx = mk("ESI", 0, 4);
+        let arr_slot = mk("tmp:arrslot", 1, 8);
+        let idx_slot = mk("tmp:idxslot", 1, 8);
+        let idx_slot_reload = mk("tmp:idxslot", 2, 8);
+        let arr_slot_reload = mk("tmp:arrslot", 2, 8);
+        let idx_loaded = mk("tmp:idxload", 1, 4);
+        let idx_ext = mk("RAX", 1, 8);
+        let scaled = mk("tmp:scaled", 1, 8);
+        let arr_loaded = mk("tmp:arrload", 1, 8);
+        let arr_copy = mk("RDX", 1, 8);
+        let addr = mk("tmp:addr", 1, 8);
+        let loaded = mk("tmp:load", 1, 4);
+        let ret = mk("EAX", 1, 4);
+
+        let info = analyze_info(vec![single_block(vec![
+            SSAOp::IntAdd {
+                dst: arr_slot.clone(),
+                a: rbp.clone(),
+                b: SSAVar::constant(0xffff_ffff_ffff_fff8, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: arr_slot,
+                val: arr.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: idx_slot.clone(),
+                a: rbp.clone(),
+                b: SSAVar::constant(0xffff_ffff_ffff_fff4, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: idx_slot,
+                val: idx.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: idx_slot_reload.clone(),
+                a: rbp.clone(),
+                b: SSAVar::constant(0xffff_ffff_ffff_fff4, 8),
+            },
+            SSAOp::Load {
+                dst: idx_loaded.clone(),
+                space: "ram".to_string(),
+                addr: idx_slot_reload,
+            },
+            SSAOp::IntSExt {
+                dst: idx_ext.clone(),
+                src: idx_loaded.clone(),
+            },
+            SSAOp::IntMult {
+                dst: scaled.clone(),
+                a: idx_ext,
+                b: SSAVar::constant(4, 8),
+            },
+            SSAOp::IntAdd {
+                dst: arr_slot_reload.clone(),
+                a: rbp,
+                b: SSAVar::constant(0xffff_ffff_ffff_fff8, 8),
+            },
+            SSAOp::Load {
+                dst: arr_loaded.clone(),
+                space: "ram".to_string(),
+                addr: arr_slot_reload,
+            },
+            SSAOp::Copy {
+                dst: arr_copy.clone(),
+                src: arr_loaded,
+            },
+            SSAOp::IntAdd {
+                dst: addr.clone(),
+                a: arr_copy,
+                b: scaled,
+            },
+            SSAOp::Load {
+                dst: loaded.clone(),
+                space: "ram".to_string(),
+                addr,
+            },
+            SSAOp::Copy {
+                dst: ret.clone(),
+                src: loaded.clone(),
+            },
+        ])]);
+
+        let idx_semantic = info.semantic_values.get(&idx_loaded.display_name());
+        assert!(
+            match idx_semantic {
+                Some(SemanticValue::Scalar(ScalarValue::Expr(CExpr::Var(name)))) => {
+                    name != "stack" && name != "saved_fp" && !name.starts_with("local_")
+                }
+                Some(SemanticValue::Scalar(ScalarValue::Root(value_ref))) => {
+                    !value_ref.var.name.starts_with("tmp:")
+                        && !value_ref.var.name.eq_ignore_ascii_case("stack")
+                        && !value_ref.var.name.eq_ignore_ascii_case("saved_fp")
+                }
+                _ => false,
+            },
+            "stack-reloaded scalar index should stay a semantic scalar, got {idx_semantic:?}"
+        );
+        assert!(
+            matches!(
+                info.semantic_values.get(&loaded.display_name()),
+                Some(SemanticValue::Load {
+                    addr: NormalizedAddr {
+                        index: Some(index),
+                        scale_bytes: 4,
+                        offset_bytes: 0,
+                        ..
+                    },
+                    size: 4,
+                }) if index.var == idx_loaded
+            ),
+            "final loaded value should keep indexed-load semantics through stack reloads"
+        );
+        assert_eq!(
+            info.semantic_values.get(&ret.display_name()),
+            info.semantic_values.get(&loaded.display_name()),
+            "return-register copy should preserve the indexed-load semantic value"
+        );
+    }
+
+    #[test]
+    fn semantic_pointer_likeness_uses_param_alias_type_hints() {
+        let mut fixture = TestEnvFixture::new();
+        fixture
+            .param_register_aliases
+            .insert("x0".to_string(), "arg1".to_string());
+        fixture
+            .type_hints
+            .insert("arg1".to_string(), CType::ptr(CType::u32()));
+        let env = fixture.env();
+        let x0 = mk("X0", 0, 8);
+
+        assert!(
+            semantic_var_is_pointer_like(&UseInfo::default(), &x0, &env),
+            "entry-register aliases should participate in pointer-like detection"
+        );
+    }
+
+    #[test]
+    fn semantic_addr_prefers_forwarded_pointer_source_over_stack_slot_identity() {
+        let mut fixture = TestEnvFixture::new();
+        fixture
+            .param_register_aliases
+            .insert("x0".to_string(), "arg1".to_string());
+        fixture
+            .type_hints
+            .insert("arg1".to_string(), CType::ptr(CType::u32()));
+        let env = fixture.env();
+        let mut info = UseInfo::default();
+        let loaded = mk("X9", 1, 8);
+        let src = mk("X0", 0, 8);
+
+        info.stack_slots
+            .insert(loaded.display_name(), StackSlotProvenance { offset: 8 });
+        info.forwarded_values.insert(
+            loaded.display_name(),
+            ValueProvenance {
+                source: src.display_name(),
+                source_var: Some(src.clone()),
+                stack_slot: Some(8),
+            },
+        );
+
+        assert!(matches!(
+            semantic_addr_for_var(&info, &loaded, &env),
+            Some(NormalizedAddr {
+                base: BaseRef::Value(value_ref),
+                index: None,
+                scale_bytes: 0,
+                offset_bytes: 0,
+            }) if value_ref.var == src
+        ));
+    }
+
+    #[test]
+    fn semantic_values_keep_live_arm64_struct_array_base_root_through_stack_reload() {
+        let mut fixture = TestEnvFixture {
+            sp_name: "sp".to_string(),
+            fp_name: "fp".to_string(),
+            arg_regs: vec!["x0".to_string(), "x1".to_string(), "x2".to_string()],
+            ..Default::default()
+        };
+        fixture
+            .param_register_aliases
+            .insert("x0".to_string(), "arg1".to_string());
+        fixture
+            .param_register_aliases
+            .insert("x1".to_string(), "arg2".to_string());
+        fixture
+            .type_hints
+            .insert("arg1".to_string(), CType::ptr(CType::u32()));
+        fixture
+            .type_hints
+            .insert("arg2".to_string(), CType::Int(32));
+        let env = fixture.env();
+
+        let sp0 = mk("SP", 0, 8);
+        let sp1 = mk("SP", 1, 8);
+        let x0 = mk("X0", 0, 8);
+        let w1 = mk("W1", 0, 4);
+        let w2 = mk("W2", 0, 4);
+        let stack_ptr = mk("tmp:6500", 1, 8);
+        let idx_ptr = mk("tmp:6400", 1, 8);
+        let reloaded_base_addr = mk("tmp:6500", 2, 8);
+        let reloaded_idx_addr = mk("tmp:6400", 2, 8);
+        let reloaded_base = mk("X9", 1, 8);
+        let reloaded_idx = mk("tmp:26b00", 1, 4);
+        let sext_idx = mk("X10", 1, 8);
+        let scaled_idx = mk("X10", 2, 8);
+        let addr_sum = mk("tmp:12480", 1, 8);
+        let copied_addr = mk("X9", 2, 8);
+        let field_addr = mk("tmp:6400", 3, 8);
+
+        let block = single_block(vec![
+            SSAOp::IntSub {
+                dst: sp1.clone(),
+                a: sp0,
+                b: SSAVar::constant(0x10, 8),
+            },
+            SSAOp::IntAdd {
+                dst: stack_ptr.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: stack_ptr,
+                val: x0.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: idx_ptr.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(4, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: idx_ptr,
+                val: w1.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: reloaded_base_addr.clone(),
+                a: sp1.clone(),
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Load {
+                dst: reloaded_base.clone(),
+                space: "ram".to_string(),
+                addr: reloaded_base_addr,
+            },
+            SSAOp::IntAdd {
+                dst: reloaded_idx_addr.clone(),
+                a: sp1,
+                b: SSAVar::constant(4, 8),
+            },
+            SSAOp::Load {
+                dst: reloaded_idx.clone(),
+                space: "ram".to_string(),
+                addr: reloaded_idx_addr,
+            },
+            SSAOp::IntSExt {
+                dst: sext_idx.clone(),
+                src: reloaded_idx,
+            },
+            SSAOp::IntMult {
+                dst: scaled_idx.clone(),
+                a: sext_idx,
+                b: SSAVar::constant(0x38, 8),
+            },
+            SSAOp::IntAdd {
+                dst: addr_sum.clone(),
+                a: reloaded_base.clone(),
+                b: scaled_idx,
+            },
+            SSAOp::Copy {
+                dst: copied_addr.clone(),
+                src: addr_sum.clone(),
+            },
+            SSAOp::IntAdd {
+                dst: field_addr.clone(),
+                a: copied_addr,
+                b: SSAVar::constant(8, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: field_addr.clone(),
+                val: w2,
+            },
+        ]);
+
+        let info = analyze(&[block], &env);
+
+        assert!(matches!(
+            info.semantic_values.get(&reloaded_base.display_name()),
+            Some(SemanticValue::Address(NormalizedAddr {
+                base: BaseRef::Value(value_ref),
+                index: None,
+                scale_bytes: 0,
+                offset_bytes: 0,
+            })) if value_ref.var == x0
+        ), "reloaded base semantic value = {:?}, forwarded = {:?}", info.semantic_values.get(&reloaded_base.display_name()), info.forwarded_values.get(&reloaded_base.display_name()));
+
+        assert!(matches!(
+            info.semantic_values.get(&field_addr.display_name()),
+            Some(SemanticValue::Address(NormalizedAddr {
+                base: BaseRef::Value(value_ref),
+                index: Some(_),
+                scale_bytes: 0x38,
+                offset_bytes: 8,
+            })) if value_ref.var == x0
+        ), "field addr semantic value = {:?}", info.semantic_values.get(&field_addr.display_name()));
+    }
+
+    #[test]
+    fn frame_slot_merges_capture_if_else_return_slot_values() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let fixture = TestEnvFixture {
+            sp_name: "sp".to_string(),
+            fp_name: "fp".to_string(),
+            ..Default::default()
+        };
+        let env = fixture.env();
+
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::CBranch {
+            target: Varnode::constant(0x1020, 8),
+            cond: Varnode::constant(1, 1),
+        });
+        let mut fallthrough = R2ILBlock::new(0x1004, 4);
+        fallthrough.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1008, 8),
+        });
+        let mut else_block = R2ILBlock::new(0x1008, 4);
+        else_block.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1010, 8),
+        });
+        let mut then_block = R2ILBlock::new(0x1020, 4);
+        then_block.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1010, 8),
+        });
+        let mut exit = R2ILBlock::new(0x1010, 4);
+        exit.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&[entry, fallthrough, else_block, then_block, exit])
+                .expect("ssa function");
+        func.get_block_mut(0x1000).expect("entry").ops = vec![SSAOp::CBranch {
+            target: mk("ram:1020", 0, 8),
+            cond: mk("tmp:a00", 1, 1),
+        }];
+        func.get_block_mut(0x1004).expect("fallthrough").ops = vec![SSAOp::Branch {
+            target: mk("ram:1008", 0, 8),
+        }];
+        func.get_block_mut(0x1008).expect("else").ops = vec![
+            SSAOp::IntAdd {
+                dst: mk("tmp:6400", 3, 8),
+                a: mk("SP", 1, 8),
+                b: SSAVar::constant(0xc, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: mk("tmp:6400", 3, 8),
+                val: SSAVar::constant(1, 4),
+            },
+            SSAOp::Branch {
+                target: mk("ram:1010", 0, 8),
+            },
+        ];
+        func.get_block_mut(0x1020).expect("then").ops = vec![
+            SSAOp::IntAdd {
+                dst: mk("tmp:6400", 4, 8),
+                a: mk("SP", 1, 8),
+                b: SSAVar::constant(0xc, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: mk("tmp:6400", 4, 8),
+                val: SSAVar::constant(0, 4),
+            },
+            SSAOp::Branch {
+                target: mk("ram:1010", 0, 8),
+            },
+        ];
+        func.get_block_mut(0x1010).expect("exit").ops = vec![
+            SSAOp::IntAdd {
+                dst: mk("tmp:6400", 6, 8),
+                a: mk("SP", 1, 8),
+                b: SSAVar::constant(0xc, 8),
+            },
+            SSAOp::Load {
+                dst: mk("tmp:24c00", 2, 4),
+                space: "ram".to_string(),
+                addr: mk("tmp:6400", 6, 8),
+            },
+            SSAOp::IntZExt {
+                dst: mk("X0", 1, 8),
+                src: mk("tmp:24c00", 2, 4),
+            },
+            SSAOp::Return {
+                target: mk("X30", 0, 8),
+            },
+        ];
+
+        let blocks = func.blocks().cloned().collect::<Vec<_>>();
+        let mut info = analyze(&blocks, &env);
+        populate_frame_slot_merges(&mut info, &func, &env);
+
+        let summary = info
+            .frame_slot_merges
+            .get("tmp:24c00_2")
+            .expect("merged return-slot load summary");
+        assert_eq!(summary.slot_offset, 12);
+        assert!(matches!(
+            summary.incoming.get(&0x1020),
+            Some(SemanticValue::Scalar(ScalarValue::Expr(CExpr::IntLit(0))))
+        ));
+        assert!(matches!(
+            summary.incoming.get(&0x1008),
+            Some(SemanticValue::Scalar(ScalarValue::Expr(CExpr::IntLit(1))))
+        ));
     }
 }

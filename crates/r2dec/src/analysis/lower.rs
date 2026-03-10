@@ -4,13 +4,17 @@ use r2ssa::{SSAOp, SSAVar};
 use r2types::TypeOracle;
 
 use super::utils::{format_traced_name, parse_const_value};
-use super::{StackSlotProvenance, ValueProvenance};
+use super::{
+    BaseRef, NormalizedAddr, ScalarValue, SemanticValue, StackSlotProvenance, ValueProvenance,
+    ValueRef,
+};
 use crate::address::parse_address_from_var_name;
 use crate::ast::{BinaryOp, CExpr, CType, UnaryOp};
 use crate::fold::PtrArith;
 
 pub(crate) struct LowerCtx<'a> {
     pub(crate) definitions: &'a HashMap<String, CExpr>,
+    pub(crate) semantic_values: &'a HashMap<String, SemanticValue>,
     pub(crate) use_counts: &'a HashMap<String, usize>,
     pub(crate) condition_vars: &'a HashSet<String>,
     pub(crate) pinned: &'a HashSet<String>,
@@ -102,6 +106,9 @@ impl<'a> LowerCtx<'a> {
         {
             return self.expr_for_ssa_name_with_depth(&prov.source, depth + 1, visited);
         }
+        if let Some(expr) = self.render_semantic_value_by_name(&key, depth, visited) {
+            return expr;
+        }
         if depth < 8
             && self.should_inline(&key)
             && visited.insert(key.clone())
@@ -147,6 +154,10 @@ impl<'a> LowerCtx<'a> {
             return self.expr_for_ssa_name_with_depth(&prov.source, depth + 1, visited);
         }
 
+        if let Some(expr) = self.render_semantic_value_by_name(name, depth, visited) {
+            return expr;
+        }
+
         if let Some(expr) = self.definitions.get(name)
             && visited.insert(name.to_string())
         {
@@ -164,7 +175,11 @@ impl<'a> LowerCtx<'a> {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
             SSAOp::Load { dst, addr, .. } => {
-                if let Some(sub) = self.try_subscript_from_var(addr, dst.size) {
+                if let Some(expr) =
+                    self.render_semantic_value_by_name(&dst.display_name(), 0, &mut HashSet::new())
+                {
+                    expr
+                } else if let Some(sub) = self.try_subscript_from_var(addr, dst.size) {
                     sub
                 } else if let Some(member) = self.try_member_access_from_var(addr) {
                     member
@@ -311,17 +326,21 @@ impl<'a> LowerCtx<'a> {
                 vec![CExpr::StringLit("cpuid".to_string())],
             ),
             SSAOp::PtrAdd {
+                dst,
                 base,
                 index,
                 element_size,
-                ..
-            } => self.ptr_arith_expr(base, index, *element_size, false),
+            } => self
+                .render_semantic_value_by_name(&dst.display_name(), 0, &mut HashSet::new())
+                .unwrap_or_else(|| self.ptr_arith_expr(base, index, *element_size, false)),
             SSAOp::PtrSub {
+                dst,
                 base,
                 index,
                 element_size,
-                ..
-            } => self.ptr_arith_expr(base, index, *element_size, true),
+            } => self
+                .render_semantic_value_by_name(&dst.display_name(), 0, &mut HashSet::new())
+                .unwrap_or_else(|| self.ptr_arith_expr(base, index, *element_size, true)),
             _ => {
                 if let Some(dst) = op.dst() {
                     CExpr::Var(self.var_name(dst))
@@ -330,6 +349,135 @@ impl<'a> LowerCtx<'a> {
                 }
             }
         }
+    }
+
+    fn render_semantic_value_by_name(
+        &self,
+        name: &str,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        if depth > 8 || !visited.insert(format!("sem:{name}")) {
+            return None;
+        }
+
+        let rendered = self
+            .semantic_values
+            .get(name)
+            .and_then(|value| self.render_semantic_value(value, depth + 1, visited));
+        visited.remove(&format!("sem:{name}"));
+        rendered
+    }
+
+    fn render_semantic_value(
+        &self,
+        value: &SemanticValue,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        match value {
+            SemanticValue::Scalar(ScalarValue::Expr(expr)) => Some(expr.clone()),
+            SemanticValue::Scalar(ScalarValue::Root(value)) => {
+                self.render_value_ref(value, depth, visited)
+            }
+            SemanticValue::Address(shape) => self.render_addr_shape(shape, depth, visited),
+            SemanticValue::Load { addr, size } => self.render_load_from_shape(addr, *size, depth, visited),
+            SemanticValue::Unknown => None,
+        }
+    }
+
+    fn render_load_from_shape(
+        &self,
+        shape: &NormalizedAddr,
+        elem_size: u32,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        if let Some(index) = &shape.index {
+            let scale = shape.scale_bytes.unsigned_abs() as u32;
+            if scale == elem_size && shape.offset_bytes == 0 {
+                let base_expr = self.render_addr_base(shape, depth + 1, visited)?;
+                let index_expr = self.render_value_ref(index, depth + 1, visited)?;
+                return self.build_subscript_expr(
+                    self.normalize_pointer_base_expr(&base_expr, 0),
+                    self.normalize_index_expr(&index_expr, 0)?,
+                    uint_type_from_size(elem_size),
+                    shape.scale_bytes < 0,
+                );
+            }
+        }
+
+        self.render_addr_shape(shape, depth + 1, visited)
+            .map(|expr| CExpr::Deref(Box::new(expr)))
+    }
+
+    fn render_addr_shape(
+        &self,
+        shape: &NormalizedAddr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        if depth > 8 {
+            return None;
+        }
+
+        let mut expr = self.render_addr_base(shape, depth + 1, visited)?;
+        if let Some(index) = &shape.index {
+            let index_expr = self.render_value_ref(index, depth + 1, visited)?;
+            let scaled = if shape.scale_bytes.unsigned_abs() <= 1 {
+                index_expr
+            } else {
+                CExpr::binary(
+                    BinaryOp::Mul,
+                    index_expr,
+                    CExpr::IntLit(shape.scale_bytes.unsigned_abs() as i64),
+                )
+            };
+            expr = CExpr::binary(
+                if shape.scale_bytes < 0 {
+                    BinaryOp::Sub
+                } else {
+                    BinaryOp::Add
+                },
+                expr,
+                scaled,
+            );
+        }
+        if shape.offset_bytes != 0 {
+            expr = CExpr::binary(
+                if shape.offset_bytes < 0 {
+                    BinaryOp::Sub
+                } else {
+                    BinaryOp::Add
+                },
+                expr,
+                CExpr::IntLit(shape.offset_bytes.unsigned_abs() as i64),
+            );
+        }
+        Some(expr)
+    }
+
+    fn render_addr_base(
+        &self,
+        shape: &NormalizedAddr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        match &shape.base {
+            BaseRef::StackSlot(_) => None,
+            BaseRef::Value(base) => self.render_value_ref(base, depth + 1, visited),
+            BaseRef::Raw(expr) => Some(expr.clone()),
+        }
+    }
+
+    fn render_value_ref(
+        &self,
+        value: &ValueRef,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        let name = value.display_name();
+        Some(self.expr_for_ssa_name_with_depth(&name, depth, visited))
     }
 
     fn should_inline(&self, var_name: &str) -> bool {
@@ -1038,8 +1186,10 @@ mod tests {
         symbols: &'a HashMap<u64, String>,
     ) -> LowerCtx<'a> {
         let type_hints = Box::leak(Box::new(HashMap::new()));
+        let semantic_values = Box::leak(Box::new(HashMap::new()));
         LowerCtx {
             definitions,
+            semantic_values,
             use_counts,
             condition_vars,
             pinned,

@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
 use r2types::{
-    CTypeLike, Constraint, ConstraintSource, ExternalTypeDb, MemoryCapability, ResolvedSignature,
-    SignatureRegistry, Signedness, SolvedTypes, SolverConfig, TypeArena, TypeId, TypeOracle,
-    TypeSolver, to_c_type_like,
+    CTypeLike, Constraint, ConstraintSource, ExternalStruct, ExternalTypeDb, MemoryCapability,
+    ResolvedSignature, SignatureRegistry, Signedness, SolvedTypes, SolverConfig, Type, TypeArena,
+    TypeId, TypeOracle, TypeSolver, to_c_type_like,
 };
 
 use crate::analysis::utils::parse_const_offset;
@@ -40,6 +40,11 @@ pub struct TypeInference {
     external_type_db: ExternalTypeDb,
     /// Last solver output for this function inference pass.
     solved_types: Option<SolvedTypes>,
+}
+
+pub(crate) struct CombinedTypeOracle<'a> {
+    solved: &'a SolvedTypes,
+    external_type_db: &'a ExternalTypeDb,
 }
 
 /// Function type signature.
@@ -144,7 +149,12 @@ impl TypeInference {
         self.emit_call_signature_constraints(func, &mut arena, &mut constraints, &mut struct_hints);
 
         let solver = TypeSolver::new(SolverConfig::default());
-        let solved = solver.solve(arena, &constraints);
+        let mut solved = solver.solve(arena, &constraints);
+        let external_var_types = self.external_var_type_overrides(func);
+        for (var, ty) in &external_var_types {
+            let (ty_id, _) = self.ctype_to_typeid(ty, &mut solved.arena);
+            solved.var_types.insert(var.clone(), ty_id);
+        }
 
         self.var_types.clear();
         let vars = collect_vars(func);
@@ -153,7 +163,63 @@ impl TypeInference {
             let hinted = self.type_id_to_ctype(&solved.arena, ty_id, var.size);
             self.var_types.insert(var, hinted);
         }
+        for (var, ty) in external_var_types {
+            self.var_types.insert(var, ty);
+        }
         self.solved_types = Some(solved);
+    }
+
+    fn external_var_type_overrides(&self, func: &SSAFunction) -> HashMap<SSAVar, CType> {
+        let mut overrides = HashMap::new();
+        let mut reg0_map: HashMap<String, SSAVar> = HashMap::new();
+        for var in collect_vars(func) {
+            if var.version == 0 {
+                reg0_map.entry(var.name.to_ascii_lowercase()).or_insert(var);
+            }
+        }
+
+        if let Some(signature) = &self.external_signature {
+            let mut occupied_param_aliases = HashSet::new();
+            for (idx, ext) in signature.params.iter().enumerate() {
+                let Some(ty) = &ext.ty else {
+                    continue;
+                };
+                let Some(reg_name) = self.arg_regs.get(idx) else {
+                    continue;
+                };
+                for alias in crate::register_alias_names(reg_name) {
+                    occupied_param_aliases.insert(alias);
+                }
+                if let Some(var) = reg0_map.get(&reg_name.to_ascii_lowercase()) {
+                    overrides.insert(var.clone(), ty.clone());
+                }
+            }
+
+            if let Some(ret_ty) = &signature.ret_type {
+                for reg_name in &self.ret_regs {
+                    if crate::register_alias_names(reg_name)
+                        .into_iter()
+                        .any(|alias| occupied_param_aliases.contains(&alias))
+                    {
+                        continue;
+                    }
+                    if let Some(var) = reg0_map.get(&reg_name.to_ascii_lowercase()) {
+                        overrides.insert(var.clone(), ret_ty.clone());
+                    }
+                }
+            }
+        }
+
+        for stack_var in self.external_stack_vars.values() {
+            let Some(ty) = &stack_var.ty else {
+                continue;
+            };
+            if let Some(var) = reg0_map.get(&stack_var.name.to_ascii_lowercase()) {
+                overrides.insert(var.clone(), ty.clone());
+            }
+        }
+
+        overrides
     }
 
     fn emit_inferred_constraints(
@@ -1142,6 +1208,70 @@ impl TypeInference {
     /// Get the last solved type lattice for oracle-based consumers.
     pub fn solved_types(&self) -> Option<&SolvedTypes> {
         self.solved_types.as_ref()
+    }
+
+    pub(crate) fn combined_type_oracle(&self) -> Option<CombinedTypeOracle<'_>> {
+        self.solved_types.as_ref().map(|solved| CombinedTypeOracle {
+            solved,
+            external_type_db: &self.external_type_db,
+        })
+    }
+}
+
+impl<'a> CombinedTypeOracle<'a> {
+    fn external_struct_for_type(&self, ty: TypeId) -> Option<&ExternalStruct> {
+        let named = match self.solved.arena.get(ty) {
+            Type::Struct(shape) => shape.name.as_deref(),
+            Type::Ptr(inner) => match self.solved.arena.get(*inner) {
+                Type::Struct(shape) => shape.name.as_deref(),
+                _ => None,
+            },
+            _ => None,
+        }?;
+        self.external_type_db.structs.get(&named.to_ascii_lowercase())
+    }
+}
+
+impl TypeOracle for CombinedTypeOracle<'_> {
+    fn type_of(&self, var: &SSAVar) -> TypeId {
+        self.solved.type_of(var)
+    }
+
+    fn struct_shape(&self, ty: TypeId) -> Option<&r2types::StructShape> {
+        self.solved.struct_shape(ty)
+    }
+
+    fn is_pointer(&self, ty: TypeId) -> bool {
+        self.solved.is_pointer(ty)
+    }
+
+    fn is_array(&self, ty: TypeId) -> bool {
+        self.solved.is_array(ty)
+    }
+
+    fn field_name(&self, ty: TypeId, offset: u64) -> Option<&str> {
+        self.solved.field_name(ty, offset).or_else(|| {
+            self.external_struct_for_type(ty)
+                .and_then(|st| st.fields.get(&offset))
+                .map(|field| field.name.as_str())
+        })
+    }
+
+    fn field_name_any(&self, offset: u64) -> Option<&str> {
+        self.solved.field_name_any(offset).or_else(|| {
+            let mut matched: Option<&str> = None;
+            for st in self.external_type_db.structs.values() {
+                let Some(field) = st.fields.get(&offset) else {
+                    continue;
+                };
+                match matched {
+                    None => matched = Some(field.name.as_str()),
+                    Some(existing) if existing == field.name => {}
+                    Some(_) => return None,
+                }
+            }
+            matched
+        })
     }
 }
 

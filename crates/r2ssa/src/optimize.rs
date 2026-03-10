@@ -21,6 +21,18 @@ pub struct OptimizationConfig {
     pub preserve_memory_reads: bool,
 }
 
+/// Configuration for preparing SSA for decompilation.
+///
+/// The decompiler needs provenance-preserving SSA more than aggressively
+/// simplified SSA, so the default intentionally disables destructive
+/// simplification passes and only allows explicitly opted-in transforms.
+#[derive(Debug, Clone)]
+pub struct DecompilePrepConfig {
+    pub max_iterations: usize,
+    pub enable_inst_combine: bool,
+    pub enable_cse: bool,
+}
+
 impl Default for OptimizationConfig {
     fn default() -> Self {
         Self {
@@ -32,6 +44,31 @@ impl Default for OptimizationConfig {
             enable_cse: true,
             enable_dce: true,
             preserve_memory_reads: false,
+        }
+    }
+}
+
+impl Default for DecompilePrepConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 1,
+            enable_inst_combine: false,
+            enable_cse: false,
+        }
+    }
+}
+
+impl From<&DecompilePrepConfig> for OptimizationConfig {
+    fn from(value: &DecompilePrepConfig) -> Self {
+        Self {
+            max_iterations: value.max_iterations.max(1),
+            enable_sccp: false,
+            enable_const_prop: false,
+            enable_inst_combine: value.enable_inst_combine,
+            enable_copy_prop: false,
+            enable_cse: value.enable_cse,
+            enable_dce: false,
+            preserve_memory_reads: true,
         }
     }
 }
@@ -1570,7 +1607,7 @@ fn collect_uses(func: &SSAFunction) -> HashSet<VarKey> {
     uses
 }
 
-fn map_sources_in_op<F>(op: &SSAOp, map: &F) -> SSAOp
+pub(crate) fn map_sources_in_op<F>(op: &SSAOp, map: &F) -> SSAOp
 where
     F: Fn(&SSAVar) -> SSAVar,
 {

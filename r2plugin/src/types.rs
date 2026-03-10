@@ -1,6 +1,8 @@
 use crate::blocks::BlockSlice;
 use crate::context::{PluginCtxView, require_ctx_view};
-use crate::decompiler::build_decompiler_env;
+use crate::decompiler::{
+    build_decompiler_env, decompiler_config_for_arch_name, normalize_sig_arch_name,
+};
 use crate::helpers::resolve_function_name;
 use crate::{
     ArchSpec, Disassembler, InferredParam, InferredParamJson, InferredSignatureCcJson, R2ILBlock,
@@ -19,7 +21,32 @@ pub(crate) struct FunctionInput<'a> {
 
 pub(crate) struct FunctionAnalysis {
     pub(crate) ssa_func: r2ssa::SSAFunction,
-    pub(crate) ssa_blocks: Vec<r2ssa::SSABlock>,
+    pub(crate) pattern_ssa_func: r2ssa::SSAFunction,
+    pub(crate) pattern_ssa_blocks: Vec<r2ssa::SSABlock>,
+}
+
+pub(crate) struct FunctionAnalysisArtifact {
+    pub(crate) ssa_func: r2ssa::SSAFunction,
+    pub(crate) pattern_ssa_blocks: Vec<r2ssa::SSABlock>,
+    pub(crate) signature_cc: InferredSignatureCcJson,
+    pub(crate) merged_signature: Option<r2dec::ExternalFunctionSignature>,
+    pub(crate) type_db: r2types::ExternalTypeDb,
+    pub(crate) struct_decls: Vec<crate::StructDeclCandidateJson>,
+    pub(crate) slot_type_overrides: std::collections::HashMap<usize, String>,
+    pub(crate) slot_field_profiles:
+        std::collections::HashMap<usize, std::collections::BTreeMap<u64, String>>,
+    pub(crate) diagnostics: crate::TypeWritebackDiagnosticsJson,
+    pub(crate) vars: Vec<VarProt>,
+}
+
+fn function_blocks_to_local_ssa(func: &r2ssa::SSAFunction) -> Vec<r2ssa::SSABlock> {
+    func.blocks()
+        .map(|block| r2ssa::SSABlock {
+            addr: block.addr,
+            size: block.size,
+            ops: block.ops.clone(),
+        })
+        .collect()
 }
 
 pub(crate) fn build_function_input<'a>(
@@ -40,27 +67,26 @@ pub(crate) fn build_function_input<'a>(
 
 pub(crate) fn build_function_analysis(input: &FunctionInput<'_>) -> Option<FunctionAnalysis> {
     let ssa_func =
-        r2ssa::SSAFunction::from_blocks_with_arch(input.blocks.as_slice(), input.ctx.arch)?
+        r2ssa::SSAFunction::from_blocks_for_decompile(input.blocks.as_slice(), input.ctx.arch)?
             .with_name(&input.function_name);
-    let ssa_blocks = input
-        .blocks
-        .as_slice()
-        .iter()
-        .map(|blk| r2ssa::block::to_ssa(blk, input.ctx.disasm))
-        .collect();
+    let pattern_ssa_func =
+        r2ssa::SSAFunction::from_blocks_for_patterns(input.blocks.as_slice(), input.ctx.arch)?
+            .with_name(&input.function_name);
+    let pattern_ssa_blocks = function_blocks_to_local_ssa(&pattern_ssa_func);
 
     Some(FunctionAnalysis {
         ssa_func,
-        ssa_blocks,
+        pattern_ssa_func,
+        pattern_ssa_blocks,
     })
 }
 
-pub(crate) fn infer_signature_cc_inner(
+fn infer_signature_cc_from_analysis(
     input: &FunctionInput<'_>,
+    analysis: &FunctionAnalysis,
 ) -> Option<InferredSignatureCcJson> {
     let env = build_decompiler_env(&input.ctx);
-    let analysis = build_function_analysis(input)?;
-    let evidence_ctx = collect_signature_type_evidence_context(&analysis.ssa_blocks);
+    let evidence_ctx = collect_signature_type_evidence_context(&analysis.pattern_ssa_blocks);
 
     let mut var_recovery =
         r2dec::VariableRecovery::new(&env.cfg.sp_name, &env.cfg.fp_name, env.cfg.ptr_size);
@@ -106,7 +132,12 @@ pub(crate) fn infer_signature_cc_inner(
     if input.ctx.semantic_metadata_enabled {
         let reg_type_hints = collect_register_type_hints(input.blocks.as_slice(), input.ctx.disasm);
         let recovered_vars =
-            recover_vars_from_ssa(&analysis.ssa_blocks, input.ctx.arch, &reg_type_hints, true);
+            recover_vars_from_ssa(
+                &analysis.pattern_ssa_blocks,
+                input.ctx.arch,
+                &reg_type_hints,
+                true,
+            );
         let pointer_arg_slots = collect_pointer_arg_slots(&recovered_vars);
         merge_pointer_slot_evidence(&mut inferred_params, &pointer_arg_slots);
     }
@@ -172,6 +203,359 @@ pub(crate) fn infer_signature_cc_inner(
         arch: env.arch_name,
         confidence,
         callconv_confidence,
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn infer_signature_cc_inner(
+    input: &FunctionInput<'_>,
+) -> Option<InferredSignatureCcJson> {
+    let analysis = build_function_analysis(input)?;
+    infer_signature_cc_from_analysis(input, &analysis)
+}
+
+fn apply_signature_context_overrides(
+    sig: &mut InferredSignatureCcJson,
+    sig_ctx: &crate::ParsedSignatureContext,
+) -> (
+    std::collections::HashMap<usize, String>,
+    std::collections::HashMap<usize, String>,
+) {
+    let mut param_types = std::collections::HashMap::new();
+    let mut param_names = std::collections::HashMap::new();
+
+    if let Some(current) = sig_ctx.current.as_ref() {
+        if let Some(ret_ty) = current.ret_type.as_ref() {
+            let ret_ty_str = ret_ty.to_string();
+            if !matches!(ret_ty, r2dec::CType::Unknown) {
+                sig.ret_type = ret_ty_str;
+            }
+        }
+        for (idx, param) in current.params.iter().enumerate() {
+            if let Some(ty) = param.ty.as_ref() {
+                let ty_str = ty.to_string();
+                param_types.insert(idx, ty_str.clone());
+                if !matches!(ty, r2dec::CType::Unknown)
+                    && let Some(inferred_param) = sig.params.get_mut(idx)
+                {
+                    inferred_param.param_type = ty_str;
+                }
+            }
+            if !crate::is_generic_arg_name(&param.name) {
+                param_names.insert(idx, param.name.clone());
+                if let Some(inferred_param) = sig.params.get_mut(idx) {
+                    inferred_param.name = param.name.clone();
+                }
+            }
+        }
+        sig.signature = crate::format_afs_signature(&sig.function_name, &sig.ret_type, &sig.params);
+        sig.confidence = sig
+            .confidence
+            .max(crate::explicit_signature_context_strength(current));
+    }
+
+    (param_types, param_names)
+}
+
+fn build_function_analysis_artifact_from_analysis(
+    input: &FunctionInput<'_>,
+    analysis: FunctionAnalysis,
+    afcfj: &str,
+    afvj: &str,
+    tsj: &str,
+) -> Option<FunctionAnalysisArtifact> {
+    let ptr_bits = input
+        .ctx
+        .arch
+        .as_ref()
+        .map(|a| a.addr_size * 8)
+        .unwrap_or(64);
+    let mut signature_cc = infer_signature_cc_from_analysis(input, &analysis)?;
+    let sig_ctx = crate::parse_signature_context(afcfj, ptr_bits);
+    let (_param_types, _param_names) = apply_signature_context_overrides(&mut signature_cc, &sig_ctx);
+
+    let reg_params = crate::parse_external_reg_params(afvj, ptr_bits);
+    let merged_signature =
+        crate::merge_signature_with_reg_params(sig_ctx.current.clone(), reg_params);
+
+    let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
+    let raw_structs =
+        crate::infer_structs_from_ssa(
+            &analysis.pattern_ssa_blocks,
+            input.ctx.arch,
+            ptr_bits,
+            &mut diagnostics,
+        );
+    let semantic_structs = crate::infer_structs_from_semantic_accesses(
+        &analysis.pattern_ssa_func,
+        &build_decompiler_env(&input.ctx).cfg,
+        ptr_bits,
+        &mut diagnostics,
+    );
+    let (mut struct_decls, mut slot_type_overrides, slot_field_profiles) =
+        crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
+    let (external_structs, solver_warnings) = crate::collect_external_struct_candidates(tsj, ptr_bits);
+    diagnostics.solver_warnings = solver_warnings;
+    crate::align_local_structs_with_external(
+        &mut struct_decls,
+        &mut slot_type_overrides,
+        &slot_field_profiles,
+        &external_structs,
+    );
+
+    {
+        let mut seen = std::collections::HashSet::new();
+        let mut merged = Vec::new();
+        for decl in external_structs.into_iter().chain(struct_decls.into_iter()) {
+            if seen.insert(decl.name.to_ascii_lowercase()) {
+                merged.push(decl);
+            }
+        }
+        struct_decls = merged;
+    }
+
+    let mut type_db = r2types::ExternalTypeDb::from_tsj_json(tsj);
+    crate::merge_local_structs_into_type_db(&mut type_db, &struct_decls);
+    let merged_signature = crate::merge_slot_type_overrides_into_signature(
+        merged_signature,
+        &slot_type_overrides,
+        ptr_bits,
+    );
+
+    let reg_type_hints = if input.ctx.semantic_metadata_enabled {
+        collect_register_type_hints(input.blocks.as_slice(), input.ctx.disasm)
+    } else {
+        std::collections::HashMap::new()
+    };
+    let vars = recover_vars_from_ssa(
+        &analysis.pattern_ssa_blocks,
+        input.ctx.arch,
+        &reg_type_hints,
+        input.ctx.semantic_metadata_enabled,
+    );
+
+    Some(FunctionAnalysisArtifact {
+        ssa_func: analysis.ssa_func,
+        pattern_ssa_blocks: analysis.pattern_ssa_blocks,
+        signature_cc,
+        merged_signature,
+        type_db,
+        struct_decls,
+        slot_type_overrides,
+        slot_field_profiles,
+        diagnostics,
+        vars,
+    })
+}
+
+pub(crate) fn build_function_analysis_artifact(
+    input: &FunctionInput<'_>,
+    afcfj: &str,
+    afvj: &str,
+    tsj: &str,
+) -> Option<FunctionAnalysisArtifact> {
+    let analysis = build_function_analysis(input)?;
+    build_function_analysis_artifact_from_analysis(input, analysis, afcfj, afvj, tsj)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_detached_function_analysis_artifact(
+    blocks: &[R2ILBlock],
+    function_name: &str,
+    arch: Option<&ArchSpec>,
+    ptr_bits: u32,
+    semantic_metadata_enabled: bool,
+    reg_type_hints: &std::collections::HashMap<String, TypeHint>,
+    afcfj: &str,
+    afvj: &str,
+    tsj: &str,
+) -> Option<FunctionAnalysisArtifact> {
+    let ssa_func = r2ssa::SSAFunction::from_blocks_for_decompile(blocks, arch)?
+        .with_name(function_name);
+    let pattern_ssa_func = r2ssa::SSAFunction::from_blocks_for_patterns(blocks, arch)?
+        .with_name(function_name);
+    let analysis = FunctionAnalysis {
+        pattern_ssa_blocks: function_blocks_to_local_ssa(&pattern_ssa_func),
+        pattern_ssa_func,
+        ssa_func,
+    };
+
+    let arch_name = normalize_sig_arch_name(arch).unwrap_or_else(|| "unknown".to_string());
+    let cfg = decompiler_config_for_arch_name(&arch_name, ptr_bits);
+    let evidence_ctx = collect_signature_type_evidence_context(&analysis.pattern_ssa_blocks);
+    let mut var_recovery = r2dec::VariableRecovery::new(&cfg.sp_name, &cfg.fp_name, cfg.ptr_size);
+    var_recovery.recover(&analysis.ssa_func);
+    let mut type_inference = r2dec::TypeInference::new(cfg.ptr_size);
+    type_inference.infer_function(&analysis.ssa_func);
+
+    let mut inferred_params: Vec<InferredParam> = var_recovery
+        .parameters()
+        .into_iter()
+        .map(|v| {
+            let initial_ty = type_inference.get_type(&v.ssa_var);
+            let mut evidence =
+                crate::collect_type_evidence_for_var(&evidence_ctx, &v.ssa_var, &initial_ty);
+            if matches!(initial_ty, r2dec::CType::Void | r2dec::CType::Unknown) {
+                crate::merge_initial_type_evidence(
+                    &type_inference.type_from_size(v.ssa_var.size),
+                    &mut evidence,
+                );
+            }
+            let ty = crate::resolve_evidence_driven_type(
+                initial_ty,
+                v.ssa_var.size,
+                ptr_bits,
+                &evidence,
+            );
+            let arg_index = v
+                .name
+                .strip_prefix("arg")
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            InferredParam {
+                name: v.name.clone(),
+                ty,
+                arg_index,
+                size_bytes: v.ssa_var.size,
+                evidence,
+            }
+        })
+        .collect();
+
+    if semantic_metadata_enabled {
+        let recovered_vars =
+            recover_vars_from_ssa(&analysis.pattern_ssa_blocks, arch, reg_type_hints, true);
+        let pointer_arg_slots = collect_pointer_arg_slots(&recovered_vars);
+        merge_pointer_slot_evidence(&mut inferred_params, &pointer_arg_slots);
+    }
+
+    for param in &mut inferred_params {
+        param.ty = crate::resolve_evidence_driven_type(
+            param.ty.clone(),
+            param.size_bytes,
+            ptr_bits,
+            &param.evidence,
+        );
+    }
+
+    inferred_params.sort_by(|a, b| {
+        a.arg_index
+            .cmp(&b.arg_index)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let mut used_param_names = HashSet::new();
+    let params: Vec<InferredParamJson> = inferred_params
+        .iter()
+        .enumerate()
+        .map(|(idx, p)| {
+            let fallback_idx = if p.arg_index == usize::MAX {
+                idx
+            } else {
+                p.arg_index
+            };
+            InferredParamJson {
+                name: crate::normalize_inferred_param_name(
+                    &p.name,
+                    fallback_idx,
+                    &mut used_param_names,
+                ),
+                param_type: crate::materialize_signature_ctype(p.ty.clone(), ptr_bits).to_string(),
+            }
+        })
+        .collect();
+
+    let (ret_type, ret_evidence) = crate::infer_signature_return_type(
+        &analysis.ssa_func,
+        &type_inference,
+        ptr_bits,
+        &evidence_ctx,
+    );
+    let ret_type = crate::materialize_signature_ctype(ret_type, ptr_bits);
+    let mut signature_cc = InferredSignatureCcJson {
+        function_name: function_name.to_string(),
+        signature: crate::format_afs_signature(function_name, &ret_type.to_string(), &params),
+        ret_type: ret_type.to_string(),
+        params,
+        callconv: crate::compute_callconv_inference(
+            &arch_name,
+            &crate::collect_version0_input_regs(&analysis.ssa_func),
+        )
+        .0,
+        arch: arch_name.clone(),
+        confidence: crate::compute_signature_confidence(&inferred_params, &ret_type, &ret_evidence),
+        callconv_confidence: crate::compute_callconv_inference(
+            &arch_name,
+            &crate::collect_version0_input_regs(&analysis.ssa_func),
+        )
+        .1,
+    };
+    let sig_ctx = crate::parse_signature_context(afcfj, ptr_bits);
+    let _ = apply_signature_context_overrides(&mut signature_cc, &sig_ctx);
+
+    let reg_params = crate::parse_external_reg_params(afvj, ptr_bits);
+    let merged_signature =
+        crate::merge_signature_with_reg_params(sig_ctx.current.clone(), reg_params);
+
+    let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
+    let raw_structs =
+        crate::infer_structs_from_ssa(
+            &analysis.pattern_ssa_blocks,
+            arch,
+            ptr_bits,
+            &mut diagnostics,
+        );
+    let semantic_structs =
+        crate::infer_structs_from_semantic_accesses(
+            &analysis.pattern_ssa_func,
+            &cfg,
+            ptr_bits,
+            &mut diagnostics,
+        );
+    let (mut struct_decls, mut slot_type_overrides, slot_field_profiles) =
+        crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
+    let (external_structs, solver_warnings) = crate::collect_external_struct_candidates(tsj, ptr_bits);
+    diagnostics.solver_warnings = solver_warnings;
+    crate::align_local_structs_with_external(
+        &mut struct_decls,
+        &mut slot_type_overrides,
+        &slot_field_profiles,
+        &external_structs,
+    );
+    {
+        let mut seen = std::collections::HashSet::new();
+        let mut merged = Vec::new();
+        for decl in external_structs.into_iter().chain(struct_decls.into_iter()) {
+            if seen.insert(decl.name.to_ascii_lowercase()) {
+                merged.push(decl);
+            }
+        }
+        struct_decls = merged;
+    }
+    let mut type_db = r2types::ExternalTypeDb::from_tsj_json(tsj);
+    crate::merge_local_structs_into_type_db(&mut type_db, &struct_decls);
+    let merged_signature = crate::merge_slot_type_overrides_into_signature(
+        merged_signature,
+        &slot_type_overrides,
+        ptr_bits,
+    );
+    let vars = recover_vars_from_ssa(
+        &analysis.pattern_ssa_blocks,
+        arch,
+        reg_type_hints,
+        semantic_metadata_enabled,
+    );
+
+    Some(FunctionAnalysisArtifact {
+        ssa_func: analysis.ssa_func,
+        pattern_ssa_blocks: analysis.pattern_ssa_blocks,
+        signature_cc,
+        merged_signature,
+        type_db,
+        struct_decls,
+        slot_type_overrides,
+        slot_field_profiles,
+        diagnostics,
+        vars,
     })
 }
 
