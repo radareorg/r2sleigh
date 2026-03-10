@@ -42,6 +42,7 @@ pub(crate) fn analyze_with_definition_overrides(
     for block in blocks {
         collect_definitions(&mut scratch, block, env, definition_overrides);
     }
+    rebuild_definitions(&mut scratch, blocks, env, definition_overrides);
 
     analyze_call_args(&mut scratch, blocks, env);
     coalesce_variables(&mut scratch, blocks, env);
@@ -169,7 +170,10 @@ fn struct_field_access_profile_for_addr(
     arg_slot_map: &HashMap<String, usize>,
 ) -> Option<LocalStructFieldAccessProfile> {
     let shape = semantic_addr_for_var(info, addr, env)?;
-    if shape.offset_bytes <= 0 {
+    if shape.offset_bytes < 0 {
+        return None;
+    }
+    if shape.offset_bytes == 0 && shape.index.is_some() {
         return None;
     }
 
@@ -497,6 +501,52 @@ fn collect_definitions(
             block_stack_semantic_values.clear();
         }
     }
+}
+
+fn rebuild_definitions(
+    scratch: &mut UseScratch,
+    blocks: &[SSABlock],
+    env: &PassEnv<'_>,
+    definition_overrides: &HashMap<String, CExpr>,
+) {
+    let mut rebuilt = HashMap::new();
+
+    for block in blocks {
+        for op in &block.ops {
+            let Some(dst) = op.dst() else {
+                continue;
+            };
+            let key = dst.display_name();
+            let expr = if let Some(expr) = definition_overrides.get(&key).cloned() {
+                expr
+            } else {
+                let lower = LowerCtx {
+                    definitions: &rebuilt,
+                    semantic_values: &scratch.info.semantic_values,
+                    use_counts: &scratch.info.use_counts,
+                    condition_vars: &scratch.info.condition_vars,
+                    pinned: &scratch.info.pinned,
+                    var_aliases: &scratch.info.var_aliases,
+                    type_hints: &scratch.info.type_hints,
+                    ptr_arith: &scratch.info.ptr_arith,
+                    stack_slots: &scratch.info.stack_slots,
+                    forwarded_values: &scratch.info.forwarded_values,
+                    function_names: env.function_names,
+                    strings: env.strings,
+                    symbols: env.symbols,
+                    type_oracle: env.type_oracle,
+                };
+                if let Some(prov) = scratch.info.forwarded_values.get(&key) {
+                    lower.expr_for_ssa_name(&prov.source)
+                } else {
+                    lower.op_to_expr(op)
+                }
+            };
+            rebuilt.insert(key, expr);
+        }
+    }
+
+    scratch.info.definitions = rebuilt;
 }
 
 fn semantic_stack_store_value(
@@ -897,6 +947,7 @@ fn semantic_var_resolves_to_zero(
         | Some(SSAOp::Subpiece { src, .. }) => {
             semantic_var_resolves_to_zero(info, producers, src, depth + 1)
         }
+        Some(SSAOp::IntXor { a, b, .. }) if a == b => true,
         _ => false,
     }
 }
@@ -2212,12 +2263,18 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                         symbols: env.symbols,
                         type_oracle: env.type_oracle,
                     };
-                    match prev_op {
-                        SSAOp::Copy { dst, src } => Some((dst, lower.get_expr(src))),
-                        SSAOp::IntZExt { dst, src } => Some((dst, lower.get_expr(src))),
-                        SSAOp::IntSExt { dst, src } => Some((dst, lower.get_expr(src))),
-                        SSAOp::IntXor { dst, a, b } if a == b => Some((dst, CExpr::IntLit(0))),
-                        _ => None,
+                    if let Some(dst) = prev_op.dst() {
+                        let dst_base = dst.name.to_lowercase();
+                        if !env.arg_regs.contains(&dst_base)
+                            || found_regs.contains_key(&dst_base)
+                            || !is_call_arg_producer(prev_op)
+                        {
+                            None
+                        } else {
+                            Some((dst, lower.get_expr(dst)))
+                        }
+                    } else {
+                        None
                     }
                 };
 
@@ -2226,10 +2283,8 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                 };
 
                 let dst_base = dst_var.name.to_lowercase();
-                if env.arg_regs.contains(&dst_base) && !found_regs.contains_key(&dst_base) {
-                    let dst_key = dst_var.display_name();
-                    found_regs.insert(dst_base.clone(), (expr, dst_key));
-                }
+                let dst_key = dst_var.display_name();
+                found_regs.insert(dst_base.clone(), (expr, dst_key));
             }
 
             let mut args = Vec::new();
@@ -2277,6 +2332,35 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
             }
         }
     }
+}
+
+fn is_call_arg_producer(op: &SSAOp) -> bool {
+    matches!(
+        op,
+        SSAOp::Copy { .. }
+            | SSAOp::Load { .. }
+            | SSAOp::IntAdd { .. }
+            | SSAOp::IntSub { .. }
+            | SSAOp::IntMult { .. }
+            | SSAOp::IntDiv { .. }
+            | SSAOp::IntSDiv { .. }
+            | SSAOp::IntRem { .. }
+            | SSAOp::IntSRem { .. }
+            | SSAOp::IntAnd { .. }
+            | SSAOp::IntOr { .. }
+            | SSAOp::IntXor { .. }
+            | SSAOp::IntLeft { .. }
+            | SSAOp::IntRight { .. }
+            | SSAOp::IntSRight { .. }
+            | SSAOp::IntNegate { .. }
+            | SSAOp::IntNot { .. }
+            | SSAOp::IntZExt { .. }
+            | SSAOp::IntSExt { .. }
+            | SSAOp::Trunc { .. }
+            | SSAOp::Cast { .. }
+            | SSAOp::Piece { .. }
+            | SSAOp::Subpiece { .. }
+    )
 }
 
 #[cfg(test)]
