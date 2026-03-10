@@ -80,7 +80,8 @@ impl<'a> FoldingContext<'a> {
         let mut has_semantic_root = false;
         if let CExpr::Var(name) = expr {
             let mut semantic_visited = HashSet::new();
-            if let Some(semantic) = self.render_semantic_value_by_name(name, 0, &mut semantic_visited)
+            if let Some(semantic) =
+                self.render_semantic_value_by_name(name, 0, &mut semantic_visited)
             {
                 has_semantic_root = true;
                 if self.prefers_visible_expr(&best, &semantic) {
@@ -430,10 +431,7 @@ impl<'a> FoldingContext<'a> {
             .or_else(|| self.best_visible_definition(&root_name))
             .unwrap_or_else(|| unresolved.clone());
         let base_root = self
-            .preferred_return_candidate(
-                Some(semantic_root),
-                Some(unresolved.clone()),
-            )
+            .preferred_return_candidate(Some(semantic_root), Some(unresolved.clone()))
             .unwrap_or_else(|| unresolved.clone());
         let predicate_root = self.predicate_return_candidate(&unresolved, 0, &mut visited);
         let root = self

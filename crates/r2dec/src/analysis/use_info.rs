@@ -67,9 +67,12 @@ pub(crate) fn populate_frame_slot_merges(
             let SSAOp::Load { dst, addr, .. } = op else {
                 continue;
             };
-            let Some(slot_offset) =
-                utils::extract_stack_offset_from_var(addr, &info.definitions, env.fp_name, env.sp_name)
-            else {
+            let Some(slot_offset) = utils::extract_stack_offset_from_var(
+                addr,
+                &info.definitions,
+                env.fp_name,
+                env.sp_name,
+            ) else {
                 continue;
             };
 
@@ -237,7 +240,13 @@ fn arg_slot_for_value_ref(
         && let Some(source_var) = &prov.source_var
         && *source_var != value_ref.var
     {
-        return arg_slot_for_value_ref(info, &ValueRef::from(source_var), env, arg_slot_map, depth + 1);
+        return arg_slot_for_value_ref(
+            info,
+            &ValueRef::from(source_var),
+            env,
+            arg_slot_map,
+            depth + 1,
+        );
     }
 
     if let Some(alias) = env.param_register_aliases.get(&key)
@@ -450,27 +459,27 @@ fn collect_definitions(
                 scratch.info.definitions.insert(key, expr);
             } else {
                 let expr = {
-                let lower = LowerCtx {
-                    definitions: &scratch.info.definitions,
-                    semantic_values: &scratch.info.semantic_values,
-                    use_counts: &scratch.info.use_counts,
-                    condition_vars: &scratch.info.condition_vars,
-                    pinned: &scratch.info.pinned,
-                    var_aliases: &scratch.info.var_aliases,
-                    type_hints: &scratch.info.type_hints,
-                    ptr_arith: &scratch.info.ptr_arith,
-                    stack_slots: &scratch.info.stack_slots,
-                    forwarded_values: &scratch.info.forwarded_values,
-                    function_names: env.function_names,
-                    strings: env.strings,
-                    symbols: env.symbols,
-                    type_oracle: env.type_oracle,
-                };
-                if let Some(prov) = scratch.info.forwarded_values.get(&key) {
-                    lower.expr_for_ssa_name(&prov.source)
-                } else {
-                    lower.op_to_expr(op)
-                }
+                    let lower = LowerCtx {
+                        definitions: &scratch.info.definitions,
+                        semantic_values: &scratch.info.semantic_values,
+                        use_counts: &scratch.info.use_counts,
+                        condition_vars: &scratch.info.condition_vars,
+                        pinned: &scratch.info.pinned,
+                        var_aliases: &scratch.info.var_aliases,
+                        type_hints: &scratch.info.type_hints,
+                        ptr_arith: &scratch.info.ptr_arith,
+                        stack_slots: &scratch.info.stack_slots,
+                        forwarded_values: &scratch.info.forwarded_values,
+                        function_names: env.function_names,
+                        strings: env.strings,
+                        symbols: env.symbols,
+                        type_oracle: env.type_oracle,
+                    };
+                    if let Some(prov) = scratch.info.forwarded_values.get(&key) {
+                        lower.expr_for_ssa_name(&prov.source)
+                    } else {
+                        lower.op_to_expr(op)
+                    }
                 };
                 scratch.info.definitions.insert(key, expr);
             }
@@ -513,8 +522,12 @@ fn merged_slot_store_value_for_pred(
 ) -> Option<SemanticValue> {
     for op in block.ops.iter().rev() {
         if let SSAOp::Store { addr, val, .. } = op
-            && utils::extract_stack_offset_from_var(addr, &info.definitions, env.fp_name, env.sp_name)
-                == Some(slot_offset)
+            && utils::extract_stack_offset_from_var(
+                addr,
+                &info.definitions,
+                env.fp_name,
+                env.sp_name,
+            ) == Some(slot_offset)
         {
             return semantic_stack_store_value(info, val, env);
         }
@@ -588,7 +601,11 @@ fn collect_semantic_values(scratch: &mut UseScratch, op: &SSAOp, env: &PassEnv<'
         } => {
             let mut addr = semantic_addr_for_var(&scratch.info, base, env)
                 .unwrap_or_else(|| normalized_addr_from_base_var(base));
-            if addr.index.is_none() || addr.index.as_ref().is_some_and(|existing| existing == &ValueRef::from(index))
+            if addr.index.is_none()
+                || addr
+                    .index
+                    .as_ref()
+                    .is_some_and(|existing| existing == &ValueRef::from(index))
             {
                 addr.index = Some(ValueRef::from(index));
                 addr.scale_bytes = i64::from(*element_size);
@@ -607,7 +624,11 @@ fn collect_semantic_values(scratch: &mut UseScratch, op: &SSAOp, env: &PassEnv<'
         } => {
             let mut addr = semantic_addr_for_var(&scratch.info, base, env)
                 .unwrap_or_else(|| normalized_addr_from_base_var(base));
-            if addr.index.is_none() || addr.index.as_ref().is_some_and(|existing| existing == &ValueRef::from(index))
+            if addr.index.is_none()
+                || addr
+                    .index
+                    .as_ref()
+                    .is_some_and(|existing| existing == &ValueRef::from(index))
             {
                 addr.index = Some(ValueRef::from(index));
                 addr.scale_bytes = -i64::from(*element_size);
@@ -635,7 +656,10 @@ fn collect_semantic_values(scratch: &mut UseScratch, op: &SSAOp, env: &PassEnv<'
                 insert_semantic_value(
                     &mut scratch.info,
                     dst.display_name(),
-                    SemanticValue::Load { addr: shape, size: dst.size },
+                    SemanticValue::Load {
+                        addr: shape,
+                        size: dst.size,
+                    },
                 );
             }
         }
@@ -720,19 +744,17 @@ fn semantic_addr_from_add_sub(
     }
 
     if let Some((index, scale)) = recover_scaled_index_from_var(info, producers, b, env, 0) {
-        let signed_scale = if is_sub {
-            scale.checked_neg()?
-        } else {
-            scale
-        };
-        let base = semantic_addr_for_var(info, a, env).unwrap_or_else(|| normalized_addr_from_base_var(a));
+        let signed_scale = if is_sub { scale.checked_neg()? } else { scale };
+        let base =
+            semantic_addr_for_var(info, a, env).unwrap_or_else(|| normalized_addr_from_base_var(a));
         return compose_indexed_addr(base, index, signed_scale);
     }
 
     if !is_sub
         && let Some((index, scale)) = recover_scaled_index_from_var(info, producers, a, env, 0)
     {
-        let base = semantic_addr_for_var(info, b, env).unwrap_or_else(|| normalized_addr_from_base_var(b));
+        let base =
+            semantic_addr_for_var(info, b, env).unwrap_or_else(|| normalized_addr_from_base_var(b));
         return compose_indexed_addr(base, index, scale);
     }
 
@@ -808,9 +830,11 @@ fn recover_scaled_index_from_var(
                 recover_scaled_index_from_var(info, producers, a, env, depth + 1)?;
             let (right, right_scale) =
                 recover_scaled_index_from_var(info, producers, b, env, depth + 1)?;
-            (left == right)
-                .then_some(())
-                .and_then(|_| left_scale.checked_add(right_scale).map(|scale| (left, scale)))
+            (left == right).then_some(()).and_then(|_| {
+                left_scale
+                    .checked_add(right_scale)
+                    .map(|scale| (left, scale))
+            })
         }
         Some(SSAOp::IntSub { a, b, .. }) => {
             if semantic_var_resolves_to_zero(info, producers, a, depth + 1) {
@@ -825,18 +849,16 @@ fn recover_scaled_index_from_var(
                 recover_scaled_index_from_var(info, producers, a, env, depth + 1)?;
             let (right, right_scale) =
                 recover_scaled_index_from_var(info, producers, b, env, depth + 1)?;
-            (left == right)
-                .then_some(())
-                .and_then(|_| left_scale.checked_sub(right_scale).map(|scale| (left, scale)))
+            (left == right).then_some(()).and_then(|_| {
+                left_scale
+                    .checked_sub(right_scale)
+                    .map(|scale| (left, scale))
+            })
         }
-        Some(SSAOp::IntNegate { src, .. }) => recover_scaled_index_from_var(
-            info,
-            producers,
-            src,
-            env,
-            depth + 1,
-        )
-        .and_then(|(inner, scale)| scale.checked_neg().map(|neg| (inner, neg))),
+        Some(SSAOp::IntNegate { src, .. }) => {
+            recover_scaled_index_from_var(info, producers, src, env, depth + 1)
+                .and_then(|(inner, scale)| scale.checked_neg().map(|neg| (inner, neg)))
+        }
         _ => Some((var.clone(), 1)),
     }
 }
@@ -933,7 +955,10 @@ fn semantic_var_is_pointer_like(info: &UseInfo, var: &SSAVar, env: &PassEnv<'_>)
 fn semantic_type_hint_names(info: &UseInfo, var: &SSAVar, env: &PassEnv<'_>) -> Vec<String> {
     let mut names = Vec::new();
     let push_unique = |names: &mut Vec<String>, name: String| {
-        if !names.iter().any(|existing| existing.eq_ignore_ascii_case(&name)) {
+        if !names
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&name))
+        {
             names.push(name);
         }
     };
@@ -947,7 +972,10 @@ fn semantic_type_hint_names(info: &UseInfo, var: &SSAVar, env: &PassEnv<'_>) -> 
         push_unique(&mut names, alias.to_ascii_lowercase());
     }
 
-    if let Some(alias) = env.param_register_aliases.get(&var.name.to_ascii_lowercase()) {
+    if let Some(alias) = env
+        .param_register_aliases
+        .get(&var.name.to_ascii_lowercase())
+    {
         push_unique(&mut names, alias.clone());
         push_unique(&mut names, alias.to_ascii_lowercase());
     }
@@ -1034,9 +1062,7 @@ fn semantic_addr_for_var(
         && let Some(reg_name) = env.arg_regs.get(slot)
     {
         return Some(normalized_addr_from_base_var(&SSAVar::new(
-            reg_name,
-            0,
-            ptr_bytes,
+            reg_name, 0, ptr_bytes,
         )));
     }
 
@@ -1161,7 +1187,9 @@ fn semantic_source_value_for_var(info: &UseInfo, var: &SSAVar) -> Option<Semanti
     {
         return None;
     }
-    Some(SemanticValue::Scalar(ScalarValue::Root(ValueRef::from(var))))
+    Some(SemanticValue::Scalar(ScalarValue::Root(ValueRef::from(
+        var,
+    ))))
 }
 
 fn semantic_source_value_from_provenance(
@@ -1213,7 +1241,9 @@ fn semantic_or_scalar_source_value(info: &UseInfo, source_name: &str) -> Option<
         return None;
     }
 
-    Some(SemanticValue::Scalar(ScalarValue::Expr(CExpr::Var(rendered))))
+    Some(SemanticValue::Scalar(ScalarValue::Expr(CExpr::Var(
+        rendered,
+    ))))
 }
 
 fn resolve_copy_root_name(info: &UseInfo, name: &str) -> String {
@@ -3067,25 +3097,34 @@ mod tests {
 
         let info = analyze(&[block], &env);
 
-        assert!(matches!(
+        assert!(
+            matches!(
+                info.semantic_values.get(&reloaded_base.display_name()),
+                Some(SemanticValue::Address(NormalizedAddr {
+                    base: BaseRef::Value(value_ref),
+                    index: None,
+                    scale_bytes: 0,
+                    offset_bytes: 0,
+                })) if value_ref.var == x0
+            ),
+            "reloaded base semantic value = {:?}, forwarded = {:?}",
             info.semantic_values.get(&reloaded_base.display_name()),
-            Some(SemanticValue::Address(NormalizedAddr {
-                base: BaseRef::Value(value_ref),
-                index: None,
-                scale_bytes: 0,
-                offset_bytes: 0,
-            })) if value_ref.var == x0
-        ), "reloaded base semantic value = {:?}, forwarded = {:?}", info.semantic_values.get(&reloaded_base.display_name()), info.forwarded_values.get(&reloaded_base.display_name()));
+            info.forwarded_values.get(&reloaded_base.display_name())
+        );
 
-        assert!(matches!(
-            info.semantic_values.get(&field_addr.display_name()),
-            Some(SemanticValue::Address(NormalizedAddr {
-                base: BaseRef::Value(value_ref),
-                index: Some(_),
-                scale_bytes: 0x38,
-                offset_bytes: 8,
-            })) if value_ref.var == x0
-        ), "field addr semantic value = {:?}", info.semantic_values.get(&field_addr.display_name()));
+        assert!(
+            matches!(
+                info.semantic_values.get(&field_addr.display_name()),
+                Some(SemanticValue::Address(NormalizedAddr {
+                    base: BaseRef::Value(value_ref),
+                    index: Some(_),
+                    scale_bytes: 0x38,
+                    offset_bytes: 8,
+                })) if value_ref.var == x0
+            ),
+            "field addr semantic value = {:?}",
+            info.semantic_values.get(&field_addr.display_name())
+        );
     }
 
     #[test]
@@ -3122,9 +3161,14 @@ mod tests {
             target: Varnode::constant(0, 8),
         });
 
-        let mut func =
-            SSAFunction::from_blocks_raw_no_arch(&[entry, fallthrough, else_block, then_block, exit])
-                .expect("ssa function");
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[
+            entry,
+            fallthrough,
+            else_block,
+            then_block,
+            exit,
+        ])
+        .expect("ssa function");
         func.get_block_mut(0x1000).expect("entry").ops = vec![SSAOp::CBranch {
             target: mk("ram:1020", 0, 8),
             cond: mk("tmp:a00", 1, 1),

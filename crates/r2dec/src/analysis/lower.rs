@@ -381,7 +381,9 @@ impl<'a> LowerCtx<'a> {
                 self.render_value_ref(value, depth, visited)
             }
             SemanticValue::Address(shape) => self.render_addr_shape(shape, depth, visited),
-            SemanticValue::Load { addr, size } => self.render_load_from_shape(addr, *size, depth, visited),
+            SemanticValue::Load { addr, size } => {
+                self.render_load_from_shape(addr, *size, depth, visited)
+            }
             SemanticValue::Unknown => None,
         }
     }

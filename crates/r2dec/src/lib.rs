@@ -1691,8 +1691,12 @@ mod tests {
         };
         let blocks: Vec<_> = func.blocks().cloned().collect();
         let use_info = analysis::UseInfo::analyze(&blocks, &env);
-        let profiles =
-            analysis::use_info::collect_local_struct_field_access_profiles(&use_info, &func, &env, &arg_slot_map);
+        let profiles = analysis::use_info::collect_local_struct_field_access_profiles(
+            &use_info,
+            &func,
+            &env,
+            &arg_slot_map,
+        );
         let accesses = infer_local_struct_field_accesses(&func, &config);
         assert!(
             accesses.iter().any(|access| access.arg_index == 0

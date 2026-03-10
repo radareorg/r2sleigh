@@ -369,10 +369,9 @@ impl<'a> FoldingContext<'a> {
         let Some(exit_block) = func.get_block(exit_addr) else {
             return;
         };
-        let pure_control_exit = exit_block
-            .ops
-            .iter()
-            .all(|op| matches!(op, SSAOp::Return { target } if self.is_control_return_target(target)));
+        let pure_control_exit = exit_block.ops.iter().all(
+            |op| matches!(op, SSAOp::Return { target } if self.is_control_return_target(target)),
+        );
         let exit_loaded_slot = if pure_control_exit {
             None
         } else {
@@ -392,7 +391,8 @@ impl<'a> FoldingContext<'a> {
             let Some(pred_block) = func.get_block(pred_addr) else {
                 return;
             };
-            let Some(slot) = self.return_stack_slot_written_before_exit(pred_block, exit_addr) else {
+            let Some(slot) = self.return_stack_slot_written_before_exit(pred_block, exit_addr)
+            else {
                 return;
             };
             match common_slot {
@@ -413,7 +413,11 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn return_stack_slot_written_before_exit(&self, block: &SSABlock, exit_addr: u64) -> Option<i64> {
+    fn return_stack_slot_written_before_exit(
+        &self,
+        block: &SSABlock,
+        exit_addr: u64,
+    ) -> Option<i64> {
         let mut branches_to_exit = false;
         for op in block.ops.iter().rev() {
             match op {
@@ -1055,8 +1059,11 @@ impl<'a> FoldingContext<'a> {
                     self.semantic_values_map()
                         .get(&format!("{}_{}", base.to_lowercase(), version))
                         .or_else(|| {
-                            self.semantic_values_map()
-                                .get(&format!("{}_{}", base.to_uppercase(), version))
+                            self.semantic_values_map().get(&format!(
+                                "{}_{}",
+                                base.to_uppercase(),
+                                version
+                            ))
                         })
                 })
             })
@@ -1085,7 +1092,9 @@ impl<'a> FoldingContext<'a> {
         visited: &mut HashSet<String>,
     ) -> Option<CExpr> {
         match value {
-            analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr)) => Some(expr.clone()),
+            analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr)) => {
+                Some(expr.clone())
+            }
             analysis::SemanticValue::Scalar(analysis::ScalarValue::Root(value)) => {
                 self.render_value_ref(value, depth, visited)
             }
@@ -1114,9 +1123,9 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
 
-        let forwarded = self
-            .forwarded_source_var(&name)
-            .and_then(|source| self.render_value_ref(&analysis::ValueRef::from(source), depth + 1, visited));
+        let forwarded = self.forwarded_source_var(&name).and_then(|source| {
+            self.render_value_ref(&analysis::ValueRef::from(source), depth + 1, visited)
+        });
         let fallback = if value.var.is_const() {
             Some(self.const_to_expr(&value.var))
         } else {
@@ -1128,8 +1137,9 @@ impl<'a> FoldingContext<'a> {
             )
         };
         let rendered = match self.lookup_semantic_value(&name) {
-            Some(analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr))) => self
-                .render_scalar_value_ref(value, expr.clone(), fallback.clone()),
+            Some(analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr))) => {
+                self.render_scalar_value_ref(value, expr.clone(), fallback.clone())
+            }
             Some(analysis::SemanticValue::Scalar(analysis::ScalarValue::Root(root))) => {
                 self.render_value_ref(root, depth + 1, visited)
             }
@@ -1141,13 +1151,13 @@ impl<'a> FoldingContext<'a> {
             }
             Some(analysis::SemanticValue::Unknown) | None => self
                 .lookup_definition(&name)
-                .and_then(|expr| self.render_semantic_load_from_definition_expr(&expr, depth + 1, visited))
+                .and_then(|expr| {
+                    self.render_semantic_load_from_definition_expr(&expr, depth + 1, visited)
+                })
                 .or_else(|| {
-                    self.definitions_map()
-                        .get(&name)
-                        .and_then(|expr| {
-                            self.render_semantic_load_from_definition_expr(expr, depth + 1, visited)
-                        })
+                    self.definitions_map().get(&name).and_then(|expr| {
+                        self.render_semantic_load_from_definition_expr(expr, depth + 1, visited)
+                    })
                 }),
         }
         .or(fallback);
@@ -1186,8 +1196,11 @@ impl<'a> FoldingContext<'a> {
                 self.forwarded_values_map()
                     .get(&format!("{}_{}", base.to_ascii_lowercase(), version))
                     .or_else(|| {
-                        self.forwarded_values_map()
-                            .get(&format!("{}_{}", base.to_ascii_uppercase(), version))
+                        self.forwarded_values_map().get(&format!(
+                            "{}_{}",
+                            base.to_ascii_uppercase(),
+                            version
+                        ))
                     })
             })
         };
@@ -1207,9 +1220,15 @@ impl<'a> FoldingContext<'a> {
     ) -> Option<CExpr> {
         match base {
             analysis::BaseRef::Value(value) => self.render_value_ref(value, depth + 1, visited),
-            analysis::BaseRef::StackSlot(offset) => self.resolve_stack_var(*offset).map(CExpr::Var).map(
-                |expr| if as_address { CExpr::AddrOf(Box::new(expr)) } else { expr },
-            ),
+            analysis::BaseRef::StackSlot(offset) => {
+                self.resolve_stack_var(*offset).map(CExpr::Var).map(|expr| {
+                    if as_address {
+                        CExpr::AddrOf(Box::new(expr))
+                    } else {
+                        expr
+                    }
+                })
+            }
             analysis::BaseRef::Raw(expr) => Some(expr.clone()),
         }
     }
@@ -1346,8 +1365,7 @@ impl<'a> FoldingContext<'a> {
         }
 
         let mut visited = HashSet::new();
-        if let Some(root) = self.semantic_root_var(&base_ref.var, 0, &mut visited)
-        {
+        if let Some(root) = self.semantic_root_var(&base_ref.var, 0, &mut visited) {
             if let Some(oracle) = self.inputs.type_oracle
                 && let Some(field) = oracle
                     .field_name(oracle.type_of(&root), offset)
@@ -1424,18 +1442,17 @@ impl<'a> FoldingContext<'a> {
                     .or(Some(source))
             })
             .or_else(|| match self.lookup_semantic_value(&name) {
-            Some(analysis::SemanticValue::Scalar(analysis::ScalarValue::Root(root))) => {
-                self.semantic_root_var(&root.var, depth + 1, visited)
-                    .or_else(|| Some(root.var.clone()))
-            }
-            Some(analysis::SemanticValue::Address(analysis::NormalizedAddr {
-                base: analysis::BaseRef::Value(root),
-                ..
-            })) => self
-                .semantic_root_var(&root.var, depth + 1, visited)
-                .or_else(|| Some(root.var.clone())),
-            _ => None,
-        });
+                Some(analysis::SemanticValue::Scalar(analysis::ScalarValue::Root(root))) => self
+                    .semantic_root_var(&root.var, depth + 1, visited)
+                    .or_else(|| Some(root.var.clone())),
+                Some(analysis::SemanticValue::Address(analysis::NormalizedAddr {
+                    base: analysis::BaseRef::Value(root),
+                    ..
+                })) => self
+                    .semantic_root_var(&root.var, depth + 1, visited)
+                    .or_else(|| Some(root.var.clone())),
+                _ => None,
+            });
 
         visited.remove(&name);
         resolved
@@ -1473,7 +1490,8 @@ impl<'a> FoldingContext<'a> {
         let field_name = self
             .oracle_field_name_for_addr(&effective_addr)
             .or_else(|| {
-                let mut normalized = self.normalized_addr_from_visible_expr(&base_expr, depth + 1)?;
+                let mut normalized =
+                    self.normalized_addr_from_visible_expr(&base_expr, depth + 1)?;
                 normalized.offset_bytes = normalized
                     .offset_bytes
                     .checked_add(effective_addr.offset_bytes)?;
@@ -1484,7 +1502,9 @@ impl<'a> FoldingContext<'a> {
         if let Some(index) = &effective_addr.index {
             let scale = effective_addr.scale_bytes.unsigned_abs() as u32;
             let index_expr = self.render_value_ref(index, depth + 1, visited)?;
-            let index_expr = self.normalize_index_expr(&index_expr, 0).unwrap_or(index_expr);
+            let index_expr = self
+                .normalize_index_expr(&index_expr, 0)
+                .unwrap_or(index_expr);
             let elem_ty =
                 self.infer_elem_type_from_base_ref(&effective_addr.base, scale.max(elem_size));
             let base_cast = CExpr::cast(
@@ -1529,15 +1549,18 @@ impl<'a> FoldingContext<'a> {
         depth: u32,
         visited: &mut HashSet<String>,
     ) -> Option<CExpr> {
-        self.render_access_expr_from_addr(addr, elem_size, depth, visited).or_else(|| {
-            self.render_address_expr_from_addr(addr, depth + 1, visited)
-                .map(|expr| CExpr::Deref(Box::new(expr)))
-        })
+        self.render_access_expr_from_addr(addr, elem_size, depth, visited)
+            .or_else(|| {
+                self.render_address_expr_from_addr(addr, depth + 1, visited)
+                    .map(|expr| CExpr::Deref(Box::new(expr)))
+            })
     }
 
     fn value_ref_from_visible_expr(&self, expr: &CExpr) -> Option<analysis::ValueRef> {
         match expr {
-            CExpr::Var(name) => self.ssa_var_for_visible_name(name).map(analysis::ValueRef::from),
+            CExpr::Var(name) => self
+                .ssa_var_for_visible_name(name)
+                .map(analysis::ValueRef::from),
             CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
                 self.value_ref_from_visible_expr(inner)
             }
@@ -1587,7 +1610,9 @@ impl<'a> FoldingContext<'a> {
             CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
                 self.extract_visible_scaled_index(inner, depth + 1)
             }
-            _ => self.value_ref_from_visible_expr(expr).map(|index| (index, 1)),
+            _ => self
+                .value_ref_from_visible_expr(expr)
+                .map(|index| (index, 1)),
         }
     }
 
@@ -1668,8 +1693,7 @@ impl<'a> FoldingContext<'a> {
                 if let Some(semantic) =
                     self.render_semantic_value_by_name(name, depth + 1, &mut semantic_visited)
                     && !matches!(&semantic, CExpr::Var(inner) if inner == name)
-                    && let Some(addr) =
-                        self.normalized_addr_from_visible_expr(&semantic, depth + 1)
+                    && let Some(addr) = self.normalized_addr_from_visible_expr(&semantic, depth + 1)
                 {
                     return Some(addr);
                 }
@@ -1804,7 +1828,9 @@ impl<'a> FoldingContext<'a> {
             analysis::SemanticValue::Address(shape) => {
                 self.render_load_from_addr(shape, elem_size, depth, visited)
             }
-            analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr)) => Some(expr.clone()),
+            analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr)) => {
+                Some(expr.clone())
+            }
             analysis::SemanticValue::Scalar(analysis::ScalarValue::Root(value_ref)) => {
                 self.render_value_ref(value_ref, depth, visited)
             }
@@ -1812,11 +1838,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn infer_elem_type_from_base_ref(
-        &self,
-        base: &analysis::BaseRef,
-        element_size: u32,
-    ) -> CType {
+    fn infer_elem_type_from_base_ref(&self, base: &analysis::BaseRef, element_size: u32) -> CType {
         match base {
             analysis::BaseRef::Value(base_ref) => {
                 if let Some(CType::Pointer(inner) | CType::Array(inner, _)) =
@@ -1872,8 +1894,7 @@ impl<'a> FoldingContext<'a> {
             if matches!(
                 lower.as_str(),
                 "eax" | "ebx" | "ecx" | "edx" | "esi" | "edi" | "ebp" | "esp" | "eip"
-            ) || (lower.starts_with('w')
-                && lower[1..].chars().all(|ch| ch.is_ascii_digit()))
+            ) || (lower.starts_with('w') && lower[1..].chars().all(|ch| ch.is_ascii_digit()))
             {
                 return 4;
             }
@@ -2774,7 +2795,8 @@ impl<'a> FoldingContext<'a> {
         let elem_size = elem_ty.bits().map(|bits| bits.div_ceil(8)).unwrap_or(0);
         if let Some(shape) = self.normalized_addr_from_visible_expr(&addr_expr, 0) {
             let mut visited = HashSet::new();
-            if let Some(access) = self.render_access_expr_from_addr(&shape, elem_size, 0, &mut visited)
+            if let Some(access) =
+                self.render_access_expr_from_addr(&shape, elem_size, 0, &mut visited)
             {
                 return access;
             }
@@ -3259,7 +3281,8 @@ impl<'a> FoldingContext<'a> {
                 }
 
                 let semantic_inner = self.semanticize_visible_expr(inner, depth + 1, visited);
-                if let Some(addr) = self.normalized_addr_from_visible_expr(&semantic_inner, depth + 1)
+                if let Some(addr) =
+                    self.normalized_addr_from_visible_expr(&semantic_inner, depth + 1)
                     && let Some(access) =
                         self.render_access_expr_from_addr(&addr, 0, depth + 1, visited)
                 {
@@ -3277,9 +3300,11 @@ impl<'a> FoldingContext<'a> {
                 ty.clone(),
                 self.semanticize_visible_expr(inner, depth + 1, visited),
             ),
-            CExpr::Paren(inner) => CExpr::Paren(Box::new(
-                self.semanticize_visible_expr(inner, depth + 1, visited),
-            )),
+            CExpr::Paren(inner) => CExpr::Paren(Box::new(self.semanticize_visible_expr(
+                inner,
+                depth + 1,
+                visited,
+            ))),
             CExpr::Unary { op, operand } => CExpr::unary(
                 *op,
                 self.semanticize_visible_expr(operand, depth + 1, visited),
@@ -3317,12 +3342,16 @@ impl<'a> FoldingContext<'a> {
                 base: Box::new(self.semanticize_visible_expr(base, depth + 1, visited)),
                 member: member.clone(),
             },
-            CExpr::Sizeof(inner) => CExpr::Sizeof(Box::new(
-                self.semanticize_visible_expr(inner, depth + 1, visited),
-            )),
-            CExpr::AddrOf(inner) => CExpr::AddrOf(Box::new(
-                self.semanticize_visible_expr(inner, depth + 1, visited),
-            )),
+            CExpr::Sizeof(inner) => CExpr::Sizeof(Box::new(self.semanticize_visible_expr(
+                inner,
+                depth + 1,
+                visited,
+            ))),
+            CExpr::AddrOf(inner) => CExpr::AddrOf(Box::new(self.semanticize_visible_expr(
+                inner,
+                depth + 1,
+                visited,
+            ))),
             CExpr::Comma(items) => CExpr::Comma(
                 items
                     .iter()

@@ -39,8 +39,6 @@ pub use function::{
     SwitchInfo,
 };
 pub use op::SSAOp;
-pub use optimize::{
-    DecompilePrepConfig, OptimizationConfig, OptimizationStats, optimize_function,
-};
+pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, optimize_function};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use var::SSAVar;

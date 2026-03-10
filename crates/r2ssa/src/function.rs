@@ -145,10 +145,7 @@ impl SSAFunction {
     /// This keeps memory reads and address arithmetic intact while still
     /// applying limited whole-function SCCP so layout-sensitive patterns
     /// collapse to a canonical indexed+offset form for downstream consumers.
-    pub fn from_blocks_for_patterns(
-        blocks: &[R2ILBlock],
-        arch: Option<&ArchSpec>,
-    ) -> Option<Self> {
+    pub fn from_blocks_for_patterns(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
         let mut func = Self::from_blocks_raw(blocks, arch)?;
         let cfg = crate::optimize::OptimizationConfig {
             max_iterations: 1,
@@ -785,7 +782,10 @@ impl RegisterFamilyInfo {
     }
 }
 
-fn meet_family_states(preds: &[u64], out_states: &HashMap<u64, FamilyRootState>) -> FamilyRootState {
+fn meet_family_states(
+    preds: &[u64],
+    out_states: &HashMap<u64, FamilyRootState>,
+) -> FamilyRootState {
     let mut pred_iter = preds.iter();
     let Some(first_pred) = pred_iter.next() else {
         return HashMap::new();

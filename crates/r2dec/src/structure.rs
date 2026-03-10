@@ -668,8 +668,10 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let mut then_stmt = self.structure_region(then_region);
         let mut else_stmt = self.structure_region(else_region);
 
-        then_stmt = self.append_merged_slot_return_if_needed(then_stmt, then_pred, summary.slot_offset)?;
-        else_stmt = self.append_merged_slot_return_if_needed(else_stmt, else_pred, summary.slot_offset)?;
+        then_stmt =
+            self.append_merged_slot_return_if_needed(then_stmt, then_pred, summary.slot_offset)?;
+        else_stmt =
+            self.append_merged_slot_return_if_needed(else_stmt, else_pred, summary.slot_offset)?;
 
         let if_stmt = CStmt::If {
             cond: self.get_branch_condition(cond_block),

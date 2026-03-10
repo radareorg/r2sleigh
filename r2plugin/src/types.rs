@@ -131,13 +131,12 @@ fn infer_signature_cc_from_analysis(
 
     if input.ctx.semantic_metadata_enabled {
         let reg_type_hints = collect_register_type_hints(input.blocks.as_slice(), input.ctx.disasm);
-        let recovered_vars =
-            recover_vars_from_ssa(
-                &analysis.pattern_ssa_blocks,
-                input.ctx.arch,
-                &reg_type_hints,
-                true,
-            );
+        let recovered_vars = recover_vars_from_ssa(
+            &analysis.pattern_ssa_blocks,
+            input.ctx.arch,
+            &reg_type_hints,
+            true,
+        );
         let pointer_arg_slots = collect_pointer_arg_slots(&recovered_vars);
         merge_pointer_slot_evidence(&mut inferred_params, &pointer_arg_slots);
     }
@@ -272,20 +271,20 @@ fn build_function_analysis_artifact_from_analysis(
         .unwrap_or(64);
     let mut signature_cc = infer_signature_cc_from_analysis(input, &analysis)?;
     let sig_ctx = crate::parse_signature_context(afcfj, ptr_bits);
-    let (_param_types, _param_names) = apply_signature_context_overrides(&mut signature_cc, &sig_ctx);
+    let (_param_types, _param_names) =
+        apply_signature_context_overrides(&mut signature_cc, &sig_ctx);
 
     let reg_params = crate::parse_external_reg_params(afvj, ptr_bits);
     let merged_signature =
         crate::merge_signature_with_reg_params(sig_ctx.current.clone(), reg_params);
 
     let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
-    let raw_structs =
-        crate::infer_structs_from_ssa(
-            &analysis.pattern_ssa_blocks,
-            input.ctx.arch,
-            ptr_bits,
-            &mut diagnostics,
-        );
+    let raw_structs = crate::infer_structs_from_ssa(
+        &analysis.pattern_ssa_blocks,
+        input.ctx.arch,
+        ptr_bits,
+        &mut diagnostics,
+    );
     let semantic_structs = crate::infer_structs_from_semantic_accesses(
         &analysis.pattern_ssa_func,
         &build_decompiler_env(&input.ctx).cfg,
@@ -294,7 +293,8 @@ fn build_function_analysis_artifact_from_analysis(
     );
     let (mut struct_decls, mut slot_type_overrides, slot_field_profiles) =
         crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
-    let (external_structs, solver_warnings) = crate::collect_external_struct_candidates(tsj, ptr_bits);
+    let (external_structs, solver_warnings) =
+        crate::collect_external_struct_candidates(tsj, ptr_bits);
     diagnostics.solver_warnings = solver_warnings;
     crate::align_local_structs_with_external(
         &mut struct_decls,
@@ -370,10 +370,10 @@ pub(crate) fn build_detached_function_analysis_artifact(
     afvj: &str,
     tsj: &str,
 ) -> Option<FunctionAnalysisArtifact> {
-    let ssa_func = r2ssa::SSAFunction::from_blocks_for_decompile(blocks, arch)?
-        .with_name(function_name);
-    let pattern_ssa_func = r2ssa::SSAFunction::from_blocks_for_patterns(blocks, arch)?
-        .with_name(function_name);
+    let ssa_func =
+        r2ssa::SSAFunction::from_blocks_for_decompile(blocks, arch)?.with_name(function_name);
+    let pattern_ssa_func =
+        r2ssa::SSAFunction::from_blocks_for_patterns(blocks, arch)?.with_name(function_name);
     let analysis = FunctionAnalysis {
         pattern_ssa_blocks: function_blocks_to_local_ssa(&pattern_ssa_func),
         pattern_ssa_func,
@@ -497,23 +497,22 @@ pub(crate) fn build_detached_function_analysis_artifact(
         crate::merge_signature_with_reg_params(sig_ctx.current.clone(), reg_params);
 
     let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
-    let raw_structs =
-        crate::infer_structs_from_ssa(
-            &analysis.pattern_ssa_blocks,
-            arch,
-            ptr_bits,
-            &mut diagnostics,
-        );
-    let semantic_structs =
-        crate::infer_structs_from_semantic_accesses(
-            &analysis.pattern_ssa_func,
-            &cfg,
-            ptr_bits,
-            &mut diagnostics,
-        );
+    let raw_structs = crate::infer_structs_from_ssa(
+        &analysis.pattern_ssa_blocks,
+        arch,
+        ptr_bits,
+        &mut diagnostics,
+    );
+    let semantic_structs = crate::infer_structs_from_semantic_accesses(
+        &analysis.pattern_ssa_func,
+        &cfg,
+        ptr_bits,
+        &mut diagnostics,
+    );
     let (mut struct_decls, mut slot_type_overrides, slot_field_profiles) =
         crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
-    let (external_structs, solver_warnings) = crate::collect_external_struct_candidates(tsj, ptr_bits);
+    let (external_structs, solver_warnings) =
+        crate::collect_external_struct_candidates(tsj, ptr_bits);
     diagnostics.solver_warnings = solver_warnings;
     crate::align_local_structs_with_external(
         &mut struct_decls,

@@ -1228,7 +1228,9 @@ impl<'a> CombinedTypeOracle<'a> {
             },
             _ => None,
         }?;
-        self.external_type_db.structs.get(&named.to_ascii_lowercase())
+        self.external_type_db
+            .structs
+            .get(&named.to_ascii_lowercase())
     }
 }
 

@@ -4112,7 +4112,10 @@ fn infer_structs_from_ssa(
             let ops = block
                 .ops
                 .iter()
-                .filter_map(|op| op.dst().map(|dst| (ssa_var_block_key(block.addr, dst), op.clone())))
+                .filter_map(|op| {
+                    op.dst()
+                        .map(|dst| (ssa_var_block_key(block.addr, dst), op.clone()))
+                })
                 .collect::<HashMap<_, _>>();
             (block.addr, ops)
         })
@@ -4149,13 +4152,7 @@ fn infer_structs_from_ssa(
                 (parse_ssa_const_offset(&a.name, 64).is_some()
                     && is_scaled_index_like(block_addr, b, ops_by_block, addr_exprs, depth + 1))
                     || (parse_ssa_const_offset(&b.name, 64).is_some()
-                        && is_scaled_index_like(
-                            block_addr,
-                            a,
-                            ops_by_block,
-                            addr_exprs,
-                            depth + 1,
-                        ))
+                        && is_scaled_index_like(block_addr, a, ops_by_block, addr_exprs, depth + 1))
             }
             r2ssa::SSAOp::IntLeft { a, b, .. } => {
                 parse_ssa_const_offset(&b.name, 64).is_some()
@@ -4323,13 +4320,7 @@ fn infer_structs_from_ssa(
                                 );
                             }
                         } else if let Some(base) = addr_of(a, &addr_exprs)
-                            && is_scaled_index_like(
-                                block.addr,
-                                b,
-                                &block_ops,
-                                &addr_exprs,
-                                0,
-                            )
+                            && is_scaled_index_like(block.addr, b, &block_ops, &addr_exprs, 0)
                         {
                             changed |= set_expr(
                                 dst,
@@ -4356,13 +4347,7 @@ fn infer_structs_from_ssa(
                                 );
                             }
                         } else if let Some(base) = addr_of(b, &addr_exprs)
-                            && is_scaled_index_like(
-                                block.addr,
-                                a,
-                                &block_ops,
-                                &addr_exprs,
-                                0,
-                            )
+                            && is_scaled_index_like(block.addr, a, &block_ops, &addr_exprs, 0)
                         {
                             changed |= set_expr(
                                 dst,
@@ -4402,13 +4387,7 @@ fn infer_structs_from_ssa(
                                 );
                             }
                         } else if let Some(base) = addr_of(a, &addr_exprs)
-                            && is_scaled_index_like(
-                                block.addr,
-                                b,
-                                &block_ops,
-                                &addr_exprs,
-                                0,
-                            )
+                            && is_scaled_index_like(block.addr, b, &block_ops, &addr_exprs, 0)
                         {
                             changed |= set_expr(
                                 dst,
@@ -4595,10 +4574,9 @@ fn is_generic_signature_type(ty: Option<&r2dec::CType>) -> bool {
     match ty {
         None => true,
         Some(r2dec::CType::Unknown | r2dec::CType::Void) => true,
-        Some(r2dec::CType::Pointer(inner)) => matches!(
-            inner.as_ref(),
-            r2dec::CType::Unknown | r2dec::CType::Void
-        ),
+        Some(r2dec::CType::Pointer(inner)) => {
+            matches!(inner.as_ref(), r2dec::CType::Unknown | r2dec::CType::Void)
+        }
         _ => false,
     }
 }
@@ -7805,8 +7783,7 @@ mod integration_tests {
             switch_info: None,
             op_metadata: Default::default(),
         };
-        let mut func =
-            r2ssa::SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        let mut func = r2ssa::SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
         func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
         func = func.with_name("sym._test_struct_array_index");
 

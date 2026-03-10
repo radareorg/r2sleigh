@@ -121,10 +121,7 @@ pub(crate) enum ScalarValue {
 pub(crate) enum SemanticValue {
     Scalar(ScalarValue),
     Address(NormalizedAddr),
-    Load {
-        addr: NormalizedAddr,
-        size: u32,
-    },
+    Load { addr: NormalizedAddr, size: u32 },
     Unknown,
 }
 
