@@ -583,6 +583,12 @@ impl<'a> FoldingContext<'a> {
                 .unwrap_or_else(|| alias.clone());
         }
 
+        if var.version == 0
+            && let Some(alias) = self.arg_alias_for_register_name(&var.name)
+        {
+            return alias;
+        }
+
         let base = if var.name.starts_with("reg:") {
             let reg = var.name.trim_start_matches("reg:");
             if is_hex_name(reg) {

@@ -730,17 +730,16 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         })
     }
 
-    fn rewrite_trailing_return_with_merged_expr(&self, stmt: &CStmt, merged: &CExpr) -> Option<CStmt> {
+    fn rewrite_trailing_return_with_merged_expr(
+        &self,
+        stmt: &CStmt,
+        merged: &CExpr,
+    ) -> Option<CStmt> {
         match stmt {
-            CStmt::Return(Some(current)) => {
-                let current_bad = self.fold_ctx.expr_contains_generic_stack_alias(current)
-                    || self.fold_ctx.is_uninitialized_return_reg(current);
-                if current_bad || self.fold_ctx.prefers_visible_expr(current, merged) {
-                    Some(CStmt::Return(Some(merged.clone())))
-                } else {
-                    None
-                }
-            }
+            // A proven frame-slot merge is authoritative for this region tail.
+            // Once structure has matched the if/else -> merge-slot -> return pattern,
+            // do not let an earlier synthesized return expression beat the merged value.
+            CStmt::Return(Some(_current)) => Some(CStmt::Return(Some(merged.clone()))),
             CStmt::Block(stmts) => {
                 let (last, prefix) = stmts.split_last()?;
                 let rewritten_tail = self.rewrite_trailing_return_with_merged_expr(last, merged)?;

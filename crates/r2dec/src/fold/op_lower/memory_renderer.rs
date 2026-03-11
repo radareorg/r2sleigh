@@ -44,9 +44,6 @@ impl<'a> FoldingContext<'a> {
             .lookup_definition(&addr.display_name())
             .or_else(|| self.definitions_map().get(&addr.display_name()).cloned())
             .unwrap_or_else(|| self.get_expr(addr));
-        let has_authoritative = self.has_authoritative_memory_semantics(&dst.display_name())
-            || self.has_authoritative_memory_semantics(&addr.display_name());
-
         let mut semantic_visited = HashSet::new();
         let mut best = self.choose_preferred_visible_expr(
             self.render_authoritative_memory_access_by_name(
@@ -62,17 +59,13 @@ impl<'a> FoldingContext<'a> {
                 &mut semantic_visited,
             ),
         );
-        if !has_authoritative {
-            best = self.choose_preferred_visible_expr(
-                best,
-                self.render_memory_access_from_visible_expr(
-                    &fallback_addr_expr,
-                    dst.size,
-                    0,
-                    &mut semantic_visited,
-                ),
-            );
-        }
+        let fallback_rendered = self.render_memory_access_from_visible_expr(
+            &fallback_addr_expr,
+            dst.size,
+            0,
+            &mut semantic_visited,
+        );
+        best = self.choose_preferred_visible_expr(best, fallback_rendered);
         if let Some(expr) = best {
             return expr;
         }
@@ -108,8 +101,6 @@ impl<'a> FoldingContext<'a> {
             .lookup_definition(&addr.display_name())
             .or_else(|| self.definitions_map().get(&addr.display_name()).cloned())
             .unwrap_or_else(|| self.get_expr(addr));
-        let has_authoritative = self.has_authoritative_memory_semantics(&addr.display_name());
-
         let mut semantic_visited = HashSet::new();
         let mut best = self.render_authoritative_memory_access_by_name(
             &addr.display_name(),
@@ -117,17 +108,13 @@ impl<'a> FoldingContext<'a> {
             0,
             &mut semantic_visited,
         );
-        if !has_authoritative {
-            best = self.choose_preferred_visible_expr(
-                best,
-                self.render_memory_access_from_visible_expr(
-                    &fallback_addr_expr,
-                    value_size,
-                    0,
-                    &mut semantic_visited,
-                ),
-            );
-        }
+        let fallback_rendered = self.render_memory_access_from_visible_expr(
+            &fallback_addr_expr,
+            value_size,
+            0,
+            &mut semantic_visited,
+        );
+        best = self.choose_preferred_visible_expr(best, fallback_rendered);
         if let Some(expr) = best {
             return expr;
         }
@@ -153,8 +140,20 @@ impl<'a> FoldingContext<'a> {
         depth: u32,
         visited: &mut HashSet<String>,
     ) -> Option<CExpr> {
-        let canonical = self.canonicalize_visible_address_expr(expr, depth + 1);
-        let addr = self.normalized_addr_from_visible_expr(&canonical, depth + 1)?;
-        self.render_access_expr_from_addr(&addr, elem_size, depth + 1, visited)
+        let mut try_render = |candidate: &CExpr, ctx: &FoldingContext<'_>| {
+            let canonical = ctx.canonicalize_visible_address_expr(candidate, depth + 1);
+            let addr = ctx.normalized_addr_from_visible_expr(&canonical, depth + 1)?;
+            ctx.render_access_expr_from_addr(&addr, elem_size, depth + 1, visited)
+        };
+
+        let mut semantic_visited = HashSet::new();
+        let semanticized = self.semanticize_visible_expr(expr, depth + 1, &mut semantic_visited);
+        let preferred = if self.prefers_visible_expr(expr, &semanticized) {
+            semanticized
+        } else {
+            expr.clone()
+        };
+
+        try_render(&preferred, self).or_else(|| try_render(expr, self))
     }
 }

@@ -3,7 +3,7 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
 
-    use crate::{ExternalStackVar, FoldArchConfig, FoldInputs};
+    use crate::{ExternalStackVar, FoldArchConfig, FoldInputs, analysis::{PassEnv, StackInfo, UseInfo}};
     use r2il::{R2ILBlock, R2ILOp, Varnode};
     use r2types::{
         ExternalField, ExternalStruct, ExternalTypeDb, Signedness, SolvedTypes,
@@ -21,6 +21,10 @@ mod tests {
             ops,
             phis: Vec::new(),
         }
+    }
+
+    fn call_arg(expr: CExpr) -> crate::analysis::SemanticCallArg {
+        crate::analysis::SemanticCallArg::from(expr)
     }
 
     fn make_oracle_for_member(base: SSAVar, offset: u64, field_name: &str) -> SolvedTypes {
@@ -248,10 +252,10 @@ mod tests {
         ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
             vec![
-                CExpr::Var("a".to_string()),
-                CExpr::Var("b".to_string()),
-                CExpr::Var("c".to_string()),
-                CExpr::Var("d".to_string()),
+                call_arg(CExpr::Var("a".to_string())),
+                call_arg(CExpr::Var("b".to_string())),
+                call_arg(CExpr::Var("c".to_string())),
+                call_arg(CExpr::Var("d".to_string())),
             ],
         );
 
@@ -290,9 +294,9 @@ mod tests {
         ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
             vec![
-                CExpr::Var("fmt".to_string()),
-                CExpr::Var("x".to_string()),
-                CExpr::Var("y".to_string()),
+                call_arg(CExpr::Var("fmt".to_string())),
+                call_arg(CExpr::Var("x".to_string())),
+                call_arg(CExpr::Var("y".to_string())),
             ],
         );
 
@@ -340,11 +344,11 @@ mod tests {
         );
         ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
-            vec![CExpr::Deref(Box::new(CExpr::binary(
+            vec![call_arg(CExpr::Deref(Box::new(CExpr::binary(
                 BinaryOp::Add,
                 CExpr::Var("arg2".to_string()),
                 CExpr::IntLit(8),
-            )))],
+            ))))],
         );
 
         let stmt = ctx
@@ -395,11 +399,11 @@ mod tests {
         ctx.inputs.strings = Box::leak(Box::new(strings));
         ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
-            vec![CExpr::binary(
+            vec![call_arg(CExpr::binary(
                 BinaryOp::Add,
                 CExpr::UIntLit(0x402000),
                 CExpr::IntLit(0x10),
-            )],
+            ))],
         );
 
         let stmt = ctx
@@ -442,7 +446,7 @@ mod tests {
             .insert("stack_178".to_string(), CExpr::Var("arg2".to_string()));
         ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
-            vec![CExpr::Deref(Box::new(CExpr::binary(
+            vec![call_arg(CExpr::Deref(Box::new(CExpr::binary(
                 BinaryOp::Add,
                 CExpr::Deref(Box::new(CExpr::binary(
                     BinaryOp::Add,
@@ -450,7 +454,7 @@ mod tests {
                     CExpr::IntLit(160),
                 ))),
                 CExpr::IntLit(8),
-            )))],
+            ))))],
         );
 
         let stmt = ctx
@@ -502,7 +506,7 @@ mod tests {
             .insert(0x178, "arg2".to_string());
         ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
-            vec![CExpr::Deref(Box::new(CExpr::binary(
+            vec![call_arg(CExpr::Deref(Box::new(CExpr::binary(
                 BinaryOp::Add,
                 CExpr::Deref(Box::new(CExpr::binary(
                     BinaryOp::Add,
@@ -510,7 +514,7 @@ mod tests {
                     CExpr::IntLit(160),
                 ))),
                 CExpr::IntLit(8),
-            )))],
+            ))))],
         );
 
         let stmt = ctx
@@ -566,7 +570,7 @@ mod tests {
             .analysis_ctx
             .use_info
             .call_args
-            .insert((0x1000, 0), vec![CExpr::Var("t6".to_string())]);
+            .insert((0x1000, 0), vec![call_arg(CExpr::Var("t6".to_string()))]);
 
         let stmt = ctx
             .op_to_stmt_with_args(
@@ -610,7 +614,7 @@ mod tests {
         );
         ctx.state.analysis_ctx.use_info.call_args.insert(
             (0x1000, 0),
-            vec![CExpr::addr_of(CExpr::Var("stack_68".to_string()))],
+            vec![call_arg(CExpr::addr_of(CExpr::Var("stack_68".to_string())))],
         );
 
         let stmt = ctx
@@ -665,7 +669,7 @@ mod tests {
             .analysis_ctx
             .use_info
             .call_args
-            .insert((0x1000, 0), vec![CExpr::Var("t19".to_string())]);
+            .insert((0x1000, 0), vec![call_arg(CExpr::Var("t19".to_string()))]);
 
         let stmt = ctx
             .op_to_stmt_with_args(
@@ -730,7 +734,7 @@ mod tests {
             .analysis_ctx
             .use_info
             .call_args
-            .insert((0x1000, 0), vec![CExpr::Var("t17".to_string())]);
+            .insert((0x1000, 0), vec![call_arg(CExpr::Var("t17".to_string()))]);
 
         let stmt = ctx
             .op_to_stmt_with_args(
@@ -747,6 +751,142 @@ mod tests {
         };
         assert_eq!(args.len(), 1);
         assert_eq!(args[0], CExpr::StringLit("usage: vuln_test <n>\\n".to_string()));
+    }
+
+    #[test]
+    fn test_imported_call_arg_phi_root_prefers_string_literal_source() {
+        let mut ctx = FoldingContext::new(64);
+        let mut names = HashMap::new();
+        names.insert(0x401030, "sym.imp.printf".to_string());
+        ctx.set_function_names(names);
+        let mut sigs = HashMap::new();
+        sigs.insert(
+            "sym.imp.printf".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: true,
+            },
+        );
+        ctx.set_known_function_signatures(sigs);
+        let mut strings = HashMap::new();
+        strings.insert(0x100002638, "Unknown test: %d\\n".to_string());
+        ctx.inputs.strings = Box::leak(Box::new(strings));
+        ctx.state.analysis_ctx.use_info.phi_sources.insert(
+            "X0_1".to_string(),
+            vec![
+                make_var("const:100002638", 0, 8),
+                make_var("stack_178", 0, 8),
+            ],
+        );
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .call_args
+            .insert((0x1000, 0), vec![call_arg(CExpr::Var("X0_1".to_string()))]);
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:401030", 0, 8),
+                },
+                0x1000,
+                0,
+            )
+            .expect("call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected call expression");
+        };
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], CExpr::StringLit("Unknown test: %d\\n".to_string()));
+    }
+
+    #[test]
+    fn test_imported_call_arg_phi_root_prefers_semantic_pointer_source_over_stack_placeholder() {
+        let mut ctx = FoldingContext::new(64);
+        let mut names = HashMap::new();
+        names.insert(0x401040, "sym.imp.atoi".to_string());
+        ctx.set_function_names(names);
+        let mut sigs = HashMap::new();
+        sigs.insert(
+            "sym.imp.atoi".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        );
+        ctx.set_known_function_signatures(sigs);
+        ctx.state.analysis_ctx.use_info.phi_sources.insert(
+            "X0_1".to_string(),
+            vec![make_var("arg2", 0, 8), make_var("stack_178", 0, 8)],
+        );
+        ctx.state
+            .analysis_ctx
+            .stack_info
+            .stack_vars
+            .insert(0x178, "arg2".to_string());
+        ctx.state
+            .analysis_ctx
+            .use_info
+            .call_args
+            .insert((0x1000, 0), vec![call_arg(CExpr::Var("X0_1".to_string()))]);
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:401040", 0, 8),
+                },
+                0x1000,
+                0,
+            )
+            .expect("call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected call expression");
+        };
+        assert_eq!(args.len(), 1);
+        assert!(
+            expr_contains_var(&args[0], "arg2"),
+            "expected semantic pointer root to win, got: {:?}",
+            args[0]
+        );
+        assert!(
+            !expr_contains_var(&args[0], "stack_178") && !expr_contains_var(&args[0], "X0_1"),
+            "phi-root imported arg should not keep placeholder or merged SSA var, got: {:?}",
+            args[0]
+        );
+    }
+
+    #[test]
+    fn test_constant_pointer_offset_load_renders_as_subscript() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(HashMap::from([(
+            "x1".to_string(),
+            "argv".to_string(),
+        )])));
+        ctx.set_type_hints(HashMap::from([(
+            "argv".to_string(),
+            CType::ptr(CType::ptr(CType::Int(8))),
+        )]));
+
+        let expr = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::Var("argv".to_string()),
+            CExpr::IntLit(8),
+        );
+        let rendered = ctx
+            .debug_render_memory_access_from_visible_expr(&expr, 8)
+            .expect("pointer offset load should render");
+
+        match rendered {
+            CExpr::Subscript { base, index } => {
+                assert_eq!(*base, CExpr::Var("argv".to_string()));
+                assert_eq!(*index, CExpr::IntLit(1));
+            }
+            other => panic!("expected constant-index subscript, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -1556,19 +1696,62 @@ mod tests {
             .into_iter()
             .collect(),
         );
+        ctx.inputs.external_type_db = Box::leak(Box::new(ExternalTypeDb {
+            structs: [(
+                "demostruct".to_string(),
+                ExternalStruct {
+                    name: "DemoStruct".to_string(),
+                    fields: [
+                        (
+                            8,
+                            ExternalField {
+                                name: "third".to_string(),
+                                offset: 8,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                        (
+                            0x34,
+                            ExternalField {
+                                name: "fourteenth".to_string(),
+                                offset: 0x34,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }));
         let oracle = make_oracle_for_members(x0.clone(), &[(8, "third"), (0x34, "fourteenth")]);
         ctx.set_type_oracle(Some(&oracle));
         ctx.analyze_block(&block);
 
-        assert!(matches!(
-            ctx.lookup_semantic_value(&tmp6400_3.display_name()),
-            Some(crate::analysis::SemanticValue::Address(crate::analysis::NormalizedAddr {
-                base: crate::analysis::BaseRef::Value(value_ref),
-                index: Some(_),
-                scale_bytes: 56,
-                offset_bytes: 8,
-            })) if value_ref.var == x0
-        ));
+        let semantic = ctx.lookup_semantic_value(&tmp6400_3.display_name());
+        assert!(
+            matches!(
+                semantic,
+                Some(crate::analysis::SemanticValue::Address(crate::analysis::NormalizedAddr {
+                    base: crate::analysis::BaseRef::Value(value_ref),
+                    index: Some(_),
+                    scale_bytes: 56,
+                    offset_bytes: 8,
+                })) if value_ref.var == x0
+            ) || matches!(
+                semantic,
+                Some(crate::analysis::SemanticValue::Address(crate::analysis::NormalizedAddr {
+                    base: crate::analysis::BaseRef::Raw(CExpr::Var(name)),
+                    index: Some(_),
+                    scale_bytes: 56,
+                    offset_bytes: 8,
+                })) if name == "arg1"
+            ),
+            "actual semantic value: {semantic:?}"
+        );
 
         let mut visited = HashSet::new();
         let rendered = ctx
@@ -4872,6 +5055,223 @@ mod tests {
     }
 
     #[test]
+    fn test_observed_live_arm64_struct_field_store_does_not_reinterpret_stack_slot_as_member_zero() {
+        let sp0 = make_var("SP", 0, 8);
+        let sp1 = make_var("SP", 1, 8);
+        let x0 = make_var("X0", 0, 8);
+        let w1 = make_var("W1", 0, 4);
+        let slot_obj = make_var("tmp:6500", 1, 8);
+        let slot_val = make_var("tmp:6400", 1, 8);
+        let load_val = make_var("tmp:24c00", 1, 4);
+        let x8_1 = make_var("X8", 1, 8);
+        let slot_obj_2 = make_var("tmp:6500", 2, 8);
+        let x9_1 = make_var("X9", 1, 8);
+        let field_addr_30 = make_var("tmp:6400", 3, 8);
+        let slot_obj_3 = make_var("tmp:6500", 3, 8);
+        let x8_2 = make_var("X8", 2, 8);
+        let field_addr_30_load = make_var("tmp:6400", 4, 8);
+        let load_30 = make_var("tmp:24c00", 2, 4);
+        let x8_3 = make_var("X8", 3, 8);
+        let slot_obj_4 = make_var("tmp:6500", 4, 8);
+        let x9_2 = make_var("X9", 2, 8);
+        let copy_base = make_var("tmp:6780", 1, 8);
+        let load_0 = make_var("tmp:24c00", 3, 4);
+        let w9_0 = make_var("W9", 0, 4);
+        let add_tmp = make_var("tmp:12280", 1, 4);
+        let x0_1 = make_var("X0", 1, 8);
+        let pc_1 = make_var("PC", 1, 8);
+        let x30_0 = make_var("X30", 0, 8);
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(
+            [
+                ("x0".to_string(), "arg1".to_string()),
+                ("x1".to_string(), "arg2".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+        ctx.set_type_hints(
+            [
+                (
+                    "arg1".to_string(),
+                    CType::ptr(CType::Struct("sla_struct_081b815e29a27703".to_string())),
+                ),
+                ("arg2".to_string(), CType::Int(32)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        ctx.inputs.external_type_db = Box::leak(Box::new(ExternalTypeDb {
+            structs: [(
+                "sla_struct_081b815e29a27703".to_string(),
+                ExternalStruct {
+                    name: "sla_struct_081b815e29a27703".to_string(),
+                    fields: [
+                        (
+                            0,
+                            ExternalField {
+                                name: "f_0".to_string(),
+                                offset: 0,
+                                ty: Some("int32_t".to_string()),
+                            },
+                        ),
+                        (
+                            0x30,
+                            ExternalField {
+                                name: "f_30".to_string(),
+                                offset: 0x30,
+                                ty: Some("int64_t".to_string()),
+                            },
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }));
+
+        let block = make_block(vec![
+            SSAOp::IntSub {
+                dst: sp1.clone(),
+                a: sp0,
+                b: make_var("const:10", 0, 8),
+            },
+            SSAOp::IntAdd {
+                dst: slot_obj.clone(),
+                a: sp1.clone(),
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: slot_obj,
+                val: x0,
+            },
+            SSAOp::IntAdd {
+                dst: slot_val.clone(),
+                a: sp1.clone(),
+                b: make_var("const:4", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: slot_val,
+                val: w1,
+            },
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 2, 8),
+                a: sp1.clone(),
+                b: make_var("const:4", 0, 8),
+            },
+            SSAOp::Load {
+                dst: load_val.clone(),
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 2, 8),
+            },
+            SSAOp::IntZExt {
+                dst: x8_1.clone(),
+                src: load_val,
+            },
+            SSAOp::IntAdd {
+                dst: slot_obj_2.clone(),
+                a: sp1.clone(),
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::Load {
+                dst: x9_1.clone(),
+                space: "ram".to_string(),
+                addr: slot_obj_2,
+            },
+            SSAOp::IntAdd {
+                dst: field_addr_30.clone(),
+                a: x9_1,
+                b: make_var("const:30", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: field_addr_30,
+                val: make_var("W8", 0, 4),
+            },
+            SSAOp::IntAdd {
+                dst: slot_obj_3.clone(),
+                a: sp1.clone(),
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::Load {
+                dst: x8_2.clone(),
+                space: "ram".to_string(),
+                addr: slot_obj_3,
+            },
+            SSAOp::IntAdd {
+                dst: field_addr_30_load.clone(),
+                a: x8_2.clone(),
+                b: make_var("const:30", 0, 8),
+            },
+            SSAOp::Load {
+                dst: load_30.clone(),
+                space: "ram".to_string(),
+                addr: field_addr_30_load,
+            },
+            SSAOp::IntZExt {
+                dst: x8_3,
+                src: load_30,
+            },
+            SSAOp::IntAdd {
+                dst: slot_obj_4.clone(),
+                a: sp1,
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::Load {
+                dst: x9_2.clone(),
+                space: "ram".to_string(),
+                addr: slot_obj_4,
+            },
+            SSAOp::Copy {
+                dst: copy_base.clone(),
+                src: x9_2,
+            },
+            SSAOp::Load {
+                dst: load_0.clone(),
+                space: "ram".to_string(),
+                addr: copy_base,
+            },
+            SSAOp::Copy {
+                dst: make_var("tmp:12180", 1, 4),
+                src: w9_0,
+            },
+            SSAOp::IntAdd {
+                dst: add_tmp.clone(),
+                a: make_var("W8", 0, 4),
+                b: make_var("tmp:12180", 1, 4),
+            },
+            SSAOp::IntZExt {
+                dst: x0_1,
+                src: add_tmp,
+            },
+            SSAOp::Copy {
+                dst: pc_1.clone(),
+                src: x30_0,
+            },
+            SSAOp::Return { target: pc_1 },
+        ]);
+
+        ctx.analyze_blocks(std::slice::from_ref(&block));
+        ctx.state.return_blocks.insert(block.addr);
+        let stmts = ctx.fold_block(&block, block.addr);
+        let text = format!("{stmts:?}");
+        assert!(
+            !text.contains("f_0 = Var(\"x0\")"),
+            "entry arg root spill should not survive as field store, got {stmts:?}"
+        );
+        assert!(
+            text.contains("f_30"),
+            "expected semantic field store in observed arm64 struct field case, got {stmts:?}"
+        );
+    }
+
+    #[test]
     fn test_live_arm64_check_secret_then_block_folds_to_return_zero() {
         use r2il::R2ILBlock;
         use r2ssa::{PhiNode, SSAFunction};
@@ -5425,6 +5825,1059 @@ mod tests {
         assert!(
             !output.contains("&stack"),
             "structured merge return must not degrade to &stack, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn test_observed_live_arm64_check_secret_with_plugin_context_returns_zero_and_one() {
+        use r2il::R2ILBlock;
+        use r2ssa::{PhiNode, SSAFunction};
+
+        let mut b0 = R2ILBlock::new(0x1000, 4);
+        b0.push(R2ILOp::CBranch {
+            target: Varnode::constant(0x1028, 8),
+            cond: Varnode::constant(1, 1),
+        });
+        let mut b_fallthrough = R2ILBlock::new(0x1004, 4);
+        b_fallthrough.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1014, 8),
+        });
+        let mut b_else = R2ILBlock::new(0x1014, 4);
+        b_else.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1028, 8),
+        });
+        let mut b_then = R2ILBlock::new(0x1028, 4);
+        b_then.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1030, 8),
+        });
+        let mut b_exit = R2ILBlock::new(0x1030, 4);
+        b_exit.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let blocks = vec![b0, b_fallthrough, b_else, b_then, b_exit];
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("ssa function");
+        func = func.with_name("sym._check_secret");
+
+        func.get_block_mut(0x1000).expect("entry").ops = vec![
+            SSAOp::IntSub {
+                dst: make_var("SP", 1, 8),
+                a: make_var("SP", 0, 8),
+                b: make_var("const:10", 0, 8),
+            },
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 1, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 1, 8),
+                val: make_var("W0", 0, 4),
+            },
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 2, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::Load {
+                dst: make_var("tmp:24c00", 1, 4),
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 2, 8),
+            },
+            SSAOp::IntZExt {
+                dst: make_var("X8", 1, 8),
+                src: make_var("tmp:24c00", 1, 4),
+            },
+            SSAOp::Copy {
+                dst: make_var("X9", 1, 8),
+                src: make_var("const:dead", 0, 8),
+            },
+            SSAOp::Copy {
+                dst: make_var("tmp:3e480", 1, 4),
+                src: make_var("W9", 0, 4),
+            },
+            SSAOp::IntLessEqual {
+                dst: make_var("TMPCY", 1, 1),
+                a: make_var("tmp:3e480", 1, 4),
+                b: make_var("W8", 0, 4),
+            },
+            SSAOp::IntSBorrow {
+                dst: make_var("TMPOV", 1, 1),
+                a: make_var("W8", 0, 4),
+                b: make_var("tmp:3e480", 1, 4),
+            },
+            SSAOp::IntSub {
+                dst: make_var("tmp:3e580", 1, 4),
+                a: make_var("W8", 0, 4),
+                b: make_var("tmp:3e480", 1, 4),
+            },
+            SSAOp::IntSLess {
+                dst: make_var("TMPNG", 1, 1),
+                a: make_var("tmp:3e580", 1, 4),
+                b: make_var("const:0", 0, 4),
+            },
+            SSAOp::IntEqual {
+                dst: make_var("TMPZR", 1, 1),
+                a: make_var("tmp:3e580", 1, 4),
+                b: make_var("const:0", 0, 4),
+            },
+            SSAOp::IntZExt {
+                dst: make_var("X8", 2, 8),
+                src: make_var("tmp:3e580", 1, 4),
+            },
+            SSAOp::Copy {
+                dst: make_var("NG", 1, 1),
+                src: make_var("TMPNG", 1, 1),
+            },
+            SSAOp::Copy {
+                dst: make_var("ZR", 1, 1),
+                src: make_var("TMPZR", 1, 1),
+            },
+            SSAOp::Copy {
+                dst: make_var("CY", 1, 1),
+                src: make_var("TMPCY", 1, 1),
+            },
+            SSAOp::Copy {
+                dst: make_var("OV", 1, 1),
+                src: make_var("TMPOV", 1, 1),
+            },
+            SSAOp::BoolNot {
+                dst: make_var("tmp:a00", 1, 1),
+                src: make_var("ZR", 1, 1),
+            },
+            SSAOp::CBranch {
+                target: make_var("ram:1028", 0, 8),
+                cond: make_var("tmp:a00", 1, 1),
+            },
+        ];
+        func.get_block_mut(0x1004).expect("fallthrough").ops = vec![SSAOp::Branch {
+            target: make_var("ram:1014", 0, 8),
+        }];
+        func.get_block_mut(0x1014).expect("else").ops = vec![
+            SSAOp::Copy {
+                dst: make_var("X8", 3, 8),
+                src: make_var("const:1", 0, 8),
+            },
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 4, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:c", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 4, 8),
+                val: make_var("const:1", 0, 4),
+            },
+            SSAOp::Branch {
+                target: make_var("ram:1030", 0, 8),
+            },
+        ];
+        func.get_block_mut(0x1028).expect("then").ops = vec![
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 3, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:c", 0, 8),
+            },
+            SSAOp::Copy {
+                dst: make_var("tmp:300", 1, 4),
+                src: make_var("const:0", 0, 4),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 3, 8),
+                val: make_var("const:0", 0, 4),
+            },
+            SSAOp::Branch {
+                target: make_var("ram:1030", 0, 8),
+            },
+        ];
+        let exit = func.get_block_mut(0x1030).expect("exit");
+        exit.phis = vec![
+            PhiNode {
+                dst: make_var("tmp:300", 2, 4),
+                sources: vec![
+                    (0x1028, make_var("tmp:300", 0, 4)),
+                    (0x1014, make_var("tmp:300", 0, 4)),
+                ],
+            },
+            PhiNode {
+                dst: make_var("X8", 4, 8),
+                sources: vec![
+                    (0x1028, make_var("X8", 0, 8)),
+                    (0x1014, make_var("X8", 0, 8)),
+                ],
+            },
+            PhiNode {
+                dst: make_var("tmp:6400", 5, 8),
+                sources: vec![
+                    (0x1028, make_var("tmp:6400", 0, 8)),
+                    (0x1014, make_var("tmp:6400", 0, 8)),
+                ],
+            },
+        ];
+        exit.ops = vec![
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 6, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:c", 0, 8),
+            },
+            SSAOp::Load {
+                dst: make_var("tmp:24c00", 2, 4),
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 6, 8),
+            },
+            SSAOp::IntZExt {
+                dst: make_var("X0", 1, 8),
+                src: make_var("tmp:24c00", 2, 4),
+            },
+            SSAOp::Copy {
+                dst: make_var("tmp:11e80", 1, 8),
+                src: make_var("const:10", 0, 8),
+            },
+            SSAOp::IntCarry {
+                dst: make_var("TMPCY", 2, 1),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:10", 0, 8),
+            },
+            SSAOp::IntSCarry {
+                dst: make_var("TMPOV", 2, 1),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:10", 0, 8),
+            },
+            SSAOp::IntAdd {
+                dst: make_var("tmp:11f80", 1, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:10", 0, 8),
+            },
+            SSAOp::IntSLess {
+                dst: make_var("TMPNG", 2, 1),
+                a: make_var("tmp:11f80", 1, 8),
+                b: make_var("const:0", 0, 8),
+            },
+            SSAOp::IntEqual {
+                dst: make_var("TMPZR", 2, 1),
+                a: make_var("tmp:11f80", 1, 8),
+                b: make_var("const:0", 0, 8),
+            },
+            SSAOp::Copy {
+                dst: make_var("SP", 2, 8),
+                src: make_var("tmp:11f80", 1, 8),
+            },
+            SSAOp::Copy {
+                dst: make_var("PC", 1, 8),
+                src: make_var("X30", 0, 8),
+            },
+            SSAOp::Return {
+                target: make_var("PC", 1, 8),
+            },
+        ];
+
+        let mut decompiler = crate::Decompiler::new(crate::DecompilerConfig::aarch64());
+        decompiler.set_function_signature(Some(crate::ExternalFunctionSignature {
+            ret_type: Some(crate::CType::Int(64)),
+            params: vec![crate::ExternalFunctionParam {
+                name: "arg1".to_string(),
+                ty: Some(crate::CType::UInt(64)),
+            }],
+        }));
+        decompiler.set_stack_vars(HashMap::from([
+            (
+                8,
+                ExternalStackVar {
+                    name: "var_8h".to_string(),
+                    ty: Some(crate::CType::Int(64)),
+                    base: Some("sp".to_string()),
+                },
+            ),
+            (
+                12,
+                ExternalStackVar {
+                    name: "var_ch".to_string(),
+                    ty: Some(crate::CType::Int(32)),
+                    base: Some("sp".to_string()),
+                },
+            ),
+        ]));
+        let output = decompiler.decompile(&func);
+        assert!(
+            output.contains("return 0;") && output.contains("return 1;"),
+            "plugin-context merge return must stay concrete, got:\n{output}"
+        );
+        assert!(
+            !output.contains("&arg1"),
+            "plugin-context merge return must not degrade to &arg1, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn observed_live_arm64_imported_atoi_arg_uses_semantic_argv_root() {
+        use crate::analysis::{PassEnv, StackInfo, UseInfo};
+
+        let sp1 = make_var("SP", 1, 8);
+        let frame_base = make_var("tmp:frame", 1, 8);
+        let slot_178 = make_var("tmp:slot", 1, 8);
+        let slot_argv = make_var("tmp:slot", 2, 8);
+        let reload_slot = make_var("tmp:6500", 6, 8);
+        let reloaded_frame = make_var("X8", 9, 8);
+        let argv_addr = make_var("tmp:6500", 7, 8);
+        let argv_root = make_var("X8", 10, 8);
+        let arg_addr = make_var("tmp:6500", 8, 8);
+        let arg_value = make_var("X0", 5, 8);
+
+        let entry = SSABlock {
+            addr: 0x1000,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntSub {
+                    dst: sp1.clone(),
+                    a: make_var("SP", 0, 8),
+                    b: make_var("const:10", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: frame_base.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:3e0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_178.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:178", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: slot_178,
+                    val: frame_base.clone(),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_argv.clone(),
+                    a: frame_base,
+                    b: make_var("const:a0", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: slot_argv,
+                    val: make_var("X1", 0, 8),
+                },
+            ],
+        };
+
+        let call_block = SSABlock {
+            addr: 0x1010,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntAdd {
+                    dst: reload_slot.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:178", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: reloaded_frame.clone(),
+                    space: "ram".to_string(),
+                    addr: reload_slot,
+                },
+                SSAOp::IntAdd {
+                    dst: argv_addr.clone(),
+                    a: reloaded_frame,
+                    b: make_var("const:a0", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: argv_root.clone(),
+                    space: "ram".to_string(),
+                    addr: argv_addr,
+                },
+                SSAOp::IntAdd {
+                    dst: arg_addr.clone(),
+                    a: argv_root.clone(),
+                    b: make_var("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: arg_value.clone(),
+                    space: "ram".to_string(),
+                    addr: arg_addr,
+                },
+                SSAOp::Call {
+                    target: make_var("const:401040", 0, 8),
+                },
+            ],
+        };
+
+        let mut function_names = HashMap::new();
+        function_names.insert(0x401040, "sym.imp.atoi".to_string());
+        let strings = HashMap::new();
+        let symbols = HashMap::new();
+        let param_register_aliases = HashMap::from([
+            ("x0".to_string(), "argc".to_string()),
+            ("x1".to_string(), "argv".to_string()),
+            ("x2".to_string(), "envp".to_string()),
+        ]);
+        let type_hints = HashMap::from([(
+            "argv".to_string(),
+            CType::ptr(CType::ptr(CType::Int(8))),
+        )]);
+        let caller_saved_regs = HashSet::new();
+        let arg_regs = vec![
+            "x0".to_string(),
+            "x1".to_string(),
+            "x2".to_string(),
+            "x3".to_string(),
+            "x4".to_string(),
+            "x5".to_string(),
+            "x6".to_string(),
+            "x7".to_string(),
+        ];
+        let env = PassEnv {
+            ptr_size: 64,
+            sp_name: "sp",
+            fp_name: "x29",
+            ret_reg_name: "x0",
+            function_names: &function_names,
+            strings: &strings,
+            symbols: &symbols,
+            arg_regs: &arg_regs,
+            param_register_aliases: &param_register_aliases,
+            caller_saved_regs: &caller_saved_regs,
+            type_hints: &type_hints,
+            type_oracle: None,
+        };
+
+        let blocks = vec![entry, call_block];
+        let use_info = UseInfo::analyze(&blocks, &env);
+        let stack_info = StackInfo::analyze(&blocks, &use_info, &env);
+        assert!(
+            matches!(
+                use_info.semantic_values.get("X8_10"),
+                Some(crate::analysis::SemanticValue::Address(crate::analysis::NormalizedAddr {
+                    base: crate::analysis::BaseRef::Value(value_ref),
+                    index: None,
+                    scale_bytes: 0,
+                    offset_bytes: 0,
+                })) if value_ref.var == make_var("X1", 0, 8)
+            ),
+            "expected argv root to stay semantic across blocks, got {:?}; stable_stack_values={:?}; type_hints={:?}; aliases={:?}",
+            use_info.semantic_values.get("X8_10"),
+            use_info.stable_stack_values,
+            use_info.type_hints,
+            use_info.var_aliases
+        );
+        assert!(
+            matches!(
+                use_info.semantic_values.get("X0_5"),
+                Some(crate::analysis::SemanticValue::Load {
+                    addr: crate::analysis::NormalizedAddr {
+                        base: crate::analysis::BaseRef::Value(_),
+                        ..
+                    },
+                    ..
+                })
+            ),
+            "expected imported atoi arg load to keep value-rooted semantic addr, got {:?}",
+            use_info.semantic_values.get("X0_5")
+        );
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.function_names = Box::leak(Box::new(function_names));
+        ctx.inputs.known_function_signatures = Box::leak(Box::new(HashMap::from([(
+            "sym.imp.atoi".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        )])));
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(param_register_aliases));
+        ctx.inputs.type_hints = Box::leak(Box::new(type_hints));
+        ctx.state.analysis_ctx.use_info = use_info;
+        ctx.state.analysis_ctx.stack_info = stack_info;
+
+        let mut visited = HashSet::new();
+        let semantic = ctx.render_semantic_value_by_name("X0_5", 0, &mut visited);
+        assert!(
+            semantic.is_some(),
+            "expected semantic value for observed imported atoi arg load, got {:?}",
+            ctx.state.analysis_ctx.use_info.semantic_values.get("X0_5")
+        );
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:401040", 0, 8),
+                },
+                0x1010,
+                6,
+            )
+            .expect("call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected call expression");
+        };
+        assert_eq!(args.len(), 1);
+        assert!(
+            matches!(
+                &args[0],
+                CExpr::Subscript { base, index }
+                    if **base == CExpr::Var("argv".to_string()) && **index == CExpr::IntLit(1)
+            ),
+            "expected observed live arm64 atoi arg to render as argv[1], got: {:?}; semantic candidate: {:?}",
+            args[0],
+            semantic
+        );
+    }
+
+    #[test]
+    fn observed_live_arm64_main_first_atoi_arg_renders_semantically() {
+        let sp0 = make_var("SP", 0, 8);
+        let sp1 = make_var("SP", 1, 8);
+        let sp2 = make_var("SP", 2, 8);
+        let fp_slot = make_var("tmp:7b80", 1, 8);
+        let frame_base = make_var("tmp:11f80", 2, 8);
+        let slot_178 = make_var("tmp:6500", 1, 8);
+        let slot_argv = make_var("tmp:6500", 2, 8);
+        let slot_local0 = make_var("tmp:6980", 1, 8);
+        let slot_local1 = make_var("tmp:6980", 2, 8);
+        let call_slot = make_var("tmp:6500", 5, 8);
+        let call_frame = make_var("X8", 8, 8);
+        let argv_addr = make_var("tmp:6500", 6, 8);
+        let argv_root = make_var("X8", 9, 8);
+        let arg_addr = make_var("tmp:6500", 7, 8);
+        let arg_value = make_var("X0", 3, 8);
+
+        let entry = SSABlock {
+            addr: 0x100001308,
+            size: 48,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntAdd {
+                    dst: sp1.clone(),
+                    a: sp0,
+                    b: make_var("const:ffffffffffffffe0", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: sp1.clone(),
+                    val: make_var("X28", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("tmp:3a600", 1, 8),
+                    a: sp1.clone(),
+                    b: make_var("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:3a600", 1, 8),
+                    val: make_var("X27", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: fp_slot.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:10", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: fp_slot.clone(),
+                    val: make_var("X29", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("tmp:3a600", 2, 8),
+                    a: fp_slot.clone(),
+                    b: make_var("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:3a600", 2, 8),
+                    val: make_var("X30", 0, 8),
+                },
+                SSAOp::IntSub {
+                    dst: sp2.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:550", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: frame_base.clone(),
+                    a: sp2.clone(),
+                    b: make_var("const:3e0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_178.clone(),
+                    a: sp2.clone(),
+                    b: make_var("const:178", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: slot_178,
+                    val: frame_base.clone(),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_local0,
+                    a: fp_slot.clone(),
+                    b: make_var("const:ffffffffffffffec", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6980", 1, 8),
+                    val: make_var("const:0", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("tmp:3a680", 2, 8),
+                    src: make_var("W0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_local1,
+                    a: fp_slot.clone(),
+                    b: make_var("const:ffffffffffffffe8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6980", 2, 8),
+                    val: make_var("tmp:3a680", 2, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_argv,
+                    a: frame_base,
+                    b: make_var("const:a0", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6500", 2, 8),
+                    val: make_var("X1", 0, 8),
+                },
+            ],
+        };
+
+        let call_block = SSABlock {
+            addr: 0x100001368,
+            size: 44,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntAdd {
+                    dst: call_slot.clone(),
+                    a: sp2.clone(),
+                    b: make_var("const:178", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: call_frame.clone(),
+                    space: "ram".to_string(),
+                    addr: call_slot,
+                },
+                SSAOp::IntAdd {
+                    dst: argv_addr.clone(),
+                    a: call_frame,
+                    b: make_var("const:a0", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: argv_root.clone(),
+                    space: "ram".to_string(),
+                    addr: argv_addr,
+                },
+                SSAOp::IntAdd {
+                    dst: arg_addr.clone(),
+                    a: argv_root.clone(),
+                    b: make_var("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: arg_value.clone(),
+                    space: "ram".to_string(),
+                    addr: arg_addr,
+                },
+                SSAOp::Call {
+                    target: make_var("const:1000025d8", 0, 8),
+                },
+            ],
+        };
+
+        let function_names =
+            HashMap::from([(0x1000025d8, "sym.imp.atoi".to_string())]);
+        let strings = HashMap::new();
+        let symbols = HashMap::new();
+        let param_register_aliases = HashMap::from([
+            ("x0".to_string(), "argc".to_string()),
+            ("x1".to_string(), "argv".to_string()),
+            ("x2".to_string(), "envp".to_string()),
+        ]);
+        let type_hints = HashMap::from([
+            ("argc".to_string(), CType::Int(32)),
+            ("argv".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
+            ("envp".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
+        ]);
+        let caller_saved_regs = HashSet::new();
+        let arg_regs = vec![
+            "x0".to_string(),
+            "x1".to_string(),
+            "x2".to_string(),
+            "x3".to_string(),
+            "x4".to_string(),
+            "x5".to_string(),
+            "x6".to_string(),
+            "x7".to_string(),
+        ];
+        let env = PassEnv {
+            ptr_size: 64,
+            sp_name: "sp",
+            fp_name: "x29",
+            ret_reg_name: "x0",
+            function_names: &function_names,
+            strings: &strings,
+            symbols: &symbols,
+            arg_regs: &arg_regs,
+            param_register_aliases: &param_register_aliases,
+            caller_saved_regs: &caller_saved_regs,
+            type_hints: &type_hints,
+            type_oracle: None,
+        };
+
+        let blocks = vec![entry, call_block];
+        let use_info = UseInfo::analyze(&blocks, &env);
+        let stack_info = StackInfo::analyze(&blocks, &use_info, &env);
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.function_names = Box::leak(Box::new(function_names));
+        ctx.inputs.known_function_signatures = Box::leak(Box::new(HashMap::from([(
+            "sym.imp.atoi".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        )])));
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(param_register_aliases));
+        ctx.inputs.type_hints = Box::leak(Box::new(type_hints));
+        ctx.state.analysis_ctx.use_info = use_info;
+        ctx.state.analysis_ctx.stack_info = stack_info;
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:1000025d8", 0, 8),
+                },
+                0x100001368,
+                6,
+            )
+            .expect("call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected call expression");
+        };
+        assert_eq!(args.len(), 1);
+        assert!(
+            matches!(
+                &args[0],
+                CExpr::Subscript { base, index }
+                    if **base == CExpr::Var("argv".to_string()) && **index == CExpr::IntLit(1)
+            ),
+            "expected observed live main atoi arg to render as argv[1], got: {:?}",
+            args[0]
+        );
+    }
+
+    #[test]
+    fn observed_exact_live_arm64_main_first_atoi_arg_with_0x160_slot_renders_semantically() {
+        let _sp0 = make_var("SP", 0, 8);
+        let sp1 = make_var("SP", 1, 8);
+        let sp2 = make_var("SP", 2, 8);
+        let fp_slot = make_var("tmp:7b80", 1, 8);
+        let frame_base = make_var("tmp:11f80", 2, 8);
+        let slot_178 = make_var("tmp:6500", 1, 8);
+        let slot_argv = make_var("tmp:6500", 2, 8);
+        let call_slot = make_var("tmp:6500", 6, 8);
+        let call_frame = make_var("X8", 9, 8);
+        let argv_addr = make_var("tmp:6500", 7, 8);
+        let argv_root = make_var("X8", 10, 8);
+        let arg_addr = make_var("tmp:6500", 8, 8);
+        let arg_value = make_var("X0", 5, 8);
+
+        let entry = SSABlock {
+            addr: 0x100001308,
+            size: 48,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntSub {
+                    dst: sp2.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:550", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: fp_slot.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:10", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: frame_base.clone(),
+                    a: sp2.clone(),
+                    b: make_var("const:3e0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_178.clone(),
+                    a: sp2.clone(),
+                    b: make_var("const:178", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: slot_178,
+                    val: frame_base.clone(),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_argv,
+                    a: frame_base,
+                    b: make_var("const:160", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6500", 2, 8),
+                    val: make_var("X1", 0, 8),
+                },
+            ],
+        };
+
+        let call_block = SSABlock {
+            addr: 0x100001368,
+            size: 44,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntAdd {
+                    dst: call_slot.clone(),
+                    a: sp2,
+                    b: make_var("const:178", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: call_frame.clone(),
+                    space: "ram".to_string(),
+                    addr: call_slot,
+                },
+                SSAOp::IntAdd {
+                    dst: argv_addr.clone(),
+                    a: call_frame,
+                    b: make_var("const:160", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: argv_root.clone(),
+                    space: "ram".to_string(),
+                    addr: argv_addr,
+                },
+                SSAOp::IntAdd {
+                    dst: arg_addr.clone(),
+                    a: argv_root,
+                    b: make_var("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: arg_value,
+                    space: "ram".to_string(),
+                    addr: arg_addr,
+                },
+                SSAOp::Call {
+                    target: make_var("const:1000025d8", 0, 8),
+                },
+            ],
+        };
+
+        let function_names = HashMap::from([(0x1000025d8, "sym.imp.atoi".to_string())]);
+        let param_register_aliases = HashMap::from([
+            ("x0".to_string(), "argc".to_string()),
+            ("x1".to_string(), "argv".to_string()),
+            ("x2".to_string(), "envp".to_string()),
+        ]);
+        let type_hints = HashMap::from([
+            ("argc".to_string(), CType::Int(32)),
+            ("argv".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
+            ("envp".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
+        ]);
+        let caller_saved_regs = HashSet::new();
+        let arg_regs = vec![
+            "x0".to_string(),
+            "x1".to_string(),
+            "x2".to_string(),
+            "x3".to_string(),
+            "x4".to_string(),
+            "x5".to_string(),
+            "x6".to_string(),
+            "x7".to_string(),
+        ];
+        let env = PassEnv {
+            ptr_size: 64,
+            sp_name: "sp",
+            fp_name: "x29",
+            ret_reg_name: "x0",
+            function_names: &function_names,
+            strings: &HashMap::new(),
+            symbols: &HashMap::new(),
+            arg_regs: &arg_regs,
+            param_register_aliases: &param_register_aliases,
+            caller_saved_regs: &caller_saved_regs,
+            type_hints: &type_hints,
+            type_oracle: None,
+        };
+
+        let blocks = vec![entry, call_block];
+        let use_info = UseInfo::analyze(&blocks, &env);
+        let stack_info = StackInfo::analyze(&blocks, &use_info, &env);
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.function_names = Box::leak(Box::new(function_names));
+        ctx.inputs.known_function_signatures = Box::leak(Box::new(HashMap::from([(
+            "sym.imp.atoi".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: false,
+            },
+        )])));
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(param_register_aliases));
+        ctx.inputs.type_hints = Box::leak(Box::new(type_hints));
+        ctx.state.analysis_ctx.use_info = use_info;
+        ctx.state.analysis_ctx.stack_info = stack_info;
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:1000025d8", 0, 8),
+                },
+                0x100001368,
+                6,
+            )
+            .expect("call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected call expression");
+        };
+        assert_eq!(args.len(), 1);
+        assert!(
+            matches!(
+                &args[0],
+                CExpr::Subscript { base, index }
+                    if **base == CExpr::Var("argv".to_string()) && **index == CExpr::IntLit(1)
+            ),
+            "expected exact live 0x160 slot to still render argv[1], got: {:?}; semantic X8_10={:?}; semantic X0_5={:?}; stable_stack={:?}; stable_memory={:?}",
+            args[0],
+            ctx.state.analysis_ctx.use_info.semantic_values.get("X8_10"),
+            ctx.state.analysis_ctx.use_info.semantic_values.get("X0_5"),
+            ctx.state.analysis_ctx.use_info.stable_stack_values,
+            ctx.state.analysis_ctx.use_info.stable_memory_values
+        );
+    }
+
+    #[test]
+    fn observed_live_arm64_check_secret_exact_shape_returns_zero_and_one() {
+        use r2il::R2ILBlock;
+        use r2ssa::SSAFunction;
+
+        let mut b0 = R2ILBlock::new(0x100000598, 4);
+        b0.push(R2ILOp::CBranch {
+            target: Varnode::constant(0x1000005c0, 8),
+            cond: Varnode::constant(1, 1),
+        });
+        let mut b_else = R2ILBlock::new(0x10000059c, 4);
+        b_else.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1000005c8, 8),
+        });
+        let mut b_then = R2ILBlock::new(0x1000005c0, 4);
+        b_then.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1000005c8, 8),
+        });
+        let mut b_exit = R2ILBlock::new(0x1000005c8, 4);
+        b_exit.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let blocks = vec![b0, b_else, b_then, b_exit];
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("ssa function");
+        func = func.with_name("sym._check_secret");
+
+        func.get_block_mut(0x100000598).expect("entry").ops = vec![
+            SSAOp::IntSub {
+                dst: make_var("SP", 1, 8),
+                a: make_var("SP", 0, 8),
+                b: make_var("const:10", 0, 8),
+            },
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 1, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 1, 8),
+                val: make_var("W0", 0, 4),
+            },
+            SSAOp::Copy {
+                dst: make_var("tmp:3e480", 1, 4),
+                src: make_var("const:dead", 0, 4),
+            },
+            SSAOp::IntSub {
+                dst: make_var("tmp:3e580", 1, 4),
+                a: make_var("W0", 0, 4),
+                b: make_var("tmp:3e480", 1, 4),
+            },
+            SSAOp::IntEqual {
+                dst: make_var("TMPZR", 1, 1),
+                a: make_var("tmp:3e580", 1, 4),
+                b: make_var("const:0", 0, 4),
+            },
+            SSAOp::BoolNot {
+                dst: make_var("tmp:a00", 1, 1),
+                src: make_var("TMPZR", 1, 1),
+            },
+            SSAOp::CBranch {
+                target: make_var("ram:1000005c0", 0, 8),
+                cond: make_var("tmp:a00", 1, 1),
+            },
+        ];
+        func.get_block_mut(0x1000005c0).expect("then").ops = vec![
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 6, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:c", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 6, 8),
+                val: make_var("const:0", 0, 4),
+            },
+            SSAOp::Branch {
+                target: make_var("ram:1000005c8", 0, 8),
+            },
+        ];
+        func.get_block_mut(0x10000059c).expect("else").ops = vec![
+            SSAOp::IntAdd {
+                dst: make_var("tmp:6400", 5, 8),
+                a: make_var("SP", 1, 8),
+                b: make_var("const:c", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("tmp:6400", 5, 8),
+                val: make_var("const:1", 0, 4),
+            },
+            SSAOp::Branch {
+                target: make_var("ram:1000005c8", 0, 8),
+            },
+        ];
+        func.get_block_mut(0x1000005c8).expect("exit").ops = vec![SSAOp::Return {
+            target: make_var("X30", 0, 8),
+        }];
+
+        let mut decompiler = crate::Decompiler::new(crate::DecompilerConfig::aarch64());
+        decompiler.set_function_signature(Some(crate::ExternalFunctionSignature {
+            ret_type: Some(crate::CType::Int(64)),
+            params: vec![crate::ExternalFunctionParam {
+                name: "arg1".to_string(),
+                ty: Some(crate::CType::UInt(64)),
+            }],
+        }));
+        decompiler.set_stack_vars(HashMap::from([(
+            12,
+            ExternalStackVar {
+                name: "var_ch".to_string(),
+                ty: Some(crate::CType::Int(32)),
+                base: Some("sp".to_string()),
+            },
+        )]));
+
+        let output = decompiler.decompile(&func);
+        assert!(
+            output.contains("return 0;") && output.contains("return 1;"),
+            "expected concrete returns for exact observed shape, got:\n{output}"
+        );
+        assert!(
+            !output.contains("&arg1"),
+            "exact observed shape must not degrade to &arg1, got:\n{output}"
         );
     }
 

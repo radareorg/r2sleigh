@@ -5313,6 +5313,19 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
     let mut param_types = std::collections::HashMap::new();
     let mut param_names = std::collections::HashMap::new();
     if let Some(current) = sig_ctx.current.as_ref() {
+        while sig.params.len() < current.params.len() {
+            let idx = sig.params.len();
+            let param_type = current
+                .params
+                .get(idx)
+                .and_then(|param| param.ty.as_ref())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "void *".to_string());
+            sig.params.push(InferredParamJson {
+                name: format!("arg{}", idx + 1),
+                param_type,
+            });
+        }
         if let Some(ret_ty) = current.ret_type.as_ref() {
             let ret_ty_str = ret_ty.to_string();
             if !matches!(ret_ty, r2dec::CType::Unknown) {
@@ -5341,6 +5354,12 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
             .confidence
             .max(explicit_signature_context_strength(current));
     }
+    let mut merged_signature_for_main = sig_ctx.current.clone();
+    types::apply_main_signature_override(
+        &function_input.function_name,
+        &mut sig,
+        &mut merged_signature_for_main,
+    );
 
     let struct_decls = artifact.struct_decls;
     let _slot_field_profiles = artifact.slot_field_profiles;
@@ -5375,6 +5394,18 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
             confidence = 96;
             source = "signature_registry".to_string();
             evidence.push("afcfj-current".to_string());
+        } else if let Some(slot) = arg_slot
+            && let Some(sig_ty) = merged_signature_for_main
+                .as_ref()
+                .and_then(|sig| sig.params.get(slot))
+                .and_then(|param| param.ty.as_ref())
+                .map(ToString::to_string)
+            && !is_generic_type_string(&sig_ty)
+        {
+            chosen_type = sig_ty;
+            confidence = 96;
+            source = "signature_registry".to_string();
+            evidence.push("canonical-main-signature".to_string());
         } else if let Some(slot) = arg_slot
             && let Some(struct_ty) = slot_struct_types.get(&slot)
             && is_generic_type_string(&chosen_type)
@@ -8248,6 +8279,10 @@ mod integration_tests {
             "expected struct-typed first argument in decompiled output, got:\n{output}"
         );
         assert!(
+            !output.contains("arg1 ="),
+            "indexed-member store path should not synthesize a bogus parameter assignment, got:\n{output}"
+        );
+        assert!(
             output.contains("f_8") && !output.contains("*(arg1 +"),
             "expected indexed-member store rendering in decompiled output, got:\n{output}"
         );
@@ -8330,6 +8365,10 @@ mod integration_tests {
             "expected indexed-member load rendering in decompiled output, got:\n{output}"
         );
         assert!(
+            !output.contains("arg1 ="),
+            "indexed-member load path should not synthesize a bogus parameter assignment, got:\n{output}"
+        );
+        assert!(
             !output.contains("*(arg1 +") && !output.contains("*(((uint8_t*)arg1) +"),
             "expected semantic indexed-member rendering without raw pointer math, got:\n{output}"
         );
@@ -8374,6 +8413,10 @@ mod integration_tests {
         assert!(
             output.contains("[arg2]"),
             "expected plain subscript rendering, got:\n{output}"
+        );
+        assert!(
+            !output.contains("arg1 ="),
+            "plain indexed load should not synthesize a bogus parameter assignment, got:\n{output}"
         );
         assert!(
             !output.contains(".p0"),
@@ -8429,6 +8472,10 @@ mod integration_tests {
         assert!(
             output.contains("[0 - arg2]") || output.contains("[-arg2]"),
             "expected negative subscript rendering, got:\n{output}"
+        );
+        assert!(
+            !output.contains("arg1 ="),
+            "negative indexed load should not synthesize a bogus parameter assignment, got:\n{output}"
         );
         assert!(
             !output.contains("[-0]"),
@@ -8528,9 +8575,9 @@ mod integration_tests {
                 },
                 r2dec::ExternalFunctionParam {
                     name: "arg2".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(Box::new(
-                        r2dec::CType::Int(8),
-                    ))))),
+                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(
+                        Box::new(r2dec::CType::Int(8)),
+                    )))),
                 },
             ],
         }));
@@ -8550,9 +8597,7 @@ mod integration_tests {
             "expected imported atoi call, got:\n{output}"
         );
         assert!(
-            output.contains("arg2")
-                && !output.contains("stack_")
-                && !output.contains("&stack"),
+            output.contains("arg2") && !output.contains("stack_") && !output.contains("&stack"),
             "expected semantic argv-rooted atoi arg without stack placeholders, got:\n{output}"
         );
     }

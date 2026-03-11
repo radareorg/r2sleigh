@@ -129,6 +129,9 @@ impl<'a> FoldingContext<'a> {
     ) -> &HashMap<String, analysis::FrameSlotMergeSummary> {
         &self.use_info().frame_slot_merges
     }
+    pub(crate) fn phi_sources_map(&self) -> &HashMap<String, Vec<SSAVar>> {
+        &self.use_info().phi_sources
+    }
     pub(crate) fn formatted_defs_map(&self) -> &HashMap<String, CExpr> {
         &self.use_info().formatted_defs
     }
@@ -154,7 +157,7 @@ impl<'a> FoldingContext<'a> {
     pub(crate) fn pinned_set(&self) -> &HashSet<String> {
         &self.use_info().pinned
     }
-    pub(crate) fn call_args_map(&self) -> &HashMap<(u64, usize), Vec<CExpr>> {
+    pub(crate) fn call_args_map(&self) -> &HashMap<(u64, usize), Vec<analysis::SemanticCallArg>> {
         &self.use_info().call_args
     }
     pub(crate) fn consumed_by_call_set(&self) -> &HashSet<String> {
@@ -1012,10 +1015,66 @@ impl<'a> FoldingContext<'a> {
         {
             return None;
         }
+        if let CExpr::Var(lhs_name) = &lhs
+            && is_generic_arg_name(lhs_name)
+            && self
+                .lookup_type_hint(lhs_name)
+                .is_some_and(|ty| matches!(ty, CType::Pointer(_)))
+            && !self.looks_like_pointer(&rhs)
+            && self.expr_mentions_rendered_name(&rhs, lhs_name)
+        {
+            return None;
+        }
         if lhs == rhs {
             return None;
         }
         Some(CStmt::Expr(CExpr::assign(lhs, rhs)))
+    }
+
+    fn assignment_lhs_expr(&self, dst: &SSAVar) -> CExpr {
+        let rendered = self.var_name(dst);
+        if dst.version > 0 && is_generic_arg_name(&rendered) {
+            if let Some(alias) = self.var_aliases_map().get(&dst.display_name())
+                && !is_generic_arg_name(alias)
+            {
+                return CExpr::Var(
+                    self.canonicalize_stack_name(alias)
+                        .unwrap_or_else(|| alias.clone()),
+                );
+            }
+
+            let base = if dst.name.starts_with("reg:") {
+                let reg = dst.name.trim_start_matches("reg:");
+                if is_hex_name(reg) {
+                    format!("r{}", reg)
+                } else {
+                    reg.to_ascii_lowercase()
+                }
+            } else if dst.name.starts_with("tmp:") || dst.name.starts_with("unique:") {
+                "t".to_string()
+            } else {
+                dst.name.to_ascii_lowercase().replace([':', '.'], "_")
+            };
+
+            return if base == "t" {
+                CExpr::Var(format!("t{}", dst.version))
+            } else {
+                CExpr::Var(format!("{}_{}", base, dst.version))
+            };
+        }
+        CExpr::Var(rendered)
+    }
+
+    fn expr_mentions_rendered_name(&self, expr: &CExpr, name: &str) -> bool {
+        let mut found = false;
+        expr.visit(&mut |node| {
+            if let CExpr::Var(candidate) = node
+                && candidate.eq_ignore_ascii_case(name)
+            {
+                found = true;
+            }
+        });
+        found
     }
 
     fn ptr_arith_expr(
@@ -1059,6 +1118,78 @@ impl<'a> FoldingContext<'a> {
             })
     }
 
+    fn phi_sources_for_name(&self, name: &str) -> Option<&Vec<SSAVar>> {
+        self.phi_sources_map()
+            .get(name)
+            .or_else(|| self.phi_sources_map().get(&name.to_ascii_lowercase()))
+            .or_else(|| {
+                name.rsplit_once('_').and_then(|(base, version)| {
+                    self.phi_sources_map()
+                        .get(&format!("{}_{}", base.to_lowercase(), version))
+                        .or_else(|| {
+                            self.phi_sources_map().get(&format!(
+                                "{}_{}",
+                                base.to_uppercase(),
+                                version
+                            ))
+                        })
+                })
+            })
+    }
+
+    fn resolve_expr_from_phi_sources(
+        &self,
+        name: &str,
+        depth: u32,
+        visited: &mut HashSet<String>,
+        imported: bool,
+    ) -> Option<CExpr> {
+        if depth > Self::MAX_SEMANTIC_RENDER_DEPTH {
+            return None;
+        }
+        let visit_key = format!("phi-expr:{name}");
+        if !visited.insert(visit_key.clone()) {
+            return None;
+        }
+
+        let mut best = None;
+        let sources = self.phi_sources_for_name(name).cloned();
+        if let Some(sources) = sources {
+            for src in sources {
+                let src_name = src.display_name();
+                let candidate = self
+                    .render_semantic_value_by_name(&src_name, depth + 1, visited)
+                    .or_else(|| {
+                        self.lookup_definition_raw(&src_name)
+                            .map(|expr| self.semanticize_visible_expr(&expr, depth + 1, visited))
+                    })
+                    .or_else(|| {
+                        self.render_value_ref(
+                            &analysis::ValueRef::from(src.clone()),
+                            depth + 1,
+                            visited,
+                        )
+                    })
+                    .or_else(|| self.lookup_definition(&src_name))
+                    .or_else(|| self.best_visible_definition(&src_name));
+                let candidate = if imported {
+                    candidate
+                        .map(|expr| self.resolve_imported_call_arg_expr(&expr, depth + 1, visited))
+                } else {
+                    candidate
+                };
+                best = if imported {
+                    self.choose_preferred_call_arg_expr(best, candidate, true)
+                } else {
+                    self.choose_preferred_visible_expr(best, candidate)
+                };
+            }
+        }
+
+        visited.remove(&visit_key);
+        best
+    }
+
     fn render_semantic_value_by_name(
         &self,
         name: &str,
@@ -1072,13 +1203,15 @@ impl<'a> FoldingContext<'a> {
             .lookup_semantic_value(name)
             .and_then(|value| self.render_semantic_value(value, depth + 1, visited))
             .or_else(|| {
-                self.find_ssa_name_for_rendered_alias(name).and_then(|ssa_name| {
-                    (ssa_name != name)
-                        .then_some(ssa_name)
-                        .and_then(|ssa_name| self.lookup_semantic_value(&ssa_name))
-                        .and_then(|value| self.render_semantic_value(value, depth + 1, visited))
-                })
-            });
+                self.find_ssa_name_for_rendered_alias(name)
+                    .and_then(|ssa_name| {
+                        (ssa_name != name)
+                            .then_some(ssa_name)
+                            .and_then(|ssa_name| self.lookup_semantic_value(&ssa_name))
+                            .and_then(|value| self.render_semantic_value(value, depth + 1, visited))
+                    })
+            })
+            .or_else(|| self.resolve_expr_from_phi_sources(name, depth + 1, visited, false));
         visited.remove(&format!("sem:{name}"));
         rendered
     }
@@ -1148,16 +1281,22 @@ impl<'a> FoldingContext<'a> {
                 self.render_load_from_addr(addr, *size, depth + 1, visited)
             }
             Some(analysis::SemanticValue::Unknown) | None => self
-                .lookup_definition_raw(&name)
-                .map(|expr| {
-                    let semanticized = self.semanticize_visible_expr(&expr, depth + 1, visited);
-                    if self.prefers_visible_expr(&expr, &semanticized) {
-                        semanticized
-                    } else {
-                        expr
-                    }
+                .resolve_expr_from_phi_sources(&name, depth + 1, visited, false)
+                .or_else(|| {
+                    self.lookup_definition_raw(&name)
+                        .map(|expr| {
+                            let semanticized =
+                                self.semanticize_visible_expr(&expr, depth + 1, visited);
+                            if self.prefers_visible_expr(&expr, &semanticized) {
+                                semanticized
+                            } else {
+                                expr
+                            }
+                        })
+                        .and_then(|expr| {
+                            self.render_scalar_value_ref(value, expr, fallback.clone())
+                        })
                 })
-                .and_then(|expr| self.render_scalar_value_ref(value, expr, fallback.clone()))
                 .or_else(|| {
                     self.lookup_definition(&name).and_then(|expr| {
                         self.render_semantic_load_from_definition_expr(&expr, depth + 1, visited)
@@ -1360,38 +1499,87 @@ impl<'a> FoldingContext<'a> {
         if addr.offset_bytes < 0 {
             return None;
         }
-        let analysis::BaseRef::Value(base_ref) = &addr.base else {
-            return None;
-        };
         let offset = addr.offset_bytes as u64;
 
-        if let Some(oracle) = self.inputs.type_oracle
-            && let Some(field) = oracle
-                .field_name(oracle.type_of(&base_ref.var), offset)
-                .map(|field| field.to_string())
-        {
-            return Some(field);
-        }
+        match &addr.base {
+            analysis::BaseRef::Value(base_ref) => {
+                if let Some(oracle) = self.inputs.type_oracle
+                    && let Some(field) = oracle
+                        .field_name(oracle.type_of(&base_ref.var), offset)
+                        .map(|field| field.to_string())
+                {
+                    return Some(field);
+                }
 
-        let mut visited = HashSet::new();
-        if let Some(root) = self.semantic_root_var(&base_ref.var, 0, &mut visited) {
-            if let Some(oracle) = self.inputs.type_oracle
-                && let Some(field) = oracle
-                    .field_name(oracle.type_of(&root), offset)
-                    .map(|field| field.to_string())
-            {
-                return Some(field);
-            }
-            if let Some(field) = self
-                .field_name_from_type_hint_for_var(&root, offset)
-                .or_else(|| self.field_name_from_type_hint_for_var(&base_ref.var, offset))
-            {
-                return Some(field);
-            }
-        }
+                let mut visited = HashSet::new();
+                if let Some(root) = self.semantic_root_var(&base_ref.var, 0, &mut visited) {
+                    if let Some(oracle) = self.inputs.type_oracle
+                        && let Some(field) = oracle
+                            .field_name(oracle.type_of(&root), offset)
+                            .map(|field| field.to_string())
+                    {
+                        return Some(field);
+                    }
+                    if let Some(field) = self
+                        .field_name_from_type_hint_for_var(&root, offset)
+                        .or_else(|| self.field_name_from_type_hint_for_var(&base_ref.var, offset))
+                    {
+                        return Some(field);
+                    }
+                }
 
-        if let Some(field) = self.field_name_from_type_hint_for_var(&base_ref.var, offset) {
-            return Some(field);
+                if let Some(field) = self.field_name_from_type_hint_for_var(&base_ref.var, offset) {
+                    return Some(field);
+                }
+            }
+            analysis::BaseRef::Raw(CExpr::Var(name)) => {
+                if let Some(hint) = self.lookup_type_hint(name)
+                    && let Some(field) = self.field_name_from_type_hint(hint, offset)
+                {
+                    return Some(field);
+                }
+                if let Some(ssa_name) = self.preferred_entry_arg_ssa_name(name)
+                    && let Some(var) = self.guess_ssa_var_from_name(&ssa_name)
+                {
+                    if let Some(oracle) = self.inputs.type_oracle
+                        && let Some(field) = oracle
+                            .field_name(oracle.type_of(&var), offset)
+                            .map(|field| field.to_string())
+                    {
+                        return Some(field);
+                    }
+                    if let Some(field) = self.field_name_from_type_hint_for_var(&var, offset) {
+                        return Some(field);
+                    }
+                }
+                if let Some(ssa_name) = self.find_ssa_name_for_rendered_alias(name)
+                    && let Some(var) = self.guess_ssa_var_from_name(&ssa_name)
+                {
+                    if let Some(oracle) = self.inputs.type_oracle
+                        && let Some(field) = oracle
+                            .field_name(oracle.type_of(&var), offset)
+                            .map(|field| field.to_string())
+                    {
+                        return Some(field);
+                    }
+                    if let Some(field) = self.field_name_from_type_hint_for_var(&var, offset) {
+                        return Some(field);
+                    }
+                }
+                if let Some(var) = self.guess_ssa_var_from_name(name) {
+                    if let Some(oracle) = self.inputs.type_oracle
+                        && let Some(field) = oracle
+                            .field_name(oracle.type_of(&var), offset)
+                            .map(|field| field.to_string())
+                    {
+                        return Some(field);
+                    }
+                    if let Some(field) = self.field_name_from_type_hint_for_var(&var, offset) {
+                        return Some(field);
+                    }
+                }
+            }
+            analysis::BaseRef::StackSlot(_) | analysis::BaseRef::Raw(_) => {}
         }
 
         None
@@ -1472,8 +1660,21 @@ impl<'a> FoldingContext<'a> {
         depth: u32,
         visited: &mut HashSet<String>,
     ) -> Option<CExpr> {
+        if addr.index.is_none()
+            && let Some(full_offset) = match addr.base {
+                analysis::BaseRef::StackSlot(base) => base.checked_add(addr.offset_bytes),
+                _ => None,
+            }
+            && let Some(value) = self.use_info().stable_stack_values.get(&full_offset)
+            && let Some(rendered) = self.render_semantic_value(value, depth + 1, visited)
+        {
+            return Some(rendered);
+        }
+
         let raw_base_expr = self.render_base_ref_expr(&addr.base, false, depth + 1, visited)?;
-        let effective_addr = if addr.index.is_none() {
+        let effective_addr = if matches!(addr.base, analysis::BaseRef::StackSlot(_)) {
+            addr.clone()
+        } else if addr.index.is_none() {
             self.normalized_addr_from_visible_expr(&raw_base_expr, depth + 1)
                 .and_then(|mut normalized| {
                     normalized.offset_bytes =
@@ -1494,17 +1695,20 @@ impl<'a> FoldingContext<'a> {
         } else {
             raw_base_expr
         };
-        let field_name = self
-            .oracle_field_name_for_addr(&effective_addr)
-            .or_else(|| {
-                let mut normalized =
-                    self.normalized_addr_from_visible_expr(&base_expr, depth + 1)?;
-                normalized.offset_bytes = normalized
-                    .offset_bytes
-                    .checked_add(effective_addr.offset_bytes)?;
-                self.oracle_field_name_for_addr(&normalized)
-            })
-            .or_else(|| self.oracle_member_name(None, &base_expr, effective_addr.offset_bytes));
+        let field_name = if matches!(effective_addr.base, analysis::BaseRef::StackSlot(_)) {
+            None
+        } else {
+            self.oracle_field_name_for_addr(&effective_addr)
+                .or_else(|| {
+                    let mut normalized =
+                        self.normalized_addr_from_visible_expr(&base_expr, depth + 1)?;
+                    normalized.offset_bytes = normalized
+                        .offset_bytes
+                        .checked_add(effective_addr.offset_bytes)?;
+                    self.oracle_field_name_for_addr(&normalized)
+                })
+                .or_else(|| self.oracle_member_name(None, &base_expr, effective_addr.offset_bytes))
+        };
 
         if let Some(index) = &effective_addr.index {
             let scale = effective_addr.scale_bytes.unsigned_abs() as u32;
@@ -1538,6 +1742,40 @@ impl<'a> FoldingContext<'a> {
             }
         }
 
+        if effective_addr.index.is_none()
+            && effective_addr.offset_bytes != 0
+            && field_name.is_none()
+            && !matches!(effective_addr.base, analysis::BaseRef::StackSlot(_))
+        {
+            let elem_ty = self.infer_elem_type_from_base_ref(&effective_addr.base, elem_size);
+            let elem_bytes = elem_ty
+                .bits()
+                .map(|bits| bits.div_ceil(8).max(1))
+                .unwrap_or(elem_size.max(1));
+            if self.can_render_constant_offset_as_subscript(&elem_ty)
+                && elem_bytes > 0
+                && effective_addr.offset_bytes % i64::from(elem_bytes) == 0
+            {
+                let normalized_base = self.normalize_pointer_base_expr(&base_expr, 0);
+                let base_source_ty = self.expr_type_hint(&normalized_base);
+                let base_cast = self.cast_expr_if_needed(
+                    normalized_base,
+                    CType::ptr(elem_ty),
+                    base_source_ty.as_ref(),
+                );
+                let index = effective_addr.offset_bytes / i64::from(elem_bytes);
+                let index_expr = if index < 0 {
+                    CExpr::unary(UnaryOp::Neg, CExpr::IntLit(index.unsigned_abs() as i64))
+                } else {
+                    CExpr::IntLit(index)
+                };
+                return Some(CExpr::Subscript {
+                    base: Box::new(base_cast),
+                    index: Box::new(index_expr),
+                });
+            }
+        }
+
         if let Some(field) = field_name {
             return Some(self.member_access_expr(base_expr, field));
         }
@@ -1550,6 +1788,15 @@ impl<'a> FoldingContext<'a> {
         }
 
         None
+    }
+
+    fn can_render_constant_offset_as_subscript(&self, elem_ty: &CType) -> bool {
+        match elem_ty {
+            CType::Unknown | CType::Void => false,
+            CType::Struct(_) | CType::Union(_) => false,
+            CType::Pointer(_) | CType::Array(_, _) => true,
+            _ => true,
+        }
     }
 
     fn render_load_from_addr(
@@ -1757,6 +2004,27 @@ impl<'a> FoldingContext<'a> {
             CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
                 self.normalized_addr_from_visible_expr(inner, depth + 1)
             }
+            CExpr::Deref(_) => {
+                if let CExpr::Deref(inner) = expr
+                    && let Some(access) = self.render_memory_access_from_visible_expr(
+                        inner,
+                        self.inputs.arch.ptr_size.max(1),
+                        depth + 1,
+                        &mut HashSet::new(),
+                    )
+                    && access != *expr
+                    && let Some(addr) = self.normalized_addr_from_visible_expr(&access, depth + 1)
+                {
+                    return Some(addr);
+                }
+                let mut semantic_visited = HashSet::new();
+                let semantic =
+                    self.semanticize_visible_expr(expr, depth + 1, &mut semantic_visited);
+                if semantic != *expr {
+                    return self.normalized_addr_from_visible_expr(&semantic, depth + 1);
+                }
+                None
+            }
             CExpr::Var(name) => {
                 let prefer_direct_root = Self::is_semantic_binding_name(name)
                     || self.arg_alias_for_rendered_name(name).is_some()
@@ -1945,6 +2213,13 @@ impl<'a> FoldingContext<'a> {
                 }
                 self.infer_subscript_elem_type(&base_ref.var, element_size)
             }
+            analysis::BaseRef::Raw(CExpr::Var(name)) => self
+                .lookup_type_hint(name)
+                .and_then(|ty| match ty {
+                    CType::Pointer(inner) | CType::Array(inner, _) => Some((**inner).clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| uint_type_from_size(element_size)),
             analysis::BaseRef::StackSlot(_) | analysis::BaseRef::Raw(_) => {
                 uint_type_from_size(element_size)
             }
@@ -2103,6 +2378,29 @@ impl<'a> FoldingContext<'a> {
                 .and_then(|oracle| oracle.field_name(oracle.type_of(addr), offset))
         {
             return Some(name.to_string());
+        }
+
+        if let CExpr::Var(base_name) = base_expr
+            && self
+                .stack_offset_for_visible_storage_name(base_name)
+                .is_none()
+            && let Some((reg_name, _)) = self
+                .inputs
+                .param_register_aliases
+                .iter()
+                .find(|(_, alias)| alias.eq_ignore_ascii_case(base_name))
+        {
+            let base_var = SSAVar::new(reg_name, 0, self.inputs.arch.ptr_size);
+            if let Some(name) = self
+                .inputs
+                .type_oracle
+                .and_then(|oracle| oracle.field_name(oracle.type_of(&base_var), offset))
+            {
+                return Some(name.to_string());
+            }
+            if let Some(name) = self.field_name_from_type_hint_for_var(&base_var, offset) {
+                return Some(name);
+            }
         }
 
         if let CExpr::Var(base_name) = base_expr
@@ -2842,6 +3140,15 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn find_ssa_name_for_rendered_alias(&self, name: &str) -> Option<String> {
+        if let Some(preferred) = self.preferred_entry_arg_ssa_name(name)
+            && (self.semantic_values_map().contains_key(&preferred)
+                || self.definitions_map().contains_key(&preferred)
+                || self.var_aliases_map().contains_key(&preferred)
+                || self.copy_sources_map().contains_key(&preferred))
+        {
+            return Some(preferred);
+        }
+
         let mut matches = self
             .var_aliases_map()
             .iter()
@@ -2858,7 +3165,7 @@ impl<'a> FoldingContext<'a> {
             let (b_base, b_version) = Self::ssa_name_parts(b);
             b_key
                 .cmp(&a_key)
-                .then_with(|| a_version.cmp(&b_version))
+                .then_with(|| b_version.cmp(&a_version))
                 .then_with(|| a_base.cmp(b_base))
                 .then_with(|| a.cmp(b))
         });
@@ -2936,6 +3243,35 @@ impl<'a> FoldingContext<'a> {
             }
             _ => (name, 0),
         }
+    }
+
+    fn preferred_entry_arg_ssa_name(&self, name: &str) -> Option<String> {
+        if is_generic_arg_name(name) {
+            return self
+                .var_aliases_map()
+                .iter()
+                .filter(|(ssa_name, alias)| {
+                    alias.eq_ignore_ascii_case(name) && Self::ssa_name_parts(ssa_name).1 == 0
+                })
+                .map(|(ssa_name, _)| ssa_name.clone())
+                .min();
+        }
+
+        let base = name
+            .rsplit_once('_')
+            .map(|(root, _)| root)
+            .unwrap_or(name)
+            .to_ascii_lowercase();
+        self.arg_alias_for_register_name(&base)?;
+
+        self.var_aliases_map()
+            .keys()
+            .filter(|ssa_name| {
+                let (ssa_base, version) = Self::ssa_name_parts(ssa_name);
+                version == 0 && ssa_base.eq_ignore_ascii_case(&base)
+            })
+            .cloned()
+            .min()
     }
 
     fn expr_for_ssa_fallback_name(&self, ssa_name: &str) -> CExpr {
@@ -3196,11 +3532,7 @@ impl<'a> FoldingContext<'a> {
                 let resolved = self
                     .render_semantic_value_by_name(name, depth + 1, visited)
                     .and_then(|expr| {
-                        self.evaluate_constish_call_arg_expr_with_visited(
-                            &expr,
-                            depth + 1,
-                            visited,
-                        )
+                        self.evaluate_constish_call_arg_expr_with_visited(&expr, depth + 1, visited)
                     })
                     .or_else(|| {
                         self.find_ssa_name_for_rendered_alias(name)
@@ -3223,6 +3555,16 @@ impl<'a> FoldingContext<'a> {
                                             )
                                         })
                                     })
+                            })
+                    })
+                    .or_else(|| {
+                        self.resolve_expr_from_phi_sources(name, depth + 1, visited, true)
+                            .and_then(|expr| {
+                                self.evaluate_constish_call_arg_expr_with_visited(
+                                    &expr,
+                                    depth + 1,
+                                    visited,
+                                )
                             })
                     })
                     .or_else(|| {
@@ -3372,6 +3714,7 @@ impl<'a> FoldingContext<'a> {
                         self.lookup_definition_raw(name),
                         self.lookup_definition(name),
                     )
+                    .or_else(|| self.resolve_expr_from_phi_sources(name, depth + 1, visited, true))
                     .or_else(|| self.best_visible_definition(name));
                 if let Some(candidate) = candidate
                     && !matches!(&candidate, CExpr::Var(inner) if inner == name)
@@ -3540,8 +3883,30 @@ impl<'a> FoldingContext<'a> {
             (some @ Some(_), None) => some,
             (Some(current_expr), Some(candidate_expr)) => {
                 if imported {
-                    let current_stacky =
-                        self.call_arg_contains_stack_placeholder(&current_expr, 0);
+                    match (&current_expr, &candidate_expr) {
+                        (CExpr::Var(current_name), candidate)
+                            if self.is_transient_visible_name(current_name)
+                                && !matches!(
+                                    candidate,
+                                    CExpr::Var(candidate_name)
+                                        if candidate_name.eq_ignore_ascii_case(current_name)
+                                ) =>
+                        {
+                            return Some(candidate_expr);
+                        }
+                        (candidate, CExpr::Var(candidate_name))
+                            if self.is_transient_visible_name(candidate_name)
+                                && !matches!(
+                                    candidate,
+                                    CExpr::Var(current_name)
+                                        if current_name.eq_ignore_ascii_case(candidate_name)
+                                ) =>
+                        {
+                            return Some(current_expr);
+                        }
+                        _ => {}
+                    }
+                    let current_stacky = self.call_arg_contains_stack_placeholder(&current_expr, 0);
                     let candidate_stacky =
                         self.call_arg_contains_stack_placeholder(&candidate_expr, 0);
                     match (current_stacky, candidate_stacky) {
@@ -3555,18 +3920,15 @@ impl<'a> FoldingContext<'a> {
                         (CExpr::StringLit(_), _) => return Some(current_expr),
                         _ => {}
                     }
-                    let current_literalish =
-                        self.resolve_literalish_call_arg_expr(&current_expr);
+                    let current_literalish = self.resolve_literalish_call_arg_expr(&current_expr);
                     let candidate_literalish =
                         self.resolve_literalish_call_arg_expr(&candidate_expr);
                     match (current_literalish, candidate_literalish) {
                         (None, Some(candidate)) => return Some(candidate),
                         (Some(current), None) => return Some(current),
                         (Some(current), Some(candidate)) => {
-                            return self.choose_preferred_visible_expr(
-                                Some(current),
-                                Some(candidate),
-                            );
+                            return self
+                                .choose_preferred_visible_expr(Some(current), Some(candidate));
                         }
                         (None, None) => {}
                     }
@@ -3589,29 +3951,59 @@ impl<'a> FoldingContext<'a> {
 
         match expr {
             CExpr::Var(name) => {
+                let transient = self.is_transient_visible_name(name);
                 if let Some(semantic) = self.render_semantic_value_by_name(name, depth + 1, visited)
-                    && self.prefers_visible_expr(expr, &semantic)
+                    && let Some(preferred) = if transient {
+                        Some(semantic.clone())
+                    } else {
+                        self.choose_preferred_call_arg_expr(
+                            Some(expr.clone()),
+                            Some(semantic.clone()),
+                            true,
+                        )
+                    }
+                    && preferred != *expr
                 {
-                    return self.resolve_imported_call_arg_expr(&semantic, depth + 1, visited);
+                    return self.resolve_imported_call_arg_expr(&preferred, depth + 1, visited);
                 }
                 if let Some(ssa_name) = self.find_ssa_name_for_rendered_alias(name)
                     && ssa_name != *name
                 {
                     if let Some(semantic) =
                         self.render_semantic_value_by_name(&ssa_name, depth + 1, visited)
-                        && self.prefers_visible_expr(expr, &semantic)
+                        && let Some(preferred) = if transient {
+                            Some(semantic.clone())
+                        } else {
+                            self.choose_preferred_call_arg_expr(
+                                Some(expr.clone()),
+                                Some(semantic.clone()),
+                                true,
+                            )
+                        }
+                        && preferred != *expr
                     {
-                        return self.resolve_imported_call_arg_expr(
-                            &semantic,
-                            depth + 1,
-                            visited,
-                        );
+                        return self.resolve_imported_call_arg_expr(&preferred, depth + 1, visited);
                     }
                     if let Some(best) = self.lookup_definition(&ssa_name)
                         && !matches!(&best, CExpr::Var(inner) if inner.eq_ignore_ascii_case(name))
                     {
                         return self.resolve_imported_call_arg_expr(&best, depth + 1, visited);
                     }
+                }
+                if let Some(best) =
+                    self.resolve_expr_from_phi_sources(name, depth + 1, visited, true)
+                    && !matches!(&best, CExpr::Var(inner) if inner.eq_ignore_ascii_case(name))
+                {
+                    return best;
+                }
+                if let Some(best) = self.lookup_definition_raw(name)
+                    && !matches!(&best, CExpr::Var(inner) if inner.eq_ignore_ascii_case(name))
+                {
+                    let resolved = self.resolve_imported_call_arg_expr(&best, depth + 1, visited);
+                    let semanticized = self.semanticize_visible_expr(&resolved, depth + 1, visited);
+                    return self
+                        .choose_preferred_visible_expr(Some(resolved), Some(semanticized))
+                        .unwrap_or(best);
                 }
                 if let Some(best) = self.lookup_definition(name)
                     && !matches!(&best, CExpr::Var(inner) if inner == name)
@@ -3626,8 +4018,7 @@ impl<'a> FoldingContext<'a> {
                 expr.clone()
             }
             CExpr::Deref(inner) => {
-                let resolved_inner =
-                    self.resolve_imported_call_arg_expr(inner, depth + 1, visited);
+                let resolved_inner = self.resolve_imported_call_arg_expr(inner, depth + 1, visited);
                 let mut memory_visited = HashSet::new();
                 if let Some(access) = self.render_memory_access_from_visible_expr(
                     &resolved_inner,
@@ -3643,9 +4034,11 @@ impl<'a> FoldingContext<'a> {
                 ty.clone(),
                 self.resolve_imported_call_arg_expr(inner, depth + 1, visited),
             ),
-            CExpr::Paren(inner) => CExpr::Paren(Box::new(
-                self.resolve_imported_call_arg_expr(inner, depth + 1, visited),
-            )),
+            CExpr::Paren(inner) => CExpr::Paren(Box::new(self.resolve_imported_call_arg_expr(
+                inner,
+                depth + 1,
+                visited,
+            ))),
             CExpr::Unary { op, operand } => CExpr::unary(
                 *op,
                 self.resolve_imported_call_arg_expr(operand, depth + 1, visited),
@@ -3661,12 +4054,16 @@ impl<'a> FoldingContext<'a> {
                 else_expr,
             } => CExpr::Ternary {
                 cond: Box::new(self.resolve_imported_call_arg_expr(cond, depth + 1, visited)),
-                then_expr: Box::new(
-                    self.resolve_imported_call_arg_expr(then_expr, depth + 1, visited),
-                ),
-                else_expr: Box::new(
-                    self.resolve_imported_call_arg_expr(else_expr, depth + 1, visited),
-                ),
+                then_expr: Box::new(self.resolve_imported_call_arg_expr(
+                    then_expr,
+                    depth + 1,
+                    visited,
+                )),
+                else_expr: Box::new(self.resolve_imported_call_arg_expr(
+                    else_expr,
+                    depth + 1,
+                    visited,
+                )),
             },
             CExpr::Call { func, args } => CExpr::Call {
                 func: Box::new(self.resolve_imported_call_arg_expr(func, depth + 1, visited)),
@@ -3687,12 +4084,16 @@ impl<'a> FoldingContext<'a> {
                 base: Box::new(self.resolve_imported_call_arg_expr(base, depth + 1, visited)),
                 member: member.clone(),
             },
-            CExpr::Sizeof(inner) => CExpr::Sizeof(Box::new(
-                self.resolve_imported_call_arg_expr(inner, depth + 1, visited),
-            )),
-            CExpr::AddrOf(inner) => CExpr::AddrOf(Box::new(
-                self.resolve_imported_call_arg_expr(inner, depth + 1, visited),
-            )),
+            CExpr::Sizeof(inner) => CExpr::Sizeof(Box::new(self.resolve_imported_call_arg_expr(
+                inner,
+                depth + 1,
+                visited,
+            ))),
+            CExpr::AddrOf(inner) => CExpr::AddrOf(Box::new(self.resolve_imported_call_arg_expr(
+                inner,
+                depth + 1,
+                visited,
+            ))),
             CExpr::Comma(items) => CExpr::Comma(
                 items
                     .iter()
@@ -3737,6 +4138,25 @@ impl<'a> FoldingContext<'a> {
                         )
                     })
                     .or_else(|| {
+                        self.resolve_expr_from_phi_sources(name, depth + 1, visited, true)
+                            .and_then(|candidate| {
+                                self.resolve_string_like_imported_call_arg_expr(
+                                    &candidate,
+                                    depth + 1,
+                                    visited,
+                                )
+                            })
+                    })
+                    .or_else(|| {
+                        self.lookup_definition_raw(name).and_then(|candidate| {
+                            self.resolve_string_like_imported_call_arg_expr(
+                                &candidate,
+                                depth + 1,
+                                visited,
+                            )
+                        })
+                    })
+                    .or_else(|| {
                         self.find_ssa_name_for_rendered_alias(name)
                             .filter(|ssa_name| ssa_name != name)
                             .and_then(|ssa_name| {
@@ -3760,15 +4180,6 @@ impl<'a> FoldingContext<'a> {
                             })
                     })
                     .or_else(|| {
-                        self.lookup_definition_raw(name).and_then(|candidate| {
-                            self.resolve_string_like_imported_call_arg_expr(
-                                &candidate,
-                                depth + 1,
-                                visited,
-                            )
-                        })
-                    })
-                    .or_else(|| {
                         self.best_visible_definition(name).and_then(|candidate| {
                             self.resolve_string_like_imported_call_arg_expr(
                                 &candidate,
@@ -3780,20 +4191,147 @@ impl<'a> FoldingContext<'a> {
                 visited.remove(&visit_key);
                 resolved
             }
-            CExpr::AddrOf(inner)
-            | CExpr::Paren(inner)
-            | CExpr::Cast { expr: inner, .. } => {
+            CExpr::AddrOf(inner) | CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
                 self.resolve_string_like_imported_call_arg_expr(inner, depth + 1, visited)
+            }
+            CExpr::Deref(inner) => {
+                let resolved_inner = self.resolve_imported_call_arg_expr(inner, depth + 1, visited);
+                let mut memory_visited = HashSet::new();
+                self.render_memory_access_from_visible_expr(
+                    &resolved_inner,
+                    self.inputs.arch.ptr_size.max(1),
+                    depth + 1,
+                    &mut memory_visited,
+                )
+                .and_then(|access| {
+                    self.resolve_string_like_imported_call_arg_expr(&access, depth + 1, visited)
+                })
             }
             _ => None,
         }
+    }
+
+    fn normalize_forced_imported_call_arg_candidate(
+        &self,
+        original_name: &str,
+        candidate: CExpr,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        if matches!(&candidate, CExpr::Var(inner) if inner.eq_ignore_ascii_case(original_name)) {
+            return None;
+        }
+
+        let expanded = self.expand_call_arg_expr(&candidate, depth + 1, visited);
+        let mut semantic_visited = HashSet::new();
+        let semanticized =
+            self.semanticize_visible_expr(&expanded, depth + 1, &mut semantic_visited);
+        let mut imported_visited = HashSet::new();
+        let imported_resolved =
+            self.resolve_imported_call_arg_expr(&semanticized, depth + 1, &mut imported_visited);
+        let memoryized = match &imported_resolved {
+            CExpr::Deref(inner) => {
+                let mut memory_visited = HashSet::new();
+                self.render_memory_access_from_visible_expr(
+                    inner,
+                    self.inputs.arch.ptr_size.max(1),
+                    depth + 1,
+                    &mut memory_visited,
+                )
+                .or_else(|| self.promote_constant_indexed_call_arg(inner))
+                .unwrap_or_else(|| imported_resolved.clone())
+            }
+            _ => imported_resolved.clone(),
+        };
+        let literalized = self
+            .resolve_literalish_call_arg_expr(&memoryized)
+            .unwrap_or(memoryized);
+        let mut string_visited = HashSet::new();
+        Some(
+            self.resolve_string_like_imported_call_arg_expr(
+                &literalized,
+                depth + 1,
+                &mut string_visited,
+            )
+            .unwrap_or(literalized),
+        )
+    }
+
+    fn force_resolve_imported_call_arg_var(
+        &self,
+        name: &str,
+        depth: u32,
+        visited: &mut HashSet<String>,
+    ) -> Option<CExpr> {
+        if depth > Self::MAX_SEMANTIC_RENDER_DEPTH {
+            return None;
+        }
+
+        let visit_key = format!("force-call:{name}");
+        if !visited.insert(visit_key.clone()) {
+            return None;
+        }
+
+        let mut best = None;
+        if let Some(candidate) = self
+            .render_semantic_value_by_name(name, depth + 1, visited)
+            .and_then(|candidate| {
+                self.normalize_forced_imported_call_arg_candidate(name, candidate, depth, visited)
+            })
+        {
+            best = self.choose_preferred_call_arg_expr(best, Some(candidate), true);
+        }
+        if let Some(ssa_name) = self.find_ssa_name_for_rendered_alias(name)
+            && ssa_name != name
+            && let Some(candidate) = self
+                .render_semantic_value_by_name(&ssa_name, depth + 1, visited)
+                .or_else(|| self.lookup_definition_raw(&ssa_name))
+                .or_else(|| self.lookup_definition(&ssa_name))
+                .and_then(|candidate| {
+                    self.normalize_forced_imported_call_arg_candidate(
+                        name, candidate, depth, visited,
+                    )
+                })
+        {
+            best = self.choose_preferred_call_arg_expr(best, Some(candidate), true);
+        }
+        if let Some(candidate) = self
+            .resolve_expr_from_phi_sources(name, depth + 1, visited, true)
+            .and_then(|candidate| {
+                self.normalize_forced_imported_call_arg_candidate(name, candidate, depth, visited)
+            })
+        {
+            best = self.choose_preferred_call_arg_expr(best, Some(candidate), true);
+        }
+        if let Some(candidate) = self.lookup_definition_raw(name).and_then(|candidate| {
+            self.normalize_forced_imported_call_arg_candidate(name, candidate, depth, visited)
+        }) {
+            best = self.choose_preferred_call_arg_expr(best, Some(candidate), true);
+        }
+        if let Some(candidate) = self.lookup_definition(name).and_then(|candidate| {
+            self.normalize_forced_imported_call_arg_candidate(name, candidate, depth, visited)
+        }) {
+            best = self.choose_preferred_call_arg_expr(best, Some(candidate), true);
+        }
+        if let Some(candidate) = self.best_visible_definition(name).and_then(|candidate| {
+            self.normalize_forced_imported_call_arg_candidate(name, candidate, depth, visited)
+        }) {
+            best = self.choose_preferred_call_arg_expr(best, Some(candidate), true);
+        }
+
+        visited.remove(&visit_key);
+        best
     }
 
     pub(super) fn normalize_call_arg_expr_for_callee(&self, callee: &CExpr, expr: CExpr) -> CExpr {
         let imported = self.is_imported_call_target(callee);
         let raw = expr.clone();
         let rewritten = self.rewrite_stack_expr(expr);
-        let initial = if imported { raw.clone() } else { rewritten.clone() };
+        let initial = if imported {
+            raw.clone()
+        } else {
+            rewritten.clone()
+        };
         let mut best = Some(initial.clone());
         if imported {
             best = self.choose_preferred_call_arg_expr(best, Some(rewritten.clone()), true);
@@ -3810,8 +4348,7 @@ impl<'a> FoldingContext<'a> {
         } else {
             semanticized.clone()
         };
-        best =
-            self.choose_preferred_call_arg_expr(best, Some(imported_resolved.clone()), imported);
+        best = self.choose_preferred_call_arg_expr(best, Some(imported_resolved.clone()), imported);
         let memoryized = match &imported_resolved {
             CExpr::Deref(inner) => {
                 let mut memory_visited = HashSet::new();
@@ -3835,20 +4372,159 @@ impl<'a> FoldingContext<'a> {
             .unwrap_or(rewritten);
         let best = if imported {
             let mut string_visited = HashSet::new();
-            let stringy = self.resolve_string_like_imported_call_arg_expr(&best, 0, &mut string_visited);
+            let stringy =
+                self.resolve_string_like_imported_call_arg_expr(&best, 0, &mut string_visited);
             self.choose_preferred_call_arg_expr(Some(best.clone()), stringy, true)
                 .unwrap_or(best)
         } else {
             best
         };
-        let rewritten_best = self.rewrite_stack_expr(best.clone());
-        if imported
-            && self.call_arg_contains_stack_placeholder(&rewritten_best, 0)
-            && !self.call_arg_contains_stack_placeholder(&best, 0)
+        let best = if imported
+            && let CExpr::Var(name) = &best
+            && self.is_transient_visible_name(name)
         {
+            let mut semantic_visited = HashSet::new();
+            let semantic = self
+                .render_semantic_value_by_name(name, 0, &mut semantic_visited)
+                .or_else(|| {
+                    self.render_authoritative_memory_access_by_name(
+                        name,
+                        self.inputs.arch.ptr_size.max(1),
+                        0,
+                        &mut semantic_visited,
+                    )
+                });
+            self.choose_preferred_call_arg_expr(Some(best.clone()), semantic, true)
+                .unwrap_or(best)
+        } else {
             best
+        };
+        let best = if imported
+            && let CExpr::Var(name) = &best
+            && self.is_transient_visible_name(name)
+        {
+            let mut force_visited = HashSet::new();
+            self.force_resolve_imported_call_arg_var(name, 0, &mut force_visited)
+                .and_then(|candidate| {
+                    (!matches!(&candidate, CExpr::Var(inner) if inner.eq_ignore_ascii_case(name)))
+                        .then_some(candidate)
+                })
+                .map(|candidate| {
+                    self.choose_preferred_call_arg_expr(Some(best.clone()), Some(candidate), true)
+                        .unwrap_or(best.clone())
+                })
+                .unwrap_or(best)
+        } else {
+            best
+        };
+        let rewritten_best = self.rewrite_stack_expr(best.clone());
+        if imported {
+            self.choose_preferred_call_arg_expr(
+                Some(best.clone()),
+                Some(rewritten_best.clone()),
+                true,
+            )
+            .unwrap_or(best)
         } else {
             rewritten_best
+        }
+    }
+
+    fn normalize_final_call_expr(&self, expr: CExpr) -> CExpr {
+        match expr {
+            CExpr::Call { func, args } => {
+                let func = self.normalize_final_call_expr(*func);
+                let args = if self.is_imported_call_target(&func) {
+                    args.into_iter()
+                        .map(|arg| self.normalize_final_call_expr(arg))
+                        .collect()
+                } else {
+                    args.into_iter()
+                        .map(|arg| {
+                            let normalized = self.normalize_final_call_expr(arg);
+                            self.normalize_call_arg_expr_for_callee(&func, normalized)
+                        })
+                        .collect()
+                };
+                CExpr::Call {
+                    func: Box::new(func),
+                    args,
+                }
+            }
+            other => other.map_children(&mut |child| self.normalize_final_call_expr(child)),
+        }
+    }
+
+    pub(crate) fn normalize_final_stmt_calls(&self, stmt: CStmt) -> CStmt {
+        match stmt {
+            CStmt::Expr(expr) => CStmt::Expr(self.normalize_final_call_expr(expr)),
+            CStmt::Decl { ty, name, init } => CStmt::Decl {
+                ty,
+                name,
+                init: init.map(|expr| self.normalize_final_call_expr(expr)),
+            },
+            CStmt::Block(stmts) => CStmt::Block(
+                stmts
+                    .into_iter()
+                    .map(|stmt| self.normalize_final_stmt_calls(stmt))
+                    .collect(),
+            ),
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => CStmt::If {
+                cond: self.normalize_final_call_expr(cond),
+                then_body: Box::new(self.normalize_final_stmt_calls(*then_body)),
+                else_body: else_body.map(|stmt| Box::new(self.normalize_final_stmt_calls(*stmt))),
+            },
+            CStmt::While { cond, body } => CStmt::While {
+                cond: self.normalize_final_call_expr(cond),
+                body: Box::new(self.normalize_final_stmt_calls(*body)),
+            },
+            CStmt::DoWhile { body, cond } => CStmt::DoWhile {
+                body: Box::new(self.normalize_final_stmt_calls(*body)),
+                cond: self.normalize_final_call_expr(cond),
+            },
+            CStmt::For {
+                init,
+                cond,
+                update,
+                body,
+            } => CStmt::For {
+                init: init.map(|stmt| Box::new(self.normalize_final_stmt_calls(*stmt))),
+                cond: cond.map(|expr| self.normalize_final_call_expr(expr)),
+                update: update.map(|expr| self.normalize_final_call_expr(expr)),
+                body: Box::new(self.normalize_final_stmt_calls(*body)),
+            },
+            CStmt::Switch {
+                expr,
+                cases,
+                default,
+            } => CStmt::Switch {
+                expr: self.normalize_final_call_expr(expr),
+                cases: cases
+                    .into_iter()
+                    .map(|case| crate::ast::SwitchCase {
+                        value: self.normalize_final_call_expr(case.value),
+                        body: case
+                            .body
+                            .into_iter()
+                            .map(|stmt| self.normalize_final_stmt_calls(stmt))
+                            .collect(),
+                    })
+                    .collect(),
+                default: default.map(|stmts| {
+                    stmts
+                        .into_iter()
+                        .map(|stmt| self.normalize_final_stmt_calls(stmt))
+                        .collect()
+                }),
+            },
+            CStmt::Return(expr) => {
+                CStmt::Return(expr.map(|expr| self.normalize_final_call_expr(expr)))
+            }
+            other => other,
         }
     }
 
@@ -4029,14 +4705,14 @@ impl<'a> FoldingContext<'a> {
                 if self.is_entry_arg_alias_copy(dst, src) {
                     return None;
                 }
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs_base = self.get_expr(src);
                 let rhs = self.resolve_predicate_rhs_for_var(src, rhs_base);
                 let rhs = self.assignment_rhs_with_type_policy(dst, Some(src), rhs);
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Load { dst, addr, .. } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let elem_ty = self
                     .type_hint_for_var(dst)
                     .unwrap_or_else(|| type_from_size(dst.size));
@@ -4044,6 +4720,9 @@ impl<'a> FoldingContext<'a> {
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Store { addr, val, .. } => {
+                if self.is_entry_arg_alias_store(addr, val) {
+                    return None;
+                }
                 let elem_ty = self
                     .type_hint_for_var(val)
                     .unwrap_or_else(|| type_from_size(val.size));
@@ -4067,7 +4746,7 @@ impl<'a> FoldingContext<'a> {
                 addr,
                 ordering,
             } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let call = CExpr::call(
                     CExpr::Var("load_linked".to_string()),
                     vec![
@@ -4095,7 +4774,7 @@ impl<'a> FoldingContext<'a> {
                     ],
                 );
                 if let Some(dst) = result {
-                    let lhs = CExpr::Var(self.var_name(dst));
+                    let lhs = self.assignment_lhs_expr(dst);
                     Some(CStmt::Expr(CExpr::assign(lhs, call)))
                 } else {
                     Some(CStmt::Expr(call))
@@ -4109,7 +4788,7 @@ impl<'a> FoldingContext<'a> {
                 replacement,
                 ordering,
             } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let call = CExpr::call(
                     CExpr::Var("atomic_cas".to_string()),
                     vec![
@@ -4129,7 +4808,7 @@ impl<'a> FoldingContext<'a> {
                 guard,
                 ordering,
             } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let call = CExpr::call(
                     CExpr::Var("load_guarded".to_string()),
                     vec![
@@ -4225,12 +4904,12 @@ impl<'a> FoldingContext<'a> {
             SSAOp::IntEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Eq),
             SSAOp::IntNotEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Ne),
             SSAOp::IntNegate { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::unary(UnaryOp::Neg, self.get_expr(src));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::IntNot { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::unary(UnaryOp::BitNot, self.get_expr(src));
                 self.assign_stmt(lhs, rhs)
             }
@@ -4238,7 +4917,7 @@ impl<'a> FoldingContext<'a> {
             SSAOp::BoolOr { dst, a, b } => self.boolean_stmt(dst, BinaryOp::Or, a, b),
             SSAOp::BoolXor { dst, a, b } => self.boolean_stmt(dst, BinaryOp::BitXor, a, b),
             SSAOp::BoolNot { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = self.resolve_predicate_rhs_for_var(
                     dst,
                     CExpr::unary(UnaryOp::Not, self.get_expr(src)),
@@ -4246,21 +4925,21 @@ impl<'a> FoldingContext<'a> {
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let ty = type_from_size(dst.size);
                 let rhs =
                     self.resolve_predicate_rhs_for_var(dst, CExpr::cast(ty, self.get_expr(src)));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Trunc { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let ty = type_from_size(dst.size);
                 let rhs =
                     self.resolve_predicate_rhs_for_var(dst, CExpr::cast(ty, self.get_expr(src)));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Piece { dst, hi, lo } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let shift_bits = lo.size.saturating_mul(8);
                 let dst_ty = uint_type_from_size(dst.size);
                 let hi_cast = CExpr::cast(dst_ty.clone(), self.get_expr(hi));
@@ -4274,7 +4953,7 @@ impl<'a> FoldingContext<'a> {
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Subpiece { dst, src, offset } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = if *offset == 0 && dst.size == src.size {
                     self.get_expr(src)
                 } else if *offset == 0 {
@@ -4293,37 +4972,37 @@ impl<'a> FoldingContext<'a> {
             SSAOp::FloatMult { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Mul),
             SSAOp::FloatDiv { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Div),
             SSAOp::FloatNeg { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::unary(UnaryOp::Neg, self.get_expr(src));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::FloatAbs { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::call(CExpr::Var("fabs".to_string()), vec![self.get_expr(src)]);
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::FloatSqrt { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::call(CExpr::Var("sqrt".to_string()), vec![self.get_expr(src)]);
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::FloatCeil { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::call(CExpr::Var("ceil".to_string()), vec![self.get_expr(src)]);
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::FloatFloor { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::call(CExpr::Var("floor".to_string()), vec![self.get_expr(src)]);
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::FloatRound { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::call(CExpr::Var("round".to_string()), vec![self.get_expr(src)]);
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::FloatNaN { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::call(CExpr::Var("isnan".to_string()), vec![self.get_expr(src)]);
                 self.assign_stmt(lhs, rhs)
             }
@@ -4332,17 +5011,17 @@ impl<'a> FoldingContext<'a> {
             SSAOp::FloatEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Eq),
             SSAOp::FloatNotEqual { dst, a, b } => self.binary_stmt(dst, a, b, BinaryOp::Ne),
             SSAOp::Int2Float { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::cast(CType::Float(dst.size), self.get_expr(src));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Float2Int { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::cast(type_from_size(dst.size), self.get_expr(src));
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::FloatFloat { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = CExpr::cast(CType::Float(dst.size), self.get_expr(src));
                 self.assign_stmt(lhs, rhs)
             }
@@ -4372,7 +5051,7 @@ impl<'a> FoldingContext<'a> {
                 }
                 let call = CExpr::call(CExpr::Var("callother".to_string()), args);
                 if let Some(dst) = output {
-                    let lhs = CExpr::Var(self.var_name(dst));
+                    let lhs = self.assignment_lhs_expr(dst);
                     Some(CStmt::Expr(CExpr::assign(lhs, call)))
                 } else {
                     Some(CStmt::Expr(call))
@@ -4383,7 +5062,7 @@ impl<'a> FoldingContext<'a> {
                     CExpr::Var("callother".to_string()),
                     vec![CExpr::StringLit("cpuid".to_string())],
                 );
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 Some(CStmt::Expr(CExpr::assign(lhs, call)))
             }
             SSAOp::PtrAdd {
@@ -4392,7 +5071,7 @@ impl<'a> FoldingContext<'a> {
                 index,
                 element_size,
             } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = self.ptr_arith_expr(base, index, *element_size, false);
                 self.assign_stmt(lhs, rhs)
             }
@@ -4402,12 +5081,12 @@ impl<'a> FoldingContext<'a> {
                 index,
                 element_size,
             } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = self.ptr_arith_expr(base, index, *element_size, true);
                 self.assign_stmt(lhs, rhs)
             }
             SSAOp::Cast { dst, src } => {
-                let lhs = CExpr::Var(self.var_name(dst));
+                let lhs = self.assignment_lhs_expr(dst);
                 let rhs = self.resolve_predicate_rhs_for_var(
                     dst,
                     CExpr::cast(type_from_size(dst.size), self.get_expr(src)),
@@ -4444,7 +5123,7 @@ impl<'a> FoldingContext<'a> {
         op: BinaryOp,
         operand_ty: Option<CType>,
     ) -> Option<CStmt> {
-        let lhs = CExpr::Var(self.var_name(dst));
+        let lhs = self.assignment_lhs_expr(dst);
         let mut lhs_expr = self.get_expr(a);
         let mut rhs_expr = self.get_expr(b);
         if let Some(ty) = operand_ty {
@@ -4472,7 +5151,7 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn boolean_stmt(&self, dst: &SSAVar, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> Option<CStmt> {
-        let lhs = CExpr::Var(self.var_name(dst));
+        let lhs = self.assignment_lhs_expr(dst);
         let rhs = self.resolve_predicate_rhs_for_var(
             dst,
             CExpr::binary(op, self.get_expr(a), self.get_expr(b)),
@@ -4524,10 +5203,11 @@ pub(super) fn is_generic_arg_name(name: &str) -> bool {
 }
 
 pub(crate) fn should_replace_preserved_stack_alias(existing: &str) -> bool {
-    existing == "stack"
-        || existing.starts_with("local_")
-        || existing.starts_with("stack_")
-        || existing == "saved_fp"
+    let normalized = existing.trim_start_matches('&');
+    normalized == "stack"
+        || normalized.starts_with("local_")
+        || normalized.starts_with("stack_")
+        || normalized == "saved_fp"
 }
 
 fn should_replace_preserved_stack_expr(existing: &CExpr, preserved: &CExpr) -> bool {

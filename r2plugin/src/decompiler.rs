@@ -101,7 +101,7 @@ pub(crate) fn run_full_decompile_on_large_stack(
     stack_vars_str: String,
     types_str: String,
 ) -> String {
-    const STACK_SIZE: usize = 32 * 1024 * 1024;
+    const STACK_SIZE: usize = 128 * 1024 * 1024;
 
     let handle = std::thread::Builder::new()
         .stack_size(STACK_SIZE)

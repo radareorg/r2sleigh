@@ -448,14 +448,11 @@ pub(crate) fn param_register_alias_for_ssa_name(
     param_register_aliases: &HashMap<String, String>,
 ) -> Option<String> {
     let lower = ssa_name.to_ascii_lowercase();
-    param_register_aliases
-        .get(&lower)
-        .cloned()
-        .or_else(|| {
-            lower
-                .rsplit_once('_')
-                .and_then(|(base, _)| param_register_aliases.get(base).cloned())
-        })
+    param_register_aliases.get(&lower).cloned().or_else(|| {
+        lower
+            .rsplit_once('_')
+            .and_then(|(base, _)| param_register_aliases.get(base).cloned())
+    })
 }
 
 pub(crate) fn arg_alias_for_store_source(
@@ -520,8 +517,7 @@ mod tests {
         let src = SSAVar::new("X1", 0, 8);
         let copy_sources = HashMap::new();
         let var_aliases = HashMap::new();
-        let param_register_aliases =
-            HashMap::from([(String::from("x1"), String::from("arg2"))]);
+        let param_register_aliases = HashMap::from([(String::from("x1"), String::from("arg2"))]);
 
         assert_eq!(
             arg_alias_for_store_source(&src, &copy_sources, &var_aliases, &param_register_aliases),

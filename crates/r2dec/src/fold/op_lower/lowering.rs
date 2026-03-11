@@ -43,7 +43,7 @@ impl<'a> FoldingContext<'a> {
                                 .cloned()
                                 .unwrap_or_default()
                                 .into_iter()
-                                .map(|arg| self.normalize_call_arg_expr_for_callee(&func_expr, arg))
+                                .map(|arg| self.render_call_arg_for_callee(&func_expr, arg))
                                 .collect();
                             if let Some(max_arity) = self.non_variadic_call_arity(&func_expr) {
                                 args.truncate(max_arity);
@@ -62,7 +62,7 @@ impl<'a> FoldingContext<'a> {
                                 .cloned()
                                 .unwrap_or_default()
                                 .into_iter()
-                                .map(|arg| self.normalize_call_arg_expr_for_callee(&func_expr, arg))
+                                .map(|arg| self.render_call_arg_for_callee(&func_expr, arg))
                                 .collect();
                             if let Some(max_arity) = self.non_variadic_call_arity(&func_expr) {
                                 args.truncate(max_arity);

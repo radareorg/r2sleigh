@@ -224,6 +224,19 @@ fn apply_signature_context_overrides(
     let mut param_names = std::collections::HashMap::new();
 
     if let Some(current) = sig_ctx.current.as_ref() {
+        while sig.params.len() < current.params.len() {
+            let idx = sig.params.len();
+            let param_type = current
+                .params
+                .get(idx)
+                .and_then(|param| param.ty.as_ref())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "void *".to_string());
+            sig.params.push(InferredParamJson {
+                name: format!("arg{}", idx + 1),
+                param_type,
+            });
+        }
         if let Some(ret_ty) = current.ret_type.as_ref() {
             let ret_ty_str = ret_ty.to_string();
             if !matches!(ret_ty, r2dec::CType::Unknown) {
@@ -256,6 +269,150 @@ fn apply_signature_context_overrides(
     (param_types, param_names)
 }
 
+pub(crate) fn normalize_function_basename(name: &str) -> String {
+    let mut lower = name.trim().to_ascii_lowercase();
+    for prefix in ["sym.imp.", "sym.", "dbg.", "fcn."] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            lower = rest.to_string();
+            break;
+        }
+    }
+    if let Some(rest) = lower.strip_prefix('_')
+        && rest == "main"
+    {
+        return "main".to_string();
+    }
+    lower
+}
+
+pub(crate) fn is_c_main_function(name: &str) -> bool {
+    normalize_function_basename(name) == "main"
+}
+
+pub(crate) fn canonical_main_external_signature() -> r2dec::ExternalFunctionSignature {
+    let char_ptr = r2dec::CType::Pointer(Box::new(r2dec::CType::Int(8)));
+    let char_pp = r2dec::CType::Pointer(Box::new(char_ptr));
+    r2dec::ExternalFunctionSignature {
+        ret_type: Some(r2dec::CType::Int(32)),
+        params: vec![
+            r2dec::ExternalFunctionParam {
+                name: "argc".to_string(),
+                ty: Some(r2dec::CType::Int(32)),
+            },
+            r2dec::ExternalFunctionParam {
+                name: "argv".to_string(),
+                ty: Some(char_pp.clone()),
+            },
+            r2dec::ExternalFunctionParam {
+                name: "envp".to_string(),
+                ty: Some(char_pp),
+            },
+        ],
+    }
+}
+
+pub(crate) fn apply_main_signature_override(
+    function_name: &str,
+    signature_cc: &mut InferredSignatureCcJson,
+    merged_signature: &mut Option<r2dec::ExternalFunctionSignature>,
+) {
+    if !is_c_main_function(function_name) {
+        return;
+    }
+
+    let main_signature = canonical_main_external_signature();
+    signature_cc.ret_type = main_signature
+        .ret_type
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "int32_t".to_string());
+    signature_cc.params = main_signature
+        .params
+        .iter()
+        .map(|param| InferredParamJson {
+            name: param.name.clone(),
+            param_type: param
+                .ty
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "void *".to_string()),
+        })
+        .collect();
+    signature_cc.signature = crate::format_afs_signature(
+        &signature_cc.function_name,
+        &signature_cc.ret_type,
+        &signature_cc.params,
+    );
+    signature_cc.confidence = signature_cc.confidence.max(96);
+    *merged_signature = Some(main_signature);
+}
+
+fn signature_param_blocks_local_struct_override(
+    signature: &Option<r2dec::ExternalFunctionSignature>,
+    slot: usize,
+) -> bool {
+    let Some(ty) = signature
+        .as_ref()
+        .and_then(|sig| sig.params.get(slot))
+        .and_then(|param| param.ty.as_ref())
+    else {
+        return false;
+    };
+
+    if matches!(ty, r2dec::CType::Unknown | r2dec::CType::Void) {
+        return false;
+    }
+
+    match ty {
+        r2dec::CType::Pointer(inner) => !matches!(
+            inner.as_ref(),
+            r2dec::CType::Unknown
+                | r2dec::CType::Void
+                | r2dec::CType::Struct(_)
+                | r2dec::CType::Union(_)
+                | r2dec::CType::Typedef(_)
+        ),
+        _ => true,
+    }
+}
+
+fn prune_conflicting_local_struct_overrides(
+    merged_signature: &Option<r2dec::ExternalFunctionSignature>,
+    struct_decls: &mut Vec<crate::StructDeclCandidateJson>,
+    slot_type_overrides: &mut std::collections::HashMap<usize, String>,
+    slot_field_profiles: &mut std::collections::HashMap<
+        usize,
+        std::collections::BTreeMap<u64, String>,
+    >,
+) {
+    let blocked_slots = slot_type_overrides
+        .keys()
+        .copied()
+        .filter(|slot| signature_param_blocks_local_struct_override(merged_signature, *slot))
+        .collect::<Vec<_>>();
+
+    if blocked_slots.is_empty() {
+        return;
+    }
+
+    for slot in &blocked_slots {
+        slot_type_overrides.remove(slot);
+        slot_field_profiles.remove(slot);
+    }
+
+    let referenced_local_names = slot_type_overrides
+        .values()
+        .filter_map(|ty| ty.trim().strip_prefix("struct "))
+        .filter_map(|rest| rest.trim_end().strip_suffix(" *"))
+        .map(|name| name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    struct_decls.retain(|decl| {
+        decl.source != "local_inferred"
+            || referenced_local_names.contains(&decl.name.to_ascii_lowercase())
+    });
+}
+
 fn build_function_analysis_artifact_from_analysis(
     input: &FunctionInput<'_>,
     analysis: FunctionAnalysis,
@@ -275,8 +432,13 @@ fn build_function_analysis_artifact_from_analysis(
         apply_signature_context_overrides(&mut signature_cc, &sig_ctx);
 
     let reg_params = crate::parse_external_reg_params(afvj, ptr_bits);
-    let merged_signature =
+    let mut merged_signature =
         crate::merge_signature_with_reg_params(sig_ctx.current.clone(), reg_params);
+    apply_main_signature_override(
+        &input.function_name,
+        &mut signature_cc,
+        &mut merged_signature,
+    );
 
     let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
     let raw_structs = crate::infer_structs_from_ssa(
@@ -291,7 +453,7 @@ fn build_function_analysis_artifact_from_analysis(
         ptr_bits,
         &mut diagnostics,
     );
-    let (mut struct_decls, mut slot_type_overrides, slot_field_profiles) =
+    let (mut struct_decls, mut slot_type_overrides, mut slot_field_profiles) =
         crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
     let (external_structs, solver_warnings) =
         crate::collect_external_struct_candidates(tsj, ptr_bits);
@@ -306,6 +468,12 @@ fn build_function_analysis_artifact_from_analysis(
         &struct_decls,
         &mut slot_type_overrides,
         &slot_field_profiles,
+    );
+    prune_conflicting_local_struct_overrides(
+        &merged_signature,
+        &mut struct_decls,
+        &mut slot_type_overrides,
+        &mut slot_field_profiles,
     );
 
     {
@@ -498,8 +666,9 @@ pub(crate) fn build_detached_function_analysis_artifact(
     let _ = apply_signature_context_overrides(&mut signature_cc, &sig_ctx);
 
     let reg_params = crate::parse_external_reg_params(afvj, ptr_bits);
-    let merged_signature =
+    let mut merged_signature =
         crate::merge_signature_with_reg_params(sig_ctx.current.clone(), reg_params);
+    apply_main_signature_override(function_name, &mut signature_cc, &mut merged_signature);
 
     let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
     let raw_structs = crate::infer_structs_from_ssa(
@@ -514,7 +683,7 @@ pub(crate) fn build_detached_function_analysis_artifact(
         ptr_bits,
         &mut diagnostics,
     );
-    let (mut struct_decls, mut slot_type_overrides, slot_field_profiles) =
+    let (mut struct_decls, mut slot_type_overrides, mut slot_field_profiles) =
         crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
     let (external_structs, solver_warnings) =
         crate::collect_external_struct_candidates(tsj, ptr_bits);
@@ -529,6 +698,12 @@ pub(crate) fn build_detached_function_analysis_artifact(
         &struct_decls,
         &mut slot_type_overrides,
         &slot_field_profiles,
+    );
+    prune_conflicting_local_struct_overrides(
+        &merged_signature,
+        &mut struct_decls,
+        &mut slot_type_overrides,
+        &mut slot_field_profiles,
     );
     {
         let mut seen = std::collections::HashSet::new();
@@ -2589,6 +2764,103 @@ mod tests {
             arg0.var_type, "void *",
             "two-block spill/reload + scaled-index pattern should mark rdi as pointer"
         );
+    }
+
+    #[test]
+    fn signature_context_overrides_extend_empty_param_list() {
+        let mut sig = InferredSignatureCcJson {
+            function_name: "main".to_string(),
+            signature: "int32_t main(void)".to_string(),
+            ret_type: "int32_t".to_string(),
+            params: Vec::new(),
+            callconv: String::new(),
+            arch: "aarch64".to_string(),
+            confidence: 80,
+            callconv_confidence: 0,
+        };
+        let sig_ctx = crate::ParsedSignatureContext {
+            current: Some(r2dec::ExternalFunctionSignature {
+                ret_type: Some(r2dec::CType::Int(32)),
+                params: vec![
+                    r2dec::ExternalFunctionParam {
+                        name: "argc".to_string(),
+                        ty: Some(r2dec::CType::Int(32)),
+                    },
+                    r2dec::ExternalFunctionParam {
+                        name: "argv".to_string(),
+                        ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(
+                            Box::new(r2dec::CType::Int(8)),
+                        )))),
+                    },
+                ],
+            }),
+            known: std::collections::HashMap::new(),
+        };
+
+        apply_signature_context_overrides(&mut sig, &sig_ctx);
+
+        assert_eq!(sig.params.len(), 2);
+        assert_eq!(sig.params[0].name, "argc");
+        assert_eq!(sig.params[0].param_type, "int32_t");
+        assert_eq!(sig.params[1].name, "argv");
+        assert_eq!(sig.params[1].param_type, "int8_t**");
+    }
+
+    #[test]
+    fn main_signature_override_is_canonical_and_caps_extra_params() {
+        let mut sig = InferredSignatureCcJson {
+            function_name: "main".to_string(),
+            signature: "int32_t main(void)".to_string(),
+            ret_type: "int32_t".to_string(),
+            params: vec![InferredParamJson {
+                name: "arg1".to_string(),
+                param_type: "void *".to_string(),
+            }],
+            callconv: String::new(),
+            arch: "aarch64".to_string(),
+            confidence: 80,
+            callconv_confidence: 0,
+        };
+        let mut merged = Some(r2dec::ExternalFunctionSignature {
+            ret_type: Some(r2dec::CType::Int(32)),
+            params: vec![
+                r2dec::ExternalFunctionParam {
+                    name: "arg0".to_string(),
+                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                },
+                r2dec::ExternalFunctionParam {
+                    name: "arg2".to_string(),
+                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                },
+                r2dec::ExternalFunctionParam {
+                    name: "arg3".to_string(),
+                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                },
+                r2dec::ExternalFunctionParam {
+                    name: "arg_550h".to_string(),
+                    ty: Some(r2dec::CType::Int(64)),
+                },
+            ],
+        });
+
+        apply_main_signature_override("sym._main", &mut sig, &mut merged);
+
+        assert_eq!(
+            sig.params
+                .iter()
+                .map(|param| (param.name.as_str(), param.param_type.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("argc", "int32_t"),
+                ("argv", "int8_t**"),
+                ("envp", "int8_t**"),
+            ]
+        );
+        let merged = merged.expect("main signature");
+        assert_eq!(merged.params.len(), 3);
+        assert_eq!(merged.params[0].name, "argc");
+        assert_eq!(merged.params[1].name, "argv");
+        assert_eq!(merged.params[2].name, "envp");
     }
 
     #[test]

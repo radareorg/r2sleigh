@@ -94,7 +94,16 @@ fn merge_params_with_external_signature(
         return recovered_params;
     }
 
-    let target_len = recovered_params.len().max(signature.params.len());
+    let signature_is_authoritative = signature.ret_type.is_some()
+        || signature
+            .params
+            .iter()
+            .any(|param| param.ty.is_some() || !is_generic_arg_name(&param.name));
+    let target_len = if signature_is_authoritative {
+        signature.params.len()
+    } else {
+        recovered_params.len().max(signature.params.len())
+    };
     (0..target_len)
         .map(|idx| {
             let fallback_name = format!("arg{}", idx + 1);
@@ -643,11 +652,11 @@ impl Decompiler {
             &self.context.register_params,
             &self.config.arg_regs,
         );
-        for (idx, (ssa_var, _)) in recovered_param_infos.iter().enumerate() {
+        for (idx, (_ssa_var, _)) in recovered_param_infos.iter().enumerate() {
             let Some(param) = params.get(idx) else {
                 continue;
             };
-            let param_ty = type_inference.get_type(ssa_var);
+            let param_ty = param.ty.clone();
             type_hints.insert(param.name.clone(), param_ty.clone());
             type_hints.insert(param.name.to_ascii_lowercase(), param_ty);
         }
@@ -749,6 +758,8 @@ impl Decompiler {
                 }
             }
         }
+
+        body_stmt = fold_ctx.normalize_final_stmt_calls(body_stmt);
 
         // Build the C function
         let func_name = func
@@ -1003,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn external_signature_does_not_shrink_richer_recovered_header_params() {
+    fn authoritative_external_signature_can_shrink_recovered_header_params() {
         let recovered = vec![
             ast::CParam {
                 ty: CType::Int(32),
@@ -1035,13 +1046,51 @@ mod tests {
         let params = merge_params_with_external_signature(recovered, Some(&signature));
         assert_eq!(
             params.len(),
-            3,
-            "external signature should not shrink a richer recovered header"
+            2,
+            "typed/named external signature should be authoritative for the visible header"
         );
         assert_eq!(params[0].name, "src");
         assert_eq!(params[1].name, "len");
-        assert_eq!(params[2].name, "arg3");
         assert!(matches!(params[1].ty, CType::UInt(64)));
+    }
+
+    #[test]
+    fn generic_external_signature_does_not_shrink_richer_recovered_header_params() {
+        let recovered = vec![
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg1".to_string(),
+            },
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg2".to_string(),
+            },
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg3".to_string(),
+            },
+        ];
+        let signature = ExternalFunctionSignature {
+            ret_type: None,
+            params: vec![
+                ExternalFunctionParam {
+                    name: "arg1".to_string(),
+                    ty: None,
+                },
+                ExternalFunctionParam {
+                    name: "arg2".to_string(),
+                    ty: None,
+                },
+            ],
+        };
+
+        let params = merge_params_with_external_signature(recovered, Some(&signature));
+        assert_eq!(
+            params.len(),
+            3,
+            "generic external signature should not hide richer recovered params"
+        );
+        assert_eq!(params[2].name, "arg3");
     }
 
     #[test]

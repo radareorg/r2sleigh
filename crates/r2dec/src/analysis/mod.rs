@@ -49,6 +49,7 @@ pub(crate) struct UseInfo {
     pub(crate) definitions: HashMap<String, CExpr>,
     pub(crate) semantic_values: HashMap<String, SemanticValue>,
     pub(crate) frame_slot_merges: HashMap<String, FrameSlotMergeSummary>,
+    pub(crate) phi_sources: HashMap<String, Vec<SSAVar>>,
     pub(crate) formatted_defs: HashMap<String, CExpr>,
     pub(crate) copy_sources: HashMap<String, String>,
     pub(crate) memory_stores: HashMap<String, String>,
@@ -56,12 +57,42 @@ pub(crate) struct UseInfo {
     pub(crate) ptr_members: HashMap<String, (r2ssa::SSAVar, i64)>,
     pub(crate) condition_vars: HashSet<String>,
     pub(crate) pinned: HashSet<String>,
-    pub(crate) call_args: HashMap<(u64, usize), Vec<CExpr>>,
+    pub(crate) call_args: HashMap<(u64, usize), Vec<SemanticCallArg>>,
     pub(crate) consumed_by_call: HashSet<String>,
     pub(crate) var_aliases: HashMap<String, String>,
     pub(crate) type_hints: HashMap<String, CType>,
     pub(crate) stack_slots: HashMap<String, StackSlotProvenance>,
+    pub(crate) stable_stack_values: HashMap<i64, SemanticValue>,
+    pub(crate) stable_memory_values: HashMap<String, SemanticValue>,
     pub(crate) forwarded_values: HashMap<String, ValueProvenance>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SemanticCallArg {
+    Semantic(SemanticValue),
+    StringAddr(u64),
+    Expr(CExpr),
+}
+
+impl SemanticCallArg {
+    pub(crate) fn semantic(value: SemanticValue) -> Self {
+        Self::Semantic(value)
+    }
+
+    pub(crate) fn value_root(var: impl Into<ValueRef>) -> Self {
+        Self::Semantic(SemanticValue::Scalar(ScalarValue::Root(var.into())))
+    }
+
+    pub(crate) fn expr_only(expr: CExpr) -> Self {
+        Self::Expr(expr)
+    }
+}
+
+impl From<CExpr> for SemanticCallArg {
+    fn from(expr: CExpr) -> Self {
+        Self::expr_only(expr)
+    }
 }
 
 #[allow(dead_code)]
