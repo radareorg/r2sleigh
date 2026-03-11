@@ -49,6 +49,7 @@ pub(crate) struct UseInfo {
     pub(crate) definitions: HashMap<String, CExpr>,
     pub(crate) semantic_values: HashMap<String, SemanticValue>,
     pub(crate) frame_slot_merges: HashMap<String, FrameSlotMergeSummary>,
+    pub(crate) frame_object_field_roots: HashMap<FrameObjectFieldKey, SemanticValue>,
     pub(crate) phi_sources: HashMap<String, Vec<SSAVar>>,
     pub(crate) formatted_defs: HashMap<String, CExpr>,
     pub(crate) copy_sources: HashMap<String, String>,
@@ -72,7 +73,7 @@ pub(crate) struct UseInfo {
 pub(crate) enum SemanticCallArg {
     Semantic(SemanticValue),
     StringAddr(u64),
-    Expr(CExpr),
+    FallbackExpr(CExpr),
 }
 
 impl SemanticCallArg {
@@ -85,7 +86,7 @@ impl SemanticCallArg {
     }
 
     pub(crate) fn expr_only(expr: CExpr) -> Self {
-        Self::Expr(expr)
+        Self::FallbackExpr(expr)
     }
 }
 
@@ -166,6 +167,13 @@ pub(crate) struct FrameSlotMergeSummary {
 }
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct FrameObjectFieldKey {
+    pub(crate) base_slot_offset: i64,
+    pub(crate) field_offset: i64,
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct FlagInfo {
     pub(crate) flag_origins: HashMap<String, (String, String)>,
@@ -225,6 +233,10 @@ impl UseInfo {
         definition_overrides: &HashMap<String, CExpr>,
     ) -> Self {
         use_info::analyze_with_definition_overrides(blocks, env, definition_overrides)
+    }
+
+    pub(crate) fn preserve_authoritative_facts_from(&mut self, baseline: &UseInfo) {
+        use_info::preserve_authoritative_facts(self, baseline);
     }
 }
 

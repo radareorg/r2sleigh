@@ -3,12 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use r2ssa::{FunctionSSABlock, SSAVar};
-use r2types::{ExternalTypeDb, SignatureRegistry, TypeOracle};
+use r2types::{ExternalTypeDb, FunctionType, SignatureRegistry, TypeOracle};
 
 use crate::ExternalStackVar;
 use crate::analysis;
 use crate::ast::CType;
-use crate::types::FunctionType;
 
 pub(crate) type SSABlock = FunctionSSABlock;
 

@@ -3,11 +3,17 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
 
-    use crate::{ExternalStackVar, FoldArchConfig, FoldInputs, analysis::{PassEnv, StackInfo, UseInfo}};
+    use crate::{
+        ExternalStackVar,
+        FoldArchConfig,
+        FoldInputs,
+        analysis::{PassEnv, StackInfo, UseInfo},
+        types::FunctionType,
+    };
     use r2il::{R2ILBlock, R2ILOp, Varnode};
     use r2types::{
-        ExternalField, ExternalStruct, ExternalTypeDb, Signedness, SolvedTypes,
-        SolverDiagnostics, StructShape, TypeArena, TypeId, TypeOracle,
+        ExternalField, ExternalStruct, ExternalTypeDb, Signedness, SolvedTypes, SolverDiagnostics,
+        StructShape, TypeArena, TypeId, TypeOracle,
     };
 
     fn make_var(name: &str, version: u32, size: u32) -> SSAVar {
@@ -79,6 +85,41 @@ mod tests {
                 "x5".to_string(),
                 "x6".to_string(),
                 "x7".to_string(),
+            ],
+            caller_saved_regs: HashSet::new(),
+        }));
+        let empty_u64 = Box::leak(Box::new(HashMap::new()));
+        let empty_stack = Box::leak(Box::new(HashMap::new()));
+        let empty_str = Box::leak(Box::new(HashMap::new()));
+        let empty_fn = Box::leak(Box::new(HashMap::new()));
+        let empty_ty = Box::leak(Box::new(HashMap::new()));
+        FoldingContext::from_inputs(FoldInputs {
+            arch,
+            function_names: empty_u64,
+            strings: empty_u64,
+            symbols: empty_u64,
+            known_function_signatures: empty_fn,
+            external_stack_vars: empty_stack,
+            external_type_db: Box::leak(Box::new(r2types::ExternalTypeDb::default())),
+            param_register_aliases: empty_str,
+            type_hints: empty_ty,
+            type_oracle: None,
+        })
+    }
+
+    fn make_x86_64_ctx<'a>() -> FoldingContext<'a> {
+        let arch = Box::leak(Box::new(FoldArchConfig {
+            ptr_size: 8,
+            sp_name: "rsp".to_string(),
+            fp_name: "rbp".to_string(),
+            ret_reg_name: "rax".to_string(),
+            arg_regs: vec![
+                "rdi".to_string(),
+                "rsi".to_string(),
+                "rdx".to_string(),
+                "rcx".to_string(),
+                "r8".to_string(),
+                "r9".to_string(),
             ],
             caller_saved_regs: HashSet::new(),
         }));
@@ -2795,6 +2836,25 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_definition_resolves_hex_temp_alias_without_explicit_var_alias() {
+        let mut ctx = FoldingContext::new(64);
+        ctx.state.analysis_ctx.use_info.definitions.insert(
+            "tmp:11f80_19".to_string(),
+            CExpr::binary(BinaryOp::Add, CExpr::UIntLit(0x100002000), CExpr::IntLit(0x638)),
+        );
+
+        let resolved = ctx.lookup_definition("t11f80_19");
+        assert_eq!(
+            resolved,
+            Some(CExpr::binary(
+                BinaryOp::Add,
+                CExpr::UIntLit(0x100002000),
+                CExpr::IntLit(0x638)
+            ))
+        );
+    }
+
+    #[test]
     fn test_lookup_definition_prefers_forwarded_semantic_value_over_register_artifact() {
         let mut ctx = FoldingContext::new(64);
         ctx.state.analysis_ctx.use_info.definitions.insert(
@@ -4007,6 +4067,133 @@ mod tests {
         };
         let Some(CStmt::Return(Some(else_expr))) = else_stmts.last() else {
             panic!("else block should fold to return");
+        };
+        assert_eq!(then_expr, &CExpr::IntLit(0));
+        assert_eq!(else_expr, &CExpr::IntLit(1));
+    }
+
+    #[test]
+    fn test_x86_64_pure_control_exit_return_slot_merge_blocks_fold_to_concrete_returns() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: Varnode::constant(0x1008, 8),
+                    cond: Varnode::constant(1, 1),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: Varnode::constant(0x100c, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: Varnode::constant(0x100c, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x100c,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: Varnode::constant(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("ssa func");
+        func.get_block_mut(0x1000).expect("entry").ops = vec![
+            SSAOp::IntSub {
+                dst: make_var("RSP", 1, 8),
+                a: make_var("RSP", 0, 8),
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::IntNotEqual {
+                dst: make_var("tmp:cond", 1, 1),
+                a: make_var("EDI", 0, 4),
+                b: make_var("const:64", 0, 4),
+            },
+            SSAOp::CBranch {
+                cond: make_var("tmp:cond", 1, 1),
+                target: make_var("ram:1008", 0, 8),
+            },
+        ];
+        func.get_block_mut(0x1004).expect("fallthrough").ops = vec![
+            SSAOp::IntAdd {
+                dst: make_var("tmp:retaddr", 1, 8),
+                a: make_var("RSP", 1, 8),
+                b: make_var("const:fffffffffffffffc", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("tmp:retaddr", 1, 8),
+                val: make_var("const:1", 0, 4),
+            },
+            SSAOp::Branch {
+                target: make_var("ram:100c", 0, 8),
+            },
+        ];
+        func.get_block_mut(0x1008).expect("taken").ops = vec![
+            SSAOp::IntAdd {
+                dst: make_var("tmp:retaddr", 2, 8),
+                a: make_var("RSP", 1, 8),
+                b: make_var("const:fffffffffffffffc", 0, 8),
+            },
+            SSAOp::Store {
+                space: "ram".to_string(),
+                addr: make_var("tmp:retaddr", 2, 8),
+                val: make_var("const:0", 0, 4),
+            },
+            SSAOp::Branch {
+                target: make_var("ram:100c", 0, 8),
+            },
+        ];
+        func.get_block_mut(0x100c).expect("exit").ops = vec![
+            SSAOp::IntAdd {
+                dst: make_var("RSP", 2, 8),
+                a: make_var("RSP", 1, 8),
+                b: make_var("const:8", 0, 8),
+            },
+            SSAOp::Load {
+                dst: make_var("RIP", 1, 8),
+                space: "ram".to_string(),
+                addr: make_var("RSP", 2, 8),
+            },
+            SSAOp::Return {
+                target: make_var("RIP", 1, 8),
+            },
+        ];
+
+        let mut ctx = make_x86_64_ctx();
+        let fold_blocks: Vec<_> = func.blocks().cloned().collect();
+        ctx.analyze_blocks(&fold_blocks);
+        ctx.analyze_function_structure(&func);
+
+        assert!(ctx.state.return_blocks.contains(&0x1004));
+        assert!(ctx.state.return_blocks.contains(&0x1008));
+        assert!(ctx.state.return_stack_slots.contains(&-4));
+
+        let then_stmts = ctx.fold_block(func.get_block(0x1008).expect("then"), 0x1008);
+        let else_stmts = ctx.fold_block(func.get_block(0x1004).expect("else"), 0x1004);
+
+        let Some(CStmt::Return(Some(then_expr))) = then_stmts.last() else {
+            panic!("then block should fold to return, got {then_stmts:?}");
+        };
+        let Some(CStmt::Return(Some(else_expr))) = else_stmts.last() else {
+            panic!("else block should fold to return, got {else_stmts:?}");
         };
         assert_eq!(then_expr, &CExpr::IntLit(0));
         assert_eq!(else_expr, &CExpr::IntLit(1));
@@ -6205,8 +6392,8 @@ mod tests {
 
         let mut function_names = HashMap::new();
         function_names.insert(0x401040, "sym.imp.atoi".to_string());
-        let strings = HashMap::new();
-        let symbols = HashMap::new();
+        let strings: HashMap<u64, String> = HashMap::new();
+        let symbols: HashMap<u64, String> = HashMap::new();
         let param_register_aliases = HashMap::from([
             ("x0".to_string(), "argc".to_string()),
             ("x1".to_string(), "argv".to_string()),
@@ -6278,14 +6465,14 @@ mod tests {
 
         let mut ctx = make_aarch64_ctx();
         ctx.inputs.function_names = Box::leak(Box::new(function_names));
-        ctx.inputs.known_function_signatures = Box::leak(Box::new(HashMap::from([(
+        ctx.set_known_function_signatures(HashMap::from([(
             "sym.imp.atoi".to_string(),
             FunctionType {
                 return_type: CType::Int(32),
                 params: vec![CType::ptr(CType::Int(8))],
                 variadic: false,
             },
-        )])));
+        )]));
         ctx.inputs.param_register_aliases = Box::leak(Box::new(param_register_aliases));
         ctx.inputs.type_hints = Box::leak(Box::new(type_hints));
         ctx.state.analysis_ctx.use_info = use_info;
@@ -6488,8 +6675,8 @@ mod tests {
 
         let function_names =
             HashMap::from([(0x1000025d8, "sym.imp.atoi".to_string())]);
-        let strings = HashMap::new();
-        let symbols = HashMap::new();
+        let _strings: HashMap<u64, String> = HashMap::new();
+        let _symbols: HashMap<u64, String> = HashMap::new();
         let param_register_aliases = HashMap::from([
             ("x0".to_string(), "argc".to_string()),
             ("x1".to_string(), "argv".to_string()),
@@ -6500,50 +6687,21 @@ mod tests {
             ("argv".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
             ("envp".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
         ]);
-        let caller_saved_regs = HashSet::new();
-        let arg_regs = vec![
-            "x0".to_string(),
-            "x1".to_string(),
-            "x2".to_string(),
-            "x3".to_string(),
-            "x4".to_string(),
-            "x5".to_string(),
-            "x6".to_string(),
-            "x7".to_string(),
-        ];
-        let env = PassEnv {
-            ptr_size: 64,
-            sp_name: "sp",
-            fp_name: "x29",
-            ret_reg_name: "x0",
-            function_names: &function_names,
-            strings: &strings,
-            symbols: &symbols,
-            arg_regs: &arg_regs,
-            param_register_aliases: &param_register_aliases,
-            caller_saved_regs: &caller_saved_regs,
-            type_hints: &type_hints,
-            type_oracle: None,
-        };
-
         let blocks = vec![entry, call_block];
-        let use_info = UseInfo::analyze(&blocks, &env);
-        let stack_info = StackInfo::analyze(&blocks, &use_info, &env);
 
         let mut ctx = make_aarch64_ctx();
         ctx.inputs.function_names = Box::leak(Box::new(function_names));
-        ctx.inputs.known_function_signatures = Box::leak(Box::new(HashMap::from([(
+        ctx.set_known_function_signatures(HashMap::from([(
             "sym.imp.atoi".to_string(),
             FunctionType {
                 return_type: CType::Int(32),
                 params: vec![CType::ptr(CType::Int(8))],
                 variadic: false,
             },
-        )])));
+        )]));
         ctx.inputs.param_register_aliases = Box::leak(Box::new(param_register_aliases));
         ctx.inputs.type_hints = Box::leak(Box::new(type_hints));
-        ctx.state.analysis_ctx.use_info = use_info;
-        ctx.state.analysis_ctx.stack_info = stack_info;
+        ctx.analyze_blocks(&blocks);
         let stmt = ctx
             .op_to_stmt_with_args(
                 &SSAOp::Call {
@@ -6566,6 +6724,25 @@ mod tests {
             ),
             "expected observed live main atoi arg to render as argv[1], got: {:?}",
             args[0]
+        );
+
+        let folded_stmts = ctx.fold_block(&blocks[1], blocks[1].addr);
+        let folded_call_args = folded_stmts.iter().find_map(|stmt| {
+            let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+                return None;
+            };
+            Some(args)
+        });
+        let Some(folded_call_args) = folded_call_args else {
+            panic!("expected folded call statement, got {folded_stmts:?}");
+        };
+        assert!(
+            matches!(
+                folded_call_args.first(),
+                Some(CExpr::Subscript { base, index })
+                    if **base == CExpr::Var("argv".to_string()) && **index == CExpr::IntLit(1)
+            ),
+            "expected folded observed live main atoi arg to stay argv[1], got {folded_stmts:?}"
         );
     }
 
@@ -6712,14 +6889,14 @@ mod tests {
 
         let mut ctx = make_aarch64_ctx();
         ctx.inputs.function_names = Box::leak(Box::new(function_names));
-        ctx.inputs.known_function_signatures = Box::leak(Box::new(HashMap::from([(
+        ctx.set_known_function_signatures(HashMap::from([(
             "sym.imp.atoi".to_string(),
             FunctionType {
                 return_type: CType::Int(32),
                 params: vec![CType::ptr(CType::Int(8))],
                 variadic: false,
             },
-        )])));
+        )]));
         ctx.inputs.param_register_aliases = Box::leak(Box::new(param_register_aliases));
         ctx.inputs.type_hints = Box::leak(Box::new(type_hints));
         ctx.state.analysis_ctx.use_info = use_info;
@@ -6751,6 +6928,524 @@ mod tests {
             ctx.state.analysis_ctx.use_info.semantic_values.get("X0_5"),
             ctx.state.analysis_ctx.use_info.stable_stack_values,
             ctx.state.analysis_ctx.use_info.stable_memory_values
+        );
+    }
+
+    #[test]
+    fn observed_live_arm64_usage_printf_renders_string_literal_and_argv0() {
+        let sp0 = make_var("SP", 0, 8);
+        let sp1 = make_var("SP", 1, 8);
+        let sp2 = make_var("SP", 2, 8);
+        let fp_slot = make_var("tmp:7b80", 1, 8);
+        let frame_base = make_var("tmp:11f80", 2, 8);
+        let slot_178 = make_var("tmp:6500", 1, 8);
+        let slot_argv = make_var("tmp:6500", 2, 8);
+        let call_slot = make_var("tmp:6500", 4, 8);
+        let call_frame = make_var("X8", 5, 8);
+        let argv_addr = make_var("tmp:6500", 5, 8);
+        let argv_root = make_var("X8", 6, 8);
+        let argv_deref_ptr = make_var("tmp:6800", 2, 8);
+        let argv0 = make_var("X8", 7, 8);
+        let stack_arg_base = make_var("X9", 2, 8);
+        let stack_arg_slot = make_var("tmp:6800", 3, 8);
+        let fmt_page = make_var("X0", 3, 8);
+        let fmt_final = make_var("X0", 4, 8);
+
+        let entry = SSABlock {
+            addr: 0x100001308,
+            size: 48,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntAdd {
+                    dst: sp1.clone(),
+                    a: sp0,
+                    b: make_var("const:ffffffffffffffe0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: fp_slot.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:10", 0, 8),
+                },
+                SSAOp::IntSub {
+                    dst: sp2.clone(),
+                    a: sp1.clone(),
+                    b: make_var("const:550", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: frame_base.clone(),
+                    a: sp2.clone(),
+                    b: make_var("const:3e0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_178.clone(),
+                    a: sp2.clone(),
+                    b: make_var("const:178", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: slot_178,
+                    val: frame_base.clone(),
+                },
+                SSAOp::IntAdd {
+                    dst: slot_argv,
+                    a: frame_base,
+                    b: make_var("const:160", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6500", 2, 8),
+                    val: make_var("X1", 0, 8),
+                },
+            ],
+        };
+
+        let call_block = SSABlock {
+            addr: 0x10000133c,
+            size: 44,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntAdd {
+                    dst: call_slot.clone(),
+                    a: sp2.clone(),
+                    b: make_var("const:178", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: call_frame.clone(),
+                    space: "ram".to_string(),
+                    addr: call_slot,
+                },
+                SSAOp::IntAdd {
+                    dst: argv_addr.clone(),
+                    a: call_frame,
+                    b: make_var("const:160", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: argv_root.clone(),
+                    space: "ram".to_string(),
+                    addr: argv_addr,
+                },
+                SSAOp::Copy {
+                    dst: argv_deref_ptr.clone(),
+                    src: argv_root,
+                },
+                SSAOp::Load {
+                    dst: argv0.clone(),
+                    space: "ram".to_string(),
+                    addr: argv_deref_ptr,
+                },
+                SSAOp::Copy {
+                    dst: stack_arg_base.clone(),
+                    src: sp2,
+                },
+                SSAOp::Copy {
+                    dst: stack_arg_slot.clone(),
+                    src: stack_arg_base,
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: stack_arg_slot,
+                    val: argv0,
+                },
+                SSAOp::Copy {
+                    dst: fmt_page,
+                    src: make_var("const:100002000", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("tmp:11e80", 5, 8),
+                    src: make_var("const:638", 0, 8),
+                },
+                SSAOp::IntCarry {
+                    dst: make_var("TMPCY", 6, 1),
+                    a: make_var("const:100002000", 0, 8),
+                    b: make_var("const:638", 0, 8),
+                },
+                SSAOp::IntSCarry {
+                    dst: make_var("TMPOV", 6, 1),
+                    a: make_var("const:100002000", 0, 8),
+                    b: make_var("const:638", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("tmp:11f80", 5, 8),
+                    a: make_var("const:100002000", 0, 8),
+                    b: make_var("const:638", 0, 8),
+                },
+                SSAOp::IntSLess {
+                    dst: make_var("TMPNG", 6, 1),
+                    a: make_var("const:100002638", 0, 8),
+                    b: make_var("const:0", 0, 8),
+                },
+                SSAOp::IntEqual {
+                    dst: make_var("TMPZR", 6, 1),
+                    a: make_var("const:100002638", 0, 8),
+                    b: make_var("const:0", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: fmt_final.clone(),
+                    src: make_var("const:100002638", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("X30", 3, 8),
+                    a: make_var("const:100001358", 0, 8),
+                    b: make_var("const:4", 0, 8),
+                },
+                SSAOp::Call {
+                    target: make_var("const:10000259c", 0, 8),
+                },
+            ],
+        };
+
+        let function_names = HashMap::from([(0x10000259c, "sym.imp.printf".to_string())]);
+        let strings =
+            HashMap::from([(0x100002638, "Usage: %s <test_num> [args...]\\n".to_string())]);
+        let _symbols: HashMap<u64, String> = HashMap::new();
+        let param_register_aliases = HashMap::from([
+            ("x0".to_string(), "argc".to_string()),
+            ("x1".to_string(), "argv".to_string()),
+            ("x2".to_string(), "envp".to_string()),
+        ]);
+        let type_hints = HashMap::from([
+            ("argc".to_string(), CType::Int(32)),
+            ("argv".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
+            ("envp".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
+        ]);
+        let blocks = vec![entry, call_block];
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.function_names = Box::leak(Box::new(function_names));
+        ctx.inputs.strings = Box::leak(Box::new(strings));
+        ctx.set_known_function_signatures(HashMap::from([(
+            "sym.imp.printf".to_string(),
+            FunctionType {
+                return_type: CType::Int(32),
+                params: vec![CType::ptr(CType::Int(8))],
+                variadic: true,
+            },
+        )]));
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(param_register_aliases));
+        ctx.inputs.type_hints = Box::leak(Box::new(type_hints));
+        ctx.analyze_blocks(&blocks);
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:10000259c", 0, 8),
+                },
+                0x10000133c,
+                18,
+            )
+            .expect("call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected call expression");
+        };
+        assert_eq!(args.len(), 2, "expected printf format + argv[0], got {args:?}");
+        assert_eq!(
+            args[0],
+            CExpr::StringLit("Usage: %s <test_num> [args...]\\n".to_string()),
+            "expected exact usage string literal, got {:?}",
+            args[0]
+        );
+        assert!(
+            matches!(
+                &args[1],
+                CExpr::Subscript { base, index }
+                    if **base == CExpr::Var("argv".to_string()) && **index == CExpr::IntLit(0)
+            ),
+            "expected argv[0] for variadic printf stack arg, got {:?}",
+            args[1]
+        );
+
+        let folded_stmts = ctx.fold_block(&blocks[1], blocks[1].addr);
+        let folded_call_args = folded_stmts.iter().find_map(|stmt| {
+            let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+                return None;
+            };
+            Some(args)
+        });
+        let Some(folded_call_args) = folded_call_args else {
+            panic!("expected folded printf call statement, got {folded_stmts:?}");
+        };
+        assert_eq!(
+            folded_call_args.first(),
+            Some(&CExpr::StringLit(
+                "Usage: %s <test_num> [args...]\\n".to_string()
+            )),
+            "expected folded printf format string literal, got {folded_stmts:?}"
+        );
+        assert!(
+            matches!(
+                folded_call_args.get(1),
+                Some(CExpr::Subscript { base, index })
+                    if **base == CExpr::Var("argv".to_string()) && **index == CExpr::IntLit(0)
+            ),
+            "expected folded printf argv[0] argument, got {folded_stmts:?}"
+        );
+    }
+
+    #[test]
+    fn observed_live_arm64_boolxor_return_keeps_xor_shape() {
+        let block = SSABlock {
+            addr: 0x1000009c8,
+            size: 48,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::IntSub {
+                    dst: make_var("SP", 1, 8),
+                    a: make_var("SP", 0, 8),
+                    b: make_var("const:10", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("tmp:6400", 1, 8),
+                    a: make_var("SP", 1, 8),
+                    b: make_var("const:c", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6400", 1, 8),
+                    val: make_var("W0", 0, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("tmp:6400", 2, 8),
+                    a: make_var("SP", 1, 8),
+                    b: make_var("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6400", 2, 8),
+                    val: make_var("W1", 0, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("tmp:6400", 3, 8),
+                    a: make_var("SP", 1, 8),
+                    b: make_var("const:c", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: make_var("tmp:24c00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6400", 3, 8),
+                },
+                SSAOp::IntLessEqual {
+                    dst: make_var("TMPCY", 1, 1),
+                    a: make_var("const:0", 0, 4),
+                    b: make_var("W8", 0, 4),
+                },
+                SSAOp::IntSBorrow {
+                    dst: make_var("TMPOV", 1, 1),
+                    a: make_var("W8", 0, 4),
+                    b: make_var("const:0", 0, 4),
+                },
+                SSAOp::IntSub {
+                    dst: make_var("tmp:3de80", 1, 4),
+                    a: make_var("W8", 0, 4),
+                    b: make_var("const:0", 0, 4),
+                },
+                SSAOp::IntSLess {
+                    dst: make_var("TMPNG", 1, 1),
+                    a: make_var("tmp:3de80", 1, 4),
+                    b: make_var("const:0", 0, 4),
+                },
+                SSAOp::IntEqual {
+                    dst: make_var("TMPZR", 1, 1),
+                    a: make_var("tmp:3de80", 1, 4),
+                    b: make_var("const:0", 0, 4),
+                },
+                SSAOp::Copy {
+                    dst: make_var("NG", 1, 1),
+                    src: make_var("TMPNG", 1, 1),
+                },
+                SSAOp::Copy {
+                    dst: make_var("ZR", 1, 1),
+                    src: make_var("TMPZR", 1, 1),
+                },
+                SSAOp::Copy {
+                    dst: make_var("OV", 1, 1),
+                    src: make_var("TMPOV", 1, 1),
+                },
+                SSAOp::BoolNot {
+                    dst: make_var("tmp:2b80", 1, 1),
+                    src: make_var("ZR", 1, 1),
+                },
+                SSAOp::IntEqual {
+                    dst: make_var("tmp:2c00", 1, 1),
+                    a: make_var("NG", 1, 1),
+                    b: make_var("OV", 1, 1),
+                },
+                SSAOp::BoolAnd {
+                    dst: make_var("tmp:2d00", 1, 1),
+                    a: make_var("tmp:2b80", 1, 1),
+                    b: make_var("tmp:2c00", 1, 1),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("tmp:6400", 4, 8),
+                    a: make_var("SP", 1, 8),
+                    b: make_var("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: make_var("tmp:24c00", 2, 4),
+                    space: "ram".to_string(),
+                    addr: make_var("tmp:6400", 4, 8),
+                },
+                SSAOp::IntLessEqual {
+                    dst: make_var("TMPCY", 2, 1),
+                    a: make_var("const:0", 0, 4),
+                    b: make_var("W9", 0, 4),
+                },
+                SSAOp::IntSBorrow {
+                    dst: make_var("TMPOV", 2, 1),
+                    a: make_var("W9", 0, 4),
+                    b: make_var("const:0", 0, 4),
+                },
+                SSAOp::IntSub {
+                    dst: make_var("tmp:3de80", 2, 4),
+                    a: make_var("W9", 0, 4),
+                    b: make_var("const:0", 0, 4),
+                },
+                SSAOp::IntSLess {
+                    dst: make_var("TMPNG", 2, 1),
+                    a: make_var("tmp:3de80", 2, 4),
+                    b: make_var("const:0", 0, 4),
+                },
+                SSAOp::IntEqual {
+                    dst: make_var("TMPZR", 2, 1),
+                    a: make_var("tmp:3de80", 2, 4),
+                    b: make_var("const:0", 0, 4),
+                },
+                SSAOp::Copy {
+                    dst: make_var("NG", 2, 1),
+                    src: make_var("TMPNG", 2, 1),
+                },
+                SSAOp::Copy {
+                    dst: make_var("ZR", 2, 1),
+                    src: make_var("TMPZR", 2, 1),
+                },
+                SSAOp::Copy {
+                    dst: make_var("OV", 2, 1),
+                    src: make_var("TMPOV", 2, 1),
+                },
+                SSAOp::BoolNot {
+                    dst: make_var("tmp:2b80", 2, 1),
+                    src: make_var("ZR", 2, 1),
+                },
+                SSAOp::IntEqual {
+                    dst: make_var("tmp:2c00", 2, 1),
+                    a: make_var("NG", 2, 1),
+                    b: make_var("OV", 2, 1),
+                },
+                SSAOp::BoolAnd {
+                    dst: make_var("tmp:2d00", 2, 1),
+                    a: make_var("tmp:2b80", 2, 1),
+                    b: make_var("tmp:2c00", 2, 1),
+                },
+                SSAOp::IntXor {
+                    dst: make_var("tmp:20380", 1, 4),
+                    a: make_var("W8", 0, 4),
+                    b: make_var("W9", 0, 4),
+                },
+                SSAOp::IntZExt {
+                    dst: make_var("X0", 1, 8),
+                    src: make_var("tmp:20380", 1, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: make_var("tmp:11f80", 1, 8),
+                    a: make_var("SP", 1, 8),
+                    b: make_var("const:10", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("SP", 2, 8),
+                    src: make_var("tmp:11f80", 1, 8),
+                },
+                SSAOp::Return {
+                    target: make_var("X30", 0, 8),
+                },
+            ],
+        };
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.analyze_block(&block);
+        ctx.state.return_blocks.insert(block.addr);
+        assert!(
+            ctx.state.return_stack_slots.is_empty(),
+            "unexpected return stack slots for register-return xor case: {:?}",
+            ctx.state.return_stack_slots
+        );
+
+        let stmts = ctx.fold_block(&block, block.addr);
+        let Some(CStmt::Return(Some(expr))) = stmts.last() else {
+            panic!("expected return statement, got {stmts:?}");
+        };
+        let (root, raw, semanticized) =
+            ctx.debug_return_expr_stages(&make_var("tmp:20380", 1, 4));
+        let def = ctx.lookup_definition("tmp:20380_1");
+        let pred = ctx.lookup_predicate_expr("tmp:20380_1");
+        assert!(
+            expr_contains_binary_op(expr, BinaryOp::BitXor),
+            "expected XOR-shaped return, got {expr:?}; def={def:?} pred={pred:?} root={root:?} raw={raw:?} semanticized={semanticized:?}"
+        );
+        assert!(
+            !matches!(expr, CExpr::IntLit(10) | CExpr::UIntLit(10)),
+            "epilogue stack adjustment leaked into return value: {expr:?}"
+        );
+    }
+
+    #[test]
+    fn exact_symbol_store_prefers_exact_global_symbol_over_base_symbol_offset() {
+        let block = make_block(vec![SSAOp::Store {
+            space: "ram".to_string(),
+            addr: make_var("const:100008008", 0, 8),
+            val: make_var("W8", 0, 4),
+        }]);
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.symbols = Box::leak(Box::new(HashMap::from([
+            (0x100008000, "sym._global_limit".to_string()),
+            (0x100008004, "sym._global_counter".to_string()),
+            (0x100008008, "sym._global_tail".to_string()),
+        ])));
+        ctx.analyze_block(&block);
+
+        let stmts = ctx.fold_block(&block, block.addr);
+        let Some(CStmt::Expr(CExpr::Binary { left, .. })) = stmts.first() else {
+            panic!("expected store assignment, got {stmts:?}");
+        };
+        assert_eq!(
+            left.as_ref(),
+            &CExpr::Var("sym._global_tail".to_string()),
+            "expected exact symbol store target, got {left:?}"
+        );
+    }
+
+    #[test]
+    fn exact_symbol_store_prefers_exact_global_symbol_over_constant_indexed_base() {
+        let block = make_block(vec![SSAOp::Store {
+            space: "ram".to_string(),
+            addr: make_var("tmp:storeptr", 1, 8),
+            val: make_var("W8", 0, 4),
+        }]);
+
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.symbols = Box::leak(Box::new(HashMap::from([
+            (0x100008000, "sym._global_limit".to_string()),
+            (0x100008004, "sym._global_counter".to_string()),
+            (0x100008008, "sym._global_tail".to_string()),
+        ])));
+        ctx.state.analysis_ctx.use_info.semantic_values.insert(
+            "tmp:storeptr_1".to_string(),
+            crate::analysis::SemanticValue::Address(crate::analysis::NormalizedAddr {
+                base: crate::analysis::BaseRef::Raw(CExpr::Var("sym._global_limit".to_string())),
+                index: Some(crate::analysis::ValueRef::from(make_var("const:1", 0, 8))),
+                scale_bytes: 8,
+                offset_bytes: 0,
+            }),
+        );
+
+        let stmts = ctx.fold_block(&block, block.addr);
+        let Some(CStmt::Expr(CExpr::Binary { left, .. })) = stmts.first() else {
+            panic!("expected store assignment, got {stmts:?}");
+        };
+        assert_eq!(
+            left.as_ref(),
+            &CExpr::Var("sym._global_tail".to_string()),
+            "expected exact symbol store target from constant indexed base, got {left:?}"
         );
     }
 

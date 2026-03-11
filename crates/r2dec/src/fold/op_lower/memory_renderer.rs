@@ -88,6 +88,17 @@ impl<'a> FoldingContext<'a> {
             return CExpr::Var(stack_var);
         }
 
+        if addr.is_const() {
+            let direct = self.get_expr(addr);
+            if matches!(direct, CExpr::Var(_) | CExpr::StringLit(_)) {
+                return direct;
+            }
+        }
+
+        if let Some(exact) = self.resolve_literalish_call_arg_expr(&fallback_addr_expr) {
+            return exact;
+        }
+
         self.typed_deref_expr(addr, fallback_addr_expr, elem_ty)
     }
 
@@ -128,6 +139,17 @@ impl<'a> FoldingContext<'a> {
 
         if let Some(stack_var) = self.stack_var_for_addr_var(addr) {
             return CExpr::Var(stack_var);
+        }
+
+        if addr.is_const() {
+            let direct = self.get_expr(addr);
+            if matches!(direct, CExpr::Var(_) | CExpr::StringLit(_)) {
+                return direct;
+            }
+        }
+
+        if let Some(exact) = self.resolve_literalish_call_arg_expr(&fallback_addr_expr) {
+            return exact;
         }
 
         self.typed_deref_expr(addr, fallback_addr_expr, elem_ty)

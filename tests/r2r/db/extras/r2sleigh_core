@@ -1,5 +1,5 @@
 NAME=sla_info_arch_loaded
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 sla: loaded architecture 'x86-64'
@@ -10,193 +10,193 @@ EOF_CMDS
 RUN
 
 NAME=sla_json_store_ops_at_0x40127e
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 ["IntAdd","Copy","Store"]
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x40127e
+s sym._check_secret+4
 a:sla.json | jq -c 'map(keys[0])'
 EOF_CMDS
 RUN
 
 NAME=sla_regs_store_at_0x40127e
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 {"read":["EDI","RBP"],"write":[]}
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x40127e
+s sym._check_secret+4
 a:sla.regs | jq -c '{read:(.read|sort),write:(.write|sort)}'
 EOF_CMDS
 RUN
 
 NAME=sla_mem_store_at_0x40127e
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
-[{"type":"store","size":4,"memory_class":"stack","stack_base":"RBP","stack_offset":-4}]
+[{"type":"store","size":4,"memory_class":"stack","stack_base":"RBP","stack_offset":-8}]
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x40127e
+s sym._check_secret+4
 a:sla.mem | jq -c 'map({type,size,memory_class,stack_base,stack_offset})'
 EOF_CMDS
 RUN
 
 NAME=sla_vars_store_shape_at_0x40127e
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 {"space_counts":[{"space":"const","count":1},{"space":"register","count":2},{"space":"unique","count":2}],"reg_names":["EDI","RBP"]}
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x40127e
+s sym._check_secret+4
 a:sla.vars | jq -c '{space_counts:(sort_by(.space)|group_by(.space)|map({space:.[0].space,count:length})), reg_names:(map(select(.space=="register")|.name)|sort)}'
 EOF_CMDS
 RUN
 
 NAME=sla_json_cmp_ops_at_0x401281
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 ["IntAdd","Load","Copy","IntLess","IntSBorrow","IntSub","IntSLess","IntEqual","IntAnd","PopCount","IntAnd","IntEqual"]
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x401281
+s sym._check_secret+7
 a:sla.json | jq -c 'map(keys[0])'
 EOF_CMDS
 RUN
 
 NAME=sla_regs_cmp_at_0x401281
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 {"read":["RBP"],"write":["CF","OF","PF","SF","ZF"]}
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x401281
+s sym._check_secret+7
 a:sla.regs | jq -c '{read:(.read|sort),write:(.write|sort)}'
 EOF_CMDS
 RUN
 
 NAME=sla_mem_cmp_at_0x401281
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
-[{"type":"load","size":4,"memory_class":"stack","stack_base":"RBP","stack_offset":-4}]
+[{"type":"load","size":4,"memory_class":"stack","stack_base":"RBP","stack_offset":-8}]
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x401281
+s sym._check_secret+7
 a:sla.mem | jq -c 'map({type,size,memory_class,stack_base,stack_offset})'
 EOF_CMDS
 RUN
 
 NAME=sla_vars_cmp_shape_at_0x401281
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 {"space_counts":[{"space":"const","count":4},{"space":"register","count":6},{"space":"unique","count":7}],"reg_names":["CF","OF","PF","RBP","SF","ZF"]}
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x401281
+s sym._check_secret+7
 a:sla.vars | jq -c '{space_counts:(sort_by(.space)|group_by(.space)|map({space:.[0].space,count:length})), reg_names:(map(select(.space=="register")|.name)|sort)}'
 EOF_CMDS
 RUN
 
 NAME=sla_json_branch_ops_at_0x401288
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 ["BoolNot","CBranch"]
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x401288
+s sym._check_secret+0xe
 a:sla.json | jq -c 'map(keys[0])'
 EOF_CMDS
 RUN
 
 NAME=sla_regs_branch_at_0x401288
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 {"read":["ZF"],"write":[]}
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x401288
+s sym._check_secret+0xe
 a:sla.regs | jq -c '{read:(.read|sort),write:(.write|sort)}'
 EOF_CMDS
 RUN
 
 NAME=sla_mem_branch_at_0x401288
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 []
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x401288
+s sym._check_secret+0xe
 a:sla.mem | jq -c 'map({type,size,memory_class,stack_base,stack_offset})'
 EOF_CMDS
 RUN
 
 NAME=sla_vars_branch_shape_at_0x401288
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 {"space_counts":[{"space":"register","count":1}],"reg_names":["ZF"]}
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x401288
+s sym._check_secret+0xe
 a:sla.vars | jq -c '{space_counts:(sort_by(.space)|group_by(.space)|map({space:.[0].space,count:length})), reg_names:(map(select(.space=="register")|.name)|sort)}'
 EOF_CMDS
 RUN
 
 NAME=sla_json_copy_ops_at_0x40128a
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
-["Copy"]
+["IntAdd","Load","Copy","IntZExt"]
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x40128a
+s sym._check_secret+0x20
 a:sla.json | jq -c 'map(keys[0])'
 EOF_CMDS
 RUN
 
 NAME=sla_regs_copy_at_0x40128a
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
-{"read":[],"write":["RAX"]}
+{"read":["EAX","RBP"],"write":["EAX","RAX"]}
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x40128a
+s sym._check_secret+0x20
 a:sla.regs | jq -c '{read:(.read|sort),write:(.write|sort)}'
 EOF_CMDS
 RUN
 
 NAME=sla_mem_copy_at_0x40128a
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
-[]
+[{"type":"load","size":4,"memory_class":"stack","stack_base":"RBP","stack_offset":-4}]
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x40128a
+s sym._check_secret+0x20
 a:sla.mem | jq -c 'map({type,size,memory_class,stack_base,stack_offset})'
 EOF_CMDS
 RUN
 
 NAME=sla_vars_copy_shape_at_0x40128a
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
-{"space_counts":[{"space":"const","count":1},{"space":"register","count":1}],"reg_names":["RAX"]}
+{"space_counts":[{"space":"const","count":1},{"space":"register","count":3},{"space":"unique","count":2}],"reg_names":["EAX","RAX","RBP"]}
 EOF_EXPECT
 CMDS=<<EOF_CMDS
-s 0x40128a
+s sym._check_secret+0x20
 a:sla.vars | jq -c '{space_counts:(sort_by(.space)|group_by(.space)|map({space:.[0].space,count:length})), reg_names:(map(select(.space=="register")|.name)|sort)}'
 EOF_CMDS
 RUN

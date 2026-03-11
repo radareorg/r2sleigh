@@ -19,6 +19,7 @@ pub(crate) struct LowerCtx<'a> {
     pub(crate) condition_vars: &'a HashSet<String>,
     pub(crate) pinned: &'a HashSet<String>,
     pub(crate) var_aliases: &'a HashMap<String, String>,
+    pub(crate) param_register_aliases: &'a HashMap<String, String>,
     pub(crate) type_hints: &'a HashMap<String, CType>,
     pub(crate) ptr_arith: &'a HashMap<String, PtrArith>,
     pub(crate) stack_slots: &'a HashMap<String, StackSlotProvenance>,
@@ -59,6 +60,15 @@ impl<'a> LowerCtx<'a> {
             return alias.clone();
         }
 
+        if var.version == 0
+            && let Some(alias) = self
+                .param_register_aliases
+                .get(&var.name.to_ascii_lowercase())
+                .cloned()
+        {
+            return alias;
+        }
+
         let base = if var.name.starts_with("reg:") {
             let reg = var.name.trim_start_matches("reg:");
             if is_hex_name(reg) {
@@ -67,7 +77,7 @@ impl<'a> LowerCtx<'a> {
                 reg.to_string()
             }
         } else if var.name.starts_with("tmp:") {
-            format!("t{}", var.version)
+            format!("t{}", var.name.trim_start_matches("tmp:"))
         } else {
             var.name.to_lowercase()
         };
@@ -135,6 +145,9 @@ impl<'a> LowerCtx<'a> {
         }
 
         if let Some(val) = parse_const_value(name) {
+            if let Some(expr) = self.resolve_addr_literal(val) {
+                return expr;
+            }
             return if val > 0x7fffffff {
                 CExpr::UIntLit(val)
             } else {
@@ -505,6 +518,9 @@ impl<'a> LowerCtx<'a> {
 
     fn const_to_expr(&self, var: &SSAVar) -> CExpr {
         let val = parse_const_value(&var.name).unwrap_or(0);
+        if let Some(expr) = self.resolve_addr_literal(val) {
+            return expr;
+        }
         if let Some(addr) = parse_address_from_var_name(&var.name)
             && let Some(expr) = self.resolve_addr_literal(addr)
         {
@@ -1189,6 +1205,7 @@ mod tests {
     ) -> LowerCtx<'a> {
         let type_hints = Box::leak(Box::new(HashMap::new()));
         let semantic_values = Box::leak(Box::new(HashMap::new()));
+        let param_register_aliases = Box::leak(Box::new(HashMap::new()));
         LowerCtx {
             definitions,
             semantic_values,
@@ -1196,6 +1213,7 @@ mod tests {
             condition_vars,
             pinned,
             var_aliases,
+            param_register_aliases,
             type_hints,
             ptr_arith,
             stack_slots,

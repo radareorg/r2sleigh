@@ -130,6 +130,7 @@ static SymStateCache sym_state_cache = {0};
 static bool sleigh_pdd_core_plugin_registered = false;
 static RCore *sleigh_pdd_core_plugin_core = NULL;
 static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn);
+static int collect_data_refs_from_json(RAnal *anal, RAnalFunction *fcn, const char *json, RVecAnalRef *refs, bool apply_to_anal);
 
 typedef enum {
 	SLEIGH_MODE_FULL = 0,
@@ -814,6 +815,70 @@ static bool parse_sym_target_expr(RCore *core, const char *expr, ut64 *target) {
 	}
 	*target = r_num_math (core->num, expr);
 	return true;
+}
+
+static RAnalFunction *resolve_function_target_by_name(RAnal *anal, const char *target_name) {
+	if (!anal || !target_name || !*target_name) {
+		return NULL;
+	}
+
+	RAnalFunction *fcn = r_anal_get_function_byname (anal, target_name);
+	if (fcn) {
+		return fcn;
+	}
+
+	char *trimmed = r_str_trim_dup (target_name);
+	if (!trimmed || !*trimmed) {
+		free (trimmed);
+		return NULL;
+	}
+
+	char *base = trimmed;
+	for (;;) {
+		if (r_str_startswith (base, "dbg.")) {
+			base += 4;
+			continue;
+		}
+		if (r_str_startswith (base, "sym.")) {
+			base += 4;
+			continue;
+		}
+		if (r_str_startswith (base, "fcn.")) {
+			base += 4;
+			continue;
+		}
+		break;
+	}
+
+	const char *plain = (*base == '_')? base + 1: base;
+	char *candidates[] = {
+		strdup (base),
+		*plain? strdup (plain): NULL,
+		r_str_newf ("sym.%s", base),
+		*plain? r_str_newf ("sym.%s", plain): NULL,
+		*plain? r_str_newf ("sym._%s", plain): NULL,
+		r_str_newf ("dbg.%s", base),
+		*plain? r_str_newf ("dbg.%s", plain): NULL,
+		r_str_newf ("fcn.%s", base),
+		*plain? r_str_newf ("fcn.%s", plain): NULL,
+		(*base == '_')? strdup (plain): r_str_newf ("_%s", plain),
+	};
+	size_t i;
+	for (i = 0; i < R_ARRAY_SIZE (candidates); i++) {
+		const char *candidate = candidates[i];
+		if (!candidate || !*candidate) {
+			continue;
+		}
+		fcn = r_anal_get_function_byname (anal, candidate);
+		if (fcn) {
+			break;
+		}
+	}
+	for (i = 0; i < R_ARRAY_SIZE (candidates); i++) {
+		free (candidates[i]);
+	}
+	free (trimmed);
+	return fcn;
 }
 
 static char *build_sym_symbol_map_json(RCore *core) {
@@ -1789,7 +1854,7 @@ static TaintRiskLevel classify_taint_risk(bool meaningful, bool has_dangerous_ca
 	if (store_hits > 0) {
 		return TAINT_RISK_LOW;
 	}
-	return TAINT_RISK_NONE;
+	return TAINT_RISK_LOW;
 }
 
 static void edge_set_init(EdgeSet *set) {
@@ -3718,7 +3783,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			if (parse_sym_target_expr (core, target_arg, &target_addr)) {
 				fcn = r_anal_get_fcn_in (anal, target_addr, R_ANAL_FCN_TYPE_ANY);
 			} else {
-				fcn = r_anal_get_function_byname (anal, target_arg);
+				fcn = resolve_function_target_by_name (anal, target_arg);
 			}
 		} else {
 			fcn = r_anal_get_fcn_in (anal, core->addr, R_ANAL_FCN_TYPE_ANY);
@@ -3984,6 +4049,7 @@ static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
 	}
 
 	BlockArray blocks;
+	ut64 cache_key;
 	if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
 		return false;
 	}
@@ -3992,6 +4058,17 @@ static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
 		anal, ctx, &blocks, fcn->addr, true);
 	R_LOG_DEBUG ("r2sleigh: semantic comments fcn=0x%"PFMT64x" enabled=%d emitted=%zu",
 		fcn->addr, 1, semantic_comments_emitted);
+
+	cache_key = compute_xref_cache_key (fcn, &blocks, sleigh_mode_effective_for_post_analysis (anal));
+	if (!data_ref_cache_get (fcn->addr) || data_ref_cache_get (fcn->addr)->key != cache_key) {
+		char *xref_json = r2sleigh_get_data_refs (ctx,
+			(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr);
+		if (xref_json && *xref_json) {
+			int ref_count = collect_data_refs_from_json (anal, fcn, xref_json, NULL, true);
+			data_ref_cache_put (fcn->addr, cache_key, r_str_hash64 (xref_json), ref_count);
+		}
+		r2il_string_free (xref_json);
+	}
 
 	block_array_free (&blocks);
 	return true;
@@ -4162,6 +4239,34 @@ static RAnalRefType data_ref_type_from_json(RAnal *anal, ut64 to_addr, const cha
 	return r_anal_get_fcn_in (anal, to_addr, 0)? R_ANAL_REF_TYPE_CODE: R_ANAL_REF_TYPE_DATA;
 }
 
+static void ensure_literal_ref_target_map(RAnal *anal, ut64 to_addr) {
+	RCore *core;
+	RIOMap *map;
+	int fd;
+	char map_name[64];
+
+	if (!anal || !to_addr) {
+		return;
+	}
+	core = anal->coreb.core;
+	if (!core || !core->io) {
+		return;
+	}
+	if (r_io_map_get_at (core->io, to_addr)) {
+		return;
+	}
+	fd = r_io_fd_get_current (core->io);
+	if (fd < 0) {
+		return;
+	}
+	map = r_io_map_add (core->io, fd, R_PERM_R, 0, to_addr, 1);
+	if (!map) {
+		return;
+	}
+	snprintf (map_name, sizeof (map_name), "sla.literal.%"PFMT64x, to_addr);
+	r_io_map_set_name (map, map_name);
+}
+
 static int collect_data_refs_from_json(
 	RAnal *anal,
 	RAnalFunction *fcn,
@@ -4213,6 +4318,9 @@ static int collect_data_refs_from_json(
 			continue;
 		}
 		ref_type = data_ref_type_from_json (anal, to_addr, j_type? j_type->str_value: NULL);
+		if (apply_to_anal && ref_type == R_ANAL_REF_TYPE_DATA) {
+			ensure_literal_ref_target_map (anal, to_addr);
+		}
 
 		if (refs) {
 			RAnalRef ref = {
@@ -4272,7 +4380,7 @@ static RVecAnalRef *sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn) {
 		block_array_free (&blocks);
 		return NULL;
 	}
-	int ref_count = collect_data_refs_from_json (anal, fcn, json, refs, false);
+	int ref_count = collect_data_refs_from_json (anal, fcn, json, refs, true);
 	data_ref_cache_put (fcn->addr, cache_key, r_str_hash64 (json), ref_count);
 	r2il_string_free (json);
 	block_array_free (&blocks);
@@ -6348,6 +6456,17 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						TaintBlockSummary *summary = &summaries.items[si];
 						char *comment = format_taint_summary_comment (summary);
 						size_t li;
+						if (summary->hits > 0 || summary->call_hits > 0 || summary->store_hits > 0) {
+							function_meaningful = true;
+							function_call_hits += summary->call_hits;
+							function_store_hits += summary->store_hits;
+							for (li = 0; li < summary->ncall_names; li++) {
+								append_unique_string (&function_call_names, &function_ncall_names, &function_call_name_cap, summary->call_names[li]);
+								if (is_dangerous_sink (summary->call_names[li])) {
+									function_has_dangerous_call = true;
+								}
+							}
+						}
 						if (comment && *comment) {
 							set_sla_taint_comment_line (anal, summary->addr, comment);
 							taint_comments++;
@@ -6364,18 +6483,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 
 						if (summary->labels && summary->nlabels > 0) {
 							int rank = label_rank (summary->labels[0]);
-							function_meaningful = true;
-							function_call_hits += summary->call_hits;
-							function_store_hits += summary->store_hits;
 
 							for (li = 0; li < summary->nlabels; li++) {
 								append_unique_string (&function_labels, &function_nlabels, &function_label_cap, summary->labels[li]);
-							}
-							for (li = 0; li < summary->ncall_names; li++) {
-								append_unique_string (&function_call_names, &function_ncall_names, &function_call_name_cap, summary->call_names[li]);
-								if (is_dangerous_sink (summary->call_names[li])) {
-									function_has_dangerous_call = true;
-								}
 							}
 
 							if (rank < best_sink_rank) {
@@ -6429,7 +6539,13 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						free (risk_comment);
 
 						if (risk_level != TAINT_RISK_NONE && core && core->flags) {
+							char generic_risk_flag[192];
 							char risk_flag[192];
+							snprintf (generic_risk_flag, sizeof (generic_risk_flag),
+								"sla.taint.risk.fcn_%"PFMT64x, fcn->addr);
+							if (r_flag_set (core->flags, generic_risk_flag, fcn->addr, 1)) {
+								taint_flags++;
+							}
 							snprintf (risk_flag, sizeof (risk_flag),
 								"sla.taint.risk.%s.fcn_%"PFMT64x,
 								taint_risk_level_flag_name (risk_level), fcn->addr);
@@ -6694,7 +6810,6 @@ static bool sleigh_post_analysis(RAnal *anal) {
 			}
 			if (data_ref_cache_get (xref_fcn->addr)) {
 				xref_cache_hits++;
-				continue;
 			}
 			append_unique_ut64 (&xref_queue, &xref_queue_count, &xref_queue_cap, xref_fcn->addr);
 			xref_dirty_queued++;

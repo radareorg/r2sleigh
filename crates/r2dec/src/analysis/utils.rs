@@ -139,16 +139,16 @@ pub(crate) fn format_traced_name(key: &str, var_aliases: &HashMap<String, String
     }
 
     if key.starts_with("tmp:")
-        && let Some(version_str) = key.rsplit_once('_').map(|(_, v)| v)
+        && let Some((base, version_str)) = key.trim_start_matches("tmp:").rsplit_once('_')
     {
         if let Ok(ver) = version_str.parse::<u32>() {
             return if ver > 0 {
-                format!("t{}_{}", ver, ver)
+                format!("t{}_{}", base, ver)
             } else {
                 "t0".to_string()
             };
         }
-        return format!("t{}", version_str);
+        return format!("t{base}");
     }
 
     key.to_string()
@@ -554,5 +554,14 @@ mod tests {
             extract_stack_offset_from_var(&addr, &definitions, "fp", "sp"),
             Some(0x540)
         );
+    }
+
+    #[test]
+    fn format_traced_name_keeps_temp_base_identity() {
+        assert_eq!(
+            format_traced_name("tmp:11f80_19", &HashMap::new()),
+            "t11f80_19"
+        );
+        assert_eq!(format_traced_name("tmp:foo_2", &HashMap::new()), "tfoo_2");
     }
 }

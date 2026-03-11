@@ -1,8 +1,8 @@
 use crate::context::PluginCtxView;
 use crate::{
-    decompile_block_guard_fallback, decompiler_max_blocks, parse_addr_name_map,
-    parse_external_reg_params, parse_external_stack_vars, parse_signature_context,
-    run_decompile_on_large_stack,
+    decompile_artifact_guard_fallback, decompile_block_guard_fallback, decompiler_cfg_guard_reason,
+    decompiler_max_blocks, parse_addr_name_map, parse_external_reg_params,
+    parse_external_stack_vars, run_decompile_on_large_stack,
 };
 use r2il::{ArchSpec, R2ILBlock};
 
@@ -70,6 +70,9 @@ pub(crate) fn decompile_blocks(
             max_blocks,
         ));
     }
+    if let Some(reason) = decompiler_cfg_guard_reason(blocks) {
+        return Some(decompile_artifact_guard_fallback(function_name, &reason));
+    }
 
     let env = DecompilerEnv {
         arch_name: normalize_sig_arch_name(arch).unwrap_or_else(|| "unknown".to_string()),
@@ -101,11 +104,14 @@ pub(crate) fn run_full_decompile_on_large_stack(
     stack_vars_str: String,
     types_str: String,
 ) -> String {
-    const STACK_SIZE: usize = 128 * 1024 * 1024;
+    const STACK_SIZE: usize = 512 * 1024 * 1024;
 
     let handle = std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(move || {
+            if let Some(reason) = crate::decompiler_cfg_guard_reason(&r2il_blocks) {
+                return decompile_artifact_guard_fallback(&func_name_str, &reason);
+            }
             let arch_name =
                 normalize_sig_arch_name(arch.as_ref()).unwrap_or_else(|| "unknown".to_string());
             let config = decompiler_config_for_arch_name(&arch_name, ptr_bits);
@@ -120,7 +126,10 @@ pub(crate) fn run_full_decompile_on_large_stack(
                 &stack_vars_str,
                 &types_str,
             ) else {
-                return String::new();
+                return decompile_artifact_guard_fallback(
+                    &func_name_str,
+                    "failed to build detached analysis artifact",
+                );
             };
 
             let mut decompiler = r2dec::Decompiler::new(config);
@@ -130,24 +139,12 @@ pub(crate) fn run_full_decompile_on_large_stack(
 
             let reg_params = parse_external_reg_params(&stack_vars_str, ptr_bits);
             decompiler.set_register_params(reg_params);
-            let sig_ctx = parse_signature_context(&signature_str, ptr_bits);
-            if !sig_ctx.known.is_empty() {
-                decompiler.set_known_function_signatures(sig_ctx.known);
-            }
-
             let stack_vars = parse_external_stack_vars(&stack_vars_str, ptr_bits);
             if !stack_vars.is_empty() {
                 decompiler.set_stack_vars(stack_vars);
             }
 
-            decompiler.set_function_signature(artifact.merged_signature);
-            if !artifact.type_db.structs.is_empty()
-                || !artifact.type_db.unions.is_empty()
-                || !artifact.type_db.enums.is_empty()
-                || !artifact.type_db.diagnostics.is_empty()
-            {
-                decompiler.set_external_type_db(artifact.type_db);
-            }
+            decompiler.set_type_facts(artifact.type_facts);
 
             decompiler.decompile(&artifact.ssa_func)
         });

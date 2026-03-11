@@ -24,6 +24,13 @@ pub struct RenameContext {
     sizes: HashMap<String, u32>,
 }
 
+/// Decompiler-safe call boundary policy.
+#[derive(Debug, Clone, Default)]
+pub struct CallBoundaryConfig {
+    /// Registers that must receive a fresh SSA definition after a call.
+    pub defined_regs: Vec<String>,
+}
+
 impl RenameContext {
     /// Create a new rename context.
     pub fn new() -> Self {
@@ -89,6 +96,19 @@ impl RenameContext {
         let size = self.get_size(name);
         SSAVar::new(name, version, size)
     }
+
+    /// Find initialized variable names that match a register name ignoring case.
+    pub fn matching_var_names_ci(&self, name: &str) -> Vec<String> {
+        let needle = name.to_ascii_lowercase();
+        let mut matches: Vec<String> = self
+            .sizes
+            .keys()
+            .filter(|candidate| candidate.to_ascii_lowercase() == needle)
+            .cloned()
+            .collect();
+        matches.sort_unstable();
+        matches
+    }
 }
 
 impl Default for RenameContext {
@@ -144,17 +164,43 @@ pub fn rename_function_with_names(
     var_sizes: &HashMap<String, u32>,
     reg_names: Option<&RegisterNameMap>,
 ) -> RenamedFunction {
+    rename_function_with_names_and_call_boundaries(
+        cfg,
+        domtree,
+        phi_placement,
+        var_sizes,
+        reg_names,
+        None,
+    )
+}
+
+/// Perform SSA renaming on a CFG with optional register names and decompiler-safe call
+/// boundaries.
+pub fn rename_function_with_names_and_call_boundaries(
+    cfg: &CFG,
+    domtree: &DomTree,
+    phi_placement: &PhiPlacement,
+    var_sizes: &HashMap<String, u32>,
+    reg_names: Option<&RegisterNameMap>,
+    call_boundaries: Option<&CallBoundaryConfig>,
+) -> RenamedFunction {
     let mut ctx = RenameContext::new();
     let mut result = RenamedFunction::new(cfg.entry);
 
     // Initialize all variables
-    for (name, &size) in var_sizes {
+    let mut initialized_vars: Vec<(&String, &u32)> = var_sizes.iter().collect();
+    initialized_vars.sort_unstable_by(|(lhs_name, lhs_size), (rhs_name, rhs_size)| {
+        lhs_name.cmp(rhs_name).then(lhs_size.cmp(rhs_size))
+    });
+    for (name, &size) in initialized_vars {
         ctx.init_var(name, size);
     }
 
     // Also initialize variables from phi nodes
-    for phis in phi_placement.phis.values() {
-        for phi in phis {
+    let mut phi_blocks: Vec<u64> = phi_placement.phis.keys().copied().collect();
+    phi_blocks.sort_unstable();
+    for block_addr in phi_blocks {
+        for phi in phi_placement.get_phis(block_addr) {
             ctx.init_var(&phi.var_name, phi.var_size);
         }
     }
@@ -176,12 +222,14 @@ pub fn rename_function_with_names(
         &mut ctx,
         &mut result,
         reg_names,
+        call_boundaries,
     );
 
     result
 }
 
 /// Rename a single block and recursively rename dominated blocks.
+#[allow(clippy::too_many_arguments)]
 fn rename_block(
     block_addr: u64,
     cfg: &CFG,
@@ -190,6 +238,7 @@ fn rename_block(
     ctx: &mut RenameContext,
     result: &mut RenamedFunction,
     reg_names: Option<&RegisterNameMap>,
+    call_boundaries: Option<&CallBoundaryConfig>,
 ) {
     // Track variables defined in this block for cleanup
     let mut defined_vars: Vec<String> = Vec::new();
@@ -219,6 +268,18 @@ fn rename_block(
         for op in &block.ops {
             let renamed_op = rename_op(op, ctx, &mut defined_vars, reg_names);
             result.blocks.get_mut(&block_addr).unwrap().push(renamed_op);
+
+            if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
+                && let Some(boundary) = call_boundaries
+            {
+                append_call_boundary_defs(
+                    &mut result.blocks,
+                    block_addr,
+                    ctx,
+                    &mut defined_vars,
+                    boundary,
+                );
+            }
         }
     }
 
@@ -229,12 +290,41 @@ fn rename_block(
 
     // 4. Recursively rename dominated blocks
     for &child in domtree.children(block_addr) {
-        rename_block(child, cfg, domtree, phi_placement, ctx, result, reg_names);
+        rename_block(
+            child,
+            cfg,
+            domtree,
+            phi_placement,
+            ctx,
+            result,
+            reg_names,
+            call_boundaries,
+        );
     }
 
     // 5. Pop versions defined in this block
     for var in defined_vars {
         ctx.pop_version(&var);
+    }
+}
+
+fn append_call_boundary_defs(
+    blocks: &mut HashMap<u64, Vec<SSAOp>>,
+    block_addr: u64,
+    ctx: &mut RenameContext,
+    defined_vars: &mut Vec<String>,
+    call_boundaries: &CallBoundaryConfig,
+) {
+    let Some(block_ops) = blocks.get_mut(&block_addr) else {
+        return;
+    };
+
+    for reg in &call_boundaries.defined_regs {
+        for actual_name in ctx.matching_var_names_ci(reg) {
+            let dst = ctx.write_var(&actual_name);
+            defined_vars.push(actual_name);
+            block_ops.push(SSAOp::CallDefine { dst });
+        }
     }
 }
 

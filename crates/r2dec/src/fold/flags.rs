@@ -54,11 +54,8 @@ impl<'a> FoldingContext<'a> {
         if let Some(expr) = self.predicate_exprs_map().get(&lower) {
             return Some(expr.clone());
         }
-        if let Some((ssa_name, _)) = self
-            .var_aliases_map()
-            .iter()
-            .find(|(_, alias)| alias.eq_ignore_ascii_case(name))
-            && let Some(expr) = self.predicate_exprs_map().get(ssa_name)
+        if let Some(ssa_name) = self.find_ssa_name_for_rendered_alias(name)
+            && let Some(expr) = self.predicate_exprs_map().get(&ssa_name)
         {
             return Some(expr.clone());
         }
@@ -68,12 +65,29 @@ impl<'a> FoldingContext<'a> {
     pub(super) fn predicate_candidate_for_var(&self, var: &SSAVar) -> Option<CExpr> {
         let key = var.display_name();
         self.lookup_predicate_expr(&key)
-            .or_else(|| self.lookup_definition(&key))
-            .or_else(|| self.formatted_defs_map().get(&key).cloned())
+            .or_else(|| {
+                self.lookup_definition(&key)
+                    .filter(|expr| self.is_assignment_predicate_expr(expr))
+            })
+            .or_else(|| {
+                self.formatted_defs_map()
+                    .get(&key)
+                    .filter(|expr| self.is_assignment_predicate_expr(expr))
+                    .cloned()
+            })
             .or_else(|| {
                 let rendered = self.var_name(var);
-                self.lookup_predicate_expr(&rendered)
-                    .or_else(|| self.formatted_defs_map().get(&rendered).cloned())
+                if self.is_transient_visible_name(&rendered)
+                    || self.is_low_signal_visible_name(&rendered)
+                {
+                    return None;
+                }
+                self.lookup_predicate_expr(&rendered).or_else(|| {
+                    self.formatted_defs_map()
+                        .get(&rendered)
+                        .filter(|expr| self.is_assignment_predicate_expr(expr))
+                        .cloned()
+                })
             })
     }
 
@@ -114,7 +128,6 @@ impl<'a> FoldingContext<'a> {
                     | BinaryOp::And
                     | BinaryOp::Or
                     | BinaryOp::BitAnd
-                    | BinaryOp::BitXor
             ),
             CExpr::Paren(inner) => self.is_assignment_predicate_expr(inner),
             CExpr::Cast { expr: inner, .. } => self.is_assignment_predicate_expr(inner),
@@ -608,7 +621,6 @@ impl<'a> FoldingContext<'a> {
                     | BinaryOp::Ge
                     | BinaryOp::And
                     | BinaryOp::Or
-                    | BinaryOp::BitXor
             ),
             CExpr::Paren(inner) => self.is_boolean_value_expr(inner),
             CExpr::Cast {
@@ -753,7 +765,6 @@ impl<'a> FoldingContext<'a> {
                     | BinaryOp::And
                     | BinaryOp::Or
                     | BinaryOp::BitAnd
-                    | BinaryOp::BitXor
                     | BinaryOp::Sub
             ),
             CExpr::Paren(inner) => self.is_predicate_like_expr(inner),
@@ -1893,33 +1904,17 @@ impl<'a> FoldingContext<'a> {
 
         let (flag_base, flag_version) = parse_flag_name(flag_name)?;
 
-        // Try exact match first (case-insensitive) including version.
-        for (key, origin) in self.flag_origins_map() {
-            if let Some((key_base, key_version)) = parse_flag_name(key)
-                && key_base == flag_base
-                && key_version == flag_version
-            {
-                return Some(origin.clone());
-            }
+        let exact_matches = self.collect_matching_flag_origins(&flag_base, flag_version.as_deref());
+        if let Some((_, origin)) = exact_matches.into_iter().next() {
+            return Some(origin);
         }
 
         // Fallback by base-name only when there is exactly one candidate.
         // This avoids picking an arbitrary origin for unsuffixed flags.
-        let candidates: Vec<(String, String)> = self
-            .flag_origins_map()
-            .iter()
-            .filter_map(|(key, origin)| {
-                let (key_base, _) = parse_flag_name(key)?;
-                if key_base == flag_base {
-                    Some(origin.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let candidates = self.collect_matching_flag_origins(&flag_base, None);
 
         if candidates.len() == 1 {
-            return candidates.into_iter().next();
+            return candidates.into_iter().next().map(|(_, origin)| origin);
         }
 
         None
@@ -1931,29 +1926,106 @@ impl<'a> FoldingContext<'a> {
     ) -> Option<FlagCompareProvenance> {
         let (flag_base, flag_version) = parse_flag_name(flag_name)?;
 
-        for (key, prov) in self.flag_compare_provenance_map() {
-            if let Some((key_base, key_version)) = parse_flag_name(key)
-                && key_base == flag_base
-                && key_version == flag_version
-            {
-                return Some(prov.clone());
-            }
+        let exact_matches =
+            self.collect_matching_flag_compare_provenance(&flag_base, flag_version.as_deref());
+        if let Some((_, prov)) = exact_matches.into_iter().next() {
+            return Some(prov);
         }
 
-        let candidates: Vec<FlagCompareProvenance> = self
-            .flag_compare_provenance_map()
-            .iter()
-            .filter_map(|(key, prov)| {
-                let (key_base, _) = parse_flag_name(key)?;
-                (key_base == flag_base).then_some(prov.clone())
-            })
-            .collect();
+        let candidates = self.collect_matching_flag_compare_provenance(&flag_base, None);
 
         if candidates.len() == 1 {
-            return candidates.into_iter().next();
+            return candidates.into_iter().next().map(|(_, prov)| prov);
         }
 
         None
+    }
+
+    fn collect_matching_flag_origins(
+        &self,
+        flag_base: &str,
+        version: Option<&str>,
+    ) -> Vec<(String, (String, String))> {
+        let mut candidates = self
+            .flag_origins_map()
+            .iter()
+            .filter_map(|(key, origin)| {
+                let (key_base, key_version) = parse_flag_name(key)?;
+                (key_base == flag_base
+                    && version.is_none_or(|expected| key_version.as_deref() == Some(expected)))
+                .then_some((key.clone(), origin.clone()))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|a, b| {
+            self.flag_origin_selection_key(&b.1)
+                .cmp(&self.flag_origin_selection_key(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        candidates
+    }
+
+    fn collect_matching_flag_compare_provenance(
+        &self,
+        flag_base: &str,
+        version: Option<&str>,
+    ) -> Vec<(String, FlagCompareProvenance)> {
+        let mut candidates = self
+            .flag_compare_provenance_map()
+            .iter()
+            .filter_map(|(key, prov)| {
+                let (key_base, key_version) = parse_flag_name(key)?;
+                (key_base == flag_base
+                    && version.is_none_or(|expected| key_version.as_deref() == Some(expected)))
+                .then_some((key.clone(), prov.clone()))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|a, b| {
+            self.flag_compare_provenance_selection_key(&b.1)
+                .cmp(&self.flag_compare_provenance_selection_key(&a.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        candidates
+    }
+
+    fn flag_origin_selection_key(&self, origin: &(String, String)) -> (i32, i32) {
+        (
+            self.flag_operand_quality(&origin.0) + self.flag_operand_quality(&origin.1),
+            self.flag_operand_quality(&origin.0)
+                .max(self.flag_operand_quality(&origin.1)),
+        )
+    }
+
+    fn flag_compare_provenance_selection_key(
+        &self,
+        prov: &FlagCompareProvenance,
+    ) -> (i32, i32, u8) {
+        (
+            self.flag_operand_quality(&prov.lhs) + self.flag_operand_quality(&prov.rhs),
+            self.flag_operand_quality(&prov.lhs)
+                .max(self.flag_operand_quality(&prov.rhs)),
+            match prov.kind {
+                FlagCompareKind::Equality => 3,
+                FlagCompareKind::UnsignedLess => 2,
+                FlagCompareKind::SignedNegative => 1,
+                FlagCompareKind::Overflow => 0,
+            },
+        )
+    }
+
+    fn flag_operand_quality(&self, name: &str) -> i32 {
+        if self.arg_alias_for_rendered_name(name).is_some() || name.starts_with("arg") {
+            return 40;
+        }
+        if self.parse_expr_from_name(name).is_some() {
+            return 30;
+        }
+        if self.is_low_signal_visible_name(name) {
+            return 0;
+        }
+        if self.is_transient_visible_name(name) {
+            return 10;
+        }
+        20
     }
 
     pub(super) fn compare_provenance_expr(&self, prov: &FlagCompareProvenance) -> Option<CExpr> {

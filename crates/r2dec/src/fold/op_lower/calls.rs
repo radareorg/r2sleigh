@@ -1,4 +1,5 @@
 use super::*;
+use r2types::FunctionType;
 
 impl<'a> FoldingContext<'a> {
     fn lookup_known_signature(&self, callee_name: &str) -> Option<&FunctionType> {
@@ -91,7 +92,7 @@ impl<'a> FoldingContext<'a> {
                         .map(|name| CExpr::Var(name.clone()))
                 })
                 .unwrap_or(CExpr::UIntLit(addr)),
-            analysis::SemanticCallArg::Expr(expr) => {
+            analysis::SemanticCallArg::FallbackExpr(expr) => {
                 self.normalize_call_arg_expr_for_callee(callee, expr)
             }
         }
@@ -114,7 +115,9 @@ impl<'a> FoldingContext<'a> {
                         .map(|name| CExpr::Var(name.clone()))
                 })
                 .unwrap_or(CExpr::UIntLit(addr)),
-            analysis::SemanticCallArg::Expr(expr) => self.normalize_imported_call_arg_expr(expr),
+            analysis::SemanticCallArg::FallbackExpr(expr) => {
+                self.normalize_imported_call_arg_expr(expr)
+            }
         }
     }
 
@@ -190,6 +193,40 @@ impl<'a> FoldingContext<'a> {
         best = self.choose_preferred_call_arg_expr(best, stringy, true);
 
         let best = best.unwrap_or(rewritten);
+        let best = if let CExpr::Var(name) = &best {
+            let name = name.clone();
+            if self.should_force_imported_call_resolution_name(&name) {
+                let mut semantic_visited = HashSet::new();
+                let semantic = self
+                    .render_semantic_value_by_name(&name, 0, &mut semantic_visited)
+                    .or_else(|| {
+                        self.render_authoritative_memory_access_by_name(
+                            &name,
+                            self.inputs.arch.ptr_size.max(1),
+                            0,
+                            &mut semantic_visited,
+                        )
+                    });
+                let best = self
+                    .choose_preferred_call_arg_expr(Some(best.clone()), semantic, true)
+                    .unwrap_or_else(|| best.clone());
+                let mut force_visited = HashSet::new();
+                self.force_resolve_imported_call_arg_var(&name, 0, &mut force_visited)
+                    .and_then(|candidate| {
+                        (!matches!(&candidate, CExpr::Var(inner) if inner.eq_ignore_ascii_case(&name)))
+                            .then_some(candidate)
+                    })
+                    .map(|candidate| {
+                        self.choose_preferred_call_arg_expr(Some(best.clone()), Some(candidate), true)
+                            .unwrap_or(best.clone())
+                    })
+                    .unwrap_or(best)
+            } else {
+                best
+            }
+        } else {
+            best
+        };
         let rewritten_best = self.rewrite_stack_expr(best.clone());
         self.choose_preferred_call_arg_expr(Some(best.clone()), Some(rewritten_best), true)
             .unwrap_or(best)

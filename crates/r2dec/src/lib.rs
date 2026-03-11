@@ -11,7 +11,7 @@
 //! 2. **Expression Building** (`expr`): Convert SSA operations to C expressions
 //! 3. **Region Identification** (`region`): Identify control flow regions
 //! 4. **Control Flow Structuring** (`structure`): Convert CFG to structured code
-//! 5. **Type Inference** (`types`): Infer C types from operations
+//! 5. **Type Facts** (`r2types`): Consume inferred type/layout facts
 //! 6. **Variable Recovery** (`variable`): Recover variable names and types
 //! 7. **Code Generation** (`codegen`): Generate readable C source code
 //!
@@ -37,7 +37,7 @@ pub(crate) mod normalize;
 pub(crate) mod post_rename;
 pub mod region;
 pub mod structure;
-pub mod types;
+pub(crate) mod types;
 pub mod variable;
 
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
@@ -45,17 +45,18 @@ pub use codegen::{CodeGenConfig, CodeGenerator, generate};
 pub use fold::lower_ssa_ops_to_stmts;
 pub use region::{Region, RegionAnalyzer};
 pub use structure::ControlFlowStructurer;
-pub use types::TypeInference;
 pub use variable::VariableRecovery;
 
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
+use crate::types::TypeInference;
 use r2ssa::SSAFunction;
 use r2ssa::SSAOp;
-use r2types::ExternalTypeDb;
-use r2types::TypeOracle;
+use r2types::{
+    CTypeLike, ExternalTypeDb, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
+    FunctionTypeFacts, TypeOracle,
+};
 use std::collections::HashSet;
-use types::FunctionType;
 
 fn is_generic_arg_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
@@ -80,6 +81,74 @@ fn normalize_callee_name(name: &str) -> String {
         return base.to_string();
     }
     out
+}
+
+fn ctype_to_type_like(ty: &CType) -> CTypeLike {
+    match ty {
+        CType::Void => CTypeLike::Void,
+        CType::Bool => CTypeLike::Bool,
+        CType::Int(bits) => CTypeLike::Int {
+            bits: *bits,
+            signedness: r2types::Signedness::Signed,
+        },
+        CType::UInt(bits) => CTypeLike::Int {
+            bits: *bits,
+            signedness: r2types::Signedness::Unsigned,
+        },
+        CType::Float(bits) => CTypeLike::Float(*bits),
+        CType::Pointer(inner) => CTypeLike::Pointer(Box::new(ctype_to_type_like(inner))),
+        CType::Array(inner, len) => CTypeLike::Array(Box::new(ctype_to_type_like(inner)), *len),
+        CType::Struct(name) => CTypeLike::Struct(name.clone()),
+        CType::Union(name) => CTypeLike::Union(name.clone()),
+        CType::Enum(name) => CTypeLike::Enum(name.clone()),
+        CType::Function { .. } | CType::Typedef(_) | CType::Unknown => CTypeLike::Unknown,
+    }
+}
+
+fn type_like_to_ctype(ty: &CTypeLike) -> CType {
+    match ty {
+        CTypeLike::Void => CType::Void,
+        CTypeLike::Bool => CType::Bool,
+        CTypeLike::Int { bits, signedness } => match signedness {
+            r2types::Signedness::Unsigned => CType::UInt(*bits),
+            _ => CType::Int(*bits),
+        },
+        CTypeLike::Float(bits) => CType::Float(*bits),
+        CTypeLike::Pointer(inner) => CType::Pointer(Box::new(type_like_to_ctype(inner))),
+        CTypeLike::Array(inner, len) => CType::Array(Box::new(type_like_to_ctype(inner)), *len),
+        CTypeLike::Struct(name) => CType::Struct(name.clone()),
+        CTypeLike::Union(name) => CType::Union(name.clone()),
+        CTypeLike::Enum(name) => CType::Enum(name.clone()),
+        CTypeLike::Function | CTypeLike::Unknown => CType::Unknown,
+    }
+}
+
+fn external_signature_to_spec(signature: &ExternalFunctionSignature) -> FunctionSignatureSpec {
+    FunctionSignatureSpec {
+        ret_type: signature.ret_type.as_ref().map(ctype_to_type_like),
+        params: signature
+            .params
+            .iter()
+            .map(|param| FunctionParamSpec {
+                name: param.name.clone(),
+                ty: param.ty.as_ref().map(ctype_to_type_like),
+            })
+            .collect(),
+    }
+}
+
+fn signature_spec_to_external(signature: &FunctionSignatureSpec) -> ExternalFunctionSignature {
+    ExternalFunctionSignature {
+        ret_type: signature.ret_type.as_ref().map(type_like_to_ctype),
+        params: signature
+            .params
+            .iter()
+            .map(|param| ExternalFunctionParam {
+                name: param.name.clone(),
+                ty: param.ty.as_ref().map(type_like_to_ctype),
+            })
+            .collect(),
+    }
 }
 
 fn merge_params_with_external_signature(
@@ -323,7 +392,7 @@ impl DecompilerConfig {
         Self {
             ptr_size: 64,
             sp_name: "sp".to_string(),
-            fp_name: "fp".to_string(),
+            fp_name: "x29".to_string(),
             arg_regs: ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
                 .into_iter()
                 .map(str::to_string)
@@ -441,16 +510,12 @@ pub struct DecompilerContext {
     pub strings: std::collections::HashMap<u64, String>,
     /// Symbol/global variable names.
     pub symbols: std::collections::HashMap<u64, String>,
-    /// Optional external function signature.
-    pub function_signature: Option<ExternalFunctionSignature>,
+    /// Externally recovered type and layout facts.
+    pub type_facts: FunctionTypeFacts,
     /// Register-backed parameter metadata from host analysis.
     pub register_params: Vec<ExternalRegisterParam>,
-    /// Optional known function signatures from host analysis.
-    pub known_function_signatures: std::collections::HashMap<String, FunctionType>,
     /// Stack variables keyed by signed stack offset.
     pub stack_vars: std::collections::HashMap<i64, ExternalStackVar>,
-    /// Optional external host type database (e.g. tsj payload).
-    pub external_type_db: ExternalTypeDb,
 }
 
 /// The main decompiler.
@@ -491,7 +556,8 @@ impl Decompiler {
 
     /// Set an externally recovered function signature.
     pub fn set_function_signature(&mut self, signature: Option<ExternalFunctionSignature>) {
-        self.context.function_signature = signature;
+        self.context.type_facts.merged_signature =
+            signature.as_ref().map(external_signature_to_spec);
     }
 
     /// Set externally recovered register-backed parameters.
@@ -500,11 +566,16 @@ impl Decompiler {
     }
 
     /// Set externally recovered known function signatures keyed by name.
-    pub fn set_known_function_signatures(
+    pub fn set_known_function_signatures<T>(
         &mut self,
-        signatures: std::collections::HashMap<String, FunctionType>,
-    ) {
-        self.context.known_function_signatures = signatures;
+        signatures: std::collections::HashMap<String, T>,
+    ) where
+        T: Into<FunctionType>,
+    {
+        self.context.type_facts.known_function_signatures = signatures
+            .into_iter()
+            .map(|(name, sig)| (name, sig.into()))
+            .collect();
     }
 
     /// Set externally recovered stack variables keyed by signed stack offset.
@@ -514,7 +585,12 @@ impl Decompiler {
 
     /// Set externally recovered host type database.
     pub fn set_external_type_db(&mut self, external_type_db: ExternalTypeDb) {
-        self.context.external_type_db = external_type_db;
+        self.context.type_facts.external_type_db = external_type_db;
+    }
+
+    /// Set externally recovered type facts.
+    pub fn set_type_facts(&mut self, type_facts: FunctionTypeFacts) {
+        self.context.type_facts = type_facts;
     }
 
     /// Decompile an SSA function to C code.
@@ -571,6 +647,12 @@ impl Decompiler {
         // Materialize phis on non-critical edges to reduce SSA artifacts in output.
         let normalized_func = normalize::materialize_phis(func);
         let func = &normalized_func;
+        let external_signature = self
+            .context
+            .type_facts
+            .merged_signature
+            .as_ref()
+            .map(signature_spec_to_external);
 
         // Recover variables
         let mut var_recovery = VariableRecovery::new_with_abi(
@@ -580,7 +662,7 @@ impl Decompiler {
             self.config.arg_regs.clone(),
             self.config.ret_regs.clone(),
         );
-        if let Some(signature) = &self.context.function_signature {
+        if let Some(signature) = &external_signature {
             var_recovery.set_external_signature(signature.clone());
         }
         if !self.context.stack_vars.is_empty() {
@@ -597,20 +679,20 @@ impl Decompiler {
         if !self.context.function_names.is_empty() {
             type_inference.set_function_names(self.context.function_names.clone());
         }
-        if self.context.function_signature.is_some() {
-            type_inference.set_external_signature(self.context.function_signature.clone());
+        if external_signature.is_some() {
+            type_inference.set_external_signature(external_signature.clone());
         }
-        for (name, signature) in &self.context.known_function_signatures {
+        for (name, signature) in &self.context.type_facts.known_function_signatures {
             type_inference.add_function_type(name, signature.clone());
         }
         if !self.context.stack_vars.is_empty() {
             type_inference.set_external_stack_vars(self.context.stack_vars.clone());
         }
-        if !self.context.external_type_db.structs.is_empty()
-            || !self.context.external_type_db.unions.is_empty()
-            || !self.context.external_type_db.enums.is_empty()
+        if !self.context.type_facts.external_type_db.structs.is_empty()
+            || !self.context.type_facts.external_type_db.unions.is_empty()
+            || !self.context.type_facts.external_type_db.enums.is_empty()
         {
-            type_inference.set_external_type_db(self.context.external_type_db.clone());
+            type_inference.set_external_type_db(self.context.type_facts.external_type_db.clone());
         }
         type_inference.infer_function(func);
         let mut type_hints = type_inference.var_type_hints();
@@ -621,6 +703,7 @@ impl Decompiler {
 
         let known_function_signatures = self
             .context
+            .type_facts
             .known_function_signatures
             .iter()
             .map(|(name, ty)| (normalize_callee_name(name), ty.clone()))
@@ -644,7 +727,7 @@ impl Decompiler {
                 .iter()
                 .map(|(_, param)| param.clone())
                 .collect(),
-            self.context.function_signature.as_ref(),
+            external_signature.as_ref(),
         );
         let param_register_aliases = build_param_register_aliases(
             &params,
@@ -692,7 +775,7 @@ impl Decompiler {
             symbols: &self.context.symbols,
             known_function_signatures: &known_function_signatures,
             external_stack_vars: &self.context.stack_vars,
-            external_type_db: &self.context.external_type_db,
+            external_type_db: &self.context.type_facts.external_type_db,
             param_register_aliases: &param_register_aliases,
             type_hints: &type_hints,
             type_oracle,
@@ -799,9 +882,10 @@ impl Decompiler {
             name: func_name,
             ret_type: self
                 .context
-                .function_signature
+                .type_facts
+                .merged_signature
                 .as_ref()
-                .and_then(|sig| sig.ret_type.clone())
+                .and_then(|sig| sig.ret_type.as_ref().map(type_like_to_ctype))
                 .unwrap_or(inferred_ret_type),
             params,
             locals,
@@ -815,7 +899,7 @@ impl Decompiler {
             for name in self.context.function_names.values() {
                 known_function_names.insert(name.to_ascii_lowercase());
             }
-            for name in self.context.known_function_signatures.keys() {
+            for name in self.context.type_facts.known_function_signatures.keys() {
                 known_function_names.insert(name.to_ascii_lowercase());
             }
             post_rename::rewrite_function_identifiers(&mut c_function, &known_function_names);
@@ -991,7 +1075,7 @@ mod tests {
         let config = DecompilerConfig::aarch64();
         assert_eq!(config.ptr_size, 64);
         assert_eq!(config.sp_name, "sp");
-        assert_eq!(config.fp_name, "fp");
+        assert_eq!(config.fp_name, "x29");
         assert_eq!(config.arg_regs[0], "x0");
         assert_eq!(config.ret_regs[0], "x0");
         assert!(config.caller_saved_regs.contains("x17"));

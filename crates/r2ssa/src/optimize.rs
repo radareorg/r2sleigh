@@ -1879,6 +1879,7 @@ where
         CallInd { target } => CallInd {
             target: map(target),
         },
+        CallDefine { dst } => CallDefine { dst: dst.clone() },
         Return { target } => Return {
             target: map(target),
         },

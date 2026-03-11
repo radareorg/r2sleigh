@@ -2121,6 +2121,7 @@ fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
         BranchInd { .. } => "BranchInd",
         Call { .. } => "Call",
         CallInd { .. } => "CallInd",
+        CallDefine { .. } => "CallDefine",
         Return { .. } => "Return",
         FloatAdd { .. } => "FloatAdd",
         FloatSub { .. } => "FloatSub",
@@ -2331,10 +2332,53 @@ fn decompiler_max_blocks() -> usize {
         .unwrap_or(200)
 }
 
+fn decompiler_cfg_guard_reason(blocks: &[R2ILBlock]) -> Option<String> {
+    let block_count = blocks.len();
+    if block_count < 96 {
+        return None;
+    }
+
+    let edge_count: usize = blocks
+        .iter()
+        .map(
+            |block| match r2ssa::BasicBlock::from_r2il(block).terminator {
+                r2ssa::BlockTerminator::ConditionalBranch { .. } => 2,
+                r2ssa::BlockTerminator::Switch { cases, default } => {
+                    cases.len() + usize::from(default.is_some())
+                }
+                r2ssa::BlockTerminator::Branch { .. }
+                | r2ssa::BlockTerminator::Fallthrough { .. } => 1,
+                r2ssa::BlockTerminator::Call { fallthrough, .. }
+                | r2ssa::BlockTerminator::IndirectCall { fallthrough } => {
+                    usize::from(fallthrough.is_some())
+                }
+                r2ssa::BlockTerminator::IndirectBranch => 1,
+                r2ssa::BlockTerminator::Return | r2ssa::BlockTerminator::None => 0,
+            },
+        )
+        .sum();
+
+    if edge_count * 2 > block_count * 3 {
+        Some(format!(
+            "high CFG edge density ({} blocks, {} edges)",
+            block_count, edge_count
+        ))
+    } else {
+        None
+    }
+}
+
 fn decompile_block_guard_fallback(func_name: &str, blocks: usize, max_blocks: usize) -> String {
     format!(
         "/* r2dec fallback: skipped decompilation for {} ({} blocks > limit {}). Set SLEIGH_DEC_MAX_BLOCKS to override. */",
         func_name, blocks, max_blocks
+    )
+}
+
+fn decompile_artifact_guard_fallback(func_name: &str, reason: &str) -> String {
+    format!(
+        "/* r2dec fallback: skipped decompilation for {} ({}) */",
+        func_name, reason
     )
 }
 
@@ -2560,88 +2604,9 @@ fn is_low_quality_stack_name(name: &str) -> bool {
 }
 
 fn parse_external_type(raw_ty: &str, ptr_bits: u32) -> Option<r2dec::CType> {
-    let mut ty = normalize_external_type_name(raw_ty);
-    if ty.is_empty() {
-        return None;
-    }
-
-    let mut array_size = None;
-    if let Some(open) = ty.rfind('[')
-        && ty.ends_with(']')
-    {
-        let len_str = ty[open + 1..ty.len() - 1].trim();
-        if !len_str.is_empty() {
-            array_size = len_str.parse::<usize>().ok();
-        }
-        ty = ty[..open].trim().to_string();
-    }
-
-    let mut ptr_count = 0usize;
-    loop {
-        let trimmed = ty.trim_end();
-        if let Some(stripped) = trimmed.strip_suffix('*') {
-            ptr_count += 1;
-            ty = stripped.trim_end().to_string();
-        } else {
-            break;
-        }
-    }
-
-    let base_key = ty
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("")
-        .to_ascii_lowercase();
-    let mut base = if let Some(rest) = base_key.strip_prefix("int")
-        && let Some(bits) = rest.strip_suffix("_t")
-    {
-        bits.parse::<u32>().ok().map(r2dec::CType::Int)
-    } else if let Some(rest) = base_key.strip_prefix("uint")
-        && let Some(bits) = rest.strip_suffix("_t")
-    {
-        bits.parse::<u32>().ok().map(r2dec::CType::UInt)
-    } else {
-        match base_key.as_str() {
-            "void" => Some(r2dec::CType::Void),
-            "bool" => Some(r2dec::CType::Bool),
-            "char" | "signedchar" => Some(r2dec::CType::Int(8)),
-            "unsignedchar" => Some(r2dec::CType::UInt(8)),
-            "short" | "shortint" | "signedshort" | "signedshortint" => Some(r2dec::CType::Int(16)),
-            "unsignedshort" | "unsignedshortint" => Some(r2dec::CType::UInt(16)),
-            "signed" | "int" | "signedint" => Some(r2dec::CType::Int(32)),
-            "unsigned" | "unsignedint" => Some(r2dec::CType::UInt(32)),
-            "long" | "longint" | "signedlong" | "signedlongint" | "longlong" | "longlongint"
-            | "signedlonglong" | "signedlonglongint" => Some(r2dec::CType::Int(ptr_bits)),
-            "unsignedlong" | "unsignedlongint" | "unsignedlonglong" | "unsignedlonglongint" => {
-                Some(r2dec::CType::UInt(ptr_bits))
-            }
-            "size_t" => Some(r2dec::CType::UInt(ptr_bits)),
-            "ssize_t" => Some(r2dec::CType::Int(ptr_bits)),
-            "float" => Some(r2dec::CType::Float(32)),
-            "double" => Some(r2dec::CType::Float(64)),
-            _ if ty.to_ascii_lowercase().starts_with("struct ") => ty
-                .split_whitespace()
-                .nth(1)
-                .map(|name| r2dec::CType::Struct(name.to_string())),
-            _ if ty.to_ascii_lowercase().starts_with("union ") => ty
-                .split_whitespace()
-                .nth(1)
-                .map(|name| r2dec::CType::Union(name.to_string())),
-            _ if ty.to_ascii_lowercase().starts_with("enum ") => ty
-                .split_whitespace()
-                .nth(1)
-                .map(|name| r2dec::CType::Enum(name.to_string())),
-            _ => None,
-        }
-    }?;
-
-    if let Some(size) = array_size {
-        base = r2dec::CType::Array(Box::new(base), Some(size));
-    }
-    for _ in 0..ptr_count {
-        base = r2dec::CType::ptr(base);
-    }
-    Some(base)
+    let normalized = normalize_external_type_name(raw_ty);
+    let parsed = r2types::parse_type_like_spec(&normalized, ptr_bits)?;
+    Some(type_like_to_ctype(&parsed))
 }
 
 fn parse_external_signature(
@@ -2655,7 +2620,7 @@ fn parse_external_signature(
 #[derive(Debug, Default)]
 struct ParsedSignatureContext {
     current: Option<r2dec::ExternalFunctionSignature>,
-    known: std::collections::HashMap<String, r2dec::types::FunctionType>,
+    known: std::collections::HashMap<String, r2types::FunctionType>,
 }
 
 fn parse_afcfj_signature_entries(
@@ -2717,9 +2682,9 @@ fn parse_afcfj_signature_value(
 }
 
 fn maybe_insert_known_signature(
-    known: &mut std::collections::HashMap<String, r2dec::types::FunctionType>,
+    known: &mut std::collections::HashMap<String, r2types::FunctionType>,
     name: &str,
-    sig: r2dec::types::FunctionType,
+    sig: r2types::FunctionType,
 ) {
     if name.is_empty() {
         return;
@@ -2738,7 +2703,7 @@ fn maybe_insert_known_signature(
 fn parse_known_function_signatures(
     value: &serde_json::Value,
     ptr_bits: u32,
-) -> std::collections::HashMap<String, r2dec::types::FunctionType> {
+) -> std::collections::HashMap<String, r2types::FunctionType> {
     let mut out = std::collections::HashMap::new();
     let Some(entries) = value.as_array() else {
         return out;
@@ -2761,16 +2726,21 @@ fn parse_known_function_signatures(
                         .get("type")
                         .or_else(|| arg_obj.get("ty"))
                         .and_then(|v| v.as_str())
-                        .and_then(|raw| parse_external_type(raw, ptr_bits));
-                    params.push(ty.unwrap_or(r2dec::CType::Unknown));
+                        .and_then(|raw| r2types::parse_type_like_spec(raw, ptr_bits));
+                    params.push(ty.unwrap_or(r2types::CTypeLike::Unknown));
                 } else if let Some(raw) = arg.as_str() {
-                    params
-                        .push(parse_external_type(raw, ptr_bits).unwrap_or(r2dec::CType::Unknown));
+                    params.push(
+                        r2types::parse_type_like_spec(raw, ptr_bits)
+                            .unwrap_or(r2types::CTypeLike::Unknown),
+                    );
                 }
             }
         } else if let Some(argtypes) = obj.get("argtypes").and_then(|v| v.as_array()) {
             for raw in argtypes.iter().filter_map(|v| v.as_str()) {
-                params.push(parse_external_type(raw, ptr_bits).unwrap_or(r2dec::CType::Unknown));
+                params.push(
+                    r2types::parse_type_like_spec(raw, ptr_bits)
+                        .unwrap_or(r2types::CTypeLike::Unknown),
+                );
             }
         }
 
@@ -2781,19 +2751,19 @@ fn parse_known_function_signatures(
             .or_else(|| obj.get("rettype"))
             .or_else(|| obj.get("type"))
             .and_then(|v| v.as_str())
-            .and_then(|raw| parse_external_type(raw, ptr_bits))
-            .unwrap_or(r2dec::CType::Unknown);
+            .and_then(|raw| r2types::parse_type_like_spec(raw, ptr_bits))
+            .unwrap_or(r2types::CTypeLike::Unknown);
 
         let variadic = obj
             .get("variadic")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        if params.is_empty() && matches!(ret, r2dec::CType::Unknown) {
+        if params.is_empty() && matches!(ret, r2types::CTypeLike::Unknown) {
             continue;
         }
 
-        let sig = r2dec::types::FunctionType {
+        let sig = r2types::FunctionType {
             return_type: ret,
             params,
             variadic,
@@ -2952,7 +2922,7 @@ fn run_decompile_on_large_stack(
     decompiler: r2dec::Decompiler,
     ssa_func: r2ssa::SSAFunction,
 ) -> String {
-    const STACK_SIZE: usize = 32 * 1024 * 1024; // 32 MB
+    const STACK_SIZE: usize = 128 * 1024 * 1024; // 128 MB
 
     let handle = std::thread::Builder::new()
         .stack_size(STACK_SIZE)
@@ -3390,9 +3360,31 @@ fn collect_type_evidence_for_var(
     evidence
 }
 
+fn type_like_to_ctype(ty: &r2types::CTypeLike) -> r2dec::CType {
+    match ty {
+        r2types::CTypeLike::Void => r2dec::CType::Void,
+        r2types::CTypeLike::Bool => r2dec::CType::Bool,
+        r2types::CTypeLike::Int { bits, signedness } => match signedness {
+            r2types::Signedness::Unsigned => r2dec::CType::UInt(*bits),
+            r2types::Signedness::Signed | r2types::Signedness::Unknown => r2dec::CType::Int(*bits),
+        },
+        r2types::CTypeLike::Float(bits) => r2dec::CType::Float(*bits),
+        r2types::CTypeLike::Pointer(inner) => {
+            r2dec::CType::Pointer(Box::new(type_like_to_ctype(inner)))
+        }
+        r2types::CTypeLike::Array(inner, len) => {
+            r2dec::CType::Array(Box::new(type_like_to_ctype(inner)), *len)
+        }
+        r2types::CTypeLike::Struct(name) => r2dec::CType::Struct(name.clone()),
+        r2types::CTypeLike::Union(name) => r2dec::CType::Union(name.clone()),
+        r2types::CTypeLike::Enum(name) => r2dec::CType::Enum(name.clone()),
+        r2types::CTypeLike::Function | r2types::CTypeLike::Unknown => r2dec::CType::Unknown,
+    }
+}
+
 fn infer_signature_return_type(
     func: &r2ssa::SSAFunction,
-    type_inference: &r2dec::TypeInference,
+    type_inference: &r2types::TypeInference,
     ptr_bits: u32,
     evidence_ctx: &SignatureTypeEvidenceContext,
 ) -> (r2dec::CType, TypeEvidence) {
@@ -3421,7 +3413,7 @@ fn infer_signature_return_type(
                 continue;
             }
 
-            let initial_ty = type_inference.get_type(target);
+            let initial_ty = type_like_to_ctype(&type_inference.get_type(target));
             let evidence = collect_type_evidence_for_var(evidence_ctx, target, &initial_ty);
             let ty = resolve_evidence_driven_type(initial_ty, target.size, ptr_bits, &evidence);
             candidates.push(ty);
@@ -5362,8 +5354,7 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
     );
 
     let struct_decls = artifact.struct_decls;
-    let _slot_field_profiles = artifact.slot_field_profiles;
-    let slot_struct_types = artifact.slot_type_overrides;
+    let slot_struct_types = artifact.type_facts.slot_type_overrides;
 
     let mut var_type_candidates = Vec::new();
     let mut var_rename_candidates = Vec::new();
@@ -8584,9 +8575,17 @@ mod integration_tests {
         decompiler.set_function_names(HashMap::from([(0x401040, "sym.imp.atoi".to_string())]));
         decompiler.set_known_function_signatures(HashMap::from([(
             "sym.imp.atoi".to_string(),
-            r2dec::types::FunctionType {
-                return_type: r2dec::CType::Int(32),
-                params: vec![r2dec::CType::ptr(r2dec::CType::Int(8))],
+            r2types::FunctionType {
+                return_type: r2types::CTypeLike::Int {
+                    bits: 32,
+                    signedness: r2types::Signedness::Signed,
+                },
+                params: vec![r2types::CTypeLike::Pointer(Box::new(
+                    r2types::CTypeLike::Int {
+                        bits: 8,
+                        signedness: r2types::Signedness::Signed,
+                    },
+                ))],
                 variadic: false,
             },
         )]));
@@ -8649,9 +8648,17 @@ mod integration_tests {
         decompiler.set_function_names(HashMap::from([(0x401030, "sym.imp.printf".to_string())]));
         decompiler.set_known_function_signatures(HashMap::from([(
             "sym.imp.printf".to_string(),
-            r2dec::types::FunctionType {
-                return_type: r2dec::CType::Int(32),
-                params: vec![r2dec::CType::ptr(r2dec::CType::Int(8))],
+            r2types::FunctionType {
+                return_type: r2types::CTypeLike::Int {
+                    bits: 32,
+                    signedness: r2types::Signedness::Signed,
+                },
+                params: vec![r2types::CTypeLike::Pointer(Box::new(
+                    r2types::CTypeLike::Int {
+                        bits: 8,
+                        signedness: r2types::Signedness::Signed,
+                    },
+                ))],
                 variadic: true,
             },
         )]));
@@ -8713,9 +8720,17 @@ mod integration_tests {
         decompiler.set_function_names(HashMap::from([(0x401030, "sym.imp.printf".to_string())]));
         decompiler.set_known_function_signatures(HashMap::from([(
             "sym.imp.printf".to_string(),
-            r2dec::types::FunctionType {
-                return_type: r2dec::CType::Int(32),
-                params: vec![r2dec::CType::ptr(r2dec::CType::Int(8))],
+            r2types::FunctionType {
+                return_type: r2types::CTypeLike::Int {
+                    bits: 32,
+                    signedness: r2types::Signedness::Signed,
+                },
+                params: vec![r2types::CTypeLike::Pointer(Box::new(
+                    r2types::CTypeLike::Int {
+                        bits: 8,
+                        signedness: r2types::Signedness::Signed,
+                    },
+                ))],
                 variadic: true,
             },
         )]));

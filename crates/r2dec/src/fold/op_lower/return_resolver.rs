@@ -50,6 +50,9 @@ impl<'a> FoldingContext<'a> {
 
         match expr {
             CExpr::Var(name) => {
+                if self.is_transient_visible_name(name) || self.is_low_signal_visible_name(name) {
+                    return None;
+                }
                 if !visited.insert(name.clone()) {
                     return None;
                 }
@@ -148,9 +151,11 @@ impl<'a> FoldingContext<'a> {
                 let current_expr = self.resolve_return_candidate(&current_expr);
                 let candidate_expr = self.resolve_return_candidate(&candidate_expr);
                 let current_bad = self.expr_contains_generic_stack_alias(&current_expr)
-                    || self.is_uninitialized_return_reg(&current_expr);
+                    || self.is_uninitialized_return_reg(&current_expr)
+                    || self.expr_is_transient_return_artifact(&current_expr);
                 let candidate_bad = self.expr_contains_generic_stack_alias(&candidate_expr)
-                    || self.is_uninitialized_return_reg(&candidate_expr);
+                    || self.is_uninitialized_return_reg(&candidate_expr)
+                    || self.expr_is_transient_return_artifact(&candidate_expr);
                 if current_bad && !candidate_bad {
                     return Some(candidate_expr);
                 }
@@ -180,6 +185,18 @@ impl<'a> FoldingContext<'a> {
             best = self.preferred_return_candidate(best, rendered);
         }
         best
+    }
+
+    fn expr_is_transient_return_artifact(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                self.is_transient_visible_name(name) || self.is_low_signal_visible_name(name)
+            }
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.expr_is_transient_return_artifact(inner)
+            }
+            _ => false,
+        }
     }
 
     pub(super) fn semantic_deref_candidate_for_name(&self, name: &str) -> Option<CExpr> {
@@ -597,7 +614,7 @@ impl<'a> FoldingContext<'a> {
                 reg.to_string()
             }
         } else if var.name.starts_with("tmp:") {
-            format!("t{}", var.version)
+            format!("t{}", var.name.trim_start_matches("tmp:"))
         } else {
             var.name.to_lowercase()
         };

@@ -136,6 +136,8 @@ pub struct RegionAnalyzer<'a> {
     back_edges: HashMap<u64, Vec<u64>>,
     /// Natural loops (header -> body blocks).
     loops: HashMap<u64, HashSet<u64>>,
+    /// Post-dominator sets used to pick stable merge blocks for conditionals.
+    post_dominators: HashMap<u64, BTreeSet<u64>>,
     /// Processed blocks.
     processed: HashSet<u64>,
     /// Blocks that exit a loop (break targets): block_addr -> exit_target.
@@ -161,6 +163,7 @@ impl<'a> RegionAnalyzer<'a> {
             func,
             back_edges: HashMap::new(),
             loops: HashMap::new(),
+            post_dominators: HashMap::new(),
             processed: HashSet::new(),
             loop_exits: HashMap::new(),
             loop_continues: HashMap::new(),
@@ -172,8 +175,66 @@ impl<'a> RegionAnalyzer<'a> {
         };
         analyzer.find_back_edges();
         analyzer.find_loops();
+        analyzer.compute_post_dominators();
         analyzer.find_loop_exits();
         analyzer
+    }
+
+    fn compute_post_dominators(&mut self) {
+        let block_addrs = self.func.block_addrs();
+        let all_blocks: BTreeSet<u64> = block_addrs.iter().copied().collect();
+        let exit_blocks: BTreeSet<u64> = block_addrs
+            .iter()
+            .copied()
+            .filter(|addr| self.func.successors(*addr).is_empty())
+            .collect();
+
+        let mut postdoms: HashMap<u64, BTreeSet<u64>> = HashMap::new();
+        for &addr in block_addrs {
+            let initial = if exit_blocks.contains(&addr) {
+                BTreeSet::from([addr])
+            } else {
+                all_blocks.clone()
+            };
+            postdoms.insert(addr, initial);
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &addr in block_addrs.iter().rev() {
+                if exit_blocks.contains(&addr) {
+                    continue;
+                }
+
+                let succs = self.func.successors(addr);
+                if succs.is_empty() {
+                    continue;
+                }
+
+                let mut new_set: Option<BTreeSet<u64>> = None;
+                for succ in succs {
+                    let succ_set = postdoms
+                        .get(&succ)
+                        .cloned()
+                        .unwrap_or_else(|| BTreeSet::from([succ]));
+                    new_set = Some(match new_set {
+                        Some(current) => current.intersection(&succ_set).copied().collect(),
+                        None => succ_set,
+                    });
+                }
+
+                let mut new_set = new_set.unwrap_or_default();
+                new_set.insert(addr);
+
+                if postdoms.get(&addr) != Some(&new_set) {
+                    postdoms.insert(addr, new_set);
+                    changed = true;
+                }
+            }
+        }
+
+        self.post_dominators = postdoms;
     }
 
     /// Find back edges using DFS.
@@ -495,18 +556,58 @@ impl<'a> RegionAnalyzer<'a> {
     }
 
     fn find_merge_point(&self, _cond: u64, true_target: u64, false_target: u64) -> Option<u64> {
-        // Simple heuristic: find the first common successor
         let mut true_reachable = HashSet::new();
         self.collect_reachable(true_target, &mut true_reachable, 10);
 
         let mut false_reachable = HashSet::new();
         self.collect_reachable(false_target, &mut false_reachable, 10);
 
-        // Find intersection
-        true_reachable
-            .iter()
-            .find(|&&block| false_reachable.contains(&block))
-            .copied()
+        let mut common: Vec<u64> = true_reachable
+            .into_iter()
+            .filter(|block| false_reachable.contains(block))
+            .collect();
+        common.sort_unstable_by_key(|block| {
+            (
+                !self.post_dominates(true_target, *block)
+                    || !self.post_dominates(false_target, *block),
+                self.shortest_distance(true_target, *block)
+                    .unwrap_or(usize::MAX),
+                self.shortest_distance(false_target, *block)
+                    .unwrap_or(usize::MAX),
+                *block,
+            )
+        });
+        common.into_iter().next()
+    }
+
+    fn post_dominates(&self, start: u64, candidate: u64) -> bool {
+        self.post_dominators
+            .get(&start)
+            .map(|set| set.contains(&candidate))
+            .unwrap_or(false)
+    }
+
+    fn shortest_distance(&self, start: u64, target: u64) -> Option<usize> {
+        if start == target {
+            return Some(0);
+        }
+
+        let mut queue = VecDeque::from([(start, 0usize)]);
+        let mut visited = HashSet::from([start]);
+
+        while let Some((block, dist)) = queue.pop_front() {
+            for succ in self.func.successors(block) {
+                if !visited.insert(succ) {
+                    continue;
+                }
+                if succ == target {
+                    return Some(dist + 1);
+                }
+                queue.push_back((succ, dist + 1));
+            }
+        }
+
+        None
     }
 
     fn resolve_conditional_targets(&self, cond: u64) -> Option<(u64, u64)> {

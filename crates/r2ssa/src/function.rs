@@ -15,7 +15,9 @@ use crate::domtree::DomTree;
 use crate::naming::build_register_name_map;
 use crate::op::SSAOp;
 use crate::phi::{PhiPlacement, collect_defs_from_cfg_with_names};
-use crate::rename::rename_function_with_names;
+use crate::rename::{
+    CallBoundaryConfig, rename_function_with_names, rename_function_with_names_and_call_boundaries,
+};
 use crate::var::SSAVar;
 
 /// Switch case information: Vec of (case_value, target_address) pairs and optional default target.
@@ -99,6 +101,37 @@ pub struct DefRef<'a> {
     pub site: DefSite,
 }
 
+fn decompile_call_boundary_config(arch: Option<&ArchSpec>) -> Option<CallBoundaryConfig> {
+    let arch = arch?;
+    let lower = arch.name.to_ascii_lowercase();
+    let defined_regs: Vec<String> = match lower.as_str() {
+        "x86-64" | "x86_64" | "x64" | "amd64" => vec![
+            "rax", "eax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11",
+        ],
+        "x86" | "x86-32" | "i386" | "i686" => vec!["eax", "ecx", "edx"],
+        "arm" if arch.addr_size == 4 => vec!["r0", "r1", "r2", "r3", "r12", "lr", "ip"],
+        "aarch64" | "arm64" => vec![
+            "x0", "w0", "x1", "w1", "x2", "w2", "x3", "w3", "x4", "w4", "x5", "w5", "x6", "w6",
+            "x7", "w7", "x8", "w8", "x9", "w9", "x10", "w10", "x11", "w11", "x12", "w12", "x13",
+            "w13", "x14", "w14", "x15", "w15", "x16", "w16", "x17", "w17", "x30", "w30",
+        ],
+        "riscv32" | "rv32" | "rv32gc" => vec![
+            "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5",
+            "a6", "a7",
+        ],
+        "riscv64" | "rv64" | "rv64gc" => vec![
+            "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5",
+            "a6", "a7",
+        ],
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    (!defined_regs.is_empty()).then_some(CallBoundaryConfig { defined_regs })
+}
+
 impl SSAFunction {
     /// Build an SSA function from a sequence of r2il blocks.
     pub fn from_blocks(blocks: &[R2ILBlock]) -> Option<Self> {
@@ -132,7 +165,7 @@ impl SSAFunction {
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
     ) -> Option<Self> {
-        let mut func = Self::from_blocks_raw(blocks, arch)?;
+        let mut func = Self::from_blocks_raw_for_decompile(blocks, arch)?;
         func.prepare_for_decompile(&crate::optimize::DecompilePrepConfig::default());
         if let Some(arch) = arch {
             func.normalize_subregister_sources_for_decompile(arch);
@@ -172,6 +205,23 @@ impl SSAFunction {
     /// 3. Place phi nodes
     /// 4. Rename variables
     pub fn from_blocks_raw(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+        Self::from_blocks_raw_with_policy(blocks, arch, None)
+    }
+
+    /// Build raw SSA prepared with decompiler-safe call boundaries.
+    pub fn from_blocks_raw_for_decompile(
+        blocks: &[R2ILBlock],
+        arch: Option<&ArchSpec>,
+    ) -> Option<Self> {
+        let policy = decompile_call_boundary_config(arch);
+        Self::from_blocks_raw_with_policy(blocks, arch, policy.as_ref())
+    }
+
+    fn from_blocks_raw_with_policy(
+        blocks: &[R2ILBlock],
+        arch: Option<&ArchSpec>,
+        call_boundaries: Option<&CallBoundaryConfig>,
+    ) -> Option<Self> {
         if blocks.is_empty() {
             return None;
         }
@@ -193,8 +243,18 @@ impl SSAFunction {
         let phi_placement = PhiPlacement::compute(&cfg, &domtree, &defs, &var_sizes);
 
         // Rename variables
-        let renamed =
-            rename_function_with_names(&cfg, &domtree, &phi_placement, &var_sizes, reg_names_ref);
+        let renamed = if let Some(boundary) = call_boundaries {
+            rename_function_with_names_and_call_boundaries(
+                &cfg,
+                &domtree,
+                &phi_placement,
+                &var_sizes,
+                reg_names_ref,
+                Some(boundary),
+            )
+        } else {
+            rename_function_with_names(&cfg, &domtree, &phi_placement, &var_sizes, reg_names_ref)
+        };
 
         // Build SSA blocks
         let mut ssa_blocks = HashMap::new();
@@ -1201,6 +1261,88 @@ mod tests {
         // Phi should have two sources
         let phi = &merge.phis[0];
         assert_eq!(phi.sources.len(), 2);
+    }
+
+    #[test]
+    fn test_raw_ssa_construction_is_deterministic_across_runs() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(1, 8),
+                    },
+                    R2ILOp::Copy {
+                        dst: make_reg(8, 8),
+                        src: make_reg(0, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(2, 8),
+                    },
+                    R2ILOp::Copy {
+                        dst: make_reg(8, 8),
+                        src: make_reg(0, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x100c,
+                size: 4,
+                ops: vec![
+                    R2ILOp::IntXor {
+                        dst: make_reg(16, 8),
+                        a: make_reg(8, 8),
+                        b: make_reg(0, 8),
+                    },
+                    R2ILOp::Return {
+                        target: make_ram(0, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let mut dumps = std::collections::BTreeSet::new();
+        for _ in 0..32 {
+            let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+            dumps.insert(func.dump());
+        }
+
+        assert_eq!(
+            dumps.len(),
+            1,
+            "raw SSA output should stay stable across repeated construction"
+        );
     }
 
     #[test]

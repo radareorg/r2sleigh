@@ -5,6 +5,7 @@ R2R_TIMEOUT ?= 120
 R2R_TMPDIR ?= /tmp/r2sleigh-r2r-tmp
 R2R_PLUGIN_DIR ?= $(R2R_TMPDIR)/plugins
 R2R_RUST_FEATURES ?= all-archs
+UNAME_S := $(shell uname -s)
 
 .PHONY: all ensure-tools build-bins link-bins install-plugin run
 
@@ -22,14 +23,33 @@ build-bins:
 	gcc -O2 -g -fno-stack-protector -no-pie -o stress_test_opt stress_test.c -lm && \
 	if [ -f test_func.c ]; then gcc -O0 -g -o test_func test_func.c; fi && \
 	if [ -f sym_test.c ]; then gcc -O0 -g -o sym_test sym_test.c; fi
+	cd ../e2e && \
+	if [ "$(UNAME_S)" = "Darwin" ]; then \
+		clang -arch x86_64 -Wl,-no_pie -O0 -g -fno-stack-protector -o vuln_test_x86 vuln_test.c; \
+		clang -arch x86_64 -Wl,-no_pie -O0 -g -fno-stack-protector -o stress_test_x86 stress_test.c -lm; \
+		clang -arch x86_64 -Wl,-no_pie -O2 -g -fno-stack-protector -o stress_test_opt_x86 stress_test.c -lm; \
+		if [ -f test_func.c ]; then clang -arch x86_64 -Wl,-no_pie -O0 -g -o test_func_x86 test_func.c; fi; \
+		if [ -f sym_test.c ]; then clang -arch x86_64 -Wl,-no_pie -O0 -g -o sym_test_x86 sym_test.c; fi; \
+	else \
+		gcc -m64 -O0 -g -fno-stack-protector -no-pie -o vuln_test_x86 vuln_test.c; \
+		gcc -m64 -O0 -g -fno-stack-protector -no-pie -o stress_test_x86 stress_test.c -lm; \
+		gcc -m64 -O2 -g -fno-stack-protector -no-pie -o stress_test_opt_x86 stress_test.c -lm; \
+		if [ -f test_func.c ]; then gcc -m64 -O0 -g -o test_func_x86 test_func.c; fi; \
+		if [ -f sym_test.c ]; then gcc -m64 -O0 -g -o sym_test_x86 sym_test.c; fi; \
+	fi
 
 link-bins: build-bins
 	@mkdir -p bins
 	@ln -sf ../../e2e/vuln_test bins/vuln_test
 	@ln -sf ../../e2e/stress_test bins/stress_test
 	@ln -sf ../../e2e/stress_test_opt bins/stress_test_opt
+	@ln -sf ../../e2e/vuln_test_x86 bins/vuln_test_x86
+	@ln -sf ../../e2e/stress_test_x86 bins/stress_test_x86
+	@ln -sf ../../e2e/stress_test_opt_x86 bins/stress_test_opt_x86
 	@if [ -f ../e2e/test_func ]; then ln -sf ../../e2e/test_func bins/test_func; fi
 	@if [ -f ../e2e/sym_test ]; then ln -sf ../../e2e/sym_test bins/sym_test; fi
+	@if [ -f ../e2e/test_func_x86 ]; then ln -sf ../../e2e/test_func_x86 bins/test_func_x86; fi
+	@if [ -f ../e2e/sym_test_x86 ]; then ln -sf ../../e2e/sym_test_x86 bins/sym_test_x86; fi
 
 install-plugin:
 	@mkdir -p "$(R2R_PLUGIN_DIR)"
