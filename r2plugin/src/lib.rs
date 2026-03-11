@@ -8519,6 +8519,10 @@ mod integration_tests {
             output.contains("arg2") && !output.contains("stack_") && !output.contains("&stack"),
             "expected semantic argv-rooted atoi arg without stack placeholders, got:\n{output}"
         );
+        assert!(
+            !output.contains("atoi(*") && !output.contains("atoi(lr)"),
+            "atoi imported arg should not regress to deref or transient register form, got:\n{output}"
+        );
     }
 
     #[test]
@@ -8596,6 +8600,10 @@ mod integration_tests {
             !output.contains("0x100002000") && !output.contains("292"),
             "raw const-add format pointer should not survive, got:\n{output}"
         );
+        assert!(
+            !output.contains("printf(&stack)") && !output.contains("printf(0x"),
+            "printf imported format arg should stay literalized, got:\n{output}"
+        );
     }
 
     #[test]
@@ -8667,6 +8675,10 @@ mod integration_tests {
         assert!(
             !output.contains("printf(0x") && !output.contains("atoi(*rax)"),
             "x86 imported-call rendering must not regress to raw literal or deref arg, got:\n{output}"
+        );
+        assert!(
+            !output.contains("printf(&stack)"),
+            "x86 imported-call rendering must not regress to stack placeholder args, got:\n{output}"
         );
     }
 }

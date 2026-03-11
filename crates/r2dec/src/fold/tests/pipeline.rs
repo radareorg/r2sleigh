@@ -6515,6 +6515,11 @@ mod tests {
             args[0],
             semantic
         );
+        assert!(
+            !matches!(&args[0], CExpr::Deref(_)) && !expr_contains_var(&args[0], "lr"),
+            "imported atoi arg should not regress to deref or transient register form, got: {:?}",
+            args[0]
+        );
     }
 
     #[test]
@@ -7159,6 +7164,13 @@ mod tests {
             "expected argv[0] for variadic printf stack arg, got {:?}",
             args[1]
         );
+        assert!(
+            !matches!(&args[0], CExpr::UIntLit(_))
+                && !matches!(&args[1], CExpr::AddrOf(_))
+                && !expr_contains_var(&args[1], "stack"),
+            "printf imported args should not regress to raw literal or stack placeholders, got {:?}",
+            args
+        );
 
         let folded_stmts = ctx.fold_block(&blocks[1], blocks[1].addr);
         let folded_call_args = folded_stmts.iter().find_map(|stmt| {
@@ -7184,6 +7196,14 @@ mod tests {
                     if **base == CExpr::Var("argv".to_string()) && **index == CExpr::IntLit(0)
             ),
             "expected folded printf argv[0] argument, got {folded_stmts:?}"
+        );
+        assert!(
+            !folded_call_args.iter().any(|arg| match arg {
+                CExpr::UIntLit(_) => true,
+                CExpr::AddrOf(inner) => expr_contains_var(inner, "stack"),
+                other => expr_contains_var(other, "stack"),
+            }),
+            "folded printf args should stay semantic and literalized, got {folded_stmts:?}"
         );
     }
 

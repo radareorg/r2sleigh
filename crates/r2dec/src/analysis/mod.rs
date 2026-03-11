@@ -25,10 +25,28 @@ pub(crate) enum UseInfoAnalysisMode {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AnalysisContext {
+pub(crate) struct DecompilerFacts {
     pub(crate) use_info: UseInfo,
     pub(crate) flag_info: FlagInfo,
     pub(crate) stack_info: StackInfo,
+}
+
+impl DecompilerFacts {
+    pub(crate) fn semantic(&self) -> &UseInfo {
+        &self.use_info
+    }
+
+    pub(crate) fn semantic_mut(&mut self) -> &mut UseInfo {
+        &mut self.use_info
+    }
+
+    pub(crate) fn flags(&self) -> &FlagInfo {
+        &self.flag_info
+    }
+
+    pub(crate) fn stack(&self) -> &StackInfo {
+        &self.stack_info
+    }
 }
 
 #[allow(dead_code)]

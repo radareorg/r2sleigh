@@ -43,7 +43,7 @@ pub(crate) struct FoldInputs<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FoldState {
-    pub(crate) analysis_ctx: analysis::AnalysisContext,
+    pub(crate) analysis_ctx: analysis::DecompilerFacts,
     pub(crate) exit_block: Option<u64>,
     pub(crate) return_blocks: HashSet<u64>,
     pub(crate) return_stack_slots: HashSet<i64>,

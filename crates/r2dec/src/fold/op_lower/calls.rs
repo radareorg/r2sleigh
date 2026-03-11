@@ -157,16 +157,10 @@ impl<'a> FoldingContext<'a> {
     fn normalize_imported_call_arg_expr(&self, expr: CExpr) -> CExpr {
         let rewritten = self.rewrite_stack_expr(expr);
         let mut best = Some(rewritten.clone());
-
         let mut expanded_visited = HashSet::new();
         let expanded = self.expand_call_arg_expr(&rewritten, 0, &mut expanded_visited);
         best = self.choose_preferred_call_arg_expr(best, Some(expanded.clone()), true);
-
-        let mut semantic_visited = HashSet::new();
-        let semanticized = self.semanticize_visible_expr(&expanded, 0, &mut semantic_visited);
-        best = self.choose_preferred_call_arg_expr(best, Some(semanticized.clone()), true);
-
-        let memoryized = match &semanticized {
+        let memoryized = match &expanded {
             CExpr::Deref(inner) => {
                 let mut memory_visited = HashSet::new();
                 self.render_memory_access_from_visible_expr(
@@ -176,9 +170,9 @@ impl<'a> FoldingContext<'a> {
                     &mut memory_visited,
                 )
                 .or_else(|| self.promote_constant_indexed_call_arg(inner))
-                .unwrap_or_else(|| semanticized.clone())
+                .unwrap_or_else(|| expanded.clone())
             }
-            _ => semanticized.clone(),
+            _ => expanded.clone(),
         };
         best = self.choose_preferred_call_arg_expr(best, Some(memoryized.clone()), true);
 
@@ -187,46 +181,7 @@ impl<'a> FoldingContext<'a> {
             .unwrap_or(memoryized);
         best = self.choose_preferred_call_arg_expr(best, Some(literalized.clone()), true);
 
-        let mut string_visited = HashSet::new();
-        let stringy =
-            self.resolve_string_like_imported_call_arg_expr(&literalized, 0, &mut string_visited);
-        best = self.choose_preferred_call_arg_expr(best, stringy, true);
-
         let best = best.unwrap_or(rewritten);
-        let best = if let CExpr::Var(name) = &best {
-            let name = name.clone();
-            if self.should_force_imported_call_resolution_name(&name) {
-                let mut semantic_visited = HashSet::new();
-                let semantic = self
-                    .render_semantic_value_by_name(&name, 0, &mut semantic_visited)
-                    .or_else(|| {
-                        self.render_authoritative_memory_access_by_name(
-                            &name,
-                            self.inputs.arch.ptr_size.max(1),
-                            0,
-                            &mut semantic_visited,
-                        )
-                    });
-                let best = self
-                    .choose_preferred_call_arg_expr(Some(best.clone()), semantic, true)
-                    .unwrap_or_else(|| best.clone());
-                let mut force_visited = HashSet::new();
-                self.force_resolve_imported_call_arg_var(&name, 0, &mut force_visited)
-                    .and_then(|candidate| {
-                        (!matches!(&candidate, CExpr::Var(inner) if inner.eq_ignore_ascii_case(&name)))
-                            .then_some(candidate)
-                    })
-                    .map(|candidate| {
-                        self.choose_preferred_call_arg_expr(Some(best.clone()), Some(candidate), true)
-                            .unwrap_or(best.clone())
-                    })
-                    .unwrap_or(best)
-            } else {
-                best
-            }
-        } else {
-            best
-        };
         let rewritten_best = self.rewrite_stack_expr(best.clone());
         self.choose_preferred_call_arg_expr(Some(best.clone()), Some(rewritten_best), true)
             .unwrap_or(best)
@@ -251,9 +206,7 @@ impl<'a> FoldingContext<'a> {
         let literalized = self
             .resolve_literalish_call_arg_expr(&memoryized)
             .unwrap_or(memoryized);
-        let mut string_visited = HashSet::new();
-        self.resolve_string_like_imported_call_arg_expr(&literalized, 0, &mut string_visited)
-            .unwrap_or(literalized)
+        self.rewrite_stack_expr(literalized)
     }
 
     /// Convert an SSA operation to a C statement.

@@ -103,15 +103,15 @@ impl<'a> FoldingContext<'a> {
     const MAX_SEMANTIC_RENDER_DEPTH: u32 = 8;
 
     fn use_info(&self) -> &analysis::UseInfo {
-        &self.state.analysis_ctx.use_info
+        self.state.analysis_ctx.semantic()
     }
 
     fn flag_info(&self) -> &analysis::FlagInfo {
-        &self.state.analysis_ctx.flag_info
+        self.state.analysis_ctx.flags()
     }
 
     fn stack_info(&self) -> &analysis::StackInfo {
-        &self.state.analysis_ctx.stack_info
+        self.state.analysis_ctx.stack()
     }
 
     pub(crate) fn use_counts_map(&self) -> &HashMap<String, usize> {
@@ -219,7 +219,7 @@ impl<'a> FoldingContext<'a> {
     #[cfg(test)]
     pub fn set_type_hints(&mut self, hints: HashMap<String, CType>) {
         self.inputs.type_hints = Box::leak(Box::new(hints.clone()));
-        self.state.analysis_ctx.use_info.type_hints = hints;
+        self.state.analysis_ctx.semantic_mut().type_hints = hints;
     }
 
     #[cfg(test)]
@@ -291,7 +291,11 @@ impl<'a> FoldingContext<'a> {
     /// This finds the exit block and blocks that branch to it.
     pub fn analyze_function_structure(&mut self, func: &SSAFunction) {
         self.state.return_stack_slots.clear();
-        self.state.analysis_ctx.use_info.frame_slot_merges.clear();
+        self.state
+            .analysis_ctx
+            .semantic_mut()
+            .frame_slot_merges
+            .clear();
         // Find exit block (the block containing SSAOp::Return)
         for block in func.blocks() {
             for op in &block.ops {
@@ -352,7 +356,7 @@ impl<'a> FoldingContext<'a> {
 
             self.detect_return_stack_slots(func, exit_addr);
         }
-        let type_hints = self.state.analysis_ctx.use_info.type_hints.clone();
+        let type_hints = self.state.analysis_ctx.semantic().type_hints.clone();
         let env = analysis::PassEnv {
             ptr_size: self.inputs.arch.ptr_size,
             sp_name: &self.inputs.arch.sp_name,
@@ -368,7 +372,7 @@ impl<'a> FoldingContext<'a> {
             type_oracle: self.inputs.type_oracle,
         };
         analysis::use_info::populate_frame_slot_merges(
-            &mut self.state.analysis_ctx.use_info,
+            self.state.analysis_ctx.semantic_mut(),
             func,
             &env,
         );
@@ -579,7 +583,7 @@ impl<'a> FoldingContext<'a> {
         // 1) UseInfo
         // 2) FlagInfo + StackInfo
         // 3) Predicate simplification/statement emit consume analysis state
-        self.state.analysis_ctx.use_info.type_hints = self.inputs.type_hints.clone();
+        self.state.analysis_ctx.semantic_mut().type_hints = self.inputs.type_hints.clone();
         let env = self.to_pass_env();
         let mut use_info = analysis::UseInfo::analyze(blocks, &env);
         let authoritative_use_info = use_info.clone();
@@ -661,7 +665,7 @@ impl<'a> FoldingContext<'a> {
             use_info.preserve_authoritative_facts_from(&authoritative_use_info);
         }
         let flag_info = analysis::FlagInfo::analyze(blocks, &use_info, &env);
-        self.state.analysis_ctx = analysis::AnalysisContext {
+        self.state.analysis_ctx = analysis::DecompilerFacts {
             use_info,
             flag_info,
             stack_info,
@@ -4283,6 +4287,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn resolve_imported_call_arg_expr(
         &self,
         expr: &CExpr,
@@ -4453,6 +4458,7 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn resolve_string_like_imported_call_arg_expr(
         &self,
         expr: &CExpr,
@@ -4601,6 +4607,7 @@ impl<'a> FoldingContext<'a> {
         )
     }
 
+    #[allow(dead_code)]
     fn force_resolve_imported_call_arg_var(
         &self,
         name: &str,
@@ -4686,12 +4693,7 @@ impl<'a> FoldingContext<'a> {
         let mut semantic_visited = HashSet::new();
         let semanticized = self.semanticize_visible_expr(&expanded, 0, &mut semantic_visited);
         best = self.choose_preferred_call_arg_expr(best, Some(semanticized.clone()), imported);
-        let imported_resolved = if imported {
-            let mut imported_visited = HashSet::new();
-            self.resolve_imported_call_arg_expr(&semanticized, 0, &mut imported_visited)
-        } else {
-            semanticized.clone()
-        };
+        let imported_resolved = semanticized.clone();
         best = self.choose_preferred_call_arg_expr(best, Some(imported_resolved.clone()), imported);
         let memoryized = match &imported_resolved {
             CExpr::Deref(inner) => {
@@ -4714,53 +4716,6 @@ impl<'a> FoldingContext<'a> {
         let best = self
             .choose_preferred_call_arg_expr(best, Some(literalized), imported)
             .unwrap_or(rewritten);
-        let best = if imported {
-            let mut string_visited = HashSet::new();
-            let stringy =
-                self.resolve_string_like_imported_call_arg_expr(&best, 0, &mut string_visited);
-            self.choose_preferred_call_arg_expr(Some(best.clone()), stringy, true)
-                .unwrap_or(best)
-        } else {
-            best
-        };
-        let best = if imported
-            && let CExpr::Var(name) = &best
-            && self.should_force_imported_call_resolution_name(name)
-        {
-            let mut semantic_visited = HashSet::new();
-            let semantic = self
-                .render_semantic_value_by_name(name, 0, &mut semantic_visited)
-                .or_else(|| {
-                    self.render_authoritative_memory_access_by_name(
-                        name,
-                        self.inputs.arch.ptr_size.max(1),
-                        0,
-                        &mut semantic_visited,
-                    )
-                });
-            self.choose_preferred_call_arg_expr(Some(best.clone()), semantic, true)
-                .unwrap_or(best)
-        } else {
-            best
-        };
-        let best = if imported
-            && let CExpr::Var(name) = &best
-            && self.should_force_imported_call_resolution_name(name)
-        {
-            let mut force_visited = HashSet::new();
-            self.force_resolve_imported_call_arg_var(name, 0, &mut force_visited)
-                .and_then(|candidate| {
-                    (!matches!(&candidate, CExpr::Var(inner) if inner.eq_ignore_ascii_case(name)))
-                        .then_some(candidate)
-                })
-                .map(|candidate| {
-                    self.choose_preferred_call_arg_expr(Some(best.clone()), Some(candidate), true)
-                        .unwrap_or(best.clone())
-                })
-                .unwrap_or(best)
-        } else {
-            best
-        };
         let rewritten_best = self.rewrite_stack_expr(best.clone());
         if imported {
             self.choose_preferred_call_arg_expr(

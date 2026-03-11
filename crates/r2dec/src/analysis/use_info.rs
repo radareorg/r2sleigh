@@ -3282,18 +3282,59 @@ fn semantic_call_arg_for_var(
     expr: CExpr,
     env: &PassEnv<'_>,
 ) -> SemanticCallArg {
-    if let Some(addr) = semantic_call_arg_string_addr(info, var, &expr, env, 0) {
-        return SemanticCallArg::StringAddr(addr);
+    if let Some(value) = canonical_frame_object_call_arg_value(info, var, &expr, env) {
+        return SemanticCallArg::semantic(value);
     }
     if let Some(value) = info.semantic_values.get(&var.display_name()).cloned()
         && should_use_semantic_call_arg_value(info, var, &value, &expr, env)
     {
         return SemanticCallArg::semantic(value);
     }
+    if let Some(addr) = semantic_call_arg_string_addr(info, var, &expr, env, 0) {
+        return SemanticCallArg::StringAddr(addr);
+    }
     if var.is_const() {
         return SemanticCallArg::FallbackExpr(expr);
     }
     SemanticCallArg::FallbackExpr(expr)
+}
+
+fn canonical_frame_object_call_arg_value(
+    info: &UseInfo,
+    var: &SSAVar,
+    expr: &CExpr,
+    env: &PassEnv<'_>,
+) -> Option<SemanticValue> {
+    let direct = semantic_addr_for_var(info, var, env)
+        .and_then(|addr| frame_object_field_key(info, &addr, env, 0))
+        .and_then(|key| info.frame_object_field_roots.get(&key).cloned());
+    let semantic = info
+        .semantic_values
+        .get(&var.display_name())
+        .and_then(|value| match value {
+            SemanticValue::Address(addr) | SemanticValue::Load { addr, .. } => {
+                frame_object_field_key(info, addr, env, 0)
+                    .and_then(|key| info.frame_object_field_roots.get(&key).cloned())
+            }
+            SemanticValue::Scalar(ScalarValue::Root(root))
+                if root.var != *var
+                    && should_use_semantic_call_arg_value(
+                        info,
+                        var,
+                        &SemanticValue::Scalar(ScalarValue::Root(root.clone())),
+                        expr,
+                        env,
+                    ) =>
+            {
+                Some(SemanticValue::Scalar(ScalarValue::Root(root.clone())))
+            }
+            _ => None,
+        });
+
+    direct
+        .into_iter()
+        .chain(semantic)
+        .find(|value| should_use_semantic_call_arg_value(info, var, value, expr, env))
 }
 
 fn should_use_semantic_call_arg_value(
@@ -3673,6 +3714,9 @@ fn semantic_call_arg_score(
         }
         SemanticCallArg::Semantic(SemanticValue::Scalar(ScalarValue::Root(root))) => {
             let mut score = 180 + call_arg_expr_score(expr, env);
+            if canonical_frame_object_call_arg_value(info, var, expr, env).is_some() {
+                score += 80;
+            }
             if root.var.version == 0
                 && env
                     .param_register_aliases

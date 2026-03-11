@@ -37,13 +37,13 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn predicate_exprs_map(&self) -> &std::collections::HashMap<String, CExpr> {
-        &self.state.analysis_ctx.flag_info.predicate_exprs
+        &self.state.analysis_ctx.flags().predicate_exprs
     }
 
     pub(super) fn flag_compare_provenance_map(
         &self,
     ) -> &std::collections::HashMap<String, FlagCompareProvenance> {
-        &self.state.analysis_ctx.flag_info.compare_provenance
+        &self.state.analysis_ctx.flags().compare_provenance
     }
 
     pub(super) fn lookup_predicate_expr(&self, name: &str) -> Option<CExpr> {

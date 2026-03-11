@@ -85,55 +85,68 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    fn semantic_return_candidate_for_name(&self, name: &str) -> Option<CExpr> {
+        let merged = self
+            .stack_slots_map()
+            .get(name)
+            .filter(|slot| self.state.return_stack_slots.contains(&slot.offset))
+            .and_then(|slot| {
+                self.current_block_addr.get().and_then(|block_addr| {
+                    self.merged_return_candidate_for_block_slot(block_addr, slot.offset)
+                })
+            });
+        if merged.is_some() {
+            return merged;
+        }
+
+        let mut semantic_visited = HashSet::new();
+        self.render_semantic_value_by_name(name, 0, &mut semantic_visited)
+    }
+
     pub(super) fn resolve_return_candidate(&self, expr: &CExpr) -> CExpr {
         let mut best = expr.clone();
         let mut has_semantic_root = false;
         if let CExpr::Var(name) = expr {
-            let mut semantic_visited = HashSet::new();
-            if let Some(semantic) =
-                self.render_semantic_value_by_name(name, 0, &mut semantic_visited)
-            {
+            if let Some(semantic) = self.semantic_return_candidate_for_name(name) {
                 has_semantic_root = true;
                 if self.prefers_visible_expr(&best, &semantic) {
                     best = semantic;
                 }
             }
+            if let Some(candidate) = self.semanticized_raw_definition_candidate(name)
+                && self.prefers_visible_expr(&best, &candidate)
+            {
+                best = candidate;
+            }
         }
-        let mut visited = HashSet::new();
-        if let Some(predicate) = self.predicate_return_candidate(expr, 0, &mut visited)
-            && self.prefers_visible_expr(&best, &predicate)
-        {
-            best = predicate;
-        }
+        if !has_semantic_root {
+            let mut visited = HashSet::new();
+            if let Some(predicate) = self.predicate_return_candidate(expr, 0, &mut visited)
+                && self.prefers_visible_expr(&best, &predicate)
+            {
+                best = predicate;
+            }
 
-        visited.clear();
-        if let Some(resolved) = self.resolve_return_expr_from_defs(expr, 0, &mut visited)
-            && self.prefers_visible_expr(&best, &resolved)
-        {
-            best = resolved;
-        }
+            visited.clear();
+            if let Some(resolved) = self.resolve_return_expr_from_defs(expr, 0, &mut visited)
+                && self.prefers_visible_expr(&best, &resolved)
+            {
+                best = resolved;
+            }
 
-        if let CExpr::Var(name) = expr
-            && let Some(candidate) = self.semanticized_raw_definition_candidate(name)
-            && self.prefers_visible_expr(&best, &candidate)
-        {
-            best = candidate;
-        }
+            if let CExpr::Var(name) = expr
+                && let Some(def) = self.lookup_definition(name)
+                && self.prefers_visible_expr(&best, &def)
+            {
+                best = def;
+            }
 
-        if !has_semantic_root
-            && let CExpr::Var(name) = expr
-            && let Some(def) = self.lookup_definition(name)
-            && self.prefers_visible_expr(&best, &def)
-        {
-            best = def;
-        }
-
-        if !has_semantic_root
-            && let CExpr::Var(name) = expr
-            && let Some(def) = self.best_visible_definition(name)
-            && self.prefers_visible_expr(&best, &def)
-        {
-            best = def;
+            if let CExpr::Var(name) = expr
+                && let Some(def) = self.best_visible_definition(name)
+                && self.prefers_visible_expr(&best, &def)
+            {
+                best = def;
+            }
         }
 
         best
@@ -463,40 +476,47 @@ impl<'a> FoldingContext<'a> {
         let mut visited = HashSet::new();
         let root_name = var.display_name();
         let unresolved = CExpr::Var(self.var_name(var));
-        let mut semantic_visited = HashSet::new();
-        let semantic_root = self
-            .preferred_return_candidate(
-                self.render_semantic_value_by_name(&root_name, 0, &mut semantic_visited),
-                self.lookup_definition(&root_name),
-            )
-            .and_then(|expr| {
-                self.preferred_return_candidate(
-                    Some(expr),
+        let semantic_root = self.semantic_return_candidate_for_name(&root_name);
+        let base_root = if let Some(semantic_root) = semantic_root.clone() {
+            let best = self
+                .preferred_return_candidate(
+                    Some(semantic_root),
                     self.semanticized_raw_definition_candidate(&root_name),
                 )
-            })
-            .and_then(|expr| {
-                self.preferred_return_candidate(
-                    Some(expr),
-                    self.best_visible_definition(&root_name),
+                .unwrap_or_else(|| unresolved.clone());
+            self.preferred_return_candidate(Some(best), Some(unresolved.clone()))
+                .unwrap_or_else(|| unresolved.clone())
+        } else {
+            let best = self
+                .preferred_return_candidate(
+                    self.lookup_definition(&root_name),
+                    self.semanticized_raw_definition_candidate(&root_name),
                 )
-            })
-            .or_else(|| self.lookup_definition(&root_name))
-            .or_else(|| self.best_visible_definition(&root_name))
-            .unwrap_or_else(|| unresolved.clone());
-        let base_root = self
-            .preferred_return_candidate(Some(semantic_root), Some(unresolved.clone()))
-            .unwrap_or_else(|| unresolved.clone());
-        let predicate_root = self.predicate_return_candidate(&unresolved, 0, &mut visited);
-        let root = self
-            .preferred_return_candidate(
+                .and_then(|expr| {
+                    self.preferred_return_candidate(
+                        Some(expr),
+                        self.best_visible_definition(&root_name),
+                    )
+                })
+                .or_else(|| self.lookup_definition(&root_name))
+                .or_else(|| self.best_visible_definition(&root_name))
+                .unwrap_or_else(|| unresolved.clone());
+            self.preferred_return_candidate(Some(best), Some(unresolved.clone()))
+                .unwrap_or_else(|| unresolved.clone())
+        };
+        let root = if semantic_root.is_some() {
+            base_root
+        } else {
+            let predicate_root = self.predicate_return_candidate(&unresolved, 0, &mut visited);
+            self.preferred_return_candidate(
                 self.choose_preferred_visible_expr(
                     self.predicate_candidate_for_var(var),
                     predicate_root,
                 ),
                 Some(base_root),
             )
-            .unwrap_or_else(|| unresolved.clone());
+            .unwrap_or_else(|| unresolved.clone())
+        };
         let root = self.resolve_predicate_rhs_for_var(var, root);
         let raw = self.expand_return_expr(&root, 0, &mut visited);
         let mut semantic_visited = HashSet::new();
@@ -514,40 +534,47 @@ impl<'a> FoldingContext<'a> {
         let mut visited = HashSet::new();
         let root_name = var.display_name();
         let unresolved = CExpr::Var(self.var_name(var));
-        let mut semantic_visited = HashSet::new();
-        let semantic_root = self
-            .preferred_return_candidate(
-                self.render_semantic_value_by_name(&root_name, 0, &mut semantic_visited),
-                self.lookup_definition(&root_name),
-            )
-            .and_then(|expr| {
-                self.preferred_return_candidate(
-                    Some(expr),
+        let semantic_root = self.semantic_return_candidate_for_name(&root_name);
+        let base_root = if let Some(semantic_root) = semantic_root.clone() {
+            let best = self
+                .preferred_return_candidate(
+                    Some(semantic_root),
                     self.semanticized_raw_definition_candidate(&root_name),
                 )
-            })
-            .and_then(|expr| {
-                self.preferred_return_candidate(
-                    Some(expr),
-                    self.best_visible_definition(&root_name),
+                .unwrap_or_else(|| unresolved.clone());
+            self.preferred_return_candidate(Some(best), Some(unresolved.clone()))
+                .unwrap_or_else(|| unresolved.clone())
+        } else {
+            let best = self
+                .preferred_return_candidate(
+                    self.lookup_definition(&root_name),
+                    self.semanticized_raw_definition_candidate(&root_name),
                 )
-            })
-            .or_else(|| self.lookup_definition(&root_name))
-            .or_else(|| self.best_visible_definition(&root_name))
-            .unwrap_or_else(|| unresolved.clone());
-        let base_root = self
-            .preferred_return_candidate(Some(semantic_root), Some(unresolved.clone()))
-            .unwrap_or_else(|| unresolved.clone());
-        let predicate_root = self.predicate_return_candidate(&unresolved, 0, &mut visited);
-        let root = self
-            .preferred_return_candidate(
+                .and_then(|expr| {
+                    self.preferred_return_candidate(
+                        Some(expr),
+                        self.best_visible_definition(&root_name),
+                    )
+                })
+                .or_else(|| self.lookup_definition(&root_name))
+                .or_else(|| self.best_visible_definition(&root_name))
+                .unwrap_or_else(|| unresolved.clone());
+            self.preferred_return_candidate(Some(best), Some(unresolved.clone()))
+                .unwrap_or_else(|| unresolved.clone())
+        };
+        let root = if semantic_root.is_some() {
+            base_root
+        } else {
+            let predicate_root = self.predicate_return_candidate(&unresolved, 0, &mut visited);
+            self.preferred_return_candidate(
                 self.choose_preferred_visible_expr(
                     self.predicate_candidate_for_var(var),
                     predicate_root,
                 ),
                 Some(base_root),
             )
-            .unwrap_or_else(|| unresolved.clone());
+            .unwrap_or_else(|| unresolved.clone())
+        };
         let root = self.resolve_predicate_rhs_for_var(var, root);
         let raw = self.expand_return_expr(&root, 0, &mut visited);
         let mut semantic_visited = HashSet::new();
