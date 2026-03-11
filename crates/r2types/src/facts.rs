@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
+use crate::context::{ExternalRegisterParamSpec, ExternalStackVarSpec};
 use crate::convert::CTypeLike;
 use crate::external::ExternalTypeDb;
 use crate::model::Signedness;
@@ -71,6 +72,8 @@ pub struct FunctionSignatureSpec {
 pub struct FunctionTypeFacts {
     pub merged_signature: Option<FunctionSignatureSpec>,
     pub known_function_signatures: HashMap<String, FunctionType>,
+    pub register_params: Vec<ExternalRegisterParamSpec>,
+    pub external_stack_vars: HashMap<i64, ExternalStackVarSpec>,
     pub external_type_db: ExternalTypeDb,
     pub slot_type_overrides: HashMap<usize, String>,
     pub slot_field_profiles: HashMap<usize, BTreeMap<u64, String>>,
@@ -81,6 +84,8 @@ pub struct FunctionTypeFacts {
 pub struct FunctionTypeFactInputs {
     pub merged_signature: Option<FunctionSignatureSpec>,
     pub known_function_signatures: HashMap<String, FunctionType>,
+    pub register_params: Vec<ExternalRegisterParamSpec>,
+    pub external_stack_vars: HashMap<i64, ExternalStackVarSpec>,
     pub external_type_db: ExternalTypeDb,
     pub slot_type_overrides: HashMap<usize, String>,
     pub slot_field_profiles: HashMap<usize, BTreeMap<u64, String>>,
@@ -97,6 +102,8 @@ impl FunctionTypeFacts {
     pub fn is_empty(&self) -> bool {
         self.merged_signature.is_none()
             && self.known_function_signatures.is_empty()
+            && self.register_params.is_empty()
+            && self.external_stack_vars.is_empty()
             && self.external_type_db.structs.is_empty()
             && self.external_type_db.unions.is_empty()
             && self.external_type_db.enums.is_empty()
@@ -129,6 +136,8 @@ impl FunctionTypeFactsBuilder {
         FunctionTypeFacts {
             merged_signature: self.inputs.merged_signature,
             known_function_signatures: self.inputs.known_function_signatures,
+            register_params: self.inputs.register_params,
+            external_stack_vars: self.inputs.external_stack_vars,
             external_type_db: self.inputs.external_type_db,
             slot_type_overrides: self.inputs.slot_type_overrides,
             slot_field_profiles: self.inputs.slot_field_profiles,

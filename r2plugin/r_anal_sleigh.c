@@ -87,8 +87,7 @@ extern char *r2dec_function(const R2ILContext *ctx, const R2ILBlock **blocks, si
 extern char *r2dec_function_with_context(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
                                           const char *func_name, const char *func_names_json,
                                           const char *strings_json, const char *symbols_json,
-                                          const char *signature_json, const char *stack_vars_json,
-                                          const char *types_json);
+                                          const char *external_context_json);
 
 /* CFG */
 extern char *r2cfg_function_ascii(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks);
@@ -103,9 +102,9 @@ extern char *r2sleigh_get_data_refs(const R2ILContext *ctx, const R2ILBlock **bl
 extern char *r2sleigh_infer_signature_cc_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
 	unsigned long long fcn_addr, const char *fcn_name);
 extern char *r2sleigh_infer_type_writeback_json(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
-	unsigned long long fcn_addr, const char *fcn_name, const char *afcfj_json, const char *afvj_json, const char *tsj_json);
+	unsigned long long fcn_addr, const char *fcn_name, const char *external_context_json);
 extern char *r2sleigh_infer_type_writeback_json_ex(const R2ILContext *ctx, const R2ILBlock **blocks, size_t num_blocks,
-	unsigned long long fcn_addr, const char *fcn_name, const char *afcfj_json, const char *afvj_json, const char *tsj_json,
+	unsigned long long fcn_addr, const char *fcn_name, const char *external_context_json,
 	size_t interproc_iter, size_t interproc_max_iters, int interproc_converged, const char *interproc_scope_json);
 /* Per-architecture context (lazy init)
  *
@@ -267,134 +266,175 @@ static ut64 compute_xref_cache_key(RAnalFunction *fcn, const BlockArray *blocks,
 	return key;
 }
 
-static bool is_top_level_type_entry(const char *name, const char *kind) {
-	return name && *name && kind && *kind
-		&& !strchr (name, '.')
-		&& (!strcmp (kind, "struct") || !strcmp (kind, "union") || !strcmp (kind, "enum"));
+static const char *function_context_var_kind_name(RAnalFunctionContextVarKind kind) {
+	switch (kind) {
+	case R_ANAL_FUNCTION_CONTEXT_VAR_KIND_REGISTER:
+		return "register";
+	case R_ANAL_FUNCTION_CONTEXT_VAR_KIND_STACK_BP:
+	case R_ANAL_FUNCTION_CONTEXT_VAR_KIND_STACK_SP:
+		return "stack";
+	default:
+		return "stack";
+	}
 }
 
-static void append_type_fields_json(PJ *pj, Sdb *tdb, const char *type_name, const char *kind, int ptr_bits) {
-	char *members_query;
-	char *members;
-	int i;
-	int count;
-	bool is_union;
+static const char *base_type_kind_name(RAnalBaseTypeKind kind) {
+	switch (kind) {
+	case R_ANAL_BASE_TYPE_KIND_STRUCT:
+		return "struct";
+	case R_ANAL_BASE_TYPE_KIND_UNION:
+		return "union";
+	case R_ANAL_BASE_TYPE_KIND_ENUM:
+		return "enum";
+	case R_ANAL_BASE_TYPE_KIND_TYPEDEF:
+		return "typedef";
+	case R_ANAL_BASE_TYPE_KIND_ATOMIC:
+		return "atomic";
+	default:
+		return "atomic";
+	}
+}
 
-	if (!pj || !tdb || !type_name || !*type_name || !kind || !*kind) {
+static void append_function_context_base_type(PJ *pj, const RAnalBaseType *type) {
+	if (!pj || !type || R_STR_ISEMPTY (type->name)) {
 		return;
 	}
-
-	members_query = r_str_newf ("%s.%s", kind, type_name);
-	members = members_query? sdb_get (tdb, members_query, 0): NULL;
-	free (members_query);
-	if (!members) {
-		return;
+	pj_o (pj);
+	pj_ks (pj, "kind", base_type_kind_name (type->kind));
+	pj_ks (pj, "name", type->name);
+	if (type->type) {
+		pj_ks (pj, "type", type->type);
 	}
-
-	is_union = !strcmp (kind, "union");
-	pj_k (pj, "fields");
-	pj_a (pj);
-
-	ut32 current_offset = 0;
-	count = r_str_split (members, ',');
-	for (i = 0; i < count; i++) {
-		const char *member_name = r_str_word_get0 (members, i);
-		char *member_query;
-		char *member_details;
-		int details_len;
-		const char *field_type;
-		const char *arr_size_str;
-		ut32 arr_size;
-		ut32 type_size;
-		ut32 field_size;
-
-		if (!member_name || R_STR_ISEMPTY (member_name)) {
-			continue;
-		}
-		member_query = r_str_newf ("%s.%s.%s", kind, type_name, member_name);
-		member_details = member_query? sdb_get (tdb, member_query, 0): NULL;
-		free (member_query);
-		if (!member_details) {
-			continue;
-		}
-		details_len = r_str_split (member_details, ',');
-		if (details_len < 3) {
-			free (member_details);
-			continue;
-		}
-
-		field_type = r_str_word_get0 (member_details, 0);
-		arr_size_str = r_str_word_get0 (member_details, 2);
-		arr_size = arr_size_str? (ut32)r_num_get (NULL, arr_size_str): 0;
-		arr_size = arr_size? arr_size: 1;
-		if (field_type && strchr (field_type, '*')) {
-			type_size = ptr_bits > 0? (ut32)(ptr_bits / 8): 8;
+	if (type->size) {
+		pj_ki (pj, "size_bits", (ut64)type->size);
+	}
+	if (type->kind == R_ANAL_BASE_TYPE_KIND_STRUCT || type->kind == R_ANAL_BASE_TYPE_KIND_UNION) {
+		pj_k (pj, "members");
+		pj_a (pj);
+		if (type->kind == R_ANAL_BASE_TYPE_KIND_STRUCT) {
+			RAnalStructMember *member;
+			R_VEC_FOREACH (&type->struct_data.members, member) {
+				pj_o (pj);
+				pj_ks (pj, "name", member->name);
+				pj_ks (pj, "type", member->type? member->type: "void *");
+				pj_ki (pj, "offset", (ut64)member->offset);
+				if (member->size) {
+					pj_ki (pj, "size_bits", (ut64)member->size);
+				}
+				pj_end (pj);
+			}
 		} else {
-			ut64 type_bits = field_type? r_type_get_bitsize (tdb, field_type): 0;
-			type_size = type_bits > 0? (ut32)(type_bits / 8): 1;
-		}
-		field_size = type_size * arr_size;
-
-		pj_o (pj);
-		pj_ks (pj, "name", member_name);
-		pj_ks (pj, "type", field_type? field_type: "void *");
-		pj_ki (pj, "offset", current_offset);
-		pj_ki (pj, "size", field_size);
-		if (arr_size > 1) {
-			pj_ki (pj, "array_size", arr_size);
+			RAnalUnionMember *member;
+			R_VEC_FOREACH (&type->union_data.members, member) {
+				pj_o (pj);
+				pj_ks (pj, "name", member->name);
+				pj_ks (pj, "type", member->type? member->type: "void *");
+				pj_ki (pj, "offset", (ut64)member->offset);
+				if (member->size) {
+					pj_ki (pj, "size_bits", (ut64)member->size);
+				}
+				pj_end (pj);
+			}
 		}
 		pj_end (pj);
-
-		if (!is_union) {
-			current_offset += field_size;
+	} else if (type->kind == R_ANAL_BASE_TYPE_KIND_ENUM) {
+		pj_k (pj, "variants");
+		pj_a (pj);
+		RAnalEnumCase *cas;
+		R_VEC_FOREACH (&type->enum_data.cases, cas) {
+			pj_o (pj);
+			pj_ks (pj, "name", cas->name);
+			pj_ki (pj, "value", cas->val);
+			pj_end (pj);
 		}
-		free (member_details);
+		pj_end (pj);
 	}
-
 	pj_end (pj);
-	free (members);
 }
 
-static char *sleigh_export_types_json(RAnal *anal) {
-	PJ *pj;
-	Sdb *tdb;
-	SdbList *list;
-	SdbListIter *it;
-	SdbKv *kv;
-	int ptr_bits;
-
-	if (!anal || !anal->sdb_types) {
+static char *sleigh_collect_external_context_json(RAnal *anal, RAnalFunction *fcn) {
+	if (!anal || !fcn) {
 		return strdup ("{}");
 	}
-	tdb = anal->sdb_types;
-	ptr_bits = anal->config? anal->config->bits: 64;
-	pj = pj_new ();
+	RAnalFunctionContext *ctx = r_anal_function_context_collect (anal, fcn);
+	if (!ctx) {
+		return strdup ("{}");
+	}
+
+	PJ *pj = pj_new ();
 	if (!pj) {
+		r_anal_function_context_free (ctx);
 		return strdup ("{}");
 	}
 
 	pj_o (pj);
-	pj_k (pj, "types");
+	pj_k (pj, "signature");
+	pj_o (pj);
+	if (ctx->name) {
+		pj_ks (pj, "name", ctx->name);
+	}
+	if (ctx->ret_type) {
+		pj_ks (pj, "ret", ctx->ret_type);
+	}
+	if (ctx->callconv) {
+		pj_ks (pj, "callconv", ctx->callconv);
+	}
+	if (ctx->noreturn) {
+		pj_kb (pj, "noreturn", true);
+	}
+	pj_k (pj, "params");
 	pj_a (pj);
-	list = sdb_foreach_list (tdb, true);
-	ls_foreach (list, it, kv) {
-		const char *name = sdbkv_key (kv);
-		const char *kind = sdbkv_value (kv);
-		if (!is_top_level_type_entry (name, kind)) {
-			continue;
-		}
+	RListIter *iter;
+	RAnalFunctionContextParam *param;
+	r_list_foreach (ctx->params, iter, param) {
 		pj_o (pj);
-		pj_ks (pj, "name", name);
-		pj_ks (pj, "kind", kind);
-		if (!strcmp (kind, "struct") || !strcmp (kind, "union")) {
-			append_type_fields_json (pj, tdb, name, kind, ptr_bits);
+		if (param->name) {
+			pj_ks (pj, "name", param->name);
+		}
+		if (param->type) {
+			pj_ks (pj, "type", param->type);
 		}
 		pj_end (pj);
 	}
-	ls_free (list);
 	pj_end (pj);
 	pj_end (pj);
-	return pj_drain (pj);
+
+	pj_k (pj, "vars");
+	pj_a (pj);
+	RAnalFunctionContextVar *var;
+	r_list_foreach (ctx->vars, iter, var) {
+		pj_o (pj);
+		pj_ks (pj, "kind", function_context_var_kind_name (var->kind));
+		if (var->name) {
+			pj_ks (pj, "name", var->name);
+		}
+		if (var->type) {
+			pj_ks (pj, "type", var->type);
+		}
+		if (var->reg) {
+			pj_ks (pj, "reg", var->reg);
+		}
+		if (var->base) {
+			pj_ks (pj, "base", var->base);
+		}
+		pj_kb (pj, "is_arg", var->is_arg);
+		pj_ki (pj, "offset", (st64)var->offset);
+		pj_end (pj);
+	}
+	pj_end (pj);
+
+	pj_k (pj, "base_types");
+	pj_a (pj);
+	RAnalBaseType *type;
+	r_list_foreach (ctx->base_types, iter, type) {
+		append_function_context_base_type (pj, type);
+	}
+	pj_end (pj);
+	pj_end (pj);
+
+	char *json = pj_drain (pj);
+	r_anal_function_context_free (ctx);
+	return json? json: strdup ("{}");
 }
 
 static void sym_state_cache_clear(void) {
@@ -3424,9 +3464,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		R2ILContext *ctx = get_context (anal);
 		RAnalFunction *fcn;
 		BlockArray blocks;
-		char *afcfj_json = NULL;
-		char *afvj_json = NULL;
-		char *tsj_json = NULL;
+		char *external_context_json = NULL;
 		char *result = NULL;
 
 		if (!ctx) {
@@ -3444,27 +3482,15 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			return strdup ("");
 		}
 
-		afcfj_json = r_core_cmd_str_at (core, fcn->addr, "afcfj");
-		if (!afcfj_json || afcfj_json[0] != '[') {
-			free (afcfj_json);
-			afcfj_json = strdup ("[]");
-		}
-
-		afvj_json = r_core_cmd_str_at (core, fcn->addr, "afvj");
-		if (!afvj_json || afvj_json[0] != '{') {
-			free (afvj_json);
-			afvj_json = strdup ("{}");
-		}
-
-		tsj_json = sleigh_export_types_json (anal);
-		if (!tsj_json || (tsj_json[0] != '{' && tsj_json[0] != '[')) {
-			free (tsj_json);
-			tsj_json = strdup ("{}");
+		external_context_json = sleigh_collect_external_context_json (anal, fcn);
+		if (!external_context_json || (external_context_json[0] != '{' && external_context_json[0] != '[')) {
+			free (external_context_json);
+			external_context_json = strdup ("{}");
 		}
 
 		result = r2sleigh_infer_type_writeback_json (ctx,
 			(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, fcn->name,
-			afcfj_json, afvj_json, tsj_json);
+			external_context_json);
 		if (cons) {
 			if (result && *result) {
 				r_cons_printf (cons, "%s\n", result);
@@ -3475,9 +3501,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		if (result) {
 			r2il_string_free (result);
 		}
-		free (afcfj_json);
-		free (afvj_json);
-		free (tsj_json);
+		free (external_context_json);
 		block_array_free (&blocks);
 		return strdup ("");
 	}
@@ -3813,9 +3837,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		char *func_names_json = NULL;
 		char *strings_json = NULL;
 		char *symbols_json = NULL;
-		char *signature_json = NULL;
-		char *stack_vars_json = NULL;
-		char *types_json = NULL;
+		char *external_context_json = NULL;
 
 		/* Get function list as JSON and convert to our format */
 		/* aflj returns [{addr:0x401000,name:"main"}, ...] */
@@ -3909,59 +3931,16 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		}
 		free (fj);
 
-		/* Build signature context payload:
-		 * {"current":[...], "known":[...], "cc":{...}}
-		 * Keep single FFI argument for ABI stability.
-		 */
-		char *signature_current_json = r_core_cmd_str (core, "afcfj");
-		if (!signature_current_json || signature_current_json[0] != '[') {
-			free (signature_current_json);
-			signature_current_json = strdup ("[]");
-		}
-
-		char *signature_known_json = r_core_cmd_str (core, "aflj");
-		if (!signature_known_json || signature_known_json[0] != '[') {
-			free (signature_known_json);
-			signature_known_json = strdup ("[]");
-		}
-
-		char *cc_json = r_core_cmd_str (core, "tccj");
-		if (!cc_json || (cc_json[0] != '{' && cc_json[0] != '[')) {
-			free (cc_json);
-			cc_json = strdup ("{}");
-		}
-
-		signature_json = r_str_newf (
-			"{\"current\":%s,\"known\":%s,\"cc\":%s}",
-			signature_current_json,
-			signature_known_json,
-			cc_json
-		);
-		free (signature_current_json);
-		free (signature_known_json);
-		free (cc_json);
-		if (!signature_json) {
-			signature_json = strdup ("{\"current\":[],\"known\":[],\"cc\":{}}");
-		}
-
-			/* Get recovered function variables metadata for current function. */
-			stack_vars_json = r_core_cmd_str (core, "afvj");
-			if (!stack_vars_json || stack_vars_json[0] != '{') {
-				free (stack_vars_json);
-				stack_vars_json = strdup ("{}");
-			}
-
-			/* Get host type DB metadata (structs) in JSON form. */
-			types_json = sleigh_export_types_json (anal);
-			if (!types_json || (types_json[0] != '{' && types_json[0] != '[')) {
-				free (types_json);
-				types_json = strdup ("{}");
+			external_context_json = sleigh_collect_external_context_json (anal, fcn);
+			if (!external_context_json || (external_context_json[0] != '{' && external_context_json[0] != '[')) {
+				free (external_context_json);
+				external_context_json = strdup ("{}");
 			}
 
 			/* Decompile with context */
 			char *result = r2dec_function_with_context (ctx, (const R2ILBlock **)blocks.blocks, blocks.count,
 			                                             fcn->name, func_names_json, strings_json, symbols_json,
-			                                             signature_json, stack_vars_json, types_json);
+			                                             external_context_json);
 
 		if (cons) {
 			if (result && result[0]) {
@@ -3978,9 +3957,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		free (func_names_json);
 		free (strings_json);
 			free (symbols_json);
-			free (signature_json);
-			free (stack_vars_json);
-			free (types_json);
+			free (external_context_json);
 			block_array_free (&blocks);
 			return strdup("");
 		}
@@ -5275,9 +5252,7 @@ static bool apply_global_type_link_candidate(RAnal *anal, RCore *core, ut64 addr
 
 static ut64 compute_type_cache_key(
 	RAnalFunction *fcn,
-	const char *afcfj_json,
-	const char *afvj_json,
-	ut64 tsj_hash,
+	const char *external_context_json,
 	ut64 dep_hash,
 	SleighTypeWritebackMode mode,
 	int min_conf,
@@ -5296,10 +5271,8 @@ static ut64 compute_type_cache_key(
 	key ^= ((ut64)(rename_min_conf & 0xff) << 16);
 	key ^= ((ut64)(struct_min_conf & 0xff) << 24);
 	key ^= ((ut64)(max_iters & 0xffff) << 40);
-	key ^= tsj_hash;
 	key ^= dep_hash;
-	key ^= r_str_hash64 (afcfj_json? afcfj_json: "");
-	key ^= r_str_hash64 (afvj_json? afvj_json: "");
+	key ^= r_str_hash64 (external_context_json? external_context_json: "");
 	return key;
 }
 
@@ -6178,8 +6151,6 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	bool sigwrite_enabled = post_mode != SLEIGH_MODE_FAST;
 	bool type_writeback_enabled = sigwrite_enabled && type_wb_mode != SLEIGH_TYPE_WRITEBACK_OFF;
 	bool sigverify_enabled = false;
-	char *tsj_shared_json = NULL;
-	ut64 tsj_shared_hash = 0;
 	ut64 *type_eligible_addrs = NULL;
 	size_t type_eligible_count = 0;
 	size_t type_eligible_cap = 0;
@@ -6201,15 +6172,6 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		if (focus_fcn) {
 			focus_callee_addr = focus_fcn->addr;
 		}
-		tsj_shared_json = sleigh_export_types_json (anal);
-		if (!tsj_shared_json || (tsj_shared_json[0] != '{' && tsj_shared_json[0] != '[')) {
-			free (tsj_shared_json);
-			tsj_shared_json = strdup ("{}");
-		}
-		if (!tsj_shared_json) {
-			tsj_shared_json = strdup ("{}");
-		}
-		tsj_shared_hash = r_str_hash64 (tsj_shared_json? tsj_shared_json: "");
 	}
 
 	int num_fcns = r_list_length (anal->fcns);
@@ -6217,7 +6179,6 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	bool sigwrite_focus_only = sigwrite_enabled && num_fcns > SLEIGH_SIG_WRITEBACK_GLOBAL_MAX_FCNS;
 	bool type_writeback_focus_only = type_writeback_enabled && num_fcns > SLEIGH_TYPE_WRITEBACK_GLOBAL_MAX_FCNS;
 	if (num_fcns == 0) {
-		free (tsj_shared_json);
 		struct_decl_memo_clear ();
 		return true;
 	}
@@ -6577,8 +6538,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 		} else {
 			char *payload_json = NULL;
 			RJson *payload_root = NULL;
-			char *afcfj_json = NULL;
-			char *afvj_json = NULL;
+			char *external_context_json = NULL;
 			const RJson *j_signature;
 			const RJson *j_callconv;
 			const RJson *j_confidence;
@@ -6606,28 +6566,22 @@ static bool sleigh_post_analysis(RAnal *anal) {
 				sig_fcns_skipped_arch++;
 			}
 
-			afcfj_json = r_core_cmd_str_at (core, fcn->addr, "afcfj");
-			if (!afcfj_json || afcfj_json[0] != '[') {
-				free (afcfj_json);
-				afcfj_json = strdup ("[]");
-			}
-			afvj_json = r_core_cmd_str_at (core, fcn->addr, "afvj");
-			if (!afvj_json || afvj_json[0] != '{') {
-				free (afvj_json);
-				afvj_json = strdup ("{}");
+			external_context_json = sleigh_collect_external_context_json (anal, fcn);
+			if (!external_context_json || (external_context_json[0] != '{' && external_context_json[0] != '[')) {
+				free (external_context_json);
+				external_context_json = strdup ("{}");
 			}
 
 			if (type_cache_enabled && type_writeback_enabled) {
 				TypeWritebackCacheEntry *cache_entry;
 				dep_hash = compute_callee_dependency_hash (anal, fcn);
-				cache_key = compute_type_cache_key (fcn, afcfj_json, afvj_json,
-					tsj_shared_hash, dep_hash, type_wb_mode, type_min_conf,
+				cache_key = compute_type_cache_key (fcn, external_context_json,
+					dep_hash, type_wb_mode, type_min_conf,
 					type_rename_min_conf, type_struct_min_conf, type_max_iters);
 				cache_entry = type_writeback_cache_get (fcn->addr);
 				if (cache_entry && cache_entry->key == cache_key) {
 					type_wb.cache_hits++;
-					free (afcfj_json);
-					free (afvj_json);
+					free (external_context_json);
 					block_array_free (&blocks);
 					continue;
 				}
@@ -6639,9 +6593,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 
 			payload_json = r2sleigh_infer_type_writeback_json_ex (ctx,
 				(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, fcn->name,
-				afcfj_json? afcfj_json: "[]",
-				afvj_json? afvj_json: "{}",
-				tsj_shared_json? tsj_shared_json: "{}",
+				external_context_json? external_context_json: "{}",
 				1, type_max_iters, 1, "{}");
 			if (!payload_json || !*payload_json) {
 				if (sig_metrics_eligible) {
@@ -6790,8 +6742,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					r2il_string_free (payload_json);
 				}
 			}
-			free (afcfj_json);
-			free (afvj_json);
+			free (external_context_json);
 		}
 
 		block_array_free (&blocks);
@@ -6885,8 +6836,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 				RAnalFunction *fcn = r_anal_get_fcn_in (anal, faddr, 0);
 				int bb_count;
 				BlockArray blocks;
-				char *afcfj_json = NULL;
-				char *afvj_json = NULL;
+				char *external_context_json = NULL;
 				char *payload_json = NULL;
 				RJson *payload_root = NULL;
 				bool type_changed = false;
@@ -6907,28 +6857,22 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					continue;
 				}
 
-				afcfj_json = r_core_cmd_str_at (core, fcn->addr, "afcfj");
-				if (!afcfj_json || afcfj_json[0] != '[') {
-					free (afcfj_json);
-					afcfj_json = strdup ("[]");
-				}
-				afvj_json = r_core_cmd_str_at (core, fcn->addr, "afvj");
-				if (!afvj_json || afvj_json[0] != '{') {
-					free (afvj_json);
-					afvj_json = strdup ("{}");
+				external_context_json = sleigh_collect_external_context_json (anal, fcn);
+				if (!external_context_json || (external_context_json[0] != '{' && external_context_json[0] != '[')) {
+					free (external_context_json);
+					external_context_json = strdup ("{}");
 				}
 
 				if (type_cache_enabled) {
 					TypeWritebackCacheEntry *cache_entry;
 					dep_hash = compute_callee_dependency_hash (anal, fcn);
-					cache_key = compute_type_cache_key (fcn, afcfj_json, afvj_json,
-						tsj_shared_hash, dep_hash, type_wb_mode, type_min_conf,
+					cache_key = compute_type_cache_key (fcn, external_context_json,
+						dep_hash, type_wb_mode, type_min_conf,
 						type_rename_min_conf, type_struct_min_conf, type_max_iters);
 					cache_entry = type_writeback_cache_get (fcn->addr);
 					if (cache_entry && cache_entry->key == cache_key) {
 						type_wb.cache_hits++;
-						free (afcfj_json);
-						free (afvj_json);
+						free (external_context_json);
 						block_array_free (&blocks);
 						continue;
 					}
@@ -6940,16 +6884,13 @@ static bool sleigh_post_analysis(RAnal *anal) {
 
 				payload_json = r2sleigh_infer_type_writeback_json_ex (ctx,
 					(const R2ILBlock **)blocks.blocks, blocks.count, fcn->addr, fcn->name,
-					afcfj_json? afcfj_json: "[]",
-					afvj_json? afvj_json: "{}",
-					tsj_shared_json? tsj_shared_json: "{}",
+					external_context_json? external_context_json: "{}",
 					(size_t)iter_idx, (size_t)type_max_iters, 0,
 					"{\"phase\":\"fixpoint\"}");
 				if (!payload_json || !*payload_json) {
 					type_wb.payload_missing++;
 					r2il_string_free (payload_json);
-					free (afcfj_json);
-					free (afvj_json);
+					free (external_context_json);
 					block_array_free (&blocks);
 					continue;
 				}
@@ -6959,8 +6900,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 					type_wb.payload_parse_failures++;
 					r_json_free (payload_root);
 					r2il_string_free (payload_json);
-					free (afcfj_json);
-					free (afvj_json);
+					free (external_context_json);
 					block_array_free (&blocks);
 					continue;
 				}
@@ -7014,8 +6954,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 				}
 				r_json_free (payload_root);
 				r2il_string_free (payload_json);
-				free (afcfj_json);
-				free (afvj_json);
+				free (external_context_json);
 				block_array_free (&blocks);
 			}
 			free (current);
@@ -7097,7 +7036,6 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	caller_propagation_state_fini (&prop_state);
 	free (type_eligible_addrs);
 	free (changed_type_fcns);
-	free (tsj_shared_json);
 	struct_decl_memo_clear ();
 	if (best_sink_label) {
 		R_LOG_INFO ("r2sleigh: post-analysis most interesting sink 0x%"PFMT64x" label=%s",

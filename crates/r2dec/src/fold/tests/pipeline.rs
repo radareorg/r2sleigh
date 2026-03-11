@@ -4,17 +4,37 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use crate::{
-        ExternalStackVar,
         FoldArchConfig,
         FoldInputs,
         analysis::{PassEnv, StackInfo, UseInfo},
-        types::FunctionType,
     };
     use r2il::{R2ILBlock, R2ILOp, Varnode};
     use r2types::{
-        ExternalField, ExternalStruct, ExternalTypeDb, Signedness, SolvedTypes, SolverDiagnostics,
-        StructShape, TypeArena, TypeId, TypeOracle,
+        ExternalField, ExternalStackVarSpec, ExternalStruct, ExternalTypeDb, FunctionParamSpec,
+        FunctionSignatureSpec, FunctionTypeFacts, Signedness, SolvedTypes,
+        SolverDiagnostics, StructShape, TypeArena, TypeId, TypeOracle,
     };
+
+    #[derive(Debug, Clone)]
+    struct FunctionType {
+        return_type: CType,
+        params: Vec<CType>,
+        variadic: bool,
+    }
+
+    impl From<FunctionType> for r2types::FunctionType {
+        fn from(value: FunctionType) -> Self {
+            Self {
+                return_type: crate::ctype_to_type_like(&value.return_type),
+                params: value
+                    .params
+                    .iter()
+                    .map(crate::ctype_to_type_like)
+                    .collect(),
+                variadic: value.variadic,
+            }
+        }
+    }
 
     fn make_var(name: &str, version: u32, size: u32) -> SSAVar {
         SSAVar::new(name, version, size)
@@ -31,6 +51,27 @@ mod tests {
 
     fn call_arg(expr: CExpr) -> crate::analysis::SemanticCallArg {
         crate::analysis::SemanticCallArg::from(expr)
+    }
+
+    fn stack_var_spec(name: &str, ty: Option<CType>, base: Option<&str>) -> ExternalStackVarSpec {
+        ExternalStackVarSpec {
+            name: name.to_string(),
+            ty: ty.as_ref().map(crate::ctype_to_type_like),
+            base: base.map(str::to_string),
+        }
+    }
+
+    fn signature_spec(ret: Option<CType>, params: Vec<(&str, Option<CType>)>) -> FunctionSignatureSpec {
+        FunctionSignatureSpec {
+            ret_type: ret.as_ref().map(crate::ctype_to_type_like),
+            params: params
+                .into_iter()
+                .map(|(name, ty)| FunctionParamSpec {
+                    name: name.to_string(),
+                    ty: ty.as_ref().map(crate::ctype_to_type_like),
+                })
+                .collect(),
+        }
     }
 
     fn make_oracle_for_member(base: SSAVar, offset: u64, field_name: &str) -> SolvedTypes {
@@ -2556,11 +2597,7 @@ mod tests {
         let mut external = HashMap::new();
         external.insert(
             -64,
-            ExternalStackVar {
-                name: "buf".to_string(),
-                ty: Some(CType::Array(Box::new(CType::Int(8)), Some(64))),
-                base: Some("RBP".to_string()),
-            },
+            stack_var_spec("buf", Some(CType::Array(Box::new(CType::Int(8)), Some(64))), Some("RBP")),
         );
         ctx.set_external_stack_vars(external);
         ctx.analyze_blocks(&[]);
@@ -2580,11 +2617,7 @@ mod tests {
         let mut external = HashMap::new();
         external.insert(
             -64,
-            ExternalStackVar {
-                name: "buf".to_string(),
-                ty: None,
-                base: Some("RBP".to_string()),
-            },
+            stack_var_spec("buf", None, Some("RBP")),
         );
         ctx.set_external_stack_vars(external);
         ctx.analyze_blocks(&[]);
@@ -2603,11 +2636,7 @@ mod tests {
         let mut external = HashMap::new();
         external.insert(
             -72,
-            ExternalStackVar {
-                name: "user_input".to_string(),
-                ty: Some(CType::ptr(CType::Int(8))),
-                base: Some("RBP".to_string()),
-            },
+            stack_var_spec("user_input", Some(CType::ptr(CType::Int(8))), Some("RBP")),
         );
         ctx.set_external_stack_vars(external);
         ctx.analyze_blocks(&[]);
@@ -2633,11 +2662,7 @@ mod tests {
         let mut external = HashMap::new();
         external.insert(
             -64,
-            ExternalStackVar {
-                name: "buf".to_string(),
-                ty: None,
-                base: Some("RBP".to_string()),
-            },
+            stack_var_spec("buf", None, Some("RBP")),
         );
         ctx.set_external_stack_vars(external);
         ctx.analyze_blocks(&[]);
@@ -2660,11 +2685,7 @@ mod tests {
             .insert(4, "local_4".to_string());
         ctx.set_external_stack_vars(HashMap::from([(
             -4,
-            ExternalStackVar {
-                name: "result".to_string(),
-                ty: None,
-                base: Some("RBP".to_string()),
-            },
+            stack_var_spec("result", None, Some("RBP")),
         )]));
 
         assert_eq!(ctx.resolve_stack_var(4), Some("result".to_string()));
@@ -2680,11 +2701,7 @@ mod tests {
             .insert(0, "stack_0".to_string());
         ctx.set_external_stack_vars(HashMap::from([(
             0,
-            ExternalStackVar {
-                name: "saved_rbp".to_string(),
-                ty: None,
-                base: Some("RBP".to_string()),
-            },
+            stack_var_spec("saved_rbp", None, Some("RBP")),
         )]));
 
         assert_eq!(ctx.resolve_stack_var(0), Some("saved_rbp".to_string()));
@@ -2700,11 +2717,7 @@ mod tests {
             .insert("tmp:1_1".to_string(), "local_4".to_string());
         ctx.set_external_stack_vars(HashMap::from([(
             -4,
-            ExternalStackVar {
-                name: "result".to_string(),
-                ty: None,
-                base: Some("RBP".to_string()),
-            },
+            stack_var_spec("result", None, Some("RBP")),
         )]));
 
         let rendered = ctx.var_name(&make_var("tmp:1", 1, 8));
@@ -6260,31 +6273,23 @@ mod tests {
         ];
 
         let mut decompiler = crate::Decompiler::new(crate::DecompilerConfig::aarch64());
-        decompiler.set_function_signature(Some(crate::ExternalFunctionSignature {
-            ret_type: Some(crate::CType::Int(64)),
-            params: vec![crate::ExternalFunctionParam {
-                name: "arg1".to_string(),
-                ty: Some(crate::CType::UInt(64)),
-            }],
-        }));
-        decompiler.set_stack_vars(HashMap::from([
-            (
-                8,
-                ExternalStackVar {
-                    name: "var_8h".to_string(),
-                    ty: Some(crate::CType::Int(64)),
-                    base: Some("sp".to_string()),
-                },
-            ),
-            (
-                12,
-                ExternalStackVar {
-                    name: "var_ch".to_string(),
-                    ty: Some(crate::CType::Int(32)),
-                    base: Some("sp".to_string()),
-                },
-            ),
-        ]));
+        decompiler.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(
+                Some(crate::CType::Int(64)),
+                vec![("arg1", Some(crate::CType::UInt(64)))],
+            )),
+            external_stack_vars: HashMap::from([
+                (
+                    8,
+                    stack_var_spec("var_8h", Some(crate::CType::Int(64)), Some("sp")),
+                ),
+                (
+                    12,
+                    stack_var_spec("var_ch", Some(crate::CType::Int(32)), Some("sp")),
+                ),
+            ]),
+            ..FunctionTypeFacts::default()
+        });
         let output = decompiler.decompile(&func);
         assert!(
             output.contains("return 0;") && output.contains("return 1;"),
@@ -7549,21 +7554,17 @@ mod tests {
         }];
 
         let mut decompiler = crate::Decompiler::new(crate::DecompilerConfig::aarch64());
-        decompiler.set_function_signature(Some(crate::ExternalFunctionSignature {
-            ret_type: Some(crate::CType::Int(64)),
-            params: vec![crate::ExternalFunctionParam {
-                name: "arg1".to_string(),
-                ty: Some(crate::CType::UInt(64)),
-            }],
-        }));
-        decompiler.set_stack_vars(HashMap::from([(
-            12,
-            ExternalStackVar {
-                name: "var_ch".to_string(),
-                ty: Some(crate::CType::Int(32)),
-                base: Some("sp".to_string()),
-            },
-        )]));
+        decompiler.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(
+                Some(crate::CType::Int(64)),
+                vec![("arg1", Some(crate::CType::UInt(64)))],
+            )),
+            external_stack_vars: HashMap::from([(
+                12,
+                stack_var_spec("var_ch", Some(crate::CType::Int(32)), Some("sp")),
+            )]),
+            ..FunctionTypeFacts::default()
+        });
 
         let output = decompiler.decompile(&func);
         assert!(

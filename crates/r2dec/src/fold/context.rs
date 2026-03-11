@@ -2,12 +2,10 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use r2ssa::{FunctionSSABlock, SSAVar};
-use r2types::{ExternalTypeDb, FunctionType, SignatureRegistry, TypeOracle};
-
-use crate::ExternalStackVar;
 use crate::analysis;
 use crate::ast::CType;
+use r2ssa::{FunctionSSABlock, SSAVar};
+use r2types::{ExternalStackVarSpec, ExternalTypeDb, FunctionType, SignatureRegistry, TypeOracle};
 
 pub(crate) type SSABlock = FunctionSSABlock;
 
@@ -36,7 +34,7 @@ pub(crate) struct FoldInputs<'a> {
     pub(crate) strings: &'a HashMap<u64, String>,
     pub(crate) symbols: &'a HashMap<u64, String>,
     pub(crate) known_function_signatures: &'a HashMap<String, FunctionType>,
-    pub(crate) external_stack_vars: &'a HashMap<i64, ExternalStackVar>,
+    pub(crate) external_stack_vars: &'a HashMap<i64, ExternalStackVarSpec>,
     pub(crate) external_type_db: &'a ExternalTypeDb,
     pub(crate) param_register_aliases: &'a HashMap<String, String>,
     pub(crate) type_hints: &'a HashMap<String, CType>,
@@ -129,7 +127,7 @@ impl<'a> FoldingContext<'a> {
     /// Test convenience constructor.
     pub fn new(ptr_size: u32) -> Self {
         static EMPTY_U64_STRING: OnceLock<HashMap<u64, String>> = OnceLock::new();
-        static EMPTY_I64_STACK: OnceLock<HashMap<i64, ExternalStackVar>> = OnceLock::new();
+        static EMPTY_I64_STACK: OnceLock<HashMap<i64, ExternalStackVarSpec>> = OnceLock::new();
         static EMPTY_TYPE_DB: OnceLock<ExternalTypeDb> = OnceLock::new();
         static EMPTY_STRING_STRING: OnceLock<HashMap<String, String>> = OnceLock::new();
         static EMPTY_STRING_FNTY: OnceLock<HashMap<String, FunctionType>> = OnceLock::new();

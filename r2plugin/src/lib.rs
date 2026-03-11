@@ -1882,7 +1882,9 @@ fn resolve_stack_addr_inner(
     }
 }
 
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Get registers written by the block as JSON array of names.
 /// Caller must free the returned string with r2il_string_free().
@@ -2406,6 +2408,7 @@ pub extern "C" fn r2dec_function(
     CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AfcfjArg {
     #[serde(default)]
@@ -2414,6 +2417,7 @@ struct AfcfjArg {
     ty: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AfcfjFunction {
     #[serde(default, rename = "return")]
@@ -2424,6 +2428,7 @@ struct AfcfjFunction {
     args: Vec<AfcfjArg>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 #[allow(dead_code)]
@@ -2433,6 +2438,7 @@ enum AfvjRef {
     Other(serde_json::Value),
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AfvjVar {
     #[serde(default)]
@@ -2443,6 +2449,7 @@ struct AfvjVar {
     reference: Option<AfvjRef>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AfvjPayload {
     #[serde(default)]
@@ -2453,7 +2460,11 @@ struct AfvjPayload {
     sp: Vec<AfvjVar>,
 }
 
-fn parse_external_reg_params(json_str: &str, ptr_bits: u32) -> Vec<r2dec::ExternalRegisterParam> {
+#[cfg(test)]
+fn parse_external_reg_params(
+    json_str: &str,
+    ptr_bits: u32,
+) -> Vec<r2types::ExternalRegisterParamSpec> {
     let payload = match serde_json::from_str::<AfvjPayload>(json_str) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
@@ -2471,12 +2482,14 @@ fn parse_external_reg_params(json_str: &str, ptr_bits: u32) -> Vec<r2dec::Extern
             if !is_generic_arg_name(&name) {
                 name = uniquify_name(name, &mut used_names);
             }
-            r2dec::ExternalRegisterParam {
+            r2types::ExternalRegisterParamSpec {
                 name,
                 ty: entry
                     .ty
                     .as_deref()
-                    .and_then(|raw| parse_external_type(raw, ptr_bits)),
+                    .and_then(|raw| parse_external_type(raw, ptr_bits))
+                    .as_ref()
+                    .map(ctype_to_type_like),
                 reg: entry
                     .reference
                     .and_then(|r| match r {
@@ -2489,10 +2502,11 @@ fn parse_external_reg_params(json_str: &str, ptr_bits: u32) -> Vec<r2dec::Extern
         .collect()
 }
 
+#[cfg(test)]
 fn merge_signature_with_reg_params(
-    signature: Option<r2dec::ExternalFunctionSignature>,
-    reg_params: Vec<r2dec::ExternalRegisterParam>,
-) -> Option<r2dec::ExternalFunctionSignature> {
+    signature: Option<r2types::FunctionSignatureSpec>,
+    reg_params: Vec<r2types::ExternalRegisterParamSpec>,
+) -> Option<r2types::FunctionSignatureSpec> {
     if reg_params.is_empty() {
         return signature;
     }
@@ -2501,7 +2515,7 @@ fn merge_signature_with_reg_params(
     if sig.params.is_empty() {
         sig.params = reg_params
             .into_iter()
-            .map(|param| r2dec::ExternalFunctionParam {
+            .map(|param| r2types::FunctionParamSpec {
                 name: param.name,
                 ty: param.ty,
             })
@@ -2518,7 +2532,7 @@ fn merge_signature_with_reg_params(
                 existing.name = reg_param.name;
             }
         } else {
-            sig.params.push(r2dec::ExternalFunctionParam {
+            sig.params.push(r2types::FunctionParamSpec {
                 name: reg_param.name,
                 ty: reg_param.ty,
             });
@@ -2609,24 +2623,27 @@ fn parse_external_type(raw_ty: &str, ptr_bits: u32) -> Option<r2dec::CType> {
     Some(type_like_to_ctype(&parsed))
 }
 
+#[cfg(test)]
 fn parse_external_signature(
     json_str: &str,
     ptr_bits: u32,
-) -> Option<r2dec::ExternalFunctionSignature> {
+) -> Option<r2types::FunctionSignatureSpec> {
     let entries = serde_json::from_str::<Vec<AfcfjFunction>>(json_str).ok()?;
     parse_afcfj_signature_entries(entries, ptr_bits)
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct ParsedSignatureContext {
-    current: Option<r2dec::ExternalFunctionSignature>,
+    current: Option<r2types::FunctionSignatureSpec>,
     known: std::collections::HashMap<String, r2types::FunctionType>,
 }
 
+#[cfg(test)]
 fn parse_afcfj_signature_entries(
     entries: Vec<AfcfjFunction>,
     ptr_bits: u32,
-) -> Option<r2dec::ExternalFunctionSignature> {
+) -> Option<r2types::FunctionSignatureSpec> {
     let first = entries.into_iter().next()?;
 
     let mut used_names = std::collections::HashSet::new();
@@ -2642,17 +2659,19 @@ fn parse_afcfj_signature_entries(
             if !is_generic_arg_name(&name) {
                 name = uniquify_name(name, &mut used_names);
             }
-            r2dec::ExternalFunctionParam {
+            r2types::FunctionParamSpec {
                 name,
                 ty: arg
                     .ty
                     .as_deref()
-                    .and_then(|raw| parse_external_type(raw, ptr_bits)),
+                    .and_then(|raw| parse_external_type(raw, ptr_bits))
+                    .as_ref()
+                    .map(ctype_to_type_like),
             }
         })
         .collect();
     if params.len() == 1
-        && params[0].ty == Some(r2dec::CType::Void)
+        && params[0].ty == Some(r2types::CTypeLike::Void)
         && is_generic_arg_name(&params[0].name)
     {
         params.clear();
@@ -2661,15 +2680,18 @@ fn parse_afcfj_signature_entries(
     let ret_type_raw = first.return_type.or(first.ret);
     let ret_type = ret_type_raw
         .as_deref()
-        .and_then(|raw| parse_external_type(raw, ptr_bits));
+        .and_then(|raw| parse_external_type(raw, ptr_bits))
+        .as_ref()
+        .map(ctype_to_type_like);
 
-    Some(r2dec::ExternalFunctionSignature { ret_type, params })
+    Some(r2types::FunctionSignatureSpec { ret_type, params })
 }
 
+#[cfg(test)]
 fn parse_afcfj_signature_value(
     value: &serde_json::Value,
     ptr_bits: u32,
-) -> Option<r2dec::ExternalFunctionSignature> {
+) -> Option<r2types::FunctionSignatureSpec> {
     if value.is_array() {
         let entries = serde_json::from_value::<Vec<AfcfjFunction>>(value.clone()).ok()?;
         return parse_afcfj_signature_entries(entries, ptr_bits);
@@ -2681,6 +2703,7 @@ fn parse_afcfj_signature_value(
     None
 }
 
+#[cfg(test)]
 fn maybe_insert_known_signature(
     known: &mut std::collections::HashMap<String, r2types::FunctionType>,
     name: &str,
@@ -2700,6 +2723,7 @@ fn maybe_insert_known_signature(
     }
 }
 
+#[cfg(test)]
 fn parse_known_function_signatures(
     value: &serde_json::Value,
     ptr_bits: u32,
@@ -2774,6 +2798,7 @@ fn parse_known_function_signatures(
     out
 }
 
+#[cfg(test)]
 fn parse_signature_context(json_str: &str, ptr_bits: u32) -> ParsedSignatureContext {
     let mut parsed = ParsedSignatureContext::default();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
@@ -2800,10 +2825,11 @@ fn parse_signature_context(json_str: &str, ptr_bits: u32) -> ParsedSignatureCont
     parsed
 }
 
+#[cfg(test)]
 fn parse_external_stack_vars(
     json_str: &str,
     ptr_bits: u32,
-) -> std::collections::HashMap<i64, r2dec::ExternalStackVar> {
+) -> std::collections::HashMap<i64, r2types::ExternalStackVarSpec> {
     let payload = match serde_json::from_str::<AfvjPayload>(json_str) {
         Ok(v) => v,
         Err(_) => return std::collections::HashMap::new(),
@@ -2824,12 +2850,14 @@ fn parse_external_stack_vars(
             continue;
         };
         let var_name = uniquify_name(clean_name, &mut used_names);
-        let candidate = r2dec::ExternalStackVar {
+        let candidate = r2types::ExternalStackVarSpec {
             name: var_name,
             ty: entry
                 .ty
                 .as_deref()
-                .and_then(|raw| parse_external_type(raw, ptr_bits)),
+                .and_then(|raw| parse_external_type(raw, ptr_bits))
+                .as_ref()
+                .map(ctype_to_type_like),
             base: Some(base),
         };
 
@@ -2861,9 +2889,7 @@ pub extern "C" fn r2dec_function_with_context(
     func_names_json: *const c_char,
     strings_json: *const c_char,
     symbols_json: *const c_char,
-    signature_json: *const c_char,
-    stack_vars_json: *const c_char,
-    types_json: *const c_char,
+    external_context_json: *const c_char,
 ) -> *mut c_char {
     let Some(ctx_view) = context::require_ctx_view(ctx) else {
         return ptr::null_mut();
@@ -2885,9 +2911,7 @@ pub extern "C" fn r2dec_function_with_context(
     let func_names_str = helpers::cstr_or_default(func_names_json, "{}");
     let strings_str = helpers::cstr_or_default(strings_json, "{}");
     let symbols_str = helpers::cstr_or_default(symbols_json, "{}");
-    let signature_str = helpers::cstr_or_default(signature_json, "[]");
-    let stack_vars_str = helpers::cstr_or_default(stack_vars_json, "{}");
-    let types_str = helpers::cstr_or_default(types_json, "{}");
+    let external_context_str = helpers::cstr_or_default(external_context_json, "{}");
     let semantic_metadata_enabled = ctx_view.semantic_metadata_enabled;
     let reg_type_hints = if semantic_metadata_enabled {
         types::collect_register_type_hints(block_slice.as_slice(), ctx_view.disasm)
@@ -2909,9 +2933,7 @@ pub extern "C" fn r2dec_function_with_context(
         func_names_str,
         strings_str,
         symbols_str,
-        signature_str,
-        stack_vars_str,
-        types_str,
+        external_context_str,
     );
 
     CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
@@ -3382,6 +3404,35 @@ fn type_like_to_ctype(ty: &r2types::CTypeLike) -> r2dec::CType {
     }
 }
 
+#[cfg(test)]
+fn ctype_to_type_like(ty: &r2dec::CType) -> r2types::CTypeLike {
+    match ty {
+        r2dec::CType::Void => r2types::CTypeLike::Void,
+        r2dec::CType::Bool => r2types::CTypeLike::Bool,
+        r2dec::CType::Int(bits) => r2types::CTypeLike::Int {
+            bits: *bits,
+            signedness: r2types::Signedness::Signed,
+        },
+        r2dec::CType::UInt(bits) => r2types::CTypeLike::Int {
+            bits: *bits,
+            signedness: r2types::Signedness::Unsigned,
+        },
+        r2dec::CType::Float(bits) => r2types::CTypeLike::Float(*bits),
+        r2dec::CType::Pointer(inner) => {
+            r2types::CTypeLike::Pointer(Box::new(ctype_to_type_like(inner)))
+        }
+        r2dec::CType::Array(inner, len) => {
+            r2types::CTypeLike::Array(Box::new(ctype_to_type_like(inner)), *len)
+        }
+        r2dec::CType::Struct(name) => r2types::CTypeLike::Struct(name.clone()),
+        r2dec::CType::Union(name) => r2types::CTypeLike::Union(name.clone()),
+        r2dec::CType::Enum(name) => r2types::CTypeLike::Enum(name.clone()),
+        r2dec::CType::Function { .. } | r2dec::CType::Typedef(_) | r2dec::CType::Unknown => {
+            r2types::CTypeLike::Unknown
+        }
+    }
+}
+
 fn infer_signature_return_type(
     func: &r2ssa::SSAFunction,
     type_inference: &r2types::TypeInference,
@@ -3626,13 +3677,55 @@ fn compute_callconv_inference(
     }
 }
 
-fn explicit_signature_context_strength(sig: &r2dec::ExternalFunctionSignature) -> u8 {
+#[cfg(test)]
+fn explicit_signature_context_strength(sig: &r2types::FunctionSignatureSpec) -> u8 {
     let typed_params = sig
         .params
         .iter()
-        .filter(|param| param.ty.as_ref().is_some_and(is_informative_type))
+        .filter(|param| {
+            param
+                .ty
+                .as_ref()
+                .map(|ty| type_like_to_ctype(ty))
+                .as_ref()
+                .is_some_and(is_informative_type)
+        })
         .count() as u8;
-    let has_ret = sig.ret_type.as_ref().is_some_and(is_informative_type);
+    let has_ret = sig
+        .ret_type
+        .as_ref()
+        .map(type_like_to_ctype)
+        .as_ref()
+        .is_some_and(is_informative_type);
+    let mut confidence = 76u8.saturating_add(typed_params.saturating_mul(4)).min(96);
+    if has_ret {
+        confidence = confidence.saturating_add(6).min(96);
+    }
+    confidence
+}
+
+fn explicit_signature_context_strength_from_spec(
+    sig: &r2types::FunctionSignatureSpec,
+    ptr_bits: u32,
+) -> u8 {
+    let typed_params = sig
+        .params
+        .iter()
+        .filter(|param| {
+            param
+                .ty
+                .as_ref()
+                .map(|ty| materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits))
+                .as_ref()
+                .is_some_and(is_informative_type)
+        })
+        .count() as u8;
+    let has_ret = sig
+        .ret_type
+        .as_ref()
+        .map(|ty| materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits))
+        .as_ref()
+        .is_some_and(is_informative_type);
     let mut confidence = 76u8.saturating_add(typed_params.saturating_mul(4)).min(96);
     if has_ret {
         confidence = confidence.saturating_add(6).min(96);
@@ -3796,6 +3889,7 @@ fn build_struct_decl(
     Some(lines.join("\n"))
 }
 
+#[cfg(test)]
 fn parse_existing_var_types(json_str: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
@@ -3827,6 +3921,21 @@ fn parse_existing_var_types(json_str: &str) -> std::collections::HashMap<String,
         }
     }
     out
+}
+
+fn parse_existing_var_types_from_specs(
+    stack_vars: &std::collections::HashMap<i64, r2types::ExternalStackVarSpec>,
+) -> std::collections::HashMap<String, String> {
+    stack_vars
+        .values()
+        .filter_map(|var| {
+            let ty = var
+                .ty
+                .as_ref()
+                .map(|ty| normalize_external_type_name(&type_like_to_ctype(ty).to_string()))?;
+            Some((var.name.clone(), ty))
+        })
+        .collect()
 }
 
 fn collect_pointer_arg_slot_map(
@@ -4479,50 +4588,6 @@ fn infer_structs_from_ssa(
     build_struct_inference_artifacts_from_field_evidence(slot_field_evidence, ptr_bits, diagnostics)
 }
 
-fn collect_external_struct_candidates(
-    tsj_json: &str,
-    ptr_bits: u32,
-) -> (Vec<StructDeclCandidateJson>, Vec<String>) {
-    let db = r2types::ExternalTypeDb::from_tsj_json(tsj_json);
-    let mut keys: Vec<String> = db.structs.keys().cloned().collect();
-    keys.sort();
-
-    let mut out = Vec::new();
-    for key in keys {
-        let Some(st) = db.structs.get(&key) else {
-            continue;
-        };
-        if is_opaque_placeholder_type_name(&st.name) {
-            continue;
-        }
-        if st.fields.is_empty() {
-            continue;
-        }
-        let mut fields = Vec::new();
-        for (offset, field) in &st.fields {
-            let raw_ty = field.ty.clone().unwrap_or_else(|| "uint8_t".to_string());
-            fields.push(StructFieldCandidateJson {
-                name: field.name.clone(),
-                offset: *offset,
-                field_type: normalize_external_type_name(&raw_ty),
-                confidence: 95,
-            });
-        }
-        let Some(decl) = build_struct_decl(&st.name, &fields, ptr_bits) else {
-            continue;
-        };
-        out.push(StructDeclCandidateJson {
-            name: st.name.clone(),
-            decl,
-            confidence: 95,
-            source: "external_type_db".to_string(),
-            fields,
-        });
-    }
-    (out, db.diagnostics)
-}
-
-#[cfg(test)]
 fn collect_external_struct_candidates_from_db(
     db: &r2types::ExternalTypeDb,
     ptr_bits: u32,
@@ -4562,22 +4627,25 @@ fn collect_external_struct_candidates_from_db(
     out
 }
 
-fn is_generic_signature_type(ty: Option<&r2dec::CType>) -> bool {
+fn is_generic_signature_type(ty: Option<&r2types::CTypeLike>) -> bool {
     match ty {
         None => true,
-        Some(r2dec::CType::Unknown | r2dec::CType::Void) => true,
-        Some(r2dec::CType::Pointer(inner)) => {
-            matches!(inner.as_ref(), r2dec::CType::Unknown | r2dec::CType::Void)
+        Some(r2types::CTypeLike::Unknown | r2types::CTypeLike::Void) => true,
+        Some(r2types::CTypeLike::Pointer(inner)) => {
+            matches!(
+                inner.as_ref(),
+                r2types::CTypeLike::Unknown | r2types::CTypeLike::Void
+            )
         }
         _ => false,
     }
 }
 
 fn merge_slot_type_overrides_into_signature(
-    mut signature: Option<r2dec::ExternalFunctionSignature>,
+    mut signature: Option<r2types::FunctionSignatureSpec>,
     slot_type_overrides: &SlotTypeOverrides,
     ptr_bits: u32,
-) -> Option<r2dec::ExternalFunctionSignature> {
+) -> Option<r2types::FunctionSignatureSpec> {
     if slot_type_overrides.is_empty() {
         return signature;
     }
@@ -4586,14 +4654,14 @@ fn merge_slot_type_overrides_into_signature(
     let sig = signature.get_or_insert_with(Default::default);
     while sig.params.len() <= max_slot {
         let idx = sig.params.len();
-        sig.params.push(r2dec::ExternalFunctionParam {
+        sig.params.push(r2types::FunctionParamSpec {
             name: format!("arg{}", idx + 1),
             ty: None,
         });
     }
 
     for (slot, raw_ty) in slot_type_overrides {
-        let Some(parsed) = parse_external_type(raw_ty, ptr_bits) else {
+        let Some(parsed) = r2types::parse_type_like_spec(raw_ty, ptr_bits) else {
             continue;
         };
         let param = &mut sig.params[*slot];
@@ -4636,10 +4704,10 @@ pub(crate) fn enrich_decompiler_type_context(
     ssa_blocks: &[r2ssa::SSABlock],
     arch: Option<&ArchSpec>,
     ptr_bits: u32,
-    signature: Option<r2dec::ExternalFunctionSignature>,
+    signature: Option<r2types::FunctionSignatureSpec>,
     mut type_db: r2types::ExternalTypeDb,
 ) -> (
-    Option<r2dec::ExternalFunctionSignature>,
+    Option<r2types::FunctionSignatureSpec>,
     r2types::ExternalTypeDb,
 ) {
     let mut diagnostics = TypeWritebackDiagnosticsJson::default();
@@ -5233,7 +5301,7 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
     else {
         return ptr::null_mut();
     };
-    let Some(artifact) = types::build_function_analysis_artifact(&input, "[]", "{}", "{}") else {
+    let Some(artifact) = types::build_function_analysis_artifact(&input, "{}") else {
         return ptr::null_mut();
     };
 
@@ -5260,9 +5328,7 @@ struct TypeWritebackInferenceInput<'a> {
     num_blocks: usize,
     fcn_addr: u64,
     fcn_name: *const c_char,
-    afcfj_json: *const c_char,
-    afvj_json: *const c_char,
-    tsj_json: *const c_char,
+    external_context_json: *const c_char,
     interproc: InterprocInferenceInput<'a>,
 }
 
@@ -5276,11 +5342,9 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
     ) else {
         return ptr::null_mut();
     };
-    let afcfj = cstr_or_default(input.afcfj_json, "[]");
-    let afvj = cstr_or_default(input.afvj_json, "{}");
-    let tsj = cstr_or_default(input.tsj_json, "{}");
+    let external_context = cstr_or_default(input.external_context_json, "{}");
     let Some(artifact) =
-        types::build_function_analysis_artifact(&function_input, &afcfj, &afvj, &tsj)
+        types::build_function_analysis_artifact(&function_input, &external_context)
     else {
         return ptr::null_mut();
     };
@@ -5299,19 +5363,19 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
     }
     let vars = artifact.vars;
     let mut diagnostics = artifact.diagnostics;
-    let existing_types = parse_existing_var_types(&afvj);
-    let stack_vars = parse_external_stack_vars(&afvj, ptr_bits);
-    let sig_ctx = parse_signature_context(&afcfj, ptr_bits);
+    let parsed_context = r2types::parse_external_context_json(&external_context, ptr_bits);
+    let existing_types = parse_existing_var_types_from_specs(&parsed_context.external_stack_vars);
+    let stack_vars = &parsed_context.external_stack_vars;
     let mut param_types = std::collections::HashMap::new();
     let mut param_names = std::collections::HashMap::new();
-    if let Some(current) = sig_ctx.current.as_ref() {
+    if let Some(current) = parsed_context.merged_signature.as_ref() {
         while sig.params.len() < current.params.len() {
             let idx = sig.params.len();
             let param_type = current
                 .params
                 .get(idx)
                 .and_then(|param| param.ty.as_ref())
-                .map(ToString::to_string)
+                .map(|ty| materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits).to_string())
                 .unwrap_or_else(|| "void *".to_string());
             sig.params.push(InferredParamJson {
                 name: format!("arg{}", idx + 1),
@@ -5319,6 +5383,7 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
             });
         }
         if let Some(ret_ty) = current.ret_type.as_ref() {
+            let ret_ty = materialize_signature_ctype(type_like_to_ctype(ret_ty), ptr_bits);
             let ret_ty_str = ret_ty.to_string();
             if !matches!(ret_ty, r2dec::CType::Unknown) {
                 sig.ret_type = ret_ty_str;
@@ -5326,6 +5391,7 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
         }
         for (idx, param) in current.params.iter().enumerate() {
             if let Some(ty) = param.ty.as_ref() {
+                let ty = materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits);
                 let ty_str = ty.to_string();
                 param_types.insert(idx, ty_str.clone());
                 if !matches!(ty, r2dec::CType::Unknown)
@@ -5344,14 +5410,22 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
         sig.signature = format_afs_signature(&sig.function_name, &sig.ret_type, &sig.params);
         sig.confidence = sig
             .confidence
-            .max(explicit_signature_context_strength(current));
+            .max(explicit_signature_context_strength_from_spec(
+                current, ptr_bits,
+            ));
     }
-    let mut merged_signature_for_main = sig_ctx.current.clone();
-    types::apply_main_signature_override(
+    let mut merged_signature_for_main = parsed_context.merged_signature.clone();
+    r2types::apply_main_signature_override(
         &function_input.function_name,
-        &mut sig,
         &mut merged_signature_for_main,
     );
+    if r2types::is_c_main_function(&function_input.function_name) {
+        types::apply_main_signature_override(
+            &function_input.function_name,
+            &mut sig,
+            &mut merged_signature_for_main,
+        );
+    }
 
     let struct_decls = artifact.struct_decls;
     let slot_struct_types = artifact.type_facts.slot_type_overrides;
@@ -5390,7 +5464,7 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
                 .as_ref()
                 .and_then(|sig| sig.params.get(slot))
                 .and_then(|param| param.ty.as_ref())
-                .map(ToString::to_string)
+                .map(|ty| materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits).to_string())
             && !is_generic_type_string(&sig_ty)
         {
             chosen_type = sig_ty;
@@ -5427,7 +5501,8 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
             && let Some(ext) = stack_vars.get(&var.delta)
             && let Some(ext_ty) = ext.ty.as_ref()
         {
-            let ext_ty_str = ext_ty.to_string();
+            let ext_ty_str =
+                materialize_signature_ctype(type_like_to_ctype(ext_ty), ptr_bits).to_string();
             if !is_generic_type_string(&ext_ty_str) && is_generic_type_string(&chosen_type) {
                 chosen_type = ext_ty_str;
                 confidence = 97;
@@ -5531,9 +5606,7 @@ pub extern "C" fn r2sleigh_infer_type_writeback_json(
     num_blocks: usize,
     fcn_addr: u64,
     fcn_name: *const c_char,
-    afcfj_json: *const c_char,
-    afvj_json: *const c_char,
-    tsj_json: *const c_char,
+    external_context_json: *const c_char,
 ) -> *mut c_char {
     infer_type_writeback_json_impl(TypeWritebackInferenceInput {
         ctx,
@@ -5541,9 +5614,7 @@ pub extern "C" fn r2sleigh_infer_type_writeback_json(
         num_blocks,
         fcn_addr,
         fcn_name,
-        afcfj_json,
-        afvj_json,
-        tsj_json,
+        external_context_json,
         interproc: InterprocInferenceInput {
             iter: 1,
             max_iters: 1,
@@ -5560,9 +5631,7 @@ pub extern "C" fn r2sleigh_infer_type_writeback_json_ex(
     num_blocks: usize,
     fcn_addr: u64,
     fcn_name: *const c_char,
-    afcfj_json: *const c_char,
-    afvj_json: *const c_char,
-    tsj_json: *const c_char,
+    external_context_json: *const c_char,
     interproc_iter: usize,
     interproc_max_iters: usize,
     interproc_converged: i32,
@@ -5575,9 +5644,7 @@ pub extern "C" fn r2sleigh_infer_type_writeback_json_ex(
         num_blocks,
         fcn_addr,
         fcn_name,
-        afcfj_json,
-        afvj_json,
-        tsj_json,
+        external_context_json,
         interproc: InterprocInferenceInput {
             iter: interproc_iter.max(1),
             max_iters: interproc_max_iters.max(1),
@@ -5831,10 +5898,54 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
 }
 
 #[cfg(test)]
+fn signature_spec(
+    ret_type: Option<r2dec::CType>,
+    params: Vec<(&str, Option<r2dec::CType>)>,
+) -> r2types::FunctionSignatureSpec {
+    r2types::FunctionSignatureSpec {
+        ret_type: ret_type.as_ref().map(ctype_to_type_like),
+        params: params
+            .into_iter()
+            .map(|(name, ty)| r2types::FunctionParamSpec {
+                name: name.to_string(),
+                ty: ty.as_ref().map(ctype_to_type_like),
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+fn set_signature_facts(
+    decompiler: &mut r2dec::Decompiler,
+    signature: Option<r2types::FunctionSignatureSpec>,
+) {
+    decompiler.set_type_facts(r2types::FunctionTypeFacts {
+        merged_signature: signature,
+        ..r2types::FunctionTypeFacts::default()
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
     use std::ffi::{CStr, CString};
+
+    fn type_like(ty: r2dec::CType) -> r2types::CTypeLike {
+        ctype_to_type_like(&ty)
+    }
+
+    fn register_param(
+        name: &str,
+        ty: Option<r2dec::CType>,
+        reg: &str,
+    ) -> r2types::ExternalRegisterParamSpec {
+        r2types::ExternalRegisterParamSpec {
+            name: name.to_string(),
+            ty: ty.as_ref().map(ctype_to_type_like),
+            reg: reg.to_string(),
+        }
+    }
 
     #[test]
     fn semantic_comment_reg_filter_excludes_cpu_flags_case_insensitively() {
@@ -6134,9 +6245,9 @@ mod tests {
         assert_eq!(sig.params[1].name, "user_len");
         assert_eq!(
             sig.params[0].ty,
-            Some(r2dec::CType::ptr(r2dec::CType::Int(8)))
+            Some(type_like(r2dec::CType::ptr(r2dec::CType::Int(8))))
         );
-        assert_eq!(sig.params[1].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(sig.params[1].ty, Some(type_like(r2dec::CType::Int(32))));
     }
 
     #[test]
@@ -6152,7 +6263,7 @@ mod tests {
         let json =
             r#"[{"name":"dbg.test","args":[{"name":"arg1","type":"void"}],"return":"int32_t"}]"#;
         let sig = parse_external_signature(json, 64).expect("signature should parse");
-        assert_eq!(sig.ret_type, Some(r2dec::CType::Int(32)));
+        assert_eq!(sig.ret_type, Some(type_like(r2dec::CType::Int(32))));
         assert!(
             sig.params.is_empty(),
             "single generic void placeholder should be treated as an empty parameter list"
@@ -6351,38 +6462,27 @@ mod tests {
         let params = parse_external_reg_params(json, 64);
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, "arg0");
-        assert_eq!(params[0].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(params[0].ty, Some(type_like(r2dec::CType::Int(32))));
         assert_eq!(params[0].reg, "RDI");
         assert_eq!(params[1].name, "arg1");
-        assert_eq!(params[1].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(params[1].ty, Some(type_like(r2dec::CType::Int(32))));
         assert_eq!(params[1].reg, "RSI");
     }
 
     #[test]
     fn test_merge_signature_with_reg_params_fills_missing_host_args() {
         let merged = merge_signature_with_reg_params(
-            Some(r2dec::ExternalFunctionSignature {
-                ret_type: Some(r2dec::CType::Int(32)),
-                params: Vec::new(),
-            }),
+            Some(signature_spec(Some(r2dec::CType::Int(32)), Vec::new())),
             vec![
-                r2dec::ExternalRegisterParam {
-                    name: "arg0".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                    reg: "RDI".to_string(),
-                },
-                r2dec::ExternalRegisterParam {
-                    name: "arg1".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                    reg: "RSI".to_string(),
-                },
+                register_param("arg0", Some(r2dec::CType::Int(32)), "RDI"),
+                register_param("arg1", Some(r2dec::CType::Int(32)), "RSI"),
             ],
         )
         .expect("merged signature");
-        assert_eq!(merged.ret_type, Some(r2dec::CType::Int(32)));
+        assert_eq!(merged.ret_type, Some(type_like(r2dec::CType::Int(32))));
         assert_eq!(merged.params.len(), 2);
-        assert_eq!(merged.params[0].ty, Some(r2dec::CType::Int(32)));
-        assert_eq!(merged.params[1].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(merged.params[0].ty, Some(type_like(r2dec::CType::Int(32))));
+        assert_eq!(merged.params[1].ty, Some(type_like(r2dec::CType::Int(32))));
     }
 
     #[test]
@@ -6442,10 +6542,9 @@ mod tests {
         let blocks: [*const R2ILBlock; 2] = [block_load, block_ret];
         let func_name = CString::new("demo").expect("valid function name");
         let empty_map = CString::new("{}").expect("valid empty json");
-        let empty_sig = CString::new("[]").expect("valid empty signature json");
-        let types_json = CString::new(
+        let external_context_json = CString::new(
             r#"{
-                "types":[
+                "base_types":[
                     {
                         "kind":"struct",
                         "name":"DemoStruct",
@@ -6466,9 +6565,7 @@ mod tests {
             empty_map.as_ptr(),
             empty_map.as_ptr(),
             empty_map.as_ptr(),
-            empty_sig.as_ptr(),
-            empty_map.as_ptr(),
-            types_json.as_ptr(),
+            external_context_json.as_ptr(),
         );
         assert!(!out.is_null(), "decompilation output should not be null");
         let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
@@ -6688,13 +6785,10 @@ mod tests {
 
     #[test]
     fn explicit_external_signature_context_yields_high_confidence() {
-        let ctx = r2dec::ExternalFunctionSignature {
-            ret_type: Some(r2dec::CType::Int(32)),
-            params: vec![r2dec::ExternalFunctionParam {
-                name: "items".to_string(),
-                ty: Some(r2dec::CType::ptr(r2dec::CType::Int(8))),
-            }],
-        };
+        let ctx = signature_spec(
+            Some(r2dec::CType::Int(32)),
+            vec![("items", Some(r2dec::CType::ptr(r2dec::CType::Int(8))))],
+        );
         let confidence = explicit_signature_context_strength(&ctx);
         assert!(confidence >= SIG_WRITEBACK_CONFIDENCE_MIN);
     }
@@ -7342,27 +7436,24 @@ mod integration_tests {
             &[block],
             Some(&arch),
             64,
-            Some(r2dec::ExternalFunctionSignature {
-                ret_type: Some(r2dec::CType::Int(64)),
-                params: vec![
-                    r2dec::ExternalFunctionParam {
-                        name: "arg1".to_string(),
-                        ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                    },
-                    r2dec::ExternalFunctionParam {
-                        name: "arg2".to_string(),
-                        ty: Some(r2dec::CType::Int(32)),
-                    },
+            Some(signature_spec(
+                Some(r2dec::CType::Int(64)),
+                vec![
+                    (
+                        "arg1",
+                        Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                    ),
+                    ("arg2", Some(r2dec::CType::Int(32))),
                 ],
-            }),
+            )),
             r2types::ExternalTypeDb::default(),
         );
 
         let struct_name = signature
             .and_then(|sig| sig.params.first().and_then(|param| param.ty.clone()))
             .and_then(|ty| match ty {
-                r2dec::CType::Pointer(inner) => match *inner {
-                    r2dec::CType::Struct(name) => Some(name),
+                r2types::CTypeLike::Pointer(inner) => match *inner {
+                    r2types::CTypeLike::Struct(name) => Some(name),
                     _ => None,
                 },
                 _ => None,
@@ -8175,23 +8266,17 @@ mod integration_tests {
     fn enrich_decompiler_type_context_applies_live_arm64_struct_array_index_override() {
         let arch = ArchSpec::new("aarch64");
         let block = live_arm64_struct_array_index_block();
-        let signature = Some(r2dec::ExternalFunctionSignature {
-            ret_type: None,
-            params: vec![
-                r2dec::ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg3".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
+        let signature = Some(signature_spec(
+            None,
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
+                ("arg3", Some(r2dec::CType::Int(32))),
             ],
-        });
+        ));
 
         let (signature, type_db) = enrich_decompiler_type_context(
             &[block],
@@ -8203,7 +8288,9 @@ mod integration_tests {
 
         let signature = signature.expect("signature");
         let arg0 = signature.params.first().and_then(|param| param.ty.as_ref());
-        let rendered = arg0.map(ToString::to_string).unwrap_or_default();
+        let rendered = arg0
+            .map(|ty| type_like_to_ctype(ty).to_string())
+            .unwrap_or_default();
         let compact = rendered.replace(' ', "");
         assert!(
             compact.starts_with("struct")
@@ -8224,23 +8311,17 @@ mod integration_tests {
 
         let arch = ArchSpec::new("aarch64");
         let block = live_arm64_struct_array_index_block();
-        let signature = Some(r2dec::ExternalFunctionSignature {
-            ret_type: Some(r2dec::CType::Int(64)),
-            params: vec![
-                r2dec::ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg3".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
+        let signature = Some(signature_spec(
+            Some(r2dec::CType::Int(64)),
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
+                ("arg3", Some(r2dec::CType::Int(32))),
             ],
-        });
+        ));
 
         let (signature, type_db) = enrich_decompiler_type_context(
             std::slice::from_ref(&block),
@@ -8259,8 +8340,11 @@ mod integration_tests {
         func = func.with_name("sym._test_struct_array_index");
 
         let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        decompiler.set_function_signature(signature);
-        decompiler.set_external_type_db(type_db);
+        decompiler.set_type_facts(r2types::FunctionTypeFacts {
+            merged_signature: signature,
+            external_type_db: type_db,
+            ..r2types::FunctionTypeFacts::default()
+        });
         let output = decompiler.decompile(&func);
 
         assert!(
@@ -8308,23 +8392,17 @@ mod integration_tests {
                 target: r2ssa::SSAVar::new("PC", 1, 8),
             },
         ]);
-        let signature = Some(r2dec::ExternalFunctionSignature {
-            ret_type: Some(r2dec::CType::Int(64)),
-            params: vec![
-                r2dec::ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg3".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
+        let signature = Some(signature_spec(
+            Some(r2dec::CType::Int(64)),
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
+                ("arg3", Some(r2dec::CType::Int(32))),
             ],
-        });
+        ));
 
         let (signature, type_db) = enrich_decompiler_type_context(
             std::slice::from_ref(&block),
@@ -8343,8 +8421,11 @@ mod integration_tests {
         func = func.with_name("sym._test_struct_array_index");
 
         let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        decompiler.set_function_signature(signature);
-        decompiler.set_external_type_db(type_db);
+        decompiler.set_type_facts(r2types::FunctionTypeFacts {
+            merged_signature: signature,
+            external_type_db: type_db,
+            ..r2types::FunctionTypeFacts::default()
+        });
         let output = decompiler.decompile(&func);
 
         assert!(
@@ -8375,19 +8456,16 @@ mod integration_tests {
         use r2ssa::SSAFunction;
 
         let block = live_arm64_array_index_block(false);
-        let signature = Some(r2dec::ExternalFunctionSignature {
-            ret_type: Some(r2dec::CType::Int(64)),
-            params: vec![
-                r2dec::ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
+        let signature = Some(signature_spec(
+            Some(r2dec::CType::Int(64)),
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
             ],
-        });
+        ));
 
         let mut raw = R2ILBlock::new(block.addr, block.size);
         raw.push(R2ILOp::Return {
@@ -8398,7 +8476,7 @@ mod integration_tests {
         func = func.with_name("sym._test_array_index");
 
         let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        decompiler.set_function_signature(signature);
+        set_signature_facts(&mut decompiler, signature);
         let output = decompiler.decompile(&func);
 
         assert!(
@@ -8434,19 +8512,16 @@ mod integration_tests {
         use r2ssa::SSAFunction;
 
         let block = live_arm64_array_index_block(true);
-        let signature = Some(r2dec::ExternalFunctionSignature {
-            ret_type: Some(r2dec::CType::Int(64)),
-            params: vec![
-                r2dec::ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
+        let signature = Some(signature_spec(
+            Some(r2dec::CType::Int(64)),
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
             ],
-        });
+        ));
 
         let mut raw = R2ILBlock::new(block.addr, block.size);
         raw.push(R2ILOp::Return {
@@ -8457,7 +8532,7 @@ mod integration_tests {
         func = func.with_name("sym._test_array_index_neg");
 
         let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        decompiler.set_function_signature(signature);
+        set_signature_facts(&mut decompiler, signature);
         let output = decompiler.decompile(&func);
 
         assert!(
@@ -8557,21 +8632,21 @@ mod integration_tests {
         func = func.with_name("sym._main");
 
         let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        decompiler.set_function_signature(Some(r2dec::ExternalFunctionSignature {
-            ret_type: Some(r2dec::CType::Int(64)),
-            params: vec![
-                r2dec::ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                },
-                r2dec::ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(
-                        Box::new(r2dec::CType::Int(8)),
-                    )))),
-                },
-            ],
-        }));
+        set_signature_facts(
+            &mut decompiler,
+            Some(signature_spec(
+                Some(r2dec::CType::Int(64)),
+                vec![
+                    ("arg1", Some(r2dec::CType::Int(32))),
+                    (
+                        "arg2",
+                        Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(
+                            Box::new(r2dec::CType::Int(8)),
+                        )))),
+                    ),
+                ],
+            )),
+        );
         decompiler.set_function_names(HashMap::from([(0x401040, "sym.imp.atoi".to_string())]));
         decompiler.set_known_function_signatures(HashMap::from([(
             "sym.imp.atoi".to_string(),

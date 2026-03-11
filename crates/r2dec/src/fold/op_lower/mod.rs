@@ -223,7 +223,10 @@ impl<'a> FoldingContext<'a> {
     }
 
     #[cfg(test)]
-    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, crate::ExternalStackVar>) {
+    pub fn set_external_stack_vars(
+        &mut self,
+        stack_vars: HashMap<i64, r2types::ExternalStackVarSpec>,
+    ) {
         self.inputs.external_stack_vars = Box::leak(Box::new(stack_vars));
     }
 

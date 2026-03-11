@@ -37,7 +37,6 @@ pub(crate) mod normalize;
 pub(crate) mod post_rename;
 pub mod region;
 pub mod structure;
-pub(crate) mod types;
 pub mod variable;
 
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
@@ -49,12 +48,11 @@ pub use variable::VariableRecovery;
 
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
-use crate::types::TypeInference;
 use r2ssa::SSAFunction;
 use r2ssa::SSAOp;
 use r2types::{
-    CTypeLike, ExternalTypeDb, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
-    FunctionTypeFacts, TypeOracle,
+    CTypeLike, ExternalRegisterParamSpec, ExternalTypeDb, FunctionSignatureSpec, FunctionType,
+    FunctionTypeFacts, TypeInference, TypeOracle,
 };
 use std::collections::HashSet;
 
@@ -83,6 +81,7 @@ fn normalize_callee_name(name: &str) -> String {
     out
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn ctype_to_type_like(ty: &CType) -> CTypeLike {
     match ty {
         CType::Void => CTypeLike::Void,
@@ -123,37 +122,9 @@ fn type_like_to_ctype(ty: &CTypeLike) -> CType {
     }
 }
 
-fn external_signature_to_spec(signature: &ExternalFunctionSignature) -> FunctionSignatureSpec {
-    FunctionSignatureSpec {
-        ret_type: signature.ret_type.as_ref().map(ctype_to_type_like),
-        params: signature
-            .params
-            .iter()
-            .map(|param| FunctionParamSpec {
-                name: param.name.clone(),
-                ty: param.ty.as_ref().map(ctype_to_type_like),
-            })
-            .collect(),
-    }
-}
-
-fn signature_spec_to_external(signature: &FunctionSignatureSpec) -> ExternalFunctionSignature {
-    ExternalFunctionSignature {
-        ret_type: signature.ret_type.as_ref().map(type_like_to_ctype),
-        params: signature
-            .params
-            .iter()
-            .map(|param| ExternalFunctionParam {
-                name: param.name.clone(),
-                ty: param.ty.as_ref().map(type_like_to_ctype),
-            })
-            .collect(),
-    }
-}
-
 fn merge_params_with_external_signature(
     recovered_params: Vec<ast::CParam>,
-    signature: Option<&ExternalFunctionSignature>,
+    signature: Option<&FunctionSignatureSpec>,
 ) -> Vec<ast::CParam> {
     let Some(signature) = signature else {
         return recovered_params;
@@ -186,7 +157,7 @@ fn merge_params_with_external_signature(
                     param.name = ext.name.clone();
                 }
                 if let Some(ext_ty) = &ext.ty {
-                    param.ty = ext_ty.clone();
+                    param.ty = type_like_to_ctype(ext_ty);
                 }
             }
 
@@ -261,7 +232,7 @@ fn register_alias_names(reg_name: &str) -> Vec<String> {
 fn build_param_register_aliases(
     params: &[ast::CParam],
     recovered_params: &[(r2ssa::SSAVar, ast::CParam)],
-    register_params: &[ExternalRegisterParam],
+    register_params: &[ExternalRegisterParamSpec],
     abi_arg_regs: &[String],
 ) -> std::collections::HashMap<String, String> {
     let mut aliases = std::collections::HashMap::new();
@@ -454,46 +425,6 @@ impl DecompilerConfig {
     }
 }
 
-/// External information for decompilation (function names, strings, symbols).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalFunctionParam {
-    /// Parameter name recovered from external metadata.
-    pub name: String,
-    /// Optional type recovered from external metadata.
-    pub ty: Option<CType>,
-}
-
-/// External register-backed parameter metadata recovered from host analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalRegisterParam {
-    /// Parameter name recovered from external metadata.
-    pub name: String,
-    /// Optional type recovered from external metadata.
-    pub ty: Option<CType>,
-    /// Register reference reported by host analysis.
-    pub reg: String,
-}
-
-/// External function signature recovered from host analysis.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ExternalFunctionSignature {
-    /// Optional return type.
-    pub ret_type: Option<CType>,
-    /// Ordered parameters.
-    pub params: Vec<ExternalFunctionParam>,
-}
-
-/// External stack variable metadata recovered from host analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalStackVar {
-    /// Variable name.
-    pub name: String,
-    /// Optional variable type.
-    pub ty: Option<CType>,
-    /// Base register used by the analysis backend (e.g. RBP/RSP).
-    pub base: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalStructFieldAccess {
     pub arg_index: usize,
@@ -512,10 +443,6 @@ pub struct DecompilerContext {
     pub symbols: std::collections::HashMap<u64, String>,
     /// Externally recovered type and layout facts.
     pub type_facts: FunctionTypeFacts,
-    /// Register-backed parameter metadata from host analysis.
-    pub register_params: Vec<ExternalRegisterParam>,
-    /// Stack variables keyed by signed stack offset.
-    pub stack_vars: std::collections::HashMap<i64, ExternalStackVar>,
 }
 
 /// The main decompiler.
@@ -554,17 +481,6 @@ impl Decompiler {
         self.context.symbols = symbols;
     }
 
-    /// Set an externally recovered function signature.
-    pub fn set_function_signature(&mut self, signature: Option<ExternalFunctionSignature>) {
-        self.context.type_facts.merged_signature =
-            signature.as_ref().map(external_signature_to_spec);
-    }
-
-    /// Set externally recovered register-backed parameters.
-    pub fn set_register_params(&mut self, register_params: Vec<ExternalRegisterParam>) {
-        self.context.register_params = register_params;
-    }
-
     /// Set externally recovered known function signatures keyed by name.
     pub fn set_known_function_signatures<T>(
         &mut self,
@@ -576,11 +492,6 @@ impl Decompiler {
             .into_iter()
             .map(|(name, sig)| (name, sig.into()))
             .collect();
-    }
-
-    /// Set externally recovered stack variables keyed by signed stack offset.
-    pub fn set_stack_vars(&mut self, stack_vars: std::collections::HashMap<i64, ExternalStackVar>) {
-        self.context.stack_vars = stack_vars;
     }
 
     /// Set externally recovered host type database.
@@ -647,12 +558,6 @@ impl Decompiler {
         // Materialize phis on non-critical edges to reduce SSA artifacts in output.
         let normalized_func = normalize::materialize_phis(func);
         let func = &normalized_func;
-        let external_signature = self
-            .context
-            .type_facts
-            .merged_signature
-            .as_ref()
-            .map(signature_spec_to_external);
 
         // Recover variables
         let mut var_recovery = VariableRecovery::new_with_abi(
@@ -662,12 +567,7 @@ impl Decompiler {
             self.config.arg_regs.clone(),
             self.config.ret_regs.clone(),
         );
-        if let Some(signature) = &external_signature {
-            var_recovery.set_external_signature(signature.clone());
-        }
-        if !self.context.stack_vars.is_empty() {
-            var_recovery.set_external_stack_vars(self.context.stack_vars.clone());
-        }
+        var_recovery.set_type_facts(self.context.type_facts.clone());
         var_recovery.recover(func);
 
         // Infer types
@@ -679,15 +579,11 @@ impl Decompiler {
         if !self.context.function_names.is_empty() {
             type_inference.set_function_names(self.context.function_names.clone());
         }
-        if external_signature.is_some() {
-            type_inference.set_external_signature(external_signature.clone());
-        }
+        type_inference.set_external_signature(self.context.type_facts.merged_signature.clone());
         for (name, signature) in &self.context.type_facts.known_function_signatures {
             type_inference.add_function_type(name, signature.clone());
         }
-        if !self.context.stack_vars.is_empty() {
-            type_inference.set_external_stack_vars(self.context.stack_vars.clone());
-        }
+        type_inference.set_external_stack_vars(self.context.type_facts.external_stack_vars.clone());
         if !self.context.type_facts.external_type_db.structs.is_empty()
             || !self.context.type_facts.external_type_db.unions.is_empty()
             || !self.context.type_facts.external_type_db.enums.is_empty()
@@ -695,7 +591,11 @@ impl Decompiler {
             type_inference.set_external_type_db(self.context.type_facts.external_type_db.clone());
         }
         type_inference.infer_function(func);
-        let mut type_hints = type_inference.var_type_hints();
+        let mut type_hints = type_inference
+            .var_type_hints()
+            .into_iter()
+            .map(|(name, ty)| (name, type_like_to_ctype(&ty)))
+            .collect::<std::collections::HashMap<_, _>>();
         let combined_type_oracle = type_inference.combined_type_oracle();
         let type_oracle = combined_type_oracle
             .as_ref()
@@ -716,7 +616,7 @@ impl Decompiler {
                 (
                     v.ssa_var.clone(),
                     ast::CParam {
-                        ty: type_inference.get_type(&v.ssa_var),
+                        ty: type_like_to_ctype(&type_inference.get_type(&v.ssa_var)),
                         name: v.name.clone(),
                     },
                 )
@@ -727,12 +627,12 @@ impl Decompiler {
                 .iter()
                 .map(|(_, param)| param.clone())
                 .collect(),
-            external_signature.as_ref(),
+            self.context.type_facts.merged_signature.as_ref(),
         );
         let param_register_aliases = build_param_register_aliases(
             &params,
             &recovered_param_infos,
-            &self.context.register_params,
+            &self.context.type_facts.register_params,
             &self.config.arg_regs,
         );
         for (idx, (_ssa_var, _)) in recovered_param_infos.iter().enumerate() {
@@ -774,7 +674,7 @@ impl Decompiler {
             strings: &self.context.strings,
             symbols: &self.context.symbols,
             known_function_signatures: &known_function_signatures,
-            external_stack_vars: &self.context.stack_vars,
+            external_stack_vars: &self.context.type_facts.external_stack_vars,
             external_type_db: &self.context.type_facts.external_type_db,
             param_register_aliases: &param_register_aliases,
             type_hints: &type_hints,
@@ -856,7 +756,7 @@ impl Decompiler {
                 .locals()
                 .iter()
                 .map(|v| ast::CLocal {
-                    ty: type_inference.get_type(&v.ssa_var),
+                    ty: type_like_to_ctype(&type_inference.get_type(&v.ssa_var)),
                     name: v.name.clone(),
                     stack_offset: v.stack_offset,
                 })
@@ -867,7 +767,7 @@ impl Decompiler {
                 .iter()
                 .filter(|v| emitted_vars.contains(&v.name))
                 .map(|v| ast::CLocal {
-                    ty: type_inference.get_type(&v.ssa_var),
+                    ty: type_like_to_ctype(&type_inference.get_type(&v.ssa_var)),
                     name: v.name.clone(),
                     stack_offset: v.stack_offset,
                 })
@@ -937,7 +837,7 @@ impl Decompiler {
                     continue;
                 }
 
-                candidates.push(type_inference.get_type(target));
+                candidates.push(type_like_to_ctype(&type_inference.get_type(target)));
             }
         }
 
@@ -1024,7 +924,9 @@ mod tests {
     use super::*;
     use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
     use r2ssa::SSAFunction;
-    use r2types::{ExternalField, ExternalStruct};
+    use r2types::{
+        ExternalField, ExternalStruct, FunctionParamSpec, FunctionSignatureSpec, FunctionTypeFacts,
+    };
 
     fn ssa_from_ops(ops: Vec<R2ILOp>, arch: &ArchSpec) -> SSAFunction {
         let mut block = R2ILBlock::new(0x1000, 4);
@@ -1044,6 +946,22 @@ mod tests {
         arch.add_register(RegisterDef::new("RBP", 0x20, 8));
         arch.add_register(RegisterDef::new("RSP", 0x28, 8));
         arch
+    }
+
+    fn signature_spec(
+        ret_type: Option<CType>,
+        params: Vec<(&str, Option<CType>)>,
+    ) -> FunctionSignatureSpec {
+        FunctionSignatureSpec {
+            ret_type: ret_type.as_ref().map(super::ctype_to_type_like),
+            params: params
+                .into_iter()
+                .map(|(name, ty)| FunctionParamSpec {
+                    name: name.to_string(),
+                    ty: ty.as_ref().map(super::ctype_to_type_like),
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -1113,19 +1031,13 @@ mod tests {
                 name: "arg3".to_string(),
             },
         ];
-        let signature = ExternalFunctionSignature {
-            ret_type: Some(CType::Pointer(Box::new(CType::Int(8)))),
-            params: vec![
-                ExternalFunctionParam {
-                    name: "src".to_string(),
-                    ty: Some(CType::Pointer(Box::new(CType::Int(8)))),
-                },
-                ExternalFunctionParam {
-                    name: "len".to_string(),
-                    ty: Some(CType::UInt(64)),
-                },
+        let signature = signature_spec(
+            Some(CType::Pointer(Box::new(CType::Int(8)))),
+            vec![
+                ("src", Some(CType::Pointer(Box::new(CType::Int(8))))),
+                ("len", Some(CType::UInt(64))),
             ],
-        };
+        );
 
         let params = merge_params_with_external_signature(recovered, Some(&signature));
         assert_eq!(
@@ -1154,19 +1066,7 @@ mod tests {
                 name: "arg3".to_string(),
             },
         ];
-        let signature = ExternalFunctionSignature {
-            ret_type: None,
-            params: vec![
-                ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: None,
-                },
-                ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: None,
-                },
-            ],
-        };
+        let signature = signature_spec(None, vec![("arg1", None), ("arg2", None)]);
 
         let params = merge_params_with_external_signature(recovered, Some(&signature));
         assert_eq!(
@@ -1179,19 +1079,13 @@ mod tests {
 
     #[test]
     fn external_signature_can_extend_empty_recovered_header_params() {
-        let signature = ExternalFunctionSignature {
-            ret_type: None,
-            params: vec![
-                ExternalFunctionParam {
-                    name: "buf".to_string(),
-                    ty: Some(CType::Pointer(Box::new(CType::Int(8)))),
-                },
-                ExternalFunctionParam {
-                    name: "count".to_string(),
-                    ty: Some(CType::UInt(64)),
-                },
+        let signature = signature_spec(
+            None,
+            vec![
+                ("buf", Some(CType::Pointer(Box::new(CType::Int(8))))),
+                ("count", Some(CType::UInt(64))),
             ],
-        };
+        );
 
         let params = merge_params_with_external_signature(Vec::new(), Some(&signature));
         assert_eq!(params.len(), 2);
@@ -1237,19 +1131,16 @@ mod tests {
         );
 
         let mut decompiler = Decompiler::new(DecompilerConfig::x86_64());
-        decompiler.set_function_signature(Some(ExternalFunctionSignature {
-            ret_type: Some(CType::Int(64)),
-            params: vec![
-                ExternalFunctionParam {
-                    name: "zzz_first".to_string(),
-                    ty: Some(CType::Int(64)),
-                },
-                ExternalFunctionParam {
-                    name: "aaa_second".to_string(),
-                    ty: Some(CType::Int(64)),
-                },
-            ],
-        }));
+        decompiler.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(
+                Some(CType::Int(64)),
+                vec![
+                    ("zzz_first", Some(CType::Int(64))),
+                    ("aaa_second", Some(CType::Int(64))),
+                ],
+            )),
+            ..FunctionTypeFacts::default()
+        });
 
         let built_first = decompiler.build_function(&func);
         let built_second = decompiler.build_function(&func);
@@ -1458,24 +1349,18 @@ mod tests {
         );
 
         let mut decompiler = Decompiler::new(DecompilerConfig::aarch64());
-        decompiler.set_function_signature(Some(ExternalFunctionSignature {
-            ret_type: Some(CType::Int(64)),
-            params: vec![
-                ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: Some(CType::ptr(CType::Struct(struct_name))),
-                },
-                ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: Some(CType::Int(32)),
-                },
-                ExternalFunctionParam {
-                    name: "arg3".to_string(),
-                    ty: Some(CType::Int(32)),
-                },
-            ],
-        }));
-        decompiler.set_external_type_db(type_db);
+        decompiler.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(
+                Some(CType::Int(64)),
+                vec![
+                    ("arg1", Some(CType::ptr(CType::Struct(struct_name)))),
+                    ("arg2", Some(CType::Int(32))),
+                    ("arg3", Some(CType::Int(32))),
+                ],
+            )),
+            external_type_db: type_db,
+            ..FunctionTypeFacts::default()
+        });
 
         let output = decompiler.decompile(&func);
         assert!(
@@ -2122,24 +2007,18 @@ mod tests {
         );
 
         let mut decompiler = Decompiler::new(DecompilerConfig::aarch64());
-        decompiler.set_function_signature(Some(ExternalFunctionSignature {
-            ret_type: Some(CType::Int(64)),
-            params: vec![
-                ExternalFunctionParam {
-                    name: "arg1".to_string(),
-                    ty: Some(CType::ptr(CType::Struct(struct_name))),
-                },
-                ExternalFunctionParam {
-                    name: "arg2".to_string(),
-                    ty: Some(CType::Int(32)),
-                },
-                ExternalFunctionParam {
-                    name: "arg3".to_string(),
-                    ty: Some(CType::Int(32)),
-                },
-            ],
-        }));
-        decompiler.set_external_type_db(type_db);
+        decompiler.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(
+                Some(CType::Int(64)),
+                vec![
+                    ("arg1", Some(CType::ptr(CType::Struct(struct_name)))),
+                    ("arg2", Some(CType::Int(32))),
+                    ("arg3", Some(CType::Int(32))),
+                ],
+            )),
+            external_type_db: type_db,
+            ..FunctionTypeFacts::default()
+        });
 
         let output = decompiler.decompile(&func);
         assert!(

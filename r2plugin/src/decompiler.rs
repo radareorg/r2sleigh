@@ -1,8 +1,7 @@
 use crate::context::PluginCtxView;
 use crate::{
     decompile_artifact_guard_fallback, decompile_block_guard_fallback, decompiler_cfg_guard_reason,
-    decompiler_max_blocks, parse_addr_name_map, parse_external_reg_params,
-    parse_external_stack_vars, run_decompile_on_large_stack,
+    decompiler_max_blocks, parse_addr_name_map, run_decompile_on_large_stack,
 };
 use r2il::{ArchSpec, R2ILBlock};
 
@@ -100,9 +99,7 @@ pub(crate) fn run_full_decompile_on_large_stack(
     func_names_str: String,
     strings_str: String,
     symbols_str: String,
-    signature_str: String,
-    stack_vars_str: String,
-    types_str: String,
+    external_context_json: String,
 ) -> String {
     const STACK_SIZE: usize = 512 * 1024 * 1024;
 
@@ -122,9 +119,7 @@ pub(crate) fn run_full_decompile_on_large_stack(
                 ptr_bits,
                 semantic_metadata_enabled,
                 &reg_type_hints,
-                &signature_str,
-                &stack_vars_str,
-                &types_str,
+                &external_context_json,
             ) else {
                 return decompile_artifact_guard_fallback(
                     &func_name_str,
@@ -136,14 +131,6 @@ pub(crate) fn run_full_decompile_on_large_stack(
             decompiler.set_function_names(parse_addr_name_map(&func_names_str));
             decompiler.set_strings(parse_addr_name_map(&strings_str));
             decompiler.set_symbols(parse_addr_name_map(&symbols_str));
-
-            let reg_params = parse_external_reg_params(&stack_vars_str, ptr_bits);
-            decompiler.set_register_params(reg_params);
-            let stack_vars = parse_external_stack_vars(&stack_vars_str, ptr_bits);
-            if !stack_vars.is_empty() {
-                decompiler.set_stack_vars(stack_vars);
-            }
-
             decompiler.set_type_facts(artifact.type_facts);
 
             decompiler.decompile(&artifact.ssa_func)

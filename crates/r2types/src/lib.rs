@@ -1,4 +1,5 @@
 pub mod constraint;
+pub mod context;
 pub mod convert;
 pub mod external;
 pub mod facts;
@@ -10,6 +11,14 @@ pub mod signature;
 pub mod solver;
 
 pub use constraint::{Constraint, ConstraintSource, MemoryCapability};
+pub use context::{
+    ExternalBaseTypeJson, ExternalBaseTypeKind, ExternalContextJson, ExternalRegisterParamSpec,
+    ExternalSignatureJson, ExternalSignatureParamJson, ExternalStackBase, ExternalStackVarSpec,
+    ExternalVarJson, ExternalVarKind, KnownSignatureJson, ParsedExternalContext,
+    apply_main_signature_override, canonical_main_signature_spec, is_c_main_function,
+    is_generic_arg_name, merge_signature_with_register_params, normalize_function_basename,
+    parse_external_context_json,
+};
 pub use convert::{CTypeLike, to_c_type_like};
 pub use external::{
     ExternalEnum, ExternalField, ExternalStruct, ExternalTypeDb, ExternalUnion,
@@ -20,7 +29,7 @@ pub use facts::{
     FunctionTypeFacts, FunctionTypeFactsBuilder, LocalFieldAccessFact, ResolvedFieldLayout,
     parse_type_like_spec,
 };
-pub use inference::{CombinedTypeOracle, ExternalStackVarSpec, TypeInference};
+pub use inference::{CombinedTypeOracle, TypeInference};
 pub use model::{Signedness, StructField, StructShape, Type, TypeArena, TypeId};
 pub use oracle::{LayoutOracle, TypeOracle};
 pub use signature::{ResolvedSignature, SignatureRegistry};

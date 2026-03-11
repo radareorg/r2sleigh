@@ -35,34 +35,6 @@ pub(crate) struct FunctionAnalysisArtifact {
     pub(crate) vars: Vec<VarProt>,
 }
 
-fn ctype_to_type_like(ty: &r2dec::CType) -> r2types::CTypeLike {
-    match ty {
-        r2dec::CType::Void => r2types::CTypeLike::Void,
-        r2dec::CType::Bool => r2types::CTypeLike::Bool,
-        r2dec::CType::Int(bits) => r2types::CTypeLike::Int {
-            bits: *bits,
-            signedness: r2types::Signedness::Signed,
-        },
-        r2dec::CType::UInt(bits) => r2types::CTypeLike::Int {
-            bits: *bits,
-            signedness: r2types::Signedness::Unsigned,
-        },
-        r2dec::CType::Float(bits) => r2types::CTypeLike::Float(*bits),
-        r2dec::CType::Pointer(inner) => {
-            r2types::CTypeLike::Pointer(Box::new(ctype_to_type_like(inner)))
-        }
-        r2dec::CType::Array(inner, len) => {
-            r2types::CTypeLike::Array(Box::new(ctype_to_type_like(inner)), *len)
-        }
-        r2dec::CType::Function { .. } => r2types::CTypeLike::Function,
-        r2dec::CType::Struct(name) => r2types::CTypeLike::Struct(name.clone()),
-        r2dec::CType::Union(name) => r2types::CTypeLike::Union(name.clone()),
-        r2dec::CType::Enum(name) => r2types::CTypeLike::Enum(name.clone()),
-        r2dec::CType::Typedef(_) => r2types::CTypeLike::Unknown,
-        r2dec::CType::Unknown => r2types::CTypeLike::Unknown,
-    }
-}
-
 fn type_like_to_ctype(ty: &r2types::CTypeLike) -> r2dec::CType {
     match ty {
         r2types::CTypeLike::Void => r2dec::CType::Void,
@@ -85,24 +57,9 @@ fn type_like_to_ctype(ty: &r2types::CTypeLike) -> r2dec::CType {
     }
 }
 
-fn external_signature_to_spec(
-    signature: Option<r2dec::ExternalFunctionSignature>,
-) -> Option<r2types::FunctionSignatureSpec> {
-    signature.map(|signature| r2types::FunctionSignatureSpec {
-        ret_type: signature.ret_type.as_ref().map(ctype_to_type_like),
-        params: signature
-            .params
-            .iter()
-            .map(|param| r2types::FunctionParamSpec {
-                name: param.name.clone(),
-                ty: param.ty.as_ref().map(ctype_to_type_like),
-            })
-            .collect(),
-    })
-}
-
 fn build_function_type_facts(
-    merged_signature: Option<r2dec::ExternalFunctionSignature>,
+    parsed_context: &r2types::ParsedExternalContext,
+    merged_signature: Option<r2types::FunctionSignatureSpec>,
     known_function_signatures: std::collections::HashMap<String, r2types::FunctionType>,
     external_type_db: r2types::ExternalTypeDb,
     slot_type_overrides: std::collections::HashMap<usize, String>,
@@ -110,8 +67,10 @@ fn build_function_type_facts(
     diagnostics: &crate::TypeWritebackDiagnosticsJson,
 ) -> r2types::FunctionTypeFacts {
     r2types::FunctionTypeFacts::builder(r2types::FunctionTypeFactInputs {
-        merged_signature: external_signature_to_spec(merged_signature),
+        merged_signature,
         known_function_signatures,
+        register_params: parsed_context.register_params.clone(),
+        external_stack_vars: parsed_context.external_stack_vars.clone(),
         external_type_db,
         slot_type_overrides,
         slot_field_profiles,
@@ -297,7 +256,7 @@ pub(crate) fn infer_signature_cc_inner(
 
 fn apply_signature_context_overrides(
     sig: &mut InferredSignatureCcJson,
-    sig_ctx: &crate::ParsedSignatureContext,
+    signature: Option<&r2types::FunctionSignatureSpec>,
 ) -> (
     std::collections::HashMap<usize, String>,
     std::collections::HashMap<usize, String>,
@@ -305,31 +264,32 @@ fn apply_signature_context_overrides(
     let mut param_types = std::collections::HashMap::new();
     let mut param_names = std::collections::HashMap::new();
 
-    if let Some(current) = sig_ctx.current.as_ref() {
-        while sig.params.len() < current.params.len() {
+    if let Some(signature) = signature {
+        while sig.params.len() < signature.params.len() {
             let idx = sig.params.len();
-            let param_type = current
+            let param_type = signature
                 .params
                 .get(idx)
                 .and_then(|param| param.ty.as_ref())
-                .map(ToString::to_string)
+                .map(|ty| type_like_to_ctype(ty).to_string())
                 .unwrap_or_else(|| "void *".to_string());
             sig.params.push(InferredParamJson {
                 name: format!("arg{}", idx + 1),
                 param_type,
             });
         }
-        if let Some(ret_ty) = current.ret_type.as_ref() {
+        if let Some(ret_ty) = signature.ret_type.as_ref() {
+            let ret_ty = type_like_to_ctype(ret_ty);
             let ret_ty_str = ret_ty.to_string();
             if !matches!(ret_ty, r2dec::CType::Unknown) {
                 sig.ret_type = ret_ty_str;
             }
         }
-        for (idx, param) in current.params.iter().enumerate() {
+        for (idx, param) in signature.params.iter().enumerate() {
             if let Some(ty) = param.ty.as_ref() {
-                let ty_str = ty.to_string();
+                let ty_str = type_like_to_ctype(ty).to_string();
                 param_types.insert(idx, ty_str.clone());
-                if !matches!(ty, r2dec::CType::Unknown)
+                if !matches!(type_like_to_ctype(ty), r2dec::CType::Unknown)
                     && let Some(inferred_param) = sig.params.get_mut(idx)
                 {
                     inferred_param.param_type = ty_str;
@@ -343,70 +303,26 @@ fn apply_signature_context_overrides(
             }
         }
         sig.signature = crate::format_afs_signature(&sig.function_name, &sig.ret_type, &sig.params);
-        sig.confidence = sig
-            .confidence
-            .max(crate::explicit_signature_context_strength(current));
+        sig.confidence = sig.confidence.max(signature_strength(signature));
     }
 
     (param_types, param_names)
 }
 
-pub(crate) fn normalize_function_basename(name: &str) -> String {
-    let mut lower = name.trim().to_ascii_lowercase();
-    for prefix in ["sym.imp.", "sym.", "dbg.", "fcn."] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            lower = rest.to_string();
-            break;
-        }
-    }
-    if let Some(rest) = lower.strip_prefix('_')
-        && rest == "main"
-    {
-        return "main".to_string();
-    }
-    lower
-}
-
-pub(crate) fn is_c_main_function(name: &str) -> bool {
-    normalize_function_basename(name) == "main"
-}
-
-pub(crate) fn canonical_main_external_signature() -> r2dec::ExternalFunctionSignature {
-    let char_ptr = r2dec::CType::Pointer(Box::new(r2dec::CType::Int(8)));
-    let char_pp = r2dec::CType::Pointer(Box::new(char_ptr));
-    r2dec::ExternalFunctionSignature {
-        ret_type: Some(r2dec::CType::Int(32)),
-        params: vec![
-            r2dec::ExternalFunctionParam {
-                name: "argc".to_string(),
-                ty: Some(r2dec::CType::Int(32)),
-            },
-            r2dec::ExternalFunctionParam {
-                name: "argv".to_string(),
-                ty: Some(char_pp.clone()),
-            },
-            r2dec::ExternalFunctionParam {
-                name: "envp".to_string(),
-                ty: Some(char_pp),
-            },
-        ],
-    }
-}
-
 pub(crate) fn apply_main_signature_override(
     function_name: &str,
     signature_cc: &mut InferredSignatureCcJson,
-    merged_signature: &mut Option<r2dec::ExternalFunctionSignature>,
+    merged_signature: &mut Option<r2types::FunctionSignatureSpec>,
 ) {
-    if !is_c_main_function(function_name) {
+    if !r2types::is_c_main_function(function_name) {
         return;
     }
 
-    let main_signature = canonical_main_external_signature();
+    let main_signature = r2types::canonical_main_signature_spec();
     signature_cc.ret_type = main_signature
         .ret_type
         .as_ref()
-        .map(ToString::to_string)
+        .map(|ty| type_like_to_ctype(ty).to_string())
         .unwrap_or_else(|| "int32_t".to_string());
     signature_cc.params = main_signature
         .params
@@ -416,7 +332,7 @@ pub(crate) fn apply_main_signature_override(
             param_type: param
                 .ty
                 .as_ref()
-                .map(ToString::to_string)
+                .map(|ty| type_like_to_ctype(ty).to_string())
                 .unwrap_or_else(|| "void *".to_string()),
         })
         .collect();
@@ -430,7 +346,7 @@ pub(crate) fn apply_main_signature_override(
 }
 
 fn signature_param_blocks_local_struct_override(
-    signature: &Option<r2dec::ExternalFunctionSignature>,
+    signature: &Option<r2types::FunctionSignatureSpec>,
     slot: usize,
 ) -> bool {
     let Some(ty) = signature
@@ -441,25 +357,24 @@ fn signature_param_blocks_local_struct_override(
         return false;
     };
 
-    if matches!(ty, r2dec::CType::Unknown | r2dec::CType::Void) {
+    if matches!(ty, r2types::CTypeLike::Unknown | r2types::CTypeLike::Void) {
         return false;
     }
 
     match ty {
-        r2dec::CType::Pointer(inner) => !matches!(
+        r2types::CTypeLike::Pointer(inner) => !matches!(
             inner.as_ref(),
-            r2dec::CType::Unknown
-                | r2dec::CType::Void
-                | r2dec::CType::Struct(_)
-                | r2dec::CType::Union(_)
-                | r2dec::CType::Typedef(_)
+            r2types::CTypeLike::Unknown
+                | r2types::CTypeLike::Void
+                | r2types::CTypeLike::Struct(_)
+                | r2types::CTypeLike::Union(_)
         ),
         _ => true,
     }
 }
 
 fn prune_conflicting_local_struct_overrides(
-    merged_signature: &Option<r2dec::ExternalFunctionSignature>,
+    merged_signature: &Option<r2types::FunctionSignatureSpec>,
     struct_decls: &mut Vec<crate::StructDeclCandidateJson>,
     slot_type_overrides: &mut std::collections::HashMap<usize, String>,
     slot_field_profiles: &mut std::collections::HashMap<
@@ -495,12 +410,24 @@ fn prune_conflicting_local_struct_overrides(
     });
 }
 
+fn signature_strength(signature: &r2types::FunctionSignatureSpec) -> u8 {
+    let has_type_info =
+        signature.ret_type.is_some() || signature.params.iter().any(|param| param.ty.is_some());
+    let has_named_params = signature
+        .params
+        .iter()
+        .any(|param| !crate::is_generic_arg_name(&param.name));
+    if has_type_info || has_named_params {
+        96
+    } else {
+        80
+    }
+}
+
 fn build_function_analysis_artifact_from_analysis(
     input: &FunctionInput<'_>,
     analysis: FunctionAnalysis,
-    afcfj: &str,
-    afvj: &str,
-    tsj: &str,
+    external_context_json: &str,
 ) -> Option<FunctionAnalysisArtifact> {
     let ptr_bits = input
         .ctx
@@ -509,19 +436,16 @@ fn build_function_analysis_artifact_from_analysis(
         .map(|a| a.addr_size * 8)
         .unwrap_or(64);
     let mut signature_cc = infer_signature_cc_from_analysis(input, &analysis)?;
-    let sig_ctx = crate::parse_signature_context(afcfj, ptr_bits);
-    let (_param_types, _param_names) =
-        apply_signature_context_overrides(&mut signature_cc, &sig_ctx);
-    let known_function_signatures = sig_ctx.known.clone();
-
-    let reg_params = crate::parse_external_reg_params(afvj, ptr_bits);
-    let mut merged_signature =
-        crate::merge_signature_with_reg_params(sig_ctx.current.clone(), reg_params);
+    let parsed_context = r2types::parse_external_context_json(external_context_json, ptr_bits);
+    let mut merged_signature = parsed_context.merged_signature.clone();
     apply_main_signature_override(
         &input.function_name,
         &mut signature_cc,
         &mut merged_signature,
     );
+    let (_param_types, _param_names) =
+        apply_signature_context_overrides(&mut signature_cc, merged_signature.as_ref());
+    let known_function_signatures = parsed_context.known_function_signatures.clone();
 
     let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
     let raw_structs = crate::infer_structs_from_ssa(
@@ -538,9 +462,11 @@ fn build_function_analysis_artifact_from_analysis(
     );
     let (mut struct_decls, mut slot_type_overrides, mut slot_field_profiles) =
         crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
-    let (external_structs, solver_warnings) =
-        crate::collect_external_struct_candidates(tsj, ptr_bits);
-    diagnostics.solver_warnings = solver_warnings;
+    let external_structs = crate::collect_external_struct_candidates_from_db(
+        &parsed_context.external_type_db,
+        ptr_bits,
+    );
+    diagnostics.solver_warnings = parsed_context.diagnostics.clone();
     crate::align_local_structs_with_external(
         &mut struct_decls,
         &mut slot_type_overrides,
@@ -570,7 +496,7 @@ fn build_function_analysis_artifact_from_analysis(
         struct_decls = merged;
     }
 
-    let mut type_db = r2types::ExternalTypeDb::from_tsj_json(tsj);
+    let mut type_db = parsed_context.external_type_db.clone();
     crate::merge_local_structs_into_type_db(&mut type_db, &struct_decls);
     let merged_signature = crate::merge_slot_type_overrides_into_signature(
         merged_signature,
@@ -578,6 +504,7 @@ fn build_function_analysis_artifact_from_analysis(
         ptr_bits,
     );
     let type_facts = build_function_type_facts(
+        &parsed_context,
         merged_signature.clone(),
         known_function_signatures,
         type_db,
@@ -611,12 +538,10 @@ fn build_function_analysis_artifact_from_analysis(
 
 pub(crate) fn build_function_analysis_artifact(
     input: &FunctionInput<'_>,
-    afcfj: &str,
-    afvj: &str,
-    tsj: &str,
+    external_context_json: &str,
 ) -> Option<FunctionAnalysisArtifact> {
     let analysis = build_function_analysis(input)?;
-    build_function_analysis_artifact_from_analysis(input, analysis, afcfj, afvj, tsj)
+    build_function_analysis_artifact_from_analysis(input, analysis, external_context_json)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -627,9 +552,7 @@ pub(crate) fn build_detached_function_analysis_artifact(
     ptr_bits: u32,
     semantic_metadata_enabled: bool,
     reg_type_hints: &std::collections::HashMap<String, TypeHint>,
-    afcfj: &str,
-    afvj: &str,
-    tsj: &str,
+    external_context_json: &str,
 ) -> Option<FunctionAnalysisArtifact> {
     let ssa_func =
         r2ssa::SSAFunction::from_blocks_for_decompile(blocks, arch)?.with_name(function_name);
@@ -750,14 +673,11 @@ pub(crate) fn build_detached_function_analysis_artifact(
         )
         .1,
     };
-    let sig_ctx = crate::parse_signature_context(afcfj, ptr_bits);
-    let _ = apply_signature_context_overrides(&mut signature_cc, &sig_ctx);
-    let known_function_signatures = sig_ctx.known.clone();
-
-    let reg_params = crate::parse_external_reg_params(afvj, ptr_bits);
-    let mut merged_signature =
-        crate::merge_signature_with_reg_params(sig_ctx.current.clone(), reg_params);
+    let parsed_context = r2types::parse_external_context_json(external_context_json, ptr_bits);
+    let mut merged_signature = parsed_context.merged_signature.clone();
     apply_main_signature_override(function_name, &mut signature_cc, &mut merged_signature);
+    let _ = apply_signature_context_overrides(&mut signature_cc, merged_signature.as_ref());
+    let known_function_signatures = parsed_context.known_function_signatures.clone();
 
     let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
     let raw_structs = crate::infer_structs_from_ssa(
@@ -774,9 +694,11 @@ pub(crate) fn build_detached_function_analysis_artifact(
     );
     let (mut struct_decls, mut slot_type_overrides, mut slot_field_profiles) =
         crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
-    let (external_structs, solver_warnings) =
-        crate::collect_external_struct_candidates(tsj, ptr_bits);
-    diagnostics.solver_warnings = solver_warnings;
+    let external_structs = crate::collect_external_struct_candidates_from_db(
+        &parsed_context.external_type_db,
+        ptr_bits,
+    );
+    diagnostics.solver_warnings = parsed_context.diagnostics.clone();
     crate::align_local_structs_with_external(
         &mut struct_decls,
         &mut slot_type_overrides,
@@ -804,7 +726,7 @@ pub(crate) fn build_detached_function_analysis_artifact(
         }
         struct_decls = merged;
     }
-    let mut type_db = r2types::ExternalTypeDb::from_tsj_json(tsj);
+    let mut type_db = parsed_context.external_type_db.clone();
     crate::merge_local_structs_into_type_db(&mut type_db, &struct_decls);
     let merged_signature = crate::merge_slot_type_overrides_into_signature(
         merged_signature,
@@ -812,6 +734,7 @@ pub(crate) fn build_detached_function_analysis_artifact(
         ptr_bits,
     );
     let type_facts = build_function_type_facts(
+        &parsed_context,
         merged_signature.clone(),
         known_function_signatures,
         type_db,
@@ -3123,26 +3046,32 @@ mod tests {
             confidence: 80,
             callconv_confidence: 0,
         };
-        let sig_ctx = crate::ParsedSignatureContext {
-            current: Some(r2dec::ExternalFunctionSignature {
-                ret_type: Some(r2dec::CType::Int(32)),
-                params: vec![
-                    r2dec::ExternalFunctionParam {
-                        name: "argc".to_string(),
-                        ty: Some(r2dec::CType::Int(32)),
-                    },
-                    r2dec::ExternalFunctionParam {
-                        name: "argv".to_string(),
-                        ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(
-                            Box::new(r2dec::CType::Int(8)),
-                        )))),
-                    },
-                ],
+        let merged = Some(r2types::FunctionSignatureSpec {
+            ret_type: Some(r2types::CTypeLike::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Signed,
             }),
-            known: std::collections::HashMap::new(),
-        };
+            params: vec![
+                r2types::FunctionParamSpec {
+                    name: "argc".to_string(),
+                    ty: Some(r2types::CTypeLike::Int {
+                        bits: 32,
+                        signedness: r2types::Signedness::Signed,
+                    }),
+                },
+                r2types::FunctionParamSpec {
+                    name: "argv".to_string(),
+                    ty: Some(r2types::CTypeLike::Pointer(Box::new(
+                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Int {
+                            bits: 8,
+                            signedness: r2types::Signedness::Signed,
+                        })),
+                    ))),
+                },
+            ],
+        });
 
-        apply_signature_context_overrides(&mut sig, &sig_ctx);
+        apply_signature_context_overrides(&mut sig, merged.as_ref());
 
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.params[0].name, "argc");
@@ -3166,24 +3095,36 @@ mod tests {
             confidence: 80,
             callconv_confidence: 0,
         };
-        let mut merged = Some(r2dec::ExternalFunctionSignature {
-            ret_type: Some(r2dec::CType::Int(32)),
+        let mut merged = Some(r2types::FunctionSignatureSpec {
+            ret_type: Some(r2types::CTypeLike::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Signed,
+            }),
             params: vec![
-                r2dec::ExternalFunctionParam {
+                r2types::FunctionParamSpec {
                     name: "arg0".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                    ty: Some(r2types::CTypeLike::Pointer(Box::new(
+                        r2types::CTypeLike::Void,
+                    ))),
                 },
-                r2dec::ExternalFunctionParam {
+                r2types::FunctionParamSpec {
                     name: "arg2".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                    ty: Some(r2types::CTypeLike::Pointer(Box::new(
+                        r2types::CTypeLike::Void,
+                    ))),
                 },
-                r2dec::ExternalFunctionParam {
+                r2types::FunctionParamSpec {
                     name: "arg3".to_string(),
-                    ty: Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                    ty: Some(r2types::CTypeLike::Pointer(Box::new(
+                        r2types::CTypeLike::Void,
+                    ))),
                 },
-                r2dec::ExternalFunctionParam {
+                r2types::FunctionParamSpec {
                     name: "arg_550h".to_string(),
-                    ty: Some(r2dec::CType::Int(64)),
+                    ty: Some(r2types::CTypeLike::Int {
+                        bits: 64,
+                        signedness: r2types::Signedness::Signed,
+                    }),
                 },
             ],
         });

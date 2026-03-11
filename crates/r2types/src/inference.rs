@@ -7,19 +7,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    CTypeLike, Constraint, ConstraintSource, ExternalStruct, ExternalTypeDb, FunctionSignatureSpec,
-    FunctionType, MemoryCapability, ResolvedFieldLayout, ResolvedSignature, SignatureRegistry,
-    Signedness, SolvedTypes, SolverConfig, Type, TypeArena, TypeId, TypeOracle, TypeSolver,
-    to_c_type_like,
+    CTypeLike, Constraint, ConstraintSource, ExternalStackVarSpec, ExternalStruct, ExternalTypeDb,
+    FunctionSignatureSpec, FunctionType, MemoryCapability, ResolvedFieldLayout, ResolvedSignature,
+    SignatureRegistry, Signedness, SolvedTypes, SolverConfig, Type, TypeArena, TypeId, TypeOracle,
+    TypeSolver, to_c_type_like,
 };
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ExternalStackVarSpec {
-    pub name: String,
-    pub ty: Option<CTypeLike>,
-    pub base: Option<String>,
-}
 
 /// Type inference context.
 pub struct TypeInference {
