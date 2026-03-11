@@ -30,9 +30,7 @@ pub(crate) struct FunctionAnalysisArtifact {
     pub(crate) pattern_ssa_blocks: Vec<r2ssa::SSABlock>,
     pub(crate) signature_cc: InferredSignatureCcJson,
     pub(crate) type_facts: r2types::FunctionTypeFacts,
-    pub(crate) struct_decls: Vec<crate::StructDeclCandidateJson>,
-    pub(crate) diagnostics: crate::TypeWritebackDiagnosticsJson,
-    pub(crate) vars: Vec<VarProt>,
+    pub(crate) writeback_plan: r2types::TypeWritebackPlan,
 }
 
 fn type_like_to_ctype(ty: &r2types::CTypeLike) -> r2dec::CType {
@@ -57,27 +55,103 @@ fn type_like_to_ctype(ty: &r2types::CTypeLike) -> r2dec::CType {
     }
 }
 
-fn build_function_type_facts(
-    parsed_context: &r2types::ParsedExternalContext,
-    merged_signature: Option<r2types::FunctionSignatureSpec>,
-    known_function_signatures: std::collections::HashMap<String, r2types::FunctionType>,
-    external_type_db: r2types::ExternalTypeDb,
+fn signature_cc_to_writeback(sig: &InferredSignatureCcJson) -> r2types::InferredSignature {
+    r2types::InferredSignature {
+        function_name: sig.function_name.clone(),
+        signature: sig.signature.clone(),
+        ret_type: sig.ret_type.clone(),
+        params: sig
+            .params
+            .iter()
+            .map(|param| r2types::InferredSignatureParam {
+                name: param.name.clone(),
+                param_type: param.param_type.clone(),
+            })
+            .collect(),
+        callconv: sig.callconv.clone(),
+        arch: sig.arch.clone(),
+        confidence: sig.confidence,
+        callconv_confidence: sig.callconv_confidence,
+    }
+}
+
+fn signature_cc_from_writeback(sig: r2types::InferredSignature) -> InferredSignatureCcJson {
+    InferredSignatureCcJson {
+        function_name: sig.function_name,
+        signature: sig.signature,
+        ret_type: sig.ret_type,
+        params: sig
+            .params
+            .into_iter()
+            .map(|param| InferredParamJson {
+                name: param.name,
+                param_type: param.param_type,
+            })
+            .collect(),
+        callconv: sig.callconv,
+        arch: sig.arch,
+        confidence: sig.confidence,
+        callconv_confidence: sig.callconv_confidence,
+    }
+}
+
+fn var_prot_to_writeback(var: &VarProt) -> r2types::RecoveredVariable {
+    r2types::RecoveredVariable {
+        name: var.name.clone(),
+        kind: var.kind.clone(),
+        delta: var.delta,
+        var_type: var.var_type.clone(),
+        isarg: var.isarg,
+        reg: var.reg.clone(),
+    }
+}
+
+fn writeback_diagnostics_from_plugin(
+    diagnostics: crate::TypeWritebackDiagnosticsJson,
+) -> r2types::TypeWritebackDiagnostics {
+    r2types::TypeWritebackDiagnostics {
+        conflicts: diagnostics.conflicts,
+        warnings: diagnostics.warnings,
+        solver_warnings: diagnostics.solver_warnings,
+    }
+}
+
+fn struct_decl_to_writeback(decl: crate::StructDeclCandidateJson) -> r2types::StructDeclCandidate {
+    r2types::StructDeclCandidate {
+        name: decl.name,
+        decl: decl.decl,
+        confidence: decl.confidence,
+        source: if decl.source == "external_type_db" {
+            r2types::StructDeclSource::ExternalTypeDb
+        } else {
+            r2types::StructDeclSource::LocalInferred
+        },
+        fields: decl
+            .fields
+            .into_iter()
+            .map(|field| r2types::StructFieldCandidate {
+                name: field.name,
+                offset: field.offset,
+                field_type: field.field_type,
+                confidence: field.confidence,
+            })
+            .collect(),
+    }
+}
+
+fn local_struct_artifacts_to_writeback(
+    struct_decls: Vec<crate::StructDeclCandidateJson>,
     slot_type_overrides: std::collections::HashMap<usize, String>,
     slot_field_profiles: std::collections::HashMap<usize, std::collections::BTreeMap<u64, String>>,
-    diagnostics: &crate::TypeWritebackDiagnosticsJson,
-) -> r2types::FunctionTypeFacts {
-    r2types::FunctionTypeFacts::builder(r2types::FunctionTypeFactInputs {
-        merged_signature,
-        known_function_signatures,
-        register_params: parsed_context.register_params.clone(),
-        external_stack_vars: parsed_context.external_stack_vars.clone(),
-        external_type_db,
+) -> r2types::LocalStructArtifacts {
+    r2types::LocalStructArtifacts {
+        struct_decls: struct_decls
+            .into_iter()
+            .map(struct_decl_to_writeback)
+            .collect(),
         slot_type_overrides,
         slot_field_profiles,
-        diagnostics: diagnostics.solver_warnings.clone(),
-        ..r2types::FunctionTypeFactInputs::default()
-    })
-    .build()
+    }
 }
 
 fn function_blocks_to_local_ssa(func: &r2ssa::SSAFunction) -> Vec<r2ssa::SSABlock> {
@@ -254,6 +328,7 @@ pub(crate) fn infer_signature_cc_inner(
     infer_signature_cc_from_analysis(input, &analysis)
 }
 
+#[cfg(test)]
 fn apply_signature_context_overrides(
     sig: &mut InferredSignatureCcJson,
     signature: Option<&r2types::FunctionSignatureSpec>,
@@ -309,6 +384,7 @@ fn apply_signature_context_overrides(
     (param_types, param_names)
 }
 
+#[cfg(test)]
 pub(crate) fn apply_main_signature_override(
     function_name: &str,
     signature_cc: &mut InferredSignatureCcJson,
@@ -345,71 +421,7 @@ pub(crate) fn apply_main_signature_override(
     *merged_signature = Some(main_signature);
 }
 
-fn signature_param_blocks_local_struct_override(
-    signature: &Option<r2types::FunctionSignatureSpec>,
-    slot: usize,
-) -> bool {
-    let Some(ty) = signature
-        .as_ref()
-        .and_then(|sig| sig.params.get(slot))
-        .and_then(|param| param.ty.as_ref())
-    else {
-        return false;
-    };
-
-    if matches!(ty, r2types::CTypeLike::Unknown | r2types::CTypeLike::Void) {
-        return false;
-    }
-
-    match ty {
-        r2types::CTypeLike::Pointer(inner) => !matches!(
-            inner.as_ref(),
-            r2types::CTypeLike::Unknown
-                | r2types::CTypeLike::Void
-                | r2types::CTypeLike::Struct(_)
-                | r2types::CTypeLike::Union(_)
-        ),
-        _ => true,
-    }
-}
-
-fn prune_conflicting_local_struct_overrides(
-    merged_signature: &Option<r2types::FunctionSignatureSpec>,
-    struct_decls: &mut Vec<crate::StructDeclCandidateJson>,
-    slot_type_overrides: &mut std::collections::HashMap<usize, String>,
-    slot_field_profiles: &mut std::collections::HashMap<
-        usize,
-        std::collections::BTreeMap<u64, String>,
-    >,
-) {
-    let blocked_slots = slot_type_overrides
-        .keys()
-        .copied()
-        .filter(|slot| signature_param_blocks_local_struct_override(merged_signature, *slot))
-        .collect::<Vec<_>>();
-
-    if blocked_slots.is_empty() {
-        return;
-    }
-
-    for slot in &blocked_slots {
-        slot_type_overrides.remove(slot);
-        slot_field_profiles.remove(slot);
-    }
-
-    let referenced_local_names = slot_type_overrides
-        .values()
-        .filter_map(|ty| ty.trim().strip_prefix("struct "))
-        .filter_map(|rest| rest.trim_end().strip_suffix(" *"))
-        .map(|name| name.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-
-    struct_decls.retain(|decl| {
-        decl.source != "local_inferred"
-            || referenced_local_names.contains(&decl.name.to_ascii_lowercase())
-    });
-}
-
+#[cfg(test)]
 fn signature_strength(signature: &r2types::FunctionSignatureSpec) -> u8 {
     let has_type_info =
         signature.ret_type.is_some() || signature.params.iter().any(|param| param.ty.is_some());
@@ -435,17 +447,8 @@ fn build_function_analysis_artifact_from_analysis(
         .as_ref()
         .map(|a| a.addr_size * 8)
         .unwrap_or(64);
-    let mut signature_cc = infer_signature_cc_from_analysis(input, &analysis)?;
+    let signature_cc = infer_signature_cc_from_analysis(input, &analysis)?;
     let parsed_context = r2types::parse_external_context_json(external_context_json, ptr_bits);
-    let mut merged_signature = parsed_context.merged_signature.clone();
-    apply_main_signature_override(
-        &input.function_name,
-        &mut signature_cc,
-        &mut merged_signature,
-    );
-    let (_param_types, _param_names) =
-        apply_signature_context_overrides(&mut signature_cc, merged_signature.as_ref());
-    let known_function_signatures = parsed_context.known_function_signatures.clone();
 
     let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
     let raw_structs = crate::infer_structs_from_ssa(
@@ -460,58 +463,8 @@ fn build_function_analysis_artifact_from_analysis(
         ptr_bits,
         &mut diagnostics,
     );
-    let (mut struct_decls, mut slot_type_overrides, mut slot_field_profiles) =
+    let (struct_decls, slot_type_overrides, slot_field_profiles) =
         crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
-    let external_structs = crate::collect_external_struct_candidates_from_db(
-        &parsed_context.external_type_db,
-        ptr_bits,
-    );
-    diagnostics.solver_warnings = parsed_context.diagnostics.clone();
-    crate::align_local_structs_with_external(
-        &mut struct_decls,
-        &mut slot_type_overrides,
-        &slot_field_profiles,
-        &external_structs,
-    );
-    crate::prefer_stronger_local_struct_overrides(
-        &struct_decls,
-        &mut slot_type_overrides,
-        &slot_field_profiles,
-    );
-    prune_conflicting_local_struct_overrides(
-        &merged_signature,
-        &mut struct_decls,
-        &mut slot_type_overrides,
-        &mut slot_field_profiles,
-    );
-
-    {
-        let mut seen = std::collections::HashSet::new();
-        let mut merged = Vec::new();
-        for decl in external_structs.into_iter().chain(struct_decls.into_iter()) {
-            if seen.insert(decl.name.to_ascii_lowercase()) {
-                merged.push(decl);
-            }
-        }
-        struct_decls = merged;
-    }
-
-    let mut type_db = parsed_context.external_type_db.clone();
-    crate::merge_local_structs_into_type_db(&mut type_db, &struct_decls);
-    let merged_signature = crate::merge_slot_type_overrides_into_signature(
-        merged_signature,
-        &slot_type_overrides,
-        ptr_bits,
-    );
-    let type_facts = build_function_type_facts(
-        &parsed_context,
-        merged_signature.clone(),
-        known_function_signatures,
-        type_db,
-        slot_type_overrides.clone(),
-        slot_field_profiles.clone(),
-        &diagnostics,
-    );
 
     let reg_type_hints = if input.ctx.semantic_metadata_enabled {
         collect_register_type_hints(input.blocks.as_slice(), input.ctx.disasm)
@@ -524,15 +477,28 @@ fn build_function_analysis_artifact_from_analysis(
         &reg_type_hints,
         input.ctx.semantic_metadata_enabled,
     );
+    let recovered_vars = vars.iter().map(var_prot_to_writeback).collect::<Vec<_>>();
+    let writeback = r2types::build_type_writeback_analysis(r2types::TypeWritebackAnalysisInput {
+        function_name: &input.function_name,
+        ptr_bits,
+        inferred_signature: signature_cc_to_writeback(&signature_cc),
+        recovered_vars: &recovered_vars,
+        ssa_blocks: &analysis.pattern_ssa_blocks,
+        parsed_context,
+        local_structs: local_struct_artifacts_to_writeback(
+            struct_decls,
+            slot_type_overrides,
+            slot_field_profiles,
+        ),
+        diagnostics: writeback_diagnostics_from_plugin(diagnostics),
+    });
 
     Some(FunctionAnalysisArtifact {
         ssa_func: analysis.ssa_func,
         pattern_ssa_blocks: analysis.pattern_ssa_blocks,
-        signature_cc,
-        type_facts,
-        struct_decls,
-        diagnostics,
-        vars,
+        signature_cc: signature_cc_from_writeback(writeback.signature),
+        type_facts: writeback.type_facts,
+        writeback_plan: writeback.plan,
     })
 }
 
@@ -655,7 +621,7 @@ pub(crate) fn build_detached_function_analysis_artifact(
         &evidence_ctx,
     );
     let ret_type = crate::materialize_signature_ctype(ret_type, ptr_bits);
-    let mut signature_cc = InferredSignatureCcJson {
+    let signature_cc = InferredSignatureCcJson {
         function_name: function_name.to_string(),
         signature: crate::format_afs_signature(function_name, &ret_type.to_string(), &params),
         ret_type: ret_type.to_string(),
@@ -674,10 +640,6 @@ pub(crate) fn build_detached_function_analysis_artifact(
         .1,
     };
     let parsed_context = r2types::parse_external_context_json(external_context_json, ptr_bits);
-    let mut merged_signature = parsed_context.merged_signature.clone();
-    apply_main_signature_override(function_name, &mut signature_cc, &mut merged_signature);
-    let _ = apply_signature_context_overrides(&mut signature_cc, merged_signature.as_ref());
-    let known_function_signatures = parsed_context.known_function_signatures.clone();
 
     let mut diagnostics = crate::TypeWritebackDiagnosticsJson::default();
     let raw_structs = crate::infer_structs_from_ssa(
@@ -692,71 +654,36 @@ pub(crate) fn build_detached_function_analysis_artifact(
         ptr_bits,
         &mut diagnostics,
     );
-    let (mut struct_decls, mut slot_type_overrides, mut slot_field_profiles) =
+    let (struct_decls, slot_type_overrides, slot_field_profiles) =
         crate::merge_struct_inference_artifacts(raw_structs, semantic_structs);
-    let external_structs = crate::collect_external_struct_candidates_from_db(
-        &parsed_context.external_type_db,
-        ptr_bits,
-    );
-    diagnostics.solver_warnings = parsed_context.diagnostics.clone();
-    crate::align_local_structs_with_external(
-        &mut struct_decls,
-        &mut slot_type_overrides,
-        &slot_field_profiles,
-        &external_structs,
-    );
-    crate::prefer_stronger_local_struct_overrides(
-        &struct_decls,
-        &mut slot_type_overrides,
-        &slot_field_profiles,
-    );
-    prune_conflicting_local_struct_overrides(
-        &merged_signature,
-        &mut struct_decls,
-        &mut slot_type_overrides,
-        &mut slot_field_profiles,
-    );
-    {
-        let mut seen = std::collections::HashSet::new();
-        let mut merged = Vec::new();
-        for decl in external_structs.into_iter().chain(struct_decls.into_iter()) {
-            if seen.insert(decl.name.to_ascii_lowercase()) {
-                merged.push(decl);
-            }
-        }
-        struct_decls = merged;
-    }
-    let mut type_db = parsed_context.external_type_db.clone();
-    crate::merge_local_structs_into_type_db(&mut type_db, &struct_decls);
-    let merged_signature = crate::merge_slot_type_overrides_into_signature(
-        merged_signature,
-        &slot_type_overrides,
-        ptr_bits,
-    );
-    let type_facts = build_function_type_facts(
-        &parsed_context,
-        merged_signature.clone(),
-        known_function_signatures,
-        type_db,
-        slot_type_overrides.clone(),
-        slot_field_profiles.clone(),
-        &diagnostics,
-    );
     let vars = recover_vars_from_ssa(
         &analysis.pattern_ssa_blocks,
         arch,
         reg_type_hints,
         semantic_metadata_enabled,
     );
+    let recovered_vars = vars.iter().map(var_prot_to_writeback).collect::<Vec<_>>();
+    let writeback = r2types::build_type_writeback_analysis(r2types::TypeWritebackAnalysisInput {
+        function_name,
+        ptr_bits,
+        inferred_signature: signature_cc_to_writeback(&signature_cc),
+        recovered_vars: &recovered_vars,
+        ssa_blocks: &analysis.pattern_ssa_blocks,
+        parsed_context,
+        local_structs: local_struct_artifacts_to_writeback(
+            struct_decls,
+            slot_type_overrides,
+            slot_field_profiles,
+        ),
+        diagnostics: writeback_diagnostics_from_plugin(diagnostics),
+    });
 
     Some(FunctionAnalysisArtifact {
         ssa_func: analysis.ssa_func,
         pattern_ssa_blocks: analysis.pattern_ssa_blocks,
-        signature_cc,
-        type_facts,
-        struct_decls,
-        diagnostics,
-        vars,
+        signature_cc: signature_cc_from_writeback(writeback.signature),
+        type_facts: writeback.type_facts,
+        writeback_plan: writeback.plan,
     })
 }
 

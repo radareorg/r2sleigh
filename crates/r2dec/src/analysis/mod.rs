@@ -17,6 +17,12 @@ pub(crate) mod utils;
 
 pub(crate) use predicate::PredicateSimplifier;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UseInfoAnalysisMode {
+    Full,
+    LocalStructAccesses,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AnalysisContext {
@@ -225,6 +231,13 @@ pub(crate) struct ValueProvenance {
 impl UseInfo {
     pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv<'_>) -> Self {
         use_info::analyze(blocks, env)
+    }
+
+    pub(crate) fn analyze_for_local_struct_accesses(
+        blocks: &[SSABlock],
+        env: &PassEnv<'_>,
+    ) -> Self {
+        use_info::analyze_for_local_struct_accesses(blocks, env)
     }
 
     pub(crate) fn analyze_with_definition_overrides(

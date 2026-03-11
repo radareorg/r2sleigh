@@ -9,6 +9,7 @@ pub mod model;
 pub mod oracle;
 pub mod signature;
 pub mod solver;
+pub mod writeback;
 
 pub use constraint::{Constraint, ConstraintSource, MemoryCapability};
 pub use context::{
@@ -34,3 +35,10 @@ pub use model::{Signedness, StructField, StructShape, Type, TypeArena, TypeId};
 pub use oracle::{LayoutOracle, TypeOracle};
 pub use signature::{ResolvedSignature, SignatureRegistry};
 pub use solver::{SolvedTypes, SolverConfig, SolverDiagnostics, TypeSolver};
+pub use writeback::{
+    GlobalTypeLinkCandidate, InferredSignature, InferredSignatureParam, LocalStructArtifacts,
+    RecoveredVariable, StructDeclCandidate, StructDeclSource, StructFieldCandidate,
+    TypeWritebackAnalysis, TypeWritebackAnalysisInput, TypeWritebackDiagnostics, TypeWritebackPlan,
+    VarRenameCandidate, VarTypeCandidate, WritebackEvidence, WritebackSource,
+    build_type_writeback_analysis,
+};

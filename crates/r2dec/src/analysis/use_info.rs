@@ -5,8 +5,8 @@ use r2ssa::{SSAFunction, SSAOp, SSAVar};
 
 use super::{
     BaseRef, FrameObjectFieldKey, FrameSlotMergeSummary, NormalizedAddr, PassEnv, ScalarValue,
-    SemanticCallArg, SemanticValue, StackSlotProvenance, UseInfo, ValueProvenance, ValueRef,
-    lower::LowerCtx, utils,
+    SemanticCallArg, SemanticValue, StackSlotProvenance, UseInfo, UseInfoAnalysisMode,
+    ValueProvenance, ValueRef, lower::LowerCtx, utils,
 };
 use crate::ast::{BinaryOp, CExpr};
 use crate::fold::op_lower::parse_const_value;
@@ -27,13 +27,36 @@ pub(crate) struct LocalStructFieldAccessProfile {
 }
 
 pub(crate) fn analyze(blocks: &[SSABlock], env: &PassEnv<'_>) -> UseInfo {
-    analyze_with_definition_overrides(blocks, env, &HashMap::new())
+    analyze_with_definition_overrides_mode(blocks, env, &HashMap::new(), UseInfoAnalysisMode::Full)
+}
+
+pub(crate) fn analyze_for_local_struct_accesses(blocks: &[SSABlock], env: &PassEnv<'_>) -> UseInfo {
+    analyze_with_definition_overrides_mode(
+        blocks,
+        env,
+        &HashMap::new(),
+        UseInfoAnalysisMode::LocalStructAccesses,
+    )
 }
 
 pub(crate) fn analyze_with_definition_overrides(
     blocks: &[SSABlock],
     env: &PassEnv<'_>,
     definition_overrides: &HashMap<String, CExpr>,
+) -> UseInfo {
+    analyze_with_definition_overrides_mode(
+        blocks,
+        env,
+        definition_overrides,
+        UseInfoAnalysisMode::Full,
+    )
+}
+
+fn analyze_with_definition_overrides_mode(
+    blocks: &[SSABlock],
+    env: &PassEnv<'_>,
+    definition_overrides: &HashMap<String, CExpr>,
+    mode: UseInfoAnalysisMode,
 ) -> UseInfo {
     let mut scratch = UseScratch::default();
     scratch.info.type_hints = env.type_hints.clone();
@@ -53,8 +76,10 @@ pub(crate) fn analyze_with_definition_overrides(
     rebuild_definitions(&mut scratch, blocks, env, definition_overrides);
 
     analyze_call_args(&mut scratch, blocks, env);
-    coalesce_variables(&mut scratch, blocks, env);
-    build_formatted_defs(&mut scratch, env);
+    if matches!(mode, UseInfoAnalysisMode::Full) {
+        coalesce_variables(&mut scratch, blocks, env);
+        build_formatted_defs(&mut scratch, env);
+    }
 
     scratch.info
 }

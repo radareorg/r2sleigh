@@ -902,7 +902,7 @@ pub fn infer_local_struct_field_accesses(
     };
 
     let blocks: Vec<_> = func.blocks().cloned().collect();
-    let use_info = analysis::UseInfo::analyze(&blocks, &env);
+    let use_info = analysis::UseInfo::analyze_for_local_struct_accesses(&blocks, &env);
     analysis::use_info::collect_local_struct_field_access_profiles(
         &use_info,
         func,

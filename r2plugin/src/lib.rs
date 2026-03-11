@@ -28,10 +28,12 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
 use std::slice;
-use types::{parse_const_value, recover_vars_arch_profile, size_to_type, ssa_var_block_key};
+use types::{recover_vars_arch_profile, size_to_type, ssa_var_block_key};
 
 #[cfg(test)]
 use analysis::ssa::{r2il_block_defuse_json, r2il_block_to_ssa_json};
+#[cfg(test)]
+use types::parse_const_value;
 
 /// Opaque context handle for C API.
 pub struct R2ILContext {
@@ -2600,6 +2602,7 @@ fn uniquify_name(base: String, used: &mut std::collections::HashSet<String>) -> 
     }
 }
 
+#[cfg(test)]
 fn is_generic_arg_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     lower
@@ -2608,6 +2611,7 @@ fn is_generic_arg_name(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn is_low_quality_stack_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.starts_with("var_")
@@ -3185,6 +3189,103 @@ struct InferredTypeWritebackJson {
     diagnostics: TypeWritebackDiagnosticsJson,
 }
 
+fn evidence_json(evidence: &[r2types::WritebackEvidence]) -> Vec<String> {
+    evidence
+        .iter()
+        .map(|tag| tag.as_str().to_string())
+        .collect()
+}
+
+fn struct_fields_json(fields: &[r2types::StructFieldCandidate]) -> Vec<StructFieldCandidateJson> {
+    fields
+        .iter()
+        .map(|field| StructFieldCandidateJson {
+            name: field.name.clone(),
+            offset: field.offset,
+            field_type: field.field_type.clone(),
+            confidence: field.confidence,
+        })
+        .collect()
+}
+
+fn writeback_plan_json(
+    plan: r2types::TypeWritebackPlan,
+    interproc: InterprocSummaryJson,
+) -> InferredTypeWritebackJson {
+    InferredTypeWritebackJson {
+        function_name: plan.signature.function_name,
+        signature: plan.signature.signature,
+        ret_type: plan.signature.ret_type,
+        params: plan
+            .signature
+            .params
+            .into_iter()
+            .map(|param| InferredParamJson {
+                name: param.name,
+                param_type: param.param_type,
+            })
+            .collect(),
+        callconv: plan.signature.callconv,
+        arch: plan.signature.arch,
+        confidence: plan.signature.confidence,
+        callconv_confidence: plan.signature.callconv_confidence,
+        var_type_candidates: plan
+            .var_type_candidates
+            .into_iter()
+            .map(|candidate| VarTypeCandidateJson {
+                name: candidate.name,
+                kind: candidate.kind,
+                delta: candidate.delta,
+                var_type: candidate.var_type,
+                isarg: candidate.isarg,
+                reg: candidate.reg,
+                size: candidate.size,
+                confidence: candidate.confidence,
+                source: candidate.source.as_str().to_string(),
+                evidence: evidence_json(&candidate.evidence),
+            })
+            .collect(),
+        var_rename_candidates: plan
+            .var_rename_candidates
+            .into_iter()
+            .map(|candidate| VarRenameCandidateJson {
+                name: candidate.name,
+                target_name: candidate.target_name,
+                confidence: candidate.confidence,
+                source: candidate.source.as_str().to_string(),
+                evidence: evidence_json(&candidate.evidence),
+            })
+            .collect(),
+        struct_decls: plan
+            .struct_decls
+            .into_iter()
+            .map(|decl| StructDeclCandidateJson {
+                name: decl.name,
+                decl: decl.decl,
+                confidence: decl.confidence,
+                source: decl.source.as_str().to_string(),
+                fields: struct_fields_json(&decl.fields),
+            })
+            .collect(),
+        global_type_links: plan
+            .global_type_links
+            .into_iter()
+            .map(|candidate| GlobalTypeLinkCandidateJson {
+                addr: candidate.addr,
+                target_type: candidate.target_type,
+                confidence: candidate.confidence,
+                source: candidate.source.as_str().to_string(),
+            })
+            .collect(),
+        interproc,
+        diagnostics: TypeWritebackDiagnosticsJson {
+            conflicts: plan.diagnostics.conflicts,
+            warnings: plan.diagnostics.warnings,
+            solver_warnings: plan.diagnostics.solver_warnings,
+        },
+    }
+}
+
 #[cfg(test)]
 const SIG_WRITEBACK_CONFIDENCE_MIN: u8 = 70;
 #[cfg(test)]
@@ -3686,7 +3787,7 @@ fn explicit_signature_context_strength(sig: &r2types::FunctionSignatureSpec) -> 
             param
                 .ty
                 .as_ref()
-                .map(|ty| type_like_to_ctype(ty))
+                .map(type_like_to_ctype)
                 .as_ref()
                 .is_some_and(is_informative_type)
         })
@@ -3695,35 +3796,6 @@ fn explicit_signature_context_strength(sig: &r2types::FunctionSignatureSpec) -> 
         .ret_type
         .as_ref()
         .map(type_like_to_ctype)
-        .as_ref()
-        .is_some_and(is_informative_type);
-    let mut confidence = 76u8.saturating_add(typed_params.saturating_mul(4)).min(96);
-    if has_ret {
-        confidence = confidence.saturating_add(6).min(96);
-    }
-    confidence
-}
-
-fn explicit_signature_context_strength_from_spec(
-    sig: &r2types::FunctionSignatureSpec,
-    ptr_bits: u32,
-) -> u8 {
-    let typed_params = sig
-        .params
-        .iter()
-        .filter(|param| {
-            param
-                .ty
-                .as_ref()
-                .map(|ty| materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits))
-                .as_ref()
-                .is_some_and(is_informative_type)
-        })
-        .count() as u8;
-    let has_ret = sig
-        .ret_type
-        .as_ref()
-        .map(|ty| materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits))
         .as_ref()
         .is_some_and(is_informative_type);
     let mut confidence = 76u8.saturating_add(typed_params.saturating_mul(4)).min(96);
@@ -3787,6 +3859,7 @@ fn is_unmaterialized_aggregate_name(name: &str) -> bool {
     lower.is_empty() || lower == "anon" || lower.starts_with("anon_")
 }
 
+#[cfg(test)]
 fn is_generic_type_string(ty: &str) -> bool {
     let normalized = normalize_external_type_name(ty);
     let lower = normalized.trim().to_ascii_lowercase();
@@ -3923,21 +3996,6 @@ fn parse_existing_var_types(json_str: &str) -> std::collections::HashMap<String,
     out
 }
 
-fn parse_existing_var_types_from_specs(
-    stack_vars: &std::collections::HashMap<i64, r2types::ExternalStackVarSpec>,
-) -> std::collections::HashMap<String, String> {
-    stack_vars
-        .values()
-        .filter_map(|var| {
-            let ty = var
-                .ty
-                .as_ref()
-                .map(|ty| normalize_external_type_name(&type_like_to_ctype(ty).to_string()))?;
-            Some((var.name.clone(), ty))
-        })
-        .collect()
-}
-
 fn collect_pointer_arg_slot_map(
     arch: Option<&ArchSpec>,
     ptr_bits: u32,
@@ -3992,6 +4050,7 @@ struct ArgAddrExpr {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 struct GlobalAddrExpr {
     base: u64,
     offset: i64,
@@ -4588,6 +4647,7 @@ fn infer_structs_from_ssa(
     build_struct_inference_artifacts_from_field_evidence(slot_field_evidence, ptr_bits, diagnostics)
 }
 
+#[cfg(test)]
 fn collect_external_struct_candidates_from_db(
     db: &r2types::ExternalTypeDb,
     ptr_bits: u32,
@@ -4627,6 +4687,7 @@ fn collect_external_struct_candidates_from_db(
     out
 }
 
+#[cfg(test)]
 fn is_generic_signature_type(ty: Option<&r2types::CTypeLike>) -> bool {
     match ty {
         None => true,
@@ -4641,6 +4702,7 @@ fn is_generic_signature_type(ty: Option<&r2types::CTypeLike>) -> bool {
     }
 }
 
+#[cfg(test)]
 fn merge_slot_type_overrides_into_signature(
     mut signature: Option<r2types::FunctionSignatureSpec>,
     slot_type_overrides: &SlotTypeOverrides,
@@ -4673,6 +4735,7 @@ fn merge_slot_type_overrides_into_signature(
     signature
 }
 
+#[cfg(test)]
 fn merge_local_structs_into_type_db(
     db: &mut r2types::ExternalTypeDb,
     struct_decls: &[StructDeclCandidateJson],
@@ -4736,6 +4799,7 @@ pub(crate) fn enrich_decompiler_type_context(
     (signature, type_db)
 }
 
+#[cfg(test)]
 fn struct_fields_signature(fields: &[StructFieldCandidateJson]) -> Vec<(u64, String)> {
     let mut out: Vec<(u64, String)> = fields
         .iter()
@@ -4745,6 +4809,7 @@ fn struct_fields_signature(fields: &[StructFieldCandidateJson]) -> Vec<(u64, Str
     out
 }
 
+#[cfg(test)]
 fn parse_struct_ptr_type_name(ty: &str) -> Option<String> {
     ty.trim()
         .strip_prefix("struct ")
@@ -4752,6 +4817,7 @@ fn parse_struct_ptr_type_name(ty: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(test)]
 fn local_struct_profile_score(
     decl: &StructDeclCandidateJson,
     profile: &std::collections::BTreeMap<u64, String>,
@@ -4786,6 +4852,7 @@ fn local_struct_profile_score(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn prefer_stronger_local_struct_overrides(
     struct_decls: &[StructDeclCandidateJson],
     slot_type_overrides: &mut std::collections::HashMap<usize, String>,
@@ -4830,6 +4897,7 @@ pub(crate) fn prefer_stronger_local_struct_overrides(
     }
 }
 
+#[cfg(test)]
 fn structurally_compatible(local_fields: &[(u64, String)], ext_fields: &[(u64, String)]) -> bool {
     if local_fields.is_empty() || ext_fields.is_empty() {
         return false;
@@ -4846,6 +4914,7 @@ fn structurally_compatible(local_fields: &[(u64, String)], ext_fields: &[(u64, S
     matches >= local_fields.len().min(2)
 }
 
+#[cfg(test)]
 fn align_local_structs_with_external(
     struct_decls: &mut [StructDeclCandidateJson],
     slot_type_overrides: &mut std::collections::HashMap<usize, String>,
@@ -4903,6 +4972,7 @@ fn align_local_structs_with_external(
     }
 }
 
+#[cfg(test)]
 fn infer_global_field_profiles(
     ssa_blocks: &[r2ssa::SSABlock],
     ptr_bits: u32,
@@ -5148,6 +5218,7 @@ fn infer_global_field_profiles(
     field_evidence
 }
 
+#[cfg(test)]
 fn score_global_type_links(
     ssa_blocks: &[r2ssa::SSABlock],
     struct_decls: &[StructDeclCandidateJson],
@@ -5348,250 +5419,24 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
     else {
         return ptr::null_mut();
     };
-    let mut sig = artifact.signature_cc;
-
-    let ptr_bits = function_input
-        .ctx
-        .arch
-        .as_ref()
-        .map(|a| a.addr_size * 8)
-        .unwrap_or(64);
-
     let ssa_blocks = artifact.pattern_ssa_blocks;
     if ssa_blocks.is_empty() {
         return ptr::null_mut();
     }
-    let vars = artifact.vars;
-    let mut diagnostics = artifact.diagnostics;
-    let parsed_context = r2types::parse_external_context_json(&external_context, ptr_bits);
-    let existing_types = parse_existing_var_types_from_specs(&parsed_context.external_stack_vars);
-    let stack_vars = &parsed_context.external_stack_vars;
-    let mut param_types = std::collections::HashMap::new();
-    let mut param_names = std::collections::HashMap::new();
-    if let Some(current) = parsed_context.merged_signature.as_ref() {
-        while sig.params.len() < current.params.len() {
-            let idx = sig.params.len();
-            let param_type = current
-                .params
-                .get(idx)
-                .and_then(|param| param.ty.as_ref())
-                .map(|ty| materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits).to_string())
-                .unwrap_or_else(|| "void *".to_string());
-            sig.params.push(InferredParamJson {
-                name: format!("arg{}", idx + 1),
-                param_type,
-            });
-        }
-        if let Some(ret_ty) = current.ret_type.as_ref() {
-            let ret_ty = materialize_signature_ctype(type_like_to_ctype(ret_ty), ptr_bits);
-            let ret_ty_str = ret_ty.to_string();
-            if !matches!(ret_ty, r2dec::CType::Unknown) {
-                sig.ret_type = ret_ty_str;
-            }
-        }
-        for (idx, param) in current.params.iter().enumerate() {
-            if let Some(ty) = param.ty.as_ref() {
-                let ty = materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits);
-                let ty_str = ty.to_string();
-                param_types.insert(idx, ty_str.clone());
-                if !matches!(ty, r2dec::CType::Unknown)
-                    && let Some(inferred_param) = sig.params.get_mut(idx)
-                {
-                    inferred_param.param_type = ty_str;
-                }
-            }
-            if !is_generic_arg_name(&param.name) {
-                param_names.insert(idx, param.name.clone());
-                if let Some(inferred_param) = sig.params.get_mut(idx) {
-                    inferred_param.name = param.name.clone();
-                }
-            }
-        }
-        sig.signature = format_afs_signature(&sig.function_name, &sig.ret_type, &sig.params);
-        sig.confidence = sig
-            .confidence
-            .max(explicit_signature_context_strength_from_spec(
-                current, ptr_bits,
-            ));
-    }
-    let mut merged_signature_for_main = parsed_context.merged_signature.clone();
-    r2types::apply_main_signature_override(
-        &function_input.function_name,
-        &mut merged_signature_for_main,
-    );
-    if r2types::is_c_main_function(&function_input.function_name) {
-        types::apply_main_signature_override(
-            &function_input.function_name,
-            &mut sig,
-            &mut merged_signature_for_main,
-        );
-    }
-
-    let struct_decls = artifact.struct_decls;
-    let slot_struct_types = artifact.type_facts.slot_type_overrides;
-
-    let mut var_type_candidates = Vec::new();
-    let mut var_rename_candidates = Vec::new();
-    let mut seen_renames = std::collections::HashSet::new();
-
-    for var in &vars {
-        let mut source = "local_inferred".to_string();
-        let mut confidence = if var.var_type.contains('*') {
-            92
-        } else if var.isarg {
-            88
-        } else {
-            84
-        };
-        let mut evidence = vec!["ssa-var-recovery".to_string()];
-        let mut chosen_type = var.var_type.clone();
-
-        let arg_slot = var
-            .name
-            .strip_prefix("arg")
-            .and_then(|idx| idx.parse::<usize>().ok());
-
-        if let Some(slot) = arg_slot
-            && let Some(sig_ty) = param_types.get(&slot)
-            && !is_generic_type_string(sig_ty)
-        {
-            chosen_type = sig_ty.clone();
-            confidence = 96;
-            source = "signature_registry".to_string();
-            evidence.push("afcfj-current".to_string());
-        } else if let Some(slot) = arg_slot
-            && let Some(sig_ty) = merged_signature_for_main
-                .as_ref()
-                .and_then(|sig| sig.params.get(slot))
-                .and_then(|param| param.ty.as_ref())
-                .map(|ty| materialize_signature_ctype(type_like_to_ctype(ty), ptr_bits).to_string())
-            && !is_generic_type_string(&sig_ty)
-        {
-            chosen_type = sig_ty;
-            confidence = 96;
-            source = "signature_registry".to_string();
-            evidence.push("canonical-main-signature".to_string());
-        } else if let Some(slot) = arg_slot
-            && let Some(struct_ty) = slot_struct_types.get(&slot)
-            && is_generic_type_string(&chosen_type)
-        {
-            chosen_type = struct_ty.clone();
-            confidence = 90;
-            source = "local_struct_inference".to_string();
-            evidence.push("ssa-field-offset-pattern".to_string());
-        }
-
-        if let Some(existing_ty) = existing_types.get(&var.name)
-            && !is_generic_type_string(existing_ty)
-        {
-            if is_generic_type_string(&chosen_type) {
-                chosen_type = existing_ty.clone();
-                confidence = 98;
-                source = "existing_state".to_string();
-                evidence.push("afvj-existing-type".to_string());
-            } else if !existing_ty.eq_ignore_ascii_case(&chosen_type) {
-                diagnostics.conflicts.push(format!(
-                    "var `{}` existing type `{}` conflicts with inferred `{}`",
-                    var.name, existing_ty, chosen_type
-                ));
-            }
-        }
-
-        if (var.kind == "b" || var.kind == "s")
-            && let Some(ext) = stack_vars.get(&var.delta)
-            && let Some(ext_ty) = ext.ty.as_ref()
-        {
-            let ext_ty_str =
-                materialize_signature_ctype(type_like_to_ctype(ext_ty), ptr_bits).to_string();
-            if !is_generic_type_string(&ext_ty_str) && is_generic_type_string(&chosen_type) {
-                chosen_type = ext_ty_str;
-                confidence = 97;
-                source = "external_type_db".to_string();
-                evidence.push("afvj-stack-annotation".to_string());
-            }
-            if ext.name != var.name
-                && is_low_quality_stack_name(&var.name)
-                && !is_low_quality_stack_name(&ext.name)
-            {
-                let target_name =
-                    sanitize_c_identifier(&ext.name).unwrap_or_else(|| ext.name.clone());
-                if target_name != var.name
-                    && seen_renames.insert(format!("{}->{target_name}", var.name))
-                {
-                    var_rename_candidates.push(VarRenameCandidateJson {
-                        name: var.name.clone(),
-                        target_name,
-                        confidence: 94,
-                        source: "external_type_db".to_string(),
-                        evidence: vec!["stack-var-name-from-afvj".to_string()],
-                    });
-                }
-            }
-        }
-
-        if let Some(slot) = arg_slot
-            && let Some(param_name) = param_names.get(&slot)
-            && is_generic_arg_name(&var.name)
-        {
-            let target_name =
-                sanitize_c_identifier(param_name).unwrap_or_else(|| param_name.clone());
-            if !target_name.is_empty()
-                && target_name != var.name
-                && seen_renames.insert(format!("{}->{target_name}", var.name))
-            {
-                var_rename_candidates.push(VarRenameCandidateJson {
-                    name: var.name.clone(),
-                    target_name,
-                    confidence: 95,
-                    source: "signature_registry".to_string(),
-                    evidence: vec!["afcfj-param-name".to_string()],
-                });
-            }
-        }
-
-        let chosen_type = normalize_external_type_name(&chosen_type);
-        var_type_candidates.push(VarTypeCandidateJson {
-            name: var.name.clone(),
-            kind: var.kind.clone(),
-            delta: var.delta,
-            var_type: chosen_type.clone(),
-            isarg: var.isarg,
-            reg: var.reg.clone(),
-            size: estimate_c_type_size_bytes(&chosen_type, ptr_bits) as u32,
-            confidence,
-            source,
-            evidence,
-        });
-    }
-
-    let global_type_links =
-        score_global_type_links(&ssa_blocks, &struct_decls, &var_type_candidates, ptr_bits);
     let scope = serde_json::from_str::<serde_json::Value>(input.interproc.scope_json)
         .ok()
         .filter(|v| !v.is_null() && v.as_object().map(|obj| !obj.is_empty()).unwrap_or(true));
 
-    let payload = InferredTypeWritebackJson {
-        function_name: sig.function_name,
-        signature: sig.signature,
-        ret_type: sig.ret_type,
-        params: sig.params,
-        callconv: sig.callconv,
-        arch: sig.arch,
-        confidence: sig.confidence,
-        callconv_confidence: sig.callconv_confidence,
-        var_type_candidates,
-        var_rename_candidates,
-        struct_decls,
-        global_type_links,
-        interproc: InterprocSummaryJson {
+    let payload = writeback_plan_json(
+        artifact.writeback_plan,
+        InterprocSummaryJson {
             callsite_count: count_callsites(&ssa_blocks),
             iterations: input.interproc.iter.max(1),
             max_iterations: input.interproc.max_iters.max(input.interproc.iter.max(1)),
             converged: input.interproc.converged,
             scope,
         },
-        diagnostics,
-    };
+    );
 
     match serde_json::to_string(&payload) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),

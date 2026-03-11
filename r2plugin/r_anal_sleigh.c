@@ -1379,6 +1379,7 @@ typedef enum {
 
 typedef struct {
 	WritebackApplyPath path;
+	bool already_applied;
 	bool api_verify_fail;
 	bool cmd_fallback_attempted;
 	bool cmd_apply_fail;
@@ -4402,6 +4403,7 @@ static const RJson *json_next_object (const RJson *item) {
 }
 
 static int json_array_object_count(const RJson *array_root);
+static bool json_is_string_with_value(const RJson *value);
 static bool is_caller_propagation_ref_type (RAnalRefType type);
 
 static char *normalize_compare_string (const char *s) {
@@ -4672,6 +4674,93 @@ static bool verify_callconv_apply(RAnal *anal, ut64 fcn_addr, const char *cc_nam
 	return strings_match_normalized (target_fcn->callconv, cc_name);
 }
 
+static bool verify_practical_signature_consistency (
+	RAnal *anal,
+	RAnalFunction *fcn,
+	const RJson *sig_root,
+	bool check_signature,
+	bool check_callconv,
+	bool *afij_signature_drift,
+	ConsistencyReasonCounters *reason_counters
+);
+
+static bool apply_inferred_signature_typed(
+	RAnal *anal,
+	RAnalFunction *fcn,
+	const RJson *sig_root,
+	char *reason,
+	size_t reason_sz
+) {
+	const RJson *j_expected_ret;
+	const RJson *j_expected_params;
+	const RJson *j_expected_callconv;
+	RAnalFunctionSignatureParam *params = NULL;
+	bool ok = false;
+	int param_count = 0;
+	int i = 0;
+	const RJson *expected_param;
+
+	if (reason && reason_sz) {
+		reason[0] = '\0';
+	}
+	if (!anal || !fcn || !sig_root || sig_root->type != R_JSON_OBJECT) {
+		write_reason_msg (reason, reason_sz, "invalid typed signature payload");
+		return false;
+	}
+
+	j_expected_ret = r_json_get (sig_root, "ret_type");
+	j_expected_params = r_json_get (sig_root, "params");
+	j_expected_callconv = r_json_get (sig_root, "callconv");
+	if (!json_is_string_with_value (j_expected_ret) || !j_expected_params || j_expected_params->type != R_JSON_ARRAY) {
+		write_reason_msg (reason, reason_sz, "missing typed ret_type/params in payload");
+		return false;
+	}
+
+	param_count = json_array_object_count (j_expected_params);
+	if (param_count > 0) {
+		params = R_NEWS0 (RAnalFunctionSignatureParam, param_count);
+		if (!params) {
+			write_reason_msg (reason, reason_sz, "oom allocating typed signature params");
+			return false;
+		}
+	}
+
+	expected_param = json_next_object (j_expected_params->children.first);
+	while (expected_param && i < param_count) {
+		const RJson *j_expected_type = r_json_get (expected_param, "type");
+		const RJson *j_expected_name = r_json_get (expected_param, "name");
+		if (!json_is_string_with_value (j_expected_type)) {
+			write_reason_msg (reason, reason_sz, "missing typed arg type at index %d", i);
+			free (params);
+			return false;
+		}
+		params[i].type = j_expected_type->str_value;
+		params[i].name = json_is_string_with_value (j_expected_name)? j_expected_name->str_value: NULL;
+		expected_param = json_next_object (expected_param->next);
+		i++;
+	}
+	if (expected_param || i != param_count) {
+		write_reason_msg (reason, reason_sz, "typed param count mismatch while materializing payload");
+		free (params);
+		return false;
+	}
+
+	ok = r_anal_function_apply_signature (
+		anal,
+		fcn,
+		j_expected_ret->str_value,
+		params,
+		(size_t)param_count,
+		json_is_string_with_value (j_expected_callconv)? j_expected_callconv->str_value: NULL,
+		fcn->is_noreturn
+	);
+	free (params);
+	if (!ok) {
+		write_reason_msg (reason, reason_sz, "typed signature apply failed");
+	}
+	return ok;
+}
+
 static WritebackApplyResult apply_inferred_signature(
 	RAnal *anal,
 	RCore *core,
@@ -4685,21 +4774,41 @@ static WritebackApplyResult apply_inferred_signature(
 	if (!anal || !fcn || !signature || !*signature || !sig_root) {
 		return res;
 	}
-	rc = r_anal_str_to_fcn (anal, fcn, signature);
-	if (rc > 0 && verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))) {
-		res.path = WRITEBACK_APPLY_API;
+	if (verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))) {
+		res.already_applied = true;
+		if (!res.detail[0]) {
+			write_reason_msg (res.detail, sizeof (res.detail), "signature already matches");
+		}
 		return res;
 	}
+	if (verify_practical_signature_consistency (anal, fcn, sig_root, true, false, NULL, NULL)) {
+		res.already_applied = true;
+		write_reason_msg (res.detail, sizeof (res.detail), "practical signature already matches");
+		return res;
+	}
+	rc = apply_inferred_signature_typed (anal, fcn, sig_root, res.detail, sizeof (res.detail))? 1: 0;
+	if (rc > 0) {
+		if (verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))
+				|| verify_practical_signature_consistency (anal, fcn, sig_root, true, false, NULL, NULL)) {
+			res.path = WRITEBACK_APPLY_API;
+			return res;
+		}
+	}
 	if (rc <= 0 && !res.detail[0]) {
-		write_reason_msg (res.detail, sizeof (res.detail), "r_anal_str_to_fcn rc=%d", rc);
+		write_reason_msg (res.detail, sizeof (res.detail), "typed signature apply rc=%d", rc);
 	}
 	res.api_verify_fail = true;
 	if (!core) {
 		return res;
 	}
 	res.cmd_fallback_attempted = true;
+	if (R_STR_ISEMPTY (signature)) {
+		res.cmd_apply_fail = true;
+		return res;
+	}
 	r_core_cmdf_at (core, fcn->addr, "afs %s", signature);
-	if (verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))) {
+	if (verify_signature_type_db_ex (anal, fcn, sig_root, res.detail, sizeof (res.detail))
+			|| verify_practical_signature_consistency (anal, fcn, sig_root, true, false, NULL, NULL)) {
 		res.path = WRITEBACK_APPLY_CMD;
 		return res;
 	}
@@ -4712,6 +4821,11 @@ static WritebackApplyResult apply_inferred_callconv (RAnal *anal, RCore *core, R
 	const char *pooled_cc = NULL;
 
 	if (!anal || !fcn || !cc_name || !*cc_name) {
+		return res;
+	}
+	if (verify_callconv_apply (anal, fcn->addr, cc_name)) {
+		res.already_applied = true;
+		write_reason_msg (res.detail, sizeof (res.detail), "callconv already matches");
 		return res;
 	}
 	if (r_anal_cc_exist (anal, cc_name)) {
@@ -5431,17 +5545,17 @@ static bool is_caller_propagation_ref_type (RAnalRefType type) {
 		|| masked == R_ANAL_REF_TYPE_JUMP;
 }
 
-static bool function_has_opaque_type_markers(RCore *core, RAnalFunction *fcn) {
-	char *afcfj_json;
+static bool function_has_opaque_type_markers(RAnal *anal, RAnalFunction *fcn) {
 	bool has_opaque = false;
-	if (!core || !fcn) {
+	RAnalFunctionReadback *readback;
+	if (!anal || !fcn) {
 		return false;
 	}
-	afcfj_json = r_core_cmd_str_at (core, fcn->addr, "afcfj");
-	if (afcfj_json && strstr (afcfj_json, "type_0x")) {
-		has_opaque = true;
+	readback = r_anal_function_readback_collect (anal, fcn);
+	if (readback) {
+		has_opaque = readback->has_opaque_type_markers;
+		r_anal_function_readback_free (readback);
 	}
-	free (afcfj_json);
 	return has_opaque;
 }
 
@@ -5450,7 +5564,7 @@ static bool run_caller_type_match (RAnal *anal, RCore *core, RAnalFunction *call
 		return false;
 	}
 	/* Avoid flooding logs with "unknown type struct type_0x..." from opaque DB placeholders. */
-	if (function_has_opaque_type_markers (core, caller_fcn)) {
+	if (function_has_opaque_type_markers (anal, caller_fcn)) {
 		return true;
 	}
 	r_anal_type_match (anal, caller_fcn);
@@ -5586,26 +5700,6 @@ static char *format_sample_callees(char **sample_callees, size_t sample_count) {
 	return out ? out : strdup ("-");
 }
 
-static const RJson *json_find_object_for_addr(const RJson *array_root, ut64 addr) {
-	const RJson *first;
-	const RJson *obj;
-
-	if (!array_root || array_root->type != R_JSON_ARRAY) {
-		return NULL;
-	}
-	first = json_next_object (array_root->children.first);
-	obj = first;
-	while (obj) {
-		const RJson *j_addr = r_json_get (obj, "addr");
-		if (j_addr && j_addr->type == R_JSON_INTEGER
-				&& (ut64)j_addr->num.u_value == addr) {
-			return obj;
-		}
-		obj = json_next_object (obj->next);
-	}
-	return first;
-}
-
 static int json_array_object_count(const RJson *array_root) {
 	const RJson *obj;
 	int count = 0;
@@ -5621,30 +5715,9 @@ static int json_array_object_count(const RJson *array_root) {
 	return count;
 }
 
-static bool json_args_is_void_sentinel(const RJson *args_array, bool long_is_i64) {
-	const RJson *first_arg;
-	const RJson *second_arg;
-	const RJson *j_type;
-
-	if (!args_array || args_array->type != R_JSON_ARRAY) {
-		return false;
-	}
-	first_arg = json_next_object (args_array->children.first);
-	if (!first_arg) {
-		return false;
-	}
-	second_arg = json_next_object (first_arg->next);
-	if (second_arg) {
-		return false;
-	}
-	j_type = r_json_get (first_arg, "type");
-	return j_type && j_type->type == R_JSON_STRING
-		&& types_match_canonical (j_type->str_value, "void", long_is_i64);
-}
-
 static bool verify_practical_signature_consistency (
-	RCore *core,
-	ut64 fcn_addr,
+	RAnal *anal,
+	RAnalFunction *fcn,
 	const RJson *sig_root,
 	bool check_signature,
 	bool check_callconv,
@@ -5657,12 +5730,7 @@ static bool verify_practical_signature_consistency (
 	bool reason_argc_mismatch = false;
 	bool reason_argtype_mismatch = false;
 	bool reason_callconv_mismatch = false;
-	char *afcfj_json = NULL;
-	RJson *afcfj_root = NULL;
-	const RJson *afcfj_item = NULL;
-	char *afij_json = NULL;
-	RJson *afij_root = NULL;
-	const RJson *afij_item = NULL;
+	RAnalFunctionReadback *readback = NULL;
 	const RJson *j_expected_signature;
 	const RJson *j_expected_ret;
 	const RJson *j_expected_params;
@@ -5673,7 +5741,7 @@ static bool verify_practical_signature_consistency (
 	if (afij_signature_drift) {
 		*afij_signature_drift = false;
 	}
-	if (!core || !sig_root || sig_root->type != R_JSON_OBJECT) {
+	if (!anal || !fcn || !sig_root || sig_root->type != R_JSON_OBJECT) {
 		if (reason_counters) {
 			reason_counters->readback_fail++;
 		}
@@ -5688,79 +5756,63 @@ static bool verify_practical_signature_consistency (
 	if (j_expected_arch && j_expected_arch->type == R_JSON_STRING && j_expected_arch->str_value) {
 		long_is_i64 = is_x64_signature_arch (j_expected_arch->str_value);
 	}
-
-	if (check_signature) {
-		const RJson *j_actual_ret;
-		const RJson *j_actual_args;
-		const RJson *expected_param;
-		const RJson *actual_arg;
-		int expected_count;
-		int actual_count;
-
-		afcfj_json = r_core_cmd_str_at (core, fcn_addr, "afcfj");
-		afcfj_root = afcfj_json ? r_json_parse (afcfj_json) : NULL;
-		if (!afcfj_root || afcfj_root->type != R_JSON_ARRAY) {
+	if (check_signature || check_callconv) {
+		readback = r_anal_function_readback_collect (anal, fcn);
+		if (!readback) {
 			reason_readback_fail = true;
 			ok = false;
-		} else {
-			afcfj_item = json_find_object_for_addr (afcfj_root, fcn_addr);
-			if (!afcfj_item) {
-				reason_readback_fail = true;
-				ok = false;
-			}
 		}
+	}
+
+	if (check_signature && readback) {
+		const RJson *expected_param;
+		int expected_count;
+		int actual_count = 0;
+		RListIter *iter;
+		RAnalFunctionReadbackParam *actual_param;
 
 		if (ok) {
-			j_actual_ret = r_json_get (afcfj_item, "return");
-			j_actual_args = r_json_get (afcfj_item, "args");
-
 			if (!j_expected_ret || j_expected_ret->type != R_JSON_STRING
-					|| !j_actual_ret || j_actual_ret->type != R_JSON_STRING) {
+					|| R_STR_ISEMPTY (readback->ret_type)) {
 				reason_readback_fail = true;
 				ok = false;
-			} else if (!types_match_canonical (j_expected_ret->str_value, j_actual_ret->str_value, long_is_i64)) {
+			} else if (!types_match_canonical (j_expected_ret->str_value, readback->ret_type, long_is_i64)) {
 				reason_ret_mismatch = true;
 				ok = false;
 			}
 
-			if (!j_expected_params || j_expected_params->type != R_JSON_ARRAY
-					|| !j_actual_args || j_actual_args->type != R_JSON_ARRAY) {
+			if (!j_expected_params || j_expected_params->type != R_JSON_ARRAY) {
 				reason_readback_fail = true;
 				ok = false;
 			} else {
 				expected_count = json_array_object_count (j_expected_params);
-				actual_count = json_array_object_count (j_actual_args);
-				if (expected_count == 0 && json_args_is_void_sentinel (j_actual_args, long_is_i64)) {
-					actual_count = 0;
-				}
+				actual_count = (int)r_list_length (readback->params);
 				if (expected_count != actual_count) {
 					reason_argc_mismatch = true;
 					ok = false;
 				}
 				expected_param = json_next_object (j_expected_params->children.first);
-				actual_arg = json_next_object (j_actual_args->children.first);
-				if (expected_count == 0 && json_args_is_void_sentinel (j_actual_args, long_is_i64)) {
-					actual_arg = NULL;
-				}
-				while (expected_param && actual_arg && ok) {
+				iter = readback->params? readback->params->head: NULL;
+				actual_param = iter? iter->data: NULL;
+				while (expected_param && actual_param && ok) {
 					const RJson *j_expected_type = r_json_get (expected_param, "type");
-					const RJson *j_actual_type = r_json_get (actual_arg, "type");
 
 					if (!j_expected_type || j_expected_type->type != R_JSON_STRING
-							|| !j_actual_type || j_actual_type->type != R_JSON_STRING) {
+							|| R_STR_ISEMPTY (actual_param->type)) {
 						reason_readback_fail = true;
 						ok = false;
 						break;
 					}
-					if (!types_match_canonical (j_expected_type->str_value, j_actual_type->str_value, long_is_i64)) {
+					if (!types_match_canonical (j_expected_type->str_value, actual_param->type, long_is_i64)) {
 						reason_argtype_mismatch = true;
 						ok = false;
 						break;
 					}
 					expected_param = json_next_object (expected_param->next);
-					actual_arg = json_next_object (actual_arg->next);
+					iter = iter? iter->n: NULL;
+					actual_param = iter? iter->data: NULL;
 				}
-				if ((expected_param || actual_arg) && ok) {
+				if ((expected_param || actual_param) && ok) {
 					reason_argc_mismatch = true;
 					ok = false;
 				}
@@ -5768,43 +5820,24 @@ static bool verify_practical_signature_consistency (
 		}
 	}
 
-	if (check_signature || check_callconv) {
-		afij_json = r_core_cmd_str_at (core, fcn_addr, "afij");
-		afij_root = afij_json ? r_json_parse (afij_json) : NULL;
-		if (!afij_root || afij_root->type != R_JSON_ARRAY) {
-			reason_readback_fail = true;
-			if (check_callconv) {
-				ok = false;
-			}
-		} else {
-			afij_item = json_find_object_for_addr (afij_root, fcn_addr);
-			if (!afij_item && check_callconv) {
-				reason_readback_fail = true;
-				ok = false;
-			}
-		}
-	}
-
-	if (check_callconv && afij_item) {
-		const RJson *j_afij_calltype = r_json_get (afij_item, "calltype");
+	if (check_callconv && readback) {
 		if (j_expected_callconv && j_expected_callconv->type == R_JSON_STRING
 				&& j_expected_callconv->str_value && *j_expected_callconv->str_value) {
-			if (!j_afij_calltype || j_afij_calltype->type != R_JSON_STRING
-					|| !strings_match_normalized (j_expected_callconv->str_value, j_afij_calltype->str_value)) {
+			if (R_STR_ISEMPTY (readback->callconv)
+					|| !strings_match_normalized (j_expected_callconv->str_value, readback->callconv)) {
 				reason_callconv_mismatch = true;
 				ok = false;
 			}
 		}
 	}
 
-	if (check_signature && afij_item && afij_signature_drift) {
-		const RJson *j_afij_sig = r_json_get (afij_item, "signature");
+	if (check_signature && readback && afij_signature_drift) {
 		if (!j_expected_signature || j_expected_signature->type != R_JSON_STRING
 				|| !j_expected_signature->str_value || !*j_expected_signature->str_value) {
 			*afij_signature_drift = false;
-		} else if (!j_afij_sig || j_afij_sig->type != R_JSON_STRING) {
+		} else if (R_STR_ISEMPTY (readback->signature)) {
 			*afij_signature_drift = true;
-		} else if (!strings_match_normalized (j_expected_signature->str_value, j_afij_sig->str_value)) {
+		} else if (!strings_match_normalized (j_expected_signature->str_value, readback->signature)) {
 			*afij_signature_drift = true;
 		}
 	}
@@ -5827,10 +5860,7 @@ static bool verify_practical_signature_consistency (
 		}
 	}
 
-	r_json_free (afcfj_root);
-	r_json_free (afij_root);
-	free (afcfj_json);
-	free (afij_json);
+	r_anal_function_readback_free (readback);
 	return ok;
 }
 
@@ -6652,7 +6682,7 @@ static bool sleigh_post_analysis(RAnal *anal) {
 						if (signature_applied) {
 							propagate_signature_to_direct_callers (anal, core, fcn->addr, fcn_name,
 								&prop_state, focus_callee_addr && fcn->addr == focus_callee_addr);
-						} else if (confidence >= SLEIGH_SIG_MIN_CONFIDENCE) {
+						} else if (!sig_apply.already_applied && confidence >= SLEIGH_SIG_MIN_CONFIDENCE) {
 							sig_cmd_failures++;
 							R_LOG_WARN ("r2sleigh: signature write-back failed for %s @ 0x%"PFMT64x" reason=%s sig=%.160s",
 								fcn_name, fcn->addr, sig_apply.detail[0]? sig_apply.detail: "unknown",
@@ -6692,7 +6722,8 @@ static bool sleigh_post_analysis(RAnal *anal) {
 								cc_applied = true;
 							}
 						}
-						if (callconv_arch_eligible && !cc_applied && cc_confidence >= SLEIGH_CC_MIN_CONFIDENCE) {
+						if (callconv_arch_eligible && !cc_applied && !cc_apply.already_applied
+								&& cc_confidence >= SLEIGH_CC_MIN_CONFIDENCE) {
 							sig_cmd_failures++;
 							R_LOG_WARN ("r2sleigh: calling-convention write-back failed for %s @ 0x%"PFMT64x,
 								fcn_name, fcn->addr);
@@ -6720,9 +6751,9 @@ static bool sleigh_post_analysis(RAnal *anal) {
 
 					if (signature_part_eligible && sigverify_enabled && (signature_applied || cc_applied)) {
 						consistency_verified++;
-						if (verify_practical_signature_consistency (
-								core, fcn->addr, payload_root, signature_applied, cc_applied,
-								&signature_drift, &consistency_reasons)) {
+							if (verify_practical_signature_consistency (
+									anal, fcn, payload_root, signature_applied, cc_applied,
+									&signature_drift, &consistency_reasons)) {
 							consistency_ok++;
 						} else {
 							consistency_mismatch++;
