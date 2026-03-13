@@ -178,7 +178,7 @@ fn stack_var_for_addr_var(
         .or_else(|| {
             utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
         })
-        .and_then(|offset| stack_vars.get(&offset).cloned());
+        .and_then(|offset| stack_vars.get(&offset).cloned().map(|name| (offset, name)));
     if let Some(alias) = resolve_stack_alias_from_addr_expr(
         &CExpr::Var(addr_key.clone()),
         definitions,
@@ -229,7 +229,7 @@ fn stack_var_for_addr_var(
         return Some(alias);
     }
 
-    offset_backed
+    offset_backed.map(|(_, name)| name)
 }
 
 fn is_generic_stack_name(name: &str) -> bool {
@@ -238,18 +238,19 @@ fn is_generic_stack_name(name: &str) -> bool {
 
 fn preferred_stack_alias(
     alias: &str,
-    offset_backed: Option<String>,
+    offset_backed: Option<(i64, String)>,
     stack_vars: &HashMap<i64, String>,
 ) -> Option<String> {
     if !is_generic_stack_name(alias) {
         return None;
     }
-    if let Some(preferred) = offset_backed
+    let offset = parse_generic_stack_name_offset(alias)?;
+    if let Some((preferred_offset, preferred)) = offset_backed
+        && preferred_offset == offset
         && !is_generic_stack_name(&preferred)
     {
         return Some(preferred);
     }
-    let offset = parse_generic_stack_name_offset(alias)?;
     let preferred = stack_vars.get(&offset)?.clone();
     if is_generic_stack_name(&preferred) {
         return None;
@@ -368,5 +369,29 @@ fn resolve_stack_alias_from_addr_expr(
             visited,
         ),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preferred_stack_alias;
+    use std::collections::HashMap;
+
+    #[test]
+    fn preferred_stack_alias_requires_offset_match_for_non_generic_override() {
+        let stack_vars = HashMap::from([
+            (-0x10, "var_10h".to_string()),
+            (-0x14, "var_14h".to_string()),
+            (-0x4, "var_4h".to_string()),
+        ]);
+
+        assert_eq!(
+            preferred_stack_alias("local_10", Some((-0x4, "var_4h".to_string())), &stack_vars),
+            Some("var_10h".to_string())
+        );
+        assert_eq!(
+            preferred_stack_alias("local_14", Some((-0x4, "var_4h".to_string())), &stack_vars),
+            Some("var_14h".to_string())
+        );
     }
 }

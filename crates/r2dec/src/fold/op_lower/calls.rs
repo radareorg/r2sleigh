@@ -2,6 +2,27 @@ use super::*;
 use r2types::FunctionType;
 
 impl<'a> FoldingContext<'a> {
+    pub(super) fn render_call_args_for_callee(
+        &self,
+        callee: &CExpr,
+        raw_args: Vec<analysis::CallArgBinding>,
+    ) -> Vec<CExpr> {
+        if self.is_imported_call_target(callee) {
+            let mut rendered = raw_args
+                .iter()
+                .cloned()
+                .map(|binding| self.render_imported_call_arg(binding))
+                .collect::<Vec<_>>();
+            self.repair_imported_result_source_sibling_args(&raw_args, &mut rendered);
+            return rendered;
+        }
+
+        raw_args
+            .into_iter()
+            .map(|binding| self.render_call_arg_for_callee(callee, binding))
+            .collect()
+    }
+
     fn lookup_known_signature(&self, callee_name: &str) -> Option<&FunctionType> {
         let normalized = normalize_callee_name(callee_name);
         self.inputs.known_function_signatures.get(&normalized)
@@ -110,7 +131,7 @@ impl<'a> FoldingContext<'a> {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|arg| self.render_call_arg_for_callee(&func, arg))
+                .map(|arg| self.render_authoritative_source_call_arg(arg))
                 .collect::<Vec<_>>();
             if let Some(max_arity) = self.non_variadic_call_arity(&func) {
                 args.truncate(max_arity);
@@ -149,6 +170,96 @@ impl<'a> FoldingContext<'a> {
                 preserve_stable_input_slot,
                 preserve_explicit_call_expr,
             ),
+        }
+    }
+
+    fn render_authoritative_source_call_arg(&self, binding: analysis::CallArgBinding) -> CExpr {
+        let preserve_stable_input_slot = binding.role == analysis::CallArgRole::Input;
+        let preserve_explicit_call_expr = binding.role == analysis::CallArgRole::Result
+            || matches!(
+                binding.arg,
+                analysis::SemanticCallArg::FallbackExpr(CExpr::Call { .. })
+            );
+
+        match binding.arg {
+            analysis::SemanticCallArg::Semantic(value) => {
+                let mut visited = HashSet::new();
+                let expr = self
+                    .render_semantic_value(&value, 0, &mut visited)
+                    .unwrap_or_else(|| self.expr_for_semantic_call_arg_fallback(&value));
+                self.finalize_authoritative_imported_call_arg_expr(
+                    expr,
+                    preserve_stable_input_slot,
+                    preserve_explicit_call_expr,
+                )
+            }
+            analysis::SemanticCallArg::StringAddr(addr) => self
+                .lookup_string(addr)
+                .map(|s| CExpr::StringLit(s.clone()))
+                .or_else(|| {
+                    self.lookup_symbol(addr)
+                        .map(|name| CExpr::Var(name.clone()))
+                })
+                .unwrap_or(CExpr::UIntLit(addr)),
+            analysis::SemanticCallArg::FallbackExpr(expr) => self.normalize_imported_call_arg_expr(
+                expr,
+                preserve_stable_input_slot,
+                preserve_explicit_call_expr,
+            ),
+        }
+    }
+
+    fn repair_imported_result_source_sibling_args(
+        &self,
+        raw_args: &[analysis::CallArgBinding],
+        rendered_args: &mut [CExpr],
+    ) {
+        let Some(format_string) = rendered_args.first().and_then(|expr| match expr {
+            CExpr::StringLit(text) => Some(text.as_str()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let Some(result_binding) = raw_args.last() else {
+            return;
+        };
+        let Some((source_block_addr, source_op_idx)) = result_binding.source_call else {
+            return;
+        };
+        if result_binding.role != analysis::CallArgRole::Result || rendered_args.len() < 2 {
+            return;
+        }
+
+        let source_args = self
+            .call_args_map()
+            .get(&(source_block_addr, source_op_idx))
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|binding| self.render_authoritative_source_call_arg(binding))
+            .collect::<Vec<_>>();
+
+        let printed_input_count = rendered_args.len().saturating_sub(2);
+        if source_args.is_empty()
+            || printed_input_count != source_args.len()
+            || count_printf_placeholders(format_string) != source_args.len() + 1
+        {
+            return;
+        }
+
+        for (idx, source_arg) in source_args.into_iter().enumerate() {
+            let target_idx = idx + 1;
+            if target_idx >= rendered_args.len().saturating_sub(1) {
+                break;
+            }
+            let should_replace = rendered_args.get(target_idx - 1).is_some_and(|previous| {
+                rendered_args[target_idx] == *previous && rendered_args[target_idx] != source_arg
+            }) || self
+                .call_arg_contains_transient_name(&rendered_args[target_idx], 0)
+                || self.call_arg_contains_stack_placeholder(&rendered_args[target_idx], 0);
+            if should_replace {
+                rendered_args[target_idx] = source_arg;
+            }
         }
     }
 
@@ -347,6 +458,14 @@ impl<'a> FoldingContext<'a> {
             return current;
         }
 
+        if preserve_stable_input_slot
+            && let (Some(current_expr), Some(candidate_expr)) = (&current, &candidate)
+            && self.is_preserved_imported_input_expr(current_expr)
+            && self.expr_is_generic_entry_arg_like(candidate_expr)
+        {
+            return current;
+        }
+
         self.choose_preferred_call_arg_expr_with_slot_policy(
             current,
             candidate,
@@ -361,4 +480,20 @@ impl<'a> FoldingContext<'a> {
         let mut frame = LowerFrame::for_stmt(0, 0, false);
         self.lowered_to_stmt(self.lower_op(op, &mut frame))
     }
+}
+
+fn count_printf_placeholders(format_string: &str) -> usize {
+    let mut count = 0;
+    let mut chars = format_string.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            continue;
+        }
+        if matches!(chars.peek(), Some('%')) {
+            chars.next();
+            continue;
+        }
+        count += 1;
+    }
+    count
 }

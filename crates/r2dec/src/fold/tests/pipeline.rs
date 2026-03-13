@@ -53,6 +53,32 @@ mod tests {
         crate::analysis::CallArgBinding::from(expr)
     }
 
+    fn stack_load_call_arg(offset: i64, size: u32) -> crate::analysis::CallArgBinding {
+        crate::analysis::CallArgBinding::input(crate::analysis::SemanticCallArg::semantic(
+            crate::analysis::SemanticValue::Load {
+                addr: crate::analysis::NormalizedAddr {
+                    base: crate::analysis::BaseRef::StackSlot(offset),
+                    index: None,
+                    scale_bytes: 0,
+                    offset_bytes: 0,
+                },
+                size,
+            },
+        ))
+    }
+
+    fn result_call_arg(
+        expr: CExpr,
+        source_call: (u64, usize),
+        stack_offset: i64,
+    ) -> crate::analysis::CallArgBinding {
+        crate::analysis::CallArgBinding::result(crate::analysis::SemanticCallArg::FallbackExpr(
+            expr,
+        ))
+        .with_source_call(source_call.0, source_call.1)
+        .with_stack_offset(stack_offset)
+    }
+
     fn stack_var_spec(name: &str, ty: Option<CType>, base: Option<&str>) -> ExternalStackVarSpec {
         ExternalStackVarSpec {
             name: name.to_string(),
@@ -181,6 +207,73 @@ mod tests {
             type_hints: empty_ty,
             type_oracle: None,
         })
+    }
+
+    fn configure_aarch64_helper_printf_ctx(
+        ctx: &mut FoldingContext<'_>,
+        helper_addr: u64,
+        helper_name: &str,
+        helper_param_count: usize,
+        format_addr: u64,
+        format: &str,
+        stack_vars: &[(i64, &str)],
+    ) {
+        ctx.inputs.function_names = Box::leak(Box::new(HashMap::from([
+            (helper_addr, helper_name.to_string()),
+            (0x10000259c, "sym.imp.printf".to_string()),
+            (0x1000025d8, "sym.imp.atoi".to_string()),
+        ])));
+        ctx.inputs.strings = Box::leak(Box::new(HashMap::from([(
+            format_addr,
+            format.to_string(),
+        )])));
+        ctx.set_known_function_signatures(HashMap::from([
+            (
+                helper_name.to_string(),
+                FunctionType {
+                    return_type: CType::Int(32),
+                    params: vec![CType::Int(32); helper_param_count],
+                    variadic: false,
+                },
+            ),
+            (
+                "sym.imp.printf".to_string(),
+                FunctionType {
+                    return_type: CType::Int(32),
+                    params: vec![CType::ptr(CType::Int(8))],
+                    variadic: true,
+                },
+            ),
+            (
+                "sym.imp.atoi".to_string(),
+                FunctionType {
+                    return_type: CType::Int(32),
+                    params: vec![CType::ptr(CType::Int(8))],
+                    variadic: false,
+                },
+            ),
+        ]));
+        ctx.set_external_stack_vars(
+            stack_vars
+                .iter()
+                .map(|(offset, name)| {
+                    (
+                        *offset,
+                        stack_var_spec(name, Some(CType::Int(32)), Some("x29")),
+                    )
+                })
+                .collect(),
+        );
+        ctx.inputs.param_register_aliases = Box::leak(Box::new(HashMap::from([
+            ("x0".to_string(), "argc".to_string()),
+            ("x1".to_string(), "argv".to_string()),
+            ("x2".to_string(), "envp".to_string()),
+        ])));
+        ctx.inputs.type_hints = Box::leak(Box::new(HashMap::from([
+            ("argc".to_string(), CType::Int(32)),
+            ("argv".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
+            ("envp".to_string(), CType::ptr(CType::ptr(CType::Int(8)))),
+        ])));
     }
 
     fn expr_contains_binary_op(expr: &CExpr, target: BinaryOp) -> bool {
@@ -767,6 +860,234 @@ mod tests {
         };
         assert_eq!(args.len(), 1);
         assert_eq!(args[0], CExpr::StringLit("Unknown test: %d\\n".to_string()));
+    }
+
+    #[test]
+    fn test_imported_printf_result_slot_rebuilds_unlock_call_from_authoritative_source_bindings() {
+        let mut ctx = make_aarch64_ctx();
+        configure_aarch64_helper_printf_ctx(
+            &mut ctx,
+            0x1000005d4,
+            "sym._unlock",
+            3,
+            0x10000266f,
+            "unlock(%d, %d, %d) = %d\\n",
+            &[(-44, "local_2c"), (-48, "local_30"), (-52, "local_34")],
+        );
+        ctx.state.analysis_ctx.use_info.call_args.insert(
+            (0x1000, 0),
+            vec![
+                stack_load_call_arg(-44, 4),
+                stack_load_call_arg(-48, 4),
+                stack_load_call_arg(-52, 4),
+            ],
+        );
+        ctx.state.analysis_ctx.use_info.call_args.insert(
+            (0x1000, 1),
+            vec![
+                crate::analysis::CallArgBinding::input(
+                    crate::analysis::SemanticCallArg::StringAddr(0x10000266f),
+                ),
+                stack_load_call_arg(-44, 4).with_stack_offset(0),
+                stack_load_call_arg(-48, 4).with_stack_offset(8),
+                stack_load_call_arg(-52, 4).with_stack_offset(16),
+                result_call_arg(
+                    CExpr::call(
+                        CExpr::Var("sym._unlock".to_string()),
+                        vec![
+                            CExpr::Var("argc".to_string()),
+                            CExpr::Var("argc".to_string()),
+                            CExpr::call(
+                                CExpr::Var("sym.imp.atoi".to_string()),
+                                vec![CExpr::Deref(Box::new(CExpr::binary(
+                                    BinaryOp::Add,
+                                    CExpr::Var("argv".to_string()),
+                                    CExpr::IntLit(32),
+                                )))],
+                            ),
+                        ],
+                    ),
+                    (0x1000, 0),
+                    24,
+                ),
+            ],
+        );
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:10000259c", 0, 8),
+                },
+                0x1000,
+                1,
+            )
+            .expect("printf call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected printf call expression");
+        };
+        assert_eq!(args[0], CExpr::StringLit("unlock(%d, %d, %d) = %d\\n".to_string()));
+        assert_eq!(args[1], CExpr::Var("local_2c".to_string()));
+        assert_eq!(args[2], CExpr::Var("local_30".to_string()));
+        assert_eq!(args[3], CExpr::Var("local_34".to_string()));
+        assert_eq!(
+            args[4],
+            CExpr::call(
+                CExpr::Var("sym._unlock".to_string()),
+                vec![
+                    CExpr::Var("local_2c".to_string()),
+                    CExpr::Var("local_30".to_string()),
+                    CExpr::Var("local_34".to_string()),
+                ],
+            )
+        );
+        assert!(
+            args.iter().skip(1).all(|arg| !expr_contains_transient_call_artifact(arg)),
+            "unlock printf should keep only recovered locals/helper result, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_imported_printf_result_slot_rebuilds_solve_equation_call_from_authoritative_source_bindings(
+    ) {
+        let mut ctx = make_aarch64_ctx();
+        configure_aarch64_helper_printf_ctx(
+            &mut ctx,
+            0x1000006c8,
+            "sym._solve_equation",
+            1,
+            0x1000026c9,
+            "solve_equation(%d) = %d\\n",
+            &[(-92, "local_5c")],
+        );
+        ctx.state.analysis_ctx.use_info.call_args.insert(
+            (0x2000, 0),
+            vec![stack_load_call_arg(-92, 4)],
+        );
+        ctx.state.analysis_ctx.use_info.call_args.insert(
+            (0x2000, 1),
+            vec![
+                crate::analysis::CallArgBinding::input(
+                    crate::analysis::SemanticCallArg::StringAddr(0x1000026c9),
+                ),
+                stack_load_call_arg(-92, 4).with_stack_offset(0),
+                result_call_arg(
+                    CExpr::call(
+                        CExpr::Var("sym._solve_equation".to_string()),
+                        vec![CExpr::Var("argc".to_string())],
+                    ),
+                    (0x2000, 0),
+                    8,
+                ),
+            ],
+        );
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:10000259c", 0, 8),
+                },
+                0x2000,
+                1,
+            )
+            .expect("printf call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected printf call expression");
+        };
+        assert_eq!(
+            args,
+            vec![
+                CExpr::StringLit("solve_equation(%d) = %d\\n".to_string()),
+                CExpr::Var("local_5c".to_string()),
+                CExpr::call(
+                    CExpr::Var("sym._solve_equation".to_string()),
+                    vec![CExpr::Var("local_5c".to_string())],
+                ),
+            ]
+        );
+        assert!(
+            args.iter().skip(1).all(|arg| !expr_contains_transient_call_artifact(arg)),
+            "solve_equation printf should keep recovered local/helper result, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_imported_printf_result_slot_rebuilds_complex_check_call_from_authoritative_source_bindings(
+    ) {
+        let mut ctx = make_aarch64_ctx();
+        configure_aarch64_helper_printf_ctx(
+            &mut ctx,
+            0x100000720,
+            "sym._complex_check",
+            2,
+            0x100002701,
+            "complex_check(%d, %d) = %d\\n",
+            &[(-96, "local_60"), (-100, "local_64")],
+        );
+        ctx.state.analysis_ctx.use_info.call_args.insert(
+            (0x3000, 0),
+            vec![stack_load_call_arg(-96, 4), stack_load_call_arg(-100, 4)],
+        );
+        ctx.state.analysis_ctx.use_info.call_args.insert(
+            (0x3000, 1),
+            vec![
+                crate::analysis::CallArgBinding::input(
+                    crate::analysis::SemanticCallArg::StringAddr(0x100002701),
+                ),
+                stack_load_call_arg(-96, 4).with_stack_offset(0),
+                stack_load_call_arg(-100, 4).with_stack_offset(8),
+                result_call_arg(
+                    CExpr::call(
+                        CExpr::Var("sym._complex_check".to_string()),
+                        vec![
+                            CExpr::Var("argc".to_string()),
+                            CExpr::call(
+                                CExpr::Var("sym.imp.atoi".to_string()),
+                                vec![CExpr::Deref(Box::new(CExpr::binary(
+                                    BinaryOp::Add,
+                                    CExpr::Var("argv".to_string()),
+                                    CExpr::IntLit(24),
+                                )))],
+                            ),
+                        ],
+                    ),
+                    (0x3000, 0),
+                    16,
+                ),
+            ],
+        );
+
+        let stmt = ctx
+            .op_to_stmt_with_args(
+                &SSAOp::Call {
+                    target: make_var("const:10000259c", 0, 8),
+                },
+                0x3000,
+                1,
+            )
+            .expect("printf call should emit statement");
+
+        let CStmt::Expr(CExpr::Call { args, .. }) = stmt else {
+            panic!("expected printf call expression");
+        };
+        assert_eq!(args[0], CExpr::StringLit("complex_check(%d, %d) = %d\\n".to_string()));
+        assert_eq!(args[1], CExpr::Var("local_60".to_string()));
+        assert_eq!(args[2], CExpr::Var("local_64".to_string()));
+        assert_eq!(
+            args[3],
+            CExpr::call(
+                CExpr::Var("sym._complex_check".to_string()),
+                vec![
+                    CExpr::Var("local_60".to_string()),
+                    CExpr::Var("local_64".to_string()),
+                ],
+            )
+        );
+        assert!(
+            args.iter().skip(1).all(|arg| !expr_contains_transient_call_artifact(arg)),
+            "complex_check printf should keep recovered locals/helper result, got {args:?}"
+        );
     }
 
     #[test]
@@ -8716,9 +9037,20 @@ mod tests {
         )) else {
             panic!("expected folded printf call, got {stmts:?}");
         };
-        assert!(
-            matches!(&args[4], CExpr::Call { func, .. } if **func == CExpr::Var("sym._unlock".to_string())),
-            "expected final printf arg to be helper result call, got {args:?}"
+        assert_eq!(args[0], CExpr::StringLit("unlock(%d, %d, %d) = %d\\n".to_string()));
+        assert_eq!(args[1], CExpr::Var("local_2c".to_string()));
+        assert_eq!(args[2], CExpr::Var("local_30".to_string()));
+        assert_eq!(args[3], CExpr::Var("local_34".to_string()));
+        assert_eq!(
+            args[4],
+            CExpr::call(
+                CExpr::Var("sym._unlock".to_string()),
+                vec![
+                    CExpr::Var("local_2c".to_string()),
+                    CExpr::Var("local_30".to_string()),
+                    CExpr::Var("local_34".to_string()),
+                ],
+            )
         );
         assert!(
             args.iter().skip(1).all(|arg| !expr_contains_transient_call_artifact(arg)),

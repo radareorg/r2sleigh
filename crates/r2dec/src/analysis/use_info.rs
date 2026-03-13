@@ -122,6 +122,21 @@ struct PostCallResultQuery<'a, 'b> {
     env: &'a PassEnv<'b>,
 }
 
+struct PostCallAliasQuery<'a, 'b> {
+    info: &'a UseInfo,
+    block: &'a SSABlock,
+    producers: &'a HashMap<String, usize>,
+    env: &'a PassEnv<'b>,
+}
+
+struct StackHomeQuery<'a, 'b> {
+    ops: &'a [SSAOp],
+    producers: &'a HashMap<String, usize>,
+    info: &'a UseInfo,
+    lower: &'a LowerCtx<'b>,
+    env: &'a PassEnv<'b>,
+}
+
 pub(crate) fn preserve_authoritative_facts(info: &mut UseInfo, baseline: &UseInfo) {
     preserve_semantic_fact_map(&mut info.semantic_values, &baseline.semantic_values);
     preserve_semantic_fact_map(
@@ -163,8 +178,9 @@ pub(crate) fn preserve_authoritative_facts(info: &mut UseInfo, baseline: &UseInf
         let should_replace = match info.call_args.get(key) {
             None => true,
             Some(current) => {
-                call_arg_vector_preservation_score(args)
-                    > call_arg_vector_preservation_score(current)
+                call_arg_vector_needs_authoritative_preservation(current)
+                    && call_arg_vector_preservation_score(args)
+                        > call_arg_vector_preservation_score(current)
             }
         };
         if should_replace {
@@ -234,6 +250,40 @@ fn call_arg_vector_preservation_score(args: &[CallArgBinding]) -> i32 {
             .sum::<i32>()
 }
 
+fn call_arg_vector_needs_authoritative_preservation(args: &[CallArgBinding]) -> bool {
+    let imported_result_slot = matches!(
+        args.first(),
+        Some(CallArgBinding {
+            arg: SemanticCallArg::StringAddr(_),
+            ..
+        })
+    );
+    let mut seen_negative_input_offsets = HashSet::new();
+
+    for (idx, binding) in args.iter().enumerate() {
+        if binding.role == CallArgRole::Result
+            && !(imported_result_slot && idx + 1 == args.len() && binding.source_call.is_some())
+        {
+            return true;
+        }
+
+        if call_arg_binding_is_low_signal(binding) {
+            return true;
+        }
+
+        if !binding.is_result()
+            && let Some(offset) =
+                call_arg_semantic_source_offset_for_binding(binding, 0, &mut HashSet::new())
+            && offset < 0
+            && !seen_negative_input_offsets.insert(offset)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn call_arg_binding_preservation_score(binding: &CallArgBinding) -> i32 {
     let role_score = match binding.role {
         CallArgRole::Input => 0,
@@ -252,6 +302,141 @@ fn semantic_call_arg_preservation_score(arg: &SemanticCallArg) -> i32 {
         SemanticCallArg::Semantic(value) => 200 + semantic_value_preservation_score(value),
         SemanticCallArg::FallbackExpr(expr) => call_arg_expr_preservation_score(expr, 0),
     }
+}
+
+fn call_arg_binding_is_low_signal(binding: &CallArgBinding) -> bool {
+    match &binding.arg {
+        SemanticCallArg::StringAddr(_) => false,
+        SemanticCallArg::Semantic(value) => semantic_value_is_low_signal(value),
+        SemanticCallArg::FallbackExpr(expr) => call_arg_expr_is_low_signal(expr, 0),
+    }
+}
+
+fn semantic_value_is_low_signal(value: &SemanticValue) -> bool {
+    match value {
+        SemanticValue::Unknown => true,
+        SemanticValue::Scalar(ScalarValue::Expr(expr)) => call_arg_expr_is_low_signal(expr, 0),
+        SemanticValue::Scalar(ScalarValue::Root(root)) => {
+            let name = root.display_name();
+            is_call_arg_placeholder_name(&name)
+                || is_call_arg_transient_name(&name)
+                || is_generic_entry_arg_name(&name)
+        }
+        SemanticValue::Address(_) | SemanticValue::Load { .. } => false,
+    }
+}
+
+fn call_arg_expr_is_low_signal(expr: &CExpr, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+
+    match expr {
+        CExpr::Var(name) => {
+            is_call_arg_placeholder_name(name)
+                || is_call_arg_transient_name(name)
+                || is_generic_entry_arg_name(name)
+        }
+        CExpr::Paren(inner)
+        | CExpr::Cast { expr: inner, .. }
+        | CExpr::AddrOf(inner)
+        | CExpr::Deref(inner)
+        | CExpr::Sizeof(inner) => call_arg_expr_is_low_signal(inner, depth + 1),
+        CExpr::Unary { operand, .. } => call_arg_expr_is_low_signal(operand, depth + 1),
+        CExpr::Binary { left, right, .. } => {
+            call_arg_expr_is_low_signal(left, depth + 1)
+                || call_arg_expr_is_low_signal(right, depth + 1)
+        }
+        CExpr::Subscript { base, index } => {
+            call_arg_expr_is_low_signal(base, depth + 1)
+                || call_arg_expr_is_low_signal(index, depth + 1)
+        }
+        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+            call_arg_expr_is_low_signal(base, depth + 1)
+        }
+        CExpr::Call { func, args } => {
+            call_arg_expr_is_low_signal(func, depth + 1)
+                || args
+                    .iter()
+                    .any(|arg| call_arg_expr_is_low_signal(arg, depth + 1))
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            call_arg_expr_is_low_signal(cond, depth + 1)
+                || call_arg_expr_is_low_signal(then_expr, depth + 1)
+                || call_arg_expr_is_low_signal(else_expr, depth + 1)
+        }
+        CExpr::Comma(items) => items
+            .iter()
+            .any(|item| call_arg_expr_is_low_signal(item, depth + 1)),
+        CExpr::IntLit(_)
+        | CExpr::UIntLit(_)
+        | CExpr::FloatLit(_)
+        | CExpr::CharLit(_)
+        | CExpr::StringLit(_)
+        | CExpr::SizeofType(_) => false,
+    }
+}
+
+fn is_generic_entry_arg_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("argc")
+        || name.eq_ignore_ascii_case("argv")
+        || name.eq_ignore_ascii_case("envp")
+        || name.strip_prefix("arg").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+fn call_arg_semantic_source_offset_for_binding(
+    binding: &CallArgBinding,
+    depth: u32,
+    visited: &mut HashSet<String>,
+) -> Option<i64> {
+    if depth > 8 {
+        return None;
+    }
+
+    match &binding.arg {
+        SemanticCallArg::Semantic(SemanticValue::Load { addr, .. })
+        | SemanticCallArg::Semantic(SemanticValue::Address(addr)) => {
+            normalized_stack_slot_offset(addr)
+        }
+        SemanticCallArg::Semantic(SemanticValue::Scalar(ScalarValue::Root(root))) => {
+            call_arg_semantic_source_offset_for_binding(
+                &CallArgBinding::input(SemanticCallArg::FallbackExpr(CExpr::Var(
+                    root.display_name(),
+                ))),
+                depth + 1,
+                visited,
+            )
+        }
+        SemanticCallArg::FallbackExpr(CExpr::Var(name)) => {
+            if !visited.insert(name.clone()) {
+                return None;
+            }
+            let offset = parse_negative_local_name(name);
+            visited.remove(name);
+            offset
+        }
+        SemanticCallArg::FallbackExpr(CExpr::Paren(inner))
+        | SemanticCallArg::FallbackExpr(CExpr::Cast { expr: inner, .. }) => {
+            call_arg_semantic_source_offset_for_binding(
+                &CallArgBinding::input(SemanticCallArg::FallbackExpr((**inner).clone())),
+                depth + 1,
+                visited,
+            )
+        }
+        _ => None,
+    }
+}
+
+fn parse_negative_local_name(name: &str) -> Option<i64> {
+    name.strip_prefix("local_")
+        .and_then(|suffix| i64::from_str_radix(suffix, 16).ok())
+        .map(|offset| -offset)
 }
 
 fn semantic_value_preservation_score(value: &SemanticValue) -> i32 {
@@ -3634,20 +3819,6 @@ fn analyze_call_args(scratch: &mut UseScratch, blocks: &[SSABlock], env: &PassEn
                 for key in consumed_keys {
                     scratch.info.consumed_by_call.insert(key);
                 }
-                if std::env::var("R2DEC_DEBUG_CALL_ARGS").ok().as_deref() == Some("1")
-                    && matches!(block.addr, 0x10000141c | 0x1000016dc | 0x1000016b8)
-                    && let Some(target_name) = call_target_name(op, env)
-                    && (target_name == "sym.imp.printf"
-                        || target_name == "sym._unlock"
-                        || target_name == "sym._solve_equation"
-                        || target_name == "sym._complex_check")
-                    && let Some(bindings) = scratch.info.call_args.get(&(block.addr, call_idx))
-                {
-                    eprintln!(
-                        "R2DEC_DEBUG_CALL_ARGS block={:#x} call_idx={} target={} bindings={bindings:#?}",
-                        block.addr, call_idx, target_name
-                    );
-                }
             }
 
             if let Some(ret_family) = ret_family.as_deref() {
@@ -3800,17 +3971,23 @@ fn bind_call_result_alias_definitions(
         if let Some(dst) = next_op.dst() {
             let is_direct_ret = matches!(next_op, SSAOp::CallDefine { .. })
                 && register_family_name(&dst.name).as_deref() == Some(ret_family);
-            let is_post_call_alias = !matches!(next_op, SSAOp::CallDefine { .. })
-                && is_post_call_result_alias_for_call(
+            let is_post_call_alias = if matches!(next_op, SSAOp::CallDefine { .. }) {
+                false
+            } else {
+                let alias_query = PostCallAliasQuery {
                     info,
                     block,
+                    producers: producer_map,
+                    env,
+                };
+                is_post_call_result_alias_for_call(
+                    &alias_query,
                     call_idx,
                     next_idx,
-                    producer_map,
                     dst,
                     ret_family,
-                    env,
-                );
+                )
+            };
             if (is_direct_ret || is_post_call_alias)
                 && info
                     .use_counts
@@ -3999,24 +4176,28 @@ fn render_visible_stack_slot_expr_for_definition(
         return None;
     }
 
-    let rendered = info
-        .stable_stack_values
-        .get(&offset)
-        .and_then(|value| {
-            render_call_arg_semantic_value_for_definition(info, lower, value, depth + 1, visited)
-        })
-        .or_else(|| {
-            let mut stack_slot_names = lower
-                .stack_slots
-                .iter()
-                .filter_map(|(name, slot)| (slot.offset == offset).then_some(name.clone()))
-                .collect::<BTreeSet<_>>();
-            stack_slot_names
-                .pop_first()
-                .map(|name| lower.expr_for_ssa_name(&name))
-                .filter(|expr| expr_is_valid_for_synthesized_call_arg(expr))
-        })
-        .or_else(|| (offset < 0).then(|| CExpr::Var(format!("local_{:x}", (-offset) as u64))));
+    let visible_local = {
+        let mut stack_slot_names = lower
+            .stack_slots
+            .iter()
+            .filter_map(|(name, slot)| (slot.offset == offset).then_some(name.clone()))
+            .collect::<BTreeSet<_>>();
+        stack_slot_names
+            .pop_first()
+            .map(|name| lower.expr_for_ssa_name(&name))
+            .filter(expr_is_valid_for_synthesized_call_arg)
+            .or_else(|| (offset < 0).then(|| CExpr::Var(format!("local_{:x}", (-offset) as u64))))
+    };
+
+    let stable_value = info.stable_stack_values.get(&offset).and_then(|value| {
+        render_call_arg_semantic_value_for_definition(info, lower, value, depth + 1, visited)
+    });
+
+    let rendered = if offset < 0 {
+        visible_local.or(stable_value)
+    } else {
+        stable_value.or(visible_local)
+    };
 
     visited.remove(&visit_key);
     rendered
@@ -4367,20 +4548,23 @@ fn collect_immediate_stack_call_args(
                             });
                     let (call_result_candidate, duplicate_result_binding) =
                         if let Some((result_call_idx, expr)) = raw_result_candidate {
+                            let stack_home_query = StackHomeQuery {
+                                ops,
+                                producers,
+                                info,
+                                lower,
+                                env,
+                            };
                             if owned_result_source_calls.insert((block_addr, result_call_idx)) {
                                 (Some((result_call_idx, expr)), None)
                             } else {
                                 (
                                     None,
                                     duplicate_result_input_binding_from_preserved_stack_home(
-                                        ops,
-                                        producers,
-                                        info,
-                                        lower,
+                                        &stack_home_query,
                                         val,
                                         result_call_idx,
                                         offset,
-                                        env,
                                     ),
                                 )
                             }
@@ -4454,49 +4638,126 @@ fn collect_immediate_stack_call_args(
     }
 
     args.sort_by_key(|(offset, _, _, _)| *offset);
+    let stack_home_query = StackHomeQuery {
+        ops,
+        producers,
+        info,
+        lower,
+        env,
+    };
+    repair_duplicate_negative_stack_home_inputs(&mut args, &stack_home_query);
     (args, inlined_call_results)
 }
 
-fn duplicate_result_input_binding_from_preserved_stack_home(
-    ops: &[SSAOp],
-    producers: &HashMap<String, usize>,
-    info: &UseInfo,
-    lower: &LowerCtx<'_>,
+fn preserved_input_binding_from_stack_home(
+    query: &StackHomeQuery<'_, '_>,
     val: &SSAVar,
-    result_call_idx: usize,
+    search_limit_idx: usize,
     printf_stack_offset: i64,
-    env: &PassEnv<'_>,
 ) -> Option<CallArgBinding> {
-    let (_, load_idx) = producer_entry_for_var(producers, val)?;
-    let SSAOp::Load { addr, .. } = ops.get(load_idx)? else {
+    let (_, load_idx) = producer_entry_for_var(query.producers, val)?;
+    let SSAOp::Load { addr, .. } = query.ops.get(load_idx)? else {
         return None;
     };
     let home_offset =
-        call_stack_arg_offset(ops, producers, info, addr, env, 0).filter(|offset| *offset >= 0)?;
-    let preserved_input = ops
+        call_stack_arg_offset(query.ops, query.producers, query.info, addr, query.env, 0)
+            .filter(|offset| *offset >= 0)?;
+    let preserved_input = query
+        .ops
         .iter()
         .enumerate()
-        .take(result_call_idx)
+        .take(search_limit_idx)
         .rev()
         .find_map(|(_, op)| match op {
             SSAOp::Store { addr, val, .. }
-                if call_stack_arg_offset(ops, producers, info, addr, env, 0)
-                    == Some(home_offset) =>
+                if call_stack_arg_offset(
+                    query.ops,
+                    query.producers,
+                    query.info,
+                    addr,
+                    query.env,
+                    0,
+                ) == Some(home_offset) =>
             {
                 Some(val.clone())
             }
             _ => None,
         })?;
-    let expr = visible_call_arg_seed_expr(lower, &preserved_input);
+    let expr = visible_call_arg_seed_expr(query.lower, &preserved_input);
     let mut binding = CallArgBinding::input(preferred_stack_input_call_arg(
-        info,
+        query.info,
         &preserved_input,
         &expr,
-        env,
+        query.env,
     ))
     .with_stack_offset(printf_stack_offset);
-    canonicalize_call_arg_binding_to_negative_stack_load(info, &mut binding, preserved_input.size);
+    canonicalize_call_arg_binding_to_negative_stack_load(
+        query.info,
+        &mut binding,
+        preserved_input.size,
+    );
     Some(binding)
+}
+
+fn duplicate_result_input_binding_from_preserved_stack_home(
+    query: &StackHomeQuery<'_, '_>,
+    val: &SSAVar,
+    result_call_idx: usize,
+    printf_stack_offset: i64,
+) -> Option<CallArgBinding> {
+    preserved_input_binding_from_stack_home(query, val, result_call_idx, printf_stack_offset)
+}
+
+fn repair_duplicate_negative_stack_home_inputs(
+    args: &mut [(i64, CallArgBinding, String, String)],
+    query: &StackHomeQuery<'_, '_>,
+) {
+    let mut seen_negative_offsets = HashSet::new();
+
+    for (printf_stack_offset, binding, value_key, _) in args.iter_mut() {
+        if binding.is_result() {
+            continue;
+        }
+
+        let current_negative_offset =
+            call_arg_semantic_source_offset(query.info, &binding.arg, 0, &mut HashSet::new())
+                .filter(|offset| *offset < 0);
+
+        let Some(current_negative_offset) = current_negative_offset else {
+            continue;
+        };
+
+        if seen_negative_offsets.insert(current_negative_offset) {
+            continue;
+        }
+
+        let Some(source_var) = ssa_var_from_display_name(value_key, 8) else {
+            continue;
+        };
+        let Some((_, load_idx)) = producer_entry_for_var(query.producers, &source_var) else {
+            continue;
+        };
+        let Some(candidate) = preserved_input_binding_from_stack_home(
+            query,
+            &source_var,
+            load_idx,
+            *printf_stack_offset,
+        ) else {
+            continue;
+        };
+        let candidate_negative_offset =
+            call_arg_semantic_source_offset(query.info, &candidate.arg, 0, &mut HashSet::new())
+                .filter(|offset| *offset < 0);
+        let Some(candidate_negative_offset) = candidate_negative_offset else {
+            continue;
+        };
+        if candidate_negative_offset == current_negative_offset {
+            continue;
+        }
+
+        *binding = candidate;
+        seen_negative_offsets.insert(candidate_negative_offset);
+    }
 }
 
 fn preferred_stack_input_call_arg(
@@ -4614,26 +4875,30 @@ fn call_result_expr_for_post_call_source(
 }
 
 fn is_post_call_result_alias_for_call(
-    info: &UseInfo,
-    block: &SSABlock,
+    query: &PostCallAliasQuery<'_, '_>,
     call_idx: usize,
     use_idx: usize,
-    producers: &HashMap<String, usize>,
     var: &SSAVar,
     ret_family: &str,
-    env: &PassEnv<'_>,
 ) -> bool {
-    let Some(source_var) =
-        resolve_post_call_result_source_var_with_facts(info, &block.ops, producers, var, env, 0)
-    else {
+    let Some(source_var) = resolve_post_call_result_source_var_with_facts(
+        query.info,
+        &query.block.ops,
+        query.producers,
+        var,
+        query.env,
+        0,
+    ) else {
         return false;
     };
     if register_family_name(&source_var.name).as_deref() != Some(ret_family) {
         return false;
     }
-    let source_entry = producer_entry_for_var(producers, &source_var);
+    let source_entry = producer_entry_for_var(query.producers, &source_var);
     let source_is_call_define = matches!(
-        source_entry.as_ref().and_then(|(_, idx)| block.ops.get(*idx)),
+        source_entry
+            .as_ref()
+            .and_then(|(_, idx)| query.block.ops.get(*idx)),
         Some(SSAOp::CallDefine { dst })
             if register_family_name(&dst.name).as_deref() == Some(ret_family)
     );
@@ -4647,10 +4912,16 @@ fn is_post_call_result_alias_for_call(
     if source_is_call_define {
         true
     } else {
-        let allowed_keys =
-            post_call_result_alias_chain_keys_with_facts(info, &block.ops, producers, var, env, 0);
+        let allowed_keys = post_call_result_alias_chain_keys_with_facts(
+            query.info,
+            &query.block.ops,
+            query.producers,
+            var,
+            query.env,
+            0,
+        );
         !has_intervening_return_family_write(
-            &block.ops,
+            &query.block.ops,
             call_idx + 1,
             use_idx,
             ret_family,

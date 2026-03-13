@@ -42,10 +42,7 @@ impl<'a> FoldingContext<'a> {
                                 .get(&(frame.block_addr, frame.op_idx))
                                 .cloned()
                                 .unwrap_or_default();
-                            let mut args: Vec<CExpr> = raw_args
-                                .into_iter()
-                                .map(|binding| self.render_call_arg_for_callee(&func_expr, binding))
-                                .collect();
+                            let mut args = self.render_call_args_for_callee(&func_expr, raw_args);
                             if let Some(max_arity) = self.non_variadic_call_arity(&func_expr) {
                                 args.truncate(max_arity);
                             }
@@ -62,10 +59,7 @@ impl<'a> FoldingContext<'a> {
                                 .get(&(frame.block_addr, frame.op_idx))
                                 .cloned()
                                 .unwrap_or_default();
-                            let mut args: Vec<CExpr> = raw_args
-                                .into_iter()
-                                .map(|binding| self.render_call_arg_for_callee(&func_expr, binding))
-                                .collect();
+                            let mut args = self.render_call_args_for_callee(&func_expr, raw_args);
                             if let Some(max_arity) = self.non_variadic_call_arity(&func_expr) {
                                 args.truncate(max_arity);
                             }
