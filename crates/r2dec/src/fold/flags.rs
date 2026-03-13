@@ -215,8 +215,9 @@ impl<'a> FoldingContext<'a> {
         }
 
         let resolved = self
-            .lookup_definition(&name)
-            .or_else(|| self.formatted_defs_map().get(&name).cloned());
+            .lookup_definition_raw(&name)
+            .or_else(|| self.formatted_defs_map().get(&name).cloned())
+            .or_else(|| self.lookup_definition(&name));
 
         let rewritten = if let Some(expr) = resolved {
             let expr = self.rewrite_condition_stack_aliases_inner(expr, depth + 1, visited);
@@ -2070,7 +2071,7 @@ fn parse_flag_name(name: &str) -> Option<(String, Option<String>)> {
 
 fn is_specific_flag_name(name: &str, flag: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    if lower == flag {
+    if flag_name_matches(&lower, flag) {
         return true;
     }
 
@@ -2078,7 +2079,23 @@ fn is_specific_flag_name(name: &str, flag: &str) -> bool {
         return false;
     };
 
-    base == flag && !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+    flag_name_matches(base, flag)
+        && !suffix.is_empty()
+        && suffix.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn flag_name_matches(base: &str, flag: &str) -> bool {
+    if base == flag {
+        return true;
+    }
+
+    matches!(
+        (base, flag),
+        ("cy" | "tmpcy", "cf")
+            | ("zr" | "tmpzr", "zf")
+            | ("ng" | "tmpng", "sf")
+            | ("ov" | "tmpov", "of")
+    )
 }
 
 fn is_flag_base_name(name: &str) -> bool {

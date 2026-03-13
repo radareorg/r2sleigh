@@ -784,6 +784,32 @@ a:sla.dec | jq -Rs 'contains("Usage: %s <test_num> [args...]") and (contains("sw
 EOF_CMDS
 RUN
 
+NAME=dec_main_usage_path_returns_one_not_argc
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs 'contains("return 1;") and (contains("return argc;")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_main_switch_selector_uses_recovered_local
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs 'contains("switch (local_") and (contains("switch (test)")|not)'
+EOF_CMDS
+RUN
+
 NAME=dec_check_secret_signature_uses_int32
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true

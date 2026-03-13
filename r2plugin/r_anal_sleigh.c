@@ -30,6 +30,8 @@ extern const char *r2il_error(const R2ILContext *ctx);
 /* Lifting */
 extern R2ILBlock *r2il_lift(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr);
 extern R2ILBlock *r2il_lift_block(R2ILContext *ctx, const unsigned char *bytes, size_t len, unsigned long long addr, unsigned int block_size);
+extern void r2il_block_rewrite_layout(R2ILBlock *block, unsigned long long addr, unsigned int size);
+extern R2ILBlock *r2il_block_new_branch(unsigned long long addr, unsigned int size, unsigned long long target, unsigned int target_size);
 extern void r2il_set_semantic_metadata_enabled(R2ILContext *ctx, bool enabled);
 extern void r2il_block_free(R2ILBlock *block);
 extern int r2il_block_validate(R2ILContext *ctx, const R2ILBlock *block);
@@ -44,6 +46,7 @@ extern unsigned long long r2il_block_addr(const R2ILBlock *block);
 extern unsigned int r2il_block_type(const R2ILBlock *block);
 extern unsigned long long r2il_block_jump(const R2ILBlock *block);
 extern unsigned long long r2il_block_fail(const R2ILBlock *block);
+extern bool r2il_block_has_trailing_indirect_branch(const R2ILBlock *block);
 
 /* ESIL/mnemonic */
 extern char *r2il_block_to_esil(const R2ILContext *ctx, const R2ILBlock *block);
@@ -136,6 +139,19 @@ typedef enum {
 	SLEIGH_MODE_BALANCED = 1,
 	SLEIGH_MODE_FAST = 2,
 } SleighMode;
+
+typedef struct {
+	size_t contiguous_run;
+	size_t small_values;
+	size_t num_cases;
+	size_t unique_targets;
+	size_t inverse_outliers;
+} SwitchScore;
+
+typedef struct {
+	ut64 addr;
+	unsigned depth;
+} SwitchQueueEntry;
 
 typedef enum {
 	SLEIGH_TYPE_WRITEBACK_OFF = 0,
@@ -266,15 +282,33 @@ static ut64 compute_xref_cache_key(RAnalFunction *fcn, const BlockArray *blocks,
 	return key;
 }
 
-static const char *function_context_var_kind_name(RAnalFunctionContextVarKind kind) {
+static const char *function_context_var_kind_name(char kind) {
 	switch (kind) {
-	case R_ANAL_FUNCTION_CONTEXT_VAR_KIND_REGISTER:
+	case R_ANAL_VAR_KIND_REG:
 		return "register";
-	case R_ANAL_FUNCTION_CONTEXT_VAR_KIND_STACK_BP:
-	case R_ANAL_FUNCTION_CONTEXT_VAR_KIND_STACK_SP:
+	case R_ANAL_VAR_KIND_BPV:
+	case R_ANAL_VAR_KIND_SPV:
 		return "stack";
 	default:
 		return "stack";
+	}
+}
+
+static const char *function_context_var_base(RAnal *anal, char kind) {
+	const char *base = NULL;
+
+	if (!anal) {
+		return NULL;
+	}
+	switch (kind) {
+	case R_ANAL_VAR_KIND_BPV:
+		base = r_reg_alias_getname (anal->reg, R_REG_ALIAS_BP);
+		return base? base: "bp";
+	case R_ANAL_VAR_KIND_SPV:
+		base = r_reg_alias_getname (anal->reg, R_REG_ALIAS_SP);
+		return base? base: "sp";
+	default:
+		return NULL;
 	}
 }
 
@@ -370,23 +404,23 @@ static char *sleigh_collect_external_context_json(RAnal *anal, RAnalFunction *fc
 	pj_o (pj);
 	pj_k (pj, "signature");
 	pj_o (pj);
-	if (ctx->name) {
-		pj_ks (pj, "name", ctx->name);
+	if (ctx->function && ctx->function->name) {
+		pj_ks (pj, "name", ctx->function->name);
 	}
-	if (ctx->ret_type) {
-		pj_ks (pj, "ret", ctx->ret_type);
+	if (ctx->function && ctx->function->ret_type) {
+		pj_ks (pj, "ret", ctx->function->ret_type);
 	}
-	if (ctx->callconv) {
-		pj_ks (pj, "callconv", ctx->callconv);
+	if (ctx->function && ctx->function->callconv) {
+		pj_ks (pj, "callconv", ctx->function->callconv);
 	}
-	if (ctx->noreturn) {
+	if (ctx->function && ctx->function->is_noreturn) {
 		pj_kb (pj, "noreturn", true);
 	}
 	pj_k (pj, "params");
 	pj_a (pj);
 	RListIter *iter;
-	RAnalFunctionContextParam *param;
-	r_list_foreach (ctx->params, iter, param) {
+	RAnalFunctionParam *param;
+	r_list_foreach (ctx->function->params, iter, param) {
 		pj_o (pj);
 		if (param->name) {
 			pj_ks (pj, "name", param->name);
@@ -401,8 +435,10 @@ static char *sleigh_collect_external_context_json(RAnal *anal, RAnalFunction *fc
 
 	pj_k (pj, "vars");
 	pj_a (pj);
-	RAnalFunctionContextVar *var;
-	r_list_foreach (ctx->vars, iter, var) {
+	RAnalVar **it;
+	R_VEC_FOREACH (&ctx->function->vars, it) {
+		RAnalVar *var = *it;
+		const char *base;
 		pj_o (pj);
 		pj_ks (pj, "kind", function_context_var_kind_name (var->kind));
 		if (var->name) {
@@ -411,14 +447,15 @@ static char *sleigh_collect_external_context_json(RAnal *anal, RAnalFunction *fc
 		if (var->type) {
 			pj_ks (pj, "type", var->type);
 		}
-		if (var->reg) {
-			pj_ks (pj, "reg", var->reg);
+		if (var->regname) {
+			pj_ks (pj, "reg", var->regname);
 		}
-		if (var->base) {
-			pj_ks (pj, "base", var->base);
+		base = function_context_var_base (anal, var->kind);
+		if (base) {
+			pj_ks (pj, "base", base);
 		}
-		pj_kb (pj, "is_arg", var->is_arg);
-		pj_ki (pj, "offset", (st64)var->offset);
+		pj_kb (pj, "is_arg", var->isarg);
+		pj_ki (pj, "offset", (st64)var->delta);
 		pj_end (pj);
 	}
 	pj_end (pj);
@@ -2555,6 +2592,488 @@ static char *format_taint_risk_comment(
 	return comment;
 }
 
+static int cmp_ut64_asc(const void *a, const void *b) {
+	const ut64 lhs = *(const ut64 *)a;
+	const ut64 rhs = *(const ut64 *)b;
+	return (lhs > rhs) - (lhs < rhs);
+}
+
+static bool block_has_usable_switch_op(const RAnalBlock *bb) {
+	return bb && bb->switch_op && bb->switch_op != (const RAnalSwitchOp *)UT64_MAX;
+}
+
+static bool switch_score_is_better(SwitchScore candidate, SwitchScore current) {
+	if (candidate.contiguous_run != current.contiguous_run) {
+		return candidate.contiguous_run > current.contiguous_run;
+	}
+	if (candidate.small_values != current.small_values) {
+		return candidate.small_values > current.small_values;
+	}
+	if (candidate.num_cases != current.num_cases) {
+		return candidate.num_cases > current.num_cases;
+	}
+	if (candidate.unique_targets != current.unique_targets) {
+		return candidate.unique_targets > current.unique_targets;
+	}
+	return candidate.inverse_outliers > current.inverse_outliers;
+}
+
+static size_t leading_contiguous_run_len(ut64 *values, size_t nvalues) {
+	size_t i;
+	ut64 expected;
+	if (!values || !nvalues) {
+		return 0;
+	}
+	expected = values[0];
+	for (i = 1; i < nvalues; i++) {
+		if (values[i] != expected + 1) {
+			return i;
+		}
+		expected = values[i];
+	}
+	return nvalues;
+}
+
+static SwitchScore score_switch_op(const RAnalSwitchOp *switch_op) {
+	SwitchScore score = {0};
+	RListIter *iter;
+	RAnalCaseOp *case_op;
+	size_t ncases;
+	size_t i;
+	ut64 *values = NULL;
+	ut64 *targets = NULL;
+
+	if (!switch_op || switch_op == (const RAnalSwitchOp *)UT64_MAX || !switch_op->cases) {
+		return score;
+	}
+
+	ncases = r_list_length(switch_op->cases);
+	if (!ncases) {
+		return score;
+	}
+
+	values = calloc(ncases, sizeof(ut64));
+	targets = calloc(ncases, sizeof(ut64));
+	if (!values || !targets) {
+		free(values);
+		free(targets);
+		return score;
+	}
+
+	i = 0;
+	r_list_foreach (switch_op->cases, iter, case_op) {
+		values[i] = case_op->value;
+		targets[i] = case_op->jump;
+		i++;
+	}
+
+	qsort(values, ncases, sizeof(ut64), cmp_ut64_asc);
+	qsort(targets, ncases, sizeof(ut64), cmp_ut64_asc);
+
+	{
+		size_t unique_values = 0;
+		size_t unique_targets = 0;
+		ut64 last = UT64_MAX;
+		for (i = 0; i < ncases; i++) {
+			if (!unique_values || values[i] != last) {
+				values[unique_values++] = values[i];
+				last = values[i];
+			}
+		}
+		last = UT64_MAX;
+		for (i = 0; i < ncases; i++) {
+			if (!unique_targets || targets[i] != last) {
+				targets[unique_targets++] = targets[i];
+				last = targets[i];
+			}
+		}
+		score.contiguous_run = leading_contiguous_run_len(values, unique_values);
+		for (i = 0; i < unique_values; i++) {
+			if (values[i] <= 0xff) {
+				score.small_values++;
+			}
+		}
+		score.num_cases = ncases;
+		score.unique_targets = unique_targets;
+		score.inverse_outliers = unique_values >= score.contiguous_run
+			? SIZE_MAX - (unique_values - score.contiguous_run)
+			: SIZE_MAX;
+	}
+
+	free(values);
+	free(targets);
+	return score;
+}
+
+static bool queue_contains_addr(const SwitchQueueEntry *queue, size_t nqueue, ut64 addr) {
+	size_t i;
+	for (i = 0; i < nqueue; i++) {
+		if (queue[i].addr == addr) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void queue_push_unique(SwitchQueueEntry *queue, size_t capacity, size_t *nqueue, ut64 addr, unsigned depth) {
+	if (!queue || !nqueue || addr == UT64_MAX || *nqueue >= capacity) {
+		return;
+	}
+	if (queue_contains_addr(queue, *nqueue, addr)) {
+		return;
+	}
+	queue[*nqueue].addr = addr;
+	queue[*nqueue].depth = depth;
+	(*nqueue)++;
+}
+
+static RAnalBlock *find_best_switch_metadata_block(RAnal *anal, RAnalFunction *fcn, RAnalBlock *start) {
+	SwitchQueueEntry queue[512];
+	size_t head = 0;
+	size_t nqueue = 0;
+	RAnalBlock *best = start;
+	SwitchScore best_score;
+
+	if (!anal || !fcn || !block_has_usable_switch_op(start) || !start->switch_op->cases) {
+		return start;
+	}
+
+	best_score = score_switch_op(start->switch_op);
+	queue_push_unique(queue, R_ARRAY_SIZE(queue), &nqueue, start->addr, 0);
+
+	while (head < nqueue) {
+		RAnalBlock *bb = r_anal_function_bbget_in(anal, fcn, queue[head].addr);
+		unsigned depth = queue[head].depth;
+		RListIter *iter;
+		RAnalCaseOp *case_op;
+		head++;
+
+		if (!bb) {
+			continue;
+		}
+
+		if (block_has_usable_switch_op(bb) && bb->switch_op->cases) {
+			SwitchScore candidate_score = score_switch_op(bb->switch_op);
+			if (switch_score_is_better(candidate_score, best_score)) {
+				best = bb;
+				best_score = candidate_score;
+			}
+		}
+
+		if (depth >= 6) {
+			continue;
+		}
+
+		queue_push_unique(queue, R_ARRAY_SIZE(queue), &nqueue, bb->jump, depth + 1);
+		queue_push_unique(queue, R_ARRAY_SIZE(queue), &nqueue, bb->fail, depth + 1);
+		if (block_has_usable_switch_op(bb) && bb->switch_op->cases) {
+			r_list_foreach (bb->switch_op->cases, iter, case_op) {
+				queue_push_unique(queue, R_ARRAY_SIZE(queue), &nqueue, case_op->jump, depth + 1);
+			}
+		}
+	}
+
+	return best;
+}
+
+static void split_missing_switch_case_targets(RAnal *anal, RAnalFunction *fcn) {
+	RListIter *iter;
+	RAnalBlock *bb;
+	ut64 *targets = NULL;
+	size_t ntargets = 0;
+	size_t capacity = 0;
+
+	if (!anal || !fcn) {
+		return;
+	}
+
+	r_list_foreach (fcn->bbs, iter, bb) {
+		RAnalBlock *switch_bb = find_best_switch_metadata_block(anal, fcn, bb);
+		RListIter *case_iter;
+		RAnalCaseOp *case_op;
+
+		if (!block_has_usable_switch_op(switch_bb) || !switch_bb->switch_op->cases) {
+			continue;
+		}
+
+		r_list_foreach (switch_bb->switch_op->cases, case_iter, case_op) {
+			bool seen = false;
+			ut64 target = case_op ? case_op->jump : UT64_MAX;
+			size_t i;
+			ut64 *next;
+
+			if (target == UT64_MAX || !target) {
+				continue;
+			}
+			for (i = 0; i < ntargets; i++) {
+				if (targets[i] == target) {
+					seen = true;
+					break;
+				}
+			}
+			if (seen) {
+				continue;
+			}
+			if (ntargets >= capacity) {
+				size_t new_capacity = capacity ? (capacity * 2) : 32;
+				next = realloc (targets, new_capacity * sizeof (ut64));
+				if (!next) {
+					free (targets);
+					return;
+				}
+				targets = next;
+				capacity = new_capacity;
+			}
+			targets[ntargets++] = target;
+		}
+	}
+
+	for (size_t i = 0; i < ntargets; i++) {
+		ut64 target = targets[i];
+		RAnalBlock *at = r_anal_function_bbget_at (anal, fcn, target);
+		RAnalBlock *containing;
+		RAnalBlock *split;
+
+		if (at) {
+			continue;
+		}
+
+		containing = r_anal_get_block_at (anal, target);
+		if (!containing) {
+			containing = r_anal_bb_from_offset (anal, target);
+		}
+		if (!containing || containing->addr == target) {
+			continue;
+		}
+
+		split = r_anal_block_split (containing, target);
+		if (split) {
+			r_unref (split);
+		}
+	}
+
+	free (targets);
+}
+
+static bool block_has_linear_direct_jump(const RAnalBlock *bb) {
+	return bb && bb->jump != UT64_MAX && bb->fail == UT64_MAX;
+}
+
+static size_t healed_layout_size(const RAnalBlock *bb, size_t fallback_size) {
+	ut64 span;
+
+	if (!block_has_linear_direct_jump (bb) || bb->jump <= bb->addr) {
+		return fallback_size;
+	}
+
+	span = bb->jump - bb->addr;
+	if (!span || span > fallback_size) {
+		return fallback_size;
+	}
+
+	return (size_t)span;
+}
+
+static bool lifted_block_needs_heal(const RAnalBlock *bb, const R2ILBlock *block) {
+	if (!bb || !block) {
+		return false;
+	}
+	if (!block_has_linear_direct_jump (bb)) {
+		return false;
+	}
+	if (r2il_block_op_count (block) == 0) {
+		return true;
+	}
+	if (r2il_block_has_trailing_indirect_branch (block)) {
+		return true;
+	}
+	return r2il_block_type (block) == R_ANAL_OP_TYPE_UJMP && r2il_block_jump (block) == 0;
+}
+
+static ut64 chase_invalid_split_jump_chain(RAnal *anal, RAnalFunction *fcn, ut64 addr) {
+	size_t depth = 0;
+	ut64 cur = addr;
+
+	while (cur != UT64_MAX && cur && depth++ < 8) {
+		RAnalBlock *bb = r_anal_function_bbget_at (anal, fcn, cur);
+		if (!bb || bb->addr != cur) {
+			break;
+		}
+		if (!block_has_linear_direct_jump (bb)) {
+			break;
+		}
+		if (bb->size > 4 && bb->ninstr > 1) {
+			break;
+		}
+		cur = bb->jump;
+	}
+
+	return cur;
+}
+
+static bool function_has_direct_predecessor_reference(RAnalFunction *fcn, ut64 addr) {
+	RListIter *iter;
+	RAnalBlock *bb;
+
+	if (!fcn || addr == UT64_MAX || !addr) {
+		return false;
+	}
+
+	r_list_foreach (fcn->bbs, iter, bb) {
+		if (!bb || bb->addr == addr) {
+			continue;
+		}
+		if ((bb->jump == addr || bb->fail == addr)
+			&& (bb->size > 4 || !block_has_linear_direct_jump (bb))) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static R2ILBlock *try_lift_prefix_healed_block(
+	R2ILContext *ctx,
+	RAnalBlock *bb,
+	const ut8 *buf,
+	size_t to_read,
+	size_t bb_size
+) {
+	size_t logical_size;
+	size_t prefix_size = bb_size;
+
+	if (!ctx || !bb || !buf || bb_size <= 4) {
+		return NULL;
+	}
+
+	logical_size = healed_layout_size (bb, bb_size);
+	while (prefix_size > 4) {
+		R2ILBlock *candidate;
+		prefix_size--;
+		candidate = r2il_lift_block (ctx, buf, to_read, bb->addr, prefix_size);
+		if (!candidate) {
+			continue;
+		}
+		if (r2il_block_op_count (candidate) == 0
+			|| r2il_block_type (candidate) == R_ANAL_OP_TYPE_UJMP
+			|| r2il_block_has_trailing_indirect_branch (candidate)) {
+			r2il_block_free (candidate);
+			continue;
+		}
+		r2il_block_rewrite_layout (candidate, bb->addr, (unsigned int)logical_size);
+		return candidate;
+	}
+
+	return NULL;
+}
+
+static R2ILBlock *try_lift_suffix_healed_block(
+	R2ILContext *ctx,
+	RAnalBlock *bb,
+	const ut8 *buf,
+	size_t to_read,
+	size_t bb_size
+) {
+	size_t delta;
+	size_t max_delta;
+	size_t logical_size;
+
+	if (!ctx || !bb || !buf || bb_size < 2 || to_read < 2) {
+		return NULL;
+	}
+
+	logical_size = healed_layout_size (bb, bb_size);
+	max_delta = R_MIN (bb_size - 1, 8);
+	for (delta = 1; delta <= max_delta; delta++) {
+		R2ILBlock *candidate;
+		if (delta >= to_read) {
+			break;
+		}
+		candidate = r2il_lift_block (
+			ctx,
+			buf + delta,
+			to_read - delta,
+			bb->addr + delta,
+			(unsigned int)(bb_size - delta)
+		);
+		if (!candidate) {
+			continue;
+		}
+		if (r2il_block_op_count (candidate) == 0
+			|| r2il_block_type (candidate) == R_ANAL_OP_TYPE_UJMP
+			|| r2il_block_has_trailing_indirect_branch (candidate)) {
+			r2il_block_free (candidate);
+			continue;
+		}
+		r2il_block_rewrite_layout (candidate, bb->addr, (unsigned int)logical_size);
+		return candidate;
+	}
+
+	return NULL;
+}
+
+static R2ILBlock *make_split_padding_alias_block(RAnal *anal, RAnalFunction *fcn, RAnalBlock *bb) {
+	ut64 target;
+
+	if (!anal || !fcn || !bb || !block_has_linear_direct_jump (bb)) {
+		return NULL;
+	}
+	if (!function_has_direct_predecessor_reference (fcn, bb->addr)) {
+		return NULL;
+	}
+
+	target = chase_invalid_split_jump_chain (anal, fcn, bb->jump);
+	if (target == UT64_MAX || !target || target == bb->addr) {
+		return NULL;
+	}
+
+	return r2il_block_new_branch (
+		bb->addr,
+		(unsigned int)bb->size,
+		target,
+		(unsigned int)R_MAX (1, anal->config ? anal->config->bits / 8 : 8)
+	);
+}
+
+static R2ILBlock *lift_function_block_healed(
+	RAnal *anal,
+	RAnalFunction *fcn,
+	R2ILContext *ctx,
+	RAnalBlock *bb,
+	const ut8 *buf,
+	size_t to_read,
+	size_t bb_size
+) {
+	R2ILBlock *block;
+
+	block = r2il_lift_block (ctx, buf, to_read, bb->addr, (unsigned int)bb_size);
+	if (block && !lifted_block_needs_heal (bb, block)) {
+		return block;
+	}
+	if (block) {
+		r2il_block_free (block);
+	}
+
+	if (block_has_linear_direct_jump (bb)) {
+		block = try_lift_prefix_healed_block (ctx, bb, buf, to_read, bb_size);
+		if (block) {
+			return block;
+		}
+
+		block = try_lift_suffix_healed_block (ctx, bb, buf, to_read, bb_size);
+		if (block) {
+			return block;
+		}
+
+		block = make_split_padding_alias_block (anal, fcn, bb);
+		if (block) {
+			return block;
+		}
+	}
+
+	return NULL;
+}
+
 /* Lift all basic blocks of a function */
 static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *ctx, BlockArray *out) {
 	R_RETURN_VAL_IF_FAIL (anal && fcn && ctx && out, false);
@@ -2563,6 +3082,7 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 	RAnalBlock *bb;
 
 	block_array_init (out);
+	split_missing_switch_case_targets (anal, fcn);
 
 	r_list_foreach (fcn->bbs, iter, bb) {
 		ut8 buf[SLEIGH_BLOCK_MAX_BYTES];
@@ -2581,11 +3101,12 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 		}
 
 		/* Lift entire basic block (multiple instructions) */
-		R2ILBlock *block = r2il_lift_block (ctx, buf, to_read, bb->addr, (unsigned int)bb_size);
+		R2ILBlock *block = lift_function_block_healed (anal, fcn, ctx, bb, buf, to_read, bb_size);
 		if (block) {
 			/* Check if this block has switch info from radare2's analysis */
-			if (bb->switch_op && bb->switch_op->cases) {
-				size_t num_cases = r_list_length (bb->switch_op->cases);
+			RAnalBlock *switch_bb = find_best_switch_metadata_block(anal, fcn, bb);
+			if (block_has_usable_switch_op(switch_bb) && switch_bb->switch_op->cases) {
+				size_t num_cases = r_list_length (switch_bb->switch_op->cases);
 				if (num_cases > 0) {
 					unsigned long long *case_values = malloc (num_cases * sizeof (unsigned long long));
 					unsigned long long *case_targets = malloc (num_cases * sizeof (unsigned long long));
@@ -2595,7 +3116,7 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 						size_t i = 0;
 						unsigned long long observed_min = ULLONG_MAX;
 						unsigned long long observed_max = 0;
-						r_list_foreach (bb->switch_op->cases, case_iter, case_op) {
+						r_list_foreach (switch_bb->switch_op->cases, case_iter, case_op) {
 							case_values[i] = case_op->value;
 							case_targets[i] = case_op->jump;
 							observed_min = R_MIN (observed_min, case_op->value);
@@ -2603,8 +3124,8 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 							i++;
 						}
 
-						unsigned long long min_val = bb->switch_op->min_val;
-						unsigned long long max_val = bb->switch_op->max_val;
+						unsigned long long min_val = switch_bb->switch_op->min_val;
+						unsigned long long max_val = switch_bb->switch_op->max_val;
 						int range_invalid = min_val > max_val;
 						if (!range_invalid) {
 							for (size_t case_idx = 0; case_idx < num_cases; case_idx++) {
@@ -2621,10 +3142,10 @@ static bool lift_function_blocks(RAnal *anal, RAnalFunction *fcn, R2ILContext *c
 						}
 
 						r2il_block_set_switch_info (block,
-							bb->switch_op->addr,
+							switch_bb->switch_op->addr,
 							min_val,
 							max_val,
-							bb->switch_op->def_val,
+							switch_bb->switch_op->def_val,
 							case_values, case_targets, num_cases);
 					}
 					free (case_values);
@@ -5547,14 +6068,14 @@ static bool is_caller_propagation_ref_type (RAnalRefType type) {
 
 static bool function_has_opaque_type_markers(RAnal *anal, RAnalFunction *fcn) {
 	bool has_opaque = false;
-	RAnalFunctionReadback *readback;
+	RAnalFunctionContext *ctx;
 	if (!anal || !fcn) {
 		return false;
 	}
-	readback = r_anal_function_readback_collect (anal, fcn);
-	if (readback) {
-		has_opaque = readback->has_opaque_type_markers;
-		r_anal_function_readback_free (readback);
+	ctx = r_anal_function_context_collect (anal, fcn);
+	if (ctx) {
+		has_opaque = ctx->function && ctx->function->has_opaque_type_markers;
+		r_anal_function_context_free (ctx);
 	}
 	return has_opaque;
 }
@@ -5730,7 +6251,7 @@ static bool verify_practical_signature_consistency (
 	bool reason_argc_mismatch = false;
 	bool reason_argtype_mismatch = false;
 	bool reason_callconv_mismatch = false;
-	RAnalFunctionReadback *readback = NULL;
+	RAnalFunctionContext *ctx = NULL;
 	const RJson *j_expected_signature;
 	const RJson *j_expected_ret;
 	const RJson *j_expected_params;
@@ -5757,26 +6278,26 @@ static bool verify_practical_signature_consistency (
 		long_is_i64 = is_x64_signature_arch (j_expected_arch->str_value);
 	}
 	if (check_signature || check_callconv) {
-		readback = r_anal_function_readback_collect (anal, fcn);
-		if (!readback) {
+		ctx = r_anal_function_context_collect (anal, fcn);
+		if (!ctx) {
 			reason_readback_fail = true;
 			ok = false;
 		}
 	}
 
-	if (check_signature && readback) {
+	if (check_signature && ctx) {
 		const RJson *expected_param;
 		int expected_count;
 		int actual_count = 0;
 		RListIter *iter;
-		RAnalFunctionReadbackParam *actual_param;
+		RAnalFunctionParam *actual_param;
 
 		if (ok) {
 			if (!j_expected_ret || j_expected_ret->type != R_JSON_STRING
-					|| R_STR_ISEMPTY (readback->ret_type)) {
+					|| !ctx->function || R_STR_ISEMPTY (ctx->function->ret_type)) {
 				reason_readback_fail = true;
 				ok = false;
-			} else if (!types_match_canonical (j_expected_ret->str_value, readback->ret_type, long_is_i64)) {
+			} else if (!types_match_canonical (j_expected_ret->str_value, ctx->function->ret_type, long_is_i64)) {
 				reason_ret_mismatch = true;
 				ok = false;
 			}
@@ -5786,13 +6307,13 @@ static bool verify_practical_signature_consistency (
 				ok = false;
 			} else {
 				expected_count = json_array_object_count (j_expected_params);
-				actual_count = (int)r_list_length (readback->params);
+				actual_count = (int)r_list_length (ctx->function->params);
 				if (expected_count != actual_count) {
 					reason_argc_mismatch = true;
 					ok = false;
 				}
 				expected_param = json_next_object (j_expected_params->children.first);
-				iter = readback->params? readback->params->head: NULL;
+				iter = ctx->function->params? ctx->function->params->head: NULL;
 				actual_param = iter? iter->data: NULL;
 				while (expected_param && actual_param && ok) {
 					const RJson *j_expected_type = r_json_get (expected_param, "type");
@@ -5820,24 +6341,24 @@ static bool verify_practical_signature_consistency (
 		}
 	}
 
-	if (check_callconv && readback) {
+	if (check_callconv && ctx) {
 		if (j_expected_callconv && j_expected_callconv->type == R_JSON_STRING
 				&& j_expected_callconv->str_value && *j_expected_callconv->str_value) {
-			if (R_STR_ISEMPTY (readback->callconv)
-					|| !strings_match_normalized (j_expected_callconv->str_value, readback->callconv)) {
+			if (!ctx->function || R_STR_ISEMPTY (ctx->function->callconv)
+					|| !strings_match_normalized (j_expected_callconv->str_value, ctx->function->callconv)) {
 				reason_callconv_mismatch = true;
 				ok = false;
 			}
 		}
 	}
 
-	if (check_signature && readback && afij_signature_drift) {
+	if (check_signature && ctx && afij_signature_drift) {
 		if (!j_expected_signature || j_expected_signature->type != R_JSON_STRING
 				|| !j_expected_signature->str_value || !*j_expected_signature->str_value) {
 			*afij_signature_drift = false;
-		} else if (R_STR_ISEMPTY (readback->signature)) {
+		} else if (!ctx->function || R_STR_ISEMPTY (ctx->function->signature)) {
 			*afij_signature_drift = true;
-		} else if (!strings_match_normalized (j_expected_signature->str_value, readback->signature)) {
+		} else if (!strings_match_normalized (j_expected_signature->str_value, ctx->function->signature)) {
 			*afij_signature_drift = true;
 		}
 	}
@@ -5860,7 +6381,7 @@ static bool verify_practical_signature_consistency (
 		}
 	}
 
-	r_anal_function_readback_free (readback);
+	r_anal_function_context_free (ctx);
 	return ok;
 }
 

@@ -82,8 +82,10 @@ pub(crate) struct UseInfo {
     pub(crate) ptr_members: HashMap<String, (r2ssa::SSAVar, i64)>,
     pub(crate) condition_vars: HashSet<String>,
     pub(crate) pinned: HashSet<String>,
-    pub(crate) call_args: HashMap<(u64, usize), Vec<SemanticCallArg>>,
+    pub(crate) call_args: HashMap<(u64, usize), Vec<CallArgBinding>>,
+    pub(crate) switch_selector_roots: BTreeMap<u64, SemanticValue>,
     pub(crate) consumed_by_call: HashSet<String>,
+    pub(crate) inlined_call_results: HashSet<(u64, usize)>,
     pub(crate) var_aliases: HashMap<String, String>,
     pub(crate) type_hints: HashMap<String, CType>,
     pub(crate) stack_slots: HashMap<String, StackSlotProvenance>,
@@ -98,6 +100,67 @@ pub(crate) enum SemanticCallArg {
     Semantic(SemanticValue),
     StringAddr(u64),
     FallbackExpr(CExpr),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallArgRole {
+    Input,
+    Result,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CallArgBinding {
+    pub(crate) arg: SemanticCallArg,
+    pub(crate) role: CallArgRole,
+    pub(crate) stack_offset: Option<i64>,
+    pub(crate) source_call: Option<(u64, usize)>,
+}
+
+impl CallArgBinding {
+    pub(crate) fn new(arg: SemanticCallArg, role: CallArgRole, stack_offset: Option<i64>) -> Self {
+        Self {
+            arg,
+            role,
+            stack_offset,
+            source_call: None,
+        }
+    }
+
+    pub(crate) fn input(arg: SemanticCallArg) -> Self {
+        Self::new(arg, CallArgRole::Input, None)
+    }
+
+    pub(crate) fn result(arg: SemanticCallArg) -> Self {
+        Self::new(arg, CallArgRole::Result, None)
+    }
+
+    pub(crate) fn with_stack_offset(mut self, stack_offset: i64) -> Self {
+        self.stack_offset = Some(stack_offset);
+        self
+    }
+
+    pub(crate) fn with_source_call(mut self, block_addr: u64, op_idx: usize) -> Self {
+        self.source_call = Some((block_addr, op_idx));
+        self
+    }
+
+    pub(crate) fn is_result(&self) -> bool {
+        self.role == CallArgRole::Result
+    }
+}
+
+impl From<SemanticCallArg> for CallArgBinding {
+    fn from(arg: SemanticCallArg) -> Self {
+        Self::input(arg)
+    }
+}
+
+impl From<CExpr> for CallArgBinding {
+    fn from(expr: CExpr) -> Self {
+        Self::input(SemanticCallArg::from(expr))
+    }
 }
 
 impl SemanticCallArg {

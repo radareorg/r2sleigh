@@ -37,13 +37,14 @@ impl<'a> FoldingContext<'a> {
                     match op {
                         SSAOp::Call { target } => {
                             let func_expr = self.resolve_call_target(target);
-                            let mut args: Vec<CExpr> = self
+                            let raw_args = self
                                 .call_args_map()
                                 .get(&(frame.block_addr, frame.op_idx))
                                 .cloned()
-                                .unwrap_or_default()
+                                .unwrap_or_default();
+                            let mut args: Vec<CExpr> = raw_args
                                 .into_iter()
-                                .map(|arg| self.render_call_arg_for_callee(&func_expr, arg))
+                                .map(|binding| self.render_call_arg_for_callee(&func_expr, binding))
                                 .collect();
                             if let Some(max_arity) = self.non_variadic_call_arity(&func_expr) {
                                 args.truncate(max_arity);
@@ -56,13 +57,14 @@ impl<'a> FoldingContext<'a> {
                                 CExpr::Var(_) => resolved_target,
                                 other => CExpr::Deref(Box::new(other)),
                             };
-                            let mut args: Vec<CExpr> = self
+                            let raw_args = self
                                 .call_args_map()
                                 .get(&(frame.block_addr, frame.op_idx))
                                 .cloned()
-                                .unwrap_or_default()
+                                .unwrap_or_default();
+                            let mut args: Vec<CExpr> = raw_args
                                 .into_iter()
-                                .map(|arg| self.render_call_arg_for_callee(&func_expr, arg))
+                                .map(|binding| self.render_call_arg_for_callee(&func_expr, binding))
                                 .collect();
                             if let Some(max_arity) = self.non_variadic_call_arity(&func_expr) {
                                 args.truncate(max_arity);

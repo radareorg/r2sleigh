@@ -330,7 +330,7 @@ impl<'a> FoldingContext<'a> {
             && let Some(alias) =
                 self.resolve_stack_alias_from_addr_expr(&CExpr::Var(name.clone()), 0)
             && alias != *name
-            && !super::op_lower::should_replace_preserved_stack_alias(&alias)
+            && !super::op_lower::is_generic_stack_placeholder_alias(&alias)
         {
             return CExpr::Var(alias);
         }
@@ -343,7 +343,7 @@ impl<'a> FoldingContext<'a> {
             } | CExpr::Paren(_)
                 | CExpr::Cast { .. }
         ) && let Some(alias) = self.resolve_stack_alias_from_addr_expr(&rewritten, 0)
-            && !super::op_lower::should_replace_preserved_stack_alias(&alias)
+            && !super::op_lower::is_generic_stack_placeholder_alias(&alias)
         {
             return CExpr::Var(alias);
         }
@@ -351,7 +351,7 @@ impl<'a> FoldingContext<'a> {
         match rewritten {
             CExpr::Deref(inner) => {
                 if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&inner, 0)
-                    && !super::op_lower::should_replace_preserved_stack_alias(&alias)
+                    && !super::op_lower::is_generic_stack_placeholder_alias(&alias)
                 {
                     return CExpr::Var(alias);
                 }

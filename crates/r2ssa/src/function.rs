@@ -23,6 +23,16 @@ use crate::var::SSAVar;
 /// Switch case information: Vec of (case_value, target_address) pairs and optional default target.
 pub type SwitchInfo = (Vec<(u64, u64)>, Option<u64>);
 
+/// Query-only CFG risk summary for decompilation preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CFGRiskSummary {
+    pub block_count: usize,
+    pub loop_count: usize,
+    pub back_edge_count: usize,
+    pub switch_block_count: usize,
+    pub max_switch_cases: usize,
+}
+
 /// A function in SSA form.
 ///
 /// This is the main entry point for function-level SSA analysis.
@@ -391,6 +401,34 @@ impl SSAFunction {
         self.domtree.dominates(a, b)
     }
 
+    /// Summarize CFG features that are useful for conservative decompiler preflight.
+    ///
+    /// This is intentionally query-only: it reports structure, but does not encode
+    /// fallback policy or mutate SSA state.
+    pub fn cfg_risk_summary(&self) -> CFGRiskSummary {
+        let back_edges = self.collect_back_edges();
+        let back_edge_count = back_edges.values().map(Vec::len).sum();
+        let loop_count = back_edges.len();
+        let mut switch_block_count = 0usize;
+        let mut max_switch_cases = 0usize;
+
+        for block in self.blocks() {
+            if let Some((cases, default)) = self.switch_info(block.addr) {
+                switch_block_count += 1;
+                let case_count = cases.len() + usize::from(default.is_some());
+                max_switch_cases = max_switch_cases.max(case_count);
+            }
+        }
+
+        CFGRiskSummary {
+            block_count: self.num_blocks(),
+            loop_count,
+            back_edge_count,
+            switch_block_count,
+            max_switch_cases,
+        }
+    }
+
     /// Get the immediate dominator of a block.
     pub fn idom(&self, block: u64) -> Option<u64> {
         self.domtree.idom(block)
@@ -720,6 +758,38 @@ impl SSAFunction {
         }
 
         out
+    }
+
+    fn collect_back_edges(&self) -> HashMap<u64, Vec<u64>> {
+        let mut visited = HashSet::new();
+        let mut in_stack = HashSet::new();
+        let mut back_edges = HashMap::new();
+        self.dfs_back_edges(self.entry, &mut visited, &mut in_stack, &mut back_edges);
+        back_edges
+    }
+
+    fn dfs_back_edges(
+        &self,
+        block: u64,
+        visited: &mut HashSet<u64>,
+        in_stack: &mut HashSet<u64>,
+        back_edges: &mut HashMap<u64, Vec<u64>>,
+    ) {
+        if visited.contains(&block) {
+            return;
+        }
+        visited.insert(block);
+        in_stack.insert(block);
+
+        for succ in self.successors(block) {
+            if in_stack.contains(&succ) {
+                back_edges.entry(succ).or_default().push(block);
+            } else {
+                self.dfs_back_edges(succ, visited, in_stack, back_edges);
+            }
+        }
+
+        in_stack.remove(&block);
     }
 }
 
@@ -1123,7 +1193,7 @@ impl SSABlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r2il::{R2ILOp, RegisterDef, SpaceId, Varnode};
+    use r2il::{R2ILOp, RegisterDef, SpaceId, SwitchCase, SwitchInfo as R2ILSwitchInfo, Varnode};
 
     fn make_const(val: u64, size: u32) -> Varnode {
         Varnode {
@@ -1261,6 +1331,95 @@ mod tests {
         // Phi should have two sources
         let phi = &merge.phis[0];
         assert_eq!(phi.sources.len(), 2);
+    }
+
+    #[test]
+    fn cfg_risk_summary_reports_loops_and_switch_density() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1010, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: make_const(0x1020, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1010,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: make_const(0x1000, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1020,
+                size: 4,
+                ops: vec![],
+                switch_info: Some(R2ILSwitchInfo {
+                    switch_addr: 0x1020,
+                    min_val: 0,
+                    max_val: 2,
+                    default_target: Some(0x1040),
+                    cases: vec![
+                        SwitchCase {
+                            value: 0,
+                            target: 0x1030,
+                        },
+                        SwitchCase {
+                            value: 1,
+                            target: 0x1040,
+                        },
+                    ],
+                }),
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1030,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1040,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("ssa function");
+        let summary = func.cfg_risk_summary();
+
+        assert_eq!(summary.block_count, 6);
+        assert_eq!(
+            summary.loop_count, 1,
+            "expected one natural loop, got {summary:?}"
+        );
+        assert_eq!(
+            summary.back_edge_count, 1,
+            "expected one back edge from loop latch, got {summary:?}"
+        );
+        assert_eq!(summary.switch_block_count, 1);
+        assert_eq!(summary.max_switch_cases, 3);
     }
 
     #[test]

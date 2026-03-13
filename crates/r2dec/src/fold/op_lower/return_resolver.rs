@@ -1,6 +1,17 @@
 use super::*;
 
 impl<'a> FoldingContext<'a> {
+    fn refine_low_signal_semantic_candidate(&self, name: &str, candidate: CExpr) -> CExpr {
+        if self.is_low_signal_visible_name(name)
+            && matches!(candidate, CExpr::Var(_))
+            && let Some(deref) = self.semantic_deref_candidate_for_name(name)
+            && deref != candidate
+        {
+            return deref;
+        }
+        candidate
+    }
+
     fn semanticized_raw_definition_candidate(&self, name: &str) -> Option<CExpr> {
         let raw = self.lookup_definition_raw(name)?;
         let mut semantic_visited = HashSet::new();
@@ -10,7 +21,7 @@ impl<'a> FoldingContext<'a> {
 
     pub(crate) fn expr_contains_generic_stack_alias(&self, expr: &CExpr) -> bool {
         match expr {
-            CExpr::Var(name) => should_replace_preserved_stack_alias(name),
+            CExpr::Var(name) => is_generic_stack_placeholder_alias(name),
             CExpr::Paren(inner) => self.expr_contains_generic_stack_alias(inner),
             CExpr::Cast { expr: inner, .. } => self.expr_contains_generic_stack_alias(inner),
             CExpr::Unary { operand, .. } => self.expr_contains_generic_stack_alias(operand),
@@ -86,6 +97,14 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn semantic_return_candidate_for_name(&self, name: &str) -> Option<CExpr> {
+        let lower = name.to_ascii_lowercase();
+        if self.inputs.arch.is_return_register_name(&lower)
+            && let Some(block_addr) = self.current_block_addr.get()
+            && let Some(merged) = self.merged_return_candidate_for_current_block(block_addr)
+        {
+            return Some(merged);
+        }
+
         let merged = self
             .stack_slots_map()
             .get(name)
@@ -101,6 +120,7 @@ impl<'a> FoldingContext<'a> {
 
         let mut semantic_visited = HashSet::new();
         self.render_semantic_value_by_name(name, 0, &mut semantic_visited)
+            .map(|candidate| self.refine_low_signal_semantic_candidate(name, candidate))
     }
 
     pub(super) fn resolve_return_candidate(&self, expr: &CExpr) -> CExpr {
@@ -200,7 +220,18 @@ impl<'a> FoldingContext<'a> {
         best
     }
 
-    fn expr_is_transient_return_artifact(&self, expr: &CExpr) -> bool {
+    fn merged_return_candidate_for_current_block(&self, block_addr: u64) -> Option<CExpr> {
+        let mut best = None;
+        for slot_offset in &self.state.return_stack_slots {
+            best = self.preferred_return_candidate(
+                best,
+                self.merged_return_candidate_for_block_slot(block_addr, *slot_offset),
+            );
+        }
+        best
+    }
+
+    pub(super) fn expr_is_transient_return_artifact(&self, expr: &CExpr) -> bool {
         match expr {
             CExpr::Var(name) => {
                 self.is_transient_visible_name(name) || self.is_low_signal_visible_name(name)
@@ -215,6 +246,20 @@ impl<'a> FoldingContext<'a> {
     pub(super) fn semantic_deref_candidate_for_name(&self, name: &str) -> Option<CExpr> {
         let mut visited = HashSet::new();
         self.render_authoritative_memory_access_by_name(name, 0, 0, &mut visited)
+            .or_else(|| {
+                self.find_ssa_name_for_rendered_alias(name)
+                    .and_then(|ssa_name| {
+                        (ssa_name != name).then(|| {
+                            let mut alias_visited = HashSet::new();
+                            self.render_authoritative_memory_access_by_name(
+                                &ssa_name,
+                                0,
+                                0,
+                                &mut alias_visited,
+                            )
+                        })?
+                    })
+            })
     }
 
     fn should_inline_in_return(&self, var_name: &str, depth: u32) -> bool {
@@ -222,16 +267,30 @@ impl<'a> FoldingContext<'a> {
             return false;
         }
 
+        let ssa_name = self
+            .find_ssa_name_for_rendered_alias(var_name)
+            .filter(|ssa_name| ssa_name != var_name);
+        let semantic_name = ssa_name.as_deref().unwrap_or(var_name);
         let lower = var_name.to_lowercase();
-        if lower.starts_with("const:") || lower.starts_with("tmp:") {
+        let semantic_lower = semantic_name.to_lowercase();
+        if lower.starts_with("const:")
+            || lower.starts_with("tmp:")
+            || semantic_lower.starts_with("const:")
+            || semantic_lower.starts_with("tmp:")
+        {
             return true;
         }
         if self.inputs.arch.is_return_register_name(&lower) {
             return true;
         }
+        if self.inputs.arch.is_return_register_name(&semantic_lower) {
+            return true;
+        }
 
         let is_pinned = self.pinned_set().contains(var_name)
             || self.pinned_set().contains(&lower)
+            || self.pinned_set().contains(semantic_name)
+            || self.pinned_set().contains(&semantic_lower)
             || var_name
                 .rsplit_once('_')
                 .map(|(base, ver)| {
@@ -263,12 +322,14 @@ impl<'a> FoldingContext<'a> {
                         })
                 })
             })
+            .or_else(|| self.use_counts_map().get(semantic_name).copied())
+            .or_else(|| self.use_counts_map().get(&semantic_lower).copied())
             .unwrap_or(0);
         if use_count == 0 || use_count > 3 {
             return false;
         }
 
-        self.lookup_definition(var_name)
+        self.lookup_definition(semantic_name)
             .map(|expr| self.is_return_inline_candidate(&expr, 0))
             .unwrap_or(false)
     }
@@ -315,7 +376,7 @@ impl<'a> FoldingContext<'a> {
             }
             CExpr::Deref(inner) => self
                 .resolve_stack_alias_from_addr_expr(inner, 0)
-                .filter(|alias| !should_replace_preserved_stack_alias(alias))
+                .filter(|alias| !is_generic_stack_placeholder_alias(alias))
                 .is_some(),
             _ => false,
         }
@@ -325,7 +386,7 @@ impl<'a> FoldingContext<'a> {
         match expr {
             CExpr::Deref(inner) => self
                 .resolve_stack_alias_from_addr_expr(inner, 0)
-                .filter(|alias| !should_replace_preserved_stack_alias(alias)),
+                .filter(|alias| !is_generic_stack_placeholder_alias(alias)),
             CExpr::Paren(inner) => self.stack_alias_from_deref_expr(inner),
             CExpr::Cast { expr: inner, .. } => self.stack_alias_from_deref_expr(inner),
             _ => None,
@@ -359,14 +420,39 @@ impl<'a> FoldingContext<'a> {
                 }
 
                 let mut semantic_visited = HashSet::new();
-                if let Some(semantic) =
-                    self.render_semantic_value_by_name(name, 0, &mut semantic_visited)
-                    && self.prefers_visible_expr(&CExpr::Var(name.clone()), &semantic)
+                if let Some(semantic) = self
+                    .render_semantic_value_by_name(name, 0, &mut semantic_visited)
+                    .map(|candidate| self.refine_low_signal_semantic_candidate(name, candidate))
+                    && (self.prefers_visible_expr(&CExpr::Var(name.clone()), &semantic)
+                        || (self.is_low_signal_visible_name(name)
+                            && matches!(
+                                semantic,
+                                CExpr::Subscript { .. }
+                                    | CExpr::Member { .. }
+                                    | CExpr::PtrMember { .. }
+                                    | CExpr::Deref(_)
+                            )))
                 {
                     if !visited.insert(name.clone()) {
                         return semantic;
                     }
                     let resolved = self.expand_return_expr(&semantic, depth + 1, visited);
+                    visited.remove(name);
+                    return if self.is_predicate_like_expr(&resolved) {
+                        self.simplify_condition_expr(resolved)
+                    } else {
+                        resolved
+                    };
+                }
+
+                if self.is_low_signal_visible_name(name)
+                    && let Some(candidate) = self.semantic_deref_candidate_for_name(name)
+                    && self.prefers_visible_expr(&CExpr::Var(name.clone()), &candidate)
+                {
+                    if !visited.insert(name.clone()) {
+                        return candidate;
+                    }
+                    let resolved = self.expand_return_expr(&candidate, depth + 1, visited);
                     visited.remove(name);
                     return if self.is_predicate_like_expr(&resolved) {
                         self.simplify_condition_expr(resolved)
@@ -420,7 +506,7 @@ impl<'a> FoldingContext<'a> {
                 }
                 if let Some(stack_var) = self
                     .resolve_stack_alias_from_addr_expr(inner, 0)
-                    .filter(|alias| !should_replace_preserved_stack_alias(alias))
+                    .filter(|alias| !is_generic_stack_placeholder_alias(alias))
                 {
                     CExpr::Var(stack_var)
                 } else {

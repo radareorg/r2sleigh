@@ -1208,8 +1208,8 @@ mod tests {
 
         assert_eq!(first, second, "predicate-heavy text should be byte-stable");
         assert!(
-            first.contains("return (int64_t)(arg1 !="),
-            "decompiled predicate should use a direct comparison"
+            first.contains("return (int64_t)(arg1 !=") || first.contains("return arg1 != 19;"),
+            "decompiled predicate should use a direct comparison, got:\n{first}"
         );
         assert!(
             !first.contains("0 != 0"),

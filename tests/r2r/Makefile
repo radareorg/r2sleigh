@@ -1,6 +1,8 @@
 # r2r test harness for r2sleigh plugin
 
-R2R_JOBS ?= 4
+# Keep the default harness deterministic. Parallel r2r runs intermittently
+# miss symbolic-path coverage on stress_parse_number under this workspace/toolchain.
+R2R_JOBS ?= 1
 R2R_TIMEOUT ?= 120
 R2R_TMPDIR ?= /tmp/r2sleigh-r2r-tmp
 R2R_PLUGIN_DIR ?= $(R2R_TMPDIR)/plugins

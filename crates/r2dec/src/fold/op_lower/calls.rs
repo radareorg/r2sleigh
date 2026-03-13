@@ -70,13 +70,13 @@ impl<'a> FoldingContext<'a> {
     pub(super) fn render_call_arg_for_callee(
         &self,
         callee: &CExpr,
-        arg: analysis::SemanticCallArg,
+        binding: analysis::CallArgBinding,
     ) -> CExpr {
         if self.is_imported_call_target(callee) {
-            return self.render_imported_call_arg(arg);
+            return self.render_imported_call_arg(binding);
         }
 
-        match arg {
+        match binding.arg {
             analysis::SemanticCallArg::Semantic(value) => {
                 let mut visited = HashSet::new();
                 let expr = self
@@ -98,14 +98,43 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn render_imported_call_arg(&self, arg: analysis::SemanticCallArg) -> CExpr {
-        match arg {
+    fn render_imported_call_arg(&self, binding: analysis::CallArgBinding) -> CExpr {
+        if let Some((block_addr, op_idx)) = binding.source_call
+            && binding.role == analysis::CallArgRole::Result
+            && let analysis::SemanticCallArg::FallbackExpr(CExpr::Call { func, .. }) =
+                binding.arg.clone()
+        {
+            let mut args = self
+                .call_args_map()
+                .get(&(block_addr, op_idx))
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|arg| self.render_call_arg_for_callee(&func, arg))
+                .collect::<Vec<_>>();
+            if let Some(max_arity) = self.non_variadic_call_arity(&func) {
+                args.truncate(max_arity);
+            }
+            return CExpr::call(*func, args);
+        }
+
+        let preserve_stable_input_slot = binding.role == analysis::CallArgRole::Input;
+        let preserve_explicit_call_expr = binding.role == analysis::CallArgRole::Result
+            || matches!(
+                binding.arg,
+                analysis::SemanticCallArg::FallbackExpr(CExpr::Call { .. })
+            );
+        match binding.arg {
             analysis::SemanticCallArg::Semantic(value) => {
                 let mut visited = HashSet::new();
                 let expr = self
                     .render_semantic_value(&value, 0, &mut visited)
                     .unwrap_or_else(|| self.expr_for_semantic_call_arg_fallback(&value));
-                self.finalize_authoritative_imported_call_arg_expr(expr)
+                self.finalize_authoritative_imported_call_arg_expr(
+                    expr,
+                    preserve_stable_input_slot,
+                    preserve_explicit_call_expr,
+                )
             }
             analysis::SemanticCallArg::StringAddr(addr) => self
                 .lookup_string(addr)
@@ -115,13 +144,18 @@ impl<'a> FoldingContext<'a> {
                         .map(|name| CExpr::Var(name.clone()))
                 })
                 .unwrap_or(CExpr::UIntLit(addr)),
-            analysis::SemanticCallArg::FallbackExpr(expr) => {
-                self.normalize_imported_call_arg_expr(expr)
-            }
+            analysis::SemanticCallArg::FallbackExpr(expr) => self.normalize_imported_call_arg_expr(
+                expr,
+                preserve_stable_input_slot,
+                preserve_explicit_call_expr,
+            ),
         }
     }
 
-    fn expr_for_semantic_call_arg_fallback(&self, value: &analysis::SemanticValue) -> CExpr {
+    pub(super) fn expr_for_semantic_call_arg_fallback(
+        &self,
+        value: &analysis::SemanticValue,
+    ) -> CExpr {
         match value {
             analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr)) => expr.clone(),
             analysis::SemanticValue::Scalar(analysis::ScalarValue::Root(value_ref)) => {
@@ -154,13 +188,40 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    fn normalize_imported_call_arg_expr(&self, expr: CExpr) -> CExpr {
+    fn normalize_imported_call_arg_expr(
+        &self,
+        expr: CExpr,
+        preserve_stable_input_slot: bool,
+        preserve_explicit_call_expr: bool,
+    ) -> CExpr {
         let rewritten = self.rewrite_stack_expr(expr);
         let mut best = Some(rewritten.clone());
         let mut expanded_visited = HashSet::new();
         let expanded = self.expand_call_arg_expr(&rewritten, 0, &mut expanded_visited);
-        best = self.choose_preferred_call_arg_expr(best, Some(expanded.clone()), true);
-        let memoryized = match &expanded {
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(expanded.clone()),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
+        let mut semantic_visited = HashSet::new();
+        let semanticized = self.semanticize_visible_expr(&expanded, 0, &mut semantic_visited);
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(semanticized.clone()),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
+        let mut imported_visited = HashSet::new();
+        let imported_resolved =
+            self.resolve_imported_call_arg_expr(&semanticized, 0, &mut imported_visited);
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(imported_resolved.clone()),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
+        let memoryized = match &imported_resolved {
             CExpr::Deref(inner) => {
                 let mut memory_visited = HashSet::new();
                 self.render_memory_access_from_visible_expr(
@@ -170,26 +231,67 @@ impl<'a> FoldingContext<'a> {
                     &mut memory_visited,
                 )
                 .or_else(|| self.promote_constant_indexed_call_arg(inner))
-                .unwrap_or_else(|| expanded.clone())
+                .unwrap_or_else(|| imported_resolved.clone())
             }
-            _ => expanded.clone(),
+            _ => imported_resolved.clone(),
         };
-        best = self.choose_preferred_call_arg_expr(best, Some(memoryized.clone()), true);
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(memoryized.clone()),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
 
         let literalized = self
             .resolve_literalish_call_arg_expr(&memoryized)
             .unwrap_or(memoryized);
-        best = self.choose_preferred_call_arg_expr(best, Some(literalized.clone()), true);
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(literalized.clone()),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
+        let mut string_visited = HashSet::new();
+        if let Some(string_like) =
+            self.resolve_string_like_imported_call_arg_expr(&literalized, 0, &mut string_visited)
+        {
+            best = self.choose_preferred_imported_call_arg_expr(
+                best,
+                Some(string_like),
+                preserve_stable_input_slot,
+                preserve_explicit_call_expr,
+            );
+        }
 
         let best = best.unwrap_or(rewritten);
         let rewritten_best = self.rewrite_stack_expr(best.clone());
-        self.choose_preferred_call_arg_expr(Some(best.clone()), Some(rewritten_best), true)
-            .unwrap_or(best)
+        self.choose_preferred_imported_call_arg_expr(
+            Some(best.clone()),
+            Some(rewritten_best),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        )
+        .unwrap_or(best)
     }
 
-    fn finalize_authoritative_imported_call_arg_expr(&self, expr: CExpr) -> CExpr {
+    fn finalize_authoritative_imported_call_arg_expr(
+        &self,
+        expr: CExpr,
+        preserve_stable_input_slot: bool,
+        preserve_explicit_call_expr: bool,
+    ) -> CExpr {
         let rewritten = self.rewrite_stack_expr(expr);
-        let memoryized = match &rewritten {
+        let mut best = Some(rewritten.clone());
+        let mut imported_visited = HashSet::new();
+        let imported_resolved =
+            self.resolve_imported_call_arg_expr(&rewritten, 0, &mut imported_visited);
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(imported_resolved.clone()),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
+        let memoryized = match &imported_resolved {
             CExpr::Deref(inner) => {
                 let mut memory_visited = HashSet::new();
                 self.render_memory_access_from_visible_expr(
@@ -199,14 +301,58 @@ impl<'a> FoldingContext<'a> {
                     &mut memory_visited,
                 )
                 .or_else(|| self.promote_constant_indexed_call_arg(inner))
-                .unwrap_or_else(|| rewritten.clone())
+                .unwrap_or_else(|| imported_resolved.clone())
             }
-            _ => rewritten.clone(),
+            _ => imported_resolved.clone(),
         };
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(memoryized.clone()),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
         let literalized = self
             .resolve_literalish_call_arg_expr(&memoryized)
             .unwrap_or(memoryized);
-        self.rewrite_stack_expr(literalized)
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(literalized.clone()),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
+        let mut string_visited = HashSet::new();
+        let finalized = self
+            .resolve_string_like_imported_call_arg_expr(&literalized, 0, &mut string_visited)
+            .unwrap_or(literalized);
+        best = self.choose_preferred_imported_call_arg_expr(
+            best,
+            Some(finalized),
+            preserve_stable_input_slot,
+            preserve_explicit_call_expr,
+        );
+        self.rewrite_stack_expr(best.unwrap_or(rewritten))
+    }
+
+    fn choose_preferred_imported_call_arg_expr(
+        &self,
+        current: Option<CExpr>,
+        candidate: Option<CExpr>,
+        preserve_stable_input_slot: bool,
+        preserve_explicit_call_expr: bool,
+    ) -> Option<CExpr> {
+        if preserve_explicit_call_expr
+            && let (Some(CExpr::Call { .. }), Some(candidate_expr)) = (&current, &candidate)
+            && !matches!(candidate_expr, CExpr::Call { .. })
+        {
+            return current;
+        }
+
+        self.choose_preferred_call_arg_expr_with_slot_policy(
+            current,
+            candidate,
+            true,
+            preserve_stable_input_slot,
+        )
     }
 
     /// Convert an SSA operation to a C statement.

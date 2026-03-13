@@ -18,7 +18,7 @@ mod helpers;
 mod types;
 
 use r2il::serialize::UserOpDef;
-use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize, validate_block_full};
+use r2il::{ArchSpec, R2ILBlock, R2ILOp, Varnode, serialize, validate_block_full};
 use r2sleigh_export::{
     ExportFormat, InstructionAction, InstructionExportInput, export_instruction, op_json_named,
 };
@@ -498,6 +498,36 @@ pub extern "C" fn r2il_lift_block(
     }
 }
 
+/// Rewrite the logical address and size of a lifted block without touching its lifted ops.
+///
+/// This is used by the C wrapper to keep CFG ownership stable when a block must be
+/// re-lifted from a recovered instruction boundary inside the original radare2 block.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_rewrite_layout(block: *mut R2ILBlock, addr: u64, size: u32) {
+    if block.is_null() {
+        return;
+    }
+
+    let block = unsafe { &mut *block };
+    block.addr = addr;
+    block.size = size;
+}
+
+/// Create a synthetic direct-branch block for CFG healing.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_new_branch(
+    addr: u64,
+    size: u32,
+    target: u64,
+    target_size: u32,
+) -> *mut R2ILBlock {
+    let mut block = R2ILBlock::new(addr, size);
+    block.push(R2ILOp::Branch {
+        target: Varnode::constant(target, target_size.max(1)),
+    });
+    Box::into_raw(Box::new(block))
+}
+
 /// Enable/disable semantic metadata auto-population during lifting.
 #[unsafe(no_mangle)]
 pub extern "C" fn r2il_set_semantic_metadata_enabled(ctx: *mut R2ILContext, enabled: bool) {
@@ -897,6 +927,16 @@ pub extern "C" fn r2il_block_fail(block: *const R2ILBlock) -> u64 {
     0
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_has_trailing_indirect_branch(block: *const R2ILBlock) -> bool {
+    if block.is_null() {
+        return false;
+    }
+
+    let blk = unsafe { &*block };
+    matches!(blk.ops.last(), Some(R2ILOp::BranchInd { .. }))
+}
+
 /// Free a string returned by r2il functions.
 #[unsafe(no_mangle)]
 pub extern "C" fn r2il_string_free(s: *mut c_char) {
@@ -907,7 +947,6 @@ pub extern "C" fn r2il_string_free(s: *mut c_char) {
 
 // ========== Typed Analysis FFI ==========
 
-use r2il::Varnode;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Helper: extract all register varnodes that are read by an operation.
@@ -2336,40 +2375,27 @@ fn decompiler_max_blocks() -> usize {
         .unwrap_or(200)
 }
 
+fn decompiler_cfg_guard_reason_from_summary(summary: &r2ssa::CFGRiskSummary) -> Option<String> {
+    if summary.loop_count > 8 || summary.back_edge_count > 16 {
+        return Some(format!(
+            "complex loop graph (loops={}, back_edges={})",
+            summary.loop_count, summary.back_edge_count
+        ));
+    }
+
+    if summary.loop_count > 4 && summary.block_count >= 96 && summary.max_switch_cases >= 32 {
+        return Some(format!(
+            "large dense switch in looped CFG (blocks={}, loops={}, max_switch_cases={})",
+            summary.block_count, summary.loop_count, summary.max_switch_cases
+        ));
+    }
+
+    None
+}
+
 fn decompiler_cfg_guard_reason(blocks: &[R2ILBlock]) -> Option<String> {
-    let block_count = blocks.len();
-    if block_count < 96 {
-        return None;
-    }
-
-    let edge_count: usize = blocks
-        .iter()
-        .map(
-            |block| match r2ssa::BasicBlock::from_r2il(block).terminator {
-                r2ssa::BlockTerminator::ConditionalBranch { .. } => 2,
-                r2ssa::BlockTerminator::Switch { cases, default } => {
-                    cases.len() + usize::from(default.is_some())
-                }
-                r2ssa::BlockTerminator::Branch { .. }
-                | r2ssa::BlockTerminator::Fallthrough { .. } => 1,
-                r2ssa::BlockTerminator::Call { fallthrough, .. }
-                | r2ssa::BlockTerminator::IndirectCall { fallthrough } => {
-                    usize::from(fallthrough.is_some())
-                }
-                r2ssa::BlockTerminator::IndirectBranch => 1,
-                r2ssa::BlockTerminator::Return | r2ssa::BlockTerminator::None => 0,
-            },
-        )
-        .sum();
-
-    if edge_count * 2 > block_count * 3 {
-        Some(format!(
-            "high CFG edge density ({} blocks, {} edges)",
-            block_count, edge_count
-        ))
-    } else {
-        None
-    }
+    let ssa_func = r2ssa::SSAFunction::from_blocks_raw_no_arch(blocks)?;
+    decompiler_cfg_guard_reason_from_summary(&ssa_func.cfg_risk_summary())
 }
 
 fn decompile_block_guard_fallback(func_name: &str, blocks: usize, max_blocks: usize) -> String {
@@ -6560,6 +6586,55 @@ mod tests {
         let (cc, confidence) = infer_callconv_x86_64_from_counts(&counts);
         assert_eq!(cc, "ms");
         assert!(confidence >= 70);
+    }
+
+    #[test]
+    fn decompiler_cfg_guard_reason_trips_on_dense_looped_switch_summary() {
+        let summary = r2ssa::CFGRiskSummary {
+            block_count: 120,
+            loop_count: 5,
+            back_edge_count: 8,
+            switch_block_count: 1,
+            max_switch_cases: 40,
+        };
+
+        let reason =
+            decompiler_cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
+        assert!(
+            reason.contains("dense switch") || reason.contains("max_switch_cases"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn decompiler_cfg_guard_reason_trips_on_large_back_edge_count() {
+        let summary = r2ssa::CFGRiskSummary {
+            block_count: 137,
+            loop_count: 1,
+            back_edge_count: 38,
+            switch_block_count: 0,
+            max_switch_cases: 0,
+        };
+
+        let reason =
+            decompiler_cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
+        assert!(
+            reason.contains("back_edges=38"),
+            "expected back-edge detail in reason, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn decompiler_cfg_guard_reason_allows_small_benign_cfgs() {
+        let summary = r2ssa::CFGRiskSummary {
+            block_count: 12,
+            loop_count: 1,
+            back_edge_count: 1,
+            switch_block_count: 0,
+            max_switch_cases: 0,
+        };
+
+        assert_eq!(decompiler_cfg_guard_reason_from_summary(&summary), None);
     }
 
     #[test]

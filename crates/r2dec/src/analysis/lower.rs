@@ -134,6 +134,10 @@ impl<'a> LowerCtx<'a> {
         self.expr_for_ssa_name_with_depth(name, 0, &mut HashSet::new())
     }
 
+    pub(crate) fn expr_for_semantic_value(&self, value: &SemanticValue) -> Option<CExpr> {
+        self.render_semantic_value(value, 0, &mut HashSet::new())
+    }
+
     fn expr_for_ssa_name_with_depth(
         &self,
         name: &str,
@@ -188,8 +192,21 @@ impl<'a> LowerCtx<'a> {
         match op {
             SSAOp::Copy { src, .. } => self.get_expr(src),
             SSAOp::Load { dst, addr, .. } => {
+                let dst_key = dst.display_name();
+                let prefer_memory_access = matches!(
+                    self.semantic_values.get(&dst_key),
+                    Some(SemanticValue::Address(_))
+                );
+                if prefer_memory_access {
+                    if let Some(sub) = self.try_subscript_from_var(addr, dst.size) {
+                        return sub;
+                    }
+                    if let Some(member) = self.try_member_access_from_var(addr) {
+                        return member;
+                    }
+                }
                 if let Some(expr) =
-                    self.render_semantic_value_by_name(&dst.display_name(), 0, &mut HashSet::new())
+                    self.render_semantic_value_by_name(&dst_key, 0, &mut HashSet::new())
                 {
                     expr
                 } else if let Some(sub) = self.try_subscript_from_var(addr, dst.size) {
@@ -552,7 +569,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn binary_expr(&self, op: BinaryOp, a: &SSAVar, b: &SSAVar) -> CExpr {
-        CExpr::binary(op, self.get_expr(a), self.get_expr(b))
+        CExpr::binary(op, self.binary_operand_expr(a), self.binary_operand_expr(b))
     }
 
     fn cast_expr_if_needed(&self, expr: CExpr, ty: CType) -> CExpr {
@@ -571,13 +588,37 @@ impl<'a> LowerCtx<'a> {
         b: &SSAVar,
         operand_ty: Option<CType>,
     ) -> CExpr {
-        let mut lhs = self.get_expr(a);
-        let mut rhs = self.get_expr(b);
+        let mut lhs = self.binary_operand_expr(a);
+        let mut rhs = self.binary_operand_expr(b);
         if let Some(ty) = operand_ty {
             lhs = self.cast_expr_if_needed(lhs, ty.clone());
             rhs = self.cast_expr_if_needed(rhs, ty);
         }
         CExpr::binary(op, lhs, rhs)
+    }
+
+    fn binary_operand_expr(&self, var: &SSAVar) -> CExpr {
+        let key = var.display_name();
+        if self.should_keep_low_signal_address_temp_visible(&key) {
+            return CExpr::Var(self.var_name(var));
+        }
+        self.get_expr(var)
+    }
+
+    fn should_keep_low_signal_address_temp_visible(&self, name: &str) -> bool {
+        if !is_low_signal_lowering_name(name) {
+            return false;
+        }
+        if !matches!(
+            self.semantic_values.get(name),
+            Some(SemanticValue::Address(_))
+        ) {
+            return false;
+        }
+        matches!(
+            self.render_semantic_value_by_name(name, 0, &mut HashSet::new()),
+            Some(CExpr::Var(_))
+        )
     }
 
     fn ptr_arith_expr(
@@ -1183,6 +1224,27 @@ fn uint_type_from_size(size: u32) -> CType {
 
 fn is_hex_name(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_low_signal_lowering_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let is_temp_family = |prefix: char| {
+        lower
+            .strip_prefix(prefix)
+            .and_then(|rest| {
+                let (head, tail) = rest.split_once('_').unwrap_or((rest, ""));
+                head.chars()
+                    .all(|ch| ch.is_ascii_hexdigit())
+                    .then_some(tail)
+            })
+            .is_some_and(|tail| tail.is_empty() || tail.chars().all(|ch| ch.is_ascii_digit()))
+    };
+    lower.starts_with("tmp:")
+        || lower.starts_with("tmp")
+        || lower.starts_with("const:")
+        || lower.starts_with("ram:")
+        || is_temp_family('t')
+        || is_temp_family('v')
 }
 
 #[cfg(test)]
