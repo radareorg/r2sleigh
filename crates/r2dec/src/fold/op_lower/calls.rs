@@ -120,6 +120,8 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn render_imported_call_arg(&self, binding: analysis::CallArgBinding) -> CExpr {
+        let allow_string_like_resolution =
+            !self.imported_input_binding_prefers_pointer_identity(&binding);
         if let Some((block_addr, op_idx)) = binding.source_call
             && binding.role == analysis::CallArgRole::Result
             && let analysis::SemanticCallArg::FallbackExpr(CExpr::Call { func, .. }) =
@@ -147,14 +149,17 @@ impl<'a> FoldingContext<'a> {
             );
         match binding.arg {
             analysis::SemanticCallArg::Semantic(value) => {
-                let mut visited = HashSet::new();
                 let expr = self
-                    .render_semantic_value(&value, 0, &mut visited)
+                    .render_imported_semantic_arg_value(&value, !allow_string_like_resolution)
                     .unwrap_or_else(|| self.expr_for_semantic_call_arg_fallback(&value));
+                if !allow_string_like_resolution {
+                    return self.rewrite_stack_expr(expr);
+                }
                 self.finalize_authoritative_imported_call_arg_expr(
                     expr,
                     preserve_stable_input_slot,
                     preserve_explicit_call_expr,
+                    allow_string_like_resolution,
                 )
             }
             analysis::SemanticCallArg::StringAddr(addr) => self
@@ -169,11 +174,14 @@ impl<'a> FoldingContext<'a> {
                 expr,
                 preserve_stable_input_slot,
                 preserve_explicit_call_expr,
+                allow_string_like_resolution,
             ),
         }
     }
 
     fn render_authoritative_source_call_arg(&self, binding: analysis::CallArgBinding) -> CExpr {
+        let allow_string_like_resolution =
+            !self.imported_input_binding_prefers_pointer_identity(&binding);
         let preserve_stable_input_slot = binding.role == analysis::CallArgRole::Input;
         let preserve_explicit_call_expr = binding.role == analysis::CallArgRole::Result
             || matches!(
@@ -183,14 +191,17 @@ impl<'a> FoldingContext<'a> {
 
         match binding.arg {
             analysis::SemanticCallArg::Semantic(value) => {
-                let mut visited = HashSet::new();
                 let expr = self
-                    .render_semantic_value(&value, 0, &mut visited)
+                    .render_imported_semantic_arg_value(&value, !allow_string_like_resolution)
                     .unwrap_or_else(|| self.expr_for_semantic_call_arg_fallback(&value));
+                if !allow_string_like_resolution {
+                    return self.rewrite_stack_expr(expr);
+                }
                 self.finalize_authoritative_imported_call_arg_expr(
                     expr,
                     preserve_stable_input_slot,
                     preserve_explicit_call_expr,
+                    allow_string_like_resolution,
                 )
             }
             analysis::SemanticCallArg::StringAddr(addr) => self
@@ -205,6 +216,7 @@ impl<'a> FoldingContext<'a> {
                 expr,
                 preserve_stable_input_slot,
                 preserve_explicit_call_expr,
+                allow_string_like_resolution,
             ),
         }
     }
@@ -212,7 +224,7 @@ impl<'a> FoldingContext<'a> {
     fn repair_imported_result_source_sibling_args(
         &self,
         raw_args: &[analysis::CallArgBinding],
-        rendered_args: &mut [CExpr],
+        rendered_args: &mut Vec<CExpr>,
     ) {
         let Some(format_string) = rendered_args.first().and_then(|expr| match expr {
             CExpr::StringLit(text) => Some(text.as_str()),
@@ -239,12 +251,17 @@ impl<'a> FoldingContext<'a> {
             .map(|binding| self.render_authoritative_source_call_arg(binding))
             .collect::<Vec<_>>();
 
-        let printed_input_count = rendered_args.len().saturating_sub(2);
+        let expected_input_count = source_args.len();
         if source_args.is_empty()
-            || printed_input_count != source_args.len()
-            || count_printf_placeholders(format_string) != source_args.len() + 1
+            || rendered_args.len() < expected_input_count + 2
+            || count_printf_placeholders(format_string) != expected_input_count + 1
         {
             return;
+        }
+
+        if rendered_args.len() > expected_input_count + 2 {
+            let final_result_idx = rendered_args.len().saturating_sub(1);
+            rendered_args.drain(1 + expected_input_count..final_result_idx);
         }
 
         for (idx, source_arg) in source_args.into_iter().enumerate() {
@@ -260,6 +277,15 @@ impl<'a> FoldingContext<'a> {
             if should_replace {
                 rendered_args[target_idx] = source_arg;
             }
+        }
+
+        let final_result_idx = rendered_args.len().saturating_sub(1);
+        let sibling_inputs = rendered_args[1..final_result_idx].to_vec();
+        if let Some(CExpr::Call { func, args }) = rendered_args.get(final_result_idx).cloned()
+            && args.len() == sibling_inputs.len()
+            && !sibling_inputs.is_empty()
+        {
+            rendered_args[final_result_idx] = CExpr::call(*func, sibling_inputs);
         }
     }
 
@@ -304,6 +330,7 @@ impl<'a> FoldingContext<'a> {
         expr: CExpr,
         preserve_stable_input_slot: bool,
         preserve_explicit_call_expr: bool,
+        allow_string_like_resolution: bool,
     ) -> CExpr {
         let rewritten = self.rewrite_stack_expr(expr);
         let mut best = Some(rewritten.clone());
@@ -362,16 +389,20 @@ impl<'a> FoldingContext<'a> {
             preserve_stable_input_slot,
             preserve_explicit_call_expr,
         );
-        let mut string_visited = HashSet::new();
-        if let Some(string_like) =
-            self.resolve_string_like_imported_call_arg_expr(&literalized, 0, &mut string_visited)
-        {
-            best = self.choose_preferred_imported_call_arg_expr(
-                best,
-                Some(string_like),
-                preserve_stable_input_slot,
-                preserve_explicit_call_expr,
-            );
+        if allow_string_like_resolution {
+            let mut string_visited = HashSet::new();
+            if let Some(string_like) = self.resolve_string_like_imported_call_arg_expr(
+                &literalized,
+                0,
+                &mut string_visited,
+            ) {
+                best = self.choose_preferred_imported_call_arg_expr(
+                    best,
+                    Some(string_like),
+                    preserve_stable_input_slot,
+                    preserve_explicit_call_expr,
+                );
+            }
         }
 
         let best = best.unwrap_or(rewritten);
@@ -390,6 +421,7 @@ impl<'a> FoldingContext<'a> {
         expr: CExpr,
         preserve_stable_input_slot: bool,
         preserve_explicit_call_expr: bool,
+        allow_string_like_resolution: bool,
     ) -> CExpr {
         let rewritten = self.rewrite_stack_expr(expr);
         let mut best = Some(rewritten.clone());
@@ -431,10 +463,13 @@ impl<'a> FoldingContext<'a> {
             preserve_stable_input_slot,
             preserve_explicit_call_expr,
         );
-        let mut string_visited = HashSet::new();
-        let finalized = self
-            .resolve_string_like_imported_call_arg_expr(&literalized, 0, &mut string_visited)
-            .unwrap_or(literalized);
+        let finalized = if allow_string_like_resolution {
+            let mut string_visited = HashSet::new();
+            self.resolve_string_like_imported_call_arg_expr(&literalized, 0, &mut string_visited)
+                .unwrap_or(literalized)
+        } else {
+            literalized
+        };
         best = self.choose_preferred_imported_call_arg_expr(
             best,
             Some(finalized),
@@ -442,6 +477,141 @@ impl<'a> FoldingContext<'a> {
             preserve_explicit_call_expr,
         );
         self.rewrite_stack_expr(best.unwrap_or(rewritten))
+    }
+
+    fn imported_input_binding_prefers_pointer_identity(
+        &self,
+        binding: &analysis::CallArgBinding,
+    ) -> bool {
+        if binding.role != analysis::CallArgRole::Input {
+            return false;
+        }
+
+        match &binding.arg {
+            analysis::SemanticCallArg::Semantic(analysis::SemanticValue::Load { addr, .. })
+            | analysis::SemanticCallArg::Semantic(analysis::SemanticValue::Address(addr)) => {
+                matches!(addr.base, analysis::BaseRef::StackSlot(_))
+            }
+            analysis::SemanticCallArg::FallbackExpr(expr) => {
+                self.call_arg_contains_stack_placeholder(expr, 0)
+            }
+            _ => false,
+        }
+    }
+
+    fn render_imported_semantic_arg_value(
+        &self,
+        value: &analysis::SemanticValue,
+        preserve_pointer_identity: bool,
+    ) -> Option<CExpr> {
+        if preserve_pointer_identity {
+            match value {
+                analysis::SemanticValue::Address(addr)
+                    if matches!(addr.base, analysis::BaseRef::StackSlot(_)) =>
+                {
+                    let mut visited = HashSet::new();
+                    return self
+                        .render_address_expr_from_addr(addr, 0, &mut visited)
+                        .or_else(|| self.render_stack_slot_address_expr_fallback(addr, 0));
+                }
+                analysis::SemanticValue::Load { addr, size }
+                    if matches!(addr.base, analysis::BaseRef::StackSlot(_)) =>
+                {
+                    let mut visited = HashSet::new();
+                    return self
+                        .render_load_from_addr(addr, *size, 0, &mut visited)
+                        .or_else(|| {
+                            self.render_address_expr_from_addr(addr, 0, &mut visited)
+                                .or_else(|| self.render_stack_slot_address_expr_fallback(addr, 0))
+                                .map(|expr| match expr {
+                                    CExpr::AddrOf(inner)
+                                        if addr.index.is_none() && addr.offset_bytes == 0 =>
+                                    {
+                                        *inner
+                                    }
+                                    other => CExpr::Deref(Box::new(other)),
+                                })
+                        });
+                }
+                _ => {}
+            }
+        }
+
+        if let analysis::SemanticValue::Address(addr) = value
+            && addr.index.is_none()
+            && addr.offset_bytes == 0
+            && matches!(addr.base, analysis::BaseRef::Value(_))
+        {
+            if let analysis::BaseRef::Value(base_value) = &addr.base
+                && let Some(expr) = self.best_visible_definition(&base_value.display_name())
+                && !matches!(expr, CExpr::StringLit(_))
+            {
+                return Some(expr);
+            }
+            let mut visited = HashSet::new();
+            if let Some(expr) = self.render_base_ref_expr(&addr.base, false, 0, &mut visited) {
+                return Some(expr);
+            }
+        }
+
+        let mut visited = HashSet::new();
+        self.render_semantic_value(value, 0, &mut visited)
+    }
+
+    fn render_stack_slot_address_expr_fallback(
+        &self,
+        addr: &analysis::NormalizedAddr,
+        depth: u32,
+    ) -> Option<CExpr> {
+        if depth > Self::MAX_SEMANTIC_RENDER_DEPTH {
+            return None;
+        }
+
+        let analysis::BaseRef::StackSlot(base_offset) = addr.base else {
+            return None;
+        };
+
+        let base_name = self
+            .resolve_stack_var(base_offset)
+            .unwrap_or_else(|| stack_slot_synthetic_name(base_offset));
+        let mut expr = CExpr::AddrOf(Box::new(CExpr::Var(base_name)));
+
+        if let Some(index) = &addr.index {
+            let mut visited = HashSet::new();
+            let index_expr = self.render_value_ref(index, depth + 1, &mut visited)?;
+            let scaled = if addr.scale_bytes.unsigned_abs() <= 1 {
+                index_expr
+            } else {
+                CExpr::binary(
+                    crate::ast::BinaryOp::Mul,
+                    index_expr,
+                    CExpr::IntLit(addr.scale_bytes.unsigned_abs() as i64),
+                )
+            };
+            expr = CExpr::binary(
+                if addr.scale_bytes < 0 {
+                    crate::ast::BinaryOp::Sub
+                } else {
+                    crate::ast::BinaryOp::Add
+                },
+                expr,
+                scaled,
+            );
+        }
+
+        if addr.offset_bytes != 0 {
+            expr = CExpr::binary(
+                if addr.offset_bytes < 0 {
+                    crate::ast::BinaryOp::Sub
+                } else {
+                    crate::ast::BinaryOp::Add
+                },
+                expr,
+                CExpr::IntLit(addr.offset_bytes.unsigned_abs() as i64),
+            );
+        }
+
+        Some(expr)
     }
 
     fn choose_preferred_imported_call_arg_expr(
@@ -479,6 +649,14 @@ impl<'a> FoldingContext<'a> {
     pub(crate) fn op_to_stmt(&self, op: &SSAOp) -> Option<CStmt> {
         let mut frame = LowerFrame::for_stmt(0, 0, false);
         self.lowered_to_stmt(self.lower_op(op, &mut frame))
+    }
+}
+
+fn stack_slot_synthetic_name(offset: i64) -> String {
+    if offset < 0 {
+        format!("local_{:x}", (-offset) as u64)
+    } else {
+        format!("stack_{:x}", offset as u64)
     }
 }
 

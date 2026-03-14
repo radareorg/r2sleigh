@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use r2ssa::{SSAOp, SSAVar};
+use r2ssa::{FunctionSSABlock, SSAOp, SSAVar};
 
 use crate::analysis;
 use crate::analysis::{FlagCompareKind, FlagCompareProvenance};
@@ -28,6 +28,37 @@ pub(super) struct CompareTuple {
 }
 
 impl<'a> FoldingContext<'a> {
+    pub fn extract_condition_from_block(&self, block: &FunctionSSABlock) -> Option<CExpr> {
+        let (branch_idx, cond) =
+            block
+                .ops
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, op)| match op {
+                    SSAOp::CBranch { cond, .. } => Some((idx, cond)),
+                    _ => None,
+                })?;
+
+        if let Some(expr) = self.local_branch_condition_expr(block, branch_idx, cond, 0) {
+            return Some(self.normalize_local_branch_expr(expr));
+        }
+
+        let cond_name = cond.display_name();
+        if let Some(prov) = self.lookup_flag_compare_provenance(&cond_name)
+            && let Some(expr) = self.compare_provenance_expr_for_branch(&prov)
+        {
+            let expr = self.rewrite_stack_expr(expr);
+            let expr = self.rewrite_condition_stack_aliases(expr);
+            return Some(self.simplify_condition_expr(expr));
+        }
+
+        let expr = self.get_condition_expr(cond);
+        let expr = self.rewrite_stack_expr(expr);
+        let expr = self.rewrite_condition_stack_aliases(expr);
+        Some(self.simplify_condition_expr(expr))
+    }
+
     pub(super) fn normalize_assignment_predicate_rhs(&self, rhs: CExpr) -> CExpr {
         if self.is_assignment_predicate_expr(&rhs) {
             self.simplify_condition_expr(rhs)
@@ -139,11 +170,347 @@ impl<'a> FoldingContext<'a> {
     pub fn extract_condition(&self, op: &SSAOp) -> Option<CExpr> {
         match op {
             SSAOp::CBranch { cond, .. } => {
+                let cond_name = cond.display_name();
+                if let Some(prov) = self.lookup_flag_compare_provenance(&cond_name)
+                    && let Some(expr) = self.compare_provenance_expr_for_branch(&prov)
+                {
+                    let expr = self.rewrite_stack_expr(expr);
+                    let expr = self.rewrite_condition_stack_aliases(expr);
+                    return Some(self.simplify_condition_expr(expr));
+                }
                 let expr = self.get_condition_expr(cond);
                 Some(self.rewrite_stack_expr(expr))
             }
             _ => None,
         }
+    }
+
+    fn local_branch_condition_expr(
+        &self,
+        block: &FunctionSSABlock,
+        branch_idx: usize,
+        cond: &SSAVar,
+        depth: u32,
+    ) -> Option<CExpr> {
+        if depth > MAX_PREDICATE_OPERAND_DEPTH {
+            return None;
+        }
+
+        if cond.is_const() {
+            return Some(self.const_to_expr(cond));
+        }
+
+        let cond_name = cond.display_name();
+        for (idx, op) in block.ops[..branch_idx].iter().enumerate().rev() {
+            if op.dst() != Some(cond) {
+                continue;
+            }
+            return match op {
+                SSAOp::Copy { src, .. }
+                | SSAOp::IntZExt { src, .. }
+                | SSAOp::IntSExt { src, .. }
+                | SSAOp::Subpiece { src, .. } => self
+                    .local_branch_condition_expr(block, idx, src, depth + 1)
+                    .or_else(|| self.local_expr_for_var(block, idx, src, depth + 1)),
+                SSAOp::BoolNot { src, .. } => self
+                    .local_branch_condition_expr(block, idx, src, depth + 1)
+                    .or_else(|| self.local_expr_for_var(block, idx, src, depth + 1))
+                    .map(|expr| CExpr::unary(UnaryOp::Not, expr)),
+                SSAOp::IntEqual { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Eq, a, b, depth + 1)
+                }
+                SSAOp::IntNotEqual { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Ne, a, b, depth + 1)
+                }
+                SSAOp::IntLess { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Lt, a, b, depth + 1)
+                }
+                SSAOp::IntSLess { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Lt, a, b, depth + 1)
+                }
+                SSAOp::IntLessEqual { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Le, a, b, depth + 1)
+                }
+                SSAOp::IntSLessEqual { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Le, a, b, depth + 1)
+                }
+                _ => None,
+            };
+        }
+
+        if let Some(prov) = self.lookup_flag_compare_provenance(&cond_name)
+            && let Some(expr) = self.compare_provenance_expr_for_branch(&prov)
+        {
+            return Some(expr);
+        }
+
+        self.predicate_candidate_for_var(cond)
+            .or_else(|| Some(CExpr::Var(self.var_name(cond))))
+    }
+
+    fn local_compare_expr(
+        &self,
+        block: &FunctionSSABlock,
+        op_idx: usize,
+        op: BinaryOp,
+        lhs: &SSAVar,
+        rhs: &SSAVar,
+        depth: u32,
+    ) -> Option<CExpr> {
+        let lhs = self.local_expr_for_var(block, op_idx, lhs, depth)?;
+        let rhs = self.local_expr_for_var(block, op_idx, rhs, depth)?;
+        Some(CExpr::binary(op, lhs, rhs))
+    }
+
+    fn local_expr_for_var(
+        &self,
+        block: &FunctionSSABlock,
+        before_idx: usize,
+        var: &SSAVar,
+        depth: u32,
+    ) -> Option<CExpr> {
+        if depth > MAX_PREDICATE_OPERAND_DEPTH {
+            return Some(CExpr::Var(self.var_name(var)));
+        }
+
+        if var.is_const() {
+            return Some(self.const_to_expr(var));
+        }
+
+        if depth > 0 && self.inputs.arch.is_return_register_name(&var.name) {
+            return Some(CExpr::Var(self.var_name(var)));
+        }
+
+        for (idx, op) in block.ops[..before_idx].iter().enumerate().rev() {
+            if op.dst() != Some(var) {
+                continue;
+            }
+            return match op {
+                SSAOp::Copy { src, .. }
+                | SSAOp::IntZExt { src, .. }
+                | SSAOp::IntSExt { src, .. }
+                | SSAOp::Subpiece { src, .. } => {
+                    self.local_expr_for_var(block, idx, src, depth + 1)
+                }
+                SSAOp::Load { addr, .. } => self.local_load_expr(block, idx, addr, depth + 1),
+                SSAOp::IntEqual { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Eq, a, b, depth + 1)
+                }
+                SSAOp::IntNotEqual { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Ne, a, b, depth + 1)
+                }
+                SSAOp::IntLess { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Lt, a, b, depth + 1)
+                }
+                SSAOp::IntSLess { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Lt, a, b, depth + 1)
+                }
+                SSAOp::IntLessEqual { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Le, a, b, depth + 1)
+                }
+                SSAOp::IntSLessEqual { a, b, .. } => {
+                    self.local_compare_expr(block, idx, BinaryOp::Le, a, b, depth + 1)
+                }
+                SSAOp::IntAdd { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::Add, a, b, depth + 1)
+                }
+                SSAOp::IntSub { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::Sub, a, b, depth + 1)
+                }
+                SSAOp::IntMult { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::Mul, a, b, depth + 1)
+                }
+                SSAOp::IntDiv { a, b, .. } | SSAOp::IntSDiv { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::Div, a, b, depth + 1)
+                }
+                SSAOp::IntRem { a, b, .. } | SSAOp::IntSRem { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::Mod, a, b, depth + 1)
+                }
+                SSAOp::IntAnd { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::BitAnd, a, b, depth + 1)
+                }
+                SSAOp::IntOr { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::BitOr, a, b, depth + 1)
+                }
+                SSAOp::IntXor { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::BitXor, a, b, depth + 1)
+                }
+                SSAOp::IntLeft { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::Shl, a, b, depth + 1)
+                }
+                SSAOp::IntRight { a, b, .. } | SSAOp::IntSRight { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::Shr, a, b, depth + 1)
+                }
+                SSAOp::BoolAnd { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::And, a, b, depth + 1)
+                }
+                SSAOp::BoolOr { a, b, .. } => {
+                    self.local_binary_expr(block, idx, BinaryOp::Or, a, b, depth + 1)
+                }
+                SSAOp::IntNot { src, .. } => self
+                    .local_expr_for_var(block, idx, src, depth + 1)
+                    .map(|expr| CExpr::unary(UnaryOp::BitNot, expr)),
+                SSAOp::IntNegate { src, .. } => self
+                    .local_expr_for_var(block, idx, src, depth + 1)
+                    .map(|expr| CExpr::unary(UnaryOp::Neg, expr)),
+                SSAOp::BoolNot { src, .. } => self
+                    .local_expr_for_var(block, idx, src, depth + 1)
+                    .map(|expr| CExpr::unary(UnaryOp::Not, expr)),
+                _ => None,
+            };
+        }
+
+        let lower_name = var.name.to_ascii_lowercase();
+        if self.inputs.arch.is_stack_base_name(&lower_name)
+            || self.inputs.arch.is_frame_pointer_name(&lower_name)
+        {
+            return Some(CExpr::Var(lower_name));
+        }
+
+        Some(CExpr::Var(self.var_name(var)))
+    }
+
+    fn local_binary_expr(
+        &self,
+        block: &FunctionSSABlock,
+        op_idx: usize,
+        op: BinaryOp,
+        lhs: &SSAVar,
+        rhs: &SSAVar,
+        depth: u32,
+    ) -> Option<CExpr> {
+        let lhs = self.local_expr_for_var(block, op_idx, lhs, depth)?;
+        let rhs = self.local_expr_for_var(block, op_idx, rhs, depth)?;
+        Some(CExpr::binary(op, lhs, rhs))
+    }
+
+    fn normalize_local_branch_expr(&self, expr: CExpr) -> CExpr {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Eq,
+                left,
+                right,
+            } => {
+                if self.is_zero_expr(right.as_ref())
+                    && let Some(inner) = Self::strip_sub_zero_local(left.as_ref())
+                {
+                    return CExpr::binary(BinaryOp::Eq, inner, CExpr::IntLit(0));
+                }
+                if self.is_zero_expr(right.as_ref())
+                    && let Some(inner) = Self::strip_test_self_local(left.as_ref())
+                {
+                    return CExpr::binary(BinaryOp::Eq, inner, CExpr::IntLit(0));
+                }
+                CExpr::Binary {
+                    op: BinaryOp::Eq,
+                    left,
+                    right,
+                }
+            }
+            CExpr::Binary {
+                op: BinaryOp::Ne,
+                left,
+                right,
+            } => {
+                if self.is_zero_expr(right.as_ref())
+                    && let Some(inner) = Self::strip_sub_zero_local(left.as_ref())
+                {
+                    return CExpr::binary(BinaryOp::Ne, inner, CExpr::IntLit(0));
+                }
+                if self.is_zero_expr(right.as_ref())
+                    && let Some(inner) = Self::strip_test_self_local(left.as_ref())
+                {
+                    return CExpr::binary(BinaryOp::Ne, inner, CExpr::IntLit(0));
+                }
+                CExpr::Binary {
+                    op: BinaryOp::Ne,
+                    left,
+                    right,
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn strip_sub_zero_local(expr: &CExpr) -> Option<CExpr> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::Sub,
+                left,
+                right,
+            } if matches!(right.as_ref(), CExpr::IntLit(0) | CExpr::UIntLit(0)) => {
+                Some(left.as_ref().clone())
+            }
+            CExpr::Paren(inner) => Self::strip_sub_zero_local(inner),
+            CExpr::Cast { expr: inner, .. } => Self::strip_sub_zero_local(inner),
+            _ => None,
+        }
+    }
+
+    fn strip_test_self_local(expr: &CExpr) -> Option<CExpr> {
+        match expr {
+            CExpr::Binary {
+                op: BinaryOp::BitAnd,
+                left,
+                right,
+            } if left == right => Some(left.as_ref().clone()),
+            CExpr::Paren(inner) => Self::strip_test_self_local(inner),
+            CExpr::Cast { expr: inner, .. } => Self::strip_test_self_local(inner),
+            _ => None,
+        }
+    }
+
+    fn local_load_expr(
+        &self,
+        block: &FunctionSSABlock,
+        op_idx: usize,
+        addr: &SSAVar,
+        depth: u32,
+    ) -> Option<CExpr> {
+        for (store_idx, op) in block.ops[..op_idx].iter().enumerate().rev() {
+            if let SSAOp::Store {
+                addr: store_addr,
+                val,
+                ..
+            } = op
+                && self.local_addrs_match(block, store_idx, store_addr, op_idx, addr, depth + 1)
+            {
+                return self.local_expr_for_var(block, store_idx, val, depth + 1);
+            }
+        }
+
+        let addr_expr = self.local_expr_for_var(block, op_idx, addr, depth + 1)?;
+        if let Some(alias) = self.simplify_stack_access(&addr_expr)
+            && !super::op_lower::is_generic_stack_placeholder_alias(&alias)
+        {
+            return Some(CExpr::Var(alias));
+        }
+
+        Some(CExpr::deref(addr_expr))
+    }
+
+    fn local_addrs_match(
+        &self,
+        block: &FunctionSSABlock,
+        left_idx: usize,
+        left: &SSAVar,
+        right_idx: usize,
+        right: &SSAVar,
+        depth: u32,
+    ) -> bool {
+        left == right
+            || self
+                .local_expr_for_var(block, left_idx, left, depth + 1)
+                .zip(self.local_expr_for_var(block, right_idx, right, depth + 1))
+                .map(|(lhs, rhs)| {
+                    lhs == rhs
+                        || self
+                            .simplify_stack_access(&lhs)
+                            .zip(self.simplify_stack_access(&rhs))
+                            .map(|(lhs_alias, rhs_alias)| lhs_alias == rhs_alias)
+                            .unwrap_or(false)
+                })
+                .unwrap_or(false)
     }
 
     /// Get the expression for a condition variable, always inlining its definition.
@@ -682,6 +1049,25 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn strip_sub_const(&self, expr: &CExpr) -> Option<(CExpr, CExpr)> {
+        let mut visited = HashSet::new();
+        self.strip_sub_const_inner(expr, &mut visited)
+    }
+
+    pub(super) fn strip_sub_zero(&self, expr: &CExpr) -> Option<CExpr> {
+        let mut visited = HashSet::new();
+        self.strip_sub_zero_inner(expr, &mut visited)
+    }
+
+    pub(super) fn strip_test_self(&self, expr: &CExpr) -> Option<CExpr> {
+        let mut visited = HashSet::new();
+        self.strip_test_self_inner(expr, &mut visited)
+    }
+
+    fn strip_sub_const_inner(
+        &self,
+        expr: &CExpr,
+        visited: &mut HashSet<String>,
+    ) -> Option<(CExpr, CExpr)> {
         match expr {
             CExpr::Binary {
                 op: BinaryOp::Sub,
@@ -690,46 +1076,67 @@ impl<'a> FoldingContext<'a> {
             } => self
                 .const_expr_for_comparison(right)
                 .map(|value| (left.as_ref().clone(), value)),
-            CExpr::Paren(inner) => self.strip_sub_const(inner),
-            CExpr::Cast { expr: inner, .. } => self.strip_sub_const(inner),
-            CExpr::Var(name) => self
-                .lookup_definition(name)
-                .or_else(|| self.formatted_defs_map().get(name).cloned())
-                .and_then(|inner| self.strip_sub_const(&inner)),
+            CExpr::Paren(inner) => self.strip_sub_const_inner(inner, visited),
+            CExpr::Cast { expr: inner, .. } => self.strip_sub_const_inner(inner, visited),
+            CExpr::Var(name) => {
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+                let inner = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned());
+                let result = inner.and_then(|inner| self.strip_sub_const_inner(&inner, visited));
+                visited.remove(name);
+                result
+            }
             _ => None,
         }
     }
 
-    pub(super) fn strip_sub_zero(&self, expr: &CExpr) -> Option<CExpr> {
+    fn strip_sub_zero_inner(&self, expr: &CExpr, visited: &mut HashSet<String>) -> Option<CExpr> {
         match expr {
             CExpr::Binary {
                 op: BinaryOp::Sub,
                 left,
                 right,
             } if self.is_zero_expr(right.as_ref()) => Some(left.as_ref().clone()),
-            CExpr::Paren(inner) => self.strip_sub_zero(inner),
-            CExpr::Cast { expr: inner, .. } => self.strip_sub_zero(inner),
-            CExpr::Var(name) => self
-                .lookup_definition(name)
-                .or_else(|| self.formatted_defs_map().get(name).cloned())
-                .and_then(|inner| self.strip_sub_zero(&inner)),
+            CExpr::Paren(inner) => self.strip_sub_zero_inner(inner, visited),
+            CExpr::Cast { expr: inner, .. } => self.strip_sub_zero_inner(inner, visited),
+            CExpr::Var(name) => {
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+                let inner = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned());
+                let result = inner.and_then(|inner| self.strip_sub_zero_inner(&inner, visited));
+                visited.remove(name);
+                result
+            }
             _ => None,
         }
     }
 
-    pub(super) fn strip_test_self(&self, expr: &CExpr) -> Option<CExpr> {
+    fn strip_test_self_inner(&self, expr: &CExpr, visited: &mut HashSet<String>) -> Option<CExpr> {
         match expr {
             CExpr::Binary {
                 op: BinaryOp::BitAnd,
                 left,
                 right,
             } if left == right => Some(left.as_ref().clone()),
-            CExpr::Paren(inner) => self.strip_test_self(inner),
-            CExpr::Cast { expr: inner, .. } => self.strip_test_self(inner),
-            CExpr::Var(name) => self
-                .lookup_definition(name)
-                .or_else(|| self.formatted_defs_map().get(name).cloned())
-                .and_then(|inner| self.strip_test_self(&inner)),
+            CExpr::Paren(inner) => self.strip_test_self_inner(inner, visited),
+            CExpr::Cast { expr: inner, .. } => self.strip_test_self_inner(inner, visited),
+            CExpr::Var(name) => {
+                if !visited.insert(name.clone()) {
+                    return None;
+                }
+                let inner = self
+                    .lookup_definition(name)
+                    .or_else(|| self.formatted_defs_map().get(name).cloned());
+                let result = inner.and_then(|inner| self.strip_test_self_inner(&inner, visited));
+                visited.remove(name);
+                result
+            }
             _ => None,
         }
     }
@@ -2038,6 +2445,34 @@ impl<'a> FoldingContext<'a> {
         let rhs = self.resolve_predicate_operand(
             &self.origin_name_to_expr(&prov.rhs),
             0,
+            &mut HashSet::new(),
+        );
+
+        match prov.kind {
+            FlagCompareKind::Equality => Some(CExpr::binary(BinaryOp::Eq, lhs, rhs)),
+            FlagCompareKind::UnsignedLess => Some(CExpr::binary(BinaryOp::Lt, lhs, rhs)),
+            FlagCompareKind::SignedNegative => Some(CExpr::binary(
+                BinaryOp::Lt,
+                CExpr::binary(BinaryOp::Sub, lhs, rhs),
+                CExpr::IntLit(0),
+            )),
+            FlagCompareKind::Overflow => None,
+        }
+    }
+
+    pub(super) fn compare_provenance_expr_for_branch(
+        &self,
+        prov: &FlagCompareProvenance,
+    ) -> Option<CExpr> {
+        let depth_seed = MAX_PREDICATE_OPERAND_DEPTH.saturating_sub(1);
+        let lhs = self.resolve_predicate_operand(
+            &self.origin_name_to_expr(&prov.lhs),
+            depth_seed,
+            &mut HashSet::new(),
+        );
+        let rhs = self.resolve_predicate_operand(
+            &self.origin_name_to_expr(&prov.rhs),
+            depth_seed,
             &mut HashSet::new(),
         );
 

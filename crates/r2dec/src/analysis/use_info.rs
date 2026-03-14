@@ -11,6 +11,7 @@ use super::{
 use crate::ast::{BinaryOp, CExpr};
 use crate::fold::op_lower::parse_const_value;
 use crate::fold::{PtrArith, SSABlock};
+use crate::registers::register_family_name;
 
 #[derive(Debug, Default)]
 pub(crate) struct UseScratch {
@@ -291,9 +292,21 @@ fn call_arg_binding_preservation_score(binding: &CallArgBinding) -> i32 {
     };
     let stack_score = binding
         .stack_offset
-        .map(|offset| if offset >= 0 { 10 } else { 0 })
+        .map(|offset| if offset >= 0 { -20 } else { 20 })
         .unwrap_or(0);
-    role_score + stack_score + semantic_call_arg_preservation_score(&binding.arg)
+    let source_score = call_arg_semantic_source_offset_for_binding(binding, 0, &mut HashSet::new())
+        .map(|offset| if offset >= 0 { -60 } else { 140 })
+        .unwrap_or(0);
+    let low_signal_penalty = if call_arg_binding_is_low_signal(binding) {
+        -180
+    } else {
+        0
+    };
+    role_score
+        + stack_score
+        + source_score
+        + low_signal_penalty
+        + semantic_call_arg_preservation_score(&binding.arg)
 }
 
 fn semantic_call_arg_preservation_score(arg: &SemanticCallArg) -> i32 {
@@ -322,7 +335,27 @@ fn semantic_value_is_low_signal(value: &SemanticValue) -> bool {
                 || is_call_arg_transient_name(&name)
                 || is_generic_entry_arg_name(&name)
         }
-        SemanticValue::Address(_) | SemanticValue::Load { .. } => false,
+        SemanticValue::Address(addr) | SemanticValue::Load { addr, .. } => {
+            normalized_addr_is_low_signal(addr)
+        }
+    }
+}
+
+fn normalized_addr_is_low_signal(addr: &NormalizedAddr) -> bool {
+    let low_signal_name = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        is_call_arg_placeholder_name(&lower)
+            || is_call_arg_transient_name(&lower)
+            || is_generic_entry_arg_name(&lower)
+    };
+
+    match &addr.base {
+        BaseRef::Value(value) => low_signal_name(&value.display_name()),
+        BaseRef::Raw(CExpr::Var(name)) => low_signal_name(name),
+        BaseRef::Raw(CExpr::Paren(inner)) | BaseRef::Raw(CExpr::Cast { expr: inner, .. }) => {
+            matches!(inner.as_ref(), CExpr::Var(name) if low_signal_name(name))
+        }
+        _ => false,
     }
 }
 
@@ -1722,20 +1755,6 @@ fn register_family_name_for_var(info: &UseInfo, var: &SSAVar) -> Option<String> 
             .then_some(root)
             .and_then(|root| register_family_name(&root))
     })
-}
-
-fn register_family_name(name: &str) -> Option<String> {
-    let lower = name.to_ascii_lowercase();
-    let lower = lower
-        .rsplit_once('_')
-        .map(|(base, _)| base.to_string())
-        .unwrap_or(lower);
-    let rest = lower
-        .strip_prefix('x')
-        .or_else(|| lower.strip_prefix('w'))
-        .or_else(|| lower.strip_prefix('r'))
-        .or_else(|| lower.strip_prefix('e'))?;
-    (!rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())).then(|| rest.to_string())
 }
 
 fn preserve_temp_copy_root_identity(
@@ -5478,27 +5497,51 @@ fn semantic_call_arg_for_var(
     env: &PassEnv<'_>,
 ) -> SemanticCallArg {
     let string_addr = semantic_call_arg_string_addr(info, var, &expr, env, 0);
+    let preserve_visible_expr_for_string_addr =
+        string_addr.is_some() && expr_preserves_pointer_identity_for_call_arg(&expr, env);
     if let Some(value) = preferred_semantic_call_arg_value(info, var, &expr, env) {
         if let Some(addr) = string_addr
             && semantic_call_arg_prefers_string_addr(&value)
+            && !preserve_visible_expr_for_string_addr
         {
             return SemanticCallArg::StringAddr(addr);
         }
         if semantic_call_arg_prefers_expr_over_stack_reload(&value, &expr, env) {
-            if let Some(addr) = string_addr {
-                return SemanticCallArg::StringAddr(addr);
-            }
             return SemanticCallArg::FallbackExpr(expr);
         }
         return SemanticCallArg::semantic(value);
     }
-    if let Some(addr) = string_addr {
+    if let Some(addr) = string_addr
+        && !preserve_visible_expr_for_string_addr
+    {
         return SemanticCallArg::StringAddr(addr);
     }
     if var.is_const() {
         return SemanticCallArg::FallbackExpr(expr);
     }
     SemanticCallArg::FallbackExpr(expr)
+}
+
+fn expr_preserves_pointer_identity_for_call_arg(expr: &CExpr, env: &PassEnv<'_>) -> bool {
+    match expr {
+        CExpr::Var(name) => {
+            !is_call_arg_placeholder_name(name)
+                && !is_call_arg_transient_name(name)
+                && !is_generic_entry_arg_name(name)
+                && !env
+                    .param_register_aliases
+                    .contains_key(&name.to_ascii_lowercase())
+        }
+        CExpr::Subscript { .. }
+        | CExpr::Member { .. }
+        | CExpr::PtrMember { .. }
+        | CExpr::Deref(_)
+        | CExpr::AddrOf(_) => true,
+        CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+            expr_preserves_pointer_identity_for_call_arg(inner, env)
+        }
+        _ => false,
+    }
 }
 
 fn semantic_call_arg_prefers_string_addr(value: &SemanticValue) -> bool {

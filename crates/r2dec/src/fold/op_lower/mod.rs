@@ -30,6 +30,7 @@ use r2types::TypeOracle;
 use crate::address::parse_address_from_var_name;
 use crate::analysis;
 use crate::ast::{BinaryOp, CExpr, CStmt, CType, UnaryOp};
+use crate::registers::register_family_name;
 
 use super::context::{FoldingContext, PtrArith, SSABlock};
 use super::flags::is_cpu_flag;
@@ -558,21 +559,6 @@ impl<'a> FoldingContext<'a> {
     }
 
     fn register_family_name_for_ssa(&self, var: &SSAVar) -> Option<String> {
-        fn register_family_name(name: &str) -> Option<String> {
-            let lower = name.to_ascii_lowercase();
-            let lower = lower
-                .rsplit_once('_')
-                .map(|(base, _)| base.to_string())
-                .unwrap_or(lower);
-            let rest = lower
-                .strip_prefix('x')
-                .or_else(|| lower.strip_prefix('w'))
-                .or_else(|| lower.strip_prefix('r'))
-                .or_else(|| lower.strip_prefix('e'))?;
-            (!rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()))
-                .then(|| rest.to_string())
-        }
-
         register_family_name(&var.name).or_else(|| {
             let root = self.resolve_copy_root_name_in_fold(&var.display_name());
             (root != var.display_name())
@@ -1395,7 +1381,55 @@ impl<'a> FoldingContext<'a> {
         let mut semantic_visited = HashSet::new();
         let semanticized = self.semanticize_visible_expr(&rendered, 0, &mut semantic_visited);
         self.choose_preferred_visible_expr(Some(rendered), Some(semanticized))
-            .map(|expr| self.rewrite_stack_expr(expr))
+            .map(|expr| self.simplify_switch_selector_expr(self.rewrite_stack_expr(expr)))
+    }
+
+    fn simplify_switch_selector_expr(&self, expr: CExpr) -> CExpr {
+        match expr {
+            CExpr::Paren(inner) => self.simplify_switch_selector_expr(*inner),
+            CExpr::Cast { expr: inner, .. } => self.simplify_switch_selector_expr(*inner),
+            CExpr::Subscript { base, index } => {
+                if self.is_jump_table_base_expr(base.as_ref())
+                    && self.is_switch_selector_index_expr(index.as_ref())
+                {
+                    self.simplify_switch_selector_expr(*index)
+                } else {
+                    CExpr::Subscript { base, index }
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn is_jump_table_base_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::UIntLit(_) | CExpr::IntLit(_) | CExpr::StringLit(_) => true,
+            CExpr::Var(name) => {
+                name.starts_with("sym.") || name.starts_with("obj.") || name.starts_with("0x")
+            }
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.is_jump_table_base_expr(inner)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_switch_selector_index_expr(&self, expr: &CExpr) -> bool {
+        match expr {
+            CExpr::Var(name) => {
+                !self.is_low_signal_visible_name(name)
+                    && !self.is_transient_visible_name(name)
+                    && !is_generic_stack_placeholder_alias(name)
+            }
+            CExpr::Paren(inner) | CExpr::Cast { expr: inner, .. } => {
+                self.is_switch_selector_index_expr(inner)
+            }
+            CExpr::Binary { left, right, .. } => {
+                self.is_switch_selector_index_expr(left)
+                    || self.is_switch_selector_index_expr(right)
+            }
+            _ => false,
+        }
     }
 
     pub(crate) fn render_semantic_value(
@@ -3671,13 +3705,9 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
 
-        let semantic = self.render_semantic_value_by_name(name, depth, visited);
-        if semantic.is_some() {
-            visited.remove(name);
-            return semantic;
-        }
+        let mut best = self.render_semantic_value_by_name(name, depth, visited);
 
-        let mut best = self.lookup_definition_raw(name).map(|expr| {
+        let raw = self.lookup_definition_raw(name).map(|expr| {
             if matches!(&expr, CExpr::Var(raw_name) if self.should_preserve_address_like_visible_name(raw_name))
                 || matches!(&expr, CExpr::AddrOf(inner) if matches!(inner.as_ref(), CExpr::Var(raw_name) if !self.is_low_signal_visible_name(raw_name) && !self.is_transient_visible_name(raw_name)))
             {
@@ -3691,6 +3721,7 @@ impl<'a> FoldingContext<'a> {
                 }
             }
         });
+        best = self.choose_preferred_visible_expr(best, raw);
 
         if let Some(prov) = self.forwarded_values_map().get(name) {
             let resolved = self
@@ -5433,6 +5464,11 @@ impl<'a> FoldingContext<'a> {
         }
         let mut stmts = Vec::new();
         let mut last_ret_value: Option<CExpr> = None;
+        let track_return_value = self.is_current_return_block()
+            || block
+                .ops
+                .iter()
+                .any(|op| matches!(op, SSAOp::Return { .. }));
 
         for (op_idx, op) in block.ops.iter().enumerate() {
             // Skip stack frame setup/teardown if enabled
@@ -5494,46 +5530,48 @@ impl<'a> FoldingContext<'a> {
                 continue;
             }
 
-            match op {
-                SSAOp::Copy { dst, src }
-                    if self
-                        .inputs
-                        .arch
-                        .is_return_register_name(&dst.name.to_lowercase()) =>
-                {
-                    last_ret_value = Some(self.get_return_expr(src));
-                }
-                SSAOp::IntZExt { dst, src }
-                | SSAOp::IntSExt { dst, src }
-                | SSAOp::Trunc { dst, src }
-                | SSAOp::Cast { dst, src }
-                    if self
-                        .inputs
-                        .arch
-                        .is_return_register_name(&dst.name.to_lowercase()) =>
-                {
-                    let ty = type_from_size(dst.size);
-                    last_ret_value = Some(CExpr::cast(ty, self.get_return_expr(src)));
-                }
-                _ => {
-                    if let Some(dst) = op.dst()
-                        && self
+            if track_return_value {
+                match op {
+                    SSAOp::Copy { dst, src }
+                        if self
                             .inputs
                             .arch
-                            .is_return_register_name(&dst.name.to_lowercase())
+                            .is_return_register_name(&dst.name.to_lowercase()) =>
                     {
-                        let mut visited = HashSet::new();
-                        let raw = self.op_to_expr(op);
-                        let expanded = self.expand_return_expr(&raw, 0, &mut visited);
-                        let mut semantic_visited = HashSet::new();
-                        let semanticized =
-                            self.semanticize_visible_expr(&expanded, 0, &mut semantic_visited);
-                        let final_expr = if self.is_predicate_like_expr(&semanticized) {
-                            self.simplify_condition_expr(semanticized)
-                        } else {
-                            semanticized
-                        };
-                        last_ret_value = Some(final_expr);
+                        last_ret_value = Some(self.tracked_return_expr(src));
+                    }
+                    SSAOp::IntZExt { dst, src }
+                    | SSAOp::IntSExt { dst, src }
+                    | SSAOp::Trunc { dst, src }
+                    | SSAOp::Cast { dst, src }
+                        if self
+                            .inputs
+                            .arch
+                            .is_return_register_name(&dst.name.to_lowercase()) =>
+                    {
+                        let ty = type_from_size(dst.size);
+                        last_ret_value = Some(CExpr::cast(ty, self.tracked_return_expr(src)));
+                    }
+                    _ => {
+                        if let Some(dst) = op.dst()
+                            && self
+                                .inputs
+                                .arch
+                                .is_return_register_name(&dst.name.to_lowercase())
+                        {
+                            let mut visited = HashSet::new();
+                            let raw = self.op_to_expr(op);
+                            let expanded = self.expand_return_expr(&raw, 0, &mut visited);
+                            let mut semantic_visited = HashSet::new();
+                            let semanticized =
+                                self.semanticize_visible_expr(&expanded, 0, &mut semantic_visited);
+                            let final_expr = if self.is_predicate_like_expr(&semanticized) {
+                                self.simplify_condition_expr(semanticized)
+                            } else {
+                                semanticized
+                            };
+                            last_ret_value = Some(final_expr);
+                        }
                     }
                 }
             }

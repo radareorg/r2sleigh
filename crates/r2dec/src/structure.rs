@@ -18,6 +18,8 @@ pub struct ControlFlowStructurer<'a, 'o> {
     func: &'a SSAFunction,
     /// Folding context for expression optimization.
     fold_ctx: &'o FoldingContext<'o>,
+    /// Cached folded statements per basic block.
+    folded_block_cache: HashMap<u64, Vec<CStmt>>,
     /// Labels for blocks that need gotos.
     labels: HashMap<u64, String>,
     /// Counter for generating unique labels.
@@ -48,6 +50,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         Self {
             func,
             fold_ctx,
+            folded_block_cache: HashMap::new(),
             labels: HashMap::new(),
             label_counter: 0,
             region_analyzer: Some(region_analyzer),
@@ -63,6 +66,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         Self {
             func,
             fold_ctx,
+            folded_block_cache: HashMap::new(),
             labels: HashMap::new(),
             label_counter: 0,
             region_analyzer: Some(RegionAnalyzer::new(func)),
@@ -462,8 +466,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
 
         // Convert operations to statements
-        // Use folding context for optimized output
-        stmts.extend(self.fold_ctx.fold_block(block, addr));
+        stmts.extend(self.folded_block_stmts(block, addr));
 
         // Check for break/continue at block end
         if let Some(ref analyzer) = self.region_analyzer {
@@ -536,7 +539,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
 
         // Convert operations to statements
-        stmts.extend(self.fold_ctx.fold_block(block, addr));
+        stmts.extend(self.folded_block_stmts(block, addr));
 
         // Check for break/continue at block end
         if let Some(ref analyzer) = self.region_analyzer {
@@ -572,7 +575,17 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             None => return Vec::new(),
         };
 
-        self.fold_ctx.fold_block(block, addr)
+        self.folded_block_stmts(block, addr)
+    }
+
+    fn folded_block_stmts(&mut self, block: &r2ssa::FunctionSSABlock, addr: u64) -> Vec<CStmt> {
+        if let Some(stmts) = self.folded_block_cache.get(&addr) {
+            return stmts.clone();
+        }
+
+        let stmts = self.fold_ctx.fold_block(block, addr);
+        self.folded_block_cache.insert(addr, stmts.clone());
+        stmts
     }
 
     /// Get the branch condition from a block.
@@ -581,6 +594,10 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             Some(b) => b,
             None => return CExpr::IntLit(1),
         };
+
+        if let Some(cond) = self.fold_ctx.extract_condition_from_block(block) {
+            return cond;
+        }
 
         // Look for a conditional branch in the block
         for op in &block.ops {
@@ -945,20 +962,30 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             return None;
         };
 
-        let mut then_stmt = self.structure_region(then_region);
-        let mut else_stmt = self.structure_region(else_region);
         let then_pred = self.unique_region_predecessor_to_merge(then_region, merge_block);
         let else_pred = self.unique_region_predecessor_to_merge(else_region, merge_block);
+        let then_can_rewrite =
+            then_pred.is_some_and(|pred| self.has_merged_slot_return_expr(pred, summary));
+        let else_can_rewrite =
+            else_pred.is_some_and(|pred| self.has_merged_slot_return_expr(pred, summary));
+        if !then_can_rewrite && !else_can_rewrite {
+            return None;
+        }
+
+        let mut then_stmt = self.structure_region(then_region);
+        let mut else_stmt = self.structure_region(else_region);
         let mut rewrote_any = false;
 
-        if let Some(pred) = then_pred
+        if then_can_rewrite
+            && let Some(pred) = then_pred
             && let Some(rewritten) =
                 self.append_merged_slot_return_if_needed(then_stmt.clone(), pred, summary)
         {
             then_stmt = rewritten;
             rewrote_any = true;
         }
-        if let Some(pred) = else_pred
+        if else_can_rewrite
+            && let Some(pred) = else_pred
             && let Some(rewritten) =
                 self.append_merged_slot_return_if_needed(else_stmt.clone(), pred, summary)
         {
@@ -1109,6 +1136,18 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         } else {
             CStmt::Block(stmts)
         })
+    }
+
+    fn has_merged_slot_return_expr(
+        &self,
+        pred_addr: u64,
+        summary: &crate::analysis::FrameSlotMergeSummary,
+    ) -> bool {
+        summary.incoming.contains_key(&pred_addr)
+            || self
+                .fold_ctx
+                .merged_return_candidate_for_block_slot(pred_addr, summary.slot_offset)
+                .is_some()
     }
 
     fn prepend_named_merged_slot_assignment_if_needed(

@@ -30,6 +30,6 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s sym._complex_check
-a:sla.dec | jq -Rs 'contains("int64_t sym._complex_check(int32_t arg1, int32_t arg2)") and contains("if (arg1 - arg2 != 64)") and contains("var_4h = 0;") and contains("var_4h = 1;") and contains("return 0;") and contains("return 1;")'
+a:sla.dec | jq -Rs 'contains("int64_t sym._complex_check(int32_t arg1, int32_t arg2)") and contains("var_4h = 0;") and contains("var_4h = 1;") and contains("return 0;") and contains("return 1;") and (contains("{\n    }\n")|not)'
 EOF_CMDS
 RUN

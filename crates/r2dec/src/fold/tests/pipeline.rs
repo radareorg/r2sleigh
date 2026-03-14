@@ -9526,4 +9526,177 @@ mod tests {
         assert!(!output.contains("{\n    }\n"), "unexpected empty if body in:\n{output}");
     }
 
+    #[test]
+    fn folded_x86_printf_result_slot_recovers_helper_call_from_eax_alias() {
+        let mut ctx = make_x86_64_ctx();
+        ctx.inputs.function_names = Box::leak(Box::new(HashMap::from([
+            (0x1000005d4, "sym._unlock".to_string()),
+            (0x10000259c, "sym.imp.printf".to_string()),
+        ])));
+        ctx.inputs.strings = Box::leak(Box::new(HashMap::from([(
+            0x1000027a0,
+            "unlock(%d, %d, %d) = %d\\n".to_string(),
+        )])));
+        ctx.set_known_function_signatures(HashMap::from([
+            (
+                "sym._unlock".to_string(),
+                FunctionType {
+                    return_type: CType::Int(32),
+                    params: vec![CType::Int(32), CType::Int(32), CType::Int(32)],
+                    variadic: false,
+                },
+            ),
+            (
+                "sym.imp.printf".to_string(),
+                FunctionType {
+                    return_type: CType::Int(32),
+                    params: vec![CType::ptr(CType::Int(8))],
+                    variadic: true,
+                },
+            ),
+        ]));
+
+        let helper_call_idx = 3usize;
+        let block = SSABlock {
+            addr: 0x2000,
+            size: 4,
+            phis: Vec::new(),
+            ops: vec![
+                SSAOp::Copy {
+                    dst: make_var("RDI", 1, 8),
+                    src: make_var("const:1", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("RSI", 1, 8),
+                    src: make_var("const:2", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("RDX", 1, 8),
+                    src: make_var("const:3", 0, 8),
+                },
+                SSAOp::Call {
+                    target: make_var("const:1000005d4", 0, 8),
+                },
+                SSAOp::CallDefine {
+                    dst: make_var("EAX", 1, 4),
+                },
+                SSAOp::Copy {
+                    dst: make_var("RDI", 2, 8),
+                    src: make_var("const:1000027a0", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("RSI", 2, 8),
+                    src: make_var("const:1", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("RDX", 2, 8),
+                    src: make_var("const:2", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("RCX", 1, 8),
+                    src: make_var("const:3", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: make_var("R8", 1, 8),
+                    src: make_var("EAX", 1, 4),
+                },
+                SSAOp::Call {
+                    target: make_var("const:10000259c", 0, 8),
+                },
+            ],
+        };
+
+        ctx.analyze_blocks(std::slice::from_ref(&block));
+        let printf_call_args = ctx
+            .state
+            .analysis_ctx
+            .use_info
+            .call_args
+            .get(&(block.addr, block.ops.len() - 1))
+            .expect("printf call args");
+        assert!(
+            matches!(
+                printf_call_args.last(),
+                Some(crate::analysis::CallArgBinding {
+                    arg: crate::analysis::SemanticCallArg::FallbackExpr(CExpr::Call { func, args }),
+                    role: crate::analysis::CallArgRole::Result,
+                    source_call: Some((source_block, source_idx)),
+                    ..
+                }) if **func == CExpr::Var("sym._unlock".to_string())
+                    && args == &vec![CExpr::IntLit(1), CExpr::IntLit(2), CExpr::IntLit(3)]
+                    && *source_block == block.addr
+                    && *source_idx == helper_call_idx
+            ),
+            "expected x86 printf result slot to recover helper call from EAX alias, got {printf_call_args:?}"
+        );
+
+        let stmts = ctx.fold_block(&block, block.addr);
+        assert_eq!(
+            stmts.len(),
+            1,
+            "expected helper call to inline into printf, got {stmts:?}"
+        );
+        let CStmt::Expr(CExpr::Call { func, args }) = &stmts[0] else {
+            panic!("expected folded printf call, got {stmts:?}");
+        };
+        assert_eq!(**func, CExpr::Var("sym.imp.printf".to_string()));
+        assert_eq!(
+            args,
+            &vec![
+                CExpr::StringLit("unlock(%d, %d, %d) = %d\\n".to_string()),
+                CExpr::IntLit(1),
+                CExpr::IntLit(2),
+                CExpr::IntLit(3),
+                CExpr::call(
+                    CExpr::Var("sym._unlock".to_string()),
+                    vec![CExpr::IntLit(1), CExpr::IntLit(2), CExpr::IntLit(3)],
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn imported_printf_stack_backed_pointer_arg_without_named_positive_base_renders_visible_storage() {
+        let mut ctx = make_aarch64_ctx();
+        ctx.inputs.strings = Box::leak(Box::new(HashMap::from([(
+            0x1000_1000,
+            "Copied: %s\\n".to_string(),
+        )])));
+
+        let rendered = ctx.render_call_args_for_callee(
+            &CExpr::Var("sym.imp.printf".to_string()),
+            vec![
+                crate::analysis::CallArgBinding::input(crate::analysis::SemanticCallArg::StringAddr(
+                    0x1000_1000,
+                )),
+                crate::analysis::CallArgBinding::input(
+                    crate::analysis::SemanticCallArg::semantic(
+                        crate::analysis::SemanticValue::Load {
+                            addr: crate::analysis::NormalizedAddr {
+                                base: crate::analysis::BaseRef::StackSlot(0x3e0),
+                                index: None,
+                                scale_bytes: 0,
+                                offset_bytes: 312,
+                            },
+                            size: 8,
+                        },
+                    ),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            rendered,
+            vec![
+                CExpr::StringLit("Copied: %s\\n".to_string()),
+                CExpr::Deref(Box::new(CExpr::binary(
+                    BinaryOp::Add,
+                    CExpr::AddrOf(Box::new(CExpr::Var("stack_3e0".to_string()))),
+                    CExpr::IntLit(312),
+                ))),
+            ],
+            "expected imported stack-backed pointer input to preserve visible storage identity instead of collapsing to 0U"
+        );
+    }
+
 }

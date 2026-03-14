@@ -125,6 +125,11 @@ impl<'a> FoldingContext<'a> {
 
     pub(super) fn resolve_return_candidate(&self, expr: &CExpr) -> CExpr {
         let mut best = expr.clone();
+        let mut semantic_visited = HashSet::new();
+        let semanticized = self.semanticize_visible_expr(expr, 0, &mut semantic_visited);
+        if self.prefers_visible_expr(&best, &semanticized) {
+            best = semanticized;
+        }
         let mut has_semantic_root = false;
         if let CExpr::Var(name) = expr {
             if let Some(semantic) = self.semantic_return_candidate_for_name(name) {
@@ -613,6 +618,19 @@ impl<'a> FoldingContext<'a> {
             raw
         };
         self.sanitize_return_expr(simplified, root, unresolved)
+    }
+
+    pub(super) fn tracked_return_expr(&self, var: &SSAVar) -> CExpr {
+        if var.is_const() {
+            return self.const_to_expr(var);
+        }
+
+        let name = var.display_name();
+        self.formatted_defs_map()
+            .get(&name)
+            .cloned()
+            .or_else(|| self.definitions_map().get(&name).cloned())
+            .unwrap_or_else(|| CExpr::Var(self.var_name(var)))
     }
 
     #[cfg(test)]

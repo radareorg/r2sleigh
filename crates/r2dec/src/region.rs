@@ -1528,9 +1528,24 @@ impl<'a> RegionAnalyzer<'a> {
         graph.collect_reachable_limited(true_target, &mut true_reachable, 10);
         let mut false_reachable = HashSet::new();
         graph.collect_reachable_limited(false_target, &mut false_reachable, 10);
-        true_reachable
+        let mut common: Vec<usize> = true_reachable
             .into_iter()
-            .find(|id| false_reachable.contains(id))
+            .filter(|id| false_reachable.contains(id))
+            .collect();
+        common.sort_by_key(|id| {
+            let true_distance = self
+                .working_shortest_distance(true_target, *id, graph)
+                .unwrap_or(usize::MAX);
+            let false_distance = self
+                .working_shortest_distance(false_target, *id, graph)
+                .unwrap_or(usize::MAX);
+            (
+                true_distance.max(false_distance),
+                true_distance.saturating_add(false_distance),
+                graph.node_entry(*id).unwrap_or(u64::MAX),
+            )
+        });
+        common.into_iter().next()
     }
 
     fn find_working_switch_merge(&self, targets: &[usize], graph: &WorkingGraph) -> Option<usize> {
@@ -1552,6 +1567,34 @@ impl<'a> RegionAnalyzer<'a> {
         common
             .into_iter()
             .min_by_key(|id| graph.node_entry(*id).unwrap_or(u64::MAX))
+    }
+
+    fn working_shortest_distance(
+        &self,
+        start: usize,
+        target: usize,
+        graph: &WorkingGraph,
+    ) -> Option<usize> {
+        if start == target {
+            return Some(0);
+        }
+
+        let mut queue = VecDeque::from([(start, 0usize)]);
+        let mut visited = HashSet::from([start]);
+
+        while let Some((node, dist)) = queue.pop_front() {
+            for succ in graph.sorted_succs(node) {
+                if !visited.insert(succ) {
+                    continue;
+                }
+                if succ == target {
+                    return Some(dist + 1);
+                }
+                queue.push_back((succ, dist + 1));
+            }
+        }
+
+        None
     }
 }
 
@@ -2272,6 +2315,56 @@ mod tests {
             else_region.as_ref().map(|r| r.entry()),
             Some(0x1004),
             "else branch should be false-target"
+        );
+    }
+
+    fn build_single_arm_guard_cfg() -> SSAFunction {
+        // Conditional at 0x1000:
+        //   true  -> 0x2000 (immediate merge)
+        //   false -> 0x1004 (body), which also flows to 0x2000
+        let mut cond = R2ILBlock::new(0x1000, 4);
+        cond.push(R2ILOp::Nop);
+
+        let mut body = R2ILBlock::new(0x1004, 4);
+        body.push(R2ILOp::Branch {
+            target: Varnode::constant(0x2000, 8),
+        });
+
+        let mut merge = R2ILBlock::new(0x2000, 4);
+        merge.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&[cond, body, merge]).expect("ssa function");
+        func.cfg_mut().set_terminator(
+            0x1000,
+            BlockTerminator::ConditionalBranch {
+                true_target: 0x2000,
+                false_target: 0x1004,
+            },
+        );
+        func
+    }
+
+    #[test]
+    fn iterative_composition_prefers_near_single_arm_merge() {
+        let func = build_single_arm_guard_cfg();
+        let analyzer = RegionAnalyzer::new(&func);
+        let graph = WorkingGraph::from_function(&func);
+        let false_node = graph
+            .node_for_block(0x1004)
+            .expect("body node should exist");
+        let true_node = graph
+            .node_for_block(0x2000)
+            .expect("merge node should exist");
+        let merge_node = analyzer
+            .find_working_merge_point(true_node, false_node, &graph)
+            .expect("merge node should be found");
+        assert_eq!(
+            graph.node_entry(merge_node),
+            Some(0x2000),
+            "iterative merge selection should pick the immediate join block"
         );
     }
 

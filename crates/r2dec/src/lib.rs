@@ -36,6 +36,7 @@ pub mod fold;
 pub(crate) mod normalize;
 pub(crate) mod post_rename;
 pub mod region;
+pub(crate) mod registers;
 pub mod structure;
 pub mod variable;
 

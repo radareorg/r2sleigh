@@ -810,6 +810,110 @@ a:sla.dec | jq -Rs 'contains("switch (local_") and (contains("switch (test)")|no
 EOF_CMDS
 RUN
 
+NAME=dec_main_unlock_printf_keeps_recovered_inputs_and_result_call
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("unlock(%d, %d, %d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("unlock(%d, %d, %d) = %d") and contains("local_2c, local_30, local_34, sym._unlock(local_2c, local_30, local_34));") and (contains("sym._unlock(local_2c, local_30, local_34);")|not) and (contains("stack_")|not) and (contains("&stack")|not) and (contains("lr")|not) and (test("\\bx[0-9]+_[0-9]+\\b")|not) and (test("\\bw[0-9]+_[0-9]+\\b")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_solve_equation_printf_keeps_recovered_input_and_result_call
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("solve_equation(%d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("solve_equation(%d) = %d") and contains("local_5c, sym._solve_equation(local_5c));") and (contains("sym._solve_equation(local_5c);")|not) and (contains("stack_")|not) and (contains("&stack")|not) and (contains("lr")|not) and (test("\\bx[0-9]+_[0-9]+\\b")|not) and (test("\\bw[0-9]+_[0-9]+\\b")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_complex_check_printf_keeps_recovered_inputs_and_result_call
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("complex_check(%d, %d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("complex_check(%d, %d) = %d") and contains("local_60, local_64, sym._complex_check(local_60, local_64));") and (contains("sym._complex_check(local_60, local_64);")|not) and (contains("stack_")|not) and (contains("&stack")|not) and (contains("lr")|not) and (test("\\bx[0-9]+_[0-9]+\\b")|not) and (test("\\bw[0-9]+_[0-9]+\\b")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_nonempty_and_usage_path_returns_one
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '(length > 0) and contains("return 1;") and contains("switch (var_") and (contains("return argc;")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_unlock_printf_keeps_recovered_inputs_and_result_call
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("unlock(%d, %d, %d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("var_3e0h, var_3dch, var_3d8h, sym._unlock(var_3e0h, var_3dch, var_3d8h));") and (contains("sym._unlock(var_3e0h, var_3dch, var_3d8h);")|not) and (contains("0U")|not) and (contains("&stack")|not) and (contains("eax_")|not) and (contains("rax_")|not) and (contains(" r8")|not) and (contains("atoi(")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_solve_equation_printf_keeps_recovered_input_and_result_call
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("solve_equation(%d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("var_3e4h, sym._solve_equation(var_3e4h));") and (contains("sym._solve_equation(var_3e4h);")|not) and (contains("0U")|not) and (contains("&stack")|not) and (contains("eax_")|not) and (contains("rax_")|not) and (contains(" r8")|not) and (contains("atoi(")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_complex_check_printf_keeps_recovered_inputs_and_result_call
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("complex_check(%d, %d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("var_3ech, var_3e8h, sym._complex_check(var_3ech, var_3e8h));") and (contains("sym._complex_check(var_3ech, var_3e8h);")|not) and (contains("0U")|not) and (contains("&stack")|not) and (contains("eax_")|not) and (contains("rax_")|not) and (contains(" r8")|not) and (contains("atoi(")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_pointer_cases_keep_concrete_values
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("Copied: %s") or contains("vuln_alloc(%d, %d) = %p") or contains("free(")))) as $lines | ($lines | any(contains("sym.imp.printf(\"Copied: %s\\n\", var_38h);")) and any(contains("sym.imp.free(var_38h);")) and any(contains("sym.imp.printf(\"vuln_alloc(%d, %d) = %p\\n\", var_3ch, var_40h, sym._vuln_alloc(var_3ch, var_40h));")) and any(contains("sym.imp.free(var_48h);")) and (tostring | contains("0U")|not) and (tostring | contains("&stack")|not) and (tostring | contains("eax_")|not) and (tostring | contains("rax_")|not))'
+EOF_CMDS
+RUN
+
 NAME=dec_check_secret_signature_uses_int32
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
