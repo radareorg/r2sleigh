@@ -4,7 +4,7 @@
 //! components for a complete function: CFG, dominator tree, phi nodes,
 //! and renamed operations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use r2il::{ArchSpec, R2ILBlock};
 use serde::{Deserialize, Serialize};
@@ -15,11 +15,23 @@ use crate::domtree::DomTree;
 use crate::naming::build_register_name_map;
 use crate::op::SSAOp;
 use crate::phi::{PhiPlacement, collect_defs_from_cfg_with_names};
-use crate::rename::rename_function_with_names;
+use crate::rename::{
+    CallBoundaryConfig, rename_function_with_names, rename_function_with_names_and_call_boundaries,
+};
 use crate::var::SSAVar;
 
 /// Switch case information: Vec of (case_value, target_address) pairs and optional default target.
 pub type SwitchInfo = (Vec<(u64, u64)>, Option<u64>);
+
+/// Query-only CFG risk summary for decompilation preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CFGRiskSummary {
+    pub block_count: usize,
+    pub loop_count: usize,
+    pub back_edge_count: usize,
+    pub switch_block_count: usize,
+    pub max_switch_cases: usize,
+}
 
 /// A function in SSA form.
 ///
@@ -99,6 +111,37 @@ pub struct DefRef<'a> {
     pub site: DefSite,
 }
 
+fn decompile_call_boundary_config(arch: Option<&ArchSpec>) -> Option<CallBoundaryConfig> {
+    let arch = arch?;
+    let lower = arch.name.to_ascii_lowercase();
+    let defined_regs: Vec<String> = match lower.as_str() {
+        "x86-64" | "x86_64" | "x64" | "amd64" => vec![
+            "rax", "eax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r11",
+        ],
+        "x86" | "x86-32" | "i386" | "i686" => vec!["eax", "ecx", "edx"],
+        "arm" if arch.addr_size == 4 => vec!["r0", "r1", "r2", "r3", "r12", "lr", "ip"],
+        "aarch64" | "arm64" => vec![
+            "x0", "w0", "x1", "w1", "x2", "w2", "x3", "w3", "x4", "w4", "x5", "w5", "x6", "w6",
+            "x7", "w7", "x8", "w8", "x9", "w9", "x10", "w10", "x11", "w11", "x12", "w12", "x13",
+            "w13", "x14", "w14", "x15", "w15", "x16", "w16", "x17", "w17", "x30", "w30",
+        ],
+        "riscv32" | "rv32" | "rv32gc" => vec![
+            "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5",
+            "a6", "a7",
+        ],
+        "riscv64" | "rv64" | "rv64gc" => vec![
+            "ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5",
+            "a6", "a7",
+        ],
+        _ => Vec::new(),
+    }
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    (!defined_regs.is_empty()).then_some(CallBoundaryConfig { defined_regs })
+}
+
 impl SSAFunction {
     /// Build an SSA function from a sequence of r2il blocks.
     pub fn from_blocks(blocks: &[R2ILBlock]) -> Option<Self> {
@@ -123,6 +166,47 @@ impl SSAFunction {
         Some(func)
     }
 
+    /// Build SSA prepared for decompilation.
+    ///
+    /// Unlike the generic constructor path, this preserves copy/cast and
+    /// address-provenance roots by default and only applies explicitly
+    /// configured decompiler-safe cleanup.
+    pub fn from_blocks_for_decompile(
+        blocks: &[R2ILBlock],
+        arch: Option<&ArchSpec>,
+    ) -> Option<Self> {
+        let mut func = Self::from_blocks_raw_for_decompile(blocks, arch)?;
+        func.prepare_for_decompile(&crate::optimize::DecompilePrepConfig::default());
+        if let Some(arch) = arch {
+            func.normalize_subregister_sources_for_decompile(arch);
+        }
+        Some(func)
+    }
+
+    /// Build SSA prepared for pattern/type inference.
+    ///
+    /// This keeps memory reads and address arithmetic intact while still
+    /// applying limited whole-function SCCP so layout-sensitive patterns
+    /// collapse to a canonical indexed+offset form for downstream consumers.
+    pub fn from_blocks_for_patterns(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+        let mut func = Self::from_blocks_raw(blocks, arch)?;
+        let cfg = crate::optimize::OptimizationConfig {
+            max_iterations: 1,
+            enable_sccp: true,
+            enable_const_prop: false,
+            enable_inst_combine: false,
+            enable_copy_prop: false,
+            enable_cse: false,
+            enable_dce: false,
+            preserve_memory_reads: true,
+        };
+        func.optimize(&cfg);
+        if let Some(arch) = arch {
+            func.normalize_subregister_sources_for_decompile(arch);
+        }
+        Some(func)
+    }
+
     /// Build an SSA function from blocks without running optimization passes.
     ///
     /// This performs raw SSA construction:
@@ -131,6 +215,23 @@ impl SSAFunction {
     /// 3. Place phi nodes
     /// 4. Rename variables
     pub fn from_blocks_raw(blocks: &[R2ILBlock], arch: Option<&ArchSpec>) -> Option<Self> {
+        Self::from_blocks_raw_with_policy(blocks, arch, None)
+    }
+
+    /// Build raw SSA prepared with decompiler-safe call boundaries.
+    pub fn from_blocks_raw_for_decompile(
+        blocks: &[R2ILBlock],
+        arch: Option<&ArchSpec>,
+    ) -> Option<Self> {
+        let policy = decompile_call_boundary_config(arch);
+        Self::from_blocks_raw_with_policy(blocks, arch, policy.as_ref())
+    }
+
+    fn from_blocks_raw_with_policy(
+        blocks: &[R2ILBlock],
+        arch: Option<&ArchSpec>,
+        call_boundaries: Option<&CallBoundaryConfig>,
+    ) -> Option<Self> {
         if blocks.is_empty() {
             return None;
         }
@@ -152,8 +253,18 @@ impl SSAFunction {
         let phi_placement = PhiPlacement::compute(&cfg, &domtree, &defs, &var_sizes);
 
         // Rename variables
-        let renamed =
-            rename_function_with_names(&cfg, &domtree, &phi_placement, &var_sizes, reg_names_ref);
+        let renamed = if let Some(boundary) = call_boundaries {
+            rename_function_with_names_and_call_boundaries(
+                &cfg,
+                &domtree,
+                &phi_placement,
+                &var_sizes,
+                reg_names_ref,
+                Some(boundary),
+            )
+        } else {
+            rename_function_with_names(&cfg, &domtree, &phi_placement, &var_sizes, reg_names_ref)
+        };
 
         // Build SSA blocks
         let mut ssa_blocks = HashMap::new();
@@ -288,6 +399,34 @@ impl SSAFunction {
     /// Check if block A dominates block B.
     pub fn dominates(&self, a: u64, b: u64) -> bool {
         self.domtree.dominates(a, b)
+    }
+
+    /// Summarize CFG features that are useful for conservative decompiler preflight.
+    ///
+    /// This is intentionally query-only: it reports structure, but does not encode
+    /// fallback policy or mutate SSA state.
+    pub fn cfg_risk_summary(&self) -> CFGRiskSummary {
+        let back_edges = self.collect_back_edges();
+        let back_edge_count = back_edges.values().map(Vec::len).sum();
+        let loop_count = back_edges.len();
+        let mut switch_block_count = 0usize;
+        let mut max_switch_cases = 0usize;
+
+        for block in self.blocks() {
+            if let Some((cases, default)) = self.switch_info(block.addr) {
+                switch_block_count += 1;
+                let case_count = cases.len() + usize::from(default.is_some());
+                max_switch_cases = max_switch_cases.max(case_count);
+            }
+        }
+
+        CFGRiskSummary {
+            block_count: self.num_blocks(),
+            loop_count,
+            back_edge_count,
+            switch_block_count,
+            max_switch_cases,
+        }
     }
 
     /// Get the immediate dominator of a block.
@@ -463,6 +602,101 @@ impl SSAFunction {
         crate::optimize::optimize_function(self, config)
     }
 
+    /// Prepare SSA for decompilation using provenance-preserving defaults.
+    pub fn prepare_for_decompile(
+        &mut self,
+        config: &crate::optimize::DecompilePrepConfig,
+    ) -> crate::optimize::OptimizationStats {
+        let cfg: crate::optimize::OptimizationConfig = config.into();
+        self.optimize(&cfg)
+    }
+
+    fn normalize_subregister_sources_for_decompile(&mut self, arch: &ArchSpec) {
+        let family_info = RegisterFamilyInfo::from_arch(arch);
+        if family_info.name_to_member.is_empty() {
+            return;
+        }
+
+        let block_in_states = self.compute_decompile_family_in_states(&family_info);
+
+        for &addr in &self.block_order {
+            let mut state = block_in_states.get(&addr).cloned().unwrap_or_default();
+            let Some(block) = self.blocks.get_mut(&addr) else {
+                continue;
+            };
+
+            for phi in &block.phis {
+                apply_phi_family_effect(phi, &mut state, &family_info);
+            }
+
+            for op in &mut block.ops {
+                let rewritten = crate::optimize::map_sources_in_op(op, &|src| {
+                    rewrite_decompile_family_source(src, &state, &family_info)
+                });
+                apply_op_family_effect(&rewritten, &mut state, &family_info);
+                *op = rewritten;
+            }
+        }
+    }
+
+    fn compute_decompile_family_in_states(
+        &self,
+        family_info: &RegisterFamilyInfo,
+    ) -> HashMap<u64, FamilyRootState> {
+        let mut in_states: HashMap<u64, FamilyRootState> = HashMap::new();
+        let mut out_states: HashMap<u64, FamilyRootState> = HashMap::new();
+
+        loop {
+            let mut changed = false;
+
+            for &addr in &self.block_order {
+                let preds = self.predecessors(addr);
+                let next_in = meet_family_states(&preds, &out_states);
+                let next_out = self.transfer_family_state_for_block(addr, &next_in, family_info);
+
+                if in_states.get(&addr) != Some(&next_in) {
+                    in_states.insert(addr, next_in.clone());
+                    changed = true;
+                }
+                if out_states.get(&addr) != Some(&next_out) {
+                    out_states.insert(addr, next_out);
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+        }
+
+        in_states
+    }
+
+    fn transfer_family_state_for_block(
+        &self,
+        addr: u64,
+        input: &FamilyRootState,
+        family_info: &RegisterFamilyInfo,
+    ) -> FamilyRootState {
+        let mut state = input.clone();
+        let Some(block) = self.get_block(addr) else {
+            return state;
+        };
+
+        for phi in &block.phis {
+            apply_phi_family_effect(phi, &mut state, family_info);
+        }
+
+        for op in &block.ops {
+            let rewritten = crate::optimize::map_sources_in_op(op, &|src| {
+                rewrite_decompile_family_source(src, &state, family_info)
+            });
+            apply_op_family_effect(&rewritten, &mut state, family_info);
+        }
+
+        state
+    }
+
     /// Print the function in a human-readable format.
     pub fn dump(&self) -> String {
         let mut out = String::new();
@@ -524,6 +758,336 @@ impl SSAFunction {
         }
 
         out
+    }
+
+    fn collect_back_edges(&self) -> HashMap<u64, Vec<u64>> {
+        let mut visited = HashSet::new();
+        let mut in_stack = HashSet::new();
+        let mut back_edges = HashMap::new();
+        self.dfs_back_edges(self.entry, &mut visited, &mut in_stack, &mut back_edges);
+        back_edges
+    }
+
+    fn dfs_back_edges(
+        &self,
+        block: u64,
+        visited: &mut HashSet<u64>,
+        in_stack: &mut HashSet<u64>,
+        back_edges: &mut HashMap<u64, Vec<u64>>,
+    ) {
+        if visited.contains(&block) {
+            return;
+        }
+        visited.insert(block);
+        in_stack.insert(block);
+
+        for succ in self.successors(block) {
+            if in_stack.contains(&succ) {
+                back_edges.entry(succ).or_default().push(block);
+            } else {
+                self.dfs_back_edges(succ, visited, in_stack, back_edges);
+            }
+        }
+
+        in_stack.remove(&block);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RegisterFamilySlot {
+    family_id: usize,
+    width: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RegisterFamilyMember {
+    family_id: usize,
+    width: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RegisterFamilyInfo {
+    name_to_member: HashMap<String, RegisterFamilyMember>,
+    family_widths: HashMap<usize, Vec<u32>>,
+}
+
+type FamilyRootState = HashMap<RegisterFamilySlot, SSAVar>;
+
+impl RegisterFamilyInfo {
+    fn from_arch(arch: &ArchSpec) -> Self {
+        #[derive(Clone)]
+        struct RangeReg {
+            name: String,
+            offset: u64,
+            size: u32,
+        }
+
+        fn find(parents: &mut [usize], idx: usize) -> usize {
+            if parents[idx] != idx {
+                let root = find(parents, parents[idx]);
+                parents[idx] = root;
+            }
+            parents[idx]
+        }
+
+        fn union(parents: &mut [usize], a: usize, b: usize) {
+            let root_a = find(parents, a);
+            let root_b = find(parents, b);
+            if root_a != root_b {
+                parents[root_b] = root_a;
+            }
+        }
+
+        fn overlaps(a: &RangeReg, b: &RangeReg) -> bool {
+            let a_end = a.offset.saturating_add(a.size as u64);
+            let b_end = b.offset.saturating_add(b.size as u64);
+            a.offset < b_end && b.offset < a_end
+        }
+
+        let regs: Vec<RangeReg> = arch
+            .registers
+            .iter()
+            .map(|reg| RangeReg {
+                name: reg.name.to_lowercase(),
+                offset: reg.offset,
+                size: reg.size,
+            })
+            .collect();
+
+        if regs.is_empty() {
+            return Self::default();
+        }
+
+        let mut parents: Vec<usize> = (0..regs.len()).collect();
+        for i in 0..regs.len() {
+            for j in (i + 1)..regs.len() {
+                if overlaps(&regs[i], &regs[j]) {
+                    union(&mut parents, i, j);
+                }
+            }
+        }
+
+        let mut root_to_family = HashMap::new();
+        let mut next_family_id = 0usize;
+        let mut name_to_member = HashMap::new();
+        let mut family_width_sets: HashMap<usize, HashSet<u32>> = HashMap::new();
+
+        for (idx, reg) in regs.iter().enumerate() {
+            let root = find(&mut parents, idx);
+            let family_id = *root_to_family.entry(root).or_insert_with(|| {
+                let id = next_family_id;
+                next_family_id += 1;
+                id
+            });
+            name_to_member.insert(
+                reg.name.clone(),
+                RegisterFamilyMember {
+                    family_id,
+                    width: reg.size,
+                },
+            );
+            family_width_sets
+                .entry(family_id)
+                .or_default()
+                .insert(reg.size);
+        }
+
+        let family_widths = family_width_sets
+            .into_iter()
+            .map(|(family_id, mut widths)| {
+                let mut widths: Vec<u32> = widths.drain().collect();
+                widths.sort_unstable();
+                (family_id, widths)
+            })
+            .collect();
+
+        Self {
+            name_to_member,
+            family_widths,
+        }
+    }
+
+    fn member_for(&self, var: &SSAVar) -> Option<RegisterFamilyMember> {
+        self.name_to_member.get(&var.name.to_lowercase()).copied()
+    }
+}
+
+fn meet_family_states(
+    preds: &[u64],
+    out_states: &HashMap<u64, FamilyRootState>,
+) -> FamilyRootState {
+    let mut pred_iter = preds.iter();
+    let Some(first_pred) = pred_iter.next() else {
+        return HashMap::new();
+    };
+    let Some(first_state) = out_states.get(first_pred).cloned() else {
+        return HashMap::new();
+    };
+
+    let mut merged = first_state;
+    for pred in pred_iter {
+        let Some(state) = out_states.get(pred) else {
+            return HashMap::new();
+        };
+        merged.retain(|slot, root| state.get(slot) == Some(root));
+    }
+    merged
+}
+
+fn apply_phi_family_effect(
+    phi: &PhiNode,
+    state: &mut FamilyRootState,
+    family_info: &RegisterFamilyInfo,
+) {
+    let Some(member) = family_info.member_for(&phi.dst) else {
+        return;
+    };
+    kill_family_roots(state, member.family_id);
+    state.insert(
+        RegisterFamilySlot {
+            family_id: member.family_id,
+            width: member.width,
+        },
+        phi.dst.clone(),
+    );
+}
+
+fn apply_op_family_effect(
+    op: &SSAOp,
+    state: &mut FamilyRootState,
+    family_info: &RegisterFamilyInfo,
+) {
+    let Some(dst) = op.dst() else {
+        return;
+    };
+    let Some(member) = family_info.member_for(dst) else {
+        return;
+    };
+
+    kill_family_roots(state, member.family_id);
+
+    let exact_slot = RegisterFamilySlot {
+        family_id: member.family_id,
+        width: member.width,
+    };
+
+    match op {
+        SSAOp::Copy { src, .. } | SSAOp::Cast { src, .. } | SSAOp::New { src, .. } => {
+            if let Some(root) = adapt_family_root(src, member.width) {
+                state.insert(exact_slot, root.clone());
+                seed_narrow_const_roots(state, family_info, member.family_id, member.width, &root);
+            } else {
+                state.insert(exact_slot, dst.clone());
+            }
+        }
+        SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. } => {
+            state.insert(exact_slot, dst.clone());
+            if let Some(root) = adapt_family_root(src, src.size) {
+                state.insert(
+                    RegisterFamilySlot {
+                        family_id: member.family_id,
+                        width: src.size,
+                    },
+                    root,
+                );
+            }
+        }
+        SSAOp::Trunc { src, .. } | SSAOp::Subpiece { src, .. } => {
+            if let Some(root) = adapt_family_root(src, member.width) {
+                state.insert(exact_slot, root);
+            } else {
+                state.insert(exact_slot, dst.clone());
+            }
+        }
+        _ => {
+            state.insert(exact_slot, dst.clone());
+        }
+    }
+}
+
+fn rewrite_decompile_family_source(
+    src: &SSAVar,
+    state: &FamilyRootState,
+    family_info: &RegisterFamilyInfo,
+) -> SSAVar {
+    if src.version != 0 {
+        return src.clone();
+    }
+    let Some(member) = family_info.member_for(src) else {
+        return src.clone();
+    };
+    let slot = RegisterFamilySlot {
+        family_id: member.family_id,
+        width: src.size,
+    };
+    let Some(root) = state.get(&slot) else {
+        return src.clone();
+    };
+    let Some(adapted) = adapt_family_root(root, src.size) else {
+        return src.clone();
+    };
+    if adapted == *src {
+        src.clone()
+    } else {
+        adapted
+    }
+}
+
+fn adapt_family_root(root: &SSAVar, width: u32) -> Option<SSAVar> {
+    if root.size == width {
+        return Some(root.clone());
+    }
+    if !root.is_const() {
+        return None;
+    }
+    const_value(root).map(|value| SSAVar::constant(mask_const_to_width(value, width), width))
+}
+
+fn seed_narrow_const_roots(
+    state: &mut FamilyRootState,
+    family_info: &RegisterFamilyInfo,
+    family_id: usize,
+    written_width: u32,
+    root: &SSAVar,
+) {
+    let Some(const_value) = const_value(root) else {
+        return;
+    };
+    let Some(widths) = family_info.family_widths.get(&family_id) else {
+        return;
+    };
+
+    for &width in widths {
+        if width > written_width {
+            continue;
+        }
+        state.insert(
+            RegisterFamilySlot { family_id, width },
+            SSAVar::constant(mask_const_to_width(const_value, width), width),
+        );
+    }
+}
+
+fn kill_family_roots(state: &mut FamilyRootState, family_id: usize) {
+    state.retain(|slot, _| slot.family_id != family_id);
+}
+
+fn const_value(var: &SSAVar) -> Option<u64> {
+    if !var.is_const() {
+        return None;
+    }
+    let hex = var.name.strip_prefix("const:")?;
+    u64::from_str_radix(hex, 16).ok()
+}
+
+fn mask_const_to_width(value: u64, width: u32) -> u64 {
+    let bits = width.saturating_mul(8);
+    if bits >= 64 {
+        value
+    } else if bits == 0 {
+        0
+    } else {
+        value & ((1u64 << bits) - 1)
     }
 }
 
@@ -629,7 +1193,7 @@ impl SSABlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r2il::{R2ILOp, SpaceId, Varnode};
+    use r2il::{R2ILOp, RegisterDef, SpaceId, SwitchCase, SwitchInfo as R2ILSwitchInfo, Varnode};
 
     fn make_const(val: u64, size: u32) -> Varnode {
         Varnode {
@@ -656,6 +1220,15 @@ mod tests {
             size,
             meta: None,
         }
+    }
+
+    fn make_arm64_alias_arch() -> ArchSpec {
+        let mut arch = ArchSpec::new("aarch64");
+        arch.add_register(RegisterDef::new("x8", 0x80, 8));
+        arch.add_register(RegisterDef::new("w8", 0x80, 4));
+        arch.add_register(RegisterDef::new("x9", 0x88, 8));
+        arch.add_register(RegisterDef::new("w9", 0x88, 4));
+        arch
     }
 
     #[test]
@@ -758,6 +1331,177 @@ mod tests {
         // Phi should have two sources
         let phi = &merge.phis[0];
         assert_eq!(phi.sources.len(), 2);
+    }
+
+    #[test]
+    fn cfg_risk_summary_reports_loops_and_switch_density() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1010, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: make_const(0x1020, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1010,
+                size: 4,
+                ops: vec![R2ILOp::Branch {
+                    target: make_const(0x1000, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1020,
+                size: 4,
+                ops: vec![],
+                switch_info: Some(R2ILSwitchInfo {
+                    switch_addr: 0x1020,
+                    min_val: 0,
+                    max_val: 2,
+                    default_target: Some(0x1040),
+                    cases: vec![
+                        SwitchCase {
+                            value: 0,
+                            target: 0x1030,
+                        },
+                        SwitchCase {
+                            value: 1,
+                            target: 0x1040,
+                        },
+                    ],
+                }),
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1030,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1040,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("ssa function");
+        let summary = func.cfg_risk_summary();
+
+        assert_eq!(summary.block_count, 6);
+        assert_eq!(
+            summary.loop_count, 1,
+            "expected one natural loop, got {summary:?}"
+        );
+        assert_eq!(
+            summary.back_edge_count, 1,
+            "expected one back edge from loop latch, got {summary:?}"
+        );
+        assert_eq!(summary.switch_block_count, 1);
+        assert_eq!(summary.max_switch_cases, 3);
+    }
+
+    #[test]
+    fn test_raw_ssa_construction_is_deterministic_across_runs() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(1, 8),
+                    },
+                    R2ILOp::Copy {
+                        dst: make_reg(8, 8),
+                        src: make_reg(0, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(2, 8),
+                    },
+                    R2ILOp::Copy {
+                        dst: make_reg(8, 8),
+                        src: make_reg(0, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x100c, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x100c,
+                size: 4,
+                ops: vec![
+                    R2ILOp::IntXor {
+                        dst: make_reg(16, 8),
+                        a: make_reg(8, 8),
+                        b: make_reg(0, 8),
+                    },
+                    R2ILOp::Return {
+                        target: make_ram(0, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let mut dumps = std::collections::BTreeSet::new();
+        for _ in 0..32 {
+            let func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+            dumps.insert(func.dump());
+        }
+
+        assert_eq!(
+            dumps.len(),
+            1,
+            "raw SSA output should stay stable across repeated construction"
+        );
     }
 
     #[test]
@@ -1057,5 +1801,140 @@ mod tests {
             seen,
             vec!["phi:0:reg:0_2".to_string(), "op:0:reg:8_1".to_string()]
         );
+    }
+
+    #[test]
+    fn test_decompile_normalization_rewrites_same_block_subregister_root() {
+        let blocks = vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![R2ILOp::Return {
+                target: make_ram(0, 8),
+            }],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }];
+
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+        let block = func.get_block_mut(0x1000).expect("entry block");
+        block.ops = vec![
+            SSAOp::IntZExt {
+                dst: SSAVar::new("x9", 1, 8),
+                src: SSAVar::new("tmp:24c00", 3, 4),
+            },
+            SSAOp::IntSExt {
+                dst: SSAVar::new("tmp:5f80", 1, 8),
+                src: SSAVar::new("w9", 0, 4),
+            },
+        ];
+
+        func.normalize_subregister_sources_for_decompile(&make_arm64_alias_arch());
+
+        match &func.get_block(0x1000).expect("entry block").ops[1] {
+            SSAOp::IntSExt { src, .. } => {
+                assert_eq!(src, &SSAVar::new("tmp:24c00", 3, 4));
+            }
+            other => panic!("expected IntSExt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decompile_normalization_propagates_family_root_across_cfg_edge() {
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::CBranch {
+                    target: make_const(0x1008, 8),
+                    cond: make_const(1, 1),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1008,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+        func.get_block_mut(0x1000).expect("entry block").ops = vec![
+            SSAOp::IntZExt {
+                dst: SSAVar::new("x8", 1, 8),
+                src: SSAVar::new("tmp:24c00", 1, 4),
+            },
+            SSAOp::CBranch {
+                target: SSAVar::new("ram:1008", 0, 8),
+                cond: SSAVar::constant(1, 1),
+            },
+        ];
+        func.get_block_mut(0x1004).expect("fallthrough block").ops = vec![SSAOp::Copy {
+            dst: SSAVar::new("tmp:300", 1, 4),
+            src: SSAVar::new("w8", 0, 4),
+        }];
+        func.get_block_mut(0x1008).expect("taken block").ops = vec![SSAOp::Copy {
+            dst: SSAVar::new("tmp:301", 1, 4),
+            src: SSAVar::new("w8", 0, 4),
+        }];
+
+        func.normalize_subregister_sources_for_decompile(&make_arm64_alias_arch());
+
+        for addr in [0x1004, 0x1008] {
+            match &func.get_block(addr).expect("block").ops[0] {
+                SSAOp::Copy { src, .. } => {
+                    assert_eq!(src, &SSAVar::new("tmp:24c00", 1, 4));
+                }
+                other => panic!("expected Copy, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_decompile_normalization_truncates_wide_const_for_narrow_alias_use() {
+        let blocks = vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![R2ILOp::Return {
+                target: make_ram(0, 8),
+            }],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }];
+
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
+        let block = func.get_block_mut(0x1000).expect("entry block");
+        block.ops = vec![
+            SSAOp::Copy {
+                dst: SSAVar::new("x9", 1, 8),
+                src: SSAVar::constant(0xdead, 8),
+            },
+            SSAOp::Copy {
+                dst: SSAVar::new("tmp:3e480", 1, 4),
+                src: SSAVar::new("w9", 0, 4),
+            },
+        ];
+
+        func.normalize_subregister_sources_for_decompile(&make_arm64_alias_arch());
+
+        match &func.get_block(0x1000).expect("entry block").ops[1] {
+            SSAOp::Copy { src, .. } => {
+                assert_eq!(src, &SSAVar::constant(0xdead, 4));
+            }
+            other => panic!("expected Copy, got {other:?}"),
+        }
     }
 }

@@ -49,6 +49,7 @@ fn analyze_stack_vars(
                             val,
                             &use_info.copy_sources,
                             &use_info.var_aliases,
+                            env.param_register_aliases,
                         ) {
                             set_stack_arg_alias(scratch, offset, arg_alias);
                         }
@@ -90,11 +91,23 @@ fn analyze_stack_vars(
                     }
                 }
                 SSAOp::Load { dst, addr, .. } => {
-                    if let Some(stack_var_name) = stack_var_for_addr_var(
+                    if let Some(expr) = forwarded_expr_for_value(
+                        dst.display_name().as_str(),
+                        &merged_defs,
+                        use_info,
+                        env,
+                    ) {
+                        scratch
+                            .info
+                            .definition_overrides
+                            .insert(dst.display_name(), expr.clone());
+                        merged_defs.insert(dst.display_name(), expr);
+                    } else if let Some(stack_var_name) = stack_var_for_addr_var(
                         addr,
                         &merged_defs,
                         &scratch.info.stack_vars,
                         &use_info.var_aliases,
+                        &use_info.stack_slots,
                         env,
                     ) {
                         let expr = CExpr::Var(stack_var_name);
@@ -142,8 +155,6 @@ fn get_or_create_stack_var(scratch: &mut StackScratch, offset: i64) -> String {
 
     let name = if offset < 0 {
         format!("local_{:x}", (-offset) as u64)
-    } else if offset == 0 {
-        "saved_fp".to_string()
     } else {
         format!("stack_{:x}", offset as u64)
     };
@@ -157,12 +168,17 @@ fn stack_var_for_addr_var(
     definitions: &HashMap<String, CExpr>,
     stack_vars: &HashMap<i64, String>,
     var_aliases: &HashMap<String, String>,
+    stack_slots: &HashMap<String, super::StackSlotProvenance>,
     env: &PassEnv<'_>,
 ) -> Option<String> {
     let addr_key = addr.display_name();
-    let offset_backed =
-        utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
-            .and_then(|offset| stack_vars.get(&offset).cloned());
+    let offset_backed = stack_slots
+        .get(&addr_key)
+        .map(|slot| slot.offset)
+        .or_else(|| {
+            utils::extract_stack_offset_from_var(addr, definitions, env.fp_name, env.sp_name)
+        })
+        .and_then(|offset| stack_vars.get(&offset).cloned().map(|name| (offset, name)));
     if let Some(alias) = resolve_stack_alias_from_addr_expr(
         &CExpr::Var(addr_key.clone()),
         definitions,
@@ -180,13 +196,19 @@ fn stack_var_for_addr_var(
     let empty_counts: HashMap<String, usize> = HashMap::new();
     let empty_names: HashSet<String> = HashSet::new();
     let empty_ptrs: HashMap<String, crate::fold::PtrArith> = HashMap::new();
+    let empty_semantic_values: HashMap<String, crate::analysis::SemanticValue> = HashMap::new();
     let lower = LowerCtx {
         definitions,
+        semantic_values: &empty_semantic_values,
         use_counts: &empty_counts,
         condition_vars: &empty_names,
         pinned: &empty_names,
         var_aliases,
+        param_register_aliases: env.param_register_aliases,
+        type_hints: env.type_hints,
         ptr_arith: &empty_ptrs,
+        stack_slots,
+        forwarded_values: &HashMap::new(),
         function_names: env.function_names,
         strings: env.strings,
         symbols: env.symbols,
@@ -207,7 +229,7 @@ fn stack_var_for_addr_var(
         return Some(alias);
     }
 
-    offset_backed
+    offset_backed.map(|(_, name)| name)
 }
 
 fn is_generic_stack_name(name: &str) -> bool {
@@ -216,18 +238,19 @@ fn is_generic_stack_name(name: &str) -> bool {
 
 fn preferred_stack_alias(
     alias: &str,
-    offset_backed: Option<String>,
+    offset_backed: Option<(i64, String)>,
     stack_vars: &HashMap<i64, String>,
 ) -> Option<String> {
     if !is_generic_stack_name(alias) {
         return None;
     }
-    if let Some(preferred) = offset_backed
+    let offset = parse_generic_stack_name_offset(alias)?;
+    if let Some((preferred_offset, preferred)) = offset_backed
+        && preferred_offset == offset
         && !is_generic_stack_name(&preferred)
     {
         return Some(preferred);
     }
-    let offset = parse_generic_stack_name_offset(alias)?;
     let preferred = stack_vars.get(&offset)?.clone();
     if is_generic_stack_name(&preferred) {
         return None;
@@ -246,6 +269,36 @@ fn parse_generic_stack_name_offset(name: &str) -> Option<i64> {
         return i64::from_str_radix(rest, 16).ok();
     }
     None
+}
+
+fn forwarded_expr_for_value(
+    value_key: &str,
+    definitions: &HashMap<String, CExpr>,
+    use_info: &UseInfo,
+    env: &PassEnv<'_>,
+) -> Option<CExpr> {
+    let prov = use_info.forwarded_values.get(value_key)?;
+    let empty_counts: HashMap<String, usize> = HashMap::new();
+    let empty_names: HashSet<String> = HashSet::new();
+    let empty_ptrs: HashMap<String, crate::fold::PtrArith> = HashMap::new();
+    let lower = LowerCtx {
+        definitions,
+        semantic_values: &use_info.semantic_values,
+        use_counts: &empty_counts,
+        condition_vars: &empty_names,
+        pinned: &empty_names,
+        var_aliases: &use_info.var_aliases,
+        param_register_aliases: env.param_register_aliases,
+        type_hints: &use_info.type_hints,
+        ptr_arith: &empty_ptrs,
+        stack_slots: &use_info.stack_slots,
+        forwarded_values: &use_info.forwarded_values,
+        function_names: env.function_names,
+        strings: env.strings,
+        symbols: env.symbols,
+        type_oracle: env.type_oracle,
+    };
+    Some(lower.expr_for_ssa_name(&prov.source))
 }
 
 fn resolve_stack_alias_from_addr_expr(
@@ -316,5 +369,29 @@ fn resolve_stack_alias_from_addr_expr(
             visited,
         ),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preferred_stack_alias;
+    use std::collections::HashMap;
+
+    #[test]
+    fn preferred_stack_alias_requires_offset_match_for_non_generic_override() {
+        let stack_vars = HashMap::from([
+            (-0x10, "var_10h".to_string()),
+            (-0x14, "var_14h".to_string()),
+            (-0x4, "var_4h".to_string()),
+        ]);
+
+        assert_eq!(
+            preferred_stack_alias("local_10", Some((-0x4, "var_4h".to_string())), &stack_vars),
+            Some("var_10h".to_string())
+        );
+        assert_eq!(
+            preferred_stack_alias("local_14", Some((-0x4, "var_4h".to_string())), &stack_vars),
+            Some("var_14h".to_string())
+        );
     }
 }

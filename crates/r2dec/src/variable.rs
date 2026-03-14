@@ -6,9 +6,27 @@
 use std::collections::{HashMap, HashSet};
 
 use r2ssa::{SSAFunction, SSAOp, SSAVar};
+use r2types::{CTypeLike, FunctionTypeFacts};
 
 use crate::ast::CType;
-use crate::{ExternalFunctionSignature, ExternalStackVar};
+
+fn type_like_to_ctype(ty: &CTypeLike) -> CType {
+    match ty {
+        CTypeLike::Void => CType::Void,
+        CTypeLike::Bool => CType::Bool,
+        CTypeLike::Int { bits, signedness } => match signedness {
+            r2types::Signedness::Unsigned => CType::UInt(*bits),
+            _ => CType::Int(*bits),
+        },
+        CTypeLike::Float(bits) => CType::Float(*bits),
+        CTypeLike::Pointer(inner) => CType::Pointer(Box::new(type_like_to_ctype(inner))),
+        CTypeLike::Array(inner, len) => CType::Array(Box::new(type_like_to_ctype(inner)), *len),
+        CTypeLike::Struct(name) => CType::Struct(name.clone()),
+        CTypeLike::Union(name) => CType::Union(name.clone()),
+        CTypeLike::Enum(name) => CType::Enum(name.clone()),
+        CTypeLike::Function | CTypeLike::Unknown => CType::Unknown,
+    }
+}
 
 /// Variable information.
 #[derive(Debug, Clone)]
@@ -84,10 +102,8 @@ pub struct VariableRecovery {
     ret_regs: Vec<String>,
     /// Ordered argument registers for the active ABI.
     arg_regs: Vec<String>,
-    /// Optional external signature metadata.
-    external_signature: Option<ExternalFunctionSignature>,
-    /// Optional external stack variables keyed by signed stack offset.
-    external_stack_vars: HashMap<i64, ExternalStackVar>,
+    /// Externally recovered type and layout facts.
+    type_facts: FunctionTypeFacts,
     /// Stable insertion order for recovered variables.
     next_order_index: usize,
 }
@@ -133,24 +149,18 @@ impl VariableRecovery {
             loop_var_idx: 0,
             ret_regs,
             arg_regs,
-            external_signature: None,
-            external_stack_vars: HashMap::new(),
+            type_facts: FunctionTypeFacts::default(),
             next_order_index: 0,
         }
     }
 
-    /// Set an externally recovered function signature.
-    pub fn set_external_signature(&mut self, signature: ExternalFunctionSignature) {
-        self.external_signature = Some(signature);
-    }
-
-    /// Set externally recovered stack variable metadata.
-    pub fn set_external_stack_vars(&mut self, stack_vars: HashMap<i64, ExternalStackVar>) {
-        self.external_stack_vars = stack_vars;
+    /// Set externally recovered type/layout facts.
+    pub fn set_type_facts(&mut self, type_facts: FunctionTypeFacts) {
+        self.type_facts = type_facts;
     }
 
     fn external_stack_name_for_offset(&self, offset: i64) -> Option<String> {
-        if let Some(var) = self.external_stack_vars.get(&offset)
+        if let Some(var) = self.type_facts.external_stack_vars.get(&offset)
             && !var.name.is_empty()
         {
             return Some(var.name.clone());
@@ -158,10 +168,15 @@ impl VariableRecovery {
 
         // r2 external metadata may encode RBP locals as negative offsets while
         // internal recovery tracks locals as positive deltas from frame base.
-        let mut mirrored_offsets: Vec<_> = self.external_stack_vars.keys().copied().collect();
+        let mut mirrored_offsets: Vec<_> = self
+            .type_facts
+            .external_stack_vars
+            .keys()
+            .copied()
+            .collect();
         mirrored_offsets.sort_unstable();
         for ext_offset in mirrored_offsets {
-            let Some(var) = self.external_stack_vars.get(&ext_offset) else {
+            let Some(var) = self.type_facts.external_stack_vars.get(&ext_offset) else {
                 continue;
             };
             if var.name.is_empty() {
@@ -442,7 +457,7 @@ impl VariableRecovery {
     }
 
     fn apply_external_param_override(&self, index: usize, name: &mut String, ty: &mut CType) {
-        let Some(signature) = self.external_signature.as_ref() else {
+        let Some(signature) = self.type_facts.merged_signature.as_ref() else {
             return;
         };
         let Some(ext) = signature.params.get(index) else {
@@ -453,7 +468,7 @@ impl VariableRecovery {
             *name = ext.name.clone();
         }
         if let Some(ext_ty) = &ext.ty {
-            *ty = ext_ty.clone();
+            *ty = type_like_to_ctype(ext_ty);
         }
     }
 
@@ -644,7 +659,34 @@ fn is_generic_arg_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExternalFunctionParam, ExternalFunctionSignature, ExternalStackVar};
+    use r2types::{
+        ExternalStackVarSpec, FunctionParamSpec, FunctionSignatureSpec, FunctionTypeFacts,
+    };
+
+    fn stack_var_spec_from_ctype(
+        name: &str,
+        ty: Option<CType>,
+        base: Option<&str>,
+    ) -> ExternalStackVarSpec {
+        ExternalStackVarSpec {
+            name: name.to_string(),
+            ty: ty.as_ref().map(super::super::ctype_to_type_like),
+            base: base.map(str::to_string),
+        }
+    }
+
+    fn signature_spec(params: Vec<(&str, Option<CType>)>) -> FunctionSignatureSpec {
+        FunctionSignatureSpec {
+            ret_type: None,
+            params: params
+                .into_iter()
+                .map(|(name, ty)| FunctionParamSpec {
+                    name: name.to_string(),
+                    ty: ty.as_ref().map(super::super::ctype_to_type_like),
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn test_gen_param_name() {
@@ -684,14 +726,13 @@ mod tests {
     #[test]
     fn test_external_stack_var_name_preferred() {
         let mut vr = VariableRecovery::new("rsp", "rbp", 64);
-        vr.set_external_stack_vars(HashMap::from([(
-            8,
-            ExternalStackVar {
-                name: "user_input".to_string(),
-                ty: None,
-                base: Some("RBP".to_string()),
-            },
-        )]));
+        vr.set_type_facts(FunctionTypeFacts {
+            external_stack_vars: HashMap::from([(
+                8,
+                stack_var_spec_from_ctype("user_input", None, Some("RBP")),
+            )]),
+            ..FunctionTypeFacts::default()
+        });
 
         let name = vr.gen_stack_var_name(8);
         assert_eq!(name, "user_input");
@@ -700,14 +741,13 @@ mod tests {
     #[test]
     fn test_external_stack_var_name_fallback_when_missing() {
         let mut vr = VariableRecovery::new("rsp", "rbp", 64);
-        vr.set_external_stack_vars(HashMap::from([(
-            -0x10,
-            ExternalStackVar {
-                name: "buf".to_string(),
-                ty: None,
-                base: Some("RBP".to_string()),
-            },
-        )]));
+        vr.set_type_facts(FunctionTypeFacts {
+            external_stack_vars: HashMap::from([(
+                -0x10,
+                stack_var_spec_from_ctype("buf", None, Some("RBP")),
+            )]),
+            ..FunctionTypeFacts::default()
+        });
 
         let name = vr.gen_stack_var_name(8);
         assert_eq!(name, "local_8");
@@ -716,24 +756,13 @@ mod tests {
     #[test]
     fn test_external_stack_var_name_collision_still_unique() {
         let mut vr = VariableRecovery::new("rsp", "rbp", 64);
-        vr.set_external_stack_vars(HashMap::from([
-            (
-                8,
-                ExternalStackVar {
-                    name: "buf".to_string(),
-                    ty: None,
-                    base: Some("RBP".to_string()),
-                },
-            ),
-            (
-                16,
-                ExternalStackVar {
-                    name: "buf".to_string(),
-                    ty: None,
-                    base: Some("RBP".to_string()),
-                },
-            ),
-        ]));
+        vr.set_type_facts(FunctionTypeFacts {
+            external_stack_vars: HashMap::from([
+                (8, stack_var_spec_from_ctype("buf", None, Some("RBP"))),
+                (16, stack_var_spec_from_ctype("buf", None, Some("RBP"))),
+            ]),
+            ..FunctionTypeFacts::default()
+        });
 
         let first = vr.gen_stack_var_name(8);
         let second = vr.gen_stack_var_name(16);
@@ -744,14 +773,13 @@ mod tests {
     #[test]
     fn test_external_stack_var_name_prefers_mirrored_rbp_offset() {
         let mut vr = VariableRecovery::new("rsp", "rbp", 64);
-        vr.set_external_stack_vars(HashMap::from([(
-            -4,
-            ExternalStackVar {
-                name: "result".to_string(),
-                ty: None,
-                base: Some("RBP".to_string()),
-            },
-        )]));
+        vr.set_type_facts(FunctionTypeFacts {
+            external_stack_vars: HashMap::from([(
+                -4,
+                stack_var_spec_from_ctype("result", None, Some("RBP")),
+            )]),
+            ..FunctionTypeFacts::default()
+        });
 
         let name = vr.gen_stack_var_name(4);
         assert_eq!(name, "result");
@@ -760,12 +788,12 @@ mod tests {
     #[test]
     fn test_external_signature_overrides_meaningful_param_name_and_type() {
         let mut vr = VariableRecovery::new("rsp", "rbp", 64);
-        vr.set_external_signature(ExternalFunctionSignature {
-            ret_type: None,
-            params: vec![ExternalFunctionParam {
-                name: "user_input".to_string(),
-                ty: Some(CType::ptr(CType::Int(8))),
-            }],
+        vr.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(vec![(
+                "user_input",
+                Some(CType::ptr(CType::Int(8))),
+            )])),
+            ..FunctionTypeFacts::default()
         });
 
         let mut name = "arg1".to_string();
@@ -779,12 +807,9 @@ mod tests {
     #[test]
     fn test_external_signature_generic_param_name_is_ignored() {
         let mut vr = VariableRecovery::new("rsp", "rbp", 64);
-        vr.set_external_signature(ExternalFunctionSignature {
-            ret_type: None,
-            params: vec![ExternalFunctionParam {
-                name: "arg0".to_string(),
-                ty: Some(CType::Int(32)),
-            }],
+        vr.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(vec![("arg0", Some(CType::Int(32)))])),
+            ..FunctionTypeFacts::default()
         });
 
         let mut name = "arg1".to_string();
@@ -798,12 +823,9 @@ mod tests {
     #[test]
     fn test_external_signature_type_override_only_when_available() {
         let mut vr = VariableRecovery::new("rsp", "rbp", 64);
-        vr.set_external_signature(ExternalFunctionSignature {
-            ret_type: None,
-            params: vec![ExternalFunctionParam {
-                name: "count".to_string(),
-                ty: None,
-            }],
+        vr.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(vec![("count", None)])),
+            ..FunctionTypeFacts::default()
         });
 
         let mut name = "arg1".to_string();

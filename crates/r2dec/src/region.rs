@@ -136,6 +136,8 @@ pub struct RegionAnalyzer<'a> {
     back_edges: HashMap<u64, Vec<u64>>,
     /// Natural loops (header -> body blocks).
     loops: HashMap<u64, HashSet<u64>>,
+    /// Post-dominator sets used to pick stable merge blocks for conditionals.
+    post_dominators: HashMap<u64, BTreeSet<u64>>,
     /// Processed blocks.
     processed: HashSet<u64>,
     /// Blocks that exit a loop (break targets): block_addr -> exit_target.
@@ -153,6 +155,19 @@ pub struct RegionAnalyzer<'a> {
     max_collapse_iterations: usize,
 }
 
+#[derive(Debug, Clone)]
+struct NormalizedSwitchInfo {
+    cases: Vec<(u64, u64)>,
+    default: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct SwitchInfoCandidate {
+    block: u64,
+    cases: Vec<(u64, u64)>,
+    default: Option<u64>,
+}
+
 impl<'a> RegionAnalyzer<'a> {
     /// Create a new region analyzer.
     pub fn new(func: &'a SSAFunction) -> Self {
@@ -161,6 +176,7 @@ impl<'a> RegionAnalyzer<'a> {
             func,
             back_edges: HashMap::new(),
             loops: HashMap::new(),
+            post_dominators: HashMap::new(),
             processed: HashSet::new(),
             loop_exits: HashMap::new(),
             loop_continues: HashMap::new(),
@@ -172,8 +188,66 @@ impl<'a> RegionAnalyzer<'a> {
         };
         analyzer.find_back_edges();
         analyzer.find_loops();
+        analyzer.compute_post_dominators();
         analyzer.find_loop_exits();
         analyzer
+    }
+
+    fn compute_post_dominators(&mut self) {
+        let block_addrs = self.func.block_addrs();
+        let all_blocks: BTreeSet<u64> = block_addrs.iter().copied().collect();
+        let exit_blocks: BTreeSet<u64> = block_addrs
+            .iter()
+            .copied()
+            .filter(|addr| self.func.successors(*addr).is_empty())
+            .collect();
+
+        let mut postdoms: HashMap<u64, BTreeSet<u64>> = HashMap::new();
+        for &addr in block_addrs {
+            let initial = if exit_blocks.contains(&addr) {
+                BTreeSet::from([addr])
+            } else {
+                all_blocks.clone()
+            };
+            postdoms.insert(addr, initial);
+        }
+
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for &addr in block_addrs.iter().rev() {
+                if exit_blocks.contains(&addr) {
+                    continue;
+                }
+
+                let succs = self.func.successors(addr);
+                if succs.is_empty() {
+                    continue;
+                }
+
+                let mut new_set: Option<BTreeSet<u64>> = None;
+                for succ in succs {
+                    let succ_set = postdoms
+                        .get(&succ)
+                        .cloned()
+                        .unwrap_or_else(|| BTreeSet::from([succ]));
+                    new_set = Some(match new_set {
+                        Some(current) => current.intersection(&succ_set).copied().collect(),
+                        None => succ_set,
+                    });
+                }
+
+                let mut new_set = new_set.unwrap_or_default();
+                new_set.insert(addr);
+
+                if postdoms.get(&addr) != Some(&new_set) {
+                    postdoms.insert(addr, new_set);
+                    changed = true;
+                }
+            }
+        }
+
+        self.post_dominators = postdoms;
     }
 
     /// Find back edges using DFS.
@@ -387,8 +461,8 @@ impl<'a> RegionAnalyzer<'a> {
         }
 
         // Prefer explicit switch metadata from CFG terminators.
-        if let Some((cases, default)) = self.func.switch_info(entry) {
-            return self.analyze_switch_with_cases(entry, &cases, default);
+        if let Some(switch_info) = self.normalized_switch_info(entry) {
+            return self.analyze_switch_with_cases(entry, &switch_info.cases, switch_info.default);
         }
 
         // Get successors
@@ -495,18 +569,58 @@ impl<'a> RegionAnalyzer<'a> {
     }
 
     fn find_merge_point(&self, _cond: u64, true_target: u64, false_target: u64) -> Option<u64> {
-        // Simple heuristic: find the first common successor
         let mut true_reachable = HashSet::new();
         self.collect_reachable(true_target, &mut true_reachable, 10);
 
         let mut false_reachable = HashSet::new();
         self.collect_reachable(false_target, &mut false_reachable, 10);
 
-        // Find intersection
-        true_reachable
-            .iter()
-            .find(|&&block| false_reachable.contains(&block))
-            .copied()
+        let mut common: Vec<u64> = true_reachable
+            .into_iter()
+            .filter(|block| false_reachable.contains(block))
+            .collect();
+        common.sort_unstable_by_key(|block| {
+            (
+                !self.post_dominates(true_target, *block)
+                    || !self.post_dominates(false_target, *block),
+                self.shortest_distance(true_target, *block)
+                    .unwrap_or(usize::MAX),
+                self.shortest_distance(false_target, *block)
+                    .unwrap_or(usize::MAX),
+                *block,
+            )
+        });
+        common.into_iter().next()
+    }
+
+    fn post_dominates(&self, start: u64, candidate: u64) -> bool {
+        self.post_dominators
+            .get(&start)
+            .map(|set| set.contains(&candidate))
+            .unwrap_or(false)
+    }
+
+    fn shortest_distance(&self, start: u64, target: u64) -> Option<usize> {
+        if start == target {
+            return Some(0);
+        }
+
+        let mut queue = VecDeque::from([(start, 0usize)]);
+        let mut visited = HashSet::from([start]);
+
+        while let Some((block, dist)) = queue.pop_front() {
+            for succ in self.func.successors(block) {
+                if !visited.insert(succ) {
+                    continue;
+                }
+                if succ == target {
+                    return Some(dist + 1);
+                }
+                queue.push_back((succ, dist + 1));
+            }
+        }
+
+        None
     }
 
     fn resolve_conditional_targets(&self, cond: u64) -> Option<(u64, u64)> {
@@ -715,13 +829,17 @@ impl<'a> RegionAnalyzer<'a> {
         let merge = self.find_switch_merge(targets);
 
         // Try to get real switch info from the CFG
-        let switch_info = self.func.switch_info(entry);
+        let switch_info = self.normalized_switch_info(entry);
 
         // Build case regions for each target
         let mut cases = Vec::new();
         let mut default_target = None;
 
-        if let Some((switch_cases, def)) = switch_info {
+        if let Some(NormalizedSwitchInfo {
+            cases: switch_cases,
+            default: def,
+        }) = switch_info
+        {
             // Use real case values from switch info
             default_target = def;
 
@@ -807,6 +925,259 @@ impl<'a> RegionAnalyzer<'a> {
             default: default_region,
             merge_block: merge,
         }
+    }
+
+    fn normalized_switch_info(&self, entry: u64) -> Option<NormalizedSwitchInfo> {
+        let mut best =
+            self.func
+                .switch_info(entry)
+                .map(|(cases, default)| SwitchInfoCandidate {
+                    block: entry,
+                    cases,
+                    default,
+                })?;
+
+        let mut visited = HashSet::from([entry]);
+        let mut queue = VecDeque::from([(entry, 0usize)]);
+        while let Some((block, depth)) = queue.pop_front() {
+            if depth >= 6 {
+                continue;
+            }
+            for succ in self.func.successors(block) {
+                if !visited.insert(succ) {
+                    continue;
+                }
+                if let Some((cases, default)) = self.func.switch_info(succ) {
+                    let candidate = SwitchInfoCandidate {
+                        block: succ,
+                        cases,
+                        default,
+                    };
+                    if self.is_better_switch_candidate(&candidate, &best) {
+                        best = candidate;
+                    }
+                }
+                queue.push_back((succ, depth + 1));
+            }
+        }
+
+        let mut cases = self.filter_switch_case_outliers(&best.cases);
+        let bias = self.estimate_switch_case_bias(entry, best.block, &cases);
+        if bias != 0 {
+            for (value, _) in &mut cases {
+                *value = value.saturating_add_signed(bias);
+            }
+        }
+
+        Some(NormalizedSwitchInfo {
+            cases,
+            default: best.default,
+        })
+    }
+
+    fn is_better_switch_candidate(
+        &self,
+        candidate: &SwitchInfoCandidate,
+        current: &SwitchInfoCandidate,
+    ) -> bool {
+        self.switch_candidate_score(candidate) > self.switch_candidate_score(current)
+    }
+
+    fn switch_candidate_score(
+        &self,
+        candidate: &SwitchInfoCandidate,
+    ) -> (usize, usize, usize, usize, usize) {
+        let values = self.normalized_switch_values(&candidate.cases);
+        let contiguous_run = Self::leading_contiguous_run_len(&values);
+        let small_values = values.iter().filter(|value| **value <= 0xff).count();
+        let unique_targets = candidate
+            .cases
+            .iter()
+            .map(|(_, target)| *target)
+            .collect::<BTreeSet<_>>()
+            .len();
+        let outliers = values.len().saturating_sub(contiguous_run);
+        (
+            contiguous_run,
+            small_values,
+            candidate.cases.len(),
+            unique_targets,
+            usize::MAX.saturating_sub(outliers),
+        )
+    }
+
+    fn normalized_switch_values(&self, cases: &[(u64, u64)]) -> Vec<u64> {
+        let mut values = cases.iter().map(|(value, _)| *value).collect::<Vec<_>>();
+        values.sort_unstable();
+        values.dedup();
+        values
+    }
+
+    fn leading_contiguous_run_len(values: &[u64]) -> usize {
+        let Some((&first, rest)) = values.split_first() else {
+            return 0;
+        };
+
+        let mut expected = first;
+        let mut len = 1usize;
+        for value in rest {
+            let next = expected.saturating_add(1);
+            if *value != next {
+                break;
+            }
+            expected = *value;
+            len += 1;
+        }
+        len
+    }
+
+    fn filter_switch_case_outliers(&self, cases: &[(u64, u64)]) -> Vec<(u64, u64)> {
+        let mut sorted = cases.to_vec();
+        sorted.sort_unstable_by_key(|(value, target)| (*value, *target));
+        sorted.dedup();
+
+        let values = self.normalized_switch_values(&sorted);
+        let contiguous_run = Self::leading_contiguous_run_len(&values);
+        if contiguous_run < 3 || contiguous_run >= values.len() {
+            return sorted;
+        }
+
+        let last_contiguous = values[contiguous_run - 1];
+        let next_value = values[contiguous_run];
+        if next_value <= last_contiguous.saturating_add(16) {
+            return sorted;
+        }
+
+        sorted
+            .into_iter()
+            .filter(|(value, _)| *value <= last_contiguous)
+            .collect()
+    }
+
+    fn estimate_switch_case_bias(
+        &self,
+        entry: u64,
+        _candidate_block: u64,
+        cases: &[(u64, u64)],
+    ) -> i64 {
+        if !cases.iter().any(|(value, _)| *value == 0) {
+            return 0;
+        }
+        if let Some(bias) = cases
+            .iter()
+            .map(|(value, _)| *value)
+            .max()
+            .and_then(|upper_bound| {
+                self.guarded_dense_zero_based_switch_bias(
+                    _candidate_block,
+                    cases.len(),
+                    upper_bound,
+                )
+            })
+        {
+            return bias;
+        }
+
+        let mut search_blocks = vec![entry];
+        let mut seen = HashSet::from([entry]);
+        let mut queue = VecDeque::from([(entry, 0usize)]);
+        if seen.insert(_candidate_block) {
+            search_blocks.push(_candidate_block);
+            queue.push_back((_candidate_block, 0usize));
+        }
+        for (_, target) in cases {
+            if seen.insert(*target) {
+                search_blocks.push(*target);
+                queue.push_back((*target, 0usize));
+            }
+        }
+        while let Some((block, depth)) = queue.pop_front() {
+            if depth >= 8 {
+                continue;
+            }
+            for pred in self.func.predecessors(block) {
+                if seen.insert(pred) {
+                    search_blocks.push(pred);
+                    queue.push_back((pred, depth + 1));
+                }
+            }
+        }
+
+        let mut best_bias = 0i64;
+        for block_addr in search_blocks {
+            let Some(block) = self.func.get_block(block_addr) else {
+                continue;
+            };
+            for op in &block.ops {
+                if let r2ssa::SSAOp::IntSub { b, .. } = op
+                    && let Some(raw) = crate::analysis::utils::parse_const_value(&b.name)
+                    && let Ok(bias) = i64::try_from(raw)
+                    && (1..=8).contains(&bias)
+                    && (best_bias == 0 || bias < best_bias)
+                {
+                    best_bias = bias;
+                }
+            }
+        }
+
+        if best_bias == 0 && cases.len() >= 16 {
+            for block_addr in self.func.block_addrs() {
+                let Some(block) = self.func.get_block(*block_addr) else {
+                    continue;
+                };
+                for op in &block.ops {
+                    if let r2ssa::SSAOp::IntSub { b, .. } = op
+                        && let Some(raw) = crate::analysis::utils::parse_const_value(&b.name)
+                        && let Ok(bias) = i64::try_from(raw)
+                        && (1..=8).contains(&bias)
+                        && (best_bias == 0 || bias < best_bias)
+                    {
+                        best_bias = bias;
+                    }
+                }
+            }
+        }
+
+        best_bias
+    }
+
+    fn guarded_dense_zero_based_switch_bias(
+        &self,
+        switch_block: u64,
+        case_count: usize,
+        upper_bound: u64,
+    ) -> Option<i64> {
+        if case_count < 4 {
+            return None;
+        }
+
+        for block_addr in std::iter::once(switch_block).chain(self.func.predecessors(switch_block))
+        {
+            let Some(block) = self.func.get_block(block_addr) else {
+                continue;
+            };
+            let mut best_bias = None;
+            let mut saw_upper_bound_guard = false;
+            for op in &block.ops {
+                if let r2ssa::SSAOp::IntSub { b, .. } = op
+                    && let Some(raw) = crate::analysis::utils::parse_const_value(&b.name)
+                {
+                    if raw == upper_bound {
+                        saw_upper_bound_guard = true;
+                    }
+                    if let Ok(bias) = i64::try_from(raw)
+                        && (1..=8).contains(&bias)
+                    {
+                        best_bias = Some(best_bias.map_or(bias, |current: i64| current.min(bias)));
+                    }
+                }
+            }
+            if saw_upper_bound_guard && best_bias.is_some() {
+                return best_bias;
+            }
+        }
+
+        None
     }
 
     /// Find the merge point for switch targets.
@@ -1007,7 +1378,11 @@ impl<'a> RegionAnalyzer<'a> {
                     };
                     let merge = self.find_working_switch_merge(&succs, graph);
                     let mut cases = Vec::new();
-                    if let Some((switch_cases, default)) = self.func.switch_info(switch_block) {
+                    if let Some(NormalizedSwitchInfo {
+                        cases: switch_cases,
+                        default,
+                    }) = self.normalized_switch_info(switch_block)
+                    {
                         let mut grouped: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
                         for (value, target) in &switch_cases {
                             grouped.entry(*target).or_default().push(*value);
@@ -1153,9 +1528,24 @@ impl<'a> RegionAnalyzer<'a> {
         graph.collect_reachable_limited(true_target, &mut true_reachable, 10);
         let mut false_reachable = HashSet::new();
         graph.collect_reachable_limited(false_target, &mut false_reachable, 10);
-        true_reachable
+        let mut common: Vec<usize> = true_reachable
             .into_iter()
-            .find(|id| false_reachable.contains(id))
+            .filter(|id| false_reachable.contains(id))
+            .collect();
+        common.sort_by_key(|id| {
+            let true_distance = self
+                .working_shortest_distance(true_target, *id, graph)
+                .unwrap_or(usize::MAX);
+            let false_distance = self
+                .working_shortest_distance(false_target, *id, graph)
+                .unwrap_or(usize::MAX);
+            (
+                true_distance.max(false_distance),
+                true_distance.saturating_add(false_distance),
+                graph.node_entry(*id).unwrap_or(u64::MAX),
+            )
+        });
+        common.into_iter().next()
     }
 
     fn find_working_switch_merge(&self, targets: &[usize], graph: &WorkingGraph) -> Option<usize> {
@@ -1177,6 +1567,34 @@ impl<'a> RegionAnalyzer<'a> {
         common
             .into_iter()
             .min_by_key(|id| graph.node_entry(*id).unwrap_or(u64::MAX))
+    }
+
+    fn working_shortest_distance(
+        &self,
+        start: usize,
+        target: usize,
+        graph: &WorkingGraph,
+    ) -> Option<usize> {
+        if start == target {
+            return Some(0);
+        }
+
+        let mut queue = VecDeque::from([(start, 0usize)]);
+        let mut visited = HashSet::from([start]);
+
+        while let Some((node, dist)) = queue.pop_front() {
+            for succ in graph.sorted_succs(node) {
+                if !visited.insert(succ) {
+                    continue;
+                }
+                if succ == target {
+                    return Some(dist + 1);
+                }
+                queue.push_back((succ, dist + 1));
+            }
+        }
+
+        None
     }
 }
 
@@ -1724,7 +2142,7 @@ impl WorkingGraph {
 mod tests {
     use super::*;
     use r2il::{R2ILBlock, R2ILOp, Varnode};
-    use r2ssa::SSAFunction;
+    use r2ssa::{BlockTerminator, SSAFunction};
 
     // Note: Full tests would require constructing SSAFunctions
     // which requires r2il blocks. These are placeholder tests.
@@ -1900,6 +2318,56 @@ mod tests {
         );
     }
 
+    fn build_single_arm_guard_cfg() -> SSAFunction {
+        // Conditional at 0x1000:
+        //   true  -> 0x2000 (immediate merge)
+        //   false -> 0x1004 (body), which also flows to 0x2000
+        let mut cond = R2ILBlock::new(0x1000, 4);
+        cond.push(R2ILOp::Nop);
+
+        let mut body = R2ILBlock::new(0x1004, 4);
+        body.push(R2ILOp::Branch {
+            target: Varnode::constant(0x2000, 8),
+        });
+
+        let mut merge = R2ILBlock::new(0x2000, 4);
+        merge.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+
+        let mut func =
+            SSAFunction::from_blocks_raw_no_arch(&[cond, body, merge]).expect("ssa function");
+        func.cfg_mut().set_terminator(
+            0x1000,
+            BlockTerminator::ConditionalBranch {
+                true_target: 0x2000,
+                false_target: 0x1004,
+            },
+        );
+        func
+    }
+
+    #[test]
+    fn iterative_composition_prefers_near_single_arm_merge() {
+        let func = build_single_arm_guard_cfg();
+        let analyzer = RegionAnalyzer::new(&func);
+        let graph = WorkingGraph::from_function(&func);
+        let false_node = graph
+            .node_for_block(0x1004)
+            .expect("body node should exist");
+        let true_node = graph
+            .node_for_block(0x2000)
+            .expect("merge node should exist");
+        let merge_node = analyzer
+            .find_working_merge_point(true_node, false_node, &graph)
+            .expect("merge node should be found");
+        assert_eq!(
+            graph.node_entry(merge_node),
+            Some(0x2000),
+            "iterative merge selection should pick the immediate join block"
+        );
+    }
+
     #[test]
     fn iterative_path_handles_nested_cross_loop_cfg() {
         // Outer header: 0x1000 (back edge from 0x1020)
@@ -1950,5 +2418,128 @@ mod tests {
             analyzer.analysis_reason().is_none(),
             "iterative analyzer should not trip safety limits on this fixture"
         );
+    }
+
+    fn build_switch_trampoline_cfg() -> SSAFunction {
+        let mut pred = R2ILBlock::new(0x0ff0, 4);
+        pred.push(R2ILOp::Nop);
+
+        let mut outer = R2ILBlock::new(0x1000, 4);
+        outer.push(R2ILOp::Nop);
+
+        let mut hop = R2ILBlock::new(0x1004, 4);
+        hop.push(R2ILOp::Nop);
+
+        let mut inner = R2ILBlock::new(0x1008, 4);
+        inner.push(R2ILOp::Nop);
+
+        let mut case1 = R2ILBlock::new(0x1010, 4);
+        case1.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+        let mut case2 = R2ILBlock::new(0x1020, 4);
+        case2.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+        let mut case3 = R2ILBlock::new(0x1030, 4);
+        case3.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+        let mut default = R2ILBlock::new(0x1040, 4);
+        default.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[
+            pred, outer, hop, inner, case1, case2, case3, default,
+        ])
+        .expect("ssa function");
+
+        func.cfg_mut()
+            .set_terminator(0x0ff0, BlockTerminator::Branch { target: 0x1000 });
+        func.cfg_mut().set_terminator(
+            0x1000,
+            BlockTerminator::Switch {
+                cases: vec![(433, 0x1004), (437, 0x1040)],
+                default: Some(0x1040),
+            },
+        );
+        func.cfg_mut()
+            .set_terminator(0x1004, BlockTerminator::Branch { target: 0x1008 });
+        func.cfg_mut().set_terminator(
+            0x1008,
+            BlockTerminator::Switch {
+                cases: vec![(0, 0x1010), (1, 0x1020), (2, 0x1030), (408, 0x1040)],
+                default: Some(0x1040),
+            },
+        );
+
+        func
+    }
+
+    #[test]
+    fn normalized_switch_info_prefers_dense_nested_cases() {
+        let func = build_switch_trampoline_cfg();
+        let analyzer = RegionAnalyzer::new(&func);
+
+        let info = analyzer
+            .normalized_switch_info(0x1000)
+            .expect("normalized switch info");
+        let values: Vec<u64> = info.cases.iter().map(|(value, _)| *value).collect();
+        let targets: Vec<u64> = info.cases.iter().map(|(_, target)| *target).collect();
+
+        assert_eq!(values, vec![0, 1, 2]);
+        assert_eq!(targets, vec![0x1010, 0x1020, 0x1030]);
+        assert_eq!(info.default, Some(0x1040));
+    }
+
+    fn build_entry_biased_switch_cfg() -> SSAFunction {
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::IntSub {
+            dst: Varnode::unique(0x20, 8),
+            a: Varnode::register(0x10, 8),
+            b: Varnode::constant(1, 8),
+        });
+
+        let mut case1 = R2ILBlock::new(0x1010, 4);
+        case1.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+        let mut case2 = R2ILBlock::new(0x1020, 4);
+        case2.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+        let mut case3 = R2ILBlock::new(0x1030, 4);
+        case3.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+        let mut default = R2ILBlock::new(0x1040, 4);
+        default.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[entry, case1, case2, case3, default])
+            .expect("ssa function");
+        func.cfg_mut().set_terminator(
+            0x1000,
+            BlockTerminator::Switch {
+                cases: vec![(0, 0x1010), (1, 0x1020), (2, 0x1030)],
+                default: Some(0x1040),
+            },
+        );
+        func
+    }
+
+    #[test]
+    fn normalized_switch_info_applies_entry_bias_for_zero_based_dense_cases() {
+        let func = build_entry_biased_switch_cfg();
+        let analyzer = RegionAnalyzer::new(&func);
+        let info = analyzer
+            .normalized_switch_info(0x1000)
+            .expect("normalized switch info");
+        let values: Vec<u64> = info.cases.iter().map(|(value, _)| *value).collect();
+
+        assert_eq!(values, vec![1, 2, 3]);
+        assert_eq!(info.default, Some(0x1040));
     }
 }

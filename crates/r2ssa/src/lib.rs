@@ -35,10 +35,10 @@ pub use defuse::{
     BackwardSlice, DefUseInfo, SliceOpRef, backward_slice_from_op, backward_slice_from_var, def_use,
 };
 pub use function::{
-    DefRef, DefSite, PhiNode, SSABlock as FunctionSSABlock, SSAFunction, SourceRef, SourceSite,
-    SwitchInfo,
+    CFGRiskSummary, DefRef, DefSite, PhiNode, SSABlock as FunctionSSABlock, SSAFunction, SourceRef,
+    SourceSite, SwitchInfo,
 };
 pub use op::SSAOp;
-pub use optimize::{OptimizationConfig, OptimizationStats, optimize_function};
+pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, optimize_function};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use var::SSAVar;

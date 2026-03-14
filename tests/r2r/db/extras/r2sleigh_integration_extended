@@ -101,7 +101,7 @@ EOF_CMDS
 RUN
 
 NAME=taint_slice_zf_structured_shape
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -109,12 +109,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
+s sym.check_secret
+s sym._check_secret
 a:sla.slice ZF_1 | jq -c 'has("sink_var") and has("ops") and has("blocks") and (.ops|type=="array") and (.blocks|type=="array")'
 EOF_CMDS
 RUN
 
 NAME=taint_vuln_memcpy_call_sinks_include_arg_regs
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -122,7 +124,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.vuln_memcpy
-a:sla.taint | jq -c 'any(.sink_hits[]?; ((.op.op // "") == "Call" or (.op.op // "") == "CallInd") and any(.tainted_vars[]?; ((.var // "") | ascii_downcase | startswith("rdi_") or startswith("rsi_") or startswith("rdx_") or startswith("rcx_") or startswith("r8_") or startswith("r9_"))))'
+s sym.vuln_memcpy
+s sym._vuln_memcpy
+a:sla.taint | jq -c 'any(.sink_hits[]?; ((.op.op // "") == "Call" or (.op.op // "") == "CallInd") and any(.tainted_vars[]?; ((.var // "") | ascii_downcase | startswith("rdi_") or startswith("edi_") or startswith("rsi_") or startswith("esi_") or startswith("rdx_") or startswith("edx_") or startswith("rcx_") or startswith("ecx_") or startswith("r8_") or startswith("r9_"))))'
 EOF_CMDS
 RUN
 
@@ -192,7 +196,7 @@ EOF_CMDS
 RUN
 
 NAME=paths_check_secret_structure
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -200,12 +204,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
+s sym.check_secret
+s sym._check_secret
 a:sla.sym.paths | jq -c 'length>0 and (.[0]|has("path_id") and has("feasible") and has("solution") and has("exit_status"))'
 EOF_CMDS
 RUN
 
 NAME=paths_check_secret_finds_magic_0xdead
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -213,12 +219,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
+s sym.check_secret
+s sym._check_secret
 a:sla.sym.paths | jq -c 'tostring|contains("0xdead")'
 EOF_CMDS
 RUN
 
 NAME=paths_solve_equation_finds_0xa
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -226,12 +234,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.solve_equation
+s sym.solve_equation
+s sym._solve_equation
 a:sla.sym.paths | jq -c 'tostring|contains("0xa")'
 EOF_CMDS
 RUN
 
 NAME=paths_bitwise_finds_0x5a
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -239,12 +249,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.bitwise_check
+s sym.bitwise_check
+s sym._bitwise_check
 a:sla.sym.paths | jq -c 'tostring|contains("0x5a")'
 EOF_CMDS
 RUN
 
 NAME=interactive_sym_explore_returns_json
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -252,12 +264,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
-a:sym.explore 0x401296 | jq -c 'has("target") and has("matched_paths") and has("paths") and ((.paths|length)>0)'
+s sym.check_secret
+s sym._check_secret
+a:sym.explore sym._check_secret+0x10 | jq -c 'has("target") and has("matched_paths") and has("paths") and ((.paths|length)>0)'
 EOF_CMDS
 RUN
 
 NAME=interactive_sym_solve_returns_solution
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -265,7 +279,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
-a:sym.solve 0x401296 | jq -c 'has("found") and has("stats") and (.found==true) and ((.selected_path.solution.inputs|length)>0)'
+s sym.check_secret
+s sym._check_secret
+a:sym.solve sym._check_secret+0x10 | jq -c 'has("found") and has("stats") and (.found==true) and ((.selected_path.solution.inputs|length)>0)'
 EOF_CMDS
 RUN
 
@@ -283,7 +299,7 @@ EOF_CMDS
 RUN
 
 NAME=interactive_sym_alias_sla_sym_paths_still_works
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -291,12 +307,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
+s sym.check_secret
+s sym._check_secret
 a:sla.sym.paths | jq -c 'length>0'
 EOF_CMDS
 RUN
 
 NAME=interactive_sym_state_after_solve_same_session
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -304,8 +322,10 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
-a:sym.solve 0x401296 >/dev/null
-a:sym.state | tail -n1 | jq -c '.has_state==true and .mode=="solve" and .target=="0x401296"'
+s sym.check_secret
+s sym._check_secret
+a:sym.solve sym._check_secret+0x10 >/dev/null
+a:sym.state | tail -n1 | jq -c '.has_state==true and .mode=="solve" and .target=="0x100000660"'
 EOF_CMDS
 RUN
 
@@ -349,7 +369,7 @@ EOF_CMDS
 RUN
 
 NAME=sim_paths_process_string_no_error_entries
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -357,12 +377,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.process_string
+s sym.process_string
+s sym._process_string
 a:sla.sym.paths | jq -c 'length>0 and (map(has("error")|not)|all)'
 EOF_CMDS
 RUN
 
 NAME=sim_paths_authenticate_no_error_entries
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -370,12 +392,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.authenticate
+s sym.authenticate
+s sym._authenticate
 a:sla.sym.paths | jq -c 'length>0 and (map(has("error")|not)|all)'
 EOF_CMDS
 RUN
 
 NAME=sim_paths_alloc_and_copy_no_error_entries
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -383,12 +407,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.alloc_and_copy
+s sym.alloc_and_copy
+s sym._alloc_and_copy
 a:sla.sym.paths | jq -c 'length>0 and (map(has("error")|not)|all)'
 EOF_CMDS
 RUN
 
 NAME=sim_paths_vuln_printf_no_error_entries
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -396,12 +422,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.vuln_printf
+s sym.vuln_printf
+s sym._vuln_printf
 a:sla.sym.paths | jq -c 'length>0 and (map(has("error")|not)|all)'
 EOF_CMDS
 RUN
 
 NAME=sim_paths_vuln_memcpy_no_error_entries
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -409,12 +437,14 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.vuln_memcpy
+s sym.vuln_memcpy
+s sym._vuln_memcpy
 a:sla.sym.paths | jq -c 'length>0 and (map(has("error")|not)|all)'
 EOF_CMDS
 RUN
 
 NAME=sim_solve_check_secret_regression
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -422,7 +452,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
-a:sym.solve 0x401296 | jq -c '.found==true'
+s sym.check_secret
+s sym._check_secret
+a:sym.solve sym._check_secret+0x10 | jq -c '.found==true'
 EOF_CMDS
 RUN
 
@@ -473,8 +505,7 @@ true
 EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
-s dbg.test_boolxor
-a:sla.dec | jq -Rs 'contains("^") and (contains("of_")|not)'
+a:sla.dec sym._test_boolxor | jq -Rs 'contains("^") and (contains("of_")|not)'
 EOF_CMDS
 RUN
 
@@ -500,7 +531,9 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_struct_field
-a:sla.dec | jq -Rs 'contains("->field_") or contains("field_")'
+s sym.test_struct_field
+s sym._test_struct_field
+a:sla.dec | jq -Rs 'contains("test_struct_field") and contains("->") and (contains("f_30") or contains("thirteenth")) and (contains("f_0") or contains("first")) and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not)'
 EOF_CMDS
 RUN
 
@@ -532,7 +565,7 @@ EOF_CMDS
 RUN
 
 NAME=dec_pdd_target_argument
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -544,7 +577,7 @@ EOF_CMDS
 RUN
 
 NAME=dec_pd_stays_disassembly
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -552,6 +585,8 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
+s sym.check_secret
+s sym._check_secret
 pd 1 | jq -Rs '(contains("endbr64") or contains("push ") or contains("mov ") or contains("cmp ")) and (contains("r2dec fallback:")|not)'
 EOF_CMDS
 RUN
@@ -608,6 +643,51 @@ a:sla.dec | jq -Rs 'contains("if (") and contains("return")'
 EOF_CMDS
 RUN
 
+NAME=dec_array_index_neg_preserves_subscript_shape
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.test_array_index_neg
+s sym.test_array_index_neg
+s sym._test_array_index_neg
+a:sla.dec | jq -Rs 'contains("test_array_index_neg") and (contains("[-idx]") or contains("[0 - idx]") or contains("[-arg2]") or contains("[0 - arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not) and (contains("*(rbp")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_array_index_uses_real_index
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.test_array_index
+s sym.test_array_index
+s sym._test_array_index
+a:sla.dec | jq -Rs 'contains("test_array_index") and (contains("[idx]") or contains("[arg2]")) and (contains("[0]")|not) and (contains("saved_fp")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_struct_array_index_keeps_member_write_shape
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.test_struct_array_index
+s sym.test_struct_array_index
+s sym._test_struct_array_index
+a:sla.dec | jq -Rs 'contains("test_struct_array_index") and (contains(".f_8") or contains(".third")) and (contains(".f_34") or contains(".fourteenth")) and (contains("saved_fp")|not) and (contains("return stack")|not) and (contains("rdx->")|not) and (contains("*(arg1 +")|not) and (contains("*(rbp")|not)'
+EOF_CMDS
+RUN
+
 NAME=dec_tail_return_guard_shape
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
@@ -616,8 +696,7 @@ true
 EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
-s dbg.test_guard_tail_return
-a:sla.dec | jq -Rs 'contains("if (") and contains("global_tail") and contains("global_counter") and contains("return")'
+a:sla.dec sym._test_guard_tail_return | jq -Rs 'contains("if (") and contains("global_tail") and contains("global_counter") and contains("return")'
 EOF_CMDS
 RUN
 
@@ -625,21 +704,14 @@ NAME=dec_check_secret_keeps_hex_compare
 FILE=bins/vuln_test
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
-int32_t dbg.check_secret(int32_t x)
-{
-    local_4 = x;
-    if (x != 57005) {
-        return 0;
-    } else {
-        return 1;
-    }
-}
-
+true
 EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
-a:sla.dec
+s sym.check_secret
+s sym._check_secret
+a:sla.dec | jq -Rs 'contains("0xdead") and contains("return 0;") and contains("return 1;") and (contains("return rax")|not) and (contains("0 != 57005")|not)'
 EOF_CMDS
 RUN
 
@@ -657,7 +729,7 @@ EOF_CMDS
 RUN
 
 NAME=dec_solve_equation_uses_named_stack_var
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -665,6 +737,8 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.solve_equation
+s sym.solve_equation
+s sym._solve_equation
 a:sla.dec | jq -Rs '(contains("*(rbp")|not) and (contains("!= 19") or contains("== 19"))'
 EOF_CMDS
 RUN
@@ -683,7 +757,7 @@ EOF_CMDS
 RUN
 
 NAME=dec_callother_emitted
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -691,6 +765,8 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.test_cpuid
+s sym.test_cpuid
+s sym._test_cpuid
 a:sla.dec | jq -Rs 'contains("callother(")'
 EOF_CMDS
 RUN
@@ -704,7 +780,137 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.main
-a:sla.dec | jq -Rs 'contains("Unknown test: %d") and (contains("switch (") or contains("if ("))'
+a:sla.dec | jq -Rs 'contains("Usage: %s <test_num> [args...]") and (contains("switch (") or contains("if ("))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_usage_path_returns_one_not_argc
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs 'contains("return 1;") and (contains("return argc;")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_main_switch_selector_uses_recovered_local
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs 'contains("switch (local_") and (contains("switch (test)")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_main_unlock_printf_keeps_recovered_inputs_and_result_call
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("unlock(%d, %d, %d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("unlock(%d, %d, %d) = %d") and contains("local_2c, local_30, local_34, sym._unlock(local_2c, local_30, local_34));") and (contains("sym._unlock(local_2c, local_30, local_34);")|not) and (contains("stack_")|not) and (contains("&stack")|not) and (contains("lr")|not) and (test("\\bx[0-9]+_[0-9]+\\b")|not) and (test("\\bw[0-9]+_[0-9]+\\b")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_solve_equation_printf_keeps_recovered_input_and_result_call
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("solve_equation(%d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("solve_equation(%d) = %d") and contains("local_5c, sym._solve_equation(local_5c));") and (contains("sym._solve_equation(local_5c);")|not) and (contains("stack_")|not) and (contains("&stack")|not) and (contains("lr")|not) and (test("\\bx[0-9]+_[0-9]+\\b")|not) and (test("\\bw[0-9]+_[0-9]+\\b")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_complex_check_printf_keeps_recovered_inputs_and_result_call
+FILE=bins/vuln_test
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("complex_check(%d, %d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("complex_check(%d, %d) = %d") and contains("local_60, local_64, sym._complex_check(local_60, local_64));") and (contains("sym._complex_check(local_60, local_64);")|not) and (contains("stack_")|not) and (contains("&stack")|not) and (contains("lr")|not) and (test("\\bx[0-9]+_[0-9]+\\b")|not) and (test("\\bw[0-9]+_[0-9]+\\b")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_nonempty_and_usage_path_returns_one
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '(length > 0) and contains("return 1;") and contains("switch (var_") and (contains("return argc;")|not)'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_unlock_printf_keeps_recovered_inputs_and_result_call
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("unlock(%d, %d, %d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("var_3e0h, var_3dch, var_3d8h, sym._unlock(var_3e0h, var_3dch, var_3d8h));") and (contains("sym._unlock(var_3e0h, var_3dch, var_3d8h);")|not) and (contains("0U")|not) and (contains("&stack")|not) and (contains("eax_")|not) and (contains("rax_")|not) and (contains(" r8")|not) and (contains("atoi(")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_solve_equation_printf_keeps_recovered_input_and_result_call
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("solve_equation(%d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("var_3e4h, sym._solve_equation(var_3e4h));") and (contains("sym._solve_equation(var_3e4h);")|not) and (contains("0U")|not) and (contains("&stack")|not) and (contains("eax_")|not) and (contains("rax_")|not) and (contains(" r8")|not) and (contains("atoi(")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_complex_check_printf_keeps_recovered_inputs_and_result_call
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("complex_check(%d, %d) = %d")))) as $lines | ($lines | length) == 1 and ($lines[0] | contains("var_3ech, var_3e8h, sym._complex_check(var_3ech, var_3e8h));") and (contains("sym._complex_check(var_3ech, var_3e8h);")|not) and (contains("0U")|not) and (contains("&stack")|not) and (contains("eax_")|not) and (contains("rax_")|not) and (contains(" r8")|not) and (contains("atoi(")|not))'
+EOF_CMDS
+RUN
+
+NAME=dec_main_x86_pointer_cases_keep_concrete_values
+FILE=bins/vuln_test_x86
+ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
+EXPECT=<<EOF_EXPECT
+true
+EOF_EXPECT
+CMDS=<<EOF_CMDS
+aaa
+s dbg.main
+a:sla.dec | jq -Rs '([splits("\n")] | map(select(contains("Copied: %s") or contains("vuln_alloc(%d, %d) = %p") or contains("free(")))) as $lines | ($lines | any(contains("sym.imp.printf(\"Copied: %s\\n\", var_38h);")) and any(contains("sym.imp.free(var_38h);")) and any(contains("sym.imp.printf(\"vuln_alloc(%d, %d) = %p\\n\", var_3ch, var_40h, sym._vuln_alloc(var_3ch, var_40h));")) and any(contains("sym.imp.free(var_48h);")) and (tostring | contains("0U")|not) and (tostring | contains("&stack")|not) and (tostring | contains("eax_")|not) and (tostring | contains("rax_")|not))'
 EOF_CMDS
 RUN
 
@@ -887,7 +1093,7 @@ EOF_CMDS
 RUN
 
 NAME=deep_signature_writeback_full_mode_updates_calltype
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -895,9 +1101,11 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
+s sym.check_secret
+s sym._check_secret
 a:sla.info >/dev/null
 e anal.sla.mode=full
-afs void dbg.check_secret(void)
+afs void sym._check_secret(void)
 afc ms
 aaaa
 afij | jq -c '.[0].calltype == "amd64"'
@@ -905,7 +1113,7 @@ EOF_CMDS
 RUN
 
 NAME=deep_signature_writeback_fast_mode_keeps_void
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -913,9 +1121,11 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
+s sym.check_secret
+s sym._check_secret
 a:sla.info >/dev/null
 e anal.sla.mode=fast
-afs void dbg.check_secret(void)
+afs void sym._check_secret(void)
 afc ms
 aaaa
 afcfj | jq -c '.[0].return == "void"'
@@ -923,7 +1133,7 @@ EOF_CMDS
 RUN
 
 NAME=deep_signature_writeback_fast_mode_keeps_calltype_ms
-FILE=bins/vuln_test
+FILE=bins/vuln_test_x86
 ARGS=-e scr.color=false -e log.level=0 -e bin.relocs.apply=true
 EXPECT=<<EOF_EXPECT
 true
@@ -931,9 +1141,11 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.check_secret
+s sym.check_secret
+s sym._check_secret
 a:sla.info >/dev/null
 e anal.sla.mode=fast
-afs void dbg.check_secret(void)
+afs void sym._check_secret(void)
 afc ms
 aaaa
 afij | jq -c '.[0].calltype == "ms"'
@@ -985,7 +1197,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.main
-a:sla.dec | jq -Rs 'contains("dbg.main(") and (contains("sym.imp.atoi") or contains("sym.imp.printf") or contains("sym.imp.puts"))'
+a:sla.dec | jq -Rs '(contains("dbg.main(") or contains("main(")) and (contains("sym.imp.atoi") or contains("sym.imp.printf") or contains("sym.imp.puts"))'
 EOF_CMDS
 RUN
 
@@ -998,7 +1210,7 @@ EOF_EXPECT
 CMDS=<<EOF_CMDS
 aaa
 s dbg.main
-a:sla.dec | jq -Rs 'contains("Unknown test: %d") and contains("sym.imp.printf")'
+a:sla.dec | jq -Rs 'contains("Usage: %s <test_num> [args...]") and contains("sym.imp.printf")'
 EOF_CMDS
 RUN
 

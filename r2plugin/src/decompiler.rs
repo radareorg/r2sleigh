@@ -1,8 +1,7 @@
 use crate::context::PluginCtxView;
 use crate::{
-    decompile_block_guard_fallback, decompiler_max_blocks, parse_addr_name_map,
-    parse_external_reg_params, parse_external_stack_vars, parse_signature_context,
-    run_decompile_on_large_stack,
+    decompile_artifact_guard_fallback, decompile_block_guard_fallback, decompiler_cfg_guard_reason,
+    decompiler_max_blocks, parse_addr_name_map, run_decompile_on_large_stack,
 };
 use r2il::{ArchSpec, R2ILBlock};
 
@@ -70,6 +69,9 @@ pub(crate) fn decompile_blocks(
             max_blocks,
         ));
     }
+    if let Some(reason) = decompiler_cfg_guard_reason(blocks) {
+        return Some(decompile_artifact_guard_fallback(function_name, &reason));
+    }
 
     let env = DecompilerEnv {
         arch_name: normalize_sig_arch_name(arch).unwrap_or_else(|| "unknown".to_string()),
@@ -81,7 +83,7 @@ pub(crate) fn decompile_blocks(
     };
 
     let ssa_func =
-        r2ssa::SSAFunction::from_blocks_with_arch(blocks, arch)?.with_name(function_name);
+        r2ssa::SSAFunction::from_blocks_for_decompile(blocks, arch)?.with_name(function_name);
     let decompiler = r2dec::Decompiler::new(env.cfg);
     Some(run_decompile_on_large_stack(decompiler, ssa_func))
 }
@@ -92,84 +94,46 @@ pub(crate) fn run_full_decompile_on_large_stack(
     func_name_str: String,
     arch: Option<r2il::ArchSpec>,
     ptr_bits: u32,
+    semantic_metadata_enabled: bool,
+    reg_type_hints: std::collections::HashMap<String, crate::types::TypeHint>,
     func_names_str: String,
     strings_str: String,
     symbols_str: String,
-    signature_str: String,
-    stack_vars_str: String,
-    types_str: String,
+    external_context_json: String,
 ) -> String {
-    const STACK_SIZE: usize = 32 * 1024 * 1024;
+    const STACK_SIZE: usize = 512 * 1024 * 1024;
 
     let handle = std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(move || {
-            let mut ssa_func =
-                match r2ssa::SSAFunction::from_blocks_raw(&r2il_blocks, arch.as_ref()) {
-                    Some(f) => f.with_name(&func_name_str),
-                    None => return String::new(),
-                };
-
-            let dec_opt_cfg = if ssa_func.num_blocks() <= 96 {
-                r2ssa::OptimizationConfig {
-                    max_iterations: 1,
-                    enable_sccp: true,
-                    enable_const_prop: false,
-                    enable_inst_combine: false,
-                    enable_copy_prop: true,
-                    enable_cse: false,
-                    enable_dce: false,
-                    preserve_memory_reads: false,
-                }
-            } else {
-                r2ssa::OptimizationConfig {
-                    max_iterations: 1,
-                    enable_sccp: true,
-                    enable_const_prop: false,
-                    enable_inst_combine: false,
-                    enable_copy_prop: false,
-                    enable_cse: false,
-                    enable_dce: false,
-                    preserve_memory_reads: false,
-                }
-            };
-            let _ = ssa_func.optimize(&dec_opt_cfg);
-
+            if let Some(reason) = crate::decompiler_cfg_guard_reason(&r2il_blocks) {
+                return decompile_artifact_guard_fallback(&func_name_str, &reason);
+            }
             let arch_name =
                 normalize_sig_arch_name(arch.as_ref()).unwrap_or_else(|| "unknown".to_string());
             let config = decompiler_config_for_arch_name(&arch_name, ptr_bits);
+            let Some(artifact) = crate::types::build_detached_function_analysis_artifact(
+                &r2il_blocks,
+                &func_name_str,
+                arch.as_ref(),
+                ptr_bits,
+                semantic_metadata_enabled,
+                &reg_type_hints,
+                &external_context_json,
+            ) else {
+                return decompile_artifact_guard_fallback(
+                    &func_name_str,
+                    "failed to build detached analysis artifact",
+                );
+            };
 
             let mut decompiler = r2dec::Decompiler::new(config);
             decompiler.set_function_names(parse_addr_name_map(&func_names_str));
             decompiler.set_strings(parse_addr_name_map(&strings_str));
             decompiler.set_symbols(parse_addr_name_map(&symbols_str));
+            decompiler.set_type_facts(artifact.type_facts);
 
-            let sig_ctx = parse_signature_context(&signature_str, ptr_bits);
-            let reg_params = parse_external_reg_params(&stack_vars_str, ptr_bits);
-            decompiler.set_register_params(reg_params.clone());
-            decompiler.set_function_signature(super::merge_signature_with_reg_params(
-                sig_ctx.current,
-                reg_params,
-            ));
-            if !sig_ctx.known.is_empty() {
-                decompiler.set_known_function_signatures(sig_ctx.known);
-            }
-
-            let stack_vars = parse_external_stack_vars(&stack_vars_str, ptr_bits);
-            if !stack_vars.is_empty() {
-                decompiler.set_stack_vars(stack_vars);
-            }
-
-            let type_db = r2types::ExternalTypeDb::from_tsj_json(&types_str);
-            if !type_db.structs.is_empty()
-                || !type_db.unions.is_empty()
-                || !type_db.enums.is_empty()
-                || !type_db.diagnostics.is_empty()
-            {
-                decompiler.set_external_type_db(type_db);
-            }
-
-            decompiler.decompile(&ssa_func)
+            decompiler.decompile(&artifact.ssa_func)
         });
 
     match handle {

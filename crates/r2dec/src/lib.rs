@@ -11,7 +11,7 @@
 //! 2. **Expression Building** (`expr`): Convert SSA operations to C expressions
 //! 3. **Region Identification** (`region`): Identify control flow regions
 //! 4. **Control Flow Structuring** (`structure`): Convert CFG to structured code
-//! 5. **Type Inference** (`types`): Infer C types from operations
+//! 5. **Type Facts** (`r2types`): Consume inferred type/layout facts
 //! 6. **Variable Recovery** (`variable`): Recover variable names and types
 //! 7. **Code Generation** (`codegen`): Generate readable C source code
 //!
@@ -36,8 +36,8 @@ pub mod fold;
 pub(crate) mod normalize;
 pub(crate) mod post_rename;
 pub mod region;
+pub(crate) mod registers;
 pub mod structure;
-pub mod types;
 pub mod variable;
 
 pub use ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp};
@@ -45,17 +45,17 @@ pub use codegen::{CodeGenConfig, CodeGenerator, generate};
 pub use fold::lower_ssa_ops_to_stmts;
 pub use region::{Region, RegionAnalyzer};
 pub use structure::ControlFlowStructurer;
-pub use types::TypeInference;
 pub use variable::VariableRecovery;
 
 use crate::fold::FoldingContext;
 use crate::fold::context::{FoldArchConfig, FoldInputs};
 use r2ssa::SSAFunction;
 use r2ssa::SSAOp;
-use r2types::ExternalTypeDb;
-use r2types::TypeOracle;
+use r2types::{
+    CTypeLike, ExternalRegisterParamSpec, ExternalTypeDb, FunctionSignatureSpec, FunctionType,
+    FunctionTypeFacts, TypeInference, TypeOracle,
+};
 use std::collections::HashSet;
-use types::FunctionType;
 
 fn is_generic_arg_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
@@ -82,9 +82,50 @@ fn normalize_callee_name(name: &str) -> String {
     out
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+fn ctype_to_type_like(ty: &CType) -> CTypeLike {
+    match ty {
+        CType::Void => CTypeLike::Void,
+        CType::Bool => CTypeLike::Bool,
+        CType::Int(bits) => CTypeLike::Int {
+            bits: *bits,
+            signedness: r2types::Signedness::Signed,
+        },
+        CType::UInt(bits) => CTypeLike::Int {
+            bits: *bits,
+            signedness: r2types::Signedness::Unsigned,
+        },
+        CType::Float(bits) => CTypeLike::Float(*bits),
+        CType::Pointer(inner) => CTypeLike::Pointer(Box::new(ctype_to_type_like(inner))),
+        CType::Array(inner, len) => CTypeLike::Array(Box::new(ctype_to_type_like(inner)), *len),
+        CType::Struct(name) => CTypeLike::Struct(name.clone()),
+        CType::Union(name) => CTypeLike::Union(name.clone()),
+        CType::Enum(name) => CTypeLike::Enum(name.clone()),
+        CType::Function { .. } | CType::Typedef(_) | CType::Unknown => CTypeLike::Unknown,
+    }
+}
+
+fn type_like_to_ctype(ty: &CTypeLike) -> CType {
+    match ty {
+        CTypeLike::Void => CType::Void,
+        CTypeLike::Bool => CType::Bool,
+        CTypeLike::Int { bits, signedness } => match signedness {
+            r2types::Signedness::Unsigned => CType::UInt(*bits),
+            _ => CType::Int(*bits),
+        },
+        CTypeLike::Float(bits) => CType::Float(*bits),
+        CTypeLike::Pointer(inner) => CType::Pointer(Box::new(type_like_to_ctype(inner))),
+        CTypeLike::Array(inner, len) => CType::Array(Box::new(type_like_to_ctype(inner)), *len),
+        CTypeLike::Struct(name) => CType::Struct(name.clone()),
+        CTypeLike::Union(name) => CType::Union(name.clone()),
+        CTypeLike::Enum(name) => CType::Enum(name.clone()),
+        CTypeLike::Function | CTypeLike::Unknown => CType::Unknown,
+    }
+}
+
 fn merge_params_with_external_signature(
     recovered_params: Vec<ast::CParam>,
-    signature: Option<&ExternalFunctionSignature>,
+    signature: Option<&FunctionSignatureSpec>,
 ) -> Vec<ast::CParam> {
     let Some(signature) = signature else {
         return recovered_params;
@@ -94,7 +135,16 @@ fn merge_params_with_external_signature(
         return recovered_params;
     }
 
-    let target_len = recovered_params.len().max(signature.params.len());
+    let signature_is_authoritative = signature.ret_type.is_some()
+        || signature
+            .params
+            .iter()
+            .any(|param| param.ty.is_some() || !is_generic_arg_name(&param.name));
+    let target_len = if signature_is_authoritative {
+        signature.params.len()
+    } else {
+        recovered_params.len().max(signature.params.len())
+    };
     (0..target_len)
         .map(|idx| {
             let fallback_name = format!("arg{}", idx + 1);
@@ -108,7 +158,7 @@ fn merge_params_with_external_signature(
                     param.name = ext.name.clone();
                 }
                 if let Some(ext_ty) = &ext.ty {
-                    param.ty = ext_ty.clone();
+                    param.ty = type_like_to_ctype(ext_ty);
                 }
             }
 
@@ -183,9 +233,19 @@ fn register_alias_names(reg_name: &str) -> Vec<String> {
 fn build_param_register_aliases(
     params: &[ast::CParam],
     recovered_params: &[(r2ssa::SSAVar, ast::CParam)],
-    register_params: &[ExternalRegisterParam],
+    register_params: &[ExternalRegisterParamSpec],
+    abi_arg_regs: &[String],
 ) -> std::collections::HashMap<String, String> {
     let mut aliases = std::collections::HashMap::new();
+
+    for (idx, reg_name) in abi_arg_regs.iter().enumerate() {
+        let Some(param) = params.get(idx) else {
+            continue;
+        };
+        for alias in register_alias_names(reg_name) {
+            aliases.insert(alias, param.name.clone());
+        }
+    }
 
     for (idx, (ssa_var, _)) in recovered_params.iter().enumerate() {
         if let Some(param) = params.get(idx) {
@@ -304,7 +364,7 @@ impl DecompilerConfig {
         Self {
             ptr_size: 64,
             sp_name: "sp".to_string(),
-            fp_name: "fp".to_string(),
+            fp_name: "x29".to_string(),
             arg_regs: ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
                 .into_iter()
                 .map(str::to_string)
@@ -366,44 +426,12 @@ impl DecompilerConfig {
     }
 }
 
-/// External information for decompilation (function names, strings, symbols).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalFunctionParam {
-    /// Parameter name recovered from external metadata.
-    pub name: String,
-    /// Optional type recovered from external metadata.
-    pub ty: Option<CType>,
-}
-
-/// External register-backed parameter metadata recovered from host analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalRegisterParam {
-    /// Parameter name recovered from external metadata.
-    pub name: String,
-    /// Optional type recovered from external metadata.
-    pub ty: Option<CType>,
-    /// Register reference reported by host analysis.
-    pub reg: String,
-}
-
-/// External function signature recovered from host analysis.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ExternalFunctionSignature {
-    /// Optional return type.
-    pub ret_type: Option<CType>,
-    /// Ordered parameters.
-    pub params: Vec<ExternalFunctionParam>,
-}
-
-/// External stack variable metadata recovered from host analysis.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExternalStackVar {
-    /// Variable name.
-    pub name: String,
-    /// Optional variable type.
-    pub ty: Option<CType>,
-    /// Base register used by the analysis backend (e.g. RBP/RSP).
-    pub base: Option<String>,
+pub struct LocalStructFieldAccess {
+    pub arg_index: usize,
+    pub field_offset: u64,
+    pub access_size: u32,
+    pub is_write: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -414,16 +442,8 @@ pub struct DecompilerContext {
     pub strings: std::collections::HashMap<u64, String>,
     /// Symbol/global variable names.
     pub symbols: std::collections::HashMap<u64, String>,
-    /// Optional external function signature.
-    pub function_signature: Option<ExternalFunctionSignature>,
-    /// Register-backed parameter metadata from host analysis.
-    pub register_params: Vec<ExternalRegisterParam>,
-    /// Optional known function signatures from host analysis.
-    pub known_function_signatures: std::collections::HashMap<String, FunctionType>,
-    /// Stack variables keyed by signed stack offset.
-    pub stack_vars: std::collections::HashMap<i64, ExternalStackVar>,
-    /// Optional external host type database (e.g. tsj payload).
-    pub external_type_db: ExternalTypeDb,
+    /// Externally recovered type and layout facts.
+    pub type_facts: FunctionTypeFacts,
 }
 
 /// The main decompiler.
@@ -462,32 +482,27 @@ impl Decompiler {
         self.context.symbols = symbols;
     }
 
-    /// Set an externally recovered function signature.
-    pub fn set_function_signature(&mut self, signature: Option<ExternalFunctionSignature>) {
-        self.context.function_signature = signature;
-    }
-
-    /// Set externally recovered register-backed parameters.
-    pub fn set_register_params(&mut self, register_params: Vec<ExternalRegisterParam>) {
-        self.context.register_params = register_params;
-    }
-
     /// Set externally recovered known function signatures keyed by name.
-    pub fn set_known_function_signatures(
+    pub fn set_known_function_signatures<T>(
         &mut self,
-        signatures: std::collections::HashMap<String, FunctionType>,
-    ) {
-        self.context.known_function_signatures = signatures;
-    }
-
-    /// Set externally recovered stack variables keyed by signed stack offset.
-    pub fn set_stack_vars(&mut self, stack_vars: std::collections::HashMap<i64, ExternalStackVar>) {
-        self.context.stack_vars = stack_vars;
+        signatures: std::collections::HashMap<String, T>,
+    ) where
+        T: Into<FunctionType>,
+    {
+        self.context.type_facts.known_function_signatures = signatures
+            .into_iter()
+            .map(|(name, sig)| (name, sig.into()))
+            .collect();
     }
 
     /// Set externally recovered host type database.
     pub fn set_external_type_db(&mut self, external_type_db: ExternalTypeDb) {
-        self.context.external_type_db = external_type_db;
+        self.context.type_facts.external_type_db = external_type_db;
+    }
+
+    /// Set externally recovered type facts.
+    pub fn set_type_facts(&mut self, type_facts: FunctionTypeFacts) {
+        self.context.type_facts = type_facts;
     }
 
     /// Decompile an SSA function to C code.
@@ -553,12 +568,7 @@ impl Decompiler {
             self.config.arg_regs.clone(),
             self.config.ret_regs.clone(),
         );
-        if let Some(signature) = &self.context.function_signature {
-            var_recovery.set_external_signature(signature.clone());
-        }
-        if !self.context.stack_vars.is_empty() {
-            var_recovery.set_external_stack_vars(self.context.stack_vars.clone());
-        }
+        var_recovery.set_type_facts(self.context.type_facts.clone());
         var_recovery.recover(func);
 
         // Infer types
@@ -570,29 +580,31 @@ impl Decompiler {
         if !self.context.function_names.is_empty() {
             type_inference.set_function_names(self.context.function_names.clone());
         }
-        if self.context.function_signature.is_some() {
-            type_inference.set_external_signature(self.context.function_signature.clone());
-        }
-        for (name, signature) in &self.context.known_function_signatures {
+        type_inference.set_external_signature(self.context.type_facts.merged_signature.clone());
+        for (name, signature) in &self.context.type_facts.known_function_signatures {
             type_inference.add_function_type(name, signature.clone());
         }
-        if !self.context.stack_vars.is_empty() {
-            type_inference.set_external_stack_vars(self.context.stack_vars.clone());
-        }
-        if !self.context.external_type_db.structs.is_empty()
-            || !self.context.external_type_db.unions.is_empty()
-            || !self.context.external_type_db.enums.is_empty()
+        type_inference.set_external_stack_vars(self.context.type_facts.external_stack_vars.clone());
+        if !self.context.type_facts.external_type_db.structs.is_empty()
+            || !self.context.type_facts.external_type_db.unions.is_empty()
+            || !self.context.type_facts.external_type_db.enums.is_empty()
         {
-            type_inference.set_external_type_db(self.context.external_type_db.clone());
+            type_inference.set_external_type_db(self.context.type_facts.external_type_db.clone());
         }
         type_inference.infer_function(func);
-        let type_hints = type_inference.var_type_hints();
-        let type_oracle = type_inference
-            .solved_types()
-            .map(|solved| solved as &dyn TypeOracle);
+        let mut type_hints = type_inference
+            .var_type_hints()
+            .into_iter()
+            .map(|(name, ty)| (name, type_like_to_ctype(&ty)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let combined_type_oracle = type_inference.combined_type_oracle();
+        let type_oracle = combined_type_oracle
+            .as_ref()
+            .map(|oracle| oracle as &dyn TypeOracle);
 
         let known_function_signatures = self
             .context
+            .type_facts
             .known_function_signatures
             .iter()
             .map(|(name, ty)| (normalize_callee_name(name), ty.clone()))
@@ -605,7 +617,7 @@ impl Decompiler {
                 (
                     v.ssa_var.clone(),
                     ast::CParam {
-                        ty: type_inference.get_type(&v.ssa_var),
+                        ty: type_like_to_ctype(&type_inference.get_type(&v.ssa_var)),
                         name: v.name.clone(),
                     },
                 )
@@ -616,13 +628,33 @@ impl Decompiler {
                 .iter()
                 .map(|(_, param)| param.clone())
                 .collect(),
-            self.context.function_signature.as_ref(),
+            self.context.type_facts.merged_signature.as_ref(),
         );
         let param_register_aliases = build_param_register_aliases(
             &params,
             &recovered_param_infos,
-            &self.context.register_params,
+            &self.context.type_facts.register_params,
+            &self.config.arg_regs,
         );
+        for (idx, (_ssa_var, _)) in recovered_param_infos.iter().enumerate() {
+            let Some(param) = params.get(idx) else {
+                continue;
+            };
+            let param_ty = param.ty.clone();
+            type_hints.insert(param.name.clone(), param_ty.clone());
+            type_hints.insert(param.name.to_ascii_lowercase(), param_ty);
+        }
+        for (reg_alias, param_name) in &param_register_aliases {
+            let Some(param) = params.iter().find(|param| param.name == *param_name) else {
+                continue;
+            };
+            type_hints
+                .entry(reg_alias.clone())
+                .or_insert_with(|| param.ty.clone());
+            type_hints
+                .entry(reg_alias.to_ascii_lowercase())
+                .or_insert_with(|| param.ty.clone());
+        }
 
         let fold_arch = FoldArchConfig {
             ptr_size: self.config.ptr_size,
@@ -643,7 +675,8 @@ impl Decompiler {
             strings: &self.context.strings,
             symbols: &self.context.symbols,
             known_function_signatures: &known_function_signatures,
-            external_stack_vars: &self.context.stack_vars,
+            external_stack_vars: &self.context.type_facts.external_stack_vars,
+            external_type_db: &self.context.type_facts.external_type_db,
             param_register_aliases: &param_register_aliases,
             type_hints: &type_hints,
             type_oracle,
@@ -710,6 +743,8 @@ impl Decompiler {
             }
         }
 
+        body_stmt = fold_ctx.normalize_final_stmt_calls(body_stmt);
+
         // Build the C function
         let func_name = func
             .name
@@ -722,7 +757,7 @@ impl Decompiler {
                 .locals()
                 .iter()
                 .map(|v| ast::CLocal {
-                    ty: type_inference.get_type(&v.ssa_var),
+                    ty: type_like_to_ctype(&type_inference.get_type(&v.ssa_var)),
                     name: v.name.clone(),
                     stack_offset: v.stack_offset,
                 })
@@ -733,7 +768,7 @@ impl Decompiler {
                 .iter()
                 .filter(|v| emitted_vars.contains(&v.name))
                 .map(|v| ast::CLocal {
-                    ty: type_inference.get_type(&v.ssa_var),
+                    ty: type_like_to_ctype(&type_inference.get_type(&v.ssa_var)),
                     name: v.name.clone(),
                     stack_offset: v.stack_offset,
                 })
@@ -748,9 +783,10 @@ impl Decompiler {
             name: func_name,
             ret_type: self
                 .context
-                .function_signature
+                .type_facts
+                .merged_signature
                 .as_ref()
-                .and_then(|sig| sig.ret_type.clone())
+                .and_then(|sig| sig.ret_type.as_ref().map(type_like_to_ctype))
                 .unwrap_or(inferred_ret_type),
             params,
             locals,
@@ -764,7 +800,7 @@ impl Decompiler {
             for name in self.context.function_names.values() {
                 known_function_names.insert(name.to_ascii_lowercase());
             }
-            for name in self.context.known_function_signatures.keys() {
+            for name in self.context.type_facts.known_function_signatures.keys() {
                 known_function_names.insert(name.to_ascii_lowercase());
             }
             post_rename::rewrite_function_identifiers(&mut c_function, &known_function_names);
@@ -802,7 +838,7 @@ impl Decompiler {
                     continue;
                 }
 
-                candidates.push(type_inference.get_type(target));
+                candidates.push(type_like_to_ctype(&type_inference.get_type(target)));
             }
         }
 
@@ -831,11 +867,67 @@ impl Decompiler {
     }
 }
 
+pub fn infer_local_struct_field_accesses(
+    func: &SSAFunction,
+    config: &DecompilerConfig,
+) -> Vec<LocalStructFieldAccess> {
+    let function_names = std::collections::HashMap::new();
+    let strings = std::collections::HashMap::new();
+    let symbols = std::collections::HashMap::new();
+    let type_hints = std::collections::HashMap::new();
+    let mut param_register_aliases = std::collections::HashMap::new();
+    let mut arg_slot_map = std::collections::HashMap::new();
+
+    for (idx, reg_name) in config.arg_regs.iter().enumerate() {
+        let arg_name = format!("arg{}", idx + 1);
+        for alias in register_alias_names(reg_name) {
+            let lower = alias.to_ascii_lowercase();
+            param_register_aliases.insert(lower.clone(), arg_name.clone());
+            arg_slot_map.insert(lower, idx);
+        }
+    }
+
+    let env = analysis::PassEnv {
+        ptr_size: config.ptr_size,
+        sp_name: &config.sp_name,
+        fp_name: &config.fp_name,
+        ret_reg_name: config.ret_regs.first().map(String::as_str).unwrap_or("rax"),
+        function_names: &function_names,
+        strings: &strings,
+        symbols: &symbols,
+        arg_regs: &config.arg_regs,
+        param_register_aliases: &param_register_aliases,
+        caller_saved_regs: &config.caller_saved_regs,
+        type_hints: &type_hints,
+        type_oracle: None,
+    };
+
+    let blocks: Vec<_> = func.blocks().cloned().collect();
+    let use_info = analysis::UseInfo::analyze_for_local_struct_accesses(&blocks, &env);
+    analysis::use_info::collect_local_struct_field_access_profiles(
+        &use_info,
+        func,
+        &env,
+        &arg_slot_map,
+    )
+    .into_iter()
+    .map(|profile| LocalStructFieldAccess {
+        arg_index: profile.arg_index,
+        field_offset: profile.field_offset,
+        access_size: profile.access_size,
+        is_write: profile.is_write,
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
     use r2ssa::SSAFunction;
+    use r2types::{
+        ExternalField, ExternalStruct, FunctionParamSpec, FunctionSignatureSpec, FunctionTypeFacts,
+    };
 
     fn ssa_from_ops(ops: Vec<R2ILOp>, arch: &ArchSpec) -> SSAFunction {
         let mut block = R2ILBlock::new(0x1000, 4);
@@ -855,6 +947,22 @@ mod tests {
         arch.add_register(RegisterDef::new("RBP", 0x20, 8));
         arch.add_register(RegisterDef::new("RSP", 0x28, 8));
         arch
+    }
+
+    fn signature_spec(
+        ret_type: Option<CType>,
+        params: Vec<(&str, Option<CType>)>,
+    ) -> FunctionSignatureSpec {
+        FunctionSignatureSpec {
+            ret_type: ret_type.as_ref().map(super::ctype_to_type_like),
+            params: params
+                .into_iter()
+                .map(|(name, ty)| FunctionParamSpec {
+                    name: name.to_string(),
+                    ty: ty.as_ref().map(super::ctype_to_type_like),
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -886,7 +994,7 @@ mod tests {
         let config = DecompilerConfig::aarch64();
         assert_eq!(config.ptr_size, 64);
         assert_eq!(config.sp_name, "sp");
-        assert_eq!(config.fp_name, "fp");
+        assert_eq!(config.fp_name, "x29");
         assert_eq!(config.arg_regs[0], "x0");
         assert_eq!(config.ret_regs[0], "x0");
         assert!(config.caller_saved_regs.contains("x17"));
@@ -909,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn external_signature_does_not_shrink_richer_recovered_header_params() {
+    fn authoritative_external_signature_can_shrink_recovered_header_params() {
         let recovered = vec![
             ast::CParam {
                 ty: CType::Int(32),
@@ -924,47 +1032,61 @@ mod tests {
                 name: "arg3".to_string(),
             },
         ];
-        let signature = ExternalFunctionSignature {
-            ret_type: Some(CType::Pointer(Box::new(CType::Int(8)))),
-            params: vec![
-                ExternalFunctionParam {
-                    name: "src".to_string(),
-                    ty: Some(CType::Pointer(Box::new(CType::Int(8)))),
-                },
-                ExternalFunctionParam {
-                    name: "len".to_string(),
-                    ty: Some(CType::UInt(64)),
-                },
+        let signature = signature_spec(
+            Some(CType::Pointer(Box::new(CType::Int(8)))),
+            vec![
+                ("src", Some(CType::Pointer(Box::new(CType::Int(8))))),
+                ("len", Some(CType::UInt(64))),
             ],
-        };
+        );
+
+        let params = merge_params_with_external_signature(recovered, Some(&signature));
+        assert_eq!(
+            params.len(),
+            2,
+            "typed/named external signature should be authoritative for the visible header"
+        );
+        assert_eq!(params[0].name, "src");
+        assert_eq!(params[1].name, "len");
+        assert!(matches!(params[1].ty, CType::UInt(64)));
+    }
+
+    #[test]
+    fn generic_external_signature_does_not_shrink_richer_recovered_header_params() {
+        let recovered = vec![
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg1".to_string(),
+            },
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg2".to_string(),
+            },
+            ast::CParam {
+                ty: CType::Int(32),
+                name: "arg3".to_string(),
+            },
+        ];
+        let signature = signature_spec(None, vec![("arg1", None), ("arg2", None)]);
 
         let params = merge_params_with_external_signature(recovered, Some(&signature));
         assert_eq!(
             params.len(),
             3,
-            "external signature should not shrink a richer recovered header"
+            "generic external signature should not hide richer recovered params"
         );
-        assert_eq!(params[0].name, "src");
-        assert_eq!(params[1].name, "len");
         assert_eq!(params[2].name, "arg3");
-        assert!(matches!(params[1].ty, CType::UInt(64)));
     }
 
     #[test]
     fn external_signature_can_extend_empty_recovered_header_params() {
-        let signature = ExternalFunctionSignature {
-            ret_type: None,
-            params: vec![
-                ExternalFunctionParam {
-                    name: "buf".to_string(),
-                    ty: Some(CType::Pointer(Box::new(CType::Int(8)))),
-                },
-                ExternalFunctionParam {
-                    name: "count".to_string(),
-                    ty: Some(CType::UInt(64)),
-                },
+        let signature = signature_spec(
+            None,
+            vec![
+                ("buf", Some(CType::Pointer(Box::new(CType::Int(8))))),
+                ("count", Some(CType::UInt(64))),
             ],
-        };
+        );
 
         let params = merge_params_with_external_signature(Vec::new(), Some(&signature));
         assert_eq!(params.len(), 2);
@@ -1010,19 +1132,16 @@ mod tests {
         );
 
         let mut decompiler = Decompiler::new(DecompilerConfig::x86_64());
-        decompiler.set_function_signature(Some(ExternalFunctionSignature {
-            ret_type: Some(CType::Int(64)),
-            params: vec![
-                ExternalFunctionParam {
-                    name: "zzz_first".to_string(),
-                    ty: Some(CType::Int(64)),
-                },
-                ExternalFunctionParam {
-                    name: "aaa_second".to_string(),
-                    ty: Some(CType::Int(64)),
-                },
-            ],
-        }));
+        decompiler.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(
+                Some(CType::Int(64)),
+                vec![
+                    ("zzz_first", Some(CType::Int(64))),
+                    ("aaa_second", Some(CType::Int(64))),
+                ],
+            )),
+            ..FunctionTypeFacts::default()
+        });
 
         let built_first = decompiler.build_function(&func);
         let built_second = decompiler.build_function(&func);
@@ -1090,8 +1209,8 @@ mod tests {
 
         assert_eq!(first, second, "predicate-heavy text should be byte-stable");
         assert!(
-            first.contains("return (int64_t)(arg1 !="),
-            "decompiled predicate should use a direct comparison"
+            first.contains("return (int64_t)(arg1 !=") || first.contains("return arg1 != 19;"),
+            "decompiled predicate should use a direct comparison, got:\n{first}"
         );
         assert!(
             !first.contains("0 != 0"),
@@ -1100,6 +1219,822 @@ mod tests {
         assert!(
             !first.contains("zf_"),
             "decompiled predicate should not leak flag temporaries"
+        );
+    }
+
+    #[test]
+    fn explicit_external_struct_context_drives_arm64_indexed_member_rendering() {
+        use std::collections::BTreeMap;
+
+        let block = r2ssa::SSABlock {
+            addr: 0x100000e40,
+            size: 96,
+            ops: vec![
+                SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                },
+                SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                },
+                SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 2, 8),
+                    a: r2ssa::SSAVar::new("X10", 1, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("X10", 2, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 2, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 2, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W2", 0, 4),
+                },
+                SSAOp::Return {
+                    target: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+            ],
+        };
+
+        let raw = R2ILBlock {
+            addr: block.addr,
+            size: block.size,
+            ops: vec![R2ILOp::Return {
+                target: Varnode::constant(0, 8),
+            }],
+            switch_info: None,
+            op_metadata: Default::default(),
+        };
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_struct_array_index");
+
+        let struct_name = "sla_struct_explicit_demo".to_string();
+        let mut type_db = ExternalTypeDb::default();
+        type_db.structs.insert(
+            struct_name.clone(),
+            ExternalStruct {
+                name: struct_name.clone(),
+                fields: BTreeMap::from([
+                    (
+                        8,
+                        ExternalField {
+                            name: "third".to_string(),
+                            offset: 8,
+                            ty: Some("int32_t".to_string()),
+                        },
+                    ),
+                    (
+                        0x34,
+                        ExternalField {
+                            name: "fourteenth".to_string(),
+                            offset: 0x34,
+                            ty: Some("int32_t".to_string()),
+                        },
+                    ),
+                ]),
+            },
+        );
+
+        let mut decompiler = Decompiler::new(DecompilerConfig::aarch64());
+        decompiler.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(
+                Some(CType::Int(64)),
+                vec![
+                    ("arg1", Some(CType::ptr(CType::Struct(struct_name)))),
+                    ("arg2", Some(CType::Int(32))),
+                    ("arg3", Some(CType::Int(32))),
+                ],
+            )),
+            external_type_db: type_db,
+            ..FunctionTypeFacts::default()
+        });
+
+        let output = decompiler.decompile(&func);
+        assert!(
+            output.contains("struct sla_struct_explicit_demo* arg1")
+                || output.contains("struct sla_struct_explicit_demo * arg1"),
+            "explicit struct-typed header should survive, got:\n{output}"
+        );
+        assert!(
+            output.contains("third"),
+            "explicit external field metadata should drive member rendering, got:\n{output}"
+        );
+        assert!(
+            !output.contains("&stack_8") && !output.contains("*(arg2 * 56"),
+            "indexed member render should not fall back to stack-rooted pointer math, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn infer_local_struct_field_accesses_recovers_observed_arm64_struct_array_offsets() {
+        let block = r2ssa::SSABlock {
+            addr: 0x100000e40,
+            size: 96,
+            ops: vec![
+                SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    src: r2ssa::SSAVar::new("SP", 1, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    val: r2ssa::SSAVar::new("W2", 0, 4),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 2, 8),
+                    src: r2ssa::SSAVar::new("SP", 1, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 2, 8),
+                },
+                SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                },
+                SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X11", 1, 8),
+                    src: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 2, 8),
+                    a: r2ssa::SSAVar::new("X10", 1, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                    src: r2ssa::SSAVar::new("X10", 2, 8),
+                },
+                SSAOp::IntCarry {
+                    dst: r2ssa::SSAVar::new("TMPCY", 1, 1),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                SSAOp::IntSCarry {
+                    dst: r2ssa::SSAVar::new("TMPOV", 1, 1),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                SSAOp::IntSLess {
+                    dst: r2ssa::SSAVar::new("TMPNG", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("TMPZR", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 2, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 2, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W8", 0, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 3, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X8", 2, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 3, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 2, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 4, 8),
+                },
+                SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X9", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 2, 4),
+                },
+                SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X9", 4, 8),
+                    a: r2ssa::SSAVar::new("X9", 3, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 2, 8),
+                    src: r2ssa::SSAVar::new("X9", 4, 8),
+                },
+                SSAOp::IntCarry {
+                    dst: r2ssa::SSAVar::new("TMPCY", 2, 1),
+                    a: r2ssa::SSAVar::new("X8", 2, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 2, 8),
+                },
+                SSAOp::IntSCarry {
+                    dst: r2ssa::SSAVar::new("TMPOV", 2, 1),
+                    a: r2ssa::SSAVar::new("X8", 2, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 2, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                    a: r2ssa::SSAVar::new("X8", 2, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 2, 8),
+                },
+                SSAOp::IntSLess {
+                    dst: r2ssa::SSAVar::new("TMPNG", 2, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("TMPZR", 2, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X8", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 5, 8),
+                    a: r2ssa::SSAVar::new("X8", 3, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 2, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 5, 8),
+                },
+                SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X8", 4, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 2, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 5, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                },
+                SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                },
+                SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 4, 8),
+                    a: r2ssa::SSAVar::new("X10", 3, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                    src: r2ssa::SSAVar::new("X10", 4, 8),
+                },
+                SSAOp::IntCarry {
+                    dst: r2ssa::SSAVar::new("TMPCY", 3, 1),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                },
+                SSAOp::IntSCarry {
+                    dst: r2ssa::SSAVar::new("TMPOV", 3, 1),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                },
+                SSAOp::IntSLess {
+                    dst: r2ssa::SSAVar::new("TMPNG", 3, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("TMPZR", 3, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 6, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                    a: r2ssa::SSAVar::new("X9", 6, 8),
+                    b: r2ssa::SSAVar::new("const:34", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                },
+                SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X9", 7, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                },
+                SSAOp::Return {
+                    target: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+            ],
+        };
+
+        let raw = R2ILBlock {
+            addr: block.addr,
+            size: block.size,
+            ops: vec![R2ILOp::Return {
+                target: Varnode::constant(0, 8),
+            }],
+            switch_info: None,
+            op_metadata: Default::default(),
+        };
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_struct_array_index");
+
+        let config = DecompilerConfig::aarch64();
+        let function_names = std::collections::HashMap::new();
+        let strings = std::collections::HashMap::new();
+        let symbols = std::collections::HashMap::new();
+        let type_hints = std::collections::HashMap::new();
+        let mut param_register_aliases = std::collections::HashMap::new();
+        let mut arg_slot_map = std::collections::HashMap::new();
+        for (idx, reg_name) in config.arg_regs.iter().enumerate() {
+            let arg_name = format!("arg{}", idx + 1);
+            for alias in register_alias_names(reg_name) {
+                let lower = alias.to_ascii_lowercase();
+                param_register_aliases.insert(lower.clone(), arg_name.clone());
+                arg_slot_map.insert(lower, idx);
+            }
+        }
+        let env = analysis::PassEnv {
+            ptr_size: config.ptr_size,
+            sp_name: &config.sp_name,
+            fp_name: &config.fp_name,
+            ret_reg_name: config.ret_regs.first().map(String::as_str).unwrap_or("x0"),
+            function_names: &function_names,
+            strings: &strings,
+            symbols: &symbols,
+            arg_regs: &config.arg_regs,
+            param_register_aliases: &param_register_aliases,
+            caller_saved_regs: &config.caller_saved_regs,
+            type_hints: &type_hints,
+            type_oracle: None,
+        };
+        let blocks: Vec<_> = func.blocks().cloned().collect();
+        let use_info = analysis::UseInfo::analyze(&blocks, &env);
+        let profiles = analysis::use_info::collect_local_struct_field_access_profiles(
+            &use_info,
+            &func,
+            &env,
+            &arg_slot_map,
+        );
+        let accesses = infer_local_struct_field_accesses(&func, &config);
+        assert!(
+            accesses.iter().any(|access| access.arg_index == 0
+                && access.field_offset == 0x8
+                && access.is_write),
+            "expected store to arg0+0x8 in semantic field accesses, got {accesses:?}; semantic_values={:?}; forwarded={:?}; profiles={profiles:?}",
+            use_info.semantic_values,
+            use_info.forwarded_values
+        );
+        assert!(
+            accesses.iter().any(|access| access.arg_index == 0
+                && access.field_offset == 0x34
+                && !access.is_write),
+            "expected load from arg0+0x34 in semantic field accesses, got {accesses:?}; semantic_values={:?}; forwarded={:?}; profiles={profiles:?}",
+            use_info.semantic_values,
+            use_info.forwarded_values
+        );
+    }
+
+    #[test]
+    fn decompile_observed_arm64_struct_array_keeps_indexed_member_loads() {
+        let block = r2ssa::SSABlock {
+            addr: 0x100000e40,
+            size: 96,
+            ops: vec![
+                SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    src: r2ssa::SSAVar::new("SP", 1, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    val: r2ssa::SSAVar::new("W2", 0, 4),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 2, 8),
+                    src: r2ssa::SSAVar::new("SP", 1, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 2, 8),
+                },
+                SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                },
+                SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                },
+                SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 2, 8),
+                    a: r2ssa::SSAVar::new("X10", 1, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("X10", 2, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 2, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 2, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W2", 0, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 3, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X8", 2, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 3, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 2, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 4, 8),
+                },
+                SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X9", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 2, 4),
+                },
+                SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X9", 4, 8),
+                    a: r2ssa::SSAVar::new("X9", 3, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                    a: r2ssa::SSAVar::new("X8", 2, 8),
+                    b: r2ssa::SSAVar::new("X9", 4, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X8", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 5, 8),
+                    a: r2ssa::SSAVar::new("X8", 3, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 2, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 5, 8),
+                },
+                SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X8", 4, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 2, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 5, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                },
+                SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                },
+                SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 4, 8),
+                    a: r2ssa::SSAVar::new("X10", 3, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("X10", 4, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 6, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                    a: r2ssa::SSAVar::new("X9", 6, 8),
+                    b: r2ssa::SSAVar::new("const:34", 0, 8),
+                },
+                SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                },
+                SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X9", 7, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                },
+                SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+                    a: r2ssa::SSAVar::new("X8", 4, 8),
+                    b: r2ssa::SSAVar::new("X9", 7, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X0", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+                },
+                SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("X30", 0, 8),
+                },
+                SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        };
+
+        let raw = R2ILBlock {
+            addr: block.addr,
+            size: block.size,
+            ops: vec![R2ILOp::Return {
+                target: Varnode::constant(0, 8),
+            }],
+            switch_info: None,
+            op_metadata: Default::default(),
+        };
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_struct_array_index");
+
+        let struct_name = "sla_struct_explicit_demo_full".to_string();
+        let mut type_db = ExternalTypeDb::default();
+        type_db.structs.insert(
+            struct_name.clone(),
+            ExternalStruct {
+                name: struct_name.clone(),
+                fields: std::collections::BTreeMap::from([
+                    (
+                        0,
+                        ExternalField {
+                            name: "f_0".to_string(),
+                            offset: 0,
+                            ty: Some("int32_t".to_string()),
+                        },
+                    ),
+                    (
+                        8,
+                        ExternalField {
+                            name: "f_8".to_string(),
+                            offset: 8,
+                            ty: Some("int32_t".to_string()),
+                        },
+                    ),
+                    (
+                        0x34,
+                        ExternalField {
+                            name: "f_34".to_string(),
+                            offset: 0x34,
+                            ty: Some("int32_t".to_string()),
+                        },
+                    ),
+                ]),
+            },
+        );
+
+        let mut decompiler = Decompiler::new(DecompilerConfig::aarch64());
+        decompiler.set_type_facts(FunctionTypeFacts {
+            merged_signature: Some(signature_spec(
+                Some(CType::Int(64)),
+                vec![
+                    ("arg1", Some(CType::ptr(CType::Struct(struct_name)))),
+                    ("arg2", Some(CType::Int(32))),
+                    ("arg3", Some(CType::Int(32))),
+                ],
+            )),
+            external_type_db: type_db,
+            ..FunctionTypeFacts::default()
+        });
+
+        let output = decompiler.decompile(&func);
+        assert!(
+            output.contains("[arg2].f_8"),
+            "indexed-member path should preserve field 0x8, got:\n{output}"
+        );
+        assert!(
+            output.contains("[arg2].f_34"),
+            "indexed-member path should preserve field 0x34, got:\n{output}"
+        );
+        assert!(
+            output.contains("return")
+                && !output.contains("*(arg1 +")
+                && !output.contains("arg2 * 38"),
+            "observed arm64 struct-array return path should stay semantic, got:\n{output}"
         );
     }
 }

@@ -12,6 +12,22 @@ use super::{MAX_STACK_ALIAS_DEPTH, MAX_STACK_OFFSET_DEPTH};
 const LIKELY_NEGATIVE_THRESHOLD: u64 = 0xffffffffffff0000;
 
 impl<'a> FoldingContext<'a> {
+    fn stack_synthetic_name(offset: i64) -> String {
+        if offset < 0 {
+            format!("local_{:x}", (-offset) as u64)
+        } else {
+            format!("stack_{:x}", offset as u64)
+        }
+    }
+
+    fn is_reserved_param_alias_name(&self, name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        self.inputs
+            .param_register_aliases
+            .values()
+            .any(|alias| alias.eq_ignore_ascii_case(&lower))
+    }
+
     /// Try to extract a stack offset from a variable name or its definition.
     pub(crate) fn extract_stack_offset_from_var(&self, var: &SSAVar) -> Option<i64> {
         let name_lower = var.name.to_lowercase();
@@ -21,8 +37,12 @@ impl<'a> FoldingContext<'a> {
             return Some(0);
         }
 
-        // Check if this variable was defined as fp/sp + offset
         let key = var.display_name();
+        if let Some(slot) = self.stack_slots_map().get(&key) {
+            return Some(slot.offset);
+        }
+
+        // Check if this variable was defined as fp/sp + offset
         if let Some(expr) = self.definitions_map().get(&key) {
             return self.extract_offset_from_expr(expr);
         }
@@ -112,6 +132,10 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn arg_alias_for_register_name(&self, reg_name: &str) -> Option<String> {
+        let lower = reg_name.to_ascii_lowercase();
+        if let Some(alias) = self.inputs.param_register_aliases.get(&lower) {
+            return Some(alias.clone());
+        }
         self.inputs.arch.arg_alias_for_register_name(reg_name)
     }
 
@@ -135,6 +159,20 @@ impl<'a> FoldingContext<'a> {
         };
         let dst_name = self.var_name(dst);
         is_generic_arg_name(&dst_name) && dst_name.eq_ignore_ascii_case(&src_alias)
+    }
+
+    pub(super) fn is_entry_arg_alias_store(&self, addr: &SSAVar, val: &SSAVar) -> bool {
+        if val.version != 0 {
+            return false;
+        }
+        if self.arg_alias_for_register_name(&val.name).is_none() {
+            return false;
+        }
+        self.stack_slots_map()
+            .get(&addr.display_name())
+            .map(|slot| slot.offset)
+            .or_else(|| self.extract_stack_offset_from_var(addr))
+            .is_some()
     }
 
     pub(super) fn arg_alias_for_expr(&self, expr: &CExpr) -> Option<String> {
@@ -184,6 +222,22 @@ impl<'a> FoldingContext<'a> {
                 if let Some(stripped) = name.strip_prefix('&') {
                     return Some(stripped.to_string());
                 }
+                let parsed_offset = if name == "saved_fp" {
+                    Some(0)
+                } else if let Some(suffix) = name.strip_prefix("local_") {
+                    i64::from_str_radix(suffix, 16).ok().map(|v| -v)
+                } else if let Some(suffix) = name.strip_prefix("stack_") {
+                    i64::from_str_radix(suffix, 16).ok()
+                } else if let Some(suffix) = name.strip_prefix("arg_") {
+                    i64::from_str_radix(suffix, 16).ok().map(|v| -v)
+                } else {
+                    None
+                };
+                if let Some(offset) = parsed_offset
+                    && let Some(alias) = self.resolve_stack_var(offset)
+                {
+                    return Some(alias);
+                }
                 self.lookup_definition(name)
                     .and_then(|inner| self.resolve_stack_alias_from_addr_expr(&inner, depth + 1))
             }
@@ -214,6 +268,7 @@ impl<'a> FoldingContext<'a> {
     pub(super) fn external_stack_name_for_offset(&self, offset: i64) -> Option<String> {
         if let Some(var) = self.inputs.external_stack_vars.get(&offset)
             && !var.name.is_empty()
+            && !self.is_reserved_param_alias_name(&var.name)
         {
             return Some(var.name.clone());
         }
@@ -224,7 +279,10 @@ impl<'a> FoldingContext<'a> {
             }
             let base_lower = var.base.as_deref().unwrap_or_default().to_ascii_lowercase();
             let is_frame_based = self.inputs.arch.is_frame_pointer_name(&base_lower);
-            if is_frame_based && -*ext_offset == offset {
+            if is_frame_based
+                && -*ext_offset == offset
+                && !self.is_reserved_param_alias_name(&var.name)
+            {
                 return Some(var.name.clone());
             }
         }
@@ -233,7 +291,11 @@ impl<'a> FoldingContext<'a> {
     }
 
     pub(super) fn canonicalize_stack_name(&self, name: &str) -> Option<String> {
-        let offset = if let Some(suffix) = name.strip_prefix("local_") {
+        let offset = if name == "saved_fp" {
+            Some(0)
+        } else if let Some(suffix) = name.strip_prefix("local_") {
+            i64::from_str_radix(suffix, 16).ok()
+        } else if let Some(suffix) = name.strip_prefix("stack_") {
             i64::from_str_radix(suffix, 16).ok()
         } else if let Some(suffix) = name.strip_prefix("arg_") {
             i64::from_str_radix(suffix, 16).ok().map(|v| -v)
@@ -246,15 +308,32 @@ impl<'a> FoldingContext<'a> {
 
     /// Resolve a stack variable name by signed stack offset.
     pub fn resolve_stack_var(&self, offset: i64) -> Option<String> {
-        self.stack_vars_map()
+        let resolved = self
+            .stack_vars_map()
             .get(&offset)
             .cloned()
             .map(|name| self.canonicalize_stack_name(&name).unwrap_or(name))
-            .or_else(|| self.external_stack_name_for_offset(offset))
+            .or_else(|| self.external_stack_name_for_offset(offset));
+        resolved.map(|name| {
+            if self.is_reserved_param_alias_name(&name) {
+                Self::stack_synthetic_name(offset)
+            } else {
+                name
+            }
+        })
     }
 
     pub(super) fn rewrite_stack_expr(&self, expr: CExpr) -> CExpr {
         let rewritten = expr.map_children(&mut |child| self.rewrite_stack_expr(child));
+
+        if let CExpr::Var(name) = &rewritten
+            && let Some(alias) =
+                self.resolve_stack_alias_from_addr_expr(&CExpr::Var(name.clone()), 0)
+            && alias != *name
+            && !super::op_lower::is_generic_stack_placeholder_alias(&alias)
+        {
+            return CExpr::Var(alias);
+        }
 
         if matches!(
             rewritten,
@@ -264,13 +343,16 @@ impl<'a> FoldingContext<'a> {
             } | CExpr::Paren(_)
                 | CExpr::Cast { .. }
         ) && let Some(alias) = self.resolve_stack_alias_from_addr_expr(&rewritten, 0)
+            && !super::op_lower::is_generic_stack_placeholder_alias(&alias)
         {
             return CExpr::Var(alias);
         }
 
         match rewritten {
             CExpr::Deref(inner) => {
-                if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&inner, 0) {
+                if let Some(alias) = self.resolve_stack_alias_from_addr_expr(&inner, 0)
+                    && !super::op_lower::is_generic_stack_placeholder_alias(&alias)
+                {
                     return CExpr::Var(alias);
                 }
                 if let Some(var_name) = self.extract_known_stack_var_name(&inner) {

@@ -80,9 +80,9 @@ endif
 # Install plugins
 install: $(ANAL_PLUGIN_SO) $(ARCH_PLUGIN_SO)
 	@mkdir -p $(R2_PLUGIN_DIR)
+	rm -f $(R2_PLUGIN_DIR)/$(RUST_LIB).$(RUST_LIB_EXT)
 	cp $(ANAL_PLUGIN_SO) $(R2_PLUGIN_DIR)/
 	cp $(ARCH_PLUGIN_SO) $(R2_PLUGIN_DIR)/
-	cp $(RUST_BUILD_DIR)/$(RUST_LIB).$(RUST_LIB_EXT) $(R2_PLUGIN_DIR)/
 	@echo "Installed to $(R2_PLUGIN_DIR)"
 
 # Uninstall plugins

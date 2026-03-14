@@ -18,7 +18,7 @@ mod helpers;
 mod types;
 
 use r2il::serialize::UserOpDef;
-use r2il::{ArchSpec, R2ILBlock, R2ILOp, serialize, validate_block_full};
+use r2il::{ArchSpec, R2ILBlock, R2ILOp, Varnode, serialize, validate_block_full};
 use r2sleigh_export::{
     ExportFormat, InstructionAction, InstructionExportInput, export_instruction, op_json_named,
 };
@@ -28,10 +28,12 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
 use std::slice;
-use types::{parse_const_value, recover_vars_arch_profile, size_to_type, ssa_var_block_key};
+use types::{recover_vars_arch_profile, size_to_type, ssa_var_block_key};
 
 #[cfg(test)]
 use analysis::ssa::{r2il_block_defuse_json, r2il_block_to_ssa_json};
+#[cfg(test)]
+use types::parse_const_value;
 
 /// Opaque context handle for C API.
 pub struct R2ILContext {
@@ -496,6 +498,36 @@ pub extern "C" fn r2il_lift_block(
     }
 }
 
+/// Rewrite the logical address and size of a lifted block without touching its lifted ops.
+///
+/// This is used by the C wrapper to keep CFG ownership stable when a block must be
+/// re-lifted from a recovered instruction boundary inside the original radare2 block.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_rewrite_layout(block: *mut R2ILBlock, addr: u64, size: u32) {
+    if block.is_null() {
+        return;
+    }
+
+    let block = unsafe { &mut *block };
+    block.addr = addr;
+    block.size = size;
+}
+
+/// Create a synthetic direct-branch block for CFG healing.
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_new_branch(
+    addr: u64,
+    size: u32,
+    target: u64,
+    target_size: u32,
+) -> *mut R2ILBlock {
+    let mut block = R2ILBlock::new(addr, size);
+    block.push(R2ILOp::Branch {
+        target: Varnode::constant(target, target_size.max(1)),
+    });
+    Box::into_raw(Box::new(block))
+}
+
 /// Enable/disable semantic metadata auto-population during lifting.
 #[unsafe(no_mangle)]
 pub extern "C" fn r2il_set_semantic_metadata_enabled(ctx: *mut R2ILContext, enabled: bool) {
@@ -895,6 +927,16 @@ pub extern "C" fn r2il_block_fail(block: *const R2ILBlock) -> u64 {
     0
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn r2il_block_has_trailing_indirect_branch(block: *const R2ILBlock) -> bool {
+    if block.is_null() {
+        return false;
+    }
+
+    let blk = unsafe { &*block };
+    matches!(blk.ops.last(), Some(R2ILOp::BranchInd { .. }))
+}
+
 /// Free a string returned by r2il functions.
 #[unsafe(no_mangle)]
 pub extern "C" fn r2il_string_free(s: *mut c_char) {
@@ -905,7 +947,6 @@ pub extern "C" fn r2il_string_free(s: *mut c_char) {
 
 // ========== Typed Analysis FFI ==========
 
-use r2il::Varnode;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Helper: extract all register varnodes that are read by an operation.
@@ -1882,7 +1923,9 @@ fn resolve_stack_addr_inner(
     }
 }
 
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Deserialize;
+use serde::Serialize;
 
 /// Get registers written by the block as JSON array of names.
 /// Caller must free the returned string with r2il_string_free().
@@ -2121,6 +2164,7 @@ fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
         BranchInd { .. } => "BranchInd",
         Call { .. } => "Call",
         CallInd { .. } => "CallInd",
+        CallDefine { .. } => "CallDefine",
         Return { .. } => "Return",
         FloatAdd { .. } => "FloatAdd",
         FloatSub { .. } => "FloatSub",
@@ -2331,10 +2375,40 @@ fn decompiler_max_blocks() -> usize {
         .unwrap_or(200)
 }
 
+fn decompiler_cfg_guard_reason_from_summary(summary: &r2ssa::CFGRiskSummary) -> Option<String> {
+    if summary.loop_count > 8 || summary.back_edge_count > 16 {
+        return Some(format!(
+            "complex loop graph (loops={}, back_edges={})",
+            summary.loop_count, summary.back_edge_count
+        ));
+    }
+
+    if summary.loop_count > 4 && summary.block_count >= 96 && summary.max_switch_cases >= 32 {
+        return Some(format!(
+            "large dense switch in looped CFG (blocks={}, loops={}, max_switch_cases={})",
+            summary.block_count, summary.loop_count, summary.max_switch_cases
+        ));
+    }
+
+    None
+}
+
+fn decompiler_cfg_guard_reason(blocks: &[R2ILBlock]) -> Option<String> {
+    let ssa_func = r2ssa::SSAFunction::from_blocks_raw_no_arch(blocks)?;
+    decompiler_cfg_guard_reason_from_summary(&ssa_func.cfg_risk_summary())
+}
+
 fn decompile_block_guard_fallback(func_name: &str, blocks: usize, max_blocks: usize) -> String {
     format!(
         "/* r2dec fallback: skipped decompilation for {} ({} blocks > limit {}). Set SLEIGH_DEC_MAX_BLOCKS to override. */",
         func_name, blocks, max_blocks
+    )
+}
+
+fn decompile_artifact_guard_fallback(func_name: &str, reason: &str) -> String {
+    format!(
+        "/* r2dec fallback: skipped decompilation for {} ({}) */",
+        func_name, reason
     )
 }
 
@@ -2362,6 +2436,7 @@ pub extern "C" fn r2dec_function(
     CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AfcfjArg {
     #[serde(default)]
@@ -2370,6 +2445,7 @@ struct AfcfjArg {
     ty: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AfcfjFunction {
     #[serde(default, rename = "return")]
@@ -2380,6 +2456,7 @@ struct AfcfjFunction {
     args: Vec<AfcfjArg>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 #[allow(dead_code)]
@@ -2389,6 +2466,7 @@ enum AfvjRef {
     Other(serde_json::Value),
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AfvjVar {
     #[serde(default)]
@@ -2399,6 +2477,7 @@ struct AfvjVar {
     reference: Option<AfvjRef>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct AfvjPayload {
     #[serde(default)]
@@ -2409,7 +2488,11 @@ struct AfvjPayload {
     sp: Vec<AfvjVar>,
 }
 
-fn parse_external_reg_params(json_str: &str, ptr_bits: u32) -> Vec<r2dec::ExternalRegisterParam> {
+#[cfg(test)]
+fn parse_external_reg_params(
+    json_str: &str,
+    ptr_bits: u32,
+) -> Vec<r2types::ExternalRegisterParamSpec> {
     let payload = match serde_json::from_str::<AfvjPayload>(json_str) {
         Ok(v) => v,
         Err(_) => return Vec::new(),
@@ -2427,12 +2510,14 @@ fn parse_external_reg_params(json_str: &str, ptr_bits: u32) -> Vec<r2dec::Extern
             if !is_generic_arg_name(&name) {
                 name = uniquify_name(name, &mut used_names);
             }
-            r2dec::ExternalRegisterParam {
+            r2types::ExternalRegisterParamSpec {
                 name,
                 ty: entry
                     .ty
                     .as_deref()
-                    .and_then(|raw| parse_external_type(raw, ptr_bits)),
+                    .and_then(|raw| parse_external_type(raw, ptr_bits))
+                    .as_ref()
+                    .map(ctype_to_type_like),
                 reg: entry
                     .reference
                     .and_then(|r| match r {
@@ -2445,10 +2530,11 @@ fn parse_external_reg_params(json_str: &str, ptr_bits: u32) -> Vec<r2dec::Extern
         .collect()
 }
 
+#[cfg(test)]
 fn merge_signature_with_reg_params(
-    signature: Option<r2dec::ExternalFunctionSignature>,
-    reg_params: Vec<r2dec::ExternalRegisterParam>,
-) -> Option<r2dec::ExternalFunctionSignature> {
+    signature: Option<r2types::FunctionSignatureSpec>,
+    reg_params: Vec<r2types::ExternalRegisterParamSpec>,
+) -> Option<r2types::FunctionSignatureSpec> {
     if reg_params.is_empty() {
         return signature;
     }
@@ -2457,7 +2543,7 @@ fn merge_signature_with_reg_params(
     if sig.params.is_empty() {
         sig.params = reg_params
             .into_iter()
-            .map(|param| r2dec::ExternalFunctionParam {
+            .map(|param| r2types::FunctionParamSpec {
                 name: param.name,
                 ty: param.ty,
             })
@@ -2474,7 +2560,7 @@ fn merge_signature_with_reg_params(
                 existing.name = reg_param.name;
             }
         } else {
-            sig.params.push(r2dec::ExternalFunctionParam {
+            sig.params.push(r2types::FunctionParamSpec {
                 name: reg_param.name,
                 ty: reg_param.ty,
             });
@@ -2542,6 +2628,7 @@ fn uniquify_name(base: String, used: &mut std::collections::HashSet<String>) -> 
     }
 }
 
+#[cfg(test)]
 fn is_generic_arg_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     lower
@@ -2550,6 +2637,7 @@ fn is_generic_arg_name(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn is_low_quality_stack_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.starts_with("var_")
@@ -2560,108 +2648,32 @@ fn is_low_quality_stack_name(name: &str) -> bool {
 }
 
 fn parse_external_type(raw_ty: &str, ptr_bits: u32) -> Option<r2dec::CType> {
-    let mut ty = normalize_external_type_name(raw_ty);
-    if ty.is_empty() {
-        return None;
-    }
-
-    let mut array_size = None;
-    if let Some(open) = ty.rfind('[')
-        && ty.ends_with(']')
-    {
-        let len_str = ty[open + 1..ty.len() - 1].trim();
-        if !len_str.is_empty() {
-            array_size = len_str.parse::<usize>().ok();
-        }
-        ty = ty[..open].trim().to_string();
-    }
-
-    let mut ptr_count = 0usize;
-    loop {
-        let trimmed = ty.trim_end();
-        if let Some(stripped) = trimmed.strip_suffix('*') {
-            ptr_count += 1;
-            ty = stripped.trim_end().to_string();
-        } else {
-            break;
-        }
-    }
-
-    let base_key = ty
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("")
-        .to_ascii_lowercase();
-    let mut base = if let Some(rest) = base_key.strip_prefix("int")
-        && let Some(bits) = rest.strip_suffix("_t")
-    {
-        bits.parse::<u32>().ok().map(r2dec::CType::Int)
-    } else if let Some(rest) = base_key.strip_prefix("uint")
-        && let Some(bits) = rest.strip_suffix("_t")
-    {
-        bits.parse::<u32>().ok().map(r2dec::CType::UInt)
-    } else {
-        match base_key.as_str() {
-            "void" => Some(r2dec::CType::Void),
-            "bool" => Some(r2dec::CType::Bool),
-            "char" | "signedchar" => Some(r2dec::CType::Int(8)),
-            "unsignedchar" => Some(r2dec::CType::UInt(8)),
-            "short" | "shortint" | "signedshort" | "signedshortint" => Some(r2dec::CType::Int(16)),
-            "unsignedshort" | "unsignedshortint" => Some(r2dec::CType::UInt(16)),
-            "signed" | "int" | "signedint" => Some(r2dec::CType::Int(32)),
-            "unsigned" | "unsignedint" => Some(r2dec::CType::UInt(32)),
-            "long" | "longint" | "signedlong" | "signedlongint" | "longlong" | "longlongint"
-            | "signedlonglong" | "signedlonglongint" => Some(r2dec::CType::Int(ptr_bits)),
-            "unsignedlong" | "unsignedlongint" | "unsignedlonglong" | "unsignedlonglongint" => {
-                Some(r2dec::CType::UInt(ptr_bits))
-            }
-            "size_t" => Some(r2dec::CType::UInt(ptr_bits)),
-            "ssize_t" => Some(r2dec::CType::Int(ptr_bits)),
-            "float" => Some(r2dec::CType::Float(32)),
-            "double" => Some(r2dec::CType::Float(64)),
-            _ if ty.to_ascii_lowercase().starts_with("struct ") => ty
-                .split_whitespace()
-                .nth(1)
-                .map(|name| r2dec::CType::Struct(name.to_string())),
-            _ if ty.to_ascii_lowercase().starts_with("union ") => ty
-                .split_whitespace()
-                .nth(1)
-                .map(|name| r2dec::CType::Union(name.to_string())),
-            _ if ty.to_ascii_lowercase().starts_with("enum ") => ty
-                .split_whitespace()
-                .nth(1)
-                .map(|name| r2dec::CType::Enum(name.to_string())),
-            _ => None,
-        }
-    }?;
-
-    if let Some(size) = array_size {
-        base = r2dec::CType::Array(Box::new(base), Some(size));
-    }
-    for _ in 0..ptr_count {
-        base = r2dec::CType::ptr(base);
-    }
-    Some(base)
+    let normalized = normalize_external_type_name(raw_ty);
+    let parsed = r2types::parse_type_like_spec(&normalized, ptr_bits)?;
+    Some(type_like_to_ctype(&parsed))
 }
 
+#[cfg(test)]
 fn parse_external_signature(
     json_str: &str,
     ptr_bits: u32,
-) -> Option<r2dec::ExternalFunctionSignature> {
+) -> Option<r2types::FunctionSignatureSpec> {
     let entries = serde_json::from_str::<Vec<AfcfjFunction>>(json_str).ok()?;
     parse_afcfj_signature_entries(entries, ptr_bits)
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct ParsedSignatureContext {
-    current: Option<r2dec::ExternalFunctionSignature>,
-    known: std::collections::HashMap<String, r2dec::types::FunctionType>,
+    current: Option<r2types::FunctionSignatureSpec>,
+    known: std::collections::HashMap<String, r2types::FunctionType>,
 }
 
+#[cfg(test)]
 fn parse_afcfj_signature_entries(
     entries: Vec<AfcfjFunction>,
     ptr_bits: u32,
-) -> Option<r2dec::ExternalFunctionSignature> {
+) -> Option<r2types::FunctionSignatureSpec> {
     let first = entries.into_iter().next()?;
 
     let mut used_names = std::collections::HashSet::new();
@@ -2677,17 +2689,19 @@ fn parse_afcfj_signature_entries(
             if !is_generic_arg_name(&name) {
                 name = uniquify_name(name, &mut used_names);
             }
-            r2dec::ExternalFunctionParam {
+            r2types::FunctionParamSpec {
                 name,
                 ty: arg
                     .ty
                     .as_deref()
-                    .and_then(|raw| parse_external_type(raw, ptr_bits)),
+                    .and_then(|raw| parse_external_type(raw, ptr_bits))
+                    .as_ref()
+                    .map(ctype_to_type_like),
             }
         })
         .collect();
     if params.len() == 1
-        && params[0].ty == Some(r2dec::CType::Void)
+        && params[0].ty == Some(r2types::CTypeLike::Void)
         && is_generic_arg_name(&params[0].name)
     {
         params.clear();
@@ -2696,15 +2710,18 @@ fn parse_afcfj_signature_entries(
     let ret_type_raw = first.return_type.or(first.ret);
     let ret_type = ret_type_raw
         .as_deref()
-        .and_then(|raw| parse_external_type(raw, ptr_bits));
+        .and_then(|raw| parse_external_type(raw, ptr_bits))
+        .as_ref()
+        .map(ctype_to_type_like);
 
-    Some(r2dec::ExternalFunctionSignature { ret_type, params })
+    Some(r2types::FunctionSignatureSpec { ret_type, params })
 }
 
+#[cfg(test)]
 fn parse_afcfj_signature_value(
     value: &serde_json::Value,
     ptr_bits: u32,
-) -> Option<r2dec::ExternalFunctionSignature> {
+) -> Option<r2types::FunctionSignatureSpec> {
     if value.is_array() {
         let entries = serde_json::from_value::<Vec<AfcfjFunction>>(value.clone()).ok()?;
         return parse_afcfj_signature_entries(entries, ptr_bits);
@@ -2716,10 +2733,11 @@ fn parse_afcfj_signature_value(
     None
 }
 
+#[cfg(test)]
 fn maybe_insert_known_signature(
-    known: &mut std::collections::HashMap<String, r2dec::types::FunctionType>,
+    known: &mut std::collections::HashMap<String, r2types::FunctionType>,
     name: &str,
-    sig: r2dec::types::FunctionType,
+    sig: r2types::FunctionType,
 ) {
     if name.is_empty() {
         return;
@@ -2735,10 +2753,11 @@ fn maybe_insert_known_signature(
     }
 }
 
+#[cfg(test)]
 fn parse_known_function_signatures(
     value: &serde_json::Value,
     ptr_bits: u32,
-) -> std::collections::HashMap<String, r2dec::types::FunctionType> {
+) -> std::collections::HashMap<String, r2types::FunctionType> {
     let mut out = std::collections::HashMap::new();
     let Some(entries) = value.as_array() else {
         return out;
@@ -2761,16 +2780,21 @@ fn parse_known_function_signatures(
                         .get("type")
                         .or_else(|| arg_obj.get("ty"))
                         .and_then(|v| v.as_str())
-                        .and_then(|raw| parse_external_type(raw, ptr_bits));
-                    params.push(ty.unwrap_or(r2dec::CType::Unknown));
+                        .and_then(|raw| r2types::parse_type_like_spec(raw, ptr_bits));
+                    params.push(ty.unwrap_or(r2types::CTypeLike::Unknown));
                 } else if let Some(raw) = arg.as_str() {
-                    params
-                        .push(parse_external_type(raw, ptr_bits).unwrap_or(r2dec::CType::Unknown));
+                    params.push(
+                        r2types::parse_type_like_spec(raw, ptr_bits)
+                            .unwrap_or(r2types::CTypeLike::Unknown),
+                    );
                 }
             }
         } else if let Some(argtypes) = obj.get("argtypes").and_then(|v| v.as_array()) {
             for raw in argtypes.iter().filter_map(|v| v.as_str()) {
-                params.push(parse_external_type(raw, ptr_bits).unwrap_or(r2dec::CType::Unknown));
+                params.push(
+                    r2types::parse_type_like_spec(raw, ptr_bits)
+                        .unwrap_or(r2types::CTypeLike::Unknown),
+                );
             }
         }
 
@@ -2781,19 +2805,19 @@ fn parse_known_function_signatures(
             .or_else(|| obj.get("rettype"))
             .or_else(|| obj.get("type"))
             .and_then(|v| v.as_str())
-            .and_then(|raw| parse_external_type(raw, ptr_bits))
-            .unwrap_or(r2dec::CType::Unknown);
+            .and_then(|raw| r2types::parse_type_like_spec(raw, ptr_bits))
+            .unwrap_or(r2types::CTypeLike::Unknown);
 
         let variadic = obj
             .get("variadic")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        if params.is_empty() && matches!(ret, r2dec::CType::Unknown) {
+        if params.is_empty() && matches!(ret, r2types::CTypeLike::Unknown) {
             continue;
         }
 
-        let sig = r2dec::types::FunctionType {
+        let sig = r2types::FunctionType {
             return_type: ret,
             params,
             variadic,
@@ -2804,6 +2828,7 @@ fn parse_known_function_signatures(
     out
 }
 
+#[cfg(test)]
 fn parse_signature_context(json_str: &str, ptr_bits: u32) -> ParsedSignatureContext {
     let mut parsed = ParsedSignatureContext::default();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
@@ -2830,10 +2855,11 @@ fn parse_signature_context(json_str: &str, ptr_bits: u32) -> ParsedSignatureCont
     parsed
 }
 
+#[cfg(test)]
 fn parse_external_stack_vars(
     json_str: &str,
     ptr_bits: u32,
-) -> std::collections::HashMap<i64, r2dec::ExternalStackVar> {
+) -> std::collections::HashMap<i64, r2types::ExternalStackVarSpec> {
     let payload = match serde_json::from_str::<AfvjPayload>(json_str) {
         Ok(v) => v,
         Err(_) => return std::collections::HashMap::new(),
@@ -2854,12 +2880,14 @@ fn parse_external_stack_vars(
             continue;
         };
         let var_name = uniquify_name(clean_name, &mut used_names);
-        let candidate = r2dec::ExternalStackVar {
+        let candidate = r2types::ExternalStackVarSpec {
             name: var_name,
             ty: entry
                 .ty
                 .as_deref()
-                .and_then(|raw| parse_external_type(raw, ptr_bits)),
+                .and_then(|raw| parse_external_type(raw, ptr_bits))
+                .as_ref()
+                .map(ctype_to_type_like),
             base: Some(base),
         };
 
@@ -2891,9 +2919,7 @@ pub extern "C" fn r2dec_function_with_context(
     func_names_json: *const c_char,
     strings_json: *const c_char,
     symbols_json: *const c_char,
-    signature_json: *const c_char,
-    stack_vars_json: *const c_char,
-    types_json: *const c_char,
+    external_context_json: *const c_char,
 ) -> *mut c_char {
     let Some(ctx_view) = context::require_ctx_view(ctx) else {
         return ptr::null_mut();
@@ -2915,9 +2941,13 @@ pub extern "C" fn r2dec_function_with_context(
     let func_names_str = helpers::cstr_or_default(func_names_json, "{}");
     let strings_str = helpers::cstr_or_default(strings_json, "{}");
     let symbols_str = helpers::cstr_or_default(symbols_json, "{}");
-    let signature_str = helpers::cstr_or_default(signature_json, "[]");
-    let stack_vars_str = helpers::cstr_or_default(stack_vars_json, "{}");
-    let types_str = helpers::cstr_or_default(types_json, "{}");
+    let external_context_str = helpers::cstr_or_default(external_context_json, "{}");
+    let semantic_metadata_enabled = ctx_view.semantic_metadata_enabled;
+    let reg_type_hints = if semantic_metadata_enabled {
+        types::collect_register_type_hints(block_slice.as_slice(), ctx_view.disasm)
+    } else {
+        std::collections::HashMap::new()
+    };
 
     let arch_clone = ctx_view.arch.cloned();
 
@@ -2928,12 +2958,12 @@ pub extern "C" fn r2dec_function_with_context(
         func_name_str,
         arch_clone,
         ptr_bits,
+        semantic_metadata_enabled,
+        reg_type_hints,
         func_names_str,
         strings_str,
         symbols_str,
-        signature_str,
-        stack_vars_str,
-        types_str,
+        external_context_str,
     );
 
     CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
@@ -2944,7 +2974,7 @@ fn run_decompile_on_large_stack(
     decompiler: r2dec::Decompiler,
     ssa_func: r2ssa::SSAFunction,
 ) -> String {
-    const STACK_SIZE: usize = 32 * 1024 * 1024; // 32 MB
+    const STACK_SIZE: usize = 128 * 1024 * 1024; // 128 MB
 
     let handle = std::thread::Builder::new()
         .stack_size(STACK_SIZE)
@@ -3185,6 +3215,103 @@ struct InferredTypeWritebackJson {
     diagnostics: TypeWritebackDiagnosticsJson,
 }
 
+fn evidence_json(evidence: &[r2types::WritebackEvidence]) -> Vec<String> {
+    evidence
+        .iter()
+        .map(|tag| tag.as_str().to_string())
+        .collect()
+}
+
+fn struct_fields_json(fields: &[r2types::StructFieldCandidate]) -> Vec<StructFieldCandidateJson> {
+    fields
+        .iter()
+        .map(|field| StructFieldCandidateJson {
+            name: field.name.clone(),
+            offset: field.offset,
+            field_type: field.field_type.clone(),
+            confidence: field.confidence,
+        })
+        .collect()
+}
+
+fn writeback_plan_json(
+    plan: r2types::TypeWritebackPlan,
+    interproc: InterprocSummaryJson,
+) -> InferredTypeWritebackJson {
+    InferredTypeWritebackJson {
+        function_name: plan.signature.function_name,
+        signature: plan.signature.signature,
+        ret_type: plan.signature.ret_type,
+        params: plan
+            .signature
+            .params
+            .into_iter()
+            .map(|param| InferredParamJson {
+                name: param.name,
+                param_type: param.param_type,
+            })
+            .collect(),
+        callconv: plan.signature.callconv,
+        arch: plan.signature.arch,
+        confidence: plan.signature.confidence,
+        callconv_confidence: plan.signature.callconv_confidence,
+        var_type_candidates: plan
+            .var_type_candidates
+            .into_iter()
+            .map(|candidate| VarTypeCandidateJson {
+                name: candidate.name,
+                kind: candidate.kind,
+                delta: candidate.delta,
+                var_type: candidate.var_type,
+                isarg: candidate.isarg,
+                reg: candidate.reg,
+                size: candidate.size,
+                confidence: candidate.confidence,
+                source: candidate.source.as_str().to_string(),
+                evidence: evidence_json(&candidate.evidence),
+            })
+            .collect(),
+        var_rename_candidates: plan
+            .var_rename_candidates
+            .into_iter()
+            .map(|candidate| VarRenameCandidateJson {
+                name: candidate.name,
+                target_name: candidate.target_name,
+                confidence: candidate.confidence,
+                source: candidate.source.as_str().to_string(),
+                evidence: evidence_json(&candidate.evidence),
+            })
+            .collect(),
+        struct_decls: plan
+            .struct_decls
+            .into_iter()
+            .map(|decl| StructDeclCandidateJson {
+                name: decl.name,
+                decl: decl.decl,
+                confidence: decl.confidence,
+                source: decl.source.as_str().to_string(),
+                fields: struct_fields_json(&decl.fields),
+            })
+            .collect(),
+        global_type_links: plan
+            .global_type_links
+            .into_iter()
+            .map(|candidate| GlobalTypeLinkCandidateJson {
+                addr: candidate.addr,
+                target_type: candidate.target_type,
+                confidence: candidate.confidence,
+                source: candidate.source.as_str().to_string(),
+            })
+            .collect(),
+        interproc,
+        diagnostics: TypeWritebackDiagnosticsJson {
+            conflicts: plan.diagnostics.conflicts,
+            warnings: plan.diagnostics.warnings,
+            solver_warnings: plan.diagnostics.solver_warnings,
+        },
+    }
+}
+
 #[cfg(test)]
 const SIG_WRITEBACK_CONFIDENCE_MIN: u8 = 70;
 #[cfg(test)]
@@ -3382,9 +3509,60 @@ fn collect_type_evidence_for_var(
     evidence
 }
 
+fn type_like_to_ctype(ty: &r2types::CTypeLike) -> r2dec::CType {
+    match ty {
+        r2types::CTypeLike::Void => r2dec::CType::Void,
+        r2types::CTypeLike::Bool => r2dec::CType::Bool,
+        r2types::CTypeLike::Int { bits, signedness } => match signedness {
+            r2types::Signedness::Unsigned => r2dec::CType::UInt(*bits),
+            r2types::Signedness::Signed | r2types::Signedness::Unknown => r2dec::CType::Int(*bits),
+        },
+        r2types::CTypeLike::Float(bits) => r2dec::CType::Float(*bits),
+        r2types::CTypeLike::Pointer(inner) => {
+            r2dec::CType::Pointer(Box::new(type_like_to_ctype(inner)))
+        }
+        r2types::CTypeLike::Array(inner, len) => {
+            r2dec::CType::Array(Box::new(type_like_to_ctype(inner)), *len)
+        }
+        r2types::CTypeLike::Struct(name) => r2dec::CType::Struct(name.clone()),
+        r2types::CTypeLike::Union(name) => r2dec::CType::Union(name.clone()),
+        r2types::CTypeLike::Enum(name) => r2dec::CType::Enum(name.clone()),
+        r2types::CTypeLike::Function | r2types::CTypeLike::Unknown => r2dec::CType::Unknown,
+    }
+}
+
+#[cfg(test)]
+fn ctype_to_type_like(ty: &r2dec::CType) -> r2types::CTypeLike {
+    match ty {
+        r2dec::CType::Void => r2types::CTypeLike::Void,
+        r2dec::CType::Bool => r2types::CTypeLike::Bool,
+        r2dec::CType::Int(bits) => r2types::CTypeLike::Int {
+            bits: *bits,
+            signedness: r2types::Signedness::Signed,
+        },
+        r2dec::CType::UInt(bits) => r2types::CTypeLike::Int {
+            bits: *bits,
+            signedness: r2types::Signedness::Unsigned,
+        },
+        r2dec::CType::Float(bits) => r2types::CTypeLike::Float(*bits),
+        r2dec::CType::Pointer(inner) => {
+            r2types::CTypeLike::Pointer(Box::new(ctype_to_type_like(inner)))
+        }
+        r2dec::CType::Array(inner, len) => {
+            r2types::CTypeLike::Array(Box::new(ctype_to_type_like(inner)), *len)
+        }
+        r2dec::CType::Struct(name) => r2types::CTypeLike::Struct(name.clone()),
+        r2dec::CType::Union(name) => r2types::CTypeLike::Union(name.clone()),
+        r2dec::CType::Enum(name) => r2types::CTypeLike::Enum(name.clone()),
+        r2dec::CType::Function { .. } | r2dec::CType::Typedef(_) | r2dec::CType::Unknown => {
+            r2types::CTypeLike::Unknown
+        }
+    }
+}
+
 fn infer_signature_return_type(
     func: &r2ssa::SSAFunction,
-    type_inference: &r2dec::TypeInference,
+    type_inference: &r2types::TypeInference,
     ptr_bits: u32,
     evidence_ctx: &SignatureTypeEvidenceContext,
 ) -> (r2dec::CType, TypeEvidence) {
@@ -3413,7 +3591,7 @@ fn infer_signature_return_type(
                 continue;
             }
 
-            let initial_ty = type_inference.get_type(target);
+            let initial_ty = type_like_to_ctype(&type_inference.get_type(target));
             let evidence = collect_type_evidence_for_var(evidence_ctx, target, &initial_ty);
             let ty = resolve_evidence_driven_type(initial_ty, target.size, ptr_bits, &evidence);
             candidates.push(ty);
@@ -3626,13 +3804,26 @@ fn compute_callconv_inference(
     }
 }
 
-fn explicit_signature_context_strength(sig: &r2dec::ExternalFunctionSignature) -> u8 {
+#[cfg(test)]
+fn explicit_signature_context_strength(sig: &r2types::FunctionSignatureSpec) -> u8 {
     let typed_params = sig
         .params
         .iter()
-        .filter(|param| param.ty.as_ref().is_some_and(is_informative_type))
+        .filter(|param| {
+            param
+                .ty
+                .as_ref()
+                .map(type_like_to_ctype)
+                .as_ref()
+                .is_some_and(is_informative_type)
+        })
         .count() as u8;
-    let has_ret = sig.ret_type.as_ref().is_some_and(is_informative_type);
+    let has_ret = sig
+        .ret_type
+        .as_ref()
+        .map(type_like_to_ctype)
+        .as_ref()
+        .is_some_and(is_informative_type);
     let mut confidence = 76u8.saturating_add(typed_params.saturating_mul(4)).min(96);
     if has_ret {
         confidence = confidence.saturating_add(6).min(96);
@@ -3694,6 +3885,7 @@ fn is_unmaterialized_aggregate_name(name: &str) -> bool {
     lower.is_empty() || lower == "anon" || lower.starts_with("anon_")
 }
 
+#[cfg(test)]
 fn is_generic_type_string(ty: &str) -> bool {
     let normalized = normalize_external_type_name(ty);
     let lower = normalized.trim().to_ascii_lowercase();
@@ -3796,6 +3988,7 @@ fn build_struct_decl(
     Some(lines.join("\n"))
 }
 
+#[cfg(test)]
 fn parse_existing_var_types(json_str: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
@@ -3829,13 +4022,47 @@ fn parse_existing_var_types(json_str: &str) -> std::collections::HashMap<String,
     out
 }
 
-fn collect_arg_slot_map(arch: Option<&ArchSpec>) -> std::collections::HashMap<String, usize> {
+fn collect_pointer_arg_slot_map(
+    arch: Option<&ArchSpec>,
+    ptr_bits: u32,
+) -> std::collections::HashMap<String, usize> {
     let (arg_regs, _, _) = recover_vars_arch_profile(arch);
+    let arch_name = arch
+        .map(|a| a.name.to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_arm64 = arch_name.contains("aarch64") || arch_name.contains("arm64");
+    let is_x86_64 = arch_name.contains("x86-64")
+        || arch_name.contains("x86_64")
+        || arch_name.contains("amd64")
+        || arch_name.contains("x64");
+    let is_riscv64 = arch_name.contains("riscv64") || arch_name.contains("rv64");
+
     let mut out = std::collections::HashMap::new();
     for (idx, (canonical, aliases)) in arg_regs.iter().enumerate() {
-        out.insert((*canonical).to_string(), idx);
+        let include_alias = |alias: &str| -> bool {
+            if ptr_bits <= 32 {
+                return true;
+            }
+            let alias = alias.to_ascii_lowercase();
+            if is_arm64 {
+                return alias.starts_with('x');
+            }
+            if is_x86_64 {
+                return alias.starts_with('r');
+            }
+            if is_riscv64 {
+                return alias.starts_with('x') || alias.starts_with('a');
+            }
+            alias == canonical.to_ascii_lowercase()
+        };
+
+        if include_alias(canonical) {
+            out.insert((*canonical).to_string(), idx);
+        }
         for alias in *aliases {
-            out.insert((*alias).to_string(), idx);
+            if include_alias(alias) {
+                out.insert((*alias).to_string(), idx);
+            }
         }
     }
     out
@@ -3849,6 +4076,7 @@ struct ArgAddrExpr {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 struct GlobalAddrExpr {
     base: u64,
     offset: i64,
@@ -3865,252 +4093,24 @@ struct StructFieldEvidence {
 
 type SlotTypeOverrides = std::collections::HashMap<usize, String>;
 type SlotFieldProfiles = std::collections::HashMap<usize, std::collections::BTreeMap<u64, String>>;
+type SlotFieldEvidenceMap =
+    std::collections::HashMap<usize, std::collections::BTreeMap<u64, StructFieldEvidence>>;
 type StructInferenceArtifacts = (
     Vec<StructDeclCandidateJson>,
     SlotTypeOverrides,
     SlotFieldProfiles,
 );
 
-fn signed_offset_from_const(raw: u64, ptr_bits: u32) -> i64 {
-    let bits = ptr_bits.clamp(8, 64);
-    if bits == 64 {
-        return raw as i64;
-    }
-    let mask = (1u64 << bits) - 1;
-    let sign = 1u64 << (bits - 1);
-    let v = raw & mask;
-    if (v & sign) != 0 {
-        (v | (!mask)) as i64
-    } else {
-        v as i64
-    }
-}
-
-fn infer_structs_from_ssa(
-    ssa_blocks: &[r2ssa::SSABlock],
-    arch: Option<&ArchSpec>,
+fn build_struct_inference_artifacts_from_field_evidence(
+    slot_field_evidence: SlotFieldEvidenceMap,
     ptr_bits: u32,
     diagnostics: &mut TypeWritebackDiagnosticsJson,
 ) -> StructInferenceArtifacts {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
     use std::hash::{Hash, Hasher};
 
-    let arg_slot_map = collect_arg_slot_map(arch);
-    let mut addr_exprs: HashMap<String, ArgAddrExpr> = HashMap::new();
-    let mut slot_field_evidence: HashMap<usize, BTreeMap<u64, StructFieldEvidence>> =
-        HashMap::new();
-    let offset_bound = 0x4000i64;
-
-    for block in ssa_blocks {
-        for op in &block.ops {
-            // Seed direct arg pointer provenance.
-            op.for_each_source(&mut |src: &r2ssa::SSAVar| {
-                if src.version != 0 {
-                    return;
-                }
-                let key = src.name.to_ascii_lowercase();
-                if let Some(slot) = arg_slot_map.get(key.as_str()).copied() {
-                    addr_exprs
-                        .entry(ssa_var_block_key(block.addr, src))
-                        .or_insert(ArgAddrExpr {
-                            slot,
-                            offset: 0,
-                            confidence: 92,
-                        });
-                }
-            });
-        }
-    }
-
-    // Bounded propagation over pointer expression transforms.
-    for _ in 0..6 {
-        let mut changed = false;
-        for block in ssa_blocks {
-            for op in &block.ops {
-                let addr_of = |var: &r2ssa::SSAVar, map: &HashMap<String, ArgAddrExpr>| {
-                    if var.version == 0 {
-                        let key = var.name.to_ascii_lowercase();
-                        if let Some(slot) = arg_slot_map.get(key.as_str()).copied() {
-                            return Some(ArgAddrExpr {
-                                slot,
-                                offset: 0,
-                                confidence: 92,
-                            });
-                        }
-                    }
-                    map.get(&ssa_var_block_key(block.addr, var)).copied()
-                };
-                let set_expr =
-                    |dst: &r2ssa::SSAVar,
-                     expr: ArgAddrExpr,
-                     map: &mut HashMap<String, ArgAddrExpr>| {
-                        let key = ssa_var_block_key(block.addr, dst);
-                        match map.get(&key).copied() {
-                            Some(prev) if prev.confidence >= expr.confidence => false,
-                            _ => {
-                                map.insert(key, expr);
-                                true
-                            }
-                        }
-                    };
-                match op {
-                    r2ssa::SSAOp::Copy { dst, src }
-                    | r2ssa::SSAOp::Cast { dst, src }
-                    | r2ssa::SSAOp::New { dst, src }
-                    | r2ssa::SSAOp::IntZExt { dst, src }
-                    | r2ssa::SSAOp::IntSExt { dst, src } => {
-                        if let Some(mut expr) = addr_of(src, &addr_exprs) {
-                            expr.confidence = expr.confidence.saturating_sub(2);
-                            changed |= set_expr(dst, expr, &mut addr_exprs);
-                        }
-                    }
-                    r2ssa::SSAOp::Phi { dst, sources } => {
-                        let mut selected = None;
-                        for src in sources {
-                            let Some(expr) = addr_of(src, &addr_exprs) else {
-                                continue;
-                            };
-                            selected = match selected {
-                                None => Some(expr),
-                                Some(prev)
-                                    if prev.slot == expr.slot && prev.offset == expr.offset =>
-                                {
-                                    Some(ArgAddrExpr {
-                                        slot: prev.slot,
-                                        offset: prev.offset,
-                                        confidence: prev.confidence.max(expr.confidence),
-                                    })
-                                }
-                                _ => None,
-                            };
-                            if selected.is_none() {
-                                break;
-                            }
-                        }
-                        if let Some(mut expr) = selected {
-                            expr.confidence = expr.confidence.saturating_sub(3);
-                            changed |= set_expr(dst, expr, &mut addr_exprs);
-                        }
-                    }
-                    r2ssa::SSAOp::IntAdd { dst, a, b } => {
-                        if let Some(base) = addr_of(a, &addr_exprs)
-                            && let Some(raw) = parse_const_value(&b.name)
-                        {
-                            let off = base
-                                .offset
-                                .saturating_add(signed_offset_from_const(raw, ptr_bits));
-                            if (-offset_bound..=offset_bound).contains(&off) {
-                                changed |= set_expr(
-                                    dst,
-                                    ArgAddrExpr {
-                                        slot: base.slot,
-                                        offset: off,
-                                        confidence: base.confidence.saturating_sub(1),
-                                    },
-                                    &mut addr_exprs,
-                                );
-                            }
-                        } else if let Some(base) = addr_of(b, &addr_exprs)
-                            && let Some(raw) = parse_const_value(&a.name)
-                        {
-                            let off = base
-                                .offset
-                                .saturating_add(signed_offset_from_const(raw, ptr_bits));
-                            if (-offset_bound..=offset_bound).contains(&off) {
-                                changed |= set_expr(
-                                    dst,
-                                    ArgAddrExpr {
-                                        slot: base.slot,
-                                        offset: off,
-                                        confidence: base.confidence.saturating_sub(1),
-                                    },
-                                    &mut addr_exprs,
-                                );
-                            }
-                        }
-                    }
-                    r2ssa::SSAOp::IntSub { dst, a, b } => {
-                        if let Some(base) = addr_of(a, &addr_exprs)
-                            && let Some(raw) = parse_const_value(&b.name)
-                        {
-                            let off = base
-                                .offset
-                                .saturating_sub(signed_offset_from_const(raw, ptr_bits));
-                            if (-offset_bound..=offset_bound).contains(&off) {
-                                changed |= set_expr(
-                                    dst,
-                                    ArgAddrExpr {
-                                        slot: base.slot,
-                                        offset: off,
-                                        confidence: base.confidence.saturating_sub(1),
-                                    },
-                                    &mut addr_exprs,
-                                );
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    for block in ssa_blocks {
-        for op in &block.ops {
-            let resolve_addr = |addr: &r2ssa::SSAVar| -> Option<ArgAddrExpr> {
-                if addr.version == 0 {
-                    let key = addr.name.to_ascii_lowercase();
-                    if let Some(slot) = arg_slot_map.get(key.as_str()).copied() {
-                        return Some(ArgAddrExpr {
-                            slot,
-                            offset: 0,
-                            confidence: 92,
-                        });
-                    }
-                }
-                addr_exprs
-                    .get(&ssa_var_block_key(block.addr, addr))
-                    .copied()
-            };
-            match op {
-                r2ssa::SSAOp::Load { dst, addr, .. } => {
-                    if let Some(expr) = resolve_addr(addr)
-                        && (0..=offset_bound).contains(&expr.offset)
-                    {
-                        let entry = slot_field_evidence
-                            .entry(expr.slot)
-                            .or_default()
-                            .entry(expr.offset as u64)
-                            .or_default();
-                        entry.reads = entry.reads.saturating_add(1);
-                        *entry.widths.entry(dst.size).or_insert(0) += 1;
-                        *entry.type_votes.entry(size_to_type(dst.size)).or_insert(0) += 1;
-                    }
-                }
-                r2ssa::SSAOp::Store { addr, val, .. } => {
-                    if let Some(expr) = resolve_addr(addr)
-                        && (0..=offset_bound).contains(&expr.offset)
-                    {
-                        let entry = slot_field_evidence
-                            .entry(expr.slot)
-                            .or_default()
-                            .entry(expr.offset as u64)
-                            .or_default();
-                        entry.writes = entry.writes.saturating_add(1);
-                        *entry.widths.entry(val.size).or_insert(0) += 1;
-                        *entry.type_votes.entry(size_to_type(val.size)).or_insert(0) += 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     let mut struct_decls = Vec::new();
-    let mut slot_type_overrides = HashMap::new();
+    let mut slot_type_overrides = std::collections::HashMap::new();
     let mut slot_fields_for_links: HashMap<usize, BTreeMap<u64, String>> = HashMap::new();
     let mut slots: Vec<usize> = slot_field_evidence.keys().copied().collect();
     slots.sort_unstable();
@@ -4187,11 +4187,497 @@ fn infer_structs_from_ssa(
     (struct_decls, slot_type_overrides, slot_fields_for_links)
 }
 
-fn collect_external_struct_candidates(
-    tsj_json: &str,
+fn infer_structs_from_semantic_accesses(
+    ssa_func: &r2ssa::SSAFunction,
+    cfg: &r2dec::DecompilerConfig,
     ptr_bits: u32,
-) -> (Vec<StructDeclCandidateJson>, Vec<String>) {
-    let db = r2types::ExternalTypeDb::from_tsj_json(tsj_json);
+    diagnostics: &mut TypeWritebackDiagnosticsJson,
+) -> StructInferenceArtifacts {
+    let mut slot_field_evidence: SlotFieldEvidenceMap = HashMap::new();
+    for access in r2dec::infer_local_struct_field_accesses(ssa_func, cfg) {
+        let entry = slot_field_evidence
+            .entry(access.arg_index)
+            .or_default()
+            .entry(access.field_offset)
+            .or_default();
+        if access.is_write {
+            entry.writes = entry.writes.saturating_add(1);
+        } else {
+            entry.reads = entry.reads.saturating_add(1);
+        }
+        *entry.widths.entry(access.access_size).or_insert(0) += 1;
+        *entry
+            .type_votes
+            .entry(size_to_type(access.access_size))
+            .or_insert(0) += 1;
+    }
+    build_struct_inference_artifacts_from_field_evidence(slot_field_evidence, ptr_bits, diagnostics)
+}
+
+fn merge_struct_inference_artifacts(
+    mut base: StructInferenceArtifacts,
+    supplement: StructInferenceArtifacts,
+) -> StructInferenceArtifacts {
+    let (struct_decls, slot_type_overrides, slot_field_profiles) = &mut base;
+    let (supp_structs, supp_types, supp_profiles) = supplement;
+
+    let mut seen_names = struct_decls
+        .iter()
+        .map(|decl| decl.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    for decl in supp_structs {
+        if seen_names.insert(decl.name.to_ascii_lowercase()) {
+            struct_decls.push(decl);
+        }
+    }
+    for (slot, ty) in supp_types {
+        slot_type_overrides.insert(slot, ty);
+    }
+    for (slot, profile) in supp_profiles {
+        slot_field_profiles.insert(slot, profile);
+    }
+
+    base
+}
+
+fn parse_ssa_const_offset(name: &str, ptr_bits: u32) -> Option<i64> {
+    let val_str = name
+        .strip_prefix("const:")
+        .or_else(|| name.strip_prefix("CONST:"))?;
+    let val_str = val_str.split('_').next().unwrap_or(val_str);
+
+    let raw = if let Some(hex) = val_str
+        .strip_prefix("0x")
+        .or_else(|| val_str.strip_prefix("0X"))
+    {
+        u64::from_str_radix(hex, 16).ok()?
+    } else if let Some(dec) = val_str
+        .strip_prefix("0d")
+        .or_else(|| val_str.strip_prefix("0D"))
+    {
+        dec.parse::<u64>().ok()?
+    } else {
+        u64::from_str_radix(val_str, 16).ok()?
+    };
+
+    Some(signed_offset_from_const(raw, ptr_bits))
+}
+
+fn signed_offset_from_const(raw: u64, ptr_bits: u32) -> i64 {
+    let bits = ptr_bits.clamp(8, 64);
+    if bits == 64 {
+        return raw as i64;
+    }
+    let mask = (1u64 << bits) - 1;
+    let sign = 1u64 << (bits - 1);
+    let v = raw & mask;
+    if (v & sign) != 0 {
+        (v | (!mask)) as i64
+    } else {
+        v as i64
+    }
+}
+
+fn infer_structs_from_ssa(
+    ssa_blocks: &[r2ssa::SSABlock],
+    arch: Option<&ArchSpec>,
+    ptr_bits: u32,
+    diagnostics: &mut TypeWritebackDiagnosticsJson,
+) -> StructInferenceArtifacts {
+    use std::collections::HashMap;
+
+    let pointer_arg_slot_map = collect_pointer_arg_slot_map(arch, ptr_bits);
+    let mut addr_exprs: HashMap<String, ArgAddrExpr> = HashMap::new();
+    let mut stack_addr_offsets: HashMap<String, i64> = HashMap::new();
+    let mut stack_slot_values: HashMap<(u64, i64), ArgAddrExpr> = HashMap::new();
+    let mut slot_field_evidence: SlotFieldEvidenceMap = HashMap::new();
+    let offset_bound = 0x4000i64;
+    let block_ops: HashMap<u64, HashMap<String, r2ssa::SSAOp>> = ssa_blocks
+        .iter()
+        .map(|block| {
+            let ops = block
+                .ops
+                .iter()
+                .filter_map(|op| {
+                    op.dst()
+                        .map(|dst| (ssa_var_block_key(block.addr, dst), op.clone()))
+                })
+                .collect::<HashMap<_, _>>();
+            (block.addr, ops)
+        })
+        .collect();
+
+    fn is_scaled_index_like(
+        block_addr: u64,
+        var: &r2ssa::SSAVar,
+        ops_by_block: &HashMap<u64, HashMap<String, r2ssa::SSAOp>>,
+        addr_exprs: &HashMap<String, ArgAddrExpr>,
+        depth: u32,
+    ) -> bool {
+        if depth > 8 || var.is_const() {
+            return false;
+        }
+        let key = ssa_var_block_key(block_addr, var);
+        if addr_exprs.contains_key(&key) {
+            return false;
+        }
+        let Some(op) = ops_by_block.get(&block_addr).and_then(|ops| ops.get(&key)) else {
+            return true;
+        };
+        match op {
+            r2ssa::SSAOp::Copy { src, .. }
+            | r2ssa::SSAOp::Cast { src, .. }
+            | r2ssa::SSAOp::New { src, .. }
+            | r2ssa::SSAOp::IntZExt { src, .. }
+            | r2ssa::SSAOp::IntSExt { src, .. }
+            | r2ssa::SSAOp::Trunc { src, .. }
+            | r2ssa::SSAOp::Subpiece { src, .. } => {
+                is_scaled_index_like(block_addr, src, ops_by_block, addr_exprs, depth + 1)
+            }
+            r2ssa::SSAOp::IntMult { a, b, .. } => {
+                (parse_ssa_const_offset(&a.name, 64).is_some()
+                    && is_scaled_index_like(block_addr, b, ops_by_block, addr_exprs, depth + 1))
+                    || (parse_ssa_const_offset(&b.name, 64).is_some()
+                        && is_scaled_index_like(block_addr, a, ops_by_block, addr_exprs, depth + 1))
+            }
+            r2ssa::SSAOp::IntLeft { a, b, .. } => {
+                parse_ssa_const_offset(&b.name, 64).is_some()
+                    && is_scaled_index_like(block_addr, a, ops_by_block, addr_exprs, depth + 1)
+            }
+            r2ssa::SSAOp::IntSub { a, b, .. } => {
+                parse_ssa_const_offset(&a.name, 64) == Some(0)
+                    && is_scaled_index_like(block_addr, b, ops_by_block, addr_exprs, depth + 1)
+            }
+            r2ssa::SSAOp::Load { .. } | r2ssa::SSAOp::Phi { .. } => true,
+            _ => false,
+        }
+    }
+
+    for block in ssa_blocks {
+        for op in &block.ops {
+            // Seed direct arg pointer provenance.
+            op.for_each_source(&mut |src: &r2ssa::SSAVar| {
+                if src.version != 0 {
+                    return;
+                }
+                let key = src.name.to_ascii_lowercase();
+                if let Some(slot) = pointer_arg_slot_map.get(key.as_str()).copied() {
+                    addr_exprs
+                        .entry(ssa_var_block_key(block.addr, src))
+                        .or_insert(ArgAddrExpr {
+                            slot,
+                            offset: 0,
+                            confidence: 92,
+                        });
+                }
+            });
+        }
+    }
+
+    // Bounded propagation over pointer expression transforms.
+    for _ in 0..6 {
+        let mut changed = false;
+        for block in ssa_blocks {
+            for op in &block.ops {
+                let addr_of = |var: &r2ssa::SSAVar, map: &HashMap<String, ArgAddrExpr>| {
+                    if var.version == 0 {
+                        let key = var.name.to_ascii_lowercase();
+                        if let Some(slot) = pointer_arg_slot_map.get(key.as_str()).copied() {
+                            return Some(ArgAddrExpr {
+                                slot,
+                                offset: 0,
+                                confidence: 92,
+                            });
+                        }
+                    }
+                    map.get(&ssa_var_block_key(block.addr, var)).copied()
+                };
+                let stack_slot_of =
+                    |var: &r2ssa::SSAVar, stack_map: &HashMap<String, i64>| -> Option<i64> {
+                        let key = ssa_var_block_key(block.addr, var);
+                        stack_map.get(&key).copied()
+                    };
+                let set_expr =
+                    |dst: &r2ssa::SSAVar,
+                     expr: ArgAddrExpr,
+                     map: &mut HashMap<String, ArgAddrExpr>| {
+                        let key = ssa_var_block_key(block.addr, dst);
+                        match map.get(&key).copied() {
+                            Some(prev) if prev.confidence >= expr.confidence => false,
+                            _ => {
+                                map.insert(key, expr);
+                                true
+                            }
+                        }
+                    };
+                let set_stack_slot =
+                    |dst: &r2ssa::SSAVar, offset: i64, map: &mut HashMap<String, i64>| {
+                        let key = ssa_var_block_key(block.addr, dst);
+                        match map.get(&key).copied() {
+                            Some(prev) if prev == offset => false,
+                            _ => {
+                                map.insert(key, offset);
+                                true
+                            }
+                        }
+                    };
+                match op {
+                    r2ssa::SSAOp::Copy { dst, src }
+                    | r2ssa::SSAOp::Cast { dst, src }
+                    | r2ssa::SSAOp::New { dst, src }
+                    | r2ssa::SSAOp::IntZExt { dst, src }
+                    | r2ssa::SSAOp::IntSExt { dst, src } => {
+                        if let Some(mut expr) = addr_of(src, &addr_exprs) {
+                            expr.confidence = expr.confidence.saturating_sub(2);
+                            changed |= set_expr(dst, expr, &mut addr_exprs);
+                        }
+                        if let Some(offset) = stack_slot_of(src, &stack_addr_offsets) {
+                            changed |= set_stack_slot(dst, offset, &mut stack_addr_offsets);
+                        }
+                    }
+                    r2ssa::SSAOp::Phi { dst, sources } => {
+                        let mut selected = None;
+                        let mut selected_slot = None;
+                        for src in sources {
+                            let Some(expr) = addr_of(src, &addr_exprs) else {
+                                selected = None;
+                                break;
+                            };
+                            selected = match selected {
+                                None => Some(expr),
+                                Some(prev)
+                                    if prev.slot == expr.slot && prev.offset == expr.offset =>
+                                {
+                                    Some(ArgAddrExpr {
+                                        slot: prev.slot,
+                                        offset: prev.offset,
+                                        confidence: prev.confidence.max(expr.confidence),
+                                    })
+                                }
+                                _ => None,
+                            };
+                            let Some(slot) = stack_slot_of(src, &stack_addr_offsets) else {
+                                selected_slot = None;
+                                break;
+                            };
+                            selected_slot = match selected_slot {
+                                None => Some(slot),
+                                Some(prev) if prev == slot => Some(prev),
+                                _ => None,
+                            };
+                            if selected.is_none() {
+                                break;
+                            }
+                        }
+                        if let Some(mut expr) = selected {
+                            expr.confidence = expr.confidence.saturating_sub(3);
+                            changed |= set_expr(dst, expr, &mut addr_exprs);
+                        }
+                        if let Some(slot) = selected_slot {
+                            changed |= set_stack_slot(dst, slot, &mut stack_addr_offsets);
+                        }
+                    }
+                    r2ssa::SSAOp::IntAdd { dst, a, b } => {
+                        if let Some(off) = parse_ssa_const_offset(&b.name, ptr_bits) {
+                            let a_lower = a.name.to_ascii_lowercase();
+                            if a_lower == "sp" || a_lower == "fp" {
+                                changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
+                            }
+                        }
+                        if let Some(off) = parse_ssa_const_offset(&a.name, ptr_bits) {
+                            let b_lower = b.name.to_ascii_lowercase();
+                            if b_lower == "sp" || b_lower == "fp" {
+                                changed |= set_stack_slot(dst, off, &mut stack_addr_offsets);
+                            }
+                        }
+                        if let Some(base) = addr_of(a, &addr_exprs)
+                            && let Some(delta) = parse_ssa_const_offset(&b.name, ptr_bits)
+                        {
+                            let off = base.offset.saturating_add(delta);
+                            if (-offset_bound..=offset_bound).contains(&off) {
+                                changed |= set_expr(
+                                    dst,
+                                    ArgAddrExpr {
+                                        slot: base.slot,
+                                        offset: off,
+                                        confidence: base.confidence.saturating_sub(1),
+                                    },
+                                    &mut addr_exprs,
+                                );
+                            }
+                        } else if let Some(base) = addr_of(a, &addr_exprs)
+                            && is_scaled_index_like(block.addr, b, &block_ops, &addr_exprs, 0)
+                        {
+                            changed |= set_expr(
+                                dst,
+                                ArgAddrExpr {
+                                    slot: base.slot,
+                                    offset: base.offset,
+                                    confidence: base.confidence.saturating_sub(4),
+                                },
+                                &mut addr_exprs,
+                            );
+                        } else if let Some(base) = addr_of(b, &addr_exprs)
+                            && let Some(delta) = parse_ssa_const_offset(&a.name, ptr_bits)
+                        {
+                            let off = base.offset.saturating_add(delta);
+                            if (-offset_bound..=offset_bound).contains(&off) {
+                                changed |= set_expr(
+                                    dst,
+                                    ArgAddrExpr {
+                                        slot: base.slot,
+                                        offset: off,
+                                        confidence: base.confidence.saturating_sub(1),
+                                    },
+                                    &mut addr_exprs,
+                                );
+                            }
+                        } else if let Some(base) = addr_of(b, &addr_exprs)
+                            && is_scaled_index_like(block.addr, a, &block_ops, &addr_exprs, 0)
+                        {
+                            changed |= set_expr(
+                                dst,
+                                ArgAddrExpr {
+                                    slot: base.slot,
+                                    offset: base.offset,
+                                    confidence: base.confidence.saturating_sub(4),
+                                },
+                                &mut addr_exprs,
+                            );
+                        }
+                    }
+                    r2ssa::SSAOp::IntSub { dst, a, b } => {
+                        if let Some(delta) = parse_ssa_const_offset(&b.name, ptr_bits) {
+                            let a_lower = a.name.to_ascii_lowercase();
+                            if a_lower == "sp" || a_lower == "fp" {
+                                changed |= set_stack_slot(
+                                    dst,
+                                    delta.saturating_neg(),
+                                    &mut stack_addr_offsets,
+                                );
+                            }
+                        }
+                        if let Some(base) = addr_of(a, &addr_exprs)
+                            && let Some(delta) = parse_ssa_const_offset(&b.name, ptr_bits)
+                        {
+                            let off = base.offset.saturating_sub(delta);
+                            if (-offset_bound..=offset_bound).contains(&off) {
+                                changed |= set_expr(
+                                    dst,
+                                    ArgAddrExpr {
+                                        slot: base.slot,
+                                        offset: off,
+                                        confidence: base.confidence.saturating_sub(1),
+                                    },
+                                    &mut addr_exprs,
+                                );
+                            }
+                        } else if let Some(base) = addr_of(a, &addr_exprs)
+                            && is_scaled_index_like(block.addr, b, &block_ops, &addr_exprs, 0)
+                        {
+                            changed |= set_expr(
+                                dst,
+                                ArgAddrExpr {
+                                    slot: base.slot,
+                                    offset: base.offset,
+                                    confidence: base.confidence.saturating_sub(4),
+                                },
+                                &mut addr_exprs,
+                            );
+                        }
+                    }
+                    r2ssa::SSAOp::Store { addr, val, .. } => {
+                        if let Some(offset) = stack_slot_of(addr, &stack_addr_offsets)
+                            && let Some(mut expr) = addr_of(val, &addr_exprs)
+                        {
+                            expr.confidence = expr.confidence.saturating_sub(2);
+                            let key = (block.addr, offset);
+                            match stack_slot_values.get(&key).copied() {
+                                Some(prev) if prev.confidence >= expr.confidence => {}
+                                _ => {
+                                    stack_slot_values.insert(key, expr);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    r2ssa::SSAOp::Load { dst, addr, .. } => {
+                        if let Some(offset) = stack_slot_of(addr, &stack_addr_offsets)
+                            && let Some(mut expr) =
+                                stack_slot_values.get(&(block.addr, offset)).copied()
+                        {
+                            expr.confidence = expr.confidence.saturating_sub(3);
+                            changed |= set_expr(dst, expr, &mut addr_exprs);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for block in ssa_blocks {
+        for op in &block.ops {
+            let resolve_addr = |addr: &r2ssa::SSAVar| -> Option<ArgAddrExpr> {
+                if addr.version == 0 {
+                    let key = addr.name.to_ascii_lowercase();
+                    if let Some(slot) = pointer_arg_slot_map.get(key.as_str()).copied() {
+                        return Some(ArgAddrExpr {
+                            slot,
+                            offset: 0,
+                            confidence: 92,
+                        });
+                    }
+                }
+                addr_exprs
+                    .get(&ssa_var_block_key(block.addr, addr))
+                    .copied()
+            };
+            match op {
+                r2ssa::SSAOp::Load { dst, addr, .. } => {
+                    if let Some(expr) = resolve_addr(addr)
+                        && (0..=offset_bound).contains(&expr.offset)
+                    {
+                        let entry = slot_field_evidence
+                            .entry(expr.slot)
+                            .or_default()
+                            .entry(expr.offset as u64)
+                            .or_default();
+                        entry.reads = entry.reads.saturating_add(1);
+                        *entry.widths.entry(dst.size).or_insert(0) += 1;
+                        *entry.type_votes.entry(size_to_type(dst.size)).or_insert(0) += 1;
+                    }
+                }
+                r2ssa::SSAOp::Store { addr, val, .. } => {
+                    if let Some(expr) = resolve_addr(addr)
+                        && (0..=offset_bound).contains(&expr.offset)
+                    {
+                        let entry = slot_field_evidence
+                            .entry(expr.slot)
+                            .or_default()
+                            .entry(expr.offset as u64)
+                            .or_default();
+                        entry.writes = entry.writes.saturating_add(1);
+                        *entry.widths.entry(val.size).or_insert(0) += 1;
+                        *entry.type_votes.entry(size_to_type(val.size)).or_insert(0) += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    build_struct_inference_artifacts_from_field_evidence(slot_field_evidence, ptr_bits, diagnostics)
+}
+
+#[cfg(test)]
+fn collect_external_struct_candidates_from_db(
+    db: &r2types::ExternalTypeDb,
+    ptr_bits: u32,
+) -> Vec<StructDeclCandidateJson> {
     let mut keys: Vec<String> = db.structs.keys().cloned().collect();
     keys.sort();
 
@@ -4200,10 +4686,7 @@ fn collect_external_struct_candidates(
         let Some(st) = db.structs.get(&key) else {
             continue;
         };
-        if is_opaque_placeholder_type_name(&st.name) {
-            continue;
-        }
-        if st.fields.is_empty() {
+        if is_opaque_placeholder_type_name(&st.name) || st.fields.is_empty() {
             continue;
         }
         let mut fields = Vec::new();
@@ -4227,9 +4710,122 @@ fn collect_external_struct_candidates(
             fields,
         });
     }
-    (out, db.diagnostics)
+    out
 }
 
+#[cfg(test)]
+fn is_generic_signature_type(ty: Option<&r2types::CTypeLike>) -> bool {
+    match ty {
+        None => true,
+        Some(r2types::CTypeLike::Unknown | r2types::CTypeLike::Void) => true,
+        Some(r2types::CTypeLike::Pointer(inner)) => {
+            matches!(
+                inner.as_ref(),
+                r2types::CTypeLike::Unknown | r2types::CTypeLike::Void
+            )
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+fn merge_slot_type_overrides_into_signature(
+    mut signature: Option<r2types::FunctionSignatureSpec>,
+    slot_type_overrides: &SlotTypeOverrides,
+    ptr_bits: u32,
+) -> Option<r2types::FunctionSignatureSpec> {
+    if slot_type_overrides.is_empty() {
+        return signature;
+    }
+
+    let max_slot = slot_type_overrides.keys().copied().max()?;
+    let sig = signature.get_or_insert_with(Default::default);
+    while sig.params.len() <= max_slot {
+        let idx = sig.params.len();
+        sig.params.push(r2types::FunctionParamSpec {
+            name: format!("arg{}", idx + 1),
+            ty: None,
+        });
+    }
+
+    for (slot, raw_ty) in slot_type_overrides {
+        let Some(parsed) = r2types::parse_type_like_spec(raw_ty, ptr_bits) else {
+            continue;
+        };
+        let param = &mut sig.params[*slot];
+        if is_generic_signature_type(param.ty.as_ref()) {
+            param.ty = Some(parsed);
+        }
+    }
+
+    signature
+}
+
+#[cfg(test)]
+fn merge_local_structs_into_type_db(
+    db: &mut r2types::ExternalTypeDb,
+    struct_decls: &[StructDeclCandidateJson],
+) {
+    for decl in struct_decls {
+        let key = decl.name.to_ascii_lowercase();
+        db.structs.entry(key).or_insert_with(|| {
+            let mut fields = std::collections::BTreeMap::new();
+            for field in &decl.fields {
+                fields.insert(
+                    field.offset,
+                    r2types::ExternalField {
+                        name: field.name.clone(),
+                        offset: field.offset,
+                        ty: Some(field.field_type.clone()),
+                    },
+                );
+            }
+            r2types::ExternalStruct {
+                name: decl.name.clone(),
+                fields,
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn enrich_decompiler_type_context(
+    ssa_blocks: &[r2ssa::SSABlock],
+    arch: Option<&ArchSpec>,
+    ptr_bits: u32,
+    signature: Option<r2types::FunctionSignatureSpec>,
+    mut type_db: r2types::ExternalTypeDb,
+) -> (
+    Option<r2types::FunctionSignatureSpec>,
+    r2types::ExternalTypeDb,
+) {
+    let mut diagnostics = TypeWritebackDiagnosticsJson::default();
+    let (mut struct_decls, mut slot_type_overrides, slot_field_profiles) =
+        infer_structs_from_ssa(ssa_blocks, arch, ptr_bits, &mut diagnostics);
+
+    if !type_db.structs.is_empty() {
+        let external_structs = collect_external_struct_candidates_from_db(&type_db, ptr_bits);
+        align_local_structs_with_external(
+            &mut struct_decls,
+            &mut slot_type_overrides,
+            &slot_field_profiles,
+            &external_structs,
+        );
+    }
+
+    prefer_stronger_local_struct_overrides(
+        &struct_decls,
+        &mut slot_type_overrides,
+        &slot_field_profiles,
+    );
+
+    merge_local_structs_into_type_db(&mut type_db, &struct_decls);
+    let signature =
+        merge_slot_type_overrides_into_signature(signature, &slot_type_overrides, ptr_bits);
+    (signature, type_db)
+}
+
+#[cfg(test)]
 fn struct_fields_signature(fields: &[StructFieldCandidateJson]) -> Vec<(u64, String)> {
     let mut out: Vec<(u64, String)> = fields
         .iter()
@@ -4239,6 +4835,95 @@ fn struct_fields_signature(fields: &[StructFieldCandidateJson]) -> Vec<(u64, Str
     out
 }
 
+#[cfg(test)]
+fn parse_struct_ptr_type_name(ty: &str) -> Option<String> {
+    ty.trim()
+        .strip_prefix("struct ")
+        .and_then(|rest| rest.strip_suffix(" *"))
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+fn local_struct_profile_score(
+    decl: &StructDeclCandidateJson,
+    profile: &std::collections::BTreeMap<u64, String>,
+) -> Option<(usize, usize, usize, i32)> {
+    if decl.source != "local_inferred" || profile.is_empty() {
+        return None;
+    }
+
+    let field_map = decl
+        .fields
+        .iter()
+        .map(|field| (field.offset, field.field_type.to_ascii_lowercase()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let mut offset_matches = 0usize;
+    let mut typed_matches = 0usize;
+    for (offset, ty) in profile {
+        let Some(field_ty) = field_map.get(offset) else {
+            continue;
+        };
+        offset_matches += 1;
+        if field_ty == &ty.to_ascii_lowercase() {
+            typed_matches += 1;
+        }
+    }
+
+    (offset_matches > 0).then_some((
+        offset_matches,
+        typed_matches,
+        decl.fields.len(),
+        i32::from(decl.confidence),
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn prefer_stronger_local_struct_overrides(
+    struct_decls: &[StructDeclCandidateJson],
+    slot_type_overrides: &mut std::collections::HashMap<usize, String>,
+    slot_field_profiles: &std::collections::HashMap<usize, std::collections::BTreeMap<u64, String>>,
+) {
+    for (slot, ty) in slot_type_overrides.iter_mut() {
+        let Some(profile) = slot_field_profiles.get(slot) else {
+            continue;
+        };
+        if profile.is_empty() {
+            continue;
+        }
+
+        let current_name = parse_struct_ptr_type_name(ty);
+        let current_decl = current_name.as_ref().and_then(|name| {
+            struct_decls
+                .iter()
+                .find(|decl| decl.name.eq_ignore_ascii_case(name))
+        });
+        if current_decl.is_some_and(|decl| decl.source == "external_type_db") {
+            continue;
+        }
+
+        let current_score = current_decl.and_then(|decl| local_struct_profile_score(decl, profile));
+        let best_local = struct_decls
+            .iter()
+            .filter_map(|decl| {
+                local_struct_profile_score(decl, profile).map(|score| (score, decl.name.clone()))
+            })
+            .max_by(|(left_score, left_name), (right_score, right_name)| {
+                left_score
+                    .cmp(right_score)
+                    .then_with(|| left_name.cmp(right_name))
+            });
+
+        let Some((best_score, best_name)) = best_local else {
+            continue;
+        };
+        if current_score.is_none_or(|score| best_score > score) {
+            *ty = format!("struct {} *", best_name);
+        }
+    }
+}
+
+#[cfg(test)]
 fn structurally_compatible(local_fields: &[(u64, String)], ext_fields: &[(u64, String)]) -> bool {
     if local_fields.is_empty() || ext_fields.is_empty() {
         return false;
@@ -4255,6 +4940,7 @@ fn structurally_compatible(local_fields: &[(u64, String)], ext_fields: &[(u64, S
     matches >= local_fields.len().min(2)
 }
 
+#[cfg(test)]
 fn align_local_structs_with_external(
     struct_decls: &mut [StructDeclCandidateJson],
     slot_type_overrides: &mut std::collections::HashMap<usize, String>,
@@ -4312,6 +4998,7 @@ fn align_local_structs_with_external(
     }
 }
 
+#[cfg(test)]
 fn infer_global_field_profiles(
     ssa_blocks: &[r2ssa::SSABlock],
     ptr_bits: u32,
@@ -4557,6 +5244,7 @@ fn infer_global_field_profiles(
     field_evidence
 }
 
+#[cfg(test)]
 fn score_global_type_links(
     ssa_blocks: &[r2ssa::SSABlock],
     struct_decls: &[StructDeclCandidateJson],
@@ -4710,11 +5398,11 @@ pub extern "C" fn r2sleigh_infer_signature_cc_json(
     else {
         return ptr::null_mut();
     };
-    let Some(payload) = types::infer_signature_cc_inner(&input) else {
+    let Some(artifact) = types::build_function_analysis_artifact(&input, "{}") else {
         return ptr::null_mut();
     };
 
-    match serde_json::to_string(&payload) {
+    match serde_json::to_string(&artifact.signature_cc) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
         Err(_) => ptr::null_mut(),
     }
@@ -4737,9 +5425,7 @@ struct TypeWritebackInferenceInput<'a> {
     num_blocks: usize,
     fcn_addr: u64,
     fcn_name: *const c_char,
-    afcfj_json: *const c_char,
-    afvj_json: *const c_char,
-    tsj_json: *const c_char,
+    external_context_json: *const c_char,
     interproc: InterprocInferenceInput<'a>,
 }
 
@@ -4753,258 +5439,30 @@ fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mu
     ) else {
         return ptr::null_mut();
     };
-    let Some(mut sig) = types::infer_signature_cc_inner(&function_input) else {
+    let external_context = cstr_or_default(input.external_context_json, "{}");
+    let Some(artifact) =
+        types::build_function_analysis_artifact(&function_input, &external_context)
+    else {
         return ptr::null_mut();
     };
-
-    let afcfj = cstr_or_default(input.afcfj_json, "[]");
-    let afvj = cstr_or_default(input.afvj_json, "{}");
-    let tsj = cstr_or_default(input.tsj_json, "{}");
-
-    let ptr_bits = function_input
-        .ctx
-        .arch
-        .as_ref()
-        .map(|a| a.addr_size * 8)
-        .unwrap_or(64);
-
-    let semantic_typing_enabled = function_input.ctx.semantic_metadata_enabled;
-    let reg_type_hints = if semantic_typing_enabled {
-        types::collect_register_type_hints(
-            function_input.blocks.as_slice(),
-            function_input.ctx.disasm,
-        )
-    } else {
-        std::collections::HashMap::new()
-    };
-
-    let ssa_blocks: Vec<r2ssa::SSABlock> = function_input
-        .blocks
-        .as_slice()
-        .iter()
-        .map(|blk| r2ssa::block::to_ssa(blk, function_input.ctx.disasm))
-        .collect();
+    let ssa_blocks = artifact.pattern_ssa_blocks;
     if ssa_blocks.is_empty() {
         return ptr::null_mut();
     }
-
-    let vars = types::recover_vars_from_ssa(
-        &ssa_blocks,
-        function_input.ctx.arch,
-        &reg_type_hints,
-        semantic_typing_enabled,
-    );
-
-    let mut diagnostics = TypeWritebackDiagnosticsJson::default();
-    let existing_types = parse_existing_var_types(&afvj);
-    let stack_vars = parse_external_stack_vars(&afvj, ptr_bits);
-    let sig_ctx = parse_signature_context(&afcfj, ptr_bits);
-    let mut param_types = std::collections::HashMap::new();
-    let mut param_names = std::collections::HashMap::new();
-    if let Some(current) = sig_ctx.current.as_ref() {
-        if let Some(ret_ty) = current.ret_type.as_ref() {
-            let ret_ty_str = ret_ty.to_string();
-            if !matches!(ret_ty, r2dec::CType::Unknown) {
-                sig.ret_type = ret_ty_str;
-            }
-        }
-        for (idx, param) in current.params.iter().enumerate() {
-            if let Some(ty) = param.ty.as_ref() {
-                let ty_str = ty.to_string();
-                param_types.insert(idx, ty_str.clone());
-                if !matches!(ty, r2dec::CType::Unknown)
-                    && let Some(inferred_param) = sig.params.get_mut(idx)
-                {
-                    inferred_param.param_type = ty_str;
-                }
-            }
-            if !is_generic_arg_name(&param.name) {
-                param_names.insert(idx, param.name.clone());
-                if let Some(inferred_param) = sig.params.get_mut(idx) {
-                    inferred_param.name = param.name.clone();
-                }
-            }
-        }
-        sig.signature = format_afs_signature(&sig.function_name, &sig.ret_type, &sig.params);
-        sig.confidence = sig
-            .confidence
-            .max(explicit_signature_context_strength(current));
-    }
-
-    let (mut struct_decls, mut slot_struct_types, slot_field_profiles) = infer_structs_from_ssa(
-        &ssa_blocks,
-        function_input.ctx.arch,
-        ptr_bits,
-        &mut diagnostics,
-    );
-    let (external_structs, solver_warnings) = collect_external_struct_candidates(&tsj, ptr_bits);
-    diagnostics.solver_warnings = solver_warnings;
-    align_local_structs_with_external(
-        &mut struct_decls,
-        &mut slot_struct_types,
-        &slot_field_profiles,
-        &external_structs,
-    );
-    {
-        let mut seen = std::collections::HashSet::new();
-        let mut merged = Vec::new();
-        for decl in external_structs.into_iter().chain(struct_decls.into_iter()) {
-            if seen.insert(decl.name.to_ascii_lowercase()) {
-                merged.push(decl);
-            }
-        }
-        struct_decls = merged;
-    }
-
-    let mut var_type_candidates = Vec::new();
-    let mut var_rename_candidates = Vec::new();
-    let mut seen_renames = std::collections::HashSet::new();
-
-    for var in &vars {
-        let mut source = "local_inferred".to_string();
-        let mut confidence = if var.var_type.contains('*') {
-            92
-        } else if var.isarg {
-            88
-        } else {
-            84
-        };
-        let mut evidence = vec!["ssa-var-recovery".to_string()];
-        let mut chosen_type = var.var_type.clone();
-
-        let arg_slot = var
-            .name
-            .strip_prefix("arg")
-            .and_then(|idx| idx.parse::<usize>().ok());
-
-        if let Some(slot) = arg_slot
-            && let Some(sig_ty) = param_types.get(&slot)
-            && !is_generic_type_string(sig_ty)
-        {
-            chosen_type = sig_ty.clone();
-            confidence = 96;
-            source = "signature_registry".to_string();
-            evidence.push("afcfj-current".to_string());
-        } else if let Some(slot) = arg_slot
-            && let Some(struct_ty) = slot_struct_types.get(&slot)
-            && is_generic_type_string(&chosen_type)
-        {
-            chosen_type = struct_ty.clone();
-            confidence = 90;
-            source = "local_struct_inference".to_string();
-            evidence.push("ssa-field-offset-pattern".to_string());
-        }
-
-        if let Some(existing_ty) = existing_types.get(&var.name)
-            && !is_generic_type_string(existing_ty)
-        {
-            if is_generic_type_string(&chosen_type) {
-                chosen_type = existing_ty.clone();
-                confidence = 98;
-                source = "existing_state".to_string();
-                evidence.push("afvj-existing-type".to_string());
-            } else if !existing_ty.eq_ignore_ascii_case(&chosen_type) {
-                diagnostics.conflicts.push(format!(
-                    "var `{}` existing type `{}` conflicts with inferred `{}`",
-                    var.name, existing_ty, chosen_type
-                ));
-            }
-        }
-
-        if (var.kind == "b" || var.kind == "s")
-            && let Some(ext) = stack_vars.get(&var.delta)
-            && let Some(ext_ty) = ext.ty.as_ref()
-        {
-            let ext_ty_str = ext_ty.to_string();
-            if !is_generic_type_string(&ext_ty_str) && is_generic_type_string(&chosen_type) {
-                chosen_type = ext_ty_str;
-                confidence = 97;
-                source = "external_type_db".to_string();
-                evidence.push("afvj-stack-annotation".to_string());
-            }
-            if ext.name != var.name
-                && is_low_quality_stack_name(&var.name)
-                && !is_low_quality_stack_name(&ext.name)
-            {
-                let target_name =
-                    sanitize_c_identifier(&ext.name).unwrap_or_else(|| ext.name.clone());
-                if target_name != var.name
-                    && seen_renames.insert(format!("{}->{target_name}", var.name))
-                {
-                    var_rename_candidates.push(VarRenameCandidateJson {
-                        name: var.name.clone(),
-                        target_name,
-                        confidence: 94,
-                        source: "external_type_db".to_string(),
-                        evidence: vec!["stack-var-name-from-afvj".to_string()],
-                    });
-                }
-            }
-        }
-
-        if let Some(slot) = arg_slot
-            && let Some(param_name) = param_names.get(&slot)
-            && is_generic_arg_name(&var.name)
-        {
-            let target_name =
-                sanitize_c_identifier(param_name).unwrap_or_else(|| param_name.clone());
-            if !target_name.is_empty()
-                && target_name != var.name
-                && seen_renames.insert(format!("{}->{target_name}", var.name))
-            {
-                var_rename_candidates.push(VarRenameCandidateJson {
-                    name: var.name.clone(),
-                    target_name,
-                    confidence: 95,
-                    source: "signature_registry".to_string(),
-                    evidence: vec!["afcfj-param-name".to_string()],
-                });
-            }
-        }
-
-        let chosen_type = normalize_external_type_name(&chosen_type);
-        var_type_candidates.push(VarTypeCandidateJson {
-            name: var.name.clone(),
-            kind: var.kind.clone(),
-            delta: var.delta,
-            var_type: chosen_type.clone(),
-            isarg: var.isarg,
-            reg: var.reg.clone(),
-            size: estimate_c_type_size_bytes(&chosen_type, ptr_bits) as u32,
-            confidence,
-            source,
-            evidence,
-        });
-    }
-
-    let global_type_links =
-        score_global_type_links(&ssa_blocks, &struct_decls, &var_type_candidates, ptr_bits);
     let scope = serde_json::from_str::<serde_json::Value>(input.interproc.scope_json)
         .ok()
         .filter(|v| !v.is_null() && v.as_object().map(|obj| !obj.is_empty()).unwrap_or(true));
 
-    let payload = InferredTypeWritebackJson {
-        function_name: sig.function_name,
-        signature: sig.signature,
-        ret_type: sig.ret_type,
-        params: sig.params,
-        callconv: sig.callconv,
-        arch: sig.arch,
-        confidence: sig.confidence,
-        callconv_confidence: sig.callconv_confidence,
-        var_type_candidates,
-        var_rename_candidates,
-        struct_decls,
-        global_type_links,
-        interproc: InterprocSummaryJson {
+    let payload = writeback_plan_json(
+        artifact.writeback_plan,
+        InterprocSummaryJson {
             callsite_count: count_callsites(&ssa_blocks),
             iterations: input.interproc.iter.max(1),
             max_iterations: input.interproc.max_iters.max(input.interproc.iter.max(1)),
             converged: input.interproc.converged,
             scope,
         },
-        diagnostics,
-    };
+    );
 
     match serde_json::to_string(&payload) {
         Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
@@ -5019,9 +5477,7 @@ pub extern "C" fn r2sleigh_infer_type_writeback_json(
     num_blocks: usize,
     fcn_addr: u64,
     fcn_name: *const c_char,
-    afcfj_json: *const c_char,
-    afvj_json: *const c_char,
-    tsj_json: *const c_char,
+    external_context_json: *const c_char,
 ) -> *mut c_char {
     infer_type_writeback_json_impl(TypeWritebackInferenceInput {
         ctx,
@@ -5029,9 +5485,7 @@ pub extern "C" fn r2sleigh_infer_type_writeback_json(
         num_blocks,
         fcn_addr,
         fcn_name,
-        afcfj_json,
-        afvj_json,
-        tsj_json,
+        external_context_json,
         interproc: InterprocInferenceInput {
             iter: 1,
             max_iters: 1,
@@ -5048,9 +5502,7 @@ pub extern "C" fn r2sleigh_infer_type_writeback_json_ex(
     num_blocks: usize,
     fcn_addr: u64,
     fcn_name: *const c_char,
-    afcfj_json: *const c_char,
-    afvj_json: *const c_char,
-    tsj_json: *const c_char,
+    external_context_json: *const c_char,
     interproc_iter: usize,
     interproc_max_iters: usize,
     interproc_converged: i32,
@@ -5063,9 +5515,7 @@ pub extern "C" fn r2sleigh_infer_type_writeback_json_ex(
         num_blocks,
         fcn_addr,
         fcn_name,
-        afcfj_json,
-        afvj_json,
-        tsj_json,
+        external_context_json,
         interproc: InterprocInferenceInput {
             iter: interproc_iter.max(1),
             max_iters: interproc_max_iters.max(1),
@@ -5319,10 +5769,54 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
 }
 
 #[cfg(test)]
+fn signature_spec(
+    ret_type: Option<r2dec::CType>,
+    params: Vec<(&str, Option<r2dec::CType>)>,
+) -> r2types::FunctionSignatureSpec {
+    r2types::FunctionSignatureSpec {
+        ret_type: ret_type.as_ref().map(ctype_to_type_like),
+        params: params
+            .into_iter()
+            .map(|(name, ty)| r2types::FunctionParamSpec {
+                name: name.to_string(),
+                ty: ty.as_ref().map(ctype_to_type_like),
+            })
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+fn set_signature_facts(
+    decompiler: &mut r2dec::Decompiler,
+    signature: Option<r2types::FunctionSignatureSpec>,
+) {
+    decompiler.set_type_facts(r2types::FunctionTypeFacts {
+        merged_signature: signature,
+        ..r2types::FunctionTypeFacts::default()
+    });
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
     use std::ffi::{CStr, CString};
+
+    fn type_like(ty: r2dec::CType) -> r2types::CTypeLike {
+        ctype_to_type_like(&ty)
+    }
+
+    fn register_param(
+        name: &str,
+        ty: Option<r2dec::CType>,
+        reg: &str,
+    ) -> r2types::ExternalRegisterParamSpec {
+        r2types::ExternalRegisterParamSpec {
+            name: name.to_string(),
+            ty: ty.as_ref().map(ctype_to_type_like),
+            reg: reg.to_string(),
+        }
+    }
 
     #[test]
     fn semantic_comment_reg_filter_excludes_cpu_flags_case_insensitively() {
@@ -5622,9 +6116,9 @@ mod tests {
         assert_eq!(sig.params[1].name, "user_len");
         assert_eq!(
             sig.params[0].ty,
-            Some(r2dec::CType::ptr(r2dec::CType::Int(8)))
+            Some(type_like(r2dec::CType::ptr(r2dec::CType::Int(8))))
         );
-        assert_eq!(sig.params[1].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(sig.params[1].ty, Some(type_like(r2dec::CType::Int(32))));
     }
 
     #[test]
@@ -5640,7 +6134,7 @@ mod tests {
         let json =
             r#"[{"name":"dbg.test","args":[{"name":"arg1","type":"void"}],"return":"int32_t"}]"#;
         let sig = parse_external_signature(json, 64).expect("signature should parse");
-        assert_eq!(sig.ret_type, Some(r2dec::CType::Int(32)));
+        assert_eq!(sig.ret_type, Some(type_like(r2dec::CType::Int(32))));
         assert!(
             sig.params.is_empty(),
             "single generic void placeholder should be treated as an empty parameter list"
@@ -5839,38 +6333,27 @@ mod tests {
         let params = parse_external_reg_params(json, 64);
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, "arg0");
-        assert_eq!(params[0].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(params[0].ty, Some(type_like(r2dec::CType::Int(32))));
         assert_eq!(params[0].reg, "RDI");
         assert_eq!(params[1].name, "arg1");
-        assert_eq!(params[1].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(params[1].ty, Some(type_like(r2dec::CType::Int(32))));
         assert_eq!(params[1].reg, "RSI");
     }
 
     #[test]
     fn test_merge_signature_with_reg_params_fills_missing_host_args() {
         let merged = merge_signature_with_reg_params(
-            Some(r2dec::ExternalFunctionSignature {
-                ret_type: Some(r2dec::CType::Int(32)),
-                params: Vec::new(),
-            }),
+            Some(signature_spec(Some(r2dec::CType::Int(32)), Vec::new())),
             vec![
-                r2dec::ExternalRegisterParam {
-                    name: "arg0".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                    reg: "RDI".to_string(),
-                },
-                r2dec::ExternalRegisterParam {
-                    name: "arg1".to_string(),
-                    ty: Some(r2dec::CType::Int(32)),
-                    reg: "RSI".to_string(),
-                },
+                register_param("arg0", Some(r2dec::CType::Int(32)), "RDI"),
+                register_param("arg1", Some(r2dec::CType::Int(32)), "RSI"),
             ],
         )
         .expect("merged signature");
-        assert_eq!(merged.ret_type, Some(r2dec::CType::Int(32)));
+        assert_eq!(merged.ret_type, Some(type_like(r2dec::CType::Int(32))));
         assert_eq!(merged.params.len(), 2);
-        assert_eq!(merged.params[0].ty, Some(r2dec::CType::Int(32)));
-        assert_eq!(merged.params[1].ty, Some(r2dec::CType::Int(32)));
+        assert_eq!(merged.params[0].ty, Some(type_like(r2dec::CType::Int(32))));
+        assert_eq!(merged.params[1].ty, Some(type_like(r2dec::CType::Int(32))));
     }
 
     #[test]
@@ -5930,10 +6413,9 @@ mod tests {
         let blocks: [*const R2ILBlock; 2] = [block_load, block_ret];
         let func_name = CString::new("demo").expect("valid function name");
         let empty_map = CString::new("{}").expect("valid empty json");
-        let empty_sig = CString::new("[]").expect("valid empty signature json");
-        let types_json = CString::new(
+        let external_context_json = CString::new(
             r#"{
-                "types":[
+                "base_types":[
                     {
                         "kind":"struct",
                         "name":"DemoStruct",
@@ -5954,9 +6436,7 @@ mod tests {
             empty_map.as_ptr(),
             empty_map.as_ptr(),
             empty_map.as_ptr(),
-            empty_sig.as_ptr(),
-            empty_map.as_ptr(),
-            types_json.as_ptr(),
+            external_context_json.as_ptr(),
         );
         assert!(!out.is_null(), "decompilation output should not be null");
         let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
@@ -5967,7 +6447,8 @@ mod tests {
         r2il_free(ctx);
 
         assert!(
-            output.contains("thirteenth")
+            output.contains("f_30")
+                || output.contains("thirteenth")
                 || output.contains("*(rdi + 30)")
                 || output.contains("*(rdi + const_30)")
                 || output.contains("*(rdi + 48)")
@@ -6108,6 +6589,55 @@ mod tests {
     }
 
     #[test]
+    fn decompiler_cfg_guard_reason_trips_on_dense_looped_switch_summary() {
+        let summary = r2ssa::CFGRiskSummary {
+            block_count: 120,
+            loop_count: 5,
+            back_edge_count: 8,
+            switch_block_count: 1,
+            max_switch_cases: 40,
+        };
+
+        let reason =
+            decompiler_cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
+        assert!(
+            reason.contains("dense switch") || reason.contains("max_switch_cases"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn decompiler_cfg_guard_reason_trips_on_large_back_edge_count() {
+        let summary = r2ssa::CFGRiskSummary {
+            block_count: 137,
+            loop_count: 1,
+            back_edge_count: 38,
+            switch_block_count: 0,
+            max_switch_cases: 0,
+        };
+
+        let reason =
+            decompiler_cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
+        assert!(
+            reason.contains("back_edges=38"),
+            "expected back-edge detail in reason, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn decompiler_cfg_guard_reason_allows_small_benign_cfgs() {
+        let summary = r2ssa::CFGRiskSummary {
+            block_count: 12,
+            loop_count: 1,
+            back_edge_count: 1,
+            switch_block_count: 0,
+            max_switch_cases: 0,
+        };
+
+        assert_eq!(decompiler_cfg_guard_reason_from_summary(&summary), None);
+    }
+
+    #[test]
     fn non_x86_strong_evidence_can_clear_signature_threshold() {
         let params = vec![
             InferredParam {
@@ -6175,13 +6705,10 @@ mod tests {
 
     #[test]
     fn explicit_external_signature_context_yields_high_confidence() {
-        let ctx = r2dec::ExternalFunctionSignature {
-            ret_type: Some(r2dec::CType::Int(32)),
-            params: vec![r2dec::ExternalFunctionParam {
-                name: "items".to_string(),
-                ty: Some(r2dec::CType::ptr(r2dec::CType::Int(8))),
-            }],
-        };
+        let ctx = signature_spec(
+            Some(r2dec::CType::Int(32)),
+            vec![("items", Some(r2dec::CType::ptr(r2dec::CType::Int(8))))],
+        );
         let confidence = explicit_signature_context_strength(&ctx);
         assert!(confidence >= SIG_WRITEBACK_CONFIDENCE_MIN);
     }
@@ -6662,5 +7189,1571 @@ mod integration_tests {
         assert_eq!(value["max_iterations"], 12);
         assert_eq!(value["converged"], false);
         assert_eq!(value["scope"]["mode"], "worklist");
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn infer_structs_from_ssa_recovers_arm64_spilled_struct_fields() {
+        let arch = ArchSpec::new("aarch64");
+        let block = r2ssa::SSABlock {
+            addr: 0x100000bb4,
+            size: 52,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("const:30", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W8", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 2, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    src: r2ssa::SSAVar::new("X9", 2, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                },
+            ],
+        };
+
+        let mut diagnostics = TypeWritebackDiagnosticsJson::default();
+        let (struct_decls, slot_types, slot_fields) =
+            infer_structs_from_ssa(&[block], Some(&arch), 64, &mut diagnostics);
+
+        assert!(!struct_decls.is_empty(), "expected inferred struct decls");
+        assert!(slot_types.contains_key(&0), "expected arg0 slot override");
+        let fields = slot_fields.get(&0).expect("slot 0 field profile");
+        assert!(fields.contains_key(&0), "expected offset 0 field");
+        assert!(fields.contains_key(&0x30), "expected offset 0x30 field");
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn enrich_decompiler_type_context_prefers_stronger_local_struct_with_offset_zero_field() {
+        let arch = ArchSpec::new("aarch64");
+        let block = r2ssa::SSABlock {
+            addr: 0x100000bb4,
+            size: 52,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("const:30", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W8", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 2, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    src: r2ssa::SSAVar::new("X9", 2, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                },
+            ],
+        };
+
+        let (signature, type_db) = enrich_decompiler_type_context(
+            &[block],
+            Some(&arch),
+            64,
+            Some(signature_spec(
+                Some(r2dec::CType::Int(64)),
+                vec![
+                    (
+                        "arg1",
+                        Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                    ),
+                    ("arg2", Some(r2dec::CType::Int(32))),
+                ],
+            )),
+            r2types::ExternalTypeDb::default(),
+        );
+
+        let struct_name = signature
+            .and_then(|sig| sig.params.first().and_then(|param| param.ty.clone()))
+            .and_then(|ty| match ty {
+                r2types::CTypeLike::Pointer(inner) => match *inner {
+                    r2types::CTypeLike::Struct(name) => Some(name),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("expected arg0 to resolve to pointer-to-struct");
+
+        let key = struct_name.to_ascii_lowercase();
+        let st = type_db
+            .structs
+            .get(&key)
+            .expect("resolved struct in type db");
+        assert!(
+            st.fields.contains_key(&0),
+            "chosen struct override should retain offset-0 field, got {st:?}"
+        );
+        assert!(
+            st.fields.contains_key(&0x30),
+            "chosen struct override should retain offset-0x30 field, got {st:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn infer_structs_from_ssa_recovers_arm64_indexed_struct_fields() {
+        let arch = ArchSpec::new("aarch64");
+        let block = r2ssa::SSABlock {
+            addr: 0x100000e40,
+            size: 96,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 2, 8),
+                    a: r2ssa::SSAVar::new("X10", 1, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("X10", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W8", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 3, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 5, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 3, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 4, 8),
+                    a: r2ssa::SSAVar::new("X10", 3, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("X10", 4, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                    a: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    b: r2ssa::SSAVar::new("const:34", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                },
+            ],
+        };
+
+        let mut diagnostics = TypeWritebackDiagnosticsJson::default();
+        let (struct_decls, slot_types, slot_fields) =
+            infer_structs_from_ssa(&[block], Some(&arch), 64, &mut diagnostics);
+
+        assert!(!struct_decls.is_empty(), "expected inferred struct decls");
+        assert!(slot_types.contains_key(&0), "expected arg0 slot override");
+        let fields = slot_fields.get(&0).expect("slot 0 field profile");
+        assert!(fields.contains_key(&0x8), "expected offset 0x8 field");
+        assert!(fields.contains_key(&0x34), "expected offset 0x34 field");
+    }
+
+    fn live_arm64_struct_array_index_block() -> r2ssa::SSABlock {
+        r2ssa::SSABlock {
+            addr: 0x100000e40,
+            size: 96,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    src: r2ssa::SSAVar::new("SP", 1, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    val: r2ssa::SSAVar::new("W2", 0, 4),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 2, 8),
+                    src: r2ssa::SSAVar::new("SP", 1, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 2, 8),
+                },
+                r2ssa::SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X11", 1, 8),
+                    src: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 2, 8),
+                    a: r2ssa::SSAVar::new("X10", 1, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                    src: r2ssa::SSAVar::new("X10", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 2, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 2, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W8", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 5, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 4, 8),
+                    a: r2ssa::SSAVar::new("X10", 3, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                    src: r2ssa::SSAVar::new("X10", 4, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 6, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                    a: r2ssa::SSAVar::new("X9", 6, 8),
+                    b: r2ssa::SSAVar::new("const:34", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                },
+            ],
+        }
+    }
+
+    fn live_arm64_array_index_block(is_negative: bool) -> r2ssa::SSABlock {
+        let addr_op = if is_negative {
+            r2ssa::SSAOp::IntSub {
+                dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                a: r2ssa::SSAVar::new("X8", 1, 8),
+                b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+            }
+        } else {
+            r2ssa::SSAOp::IntAdd {
+                dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                a: r2ssa::SSAVar::new("X8", 1, 8),
+                b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+            }
+        };
+
+        r2ssa::SSABlock {
+            addr: 0x100000d80,
+            size: 72,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::IntCarry {
+                    dst: r2ssa::SSAVar::new("TMPCY", 1, 1),
+                    a: r2ssa::SSAVar::new("X8", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                r2ssa::SSAOp::IntSCarry {
+                    dst: r2ssa::SSAVar::new("TMPOV", 1, 1),
+                    a: r2ssa::SSAVar::new("X8", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                addr_op,
+                r2ssa::SSAOp::IntSLess {
+                    dst: r2ssa::SSAVar::new("TMPNG", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("TMPZR", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("W8", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                },
+                r2ssa::SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X0", 1, 8),
+                    src: r2ssa::SSAVar::new("W8", 1, 4),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("X30", 0, 8),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        }
+    }
+
+    fn observed_live_arm64_struct_array_index_block_full() -> r2ssa::SSABlock {
+        r2ssa::SSABlock {
+            addr: 0x100000e40,
+            size: 96,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:10", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
+                    val: r2ssa::SSAVar::new("X0", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
+                    val: r2ssa::SSAVar::new("W1", 0, 4),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    src: r2ssa::SSAVar::new("SP", 1, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
+                    val: r2ssa::SSAVar::new("W2", 0, 4),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:6780", 2, 8),
+                    src: r2ssa::SSAVar::new("SP", 1, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6780", 2, 8),
+                },
+                r2ssa::SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 1, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X11", 1, 8),
+                    src: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 2, 8),
+                    a: r2ssa::SSAVar::new("X10", 1, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                    src: r2ssa::SSAVar::new("X10", 2, 8),
+                },
+                r2ssa::SSAOp::IntCarry {
+                    dst: r2ssa::SSAVar::new("TMPCY", 1, 1),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                r2ssa::SSAOp::IntSCarry {
+                    dst: r2ssa::SSAVar::new("TMPOV", 1, 1),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    a: r2ssa::SSAVar::new("X9", 1, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
+                },
+                r2ssa::SSAOp::IntSLess {
+                    dst: r2ssa::SSAVar::new("TMPNG", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("TMPZR", 1, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 2, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 1, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 2, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
+                    val: r2ssa::SSAVar::new("W8", 0, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 3, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X8", 2, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 3, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 2, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 4, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X9", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 2, 4),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X9", 4, 8),
+                    a: r2ssa::SSAVar::new("X9", 3, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 2, 8),
+                    src: r2ssa::SSAVar::new("X9", 4, 8),
+                },
+                r2ssa::SSAOp::IntCarry {
+                    dst: r2ssa::SSAVar::new("TMPCY", 2, 1),
+                    a: r2ssa::SSAVar::new("X8", 2, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 2, 8),
+                },
+                r2ssa::SSAOp::IntSCarry {
+                    dst: r2ssa::SSAVar::new("TMPOV", 2, 1),
+                    a: r2ssa::SSAVar::new("X8", 2, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                    a: r2ssa::SSAVar::new("X8", 2, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 2, 8),
+                },
+                r2ssa::SSAOp::IntSLess {
+                    dst: r2ssa::SSAVar::new("TMPNG", 2, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("TMPZR", 2, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X8", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 5, 8),
+                    a: r2ssa::SSAVar::new("X8", 3, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 2, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 5, 8),
+                },
+                r2ssa::SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X8", 4, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 2, 4),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X9", 5, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:4", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 6, 8),
+                },
+                r2ssa::SSAOp::IntSExt {
+                    dst: r2ssa::SSAVar::new("X10", 3, 8),
+                    src: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
+                },
+                r2ssa::SSAOp::IntMult {
+                    dst: r2ssa::SSAVar::new("X10", 4, 8),
+                    a: r2ssa::SSAVar::new("X10", 3, 8),
+                    b: r2ssa::SSAVar::new("const:38", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                    src: r2ssa::SSAVar::new("X10", 4, 8),
+                },
+                r2ssa::SSAOp::IntCarry {
+                    dst: r2ssa::SSAVar::new("TMPCY", 3, 1),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                },
+                r2ssa::SSAOp::IntSCarry {
+                    dst: r2ssa::SSAVar::new("TMPOV", 3, 1),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    a: r2ssa::SSAVar::new("X9", 5, 8),
+                    b: r2ssa::SSAVar::new("tmp:12380", 3, 8),
+                },
+                r2ssa::SSAOp::IntSLess {
+                    dst: r2ssa::SSAVar::new("TMPNG", 3, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::IntEqual {
+                    dst: r2ssa::SSAVar::new("TMPZR", 3, 1),
+                    a: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                    b: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X9", 6, 8),
+                    src: r2ssa::SSAVar::new("tmp:12480", 3, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                    a: r2ssa::SSAVar::new("X9", 6, 8),
+                    b: r2ssa::SSAVar::new("const:34", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
+                },
+                r2ssa::SSAOp::IntZExt {
+                    dst: r2ssa::SSAVar::new("X9", 7, 8),
+                    src: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn infer_structs_from_ssa_recovers_live_arm64_struct_array_index_pattern() {
+        let arch = ArchSpec::new("aarch64");
+        let block = live_arm64_struct_array_index_block();
+
+        let mut diagnostics = TypeWritebackDiagnosticsJson::default();
+        let (struct_decls, slot_types, slot_fields) =
+            infer_structs_from_ssa(&[block], Some(&arch), 64, &mut diagnostics);
+
+        assert!(
+            !struct_decls.is_empty(),
+            "expected inferred struct decls for live indexed-member pattern"
+        );
+        assert!(slot_types.contains_key(&0), "expected arg0 slot override");
+        let fields = slot_fields.get(&0).expect("slot 0 field profile");
+        assert!(fields.contains_key(&0x8), "expected offset 0x8 field");
+        assert!(fields.contains_key(&0x34), "expected offset 0x34 field");
+    }
+
+    #[test]
+    fn infer_structs_from_ssa_recovers_observed_live_arm64_struct_array_index_pattern() {
+        let arch = ArchSpec::new("aarch64");
+        let mut block = observed_live_arm64_struct_array_index_block_full();
+        block.ops.extend([
+            r2ssa::SSAOp::IntAdd {
+                dst: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+                a: r2ssa::SSAVar::new("X8", 4, 8),
+                b: r2ssa::SSAVar::new("X9", 7, 8),
+            },
+            r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("X0", 1, 8),
+                src: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+            },
+            r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("PC", 1, 8),
+                src: r2ssa::SSAVar::new("X30", 0, 8),
+            },
+            r2ssa::SSAOp::Return {
+                target: r2ssa::SSAVar::new("PC", 1, 8),
+            },
+        ]);
+
+        let mut diagnostics = TypeWritebackDiagnosticsJson::default();
+        let (struct_decls, slot_types, slot_fields) =
+            infer_structs_from_ssa(&[block], Some(&arch), 64, &mut diagnostics);
+
+        assert!(
+            !struct_decls.is_empty(),
+            "expected inferred struct decls for observed live indexed-member pattern; diagnostics={diagnostics:?}"
+        );
+        assert!(slot_types.contains_key(&0), "expected arg0 slot override");
+        let fields = slot_fields.get(&0).expect("slot 0 field profile");
+        assert!(fields.contains_key(&0x8), "expected offset 0x8 field");
+        assert!(fields.contains_key(&0x34), "expected offset 0x34 field");
+    }
+
+    #[test]
+    fn infer_structs_from_semantic_accesses_recovers_observed_live_arm64_struct_array_pattern() {
+        let block = observed_live_arm64_struct_array_index_block_full();
+        let raw = r2il::R2ILBlock {
+            addr: block.addr,
+            size: block.size,
+            ops: vec![r2il::R2ILOp::Return {
+                target: r2il::Varnode::constant(0, 8),
+            }],
+            switch_info: None,
+            op_metadata: Default::default(),
+        };
+        let mut func = r2ssa::SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_struct_array_index");
+
+        let mut diagnostics = TypeWritebackDiagnosticsJson::default();
+        let (struct_decls, slot_types, slot_fields) = infer_structs_from_semantic_accesses(
+            &func,
+            &r2dec::DecompilerConfig::aarch64(),
+            64,
+            &mut diagnostics,
+        );
+
+        assert!(
+            !struct_decls.is_empty(),
+            "expected semantic access supplement to infer struct decls; diagnostics={diagnostics:?}"
+        );
+        assert!(slot_types.contains_key(&0), "expected arg0 slot override");
+        let fields = slot_fields.get(&0).expect("slot 0 field profile");
+        assert!(fields.contains_key(&0x8), "expected offset 0x8 field");
+        assert!(fields.contains_key(&0x34), "expected offset 0x34 field");
+    }
+
+    #[test]
+    fn enrich_decompiler_type_context_applies_live_arm64_struct_array_index_override() {
+        let arch = ArchSpec::new("aarch64");
+        let block = live_arm64_struct_array_index_block();
+        let signature = Some(signature_spec(
+            None,
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
+                ("arg3", Some(r2dec::CType::Int(32))),
+            ],
+        ));
+
+        let (signature, type_db) = enrich_decompiler_type_context(
+            &[block],
+            Some(&arch),
+            64,
+            signature,
+            r2types::ExternalTypeDb::default(),
+        );
+
+        let signature = signature.expect("signature");
+        let arg0 = signature.params.first().and_then(|param| param.ty.as_ref());
+        let rendered = arg0
+            .map(|ty| type_like_to_ctype(ty).to_string())
+            .unwrap_or_default();
+        let compact = rendered.replace(' ', "");
+        assert!(
+            compact.starts_with("struct")
+                && compact.ends_with('*')
+                && !compact.eq_ignore_ascii_case("void*"),
+            "expected inferred struct pointer override, got {rendered}"
+        );
+        assert!(
+            !type_db.structs.is_empty(),
+            "expected inferred struct declarations in type db"
+        );
+    }
+
+    #[test]
+    fn enrich_decompiler_type_context_drives_live_arm64_struct_array_decompile() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let arch = ArchSpec::new("aarch64");
+        let block = live_arm64_struct_array_index_block();
+        let signature = Some(signature_spec(
+            Some(r2dec::CType::Int(64)),
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
+                ("arg3", Some(r2dec::CType::Int(32))),
+            ],
+        ));
+
+        let (signature, type_db) = enrich_decompiler_type_context(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            64,
+            signature,
+            r2types::ExternalTypeDb::default(),
+        );
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_struct_array_index");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        decompiler.set_type_facts(r2types::FunctionTypeFacts {
+            merged_signature: signature,
+            external_type_db: type_db,
+            ..r2types::FunctionTypeFacts::default()
+        });
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("struct ")
+                && output.contains("* arg1")
+                && !output.contains("void* arg1"),
+            "expected struct-typed first argument in decompiled output, got:\n{output}"
+        );
+        assert!(
+            !output.contains("arg1 ="),
+            "indexed-member store path should not synthesize a bogus parameter assignment, got:\n{output}"
+        );
+        assert!(
+            output.contains("f_8") && !output.contains("*(arg1 +"),
+            "expected indexed-member store rendering in decompiled output, got:\n{output}"
+        );
+        assert!(
+            !output.contains("\nx8 =") && !output.contains("\nstack_"),
+            "dead register or stack artifacts should not leak into decompiled output, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn enrich_decompiler_type_context_drives_observed_live_arm64_struct_array_decompile() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let arch = ArchSpec::new("aarch64");
+        let mut block = observed_live_arm64_struct_array_index_block_full();
+        block.ops.extend([
+            r2ssa::SSAOp::IntAdd {
+                dst: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+                a: r2ssa::SSAVar::new("X8", 4, 8),
+                b: r2ssa::SSAVar::new("X9", 7, 8),
+            },
+            r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("X0", 1, 8),
+                src: r2ssa::SSAVar::new("tmp:sum", 1, 8),
+            },
+            r2ssa::SSAOp::Copy {
+                dst: r2ssa::SSAVar::new("PC", 1, 8),
+                src: r2ssa::SSAVar::new("X30", 0, 8),
+            },
+            r2ssa::SSAOp::Return {
+                target: r2ssa::SSAVar::new("PC", 1, 8),
+            },
+        ]);
+        let signature = Some(signature_spec(
+            Some(r2dec::CType::Int(64)),
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
+                ("arg3", Some(r2dec::CType::Int(32))),
+            ],
+        ));
+
+        let (signature, type_db) = enrich_decompiler_type_context(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            64,
+            signature,
+            r2types::ExternalTypeDb::default(),
+        );
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_struct_array_index");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        decompiler.set_type_facts(r2types::FunctionTypeFacts {
+            merged_signature: signature,
+            external_type_db: type_db,
+            ..r2types::FunctionTypeFacts::default()
+        });
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("[arg2].f_8"),
+            "expected indexed-member store rendering in decompiled output, got:\n{output}"
+        );
+        assert!(
+            output.contains("[arg2].f_34"),
+            "expected indexed-member load rendering in decompiled output, got:\n{output}"
+        );
+        assert!(
+            !output.contains("arg1 ="),
+            "indexed-member load path should not synthesize a bogus parameter assignment, got:\n{output}"
+        );
+        assert!(
+            !output.contains("*(arg1 +") && !output.contains("*(((uint8_t*)arg1) +"),
+            "expected semantic indexed-member rendering without raw pointer math, got:\n{output}"
+        );
+        assert!(
+            !output.contains("\nx8 =") && !output.contains("\nstack_"),
+            "dead register or stack artifacts should not leak into decompiled output, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_arm64_array_index_decompile_keeps_plain_subscript_without_flag_noise() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = live_arm64_array_index_block(false);
+        let signature = Some(signature_spec(
+            Some(r2dec::CType::Int(64)),
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
+            ],
+        ));
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_array_index");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        set_signature_facts(&mut decompiler, signature);
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("[arg2]"),
+            "expected plain subscript rendering, got:\n{output}"
+        );
+        assert!(
+            !output.contains("arg1 ="),
+            "plain indexed load should not synthesize a bogus parameter assignment, got:\n{output}"
+        );
+        assert!(
+            !output.contains(".p0"),
+            "plain indexed load must not upgrade to a fake member, got:\n{output}"
+        );
+        assert!(
+            !output.contains("tmpng")
+                && !output.contains("tmpzr")
+                && !output.contains("TMPCY")
+                && !output.contains("TMPOV"),
+            "dead arm64 flag temps should not leak into final output, got:\n{output}"
+        );
+        assert!(
+            !output.contains("stack_8 =")
+                && !output.contains("stack_4 =")
+                && !output.contains("stack ="),
+            "dead synthetic stack argument spills should not leak into final output, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_arm64_array_index_neg_decompile_keeps_negative_subscript_without_flag_noise() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = live_arm64_array_index_block(true);
+        let signature = Some(signature_spec(
+            Some(r2dec::CType::Int(64)),
+            vec![
+                (
+                    "arg1",
+                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
+                ),
+                ("arg2", Some(r2dec::CType::Int(32))),
+            ],
+        ));
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._test_array_index_neg");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        set_signature_facts(&mut decompiler, signature);
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("[0 - arg2]") || output.contains("[-arg2]"),
+            "expected negative subscript rendering, got:\n{output}"
+        );
+        assert!(
+            !output.contains("arg1 ="),
+            "negative indexed load should not synthesize a bogus parameter assignment, got:\n{output}"
+        );
+        assert!(
+            !output.contains("[-0]"),
+            "negative index must preserve the scalar index, got:\n{output}"
+        );
+        assert!(
+            !output.contains("tmpng")
+                && !output.contains("tmpzr")
+                && !output.contains("TMPCY")
+                && !output.contains("TMPOV"),
+            "dead arm64 flag temps should not leak into final output, got:\n{output}"
+        );
+        assert!(
+            !output.contains("stack_8 =")
+                && !output.contains("stack_4 =")
+                && !output.contains("stack ="),
+            "dead synthetic stack argument spills should not leak into final output, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_arm64_main_atoi_arg_keeps_semantic_root() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = r2ssa::SSABlock {
+            addr: 0x100001000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::IntSub {
+                    dst: r2ssa::SSAVar::new("SP", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 0, 8),
+                    b: r2ssa::SSAVar::new("const:200", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:178", 0, 8),
+                },
+                r2ssa::SSAOp::Store {
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:slot", 1, 8),
+                    val: r2ssa::SSAVar::new("X1", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:slot", 2, 8),
+                    a: r2ssa::SSAVar::new("SP", 1, 8),
+                    b: r2ssa::SSAVar::new("const:178", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:slot", 2, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("tmp:arg", 1, 8),
+                    a: r2ssa::SSAVar::new("X8", 1, 8),
+                    b: r2ssa::SSAVar::new("const:8", 0, 8),
+                },
+                r2ssa::SSAOp::Load {
+                    dst: r2ssa::SSAVar::new("X0", 1, 8),
+                    space: "ram".to_string(),
+                    addr: r2ssa::SSAVar::new("tmp:arg", 1, 8),
+                },
+                r2ssa::SSAOp::Call {
+                    target: r2ssa::SSAVar::new("const:401040", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X0", 2, 8),
+                    src: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("X30", 0, 8),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        };
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._main");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        set_signature_facts(
+            &mut decompiler,
+            Some(signature_spec(
+                Some(r2dec::CType::Int(64)),
+                vec![
+                    ("arg1", Some(r2dec::CType::Int(32))),
+                    (
+                        "arg2",
+                        Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(
+                            Box::new(r2dec::CType::Int(8)),
+                        )))),
+                    ),
+                ],
+            )),
+        );
+        decompiler.set_function_names(HashMap::from([(0x401040, "sym.imp.atoi".to_string())]));
+        decompiler.set_known_function_signatures(HashMap::from([(
+            "sym.imp.atoi".to_string(),
+            r2types::FunctionType {
+                return_type: r2types::CTypeLike::Int {
+                    bits: 32,
+                    signedness: r2types::Signedness::Signed,
+                },
+                params: vec![r2types::CTypeLike::Pointer(Box::new(
+                    r2types::CTypeLike::Int {
+                        bits: 8,
+                        signedness: r2types::Signedness::Signed,
+                    },
+                ))],
+                variadic: false,
+            },
+        )]));
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("sym.imp.atoi("),
+            "expected imported atoi call, got:\n{output}"
+        );
+        assert!(
+            output.contains("arg2") && !output.contains("stack_") && !output.contains("&stack"),
+            "expected semantic argv-rooted atoi arg without stack placeholders, got:\n{output}"
+        );
+        assert!(
+            !output.contains("atoi(*") && !output.contains("atoi(lr)"),
+            "atoi imported arg should not regress to deref or transient register form, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_arm64_main_printf_format_arg_keeps_string_literal() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = r2ssa::SSABlock {
+            addr: 0x100001100,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X8", 1, 8),
+                    src: r2ssa::SSAVar::new("const:100002000", 0, 8),
+                },
+                r2ssa::SSAOp::IntAdd {
+                    dst: r2ssa::SSAVar::new("X0", 1, 8),
+                    a: r2ssa::SSAVar::new("X8", 1, 8),
+                    b: r2ssa::SSAVar::new("const:292", 0, 8),
+                },
+                r2ssa::SSAOp::Call {
+                    target: r2ssa::SSAVar::new("const:401030", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("X0", 2, 8),
+                    src: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("X30", 0, 8),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        };
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("sym._main");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
+        decompiler.set_function_names(HashMap::from([(0x401030, "sym.imp.printf".to_string())]));
+        decompiler.set_known_function_signatures(HashMap::from([(
+            "sym.imp.printf".to_string(),
+            r2types::FunctionType {
+                return_type: r2types::CTypeLike::Int {
+                    bits: 32,
+                    signedness: r2types::Signedness::Signed,
+                },
+                params: vec![r2types::CTypeLike::Pointer(Box::new(
+                    r2types::CTypeLike::Int {
+                        bits: 8,
+                        signedness: r2types::Signedness::Signed,
+                    },
+                ))],
+                variadic: true,
+            },
+        )]));
+        decompiler.set_strings(HashMap::from([(
+            0x100002292,
+            "usage: vuln_test <n>\\n".to_string(),
+        )]));
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("\"usage: vuln_test <n>\\\\n\""),
+            "expected string literal printf arg, got:\n{output}"
+        );
+        assert!(
+            !output.contains("0x100002000") && !output.contains("292"),
+            "raw const-add format pointer should not survive, got:\n{output}"
+        );
+        assert!(
+            !output.contains("printf(&stack)") && !output.contains("printf(0x"),
+            "printf imported format arg should stay literalized, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn live_x86_main_printf_format_arg_keeps_string_literal() {
+        use r2il::{R2ILBlock, R2ILOp, Varnode};
+        use r2ssa::SSAFunction;
+
+        let block = r2ssa::SSABlock {
+            addr: 0x401000,
+            size: 4,
+            ops: vec![
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("RDI", 1, 8),
+                    src: r2ssa::SSAVar::new("const:40229e", 0, 8),
+                },
+                r2ssa::SSAOp::Call {
+                    target: r2ssa::SSAVar::new("const:401030", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("RAX", 1, 8),
+                    src: r2ssa::SSAVar::new("const:0", 0, 8),
+                },
+                r2ssa::SSAOp::Copy {
+                    dst: r2ssa::SSAVar::new("PC", 1, 8),
+                    src: r2ssa::SSAVar::new("RIP", 0, 8),
+                },
+                r2ssa::SSAOp::Return {
+                    target: r2ssa::SSAVar::new("PC", 1, 8),
+                },
+            ],
+        };
+
+        let mut raw = R2ILBlock::new(block.addr, block.size);
+        raw.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
+        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
+        func = func.with_name("dbg.main");
+
+        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
+        decompiler.set_function_names(HashMap::from([(0x401030, "sym.imp.printf".to_string())]));
+        decompiler.set_known_function_signatures(HashMap::from([(
+            "sym.imp.printf".to_string(),
+            r2types::FunctionType {
+                return_type: r2types::CTypeLike::Int {
+                    bits: 32,
+                    signedness: r2types::Signedness::Signed,
+                },
+                params: vec![r2types::CTypeLike::Pointer(Box::new(
+                    r2types::CTypeLike::Int {
+                        bits: 8,
+                        signedness: r2types::Signedness::Signed,
+                    },
+                ))],
+                variadic: true,
+            },
+        )]));
+        decompiler.set_strings(HashMap::from([(
+            0x40229e,
+            "Unknown test: %d\\n".to_string(),
+        )]));
+        let output = decompiler.decompile(&func);
+
+        assert!(
+            output.contains("\"Unknown test: %d\\\\n\""),
+            "expected x86 string literal printf arg, got:\n{output}"
+        );
+        assert!(
+            !output.contains("printf(0x") && !output.contains("atoi(*rax)"),
+            "x86 imported-call rendering must not regress to raw literal or deref arg, got:\n{output}"
+        );
+        assert!(
+            !output.contains("printf(&stack)"),
+            "x86 imported-call rendering must not regress to stack placeholder args, got:\n{output}"
+        );
     }
 }
