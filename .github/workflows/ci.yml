@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ['*']
   pull_request:
     branches: [master]
 
@@ -106,12 +107,13 @@ jobs:
           R2R_OFFLINE: "1"
         run: make -C tests/r2r run
 
-  # ── Release build check ────────────────────────────────────────────
+  # ── Release build + plugin bundle ─────────────────────────────────
   release:
-    name: Release Build
+    name: Release Build + Plugin Bundle
     runs-on: self-hosted
     needs: [quality, r2r]
-    if: github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
       - name: Setup Rust PATH
@@ -128,8 +130,47 @@ jobs:
           fi
       - name: Prepare shared target dir
         run: mkdir -p "$CARGO_TARGET_DIR"
+      - name: Ensure radare2 + headers
+        run: |
+          check_radare2() {
+            command -v r2 >/dev/null &&
+            pkg-config --exists r_anal r_arch r_core &&
+            r2 -v >/dev/null 2>&1
+          }
+
+          if check_radare2; then
+            echo "radare2 and headers already available"
+          else
+            echo "Installing radare2 from git..."
+            if [ -d /tmp/radare2/.git ]; then
+              cd /tmp/radare2 && git fetch --depth=1 origin && git reset --hard origin/master
+            else
+              rm -rf /tmp/radare2
+              git clone --depth=1 https://github.com/radareorg/radare2 /tmp/radare2
+            fi
+            cd /tmp/radare2 && sys/install.sh
+            cd "$GITHUB_WORKSPACE"
+            check_radare2
+          fi
 
       - name: Build release (all architectures)
         run: cargo build --release --features all-archs
       - name: Build plugin release
         run: make -C r2plugin RUST_FEATURES=all-archs
+      - name: Package plugin bundle
+        id: bundle
+        run: bash scripts/package-plugin-bundle.sh
+      - name: Upload plugin bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.bundle.outputs.artifact_name }}
+          path: |
+            ${{ steps.bundle.outputs.bundle_path }}
+            ${{ steps.bundle.outputs.checksum_path }}
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.bundle.outputs.bundle_path }}
+            ${{ steps.bundle.outputs.checksum_path }}

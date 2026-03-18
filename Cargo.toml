@@ -17,7 +17,7 @@ version = "0.1.0"
 edition = "2024"
 license = "LGPL-3.0-only"
 authors = ["radare2 contributors", "0verflowme"]
-repository = "https://github.com/0verflowme/r2sleigh"
+repository = "https://github.com/radareorg/r2sleigh"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
