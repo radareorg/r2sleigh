@@ -3951,6 +3951,18 @@ fn prepared_call_render_facts(
             let disposition = if count_refusal.is_some() {
                 CallsiteRenderDisposition::Residualized
             } else if cert.transfer == r2ssa::CallSiteTransfer::TailCall {
+                // A tail transfer returns whatever the callee leaves, and
+                // what the caller's own declaration says of that decides the
+                // spelling: a void function discards it (`callee(); return;`),
+                // a function returning a value hands it on (`return callee();`)
+                // only where the callee produces one, and a function that
+                // declares a value the callee does not produce returns nothing
+                // this can prove.
+                let function_returns_void = prepared
+                    .machine_context()
+                    .function_interface()
+                    .map(|interface| interface.return_kind())
+                    .is_some_and(|kind| kind == r2ssa::SourceFunctionReturn::Void);
                 match prepared
                     .facts()
                     .boundaries
@@ -3959,6 +3971,9 @@ fn prepared_call_render_facts(
                     .filter(|boundary| boundary.complete && boundary.at == cert.at)
                     .and_then(|boundary| boundary.result_kind)
                 {
+                    Some(_) if function_returns_void => {
+                        CallsiteRenderDisposition::TerminalVoidReturn
+                    }
                     Some(r2ssa::SourceCallResult::Register { .. }) => {
                         CallsiteRenderDisposition::TerminalReturn
                     }
