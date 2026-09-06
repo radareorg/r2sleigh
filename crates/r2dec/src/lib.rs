@@ -4707,6 +4707,19 @@ impl Decompiler {
                 Ok(plan) => std::rc::Rc::new(plan),
                 Err(error) => {
                     debug_log_render_contract_error(prepared, "binding-plan", &error);
+                    // The plan's own error says which value or entity it could
+                    // not place, and until now it reached only a debug log
+                    // nobody turns on: the census recorded six functions as
+                    // `BindingPlanBuild` with no way to tell what any of them
+                    // met. It rides the same evidence channel as every other
+                    // refusal now.
+                    r2il::refusal_evidence!(
+                        "binding-plan-build",
+                        "{}: {error:?}",
+                        func.name
+                            .clone()
+                            .unwrap_or_else(|| format!("sub_{:x}", func.entry))
+                    );
                     let refusal = match error {
                         crate::binding_plan::BindingPlanBuildError::MachineProjection(_)
                         | crate::binding_plan::BindingPlanBuildError::Seal(

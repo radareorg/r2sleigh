@@ -897,6 +897,22 @@ impl SemanticObligationInventory {
             || self.instructions.len() != self.source_instruction_count + zero_op_span_count
             || self.by_inst.len() != self.source_instruction_count
         {
+            // An incomplete inventory refuses the function at the binding
+            // plan, and until now it said only that. Which of the five
+            // conditions failed is the whole difference between a lifter gap,
+            // an unstructured cycle and a seeding defect.
+            r2il::refusal_evidence!(
+                "obligation-inventory",
+                "incomplete: schema={} failures={:?} unstructured_cycles={:?} \
+                 instructions={} sources={} zero_op_spans={} by_inst={}",
+                self.schema_version,
+                self.construction_failures,
+                self.unstructured_cycle_blocks,
+                self.instructions.len(),
+                self.source_instruction_count,
+                zero_op_span_count,
+                self.by_inst.len()
+            );
             return false;
         }
         for (id, instruction) in &self.instructions {
