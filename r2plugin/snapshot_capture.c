@@ -11,6 +11,7 @@
 #include <r_core.h>
 #include <r_util.h>
 #include "snapshot_capture.h"
+#include "dwarf_facts.h"
 
 /* forward declarations, so the moved bodies keep their original order */
 
@@ -460,6 +461,40 @@ static bool fcn_context_slot_declared_by_dwarf(RAnal *anal, RAnalFunction *fcn, 
 	sdb_foreach (dwarf, slot_dwarf_provenance_cb, &probe);
 	free ((char *)probe.sname);
 	return probe.declared;
+}
+
+/* The ABI position of a stack-homed formal, certified against the live
+ * variable.
+ *
+ * radare2 numbers the arguments it managed to place; the debug information
+ * numbers every parameter the caller passes. The two agree in the ordinary
+ * case and part company when a formal could not be placed, so the position is
+ * only taken when radare2's own numbering matches it and the variable is
+ * still the one the debug information described. This replaces a proof table
+ * the fork kept inside `RAnal`; the evidence is read from the entries
+ * themselves now.
+ */
+static bool fcn_context_dwarf_formal_ordinal(RAnal *anal, RAnalFunction *fcn,
+		const RAnalVar *var, R_OUT int *ordinal) {
+	R_RETURN_VAL_IF_FAIL (ordinal, false);
+	*ordinal = -1;
+	if (!anal || !fcn || !var || !var->isarg || var->argnum < 0
+		|| R_STR_ISEMPTY (var->name) || R_STR_ISEMPTY (var->type)
+		|| (var->kind != R_ANAL_VAR_KIND_BPV && var->kind != R_ANAL_VAR_KIND_SPV)) {
+		return false;
+	}
+	// The variable has to still sit where the debug information put it, which
+	// is the same question the slot's provenance asks.
+	if (!fcn_context_slot_declared_by_dwarf (anal, fcn, var)) {
+		return false;
+	}
+	int position = -1;
+	if (!r2sleigh_dwarf_formal_ordinal (anal, fcn->addr, var->name, &position)
+		|| position != var->argnum) {
+		return false;
+	}
+	*ordinal = position;
+	return true;
 }
 
 static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext *ctx, RAnalFunction *fcn, RAnalVar *var, RAnalVar *home_source, int arg_index) {
@@ -3059,9 +3094,8 @@ static bool snapshot_frame_pointer_storage_collect(RAnal *anal,
 			(RAnalFunction *)fcn)) {
 		return true;
 	}
-	RAnalDwarfFramePointerStorage proof = {0};
-	if (!r_anal_dwarf_function_frame_pointer_get (
-			anal, fcn->addr, &proof)) {
+	R2SleighDwarfFrameBase proof = {0};
+	if (!r2sleigh_dwarf_function_frame_base (anal, fcn->addr, &proof)) {
 		return true;
 	}
 	ut32 address_size;
@@ -3069,7 +3103,7 @@ static bool snapshot_frame_pointer_storage_collect(RAnal *anal,
 	SnapshotStorageResult collected = snapshot_register_storage_collect (
 		anal, proof.name, true, &candidate);
 	if (collected == SNAPSHOT_STORAGE_NO_MEMORY) {
-		r_anal_dwarf_frame_pointer_storage_fini (&proof);
+		r2sleigh_dwarf_frame_base_fini (&proof);
 		return false;
 	}
 	const bool exact = collected == SNAPSHOT_STORAGE_VALID
@@ -3080,7 +3114,7 @@ static bool snapshot_frame_pointer_storage_collect(RAnal *anal,
 		&& candidate.size == proof.size
 		&& !snapshot_frame_pointer_storage_conflicts_interface (
 			&candidate, interface, ctx);
-	r_anal_dwarf_frame_pointer_storage_fini (&proof);
+	r2sleigh_dwarf_frame_base_fini (&proof);
 	if (!exact) {
 		snapshot_register_storage_fini (&candidate);
 		return true;
@@ -4932,7 +4966,7 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 		int exact_formal_ordinal = -1;
 		const int arg_index = home_source
 			? fcn_context_register_arg_index (anal, fcn, cache.rvars, home_source)
-			: r_anal_var_exact_formal_get (anal, var, &exact_formal_ordinal)
+			: fcn_context_dwarf_formal_ordinal (anal, fcn, var, &exact_formal_ordinal)
 				? exact_formal_ordinal: -1;
 		RAnalFcnSlot *slot = fcn_context_collect_slot (
 			anal, ctx, fcn, var, home_source, arg_index);
@@ -4950,7 +4984,7 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 		int exact_formal_ordinal = -1;
 		const int arg_index = home_source
 			? fcn_context_register_arg_index (anal, fcn, cache.rvars, home_source)
-			: r_anal_var_exact_formal_get (anal, var, &exact_formal_ordinal)
+			: fcn_context_dwarf_formal_ordinal (anal, fcn, var, &exact_formal_ordinal)
 				? exact_formal_ordinal: -1;
 		RAnalFcnSlot *slot = fcn_context_collect_slot (
 			anal, ctx, fcn, var, home_source, arg_index);
