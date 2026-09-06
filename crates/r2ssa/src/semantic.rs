@@ -3897,6 +3897,12 @@ fn collect_source_boundary_facts(
             boundary.fixed_argument_count = Some(convention.arguments.len());
             boundary.arguments = convention.arguments;
             boundary.results = convention.results;
+            // Deliberately not the result kind. Where the convention says a
+            // result would be left is a fact about the caller's side, and
+            // recording it here would make interface recovery read a thunk's
+            // tail transfer as proof that its target returns a value. What
+            // the callee returns stays unproven; the renderer's disposition
+            // decides what a transfer through this boundary looks like.
             boundary.complete = true;
         }
         facts.calls.insert(call_site.id, boundary);
@@ -10534,8 +10540,21 @@ fn collect_call_sites(
                                         .is_some_and(|value| {
                                             value.canonical_storage == Some(identity.target())
                                         }),
+                                    // A slot in memory, or the register the
+                                    // jump goes through: both are targets a
+                                    // tail transfer can name, and the register
+                                    // case is checked the same way the direct
+                                    // tail jump is, against the value the
+                                    // branch actually reads.
                                     SSAOp::BranchInd { .. } => {
                                         identity.target().space == crate::CanonicalStorageSpace::Ram
+                                            || graph
+                                                .value_id_for_var(target)
+                                                .and_then(|value| graph.value(value))
+                                                .is_some_and(|value| {
+                                                    value.canonical_storage
+                                                        == Some(identity.target())
+                                                })
                                     }
                                     _ => false,
                                 }

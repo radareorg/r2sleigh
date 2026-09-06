@@ -927,6 +927,33 @@ impl SourceMachineContext {
         call_site_interfaces: Vec<SourceCallSiteInterface>,
         tail_call_identities: Vec<SourceCallSiteIdentity>,
     ) -> Self {
+        Self::from_blocks_with_interfaces_tail_calls_and_terminals(
+            blocks,
+            arch,
+            function_interface,
+            machine_roles,
+            convention_slots,
+            call_site_interfaces,
+            tail_call_identities,
+            &BTreeSet::new(),
+        )
+    }
+
+    /// `terminal_blocks` are the blocks the source's own block graph declares
+    /// to have no successor. A transfer at the end of one of them leaves the
+    /// function whatever it transfers through, which is what makes an
+    /// indirect jump there a tail call rather than an unresolved dispatch.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_blocks_with_interfaces_tail_calls_and_terminals(
+        blocks: &[R2ILBlock],
+        arch: Option<&ArchSpec>,
+        function_interface: Option<SourceFunctionInterface>,
+        machine_roles: SourceMachineRoles,
+        convention_slots: Option<SourceConventionSlots>,
+        call_site_interfaces: Vec<SourceCallSiteInterface>,
+        tail_call_identities: Vec<SourceCallSiteIdentity>,
+        terminal_blocks: &BTreeSet<u64>,
+    ) -> Self {
         // The architecture says where it returns a value, for a function whose
         // ABI was never recovered.
         let architecture_result_slot = arch.and_then(|arch| {
@@ -1101,7 +1128,7 @@ impl SourceMachineContext {
             abi_model.coherent &= coherent;
         }
         let (raw_call_sites, tail_call_sites) =
-            collect_raw_call_site_identities(blocks, &tail_call_identities);
+            collect_raw_call_site_identities(blocks, &tail_call_identities, terminal_blocks);
         let expected_call_site_revision = function_interface
             .as_ref()
             .map(|interface| interface.revision_identity().to_vec().into_boxed_slice())
@@ -1705,6 +1732,7 @@ fn ssa_memory_space(op: &SSAOp) -> Option<SpaceId> {
 fn collect_raw_call_site_identities(
     blocks: &[R2ILBlock],
     tail_call_identities: &[SourceCallSiteIdentity],
+    terminal_blocks: &BTreeSet<u64>,
 ) -> (
     BTreeMap<u64, SourceCallSiteIdentity>,
     BTreeSet<SourceCallSiteIdentity>,
@@ -1741,16 +1769,48 @@ fn collect_raw_call_site_identities(
                     tails.insert(identity);
                     identity
                 }
-                R2ILOp::BranchInd { .. } if op_index + 1 == block.ops.len() => {
-                    let Some(target) = terminal_indirect_loaded_slot(block, op_index) else {
-                        continue;
-                    };
-                    let identity = SourceCallSiteIdentity::new(instruction, target);
-                    if !authorized_tail_calls.contains(&identity) {
-                        continue;
+                R2ILOp::BranchInd { target } if op_index + 1 == block.ops.len() => {
+                    match terminal_indirect_loaded_slot(block, op_index) {
+                        Some(slot) => {
+                            let identity = SourceCallSiteIdentity::new(instruction, slot);
+                            if !authorized_tail_calls.contains(&identity) {
+                                continue;
+                            }
+                            tails.insert(identity);
+                            identity
+                        }
+                        // The jump goes through a register and the source says
+                        // this block has no successor, so control leaves the
+                        // function here: it is a tail call through whatever the
+                        // register holds. Nothing else can be true of a
+                        // terminal transfer the block graph does not continue.
+                        None if terminal_blocks.contains(&block.addr) => {
+                            let identity = SourceCallSiteIdentity::new(
+                                instruction,
+                                CanonicalStorageId::from_varnode(target),
+                            );
+                            r2il::refusal_evidence!(
+                                "call-site-identity",
+                                "terminal indirect transfer at {instruction:#x} in block \
+                                 {:#x}, which the source declares has no successor, is a tail \
+                                 call through {:?}",
+                                block.addr,
+                                identity.target()
+                            );
+                            tails.insert(identity);
+                            identity
+                        }
+                        None => {
+                            r2il::refusal_evidence!(
+                                "call-site-identity",
+                                "terminal indirect transfer at {instruction:#x} in block {:#x} \
+                                 loads no slot and the source does not declare the block \
+                                 terminal, so it names no call site",
+                                block.addr
+                            );
+                            continue;
+                        }
                     }
-                    tails.insert(identity);
-                    identity
                 }
                 _ => continue,
             };

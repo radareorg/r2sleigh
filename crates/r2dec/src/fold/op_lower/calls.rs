@@ -94,16 +94,18 @@ impl<'a> FoldingContext<'a> {
     /// more". Where two calls disagree about anything the declaration does
     /// state, there is no declaration that describes both, and the rendering
     /// refuses rather than declaring one of them and contradicting the other.
-    pub(super) fn record_callee_declaration(
+    /// The prototype this call site proves for whatever it calls.
+    ///
+    /// One derivation, two readers: a named callee gets it as a declaration,
+    /// and a callee the program computed gets it as the function-pointer type
+    /// its target is called through. Spelling them apart is how an indirect
+    /// call came to be rendered as `RAX_3(...)`, which is not callable C.
+    pub(super) fn certified_callee_signature(
         &self,
-        func_expr: &CExpr,
         block_addr: u64,
         op_idx: usize,
         args: &CertifiedCallArgs,
-    ) -> OpLoweringResult<()> {
-        let CExpr::External { name, .. } = func_expr.unobserved() else {
-            return Ok(());
-        };
+    ) -> OpLoweringResult<(CType, Vec<CType>, bool)> {
         // A callee body captured with this caller owns the strongest logical
         // signature. `r2ssa` admitted it only after its physical carriers
         // matched this exact call site, and `r2types` projected it here. Where
@@ -192,6 +194,27 @@ impl<'a> FoldingContext<'a> {
                 .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
             (ret_type, params, cert.variadic)
         };
+        Ok((ret_type, params, variadic))
+    }
+
+    pub(super) fn record_callee_declaration(
+        &self,
+        func_expr: &CExpr,
+        block_addr: u64,
+        op_idx: usize,
+        args: &CertifiedCallArgs,
+    ) -> OpLoweringResult<()> {
+        let CExpr::External { name, .. } = func_expr.unobserved() else {
+            return Ok(());
+        };
+        let cert = self
+            .certified_callsite_for_op(block_addr, op_idx)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        let render_fact = self
+            .certified_call_render_fact_for_op(block_addr, op_idx)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        let (ret_type, params, variadic) =
+            self.certified_callee_signature(block_addr, op_idx, args)?;
         let declaration = crate::ast::CExternDecl {
             name: name.clone(),
             ret_type,

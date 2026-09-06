@@ -1502,6 +1502,12 @@ impl<'a> FoldingContext<'a> {
                                     &certified_args,
                                 )?;
                             }
+                            let func_expr = self.callable_target_expr(
+                                func_expr,
+                                source_block,
+                                source_op_idx,
+                                &certified_args,
+                            )?;
                             let call = CExpr::call_at(
                                 (source_block, source_op_idx),
                                 func_expr,
@@ -1532,12 +1538,24 @@ impl<'a> FoldingContext<'a> {
                             if !render_fact.disposition.is_terminal_return() {
                                 return Err(OpLoweringRefusal::missing_machine_projection());
                             }
+                            // A tail transfer is direct when the site names the
+                            // address it goes to, exactly as an ordinary call
+                            // is. `jmp rax` names none: the callee is whatever
+                            // the register holds, and the target expression is
+                            // the planned value of that register.
+                            let direct = cert.direct_target.is_some();
                             let func_expr =
-                                self.certified_call_target_expr(frame, target, cert, true)?;
+                                self.certified_call_target_expr(frame, target, cert, direct)?;
                             let certified_args =
                                 self.certified_call_args_for_site(source_block, source_op_idx)?;
                             self.record_callee_declaration(
                                 &func_expr,
+                                source_block,
+                                source_op_idx,
+                                &certified_args,
+                            )?;
+                            let func_expr = self.callable_target_expr(
+                                func_expr,
                                 source_block,
                                 source_op_idx,
                                 &certified_args,
@@ -1687,6 +1705,38 @@ impl<'a> FoldingContext<'a> {
             CExpr::Var(_) => resolved_target,
             _ => CExpr::Deref(Box::new(resolved_target)),
         }
+    }
+
+    /// The call target spelled as something C can call.
+    ///
+    /// A computed target is a value in a machine-width local, and calling it
+    /// as it stands renders `RAX_3(...)`, which no compiler accepts. The type
+    /// it is called through is the prototype the call site itself proves, so
+    /// the cast asserts nothing the arguments and the result boundary did not
+    /// already say. A named callee is left alone: its declaration carries the
+    /// same prototype and the name is already callable.
+    fn callable_target_expr(
+        &self,
+        func_expr: CExpr,
+        block_addr: u64,
+        op_idx: usize,
+        args: &CertifiedCallArgs,
+    ) -> OpLoweringResult<CExpr> {
+        if matches!(func_expr.unobserved(), CExpr::External { .. }) {
+            return Ok(func_expr);
+        }
+        let (ret_type, params, _variadic) =
+            self.certified_callee_signature(block_addr, op_idx, args)?;
+        // `CType::Function` is already spelled as a pointer to function,
+        // `ret(*)(params)`, so wrapping it in `Pointer` would spell a pointer
+        // to that and call the wrong thing.
+        Ok(CExpr::cast(
+            CType::Function {
+                ret: Box::new(ret_type),
+                params,
+            },
+            func_expr,
+        ))
     }
 }
 

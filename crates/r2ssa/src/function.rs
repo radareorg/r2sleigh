@@ -1623,15 +1623,17 @@ impl TrustedSsaArtifact {
                 minted
             }
         };
-        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
-            blocks.as_slice(),
-            Some(&arch),
-            function_interface,
-            *source.machine_roles(),
-            Some(source.convention_slots().clone()),
-            correlated_call_sites.interfaces,
-            correlated_call_sites.tail_calls,
-        );
+        let mut machine_context =
+            SourceMachineContext::from_blocks_with_interfaces_tail_calls_and_terminals(
+                blocks.as_slice(),
+                Some(&arch),
+                function_interface,
+                *source.machine_roles(),
+                Some(source.convention_slots().clone()),
+                correlated_call_sites.interfaces,
+                correlated_call_sites.tail_calls,
+                &declared_successors.terminal_blocks(),
+            );
         machine_context.bind_source_string_literals(source.image().string_literals());
         let mut function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             blocks.as_slice(),

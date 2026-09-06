@@ -268,8 +268,11 @@ pub fn render_c_type_like(ty: &CTypeLike) -> String {
         CTypeLike::Enum(name) => format!("enum {name}"),
         CTypeLike::Typedef(name) => name.clone(),
         CTypeLike::Function { ret, params } => {
+            // A function proven to take nothing is spelled `(void)`. An empty
+            // list says the arguments are unspecified, which is a weaker claim
+            // than the one the call site proved, and C23 removed it.
             let params = if params.is_empty() {
-                String::new()
+                "void".to_string()
             } else {
                 params
                     .iter()

@@ -109,6 +109,19 @@ impl DeclaredSuccessors {
         self.by_block.entry(block).or_default().extend(successors);
     }
 
+    /// Blocks the source declares to have no successor at all.
+    ///
+    /// Control leaves the function at the end of one of these, whatever the
+    /// last instruction is: a return, a call that does not come back, or a
+    /// jump through a register that is therefore a tail call.
+    pub fn terminal_blocks(&self) -> BTreeSet<u64> {
+        self.by_block
+            .iter()
+            .filter(|(_, successors)| successors.is_empty())
+            .map(|(block, _)| *block)
+            .collect()
+    }
+
     /// Whether the source lets control run off the end of `block` into
     /// `next`. `None` where the source said nothing about the block.
     fn continues_to(&self, block: u64, next: u64) -> Option<bool> {

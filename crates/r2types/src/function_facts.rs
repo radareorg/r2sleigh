@@ -3980,7 +3980,18 @@ fn prepared_call_render_facts(
                     Some(r2ssa::SourceCallResult::Void) => {
                         CallsiteRenderDisposition::TerminalVoidReturn
                     }
-                    None => CallsiteRenderDisposition::Residualized,
+                    // Nothing describes the callee, so nothing says what it
+                    // returns. The transfer is still a transfer: control
+                    // leaves through it and comes back to this function's
+                    // caller, so whatever the callee leaves in the result slot
+                    // is this function's result. Rendering it as
+                    // `return callee(...)` claims only what the ABI already
+                    // says; the alternative was dropping the call entirely,
+                    // which is a wrong answer rather than a cautious one.
+                    // A void caller discards the value, which the arm above
+                    // covers once the boundary names a kind, and here too.
+                    None if function_returns_void => CallsiteRenderDisposition::TerminalVoidReturn,
+                    None => CallsiteRenderDisposition::TerminalReturn,
                 }
             } else if call_results.owner_for_site(callsite).is_some() {
                 CallsiteRenderDisposition::AssignedResult
