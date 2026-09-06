@@ -3088,6 +3088,36 @@ impl LegacyObservationJournal {
                 ));
                 continue;
             }
+            r2il::refusal_evidence!(
+                "unowned-binding-symbol",
+                "value {value:?} named {symbol:?} has no binding; live uses {:?} of {}",
+                graph
+                    .use_sites(value)
+                    .iter()
+                    .filter(|site| {
+                        !matches!(
+                            self.uses
+                                .get(site.inst.0 as usize)
+                                .and_then(|row| row.get(site.input_idx)),
+                            Some(Some(LegacyUseObservation::Elided(_)))
+                        )
+                    })
+                    .map(|site| {
+                        (
+                            site.inst,
+                            site.input_idx,
+                            graph
+                                .inst(site.inst)
+                                .map(|inst| format!("{:?}", inst.payload)),
+                            self.uses
+                                .get(site.inst.0 as usize)
+                                .and_then(|row| row.get(site.input_idx))
+                                .map(|observation| format!("{observation:?}")),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                graph.use_sites(value).len()
+            );
             return Err(LegacyObservationJournalError::UnownedBindingSymbol { value, symbol });
         }
         Ok(())

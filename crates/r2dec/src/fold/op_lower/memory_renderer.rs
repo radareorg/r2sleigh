@@ -77,8 +77,8 @@ impl<'a> FoldingContext<'a> {
         let (block_addr, op_idx) = self
             .current_source_op_site()
             .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
-        let fact = self
-            .certified_memory_access_for_current_op(is_write)
+        let certified = self.certified_memory_access_for_current_op(is_write);
+        let fact = certified
             .filter(|fact| {
                 fact.block_addr == block_addr
                     && fact.op_index == op_idx
@@ -88,11 +88,39 @@ impl<'a> FoldingContext<'a> {
                     && fact.is_write == is_write
                     && fact.width == width
             })
-            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+            .ok_or_else(|| {
+                r2il::refusal_evidence!(
+                    "memory-access-certificate",
+                    "({block_addr:#x}, {op_idx}) {} of {width} bytes at {address:?} value {value:?}: certified={:?}",
+                    if is_write { "store" } else { "load" },
+                    certified.map(|fact| (
+                        fact.block_addr,
+                        fact.op_index,
+                        fact.space,
+                        fact.address,
+                        fact.value,
+                        fact.is_write,
+                        fact.width
+                    ))
+                );
+                OpLoweringRefusal::missing_machine_projection()
+            })?;
         let expr = self
             .finalize_certified_memory_expr_for_fact(fact, elem_ty.clone())
-            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+            .ok_or_else(|| {
+                r2il::refusal_evidence!(
+                    "memory-access-expression",
+                    "({block_addr:#x}, {op_idx}) access {:?} at {address:?} has no planned expression",
+                    fact.access
+                );
+                OpLoweringRefusal::missing_machine_projection()
+            })?;
         if is_write && !Self::expr_is_store_target_candidate(&expr) {
+            r2il::refusal_evidence!(
+                "memory-access-expression",
+                "({block_addr:#x}, {op_idx}) store target {:?} is not assignable",
+                expr
+            );
             return Err(OpLoweringRefusal::missing_machine_projection());
         }
         Ok(CertifiedMemoryAccessExpr {

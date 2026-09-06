@@ -3567,11 +3567,12 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
         if writes_for_binding.is_empty() && !entry_declared.contains(&binding) {
             r2il::refusal_evidence!(
                 "placement-missing-definition",
-                "{:?} is read {} times and never written; externally_declared={} entry_declared={}; reads {:?}",
+                "{:?} is read {} times and never written; externally_declared={} entry_declared={} (entry set {:?}); reads {:?}",
                 binding,
                 binding_occurrences.len(),
                 externally_declared.contains(&binding),
                 entry_declared.contains(&binding),
+                entry_declared.iter().collect::<Vec<_>>(),
                 reads
                     .iter()
                     .filter(|read| read.binding == binding)

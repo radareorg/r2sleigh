@@ -476,31 +476,32 @@ impl<'a> FoldingContext<'a> {
     ) -> Option<CExpr> {
         let prepared = self.inputs.prepared_ssa?;
         let call = prepared.graph().inst_id_for_op_site(site.0, site.1)?;
-        // Object identity licenses the source-level spelling only when the
-        // same plan also gave that object a program variable. A refused stack
-        // identity still has a valid ordinary machine spelling; declining
-        // this replacement must therefore fall through rather than turn that
-        // unrelated function into a lowering refusal.
-        if let Some((object, (expr, ty))) =
-            crate::binding_plan::certified_frame_object_call_argument(
-                prepared,
-                call,
-                argument_index,
-                value,
+        let frame_object = crate::binding_plan::certified_frame_object_call_argument(
+            prepared,
+            call,
+            argument_index,
+            value,
+        );
+        let planned_inline = self.inputs.binding_names.is_some_and(|names| {
+            matches!(
+                names.require_value(value),
+                Ok(crate::binding_plan::PlannedValueSymbol::Inline(_))
             )
-            .filter(|_| {
-                self.inputs.binding_names.is_some_and(|names| {
-                    matches!(
-                        names.require_value(value),
-                        Ok(crate::binding_plan::PlannedValueSymbol::Inline(_))
-                    )
-                })
-            })
-            .and_then(|object| {
-                self.certified_stack_address_expr_for_object(object)
-                    .map(|spelling| (object, spelling))
-            })
-        {
+        });
+        let spelling = frame_object
+            .filter(|_| planned_inline)
+            .and_then(|object| self.certified_stack_address_expr_for_object(object));
+        if frame_object.is_some() && spelling.is_none() {
+            r2il::refusal_evidence!(
+                "call-argument-frame-address",
+                "callsite ({:#x}, {}) argument {argument_index} value {value:?} names frame object {:?}: planned inline={planned_inline} spelled={}",
+                site.0,
+                site.1,
+                frame_object,
+                spelling.is_some()
+            );
+        }
+        if let Some((object, (expr, ty))) = frame_object.zip(spelling) {
             let expr = self.finish_replacement_expr(PendingReplacementExpr::escaped_stack_address(
                 value,
                 call,

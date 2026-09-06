@@ -298,23 +298,31 @@ pub(crate) fn certified_frame_object_call_argument(
     value: ValueId,
 ) -> Option<r2ssa::ObjectId> {
     let certificate = certified_call_site(source, at)?;
-    if certificate.argument_values.get(argument_index).copied() != Some(value)
-        || !certificate
-            .argument_certificates
-            .iter()
-            .any(|argument| argument.index == argument_index && argument.value == value)
-        || source.objects().address_is_indexed(value)
-    {
+    let listed = certificate.argument_values.get(argument_index).copied() == Some(value);
+    let certified = certificate
+        .argument_certificates
+        .iter()
+        .any(|argument| argument.index == argument_index && argument.value == value);
+    let indexed = source.objects().address_is_indexed(value);
+    let object = source.objects().object_for_value(value, r2il::SpaceId::Ram);
+    let kind = object.and_then(|object| {
+        source
+            .objects()
+            .object(object)
+            .map(|object| object.kind.clone())
+    });
+    let frame = matches!(
+        kind,
+        Some(r2ssa::ObjectKind::StackSlot { .. } | r2ssa::ObjectKind::FrameObject { .. })
+    );
+    if !(listed && certified && !indexed && frame) {
+        r2il::refusal_evidence!(
+            "call-argument-frame-object",
+            "call {at:?} argument {argument_index} value {value:?}: listed={listed} certified={certified} indexed={indexed} object={object:?} kind={kind:?}"
+        );
         return None;
     }
-    let object = source
-        .objects()
-        .object_for_value(value, r2il::SpaceId::Ram)?;
-    matches!(
-        source.objects().object(object)?.kind,
-        r2ssa::ObjectKind::StackSlot { .. } | r2ssa::ObjectKind::FrameObject { .. }
-    )
-    .then_some(object)
+    object
 }
 
 /// Whether affine address provenance certifies that one structured memory
