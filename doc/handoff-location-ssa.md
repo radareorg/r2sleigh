@@ -12923,3 +12923,72 @@ rewrite that stops surviving. The snapshot baseline stays unblessed.
    bzip2-O2) from duplicate radare2-inferred locals.
 5. `register_tm_clones`/`deregister_tm_clones` (36, every binary):
    `ExactUseRequiresRenderedOccurrence`, one shape, untraced.
+
+### Later in the same session
+
+**A shared exit wrote dead merges.** `structure.rs` refused `gz_fetch`
+and 36 others as a missing program variable because the shared-exit
+rewrite asked the plan to spell a flag merge the plan had elided as
+unobserved. Nothing reads such a merge, so the edge now writes nothing
+for it (commit "Write nothing at a shared exit for a merge nothing
+observes"). minigzip -O2 37→28, bzip2 -O2 38→29, bzip2 -O0 39→31,
+bzip2recover -O2 12→6.
+
+**The return certificate narrows the carrier.** The user ruled that a
+declared narrow return certifies the full carrier and renders the cast
+(`6e972ee2`); the extension-frontier walk is gone. minigzip -O0 28→22,
+bzip2 -O0 47→39.
+
+**`struct stat` erased `stat()`.** radare2's type database keeps one kind
+key per name; the DWARF pass writes `stat=struct` over `stat=func`, and
+`r_type_func_exist`, `function_signature_try_type_name` and the copy of
+the latter the capture carries all consulted that key. The prototype's
+own namespace (`func.NAME.ret`) decides now, on the fork (`a6d34e9db9`),
+in the plugin, and as upstream PR from `pr/type-namespace` with a unit
+test. `lstat` was also declared `void` in `types.sdb.txt`; corrected on
+the fork (`8a3c465228`) and as #26675. The fork embeds the type database
+in `libr_anal`, so a `.sdb.txt` edit needs `make -C libr/anal` and the
+library reinstalled, not only the sdb.
+
+**Suffix string literals.** `pad`'s `fprintf (stderr, " ")` references
+the tail of a string radare2 recorded once and trimmed; the capture now
+reads a suffix from the bytes the string record covers.
+
+**Open: interior accesses of a declared aggregate slot.** With `lstat`
+typed, `notAStandardFile` still refuses `missing_definition`: the address
+`&statBuf` passed to `lstat` escapes `BindingId(26)`, but the later read of
+`statBuf.st_mode` is `BindingId(27)`, an anonymous `stack_m144` the plan
+minted for an object at an interior offset of the same DWARF-typed slot.
+The binding plan matches objects to slots by exact offset; an access inside
+a declared aggregate's extent must be a member projection of that slot's
+one binding, rendered `statBuf.st_mode` from the type graph's layout, and
+the aggregate's escape must cover every member. That is a feature
+(stack aggregates as one object), not a fix, and it is the next class:
+every `stat(&buf)`, `gettimeofday(&tv)` and struct local hits it.
+Evidence: `call-argument-frame-object`, `call-argument-frame-address`,
+and the entry set printed by `placement-missing-definition`.
+
+**Open: `FILE *` roots refuse.** `_IO_FILE` holds `struct _IO_marker *`,
+and DWARF only declares `_IO_marker`; radare2's `parse_structure_type`
+skips declarations, so the capture finds no such type and refuses the
+pointer, and with it every parameter of type `FILE *` (all of bzip2's
+stream API, `BZ2_bzWriteOpen`/`ReadOpen`). C treats a pointer to an
+incomplete struct as complete. The type graph needs an incomplete
+aggregate -- present by name, no members, no size -- which its
+validation currently rejects (`aggregate.members.is_empty()` and
+`size_bits == 0` both refuse), radare2 needs to record a declaration-only
+struct when no definition by that name exists, and the renderer needs to
+emit `struct _IO_marker;` for it.
+
+**Open: `[rsp]` locals.** `_tr_flush_block` at -O2 spills through
+`mov [rsp], rcx` / `mov rcx, [rsp]`; radare2's `extract_arg_from_value`
+accepts a zero displacement from the stack pointer only when the return
+address lives in a register (`zero_ok`), so no variable is recovered, the
+load's address is the bare stack-pointer carrier, and the journal refuses
+`UnownedBindingSymbol` for a carrier no declaration names. Either radare2
+recovers the slot once the frame has been adjusted, or the engine's own
+stack objects supply it.
+
+**Open: `BZ2_bzReadOpen` at -O2** reads a stack binding at the frame
+allocation itself (`StackAccess` at the `sub rsp` instruction), with
+`stack-slot-translation ... root=None` for its slots.
