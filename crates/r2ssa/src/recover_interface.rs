@@ -322,7 +322,25 @@ fn recover_interface_inner(
         return None;
     }
 
-    let exact_tail_result = exact_tail_result_storage(&facts);
+    let exact_tail_result = match tail_result_storage(&facts) {
+        TailResult::NoTailBoundary => None,
+        TailResult::Exact(result) => Some(result),
+        // The body hands control to a callee it names nothing about, and
+        // that callee's result is this function's result on that path. A
+        // register the body never wrote is not evidence of a void result
+        // here; it is evidence that the answer lives in a body not read.
+        // Claiming void from it gave every caller of an import thunk a
+        // callee that returns nothing, and the caller then read the return
+        // register as a value no statement had assigned.
+        TailResult::Unproven => {
+            r2il::refusal_evidence!(
+                "interface-recovery",
+                "a tail transfer to a target without a complete prototype owns the result \
+                 boundary, so no interface is recovered"
+            );
+            return None;
+        }
+    };
     let mut result = exact_tail_result.flatten().map(|slot| RecoveredResult {
         slot,
         observed: slot,
@@ -393,13 +411,21 @@ fn recover_interface_inner(
     })
 }
 
+/// What the function's tail transfers say about its result.
+enum TailResult {
+    /// No exit is a tail transfer; ordinary live-out recovery answers.
+    NoTailBoundary,
+    /// Every tail transfer names a complete prototype and they agree:
+    /// `None` is an exact void result, `Some` the carrier.
+    Exact(Option<CanonicalStorageId>),
+    /// Some tail transfer reaches a body whose prototype is unknown or
+    /// incomplete, or two tail transfers disagree. The result is owned by a
+    /// body not read here, so nothing can be recovered for it.
+    Unproven,
+}
+
 /// The result carrier licensed by every source-proven tail boundary.
-///
-/// `Some(None)` is an exact void result; `None` means there is no complete,
-/// unanimous tail boundary and ordinary live-out recovery remains responsible.
-fn exact_tail_result_storage(
-    facts: &crate::semantic::PreparedFunctionFacts,
-) -> Option<Option<CanonicalStorageId>> {
+fn tail_result_storage(facts: &crate::semantic::PreparedFunctionFacts) -> TailResult {
     let mut results = facts
         .call_sites
         .by_id
@@ -408,12 +434,18 @@ fn exact_tail_result_storage(
         .map(|call| {
             let boundary = facts.boundaries.calls.get(&call.id)?;
             boundary.complete.then_some(boundary.result_kind?)
-        });
-    let first = results.next()??;
-    if results.any(|result| result != Some(first)) {
-        return None;
+        })
+        .peekable();
+    if results.peek().is_none() {
+        return TailResult::NoTailBoundary;
     }
-    Some(match first {
+    let Some(Some(first)) = results.next() else {
+        return TailResult::Unproven;
+    };
+    if results.any(|result| result != Some(first)) {
+        return TailResult::Unproven;
+    }
+    TailResult::Exact(match first {
         SourceCallResult::Void => None,
         SourceCallResult::Register { storage } => Some(storage),
     })
@@ -1056,5 +1088,76 @@ mod tests {
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
         let empty = SourceConventionSlots::new("", [], None).expect("empty");
         assert!(recover_interface(&func, &empty).is_none());
+    }
+
+    #[test]
+    fn a_tail_transfer_to_an_unknown_target_recovers_no_interface() {
+        // An import thunk: load the relocated slot, jump through it. The body
+        // writes no register, which says nothing about what the target
+        // returns.
+        let arch = arch();
+        let slot = 0x4000u64;
+        let slot_storage = CanonicalStorageId {
+            space: CanonicalStorageSpace::Ram,
+            offset: slot,
+            size: 8,
+        };
+        let loaded = Varnode::unique(0x100, 8);
+        let mut block = R2ILBlock::new(0x1000, 8);
+        block.push(R2ILOp::Load {
+            dst: loaded.clone(),
+            space: r2il::SpaceId::Ram,
+            addr: Varnode::constant(slot, 8),
+        });
+        block.push(R2ILOp::BranchInd { target: loaded });
+        let identity = SourceCallSiteIdentity::new(0x1000, 1, slot_storage);
+        let function =
+            SSAFunction::from_blocks_for_decompile(std::slice::from_ref(&block), Some(&arch))
+                .expect("thunk ssa");
+
+        let unknown = crate::SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            None,
+            SourceMachineRoles::default(),
+            Some(candidates()),
+            Vec::new(),
+            vec![identity],
+        );
+        assert!(
+            recover_interface_with_context(&function, &candidates(), &unknown).is_none(),
+            "a body that hands its result to an unknown target proves nothing about it"
+        );
+
+        // The same body behind a complete prototype recovers that prototype's
+        // result.
+        let interface = SourceCallSiteInterface::new(
+            b"thunk-prototype".to_vec(),
+            identity,
+            true,
+            "arm64",
+            [SourceCallArgumentSpec::new(0, register(0, 8))],
+            false,
+            false,
+            SourceCallResult::Register {
+                storage: register(0, 8),
+            },
+        )
+        .expect("exact tail interface");
+        let known = crate::SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            None,
+            SourceMachineRoles::default(),
+            Some(candidates()),
+            vec![interface],
+            vec![identity],
+        );
+        let recovered = recover_interface_with_context(&function, &candidates(), &known)
+            .expect("a proven tail boundary owns the result");
+        assert_eq!(
+            recovered.result().map(|result| result.slot()),
+            Some(register(0, 8))
+        );
     }
 }

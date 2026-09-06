@@ -4,7 +4,7 @@
 //! components for a complete function: CFG, dominator tree, phi nodes,
 //! and renamed operations.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -554,6 +554,7 @@ impl SsaArtifact {
                 coherent_function_interface(&machine_context),
                 machine_context.machine_roles().call_preserved_carriers(),
                 machine_context.stack_pointer_carrier(),
+                &CalleePreservedCarriers::new(),
                 &UncheckedSsaWorkControl,
             )
             .ok()?,
@@ -575,6 +576,26 @@ impl SsaArtifact {
         call_site_interfaces: Vec<SourceCallSiteInterface>,
         tail_call_identities: Vec<SourceCallSiteIdentity>,
     ) -> Option<Self> {
+        Self::for_decompile_with_callee_preserved_carriers(
+            blocks,
+            arch,
+            function_interface,
+            call_site_interfaces,
+            tail_call_identities,
+            &CalleePreservedCarriers::new(),
+        )
+    }
+
+    /// The same, told which registers each direct callee's body proves it
+    /// leaves untouched, so construction defines nothing a call did not touch.
+    pub fn for_decompile_with_callee_preserved_carriers(
+        blocks: &[R2ILBlock],
+        arch: Option<&ArchSpec>,
+        function_interface: Option<SourceFunctionInterface>,
+        call_site_interfaces: Vec<SourceCallSiteInterface>,
+        tail_call_identities: Vec<SourceCallSiteIdentity>,
+        callee_preserved_carriers: &CalleePreservedCarriers,
+    ) -> Option<Self> {
         let machine_context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
             blocks,
             arch,
@@ -591,6 +612,7 @@ impl SsaArtifact {
                 coherent_function_interface(&machine_context),
                 machine_context.machine_roles().call_preserved_carriers(),
                 machine_context.stack_pointer_carrier(),
+                callee_preserved_carriers,
                 &UncheckedSsaWorkControl,
             )
             .ok()?,
@@ -641,6 +663,7 @@ impl SsaArtifact {
             coherent_function_interface(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
+            &CalleePreservedCarriers::new(),
             control,
         )?;
         control.poll()?;
@@ -693,6 +716,7 @@ impl SsaArtifact {
             coherent_function_interface(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
+            &CalleePreservedCarriers::new(),
             control,
         )?;
         if function.entry != lifted.authority().layout().entry_addr() {
@@ -1423,7 +1447,12 @@ impl TrustedSsaArtifact {
         lifted: TrustedLiftedFunction,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::prepare_with_callee_interfaces(lifted, control, &BTreeMap::new())
+        Self::prepare_with_callee_interfaces(
+            lifted,
+            control,
+            &BTreeMap::new(),
+            &CalleePreservedCarriers::new(),
+        )
     }
 
     /// Prepare, describing each call whose callee body came in this capture.
@@ -1434,6 +1463,7 @@ impl TrustedSsaArtifact {
         lifted: TrustedLiftedFunction,
         control: &C,
         callee_interfaces: &BTreeMap<u64, SourceFunctionInterface>,
+        callee_preserved_carriers: &CalleePreservedCarriers,
     ) -> Result<Self, SsaPrepareError> {
         let source = lifted.source().clone();
         let genuine = lifted.lifted();
@@ -1526,6 +1556,7 @@ impl TrustedSsaArtifact {
                             .machine_roles()
                             .call_preserved_carriers(),
                         provisional_machine_context.stack_pointer_carrier(),
+                        callee_preserved_carriers,
                         control,
                     )
                 else {
@@ -1586,6 +1617,7 @@ impl TrustedSsaArtifact {
             coherent_function_interface(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
+            callee_preserved_carriers,
             control,
         )?;
         // What the source calls this function. A name radare2 derived from the
@@ -1858,6 +1890,17 @@ pub struct DefRef<'a> {
     pub site: DefSite,
 }
 
+/// Registers each direct callee's body proves it leaves exactly as it found
+/// them, keyed by the callee's entry address.
+///
+/// A compiler that has seen the callee relies on this: with `-fipa-ra` GCC
+/// keeps a value in an argument register across a call to a leaf that never
+/// writes it, so the caller reads that register after the call as its own.
+/// Construction consults this before emitting a `CallDefine`, so the read
+/// reaches the value the compiler meant rather than a clobber that never
+/// happened.
+pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
+
 /// What a call boundary does to this architecture's registers.
 ///
 /// `stack_pointer_restored_by_callee` carries the storage only when the source
@@ -1867,10 +1910,31 @@ pub struct DefRef<'a> {
 fn decompile_call_boundary_config(
     arch: Option<&ArchSpec>,
     stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
+    preserved_by_target: CalleePreservedCarriers,
 ) -> Option<CallBoundaryConfig> {
     let arch = arch?;
+    let defined_regs = call_clobbered_register_defs(arch);
+    if defined_regs.is_empty() && stack_pointer_restored_by_callee.is_none() {
+        return None;
+    }
+    Some(CallBoundaryConfig {
+        defined_regs,
+        stack_pointer_restored_by_callee,
+        preserved_by_target,
+    })
+}
+
+/// The registers a call may leave changed under this architecture's
+/// convention: what a caller must treat as freshly defined after a call it
+/// knows nothing more about.
+///
+/// This list has one owner. Construction emits a `CallDefine` for each entry
+/// at every call, and a callee's return boundary tests the same entries to
+/// state which of them its body leaves untouched, so the two sides can never
+/// disagree about which registers are in question.
+pub(crate) fn call_clobbered_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
     let lower = arch.name.to_ascii_lowercase();
-    let defined_regs: Vec<CallBoundaryDef> = match lower.as_str() {
+    match lower.as_str() {
         "x86-64" | "x86_64" | "x64" | "amd64" => vec![
             CallBoundaryDef {
                 name: "rax".to_string(),
@@ -2244,15 +2308,7 @@ fn decompile_call_boundary_config(
             },
         ],
         _ => Vec::new(),
-    };
-
-    if defined_regs.is_empty() && stack_pointer_restored_by_callee.is_none() {
-        return None;
     }
-    Some(CallBoundaryConfig {
-        defined_regs,
-        stack_pointer_restored_by_callee,
-    })
 }
 
 /// Whether the convention puts the stack pointer back after a call.
@@ -2360,7 +2416,13 @@ impl SSAFunction {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         Self::from_blocks_for_decompile_with_interface_and_control(
-            blocks, arch, None, None, None, control,
+            blocks,
+            arch,
+            None,
+            None,
+            None,
+            &CalleePreservedCarriers::new(),
+            control,
         )
     }
 
@@ -2370,6 +2432,7 @@ impl SSAFunction {
         function_interface: Option<&SourceFunctionInterface>,
         call_preserved_carriers: Option<SourceCallPreservedCarriers>,
         stack_pointer_carrier: Option<CanonicalStorageId>,
+        callee_preserved_carriers: &CalleePreservedCarriers,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
@@ -2385,6 +2448,7 @@ impl SSAFunction {
             blocks,
             arch,
             stack_pointer_restored_by_callee,
+            callee_preserved_carriers,
             control,
         )?;
         func.call_preserved_carriers = call_preserved_carriers;
@@ -2496,7 +2560,13 @@ impl SSAFunction {
         arch: Option<&ArchSpec>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::from_blocks_raw_for_decompile_with_carriers_and_control(blocks, arch, None, control)
+        Self::from_blocks_raw_for_decompile_with_carriers_and_control(
+            blocks,
+            arch,
+            None,
+            &CalleePreservedCarriers::new(),
+            control,
+        )
     }
 
     /// The same, told which carrier the convention says a callee restores.
@@ -2504,9 +2574,14 @@ impl SSAFunction {
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
         stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
+        callee_preserved_carriers: &CalleePreservedCarriers,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        let policy = decompile_call_boundary_config(arch, stack_pointer_restored_by_callee);
+        let policy = decompile_call_boundary_config(
+            arch,
+            stack_pointer_restored_by_callee,
+            callee_preserved_carriers.clone(),
+        );
         Self::from_blocks_raw_with_policy_and_control(blocks, arch, policy.as_ref(), control)
     }
 
@@ -7825,6 +7900,7 @@ mod tests {
             coherent_function_interface(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
+            &CalleePreservedCarriers::new(),
             &UncheckedSsaWorkControl,
         )
         .expect("decompile SSA");
@@ -7986,6 +8062,7 @@ mod tests {
             coherent_function_interface(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
+            &CalleePreservedCarriers::new(),
             &UncheckedSsaWorkControl,
         )
         .expect("decompile SSA");
@@ -12330,5 +12407,252 @@ mod tests {
                 "an implicit width change has no prepared-SSA proof"
             );
         }
+    }
+
+    fn call_preservation_arch() -> ArchSpec {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("rax", 0, 8));
+        arch.add_register(RegisterDef::new("eax", 0, 4));
+        arch.add_register(RegisterDef::new("rdi", 8, 8));
+        arch.add_register(RegisterDef::new("rsi", 16, 8));
+        arch.add_register(RegisterDef::new("rdx", 24, 8));
+        arch
+    }
+
+    fn call_preservation_storage(offset: u64, size: u32) -> CanonicalStorageId {
+        CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size,
+        }
+    }
+
+    fn call_preservation_block(ops: Vec<R2ILOp>) -> R2ILBlock {
+        R2ILBlock {
+            addr: 0x1000,
+            size: 16,
+            ops,
+            switch_info: None,
+            op_metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
+        let arch = call_preservation_arch();
+        // call 0x2000; *rsi = rdi; return -- the compiler kept rdi live across
+        // the call because it knows the callee never writes it.
+        let block = call_preservation_block(vec![
+            R2ILOp::Call {
+                target: make_ram(0x2000, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: make_reg(16, 8),
+                val: make_reg(8, 8),
+            },
+            R2ILOp::Return {
+                target: make_const(0, 8),
+            },
+        ]);
+        let rdi = call_preservation_storage(8, 8);
+        let preserved = CalleePreservedCarriers::from([(0x2000u64, BTreeSet::from([rdi]))]);
+        let with = SsaArtifact::for_decompile_with_callee_preserved_carriers(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            None,
+            Vec::new(),
+            Vec::new(),
+            &preserved,
+        )
+        .expect("artifact with a preserving callee");
+        let without = SsaArtifact::for_decompile_with_interfaces_and_tail_calls(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("artifact without callee facts");
+        let call_defines = |artifact: &SsaArtifact, name: &str| {
+            artifact
+                .function()
+                .get_block(0x1000)
+                .expect("entry block")
+                .ops
+                .iter()
+                .filter(|op| {
+                    matches!(op, SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case(name))
+                })
+                .count()
+        };
+        assert_eq!(call_defines(&without, "rdi"), 1);
+        assert_eq!(call_defines(&with, "rdi"), 0);
+        // What the callee may touch is still defined by the call.
+        assert_eq!(call_defines(&with, "rsi"), 1);
+        assert_eq!(call_defines(&with, "rax"), 1);
+        // The store reads the value rdi held on entry, not a clobber.
+        let stored = with
+            .function()
+            .get_block(0x1000)
+            .expect("entry block")
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                SSAOp::Store { val, .. } => Some(val.clone()),
+                _ => None,
+            })
+            .expect("the store survives");
+        assert_eq!(
+            stored.version, 0,
+            "{stored:?} must be the entry value of rdi"
+        );
+    }
+
+    #[test]
+    fn a_leaf_body_preserves_every_clobbered_register_it_never_writes() {
+        let arch = call_preservation_arch();
+        let block = call_preservation_block(vec![
+            R2ILOp::Copy {
+                dst: make_reg(0, 4),
+                src: make_const(1, 4),
+            },
+            R2ILOp::Return {
+                target: make_const(0, 8),
+            },
+        ]);
+        let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("leaf artifact");
+        let preserved = &artifact.facts().boundaries.preserved_call_carriers;
+        for offset in [8, 16, 24] {
+            assert!(
+                preserved.contains(&call_preservation_storage(offset, 8)),
+                "register at {offset} is never written and must be preserved: {preserved:?}"
+            );
+        }
+        assert!(!preserved.contains(&call_preservation_storage(0, 8)));
+        assert!(!preserved.contains(&call_preservation_storage(0, 4)));
+    }
+
+    #[test]
+    fn a_body_that_calls_preserves_nothing_its_own_call_may_touch() {
+        let arch = call_preservation_arch();
+        let block = call_preservation_block(vec![
+            R2ILOp::Call {
+                target: make_ram(0x2000, 8),
+            },
+            R2ILOp::Return {
+                target: make_const(0, 8),
+            },
+        ]);
+        let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("calling artifact");
+        assert!(
+            artifact
+                .facts()
+                .boundaries
+                .preserved_call_carriers
+                .is_empty(),
+            "{:?}",
+            artifact.facts().boundaries.preserved_call_carriers
+        );
+    }
+
+    #[test]
+    fn a_body_that_leaves_by_a_jump_claims_no_preserved_register() {
+        let arch = call_preservation_arch();
+        let block = call_preservation_block(vec![
+            R2ILOp::Copy {
+                dst: make_reg(0, 4),
+                src: make_const(1, 4),
+            },
+            R2ILOp::Branch {
+                target: make_ram(0x3000, 8),
+            },
+        ]);
+        let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("jumping artifact");
+        assert!(
+            artifact
+                .facts()
+                .boundaries
+                .preserved_call_carriers
+                .is_empty(),
+            "{:?}",
+            artifact.facts().boundaries.preserved_call_carriers
+        );
+    }
+
+    #[test]
+    fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
+        let arch = call_preservation_arch();
+        let slot = |offset| call_preservation_storage(offset, 8);
+        // call A; rdi = 1; call B. B has no prototype, so its arguments are
+        // what the machine set for it: rdi, and not the rsi and rdx that A's
+        // clobbers left behind.
+        let block = call_preservation_block(vec![
+            R2ILOp::Call {
+                target: make_ram(0x2000, 8),
+            },
+            R2ILOp::Copy {
+                dst: make_reg(8, 8),
+                src: make_const(1, 8),
+            },
+            R2ILOp::Call {
+                target: make_ram(0x3000, 8),
+            },
+            R2ILOp::Return {
+                target: make_const(0, 8),
+            },
+        ]);
+        let convention =
+            SourceConventionSlots::new("amd64", vec![slot(8), slot(16), slot(24)], Some(slot(0)))
+                .expect("convention slots");
+        let machine_context = SourceMachineContext::from_blocks_with_interfaces(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            None,
+            SourceMachineRoles::default(),
+            Some(convention),
+            Vec::new(),
+        );
+        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+            std::slice::from_ref(&block),
+            Some(&arch),
+            None,
+            None,
+            None,
+            &CalleePreservedCarriers::new(),
+            &UncheckedSsaWorkControl,
+        )
+        .expect("decompile SSA");
+        let artifact = SsaArtifact::new_with_context(
+            function,
+            FunctionPrepareMode::Decompile,
+            machine_context,
+        );
+        let facts = artifact.facts();
+        let boundary_of = |target: u64| {
+            let call = facts
+                .call_sites
+                .by_id
+                .values()
+                .find(|call| call.direct_target == Some(target))
+                .expect("call site");
+            facts.boundaries.calls.get(&call.id).expect("call boundary")
+        };
+        assert!(boundary_of(0x2000).arguments.is_empty());
+        let second = boundary_of(0x3000);
+        assert!(second.complete, "{second:?}");
+        assert_eq!(
+            second
+                .arguments
+                .iter()
+                .map(|argument| argument.slot)
+                .collect::<Vec<_>>(),
+            vec![crate::semantic::CallBoundarySlot::Register {
+                index: 0,
+                storage: slot(8),
+            }],
+            "{second:?}"
+        );
     }
 }

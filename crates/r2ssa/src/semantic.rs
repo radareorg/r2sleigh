@@ -818,6 +818,11 @@ pub struct SourceBoundaryFacts {
     pub parameters: BTreeMap<u32, SourceFormalParameterFact>,
     pub calls: BTreeMap<CallSiteId, SourceCallBoundaryFact>,
     pub returns: BTreeMap<InstId, SourceReturnBoundaryFact>,
+    /// Convention-clobbered registers this body leaves exactly as it found
+    /// them at every exit. A caller that reads one of these after calling
+    /// here is reading its own value, not a clobber; see
+    /// [`preserved_call_carriers`].
+    pub preserved_call_carriers: BTreeSet<CanonicalStorageId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -3418,6 +3423,20 @@ fn convention_call_boundary(
     op_index: usize,
 ) -> Option<ConventionCallBoundary> {
     let convention = machine_context.convention_slots()?;
+    // A register untouched since entry holds a value only where this
+    // function's own interface says one arrived there. Without that, the
+    // register holds whatever the caller left -- which every register does --
+    // and passing it on is not something the machine can be seen to do.
+    let declared_on_entry = |storage: CanonicalStorageId| {
+        machine_context
+            .function_interface()
+            .is_some_and(|interface| {
+                interface
+                    .parameters()
+                    .iter()
+                    .any(|parameter| register_storages_overlap(parameter.storage(), storage))
+            })
+    };
     let mut arguments = Vec::new();
     for (position, slot) in convention.argument_slots().iter().enumerate() {
         let Ok(index) = u32::try_from(position) else {
@@ -3433,6 +3452,9 @@ fn convention_call_boundary(
         ) else {
             break;
         };
+        if graph.def_inst(value).is_none() && !declared_on_entry(*slot) {
+            break;
+        }
         arguments.push(SourceCallArgumentFact {
             slot: CallBoundarySlot::Register {
                 index,
@@ -3457,6 +3479,67 @@ fn convention_call_boundary(
         arguments,
         results,
     })
+}
+
+/// Convention-clobbered registers this body leaves exactly as it found them
+/// at every exit.
+///
+/// A register is preserved when no instruction anywhere in the body defines a
+/// storage overlapping it. A call's own clobbers are the `CallDefine`s that
+/// follow it, so a body that calls something it knows nothing more about
+/// preserves nothing that call may touch, and the answer composes through
+/// exactly the callees whose own bodies were read. This is the set a compiler
+/// computes for the same purpose: GCC's `-fipa-ra` keeps a caller's value in
+/// an argument register across a call to a callee it has seen never write it,
+/// and the caller then reads that register after the call as its own.
+///
+/// Every exit has to be a return for the claim to hold. A block that leaves by
+/// any other transfer hands control to a body not read here, so nothing is
+/// claimed for the function; a call that ends its block with no successor is
+/// one the source marked noreturn, which never comes back and constrains
+/// nothing.
+fn preserved_call_carriers(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    machine_context: &SourceMachineContext,
+) -> BTreeSet<CanonicalStorageId> {
+    let candidates = machine_context.call_clobbered_carriers();
+    if candidates.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut saw_return = false;
+    for block in function.blocks() {
+        if !function.successors(block.addr).is_empty() {
+            continue;
+        }
+        let terminal = block
+            .ops
+            .iter()
+            .rev()
+            .find(|op| !matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }));
+        match terminal {
+            Some(SSAOp::Return { .. }) => saw_return = true,
+            Some(SSAOp::Call { .. } | SSAOp::CallInd { .. }) => {}
+            _ => return BTreeSet::new(),
+        }
+    }
+    if !saw_return {
+        return BTreeSet::new();
+    }
+    let mut preserved = candidates.iter().copied().collect::<BTreeSet<_>>();
+    for inst in &graph.insts {
+        if inst.output.is_none() {
+            continue;
+        }
+        let Some(written) = inst.canonical_storage else {
+            continue;
+        };
+        preserved.retain(|storage| !register_storages_overlap(written, *storage));
+        if preserved.is_empty() {
+            break;
+        }
+    }
+    preserved
 }
 
 fn collect_source_boundary_facts(
@@ -3636,6 +3719,23 @@ fn collect_source_boundary_facts(
             boundary.complete = true;
         }
         facts.calls.insert(call_site.id, boundary);
+    }
+
+    if let Some(machine_context) = machine_context {
+        facts.preserved_call_carriers = preserved_call_carriers(function, graph, machine_context);
+        if std::env::var_os("R2SSA_TRACE_CALLDEF").is_some() {
+            eprintln!(
+                "  preserved across calls to {:#x}: {:?}",
+                function.entry,
+                facts
+                    .preserved_call_carriers
+                    .iter()
+                    .map(|storage| machine_context
+                        .register_name(*storage)
+                        .unwrap_or_else(|| format!("{storage:?}")))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     for inst in &graph.insts {
@@ -4096,6 +4196,11 @@ enum ReachingAbiState {
 struct ReachingAbiPolicy {
     allow_distinct_phi_inputs: bool,
     calls_are_barriers: bool,
+    /// The carrier a call transfer moves by itself: the stack pointer, which
+    /// the callee's return puts back only where the convention states it. A
+    /// call is a barrier for this carrier and for nothing else, because every
+    /// other register a call may change is a `CallDefine` the walk sees.
+    transfer_carrier: Option<CanonicalStorageId>,
 }
 
 /// Resolve the value the source says a return exposes.
@@ -4287,8 +4392,22 @@ fn reaching_variadic_tail_argument_in_block(
     )
     .and_then(|state| match state {
         ReachingAbiState::PreservedEntry => None,
+        // A register an earlier call clobbered holds whatever that callee
+        // left there. Nothing this function wrote reaches the slot, so no
+        // argument was passed in it; counting it claimed an argument the
+        // caller never set and read a value no statement had assigned.
+        ReachingAbiState::Value(value) if value_is_call_clobber(graph, value) => None,
         ReachingAbiState::Value(value) => Some(value),
     })
+}
+
+/// Whether a value is the fresh definition a call leaves in a register it may
+/// have clobbered, rather than anything this function computed.
+fn value_is_call_clobber(graph: &SsaGraph, value: ValueId) -> bool {
+    graph
+        .def_inst(value)
+        .and_then(|inst| graph.inst(inst))
+        .is_some_and(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::CallDefine { .. })))
 }
 
 /// Resolve one call argument carrier, keeping the preserved-entry case.
@@ -4357,6 +4476,7 @@ fn reaching_preserved_abi_value_in_block(
             block_addr,
             boundary_op_index,
             storage,
+            machine_context.stack_pointer_carrier(),
         )
         .then_some(ReachingAbiState::PreservedEntry)
     })
@@ -4368,6 +4488,7 @@ fn storage_is_untouched_on_all_predecessor_paths(
     block_addr: u64,
     boundary_op_index: usize,
     storage: CanonicalStorageId,
+    transfer_carrier: Option<CanonicalStorageId>,
 ) -> bool {
     let mut pending = vec![(block_addr, boundary_op_index)];
     let mut visited = BTreeSet::new();
@@ -4383,14 +4504,14 @@ fn storage_is_untouched_on_all_predecessor_paths(
             return false;
         };
         for (op_index, op) in ops.iter().enumerate() {
-            if matches!(
-                op,
-                SSAOp::Call { .. }
-                    | SSAOp::CallInd { .. }
-                    | SSAOp::CallOther { .. }
-                    | SSAOp::CallDefine { .. }
-                    | SSAOp::Return { .. }
-            ) {
+            // A call's clobbers are the `CallDefine`s that follow it, each a
+            // definition checked for overlap below; the call itself touches
+            // only the carrier the transfer moves.
+            if matches!(op, SSAOp::CallOther { .. } | SSAOp::Return { .. })
+                || (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
+                    && transfer_carrier
+                        .is_some_and(|carrier| register_storages_overlap(carrier, storage)))
+            {
                 return false;
             }
             if op.dst().is_none() {
@@ -4429,7 +4550,7 @@ fn storage_is_untouched_on_all_predecessor_paths(
 fn reaching_abi_value_in_block_with_policy(
     function: &SSAFunction,
     graph: &SsaGraph,
-    _machine_context: &SourceMachineContext,
+    machine_context: &SourceMachineContext,
     block_addr: u64,
     boundary_op_index: usize,
     storage: CanonicalStorageId,
@@ -4446,6 +4567,7 @@ fn reaching_abi_value_in_block_with_policy(
         ReachingAbiPolicy {
             allow_distinct_phi_inputs,
             calls_are_barriers: true,
+            transfer_carrier: machine_context.stack_pointer_carrier(),
         },
     )
 }
@@ -4466,15 +4588,15 @@ fn reaching_abi_value_before(
     path_visited.insert(block_addr);
     let block = function.get_block(block_addr)?;
     for (op_index, op) in block.ops.get(..boundary_op_index)?.iter().enumerate().rev() {
+        // A call's clobbers are the `CallDefine`s that follow it, each a
+        // definition the overlap check below sees; the call itself is a
+        // barrier only for the carrier the transfer moves.
         if policy.calls_are_barriers
-            && matches!(
-                op,
-                SSAOp::Call { .. }
-                    | SSAOp::CallInd { .. }
-                    | SSAOp::CallOther { .. }
-                    | SSAOp::CallDefine { .. }
-                    | SSAOp::Return { .. }
-            )
+            && (matches!(op, SSAOp::CallOther { .. } | SSAOp::Return { .. })
+                || (matches!(op, SSAOp::Call { .. } | SSAOp::CallInd { .. })
+                    && policy
+                        .transfer_carrier
+                        .is_some_and(|carrier| register_storages_overlap(carrier, storage))))
         {
             return None;
         }

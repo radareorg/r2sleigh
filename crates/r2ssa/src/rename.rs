@@ -63,6 +63,11 @@ pub struct CallBoundaryConfig {
     /// where the source stated it. `None` leaves the drift visible rather than
     /// correcting it on a guess.
     pub stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
+    /// Registers a direct callee's own body proves it leaves untouched, by
+    /// callee entry address. A call to such a callee defines none of these:
+    /// the value the caller held going in is the value it holds coming out,
+    /// which is exactly what a compiler that has seen the callee relies on.
+    pub preserved_by_target: BTreeMap<u64, BTreeSet<CanonicalStorageId>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -399,12 +404,21 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
                     && let Some(boundary) = call_boundaries
                 {
+                    // Only a direct call names a callee whose body may have
+                    // been read; anything else defines the whole list.
+                    let preserved = match op {
+                        r2il::R2ILOp::Call { target } if target.is_ram() => {
+                            boundary.preserved_by_target.get(&target.offset)
+                        }
+                        _ => None,
+                    };
                     let boundary_defs = append_call_boundary_defs(
                         &mut result.blocks,
                         block_addr,
                         ctx,
                         &mut defined_vars,
                         boundary,
+                        preserved,
                         reg_names,
                     );
                     for (dst, storage) in boundary_defs {
@@ -521,6 +535,7 @@ fn append_call_boundary_defs(
     ctx: &mut RenameContext,
     defined_vars: &mut Vec<RenameIdentity>,
     call_boundaries: &CallBoundaryConfig,
+    preserved_by_callee: Option<&BTreeSet<CanonicalStorageId>>,
     reg_names: Option<&RegisterNameMap>,
 ) -> Vec<(SSAVar, CanonicalStorageId)> {
     let Some(block_ops) = blocks.get_mut(&block_addr) else {
@@ -554,6 +569,9 @@ fn append_call_boundary_defs(
         }
         for identity in actual_identities {
             let storage = identity.storage;
+            if preserved_by_callee.is_some_and(|preserved| preserved.contains(&storage)) {
+                continue;
+            }
             ctx.init_identity(identity.clone());
             let dst = ctx.write_var(&identity);
             defined_vars.push(identity);

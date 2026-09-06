@@ -1187,6 +1187,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
     // back to knowing nothing about that call, which is where it started.
     let mut callee_facts = Vec::new();
     let mut callee_interfaces = std::collections::BTreeMap::new();
+    let mut callee_preserved_carriers = r2ssa::CalleePreservedCarriers::new();
     let callee_started = Instant::now();
     let callee_count = callees.len();
     let mut callee_hits = 0usize;
@@ -1234,6 +1235,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
             }
         };
         callee_interfaces.insert(entry, facts.interface().clone());
+        callee_preserved_carriers.insert(entry, facts.preserved_carriers().clone());
         callee_facts.push(facts);
     }
     let callee_elapsed = callee_started.elapsed();
@@ -1247,7 +1249,12 @@ unsafe fn capture_trusted_ssa_from_buffer(
     let (root, root_hit) = match r2engine::cached_root_artifact(root_address, bytes) {
         Some(root) => (root, true),
         None => {
-            let root = trusted_from_source_with_callees(source, execution, &callee_interfaces)?;
+            let root = trusted_from_source_with_callees(
+                source,
+                execution,
+                &callee_interfaces,
+                &callee_preserved_carriers,
+            )?;
             r2engine::cache_root_artifact(root_address, bytes, &root);
             (root, false)
         }
@@ -1321,7 +1328,12 @@ fn trusted_from_source(
     source: r2source::OwnedFunctionSnapshot,
     execution: &r2engine::EngineExecutionControl,
 ) -> Result<Arc<r2ssa::TrustedSsaArtifact>, BoundaryError> {
-    trusted_from_source_with_callees(source, execution, &std::collections::BTreeMap::new())
+    trusted_from_source_with_callees(
+        source,
+        execution,
+        &std::collections::BTreeMap::new(),
+        &r2ssa::CalleePreservedCarriers::new(),
+    )
 }
 
 /// Lift and prepare one owned snapshot, describing each call whose callee body
@@ -1330,6 +1342,7 @@ fn trusted_from_source_with_callees(
     source: r2source::OwnedFunctionSnapshot,
     execution: &r2engine::EngineExecutionControl,
     callee_interfaces: &std::collections::BTreeMap<u64, r2source::SourceFunctionInterface>,
+    callee_preserved_carriers: &r2ssa::CalleePreservedCarriers,
 ) -> Result<Arc<r2ssa::TrustedSsaArtifact>, BoundaryError> {
     let ssa_control = execution.ssa_execution_control();
     r2ssa::SsaWorkControl::poll(&ssa_control).map_err(|error| {
@@ -1346,6 +1359,7 @@ fn trusted_from_source_with_callees(
         lifted,
         &ssa_control,
         callee_interfaces,
+        callee_preserved_carriers,
     )
     .map_err(|error| BoundaryError::engine(format!("trusted SSA preparation failed: {error}")))?;
     Ok(Arc::new(trusted))

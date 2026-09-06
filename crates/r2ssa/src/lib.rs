@@ -87,11 +87,11 @@ pub use execution::{
 };
 pub use fingerprint::{SSA_SEMANTIC_FINGERPRINT_SCHEMA_VERSION, stable_ssa_semantic_fingerprint};
 pub use function::{
-    CFGRiskSummary, DecompilePrepFacts, DefRef, DefSite, FunctionPrepareMode,
-    GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo, RegisterFamilySlot,
-    SSABlock as FunctionSSABlock, SSAFunction, SourceRef, SourceSite, SsaArtifact,
-    SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot,
-    SwitchInfo, TrustedSsaArtifact, family_slot_contains,
+    CFGRiskSummary, CalleePreservedCarriers, DecompilePrepFacts, DefRef, DefSite,
+    FunctionPrepareMode, GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo,
+    RegisterFamilySlot, SSABlock as FunctionSSABlock, SSAFunction, SourceRef, SourceSite,
+    SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase,
+    StackAddressRoot, SwitchInfo, TrustedSsaArtifact, family_slot_contains,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,

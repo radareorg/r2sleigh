@@ -521,6 +521,11 @@ pub struct SourceMachineContext {
     architecture_result_slot: Option<CanonicalStorageId>,
     abi_model: MachineAbiModel,
     register_storages_by_name: BTreeMap<String, CanonicalStorageId>,
+    /// The registers a call may leave changed under this architecture, as
+    /// storages. The same list construction defines after every call, so a
+    /// body that proves one of these untouched at every return is stating a
+    /// fact its callers can consume without translation.
+    call_clobbered_carriers: Box<[CanonicalStorageId]>,
     /// Exact source-owned register geometry; no write policy is stored here.
     register_geometry_state: MachineRegisterGeometryState,
     register_projections: Box<[RegisterProjection]>,
@@ -934,6 +939,19 @@ impl SourceMachineContext {
                     Some((name, *storage))
                 })
                 .collect();
+        let call_clobbered_carriers = arch
+            .map(|arch| {
+                crate::function::call_clobbered_register_defs(arch)
+                    .into_iter()
+                    .filter_map(|def| {
+                        register_storages_by_name
+                            .get(&def.name.to_ascii_lowercase())
+                            .copied()
+                            .filter(|storage| storage.size == def.size)
+                    })
+                    .collect::<Box<[_]>>()
+            })
+            .unwrap_or_default();
         let (register_geometry_state, register_projections) = match arch {
             None => (MachineRegisterGeometryState::Unavailable, Box::default()),
             Some(arch) => match RegisterProjectionQuery::from_arch(arch) {
@@ -1132,6 +1150,7 @@ impl SourceMachineContext {
             architecture_result_slot,
             abi_model,
             register_storages_by_name,
+            call_clobbered_carriers,
             register_geometry_state,
             register_projections,
             raw_call_sites_by_id,
@@ -1306,6 +1325,12 @@ impl SourceMachineContext {
             .iter()
             .find(|(_, candidate)| **candidate == storage)
             .map(|(name, _)| name.clone())
+    }
+
+    /// The registers a call may leave changed under this architecture's
+    /// convention; empty when the architecture is unknown.
+    pub const fn call_clobbered_carriers(&self) -> &[CanonicalStorageId] {
+        &self.call_clobbered_carriers
     }
 
     pub const fn register_storages_by_name(&self) -> &BTreeMap<String, CanonicalStorageId> {

@@ -2020,6 +2020,9 @@ pub struct CalleeFacts {
     summary: r2ssa::PreparedCalleeSummary,
     signature: Option<r2types::SourceOwnedCalleeSignature>,
     observed_data_objects: r2types::ProgramDataObjectTypeFacts,
+    /// Convention-clobbered registers this callee's body proves it leaves
+    /// untouched at every exit; a caller reads them after the call as its own.
+    preserved_carriers: BTreeSet<r2ssa::CanonicalStorageId>,
 }
 
 impl CalleeFacts {
@@ -2029,6 +2032,7 @@ impl CalleeFacts {
         let shared = callee.shared_artifact();
         let address = shared.function().entry;
         let interface = shared.machine_context().function_interface()?.clone();
+        let preserved_carriers = shared.facts().boundaries.preserved_call_carriers.clone();
         let summary =
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)
                 .ok()?;
@@ -2055,6 +2059,7 @@ impl CalleeFacts {
             summary,
             signature,
             observed_data_objects,
+            preserved_carriers,
         })
     }
 
@@ -2064,6 +2069,11 @@ impl CalleeFacts {
 
     pub const fn interface(&self) -> &r2ssa::SourceFunctionInterface {
         &self.interface
+    }
+
+    /// Registers this callee's body proves it leaves untouched at every exit.
+    pub const fn preserved_carriers(&self) -> &BTreeSet<r2ssa::CanonicalStorageId> {
+        &self.preserved_carriers
     }
 
     /// Re-announce this callee's observed data objects to the program view.
