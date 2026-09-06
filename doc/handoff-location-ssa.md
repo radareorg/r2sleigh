@@ -13309,9 +13309,12 @@ marked gap, which matches the local census and says the backstop is a
 backstop rather than a crutch.
 
 **Against angr on the scored zlib functions** (1550 functions, r2sleigh
-produced 1281 to angr's 1484): angr leads on `byte_match` (0.369 to 0.242)
-and on graph edit distance (11.6 to 13.9), and r2sleigh leads on
-`type_match` (0.284 to 0.361 by mean, but 121 perfect scores to angr's 83).
+produced 1281 to angr's 1484): angr leads on `byte_match` (0.369 to 0.242),
+on graph edit distance (11.6 to 13.9) and on mean `type_match` (0.361 to
+0.284), while r2sleigh scores more *perfect* type matches, 121 to angr's 83.
+The split is worth keeping in view: where this decompiler names a type it
+tends to name it exactly, and it declines more often, which is what drags
+the mean down.
 The graph distance and byte match are both measuring how close the rendered
 control flow and text are to the source, which is the quality gap the
 machine-shaped renderings already showed locally: `crc32_bitwise` renders a
