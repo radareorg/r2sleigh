@@ -13168,3 +13168,47 @@ constant false and the four escape hatches reading them were unreachable:
 two in `compile_native_worker_summary_artifact`, two in the engine's
 pre-probe predicates, which no longer take a root summary at all. The
 `native_worker` tests that asserted the falseness are removed with them.
+
+### An indirect tail transfer is a call through the register
+
+`register_tm_clones` and `deregister_tm_clones` end in `jmp rax`, with `rax`
+loaded from a weak symbol in a predecessor. Nothing named that transfer a
+call site, so the branch's operand had no rendered occurrence and the journal
+refused `ExactUseRequiresRenderedOccurrence`. Twelve functions locally, and
+thirty-six in the last sweep.
+
+The rule is the source's own block graph: a terminal `BranchInd` in a block
+the source declares to have no successor leaves the function, so it is a tail
+call through whatever the register holds. Nothing else can be true of a
+transfer the block graph does not continue. `DeclaredSuccessors` gained
+`terminal_blocks`, the machine context takes that set and mints the identity
+from the register's storage, and the semantic collector admits a register
+target the same way it already admitted a memory slot: by checking the value
+the branch reads against the identity.
+
+Two things had to follow for it to render.
+
+**A tail transfer nothing describes is still a transfer.** The disposition
+read `boundary.result_kind`, which a boundary completed from the calling
+convention never carries, and called the transfer residual. It is now a
+terminal return: control leaves through the callee and returns to this
+function's caller, so whatever the callee leaves in the result slot is this
+function's result, which is what the ABI already says. A void caller
+discards it. Deliberately *not* done: recording that result kind on the
+boundary itself, because interface recovery reads the same field and would
+have taken a thunk's tail transfer as proof that its target returns a value,
+which is the claim `a_tail_transfer_to_an_unknown_target_recovers_no_interface`
+exists to forbid.
+
+**A computed callee has to be spelled as something C can call.** The target
+was rendered bare, so an indirect call came out as `RAX_3(0x16010, ...)` and
+`_init` as `RAX_1()`, neither of which compiles. The prototype the call site
+proves is now also the type its target is called through:
+`certified_callee_signature` is one derivation with two readers, a named
+callee taking it as a declaration and a computed one as a cast, so
+`((uint64_t(*)(uint64_t, uint64_t))RAX_3)(0x16010, ...)`. A function type
+with no parameters spells `(void)` rather than `()`, since an empty list
+claims less than the call site proved and C23 removed it.
+
+Local census: 91 to 79 refusals, twelve newly rendered, nothing newly
+refused.
