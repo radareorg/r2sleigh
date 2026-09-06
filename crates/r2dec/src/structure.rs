@@ -2297,14 +2297,36 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             let Some(source_value) = self.fold_ctx.prepared_value_id_for_var(value) else {
                 return Ok(None);
             };
-            let target_expr = self
-                .fold_ctx
-                .planned_value_expr(target_value)
-                .map_err(|_| OpLoweringRefusal::missing_program_variable())?;
+            // A merge nothing observes has no reader to carry a value to, so
+            // the edge writes nothing for it: the flag merges a compiler's
+            // shared exit accumulates are this, and a write of them would
+            // name a value the plan has proven dead.
+            let target_expr = match self.fold_ctx.planned_value_expr(target_value) {
+                Ok(expr) => expr,
+                Err(crate::observation_journal::LegacyObservationJournalError::PlannedElidedValueRendered {
+                    reason: r2ssa::ledger::ElisionReason::UnobservedMerge,
+                    ..
+                }) => continue,
+                Err(error) => {
+                    r2il::refusal_evidence!(
+                        "program-variable",
+                        "shared exit {target:#x} from {source:#x}: merge target {target_value:?} of {:?} unplanned: {error:?}",
+                        phi.dst
+                    );
+                    return Err(OpLoweringRefusal::missing_program_variable().into());
+                }
+            };
             let source_expr = self
                 .fold_ctx
                 .planned_value_expr(source_value)
-                .map_err(|_| OpLoweringRefusal::missing_program_variable())?;
+                .map_err(|error| {
+                    r2il::refusal_evidence!(
+                        "program-variable",
+                        "shared exit {target:#x} from {source:#x}: merge source {source_value:?} of {:?} unplanned: {error:?}",
+                        phi.dst
+                    );
+                    OpLoweringRefusal::missing_program_variable()
+                })?;
             if target_expr.transparently_eq(&source_expr) {
                 continue;
             }
