@@ -2625,7 +2625,13 @@ static bool function_interface_snapshot_collect(
 	RAnalFunctionInterfaceSnapshot *interface,
 	const RAnalFunctionSnapshotLimits *limits) {
 	interface->return_type_id = R_ANAL_SNAPSHOT_TYPE_ID_INVALID;
-	interface->variadic = fcn->is_variadic;
+	/* Whether a function takes a variadic tail is a fact about its prototype,
+	 * and the signature below says it through its trailing ellipsis.
+	 * `fcn->is_variadic` is radare2's body heuristic -- a compare of the
+	 * lowest byte of the vector-count register against itself -- and it
+	 * fires on any `test al, al`, which marked zlib's deflateParams
+	 * variadic and left every call to it without an argument count. */
+	interface->variadic = false;
 	interface->noreturn = fcn->is_noreturn;
 	interface->stack_resources_complete = snapshot_stack_resources_complete (ctx);
 	SnapshotStorageResult return_address_collected =
@@ -4429,6 +4435,13 @@ static bool call_site_interface_snapshot_collect_one(
 		}
 	}
 	interface->num_arguments = argument_count;
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		eprintf ("R2SLEIGH_CALLSITE call=0x%" PFMT64x " target=0x%" PFMT64x
+			" name=%s exact=%d slot=%d arguments=%zu variadic=%d\n",
+			callee->call_addr, callee->addr, callee->name? callee->name: "",
+			target_is_exact? 1: 0, through_slot? 1: 0, argument_count,
+			signature_variadic? 1: 0);
+	}
 	bool arguments_complete = true;
 	RListIter *iter;
 	RAnalFunctionParam *argument;
@@ -4475,7 +4488,9 @@ static bool call_site_interface_snapshot_collect_one(
 		|| snapshot_parameter_storages_overlap (interface->arguments, argument_count)) {
 		arguments_complete = false;
 	}
-	interface->variadic = (target && target->is_variadic) || signature_variadic;
+	/* The signature in hand says whether the callee takes a variadic tail;
+	 * `target->is_variadic` is the body heuristic and does not override it. */
+	interface->variadic = signature_variadic;
 	interface->noreturn = callee->signature->noreturn || (target && target->is_noreturn);
 	bool result_complete = false;
 	if (!strcmp (r_str_get (callee->signature->ret_type), "void")) {
