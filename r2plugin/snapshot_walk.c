@@ -243,6 +243,9 @@ static bool walk_image(R2SleighWireWriter *writer, const RAnalFunctionSnapshot *
 
 #define WALK_BASE_FRAME_POINTER 0
 #define WALK_BASE_STACK_POINTER 1
+#define WALK_LOADER_ROLE_NONE 0
+#define WALK_LOADER_ROLE_INIT 1
+#define WALK_LOADER_ROLE_FINI 2
 
 // The prototype radare2 recovered, which is the only place a spelling like
 // size_t survives; the interface carries where values live, not what they are.
@@ -447,6 +450,17 @@ bool r2sleigh_wire_write_snapshot_prefix(R2SleighWireWriter *writer, const void 
 		return false;
 	}
 	r2sleigh_wire_u64 (writer, source->function_addr);
+	switch (source->loader_role) {
+	case R_ANAL_SNAPSHOT_LOADER_ROLE_INIT:
+		r2sleigh_wire_u8 (writer, WALK_LOADER_ROLE_INIT);
+		break;
+	case R_ANAL_SNAPSHOT_LOADER_ROLE_FINI:
+		r2sleigh_wire_u8 (writer, WALK_LOADER_ROLE_FINI);
+		break;
+	default:
+		r2sleigh_wire_u8 (writer, WALK_LOADER_ROLE_NONE);
+		break;
+	}
 	if (!walk_presentation (writer, source)) {
 		return false;
 	}

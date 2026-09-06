@@ -227,11 +227,14 @@ typedef enum {
 	R_ANAL_SNAPSHOT_RETURN_REGISTER,
 } RAnalSnapshotReturnKind;
 
+/* The hook the program loader calls this function as, from the binary's
+ * dynamic entries. The loader discards the hook's result, which is the one
+ * thing a caller-side contract can say about it. */
 typedef enum {
-	R_ANAL_SNAPSHOT_RETURN_ARITY_UNKNOWN = 0,
-	R_ANAL_SNAPSHOT_RETURN_ARITY_VOID,
-	R_ANAL_SNAPSHOT_RETURN_ARITY_VALUE,
-} RAnalSnapshotReturnArity;
+	R_ANAL_SNAPSHOT_LOADER_ROLE_NONE = 0,
+	R_ANAL_SNAPSHOT_LOADER_ROLE_INIT,
+	R_ANAL_SNAPSHOT_LOADER_ROLE_FINI,
+} RAnalSnapshotLoaderRole;
 
 typedef enum {
 	R_ANAL_SNAPSHOT_RETURN_MECHANISM_NONE = 0,
@@ -533,12 +536,6 @@ typedef enum {
 	R_ANAL_SNAPSHOT_STACK_SLOT_STRING_HOME_REGISTER,
 } RAnalSnapshotStackSlotStringKind;
 
-typedef struct r_anal_snapshot_signature_view_t {
-	size_t num_parameters;
-	bool noreturn;
-	RAnalSnapshotReturnArity return_arity;
-} RAnalSnapshotSignatureView;
-
 typedef enum {
 	R_ANAL_SNAPSHOT_SIGNATURE_STRING_RETURN_TYPE = 0,
 	R_ANAL_SNAPSHOT_SIGNATURE_STRING_CALLING_CONVENTION,
@@ -804,8 +801,7 @@ struct r_anal_function_snapshot_t {
 	ut32 struct_size;
 	ut64 capabilities;
 	RAnalFcnContext context;
-	// Logical return arity from a recovered signature or an exact loader role.
-	RAnalSnapshotReturnArity return_arity;
+	RAnalSnapshotLoaderRole loader_role;
 	ut64 function_addr;
 	ut64 function_size;
 	int bits;

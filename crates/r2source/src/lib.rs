@@ -77,12 +77,32 @@ impl MachineProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionIdentity {
     address: u64,
+    loader_role: Option<SourceLoaderRole>,
 }
 
 impl FunctionIdentity {
     pub const fn address(&self) -> u64 {
         self.address
     }
+
+    /// The hook the program's loader invokes this function as, if any.
+    pub const fn loader_role(&self) -> Option<SourceLoaderRole> {
+        self.loader_role
+    }
+}
+
+/// A function the loader itself calls, recorded from the binary's dynamic
+/// entries (`DT_INIT`, `DT_FINI`) rather than from any prototype.
+///
+/// The loader invokes these hooks for their effects and discards whatever the
+/// machine result carrier holds afterwards, so their result is void by the
+/// caller's contract even though the instructions leave a value in the
+/// register. Their parameters are not asserted here: they stay whatever the
+/// body proves it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SourceLoaderRole {
+    Init,
+    Fini,
 }
 
 /// Non-semantic presentation copied from the source owner.  It is deliberately
@@ -1031,7 +1051,10 @@ mod tests {
                 bits: 64,
                 endianness: SourceEndianness::Little,
             },
-            FunctionIdentity { address: 0x1000 },
+            FunctionIdentity {
+                address: 0x1000,
+                loader_role: None,
+            },
             FunctionPresentation {
                 display_name: "fixture".into(),
                 parameter_names: Box::new([]),
@@ -1147,7 +1170,10 @@ mod tests {
         assert_eq!(
             OwnedFunctionSnapshot::from_captured_parts(
                 valid.machine().clone(),
-                FunctionIdentity { address: 0x2000 },
+                FunctionIdentity {
+                    address: 0x2000,
+                    loader_role: None,
+                },
                 valid.presentation().clone(),
                 valid.image().clone(),
                 valid.advisory_calls().to_vec().into_boxed_slice(),

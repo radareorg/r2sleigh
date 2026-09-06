@@ -1599,6 +1599,7 @@ impl TrustedSsaArtifact {
                     &preliminary,
                     source.convention_slots(),
                     &provisional_machine_context,
+                    source.function().loader_role(),
                 );
                 let Some(recovered) = recovered else {
                     break 'recovered None;

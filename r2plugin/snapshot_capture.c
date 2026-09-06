@@ -140,7 +140,6 @@ static void function_interface_snapshot_fini(RAnalFunctionInterfaceSnapshot *int
 static void snapshot_type_graph_fini(RAnalSnapshotTypeGraph *graph);
 static void call_site_interface_snapshot_fini(RAnalCallSiteInterfaceSnapshot *interface);
 static void r_anal_function_snapshot_free(RAnalFunctionSnapshot *snapshot);
-static RAnalSnapshotReturnArity snapshot_signature_return_arity(const RAnalFunctionSignature *signature);
 static ut64 function_snapshot_hash_signature(ut64 hash, const RAnalFunctionSignature *signature);
 static ut64 function_snapshot_hash_base_types(ut64 hash, const RList *base_types);
 static ut64 function_snapshot_hash_storage(ut64 hash, const RAnalSnapshotRegisterStorage *storage);
@@ -1736,15 +1735,6 @@ static void r_anal_function_snapshot_free(RAnalFunctionSnapshot *snapshot) {
 	free (snapshot->function_name);
 	free (snapshot);
 }
-static RAnalSnapshotReturnArity snapshot_signature_return_arity(const RAnalFunctionSignature *signature) {
-	RAnalSnapshotReturnArity return_arity = R_ANAL_SNAPSHOT_RETURN_ARITY_UNKNOWN;
-	if (signature && !strcmp (r_str_get (signature->ret_type), "void")) {
-		return_arity = R_ANAL_SNAPSHOT_RETURN_ARITY_VOID;
-	} else if (signature && R_STR_ISNOTEMPTY (signature->ret_type)) {
-		return_arity = R_ANAL_SNAPSHOT_RETURN_ARITY_VALUE;
-	}
-	return return_arity;
-}
 static ut64 function_snapshot_hash_signature(ut64 hash, const RAnalFunctionSignature *signature) {
 	if (!signature) {
 		return function_context_hash_mix (hash, 0);
@@ -1973,7 +1963,7 @@ static ut64 function_snapshot_hash(const RAnalFunctionSnapshot *snapshot) {
 	hash = function_context_hash_string (hash, snapshot->arch_id);
 	hash = function_context_hash_string (hash, snapshot->cpu_id);
 	hash = function_context_hash_string (hash, snapshot->function_name);
-	hash = function_context_hash_mix (hash, snapshot->return_arity);
+	hash = function_context_hash_mix (hash, snapshot->loader_role);
 	hash = function_snapshot_hash_base_types (hash, snapshot->base_types);
 	hash = function_snapshot_hash_interface (hash, &snapshot->function_interface);
 	hash = function_snapshot_hash_return_mechanism (hash, &snapshot->return_mechanism);
@@ -4886,15 +4876,19 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 	snapshot->base_types = base_types;
 	RAnalFcnContext *ctx = &snapshot->context;
 	ctx->signature = fcn_context_collect_signature (fcn);
-	snapshot->return_arity = snapshot_signature_return_arity (ctx->signature);
-	if (snapshot->return_arity == R_ANAL_SNAPSHOT_RETURN_ARITY_UNKNOWN
-		&& anal->binb.bin && anal->binb.get_sym) {
+	snapshot->loader_role = R_ANAL_SNAPSHOT_LOADER_ROLE_NONE;
+	if (anal->binb.bin && anal->binb.get_sym) {
+		// The loader invokes the initialization and finalization hooks for
+		// their effects and discards the machine return carrier. Recording
+		// which hook this is lets the engine prove a void result without
+		// inventing a source prototype or a parameter list: the parameters
+		// stay whatever the body reads.
 		const RBinAddr *init = anal->binb.get_sym (anal->binb.bin, R_BIN_SYM_INIT);
+		const RBinAddr *fini = anal->binb.get_sym (anal->binb.bin, R_BIN_SYM_FINI);
 		if (init && init->vaddr == fcn->addr) {
-			// The loader invokes the initialization hook for its effects and
-			// discards the machine return carrier. This establishes logical
-			// void arity without inventing a source prototype or parameter list.
-			snapshot->return_arity = R_ANAL_SNAPSHOT_RETURN_ARITY_VOID;
+			snapshot->loader_role = R_ANAL_SNAPSHOT_LOADER_ROLE_INIT;
+		} else if (fini && fini->vaddr == fcn->addr) {
+			snapshot->loader_role = R_ANAL_SNAPSHOT_LOADER_ROLE_FINI;
 		}
 	}
 	ctx->fcn_slots = r_list_newf ((RListFree)fcn_context_slot_free);

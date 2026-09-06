@@ -271,8 +271,9 @@ fn narrow_zero_extend_input_size(graph: &SsaGraph, value: crate::ValueId) -> Opt
 pub fn recover_interface(
     func: &SSAFunction,
     slots: &SourceConventionSlots,
+    loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, slots, None)
+    recover_interface_inner(func, slots, None, loader_role)
 }
 
 /// Recover an interface while retaining exact source-owned call boundaries.
@@ -284,14 +285,20 @@ pub(crate) fn recover_interface_with_context(
     func: &SSAFunction,
     slots: &SourceConventionSlots,
     machine_context: &crate::SourceMachineContext,
+    loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
-    recover_interface_inner(func, slots, Some(machine_context))
+    recover_interface_inner(func, slots, Some(machine_context), loader_role)
 }
 
+/// `loader_role` is the source's record that the program loader calls this
+/// function as its init or fini hook. The loader discards the result carrier,
+/// so the result is void by the caller's contract whatever the body leaves in
+/// the register; parameters are still read off the body.
 fn recover_interface_inner(
     func: &SSAFunction,
     slots: &SourceConventionSlots,
     machine_context: Option<&crate::SourceMachineContext>,
+    loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
     if slots.argument_slots().is_empty() {
         return None;
@@ -323,9 +330,19 @@ fn recover_interface_inner(
         return None;
     }
 
+    if let Some(role) = loader_role {
+        r2il::refusal_evidence!(
+            "interface-recovery",
+            "the loader invokes this function as its {role:?} hook and discards its result, \
+             so the result is void"
+        );
+    }
     let exact_tail_result = match tail_result_storage(&facts) {
         TailResult::NoTailBoundary => None,
         TailResult::Exact(result) => Some(result),
+        // The loader discards whatever the tail callee returns, so an
+        // unproven tail result is not a question this boundary has to answer.
+        TailResult::Unproven if loader_role.is_some() => None,
         // The body hands control to a callee it names nothing about, and
         // that callee's result is this function's result on that path. A
         // register the body never wrote is not evidence of a void result
@@ -342,15 +359,19 @@ fn recover_interface_inner(
             return None;
         }
     };
-    let mut result = exact_tail_result.flatten().map(|slot| RecoveredResult {
-        slot,
-        observed: slot,
-    });
+    let mut result = exact_tail_result
+        .flatten()
+        .filter(|_| loader_role.is_none())
+        .map(|slot| RecoveredResult {
+            slot,
+            observed: slot,
+        });
     let mut live_out = crate::liveout::FunctionLiveOut::default();
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
     if exact_tail_result.is_none()
+        && loader_role.is_none()
         && let Some(candidate) = slots.result_slot()
     {
         let candidate_live_out =
@@ -737,7 +758,7 @@ mod tests {
         });
         let arch = arch();
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
-        recover_interface(&func, &candidates()).expect("recovery")
+        recover_interface(&func, &candidates(), None).expect("recovery")
     }
 
     fn call_boundary_with(
@@ -867,11 +888,41 @@ mod tests {
         );
         let function = SSAFunction::from_blocks_for_decompile(&blocks, Some(&arch))
             .expect("decompile-normalized ssa");
-        let recovered = recover_interface_with_context(&function, &candidates(), &machine_context)
-            .expect("contextual recovery");
+        let recovered =
+            recover_interface_with_context(&function, &candidates(), &machine_context, None)
+                .expect("contextual recovery");
 
         assert_eq!(recovered.parameters().len(), 1);
         assert_eq!(recovered.parameters()[0].slot(), register(0, 8));
+    }
+
+    #[test]
+    fn a_loader_hook_has_a_void_result_whatever_the_body_leaves_in_the_register() {
+        // `_init` leaves the result register defined at its return, so live-out
+        // recovery observes a value there; the loader that calls the hook
+        // discards it, and the source says so.
+        let mut block = R2ILBlock::new(0x2000, 4);
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(0, 8),
+            src: Varnode::constant(7, 8),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+        let arch = arch();
+        let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
+        let observed = recover_interface(&func, &candidates(), None).expect("recovery");
+        assert!(
+            observed.result().is_some(),
+            "the defined result register is live out"
+        );
+        let hook = recover_interface(&func, &candidates(), Some(r2source::SourceLoaderRole::Init))
+            .expect("recovery");
+        assert!(
+            hook.result().is_none(),
+            "the loader discards the hook's result"
+        );
+        assert!(hook.parameters().is_empty());
     }
 
     #[test]
@@ -1104,7 +1155,7 @@ mod tests {
         });
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
         let empty = SourceConventionSlots::new("", [], None).expect("empty");
-        assert!(recover_interface(&func, &empty).is_none());
+        assert!(recover_interface(&func, &empty, None).is_none());
     }
 
     #[test]
@@ -1143,7 +1194,7 @@ mod tests {
             vec![identity],
         );
         assert!(
-            recover_interface_with_context(&function, &candidates(), &unknown).is_none(),
+            recover_interface_with_context(&function, &candidates(), &unknown, None).is_none(),
             "a body that hands its result to an unknown target proves nothing about it"
         );
 
@@ -1171,7 +1222,7 @@ mod tests {
             vec![interface],
             vec![identity],
         );
-        let recovered = recover_interface_with_context(&function, &candidates(), &known)
+        let recovered = recover_interface_with_context(&function, &candidates(), &known, None)
             .expect("a proven tail boundary owns the result");
         assert_eq!(
             recovered.result().map(|result| result.slot()),

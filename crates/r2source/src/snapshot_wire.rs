@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 10;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 11;
 const SNAPSHOT_WIRE_MIN_FORMAT_VERSION: u32 = 1;
 
 /// Bytes of fixed header preceding the string table.
@@ -491,15 +491,53 @@ pub fn read_machine_profile(
     })
 }
 
+const LOADER_ROLE_NONE: u8 = 0;
+const LOADER_ROLE_INIT: u8 = 1;
+const LOADER_ROLE_FINI: u8 = 2;
+
 pub fn write_function_identity(writer: &mut SnapshotWireWriter, identity: &FunctionIdentity) {
+    write_function_identity_for_format(writer, identity, SNAPSHOT_WIRE_FORMAT_VERSION);
+}
+
+fn write_function_identity_for_format(
+    writer: &mut SnapshotWireWriter,
+    identity: &FunctionIdentity,
+    format_version: u32,
+) {
     writer.u64(identity.address());
+    if format_version >= 11 {
+        writer.u8(match identity.loader_role() {
+            None => LOADER_ROLE_NONE,
+            Some(crate::SourceLoaderRole::Init) => LOADER_ROLE_INIT,
+            Some(crate::SourceLoaderRole::Fini) => LOADER_ROLE_FINI,
+        });
+    }
 }
 
 pub fn read_function_identity(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<FunctionIdentity, SnapshotWireError> {
+    let address = reader.u64()?;
+    // Format 11 added the loader role; an older producer simply did not
+    // record one, which is what `None` means.
+    let loader_role = if reader.format_version() >= 11 {
+        match reader.u8()? {
+            LOADER_ROLE_NONE => None,
+            LOADER_ROLE_INIT => Some(crate::SourceLoaderRole::Init),
+            LOADER_ROLE_FINI => Some(crate::SourceLoaderRole::Fini),
+            tag => {
+                return Err(SnapshotWireError::UnknownDiscriminant {
+                    record: "loader role",
+                    tag: u64::from(tag),
+                });
+            }
+        }
+    } else {
+        None
+    };
     Ok(FunctionIdentity {
-        address: reader.u64()?,
+        address,
+        loader_role,
     })
 }
 
@@ -2647,6 +2685,7 @@ mod tests {
     fn identities_round_trip() {
         let function = FunctionIdentity {
             address: 0x1000_07c0,
+            loader_role: Some(crate::SourceLoaderRole::Fini),
         };
         let diagnostic = DiagnosticIdentity(0xfeed_face_dead_beef);
         let mut writer = SnapshotWireWriter::new();
@@ -2660,6 +2699,29 @@ mod tests {
             diagnostic
         );
         reader.finish().expect("consumed exactly");
+    }
+
+    #[test]
+    fn a_format_10_identity_carries_no_loader_role() {
+        let mut writer = SnapshotWireWriter::new();
+        writer.u64(0x2000);
+        let mut buffer = writer.finish().expect("finish");
+        buffer[4..8].copy_from_slice(&10u32.to_le_bytes());
+        let mut reader = SnapshotWireReader::new(&buffer).expect("header");
+        let identity = read_function_identity(&mut reader).expect("fn");
+        assert_eq!(identity.address(), 0x2000);
+        assert_eq!(identity.loader_role(), None);
+        reader.finish().expect("consumed exactly");
+    }
+
+    #[test]
+    fn an_unknown_loader_role_is_refused() {
+        let mut writer = SnapshotWireWriter::new();
+        writer.u64(0x2000);
+        writer.u8(7);
+        let buffer = writer.finish().expect("finish");
+        let mut reader = SnapshotWireReader::new(&buffer).expect("header");
+        assert!(read_function_identity(&mut reader).is_err());
     }
 
     #[test]
@@ -3445,6 +3507,7 @@ mod tests {
             },
             FunctionIdentity {
                 address: 0x1000_07c0,
+                loader_role: None,
             },
             FunctionPresentation {
                 display_name: "safe_array_access".into(),
@@ -3495,7 +3558,7 @@ mod tests {
         assert!(matches!(format_version, 1 | 2));
         let mut writer = SnapshotWireWriter::new();
         write_machine_profile(&mut writer, snapshot.machine()).expect("machine");
-        write_function_identity(&mut writer, snapshot.function());
+        write_function_identity_for_format(&mut writer, snapshot.function(), format_version);
         write_presentation(&mut writer, snapshot.presentation()).expect("presentation");
         write_image_for_format(&mut writer, snapshot.image(), format_version).expect("image");
         writer.u32(snapshot.advisory_calls().len() as u32);

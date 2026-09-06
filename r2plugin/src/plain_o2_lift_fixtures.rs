@@ -320,7 +320,7 @@ fn assert_captured_abi_facts(function: &FunctionCapture, ssa: &Value, blocks: &[
     let recovered_function = r2ssa::SSAFunction::from_blocks_with_arch(blocks, Some(&arch))
         .expect("machine-only SSA fixture");
     let recovered =
-        r2ssa::recover_interface::recover_interface(&recovered_function, &convention_slots)
+        r2ssa::recover_interface::recover_interface(&recovered_function, &convention_slots, None)
             .expect("machine-code ABI recovery");
     assert_eq!(
         recovered
