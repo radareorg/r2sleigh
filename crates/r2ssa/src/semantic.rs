@@ -3273,18 +3273,49 @@ fn variadic_callsite_argument_count(
         .and_then(Option::as_ref)
         .ok_or(VariadicCallsiteArgumentCountRefusal::FormatArgumentUnavailable)?;
     let SourceCallArgumentValue::Value(format_value) = format_value.value else {
+        r2il::refusal_evidence!(
+            "variadic-format-literal",
+            "format argument {format_argument_index} is the entry carrier, not a value this function defines"
+        );
         return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
     };
     let format_var = graph
         .value(format_value)
         .map(|value| &value.var)
         .ok_or(VariadicCallsiteArgumentCountRefusal::FormatArgumentUnavailable)?;
-    let format_literal_address =
-        resolve_const_value(function.decompile_prep_facts(), format_var)
-            .ok_or(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral)?;
+    let format_literal_address = resolve_const_value(function.decompile_prep_facts(), format_var)
+        .ok_or_else(|| {
+        r2il::refusal_evidence!(
+            "variadic-format-literal",
+            "format argument {format_argument_index} at {:?} is {:?} (root {:?}), \
+                 graph literal {:?}, defined by {:?}",
+            interface
+                .arguments()
+                .get(format_argument_index)
+                .map(|argument| argument.location()),
+            format_var,
+            canonical_value_root(function.decompile_prep_facts(), format_var),
+            resolve_graph_literal_value(graph, function.decompile_prep_facts(), format_var),
+            graph
+                .value(format_value)
+                .and_then(|value| graph.def_inst(value.id))
+                .and_then(|id| graph.inst(id))
+                .map(|inst| format!("{:?}", inst.payload)
+                    .chars()
+                    .take(80)
+                    .collect::<String>())
+        );
+        VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral
+    })?;
     let format = machine_context
         .source_string_literal(format_literal_address)
-        .ok_or(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral)?;
+        .ok_or_else(|| {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "format argument {format_argument_index} points at {format_literal_address:#x}, where the source carries no string literal"
+            );
+            VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral
+        })?;
     let format_consumed_argument_count = crate::printf::printf_consumed_argument_count(format)
         .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
     let total_argument_count = interface

@@ -1344,7 +1344,26 @@ static bool function_image_string_literals_collect(RAnal *anal,
 						const ut64 span = R_MIN (node->end - ref->addr, sizeof (suffix) - 1);
 						if (anal->iob.read_at (anal->iob.io, ref->addr, (ut8 *)suffix, (int)span)) {
 							suffix[span] = 0;
-							if (*suffix && r_str_is_printable (suffix)) {
+							if (*suffix && r_str_is_printable_incl_newlines (suffix)) {
+								text = suffix;
+							}
+						}
+					}
+				}
+				/* A referenced address in a read-only mapping with no string
+				 * record at all holds a literal shorter than the analysis
+				 * scanner's minimum: `"ok\n"` is three bytes and the scanner
+				 * starts at four. The bytes are the fact; read them up to the
+				 * terminator, bounded by the mapping. */
+				if (!text && anal->iob.io && anal->iob.read_at && anal->iob.map_get_at) {
+					RIOMap *map = anal->iob.map_get_at (anal->iob.io, ref->addr);
+					if (map && !(map->perm & R_PERM_W) && ref->addr >= r_io_map_begin (map)
+						&& ref->addr < r_io_map_end (map)) {
+						const ut64 span = R_MIN (r_io_map_end (map) - ref->addr, sizeof (suffix) - 1);
+						if (anal->iob.read_at (anal->iob.io, ref->addr, (ut8 *)suffix, (int)span)) {
+							suffix[span] = 0;
+							if (*suffix && strlen (suffix) < span
+								&& r_str_is_printable_incl_newlines (suffix)) {
 								text = suffix;
 							}
 						}
