@@ -127,7 +127,7 @@ static int snapshot_addr_compare(const void *left, const void *right);
 static SnapshotTerminalFlow snapshot_terminal_flow(const RAnalOp *op, ut64 target);
 static bool snapshot_block_sequential_jump_normalize(RAnal *anal, RAnalSnapshotBlock *block);
 static bool snapshot_switch_cases_target(const RAnalSwitchOp *switch_op, ut64 addr);
-static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSnapshotBlock *block, size_t *total_successors, const RAnalFunctionSnapshotLimits *limits);
+static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSnapshotBlock *block, size_t *total_successors, const RAnalFunctionSnapshotLimits *limits, const char **reason);
 static int function_image_target_classify(const RAnalFunctionImageSnapshot *image, ut64 target);
 static bool snapshot_addr_starts_function(RAnal *anal, ut64 addr);
 static bool function_image_code_pointer_table_collect(RAnal *anal, RAnalFunctionImageSnapshot *image, ut64 addr, ut32 entry_size);
@@ -1116,7 +1116,18 @@ static bool snapshot_switch_cases_target(const RAnalSwitchOp *switch_op, ut64 ad
 	}
 	return false;
 }
-static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSnapshotBlock *block, size_t *total_successors, const RAnalFunctionSnapshotLimits *limits) {
+/* Every way this can refuse names itself. One shared message for nine
+ * different disagreements meant a real defect -- a dispatch block radare2
+ * describes in a way the snapshot does not expect -- was indistinguishable
+ * from a limit being hit, and the whole function was dropped either way. */
+#define SUCCESSOR_REFUSE(why) \
+	do { \
+		if (reason) { \
+			*reason = (why); \
+		} \
+		return false; \
+	} while (0)
+static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSnapshotBlock *block, size_t *total_successors, const RAnalFunctionSnapshotLimits *limits, const char **reason) {
 	size_t count = 0;
 	ut64 default_addr = UT64_MAX;
 	bool jump_is_distinct = false;
@@ -1124,7 +1135,7 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 		const RAnalSwitchOp *switch_op = source->switch_op;
 		const int listed_cases = switch_op->cases? r_list_length (switch_op->cases): 0;
 		if (listed_cases <= 0) {
-			return false;
+			SUCCESSOR_REFUSE ("a switch block lists no cases");
 		}
 		// A snapshot describes the graph the function analysis built, not the
 		// architecture metadata it was built from, so the block fail edge is the
@@ -1135,12 +1146,12 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 		default_addr = source->fail;
 		if (default_addr != UT64_MAX && switch_op->def_val != UT64_MAX
 			&& switch_op->def_val != default_addr) {
-			return false;
+			SUCCESSOR_REFUSE ("the switch default target and the block fail edge disagree");
 		}
 		count = (size_t)listed_cases;
 		if (default_addr != UT64_MAX
 			&& r_add_overflow_size_t (count, 1, &count)) {
-			return false;
+			SUCCESSOR_REFUSE ("the switch case count overflows");
 		}
 		// Some architectures leave the linear flow edge on a dispatch block in
 		// addition to the case list. Keep it only when it names a target the
@@ -1149,14 +1160,14 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 			&& !snapshot_switch_cases_target (switch_op, source->jump)) {
 			jump_is_distinct = true;
 			if (r_add_overflow_size_t (count, 1, &count)) {
-				return false;
+				SUCCESSOR_REFUSE ("the extra linear edge overflows the successor count");
 			}
 		}
 		block->switch_addr = switch_op->jump_addr != UT64_MAX
 			? switch_op->jump_addr: switch_op->addr;
 		const ut64 block_end = source->addr + source->size;
 		if (block->switch_addr < source->addr || block->switch_addr >= block_end) {
-			return false;
+			SUCCESSOR_REFUSE ("the switch dispatch address is outside its own block");
 		}
 	} else {
 		block->switch_addr = UT64_MAX;
@@ -1166,7 +1177,7 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 	size_t next_total;
 	if (r_add_overflow_size_t (*total_successors, count, &next_total)
 		|| next_total > limits->max_function_successors) {
-		return false;
+		SUCCESSOR_REFUSE ("the function successor total overflows or is past its limit");
 	}
 	*total_successors = next_total;
 	if (!count) {
@@ -1174,11 +1185,11 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 	}
 	size_t allocation_size;
 	if (r_mul_overflow (count, sizeof (RAnalSnapshotSuccessor), &allocation_size)) {
-		return false;
+		SUCCESSOR_REFUSE ("the successor table size overflows");
 	}
 	block->successors = calloc (1, allocation_size);
 	if (!block->successors) {
-		return false;
+		SUCCESSOR_REFUSE ("out of memory allocating the successor table");
 	}
 	block->num_successors = count;
 	if (source->switch_op) {
@@ -1187,7 +1198,7 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 		size_t index = 0;
 		r_list_foreach (source->switch_op->cases, iter, case_op) {
 			if (!case_op || case_op->jump == UT64_MAX || index >= count) {
-				return false;
+				SUCCESSOR_REFUSE ("a switch case has no target or the case list grew while it was read");
 			}
 			block->successors[index++] = (RAnalSnapshotSuccessor) {
 				.kind = R_ANAL_SNAPSHOT_SUCCESSOR_SWITCH_CASE,
@@ -1197,7 +1208,7 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 		}
 		if (default_addr != UT64_MAX) {
 			if (index >= count) {
-				return false;
+				SUCCESSOR_REFUSE ("the switch default does not fit the successor table");
 			}
 			block->successors[index++] = (RAnalSnapshotSuccessor) {
 				.kind = R_ANAL_SNAPSHOT_SUCCESSOR_SWITCH_DEFAULT,
@@ -1206,7 +1217,7 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 		}
 		if (jump_is_distinct) {
 			if (index >= count) {
-				return false;
+				SUCCESSOR_REFUSE ("the extra linear edge does not fit the successor table");
 			}
 			block->successors[index++] = (RAnalSnapshotSuccessor) {
 				.kind = R_ANAL_SNAPSHOT_SUCCESSOR_DIRECT,
@@ -1214,7 +1225,7 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 			};
 		}
 		if (index != count) {
-			return false;
+			SUCCESSOR_REFUSE ("the switch successor count does not match what was written");
 		}
 	} else {
 		size_t index = 0;
@@ -1233,16 +1244,27 @@ static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSna
 	}
 	qsort (block->successors, count, sizeof (RAnalSnapshotSuccessor),
 		snapshot_successor_compare);
+	// A case value names one target. radare2 can list the same case twice --
+	// two jump-table walks reaching the same entry -- and repeating a fact is
+	// not a disagreement, so an exact repeat is folded away. Two targets under
+	// one value is a real disagreement and still refuses, because the snapshot
+	// would otherwise describe a switch that cannot exist.
 	size_t i;
+	size_t kept = count? 1: 0;
 	for (i = 1; i < count; i++) {
-		const RAnalSnapshotSuccessor *previous = &block->successors[i - 1];
+		const RAnalSnapshotSuccessor *previous = &block->successors[kept - 1];
 		const RAnalSnapshotSuccessor *current = &block->successors[i];
 		if (previous->kind == R_ANAL_SNAPSHOT_SUCCESSOR_SWITCH_CASE
 			&& current->kind == R_ANAL_SNAPSHOT_SUCCESSOR_SWITCH_CASE
 			&& previous->case_value == current->case_value) {
-			return false;
+			if (previous->target_addr != current->target_addr) {
+				SUCCESSOR_REFUSE ("one switch case value names two targets");
+			}
+			continue;
 		}
+		block->successors[kept++] = *current;
 	}
+	block->num_successors = kept;
 	return true;
 }
 static int function_image_target_classify(const RAnalFunctionImageSnapshot *image, ut64 target) {
@@ -1575,9 +1597,12 @@ static bool function_image_snapshot_collect(RAnal *anal, const RAnalFunction *fc
 		block->addr = source->addr;
 		block->size = source->size;
 		block->switch_addr = UT64_MAX;
+		const char *successor_reason = NULL;
 		if (!snapshot_block_successors_collect (
-				source, block, &total_successors, limits)) {
-			IMAGE_REFUSE ("the block successors are not coherent");
+				source, block, &total_successors, limits,
+				&successor_reason)) {
+			IMAGE_REFUSE (successor_reason
+				? successor_reason: "the block successors are not coherent");
 		}
 	}
 	if (index != count) {

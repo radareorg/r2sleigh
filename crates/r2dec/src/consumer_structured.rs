@@ -65,7 +65,17 @@ where
                 "r2dec residual: {}; body rendered without structure",
                 crate::sanitize_comment_text(&reason)
             ))];
-            stmts.extend(linearize()?);
+            // When the linear form refuses too, its refusal is all the reader
+            // was given -- "unrepresentable operation" -- and the reason
+            // structuring gave up, which is the fact worth chasing, went with
+            // the abandoned body. Say it before handing the refusal on.
+            let linearized = linearize().inspect_err(|error| {
+                r2il::refusal_evidence!(
+                    "structuring-gave-up",
+                    "reason={reason} then linearization refused: {error:?}"
+                );
+            })?;
+            stmts.extend(linearized);
             let structured_body = structurer.seal_linearized_body(CStmt::Block(stmts))?;
             Ok(RoutedBody {
                 body_stmt: None,

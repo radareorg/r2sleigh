@@ -624,15 +624,30 @@ impl CFG {
                 }
             }
             BlockTerminator::Switch { ref cases, default } => {
-                // Add edges for each switch case
+                // One edge per target, not one per case. `case 1:` and
+                // `case 2:` falling into the same body is one way the
+                // program can go, and the case values that reach it live on
+                // the terminator, which keeps all of them.
+                //
+                // Adding an edge per case put sixty-seven parallel edges
+                // between zlib's `gz_open` dispatch and its shared arm. The
+                // block then had that predecessor sixty-seven times, every
+                // phi built from the predecessor list repeated its source
+                // that many times, and the SSA integrity check refused the
+                // whole function -- so a switch with a shared arm could not
+                // be decompiled at all.
+                let mut linked = std::collections::HashSet::new();
                 for (_, target) in cases {
-                    if let Some(&target_idx) = self.addr_to_node.get(target) {
+                    if let Some(&target_idx) = self.addr_to_node.get(target)
+                        && linked.insert(*target)
+                    {
                         self.graph.add_edge(node_idx, target_idx, CFGEdge::Normal);
                     }
                 }
                 // Add edge for default case
                 if let Some(def) = default
                     && let Some(&def_idx) = self.addr_to_node.get(&def)
+                    && linked.insert(def)
                 {
                     self.graph.add_edge(node_idx, def_idx, CFGEdge::Normal);
                 }
@@ -959,6 +974,62 @@ mod tests {
         assert_eq!(bb.addr, 0x1000);
         assert_eq!(bb.terminator, BlockTerminator::Fallthrough { next: 0x1004 });
         assert_eq!(bb.successors(), vec![0x1004]);
+    }
+
+    /// `case 1:` and `case 2:` falling into one body is one edge.
+    ///
+    /// It used to be two, and the shared arm then listed the dispatch block
+    /// as a predecessor twice. Every phi built from that list repeated its
+    /// source, the SSA integrity check refused the duplicate, and zlib's
+    /// `gz_open` -- fifty-five blocks, sixty-seven cases into one arm --
+    /// could not be decompiled at all.
+    #[test]
+    fn a_switch_arm_shared_by_several_cases_is_one_edge() {
+        let cases = (0..8)
+            .map(|value| r2il::SwitchCase {
+                value,
+                target: 0x4010,
+            })
+            .collect::<Vec<_>>();
+        let mut blocks = vec![R2ILBlock {
+            addr: 0x4000,
+            size: 4,
+            ops: vec![R2ILOp::BranchInd {
+                target: make_ram(0x4010, 8),
+            }],
+            switch_info: Some(r2il::SwitchInfo {
+                switch_addr: 0x4000,
+                min_val: 0,
+                max_val: 7,
+                default_target: Some(0x4020),
+                cases,
+            }),
+            op_metadata: Default::default(),
+        }];
+        for addr in [0x4010, 0x4020] {
+            blocks.push(R2ILBlock {
+                addr,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_const(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            });
+        }
+
+        let cfg = CFG::from_blocks(&blocks).expect("switch cfg");
+
+        assert_eq!(cfg.successors(0x4000), vec![0x4010, 0x4020]);
+        assert_eq!(cfg.predecessors(0x4010), vec![0x4000]);
+        // The case values are not lost by collapsing the edge: they live on
+        // the terminator, which still carries every one of them.
+        let dispatch = cfg.get_block(0x4000).expect("dispatch block");
+        let BlockTerminator::Switch { cases, default } = &dispatch.terminator else {
+            panic!("switch dispatch block");
+        };
+        assert_eq!(cases.len(), 8);
+        assert_eq!(*default, Some(0x4020u64));
     }
 
     #[test]

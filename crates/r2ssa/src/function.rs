@@ -332,7 +332,13 @@ impl SsaArtifact {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        validate_ssa_function(&function).map_err(|_| malformed_ssa_input())?;
+        // The validator answers with a typed integrity error naming the block
+        // and the edge it disagreed about; discarding it left the reader with
+        // "malformed SSA source input" and nothing to look at.
+        validate_ssa_function(&function).map_err(|error| {
+            r2il::refusal_evidence!("ssa-integrity", "{error:?}");
+            malformed_ssa_input()
+        })?;
         machine_context.remap_memory_sites_to_prepared(&function);
         let mut graph = SsaGraph::from_function_with_storage(&function);
         crate::semantic::ensure_source_formal_parameter_values(&mut graph, &machine_context);
@@ -2745,7 +2751,13 @@ impl SSAFunction {
         if let Some(arch) = arch {
             function.normalize_register_alias_sources_with_control(arch, control)?;
         }
-        validate_ssa_function(&function).map_err(|_| malformed_ssa_input())?;
+        // The validator answers with a typed integrity error naming the block
+        // and the edge it disagreed about; discarding it left the reader with
+        // "malformed SSA source input" and nothing to look at.
+        validate_ssa_function(&function).map_err(|error| {
+            r2il::refusal_evidence!("ssa-integrity", "{error:?}");
+            malformed_ssa_input()
+        })?;
         control.poll()?;
         Ok(function)
     }

@@ -13489,3 +13489,52 @@ public function now, and the consolidation fixed a live difference: the
 `signature_infer` copy trimmed leading and trailing underscores, so a DWARF
 parameter named `_x` was renamed `x` and `_init` would have been renamed
 `init`. Leading and trailing underscores are part of a name and are kept.
+
+## A switch arm shared by several cases is one edge
+
+Raising the engine's complexity limit to see what it hides -- the limit is a
+cost guard, and the user's rule is that a size guard never decides coverage --
+turned up something else entirely. zlib's `inflate` did not time out; it was
+refused at capture, with `the block successors are not coherent`. That one
+message stood for nine different disagreements inside
+`snapshot_block_successors_collect`, so it was not traceable. Every one of them
+names itself now, and the answer came back immediately:
+`two switch cases carry the same value`.
+
+Three layers, each hiding the next:
+
+1. **The capture refused a repeat.** radare2 can list the same case twice, two
+   jump-table walks reaching one entry, and a repeated fact is not a
+   disagreement. An exact repeat is folded; two *targets* under one value is a
+   real disagreement and still refuses, with a message that says so.
+2. **The CFG added an edge per case.** `case 1:` and `case 2:` falling into one
+   body were two parallel edges, so the shared arm listed its dispatch block as
+   a predecessor sixty-seven times, every phi built from that list repeated its
+   source sixty-seven times, and `validate_ssa_function` refused the function
+   as malformed. It is one edge per target now; the case values live on the
+   terminator, which keeps every one of them. The validator's typed integrity
+   error is also printed rather than discarded -- fifteen checks answered with
+   the single string `malformed SSA source input`.
+3. **The region composer keeps one case value per target.** `detect_switch`
+   comments "Use the first value for this target", so a shared arm reaches
+   `structure_switch_region` with one value while the certified control fact
+   has all sixty-seven. They are compared literally, the switch renders as
+   `r2dec residual: switch control mismatch`, thirteen blocks go unrendered,
+   coverage validation sets a safety reason, the linearized fallback cannot
+   express a multi-way dispatch either, and the reader is told
+   `unrepresentable operation`. That last hop now records what structuring
+   actually gave up on, so the chain reads end to end.
+
+Five functions across the local binaries sit at layer 3 today: `gz_open` in
+both minigzip builds and three in bzip2 -O0. They are counted as refusals now
+where before they died at capture and produced no marker at all, so the local
+census reads 89 rather than 84 with nothing actually lost.
+
+**What layer 3 needs.** `Region::Switch` must carry every value that reaches an
+arm, not the first, and the rendering must emit one `case` label per value with
+the body on the last -- which is what C means by a shared arm. `ControlGuard::
+SwitchArm` already carries `case_values: Vec<u64>`, so the guard model is
+already right; the region tree and `crate::ast::SwitchCase` are what still
+assume one value per arm. Until then the literal comparison in
+`structure_switch_region` is the honest answer: rendering `case 1:` for an arm
+that also serves 2 through 67 would send those values to the default.
