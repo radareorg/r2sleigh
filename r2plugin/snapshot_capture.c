@@ -3422,6 +3422,13 @@ static char *snapshot_type_member_element_spec(const char *spec, ut64 *count) {
 	if (!element) {
 		return NULL;
 	}
+	// A qualifier says how a declaration may be used, never how wide it is:
+	// `code const[512] const` is 512 `code`s however it is spelled. Leaving
+	// the words in left the trailing one after the brackets, which this
+	// parser reads as a malformed extent, so the slot had no size, the frame
+	// had no proven resources, and every function holding such a local was
+	// refused at its return boundary.
+	snapshot_type_strip_qualifiers (element);
 	char *open = strchr (element, '[');
 	if (!open) {
 		return element;
