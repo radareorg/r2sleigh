@@ -13062,3 +13062,72 @@ had drifted since `df61932a`, which named call sites by their instruction and
 so changed the prepared SSA of the one block holding a call. The plugin crate
 is not in the usual `cargo test -p ...` set, so nothing caught it; the fixture
 is re-blessed and `-p r2sleigh-plugin` belongs in the gate command from now on.
+
+### The marked-gap backstop
+
+An operation the renderer cannot prove used to refuse the whole function,
+which threw away every cell it could prove. It is now marked where it
+stands. The output carries
+`/* r2dec gap: <kind> at 0x<block>:<op> covering N ops (<origin>) */`, the
+cells the marker covers hold a typed `Gap(anchor)` observation, and the
+function keeps rendering.
+
+**What a gap is allowed to be.** A gap is neither a discharge nor a refusal.
+It accounts for its cells, so the ledger's closure equation still balances
+and `is_closed` keeps its meaning, and it is counted in a new column that
+`is_fully_proven` reads. The distinction is load-bearing: the journal seal
+refuses a function whose cells are empty, which is what makes a silently
+dropped statement impossible to miss, so a gap had to be a typed observation
+rather than an empty cell.
+
+The columns exist in every layer that accounts for a cell:
+`r2ssa::ledger::Outcome::Gapped` and `LedgerClosure::gapped`; the three
+legacy observations; the shadow report's own `Gapped` classification, which
+is neither side being wrong because neither side made a claim; the coverage
+equations; `EffectObligationDisposition::Gapped`, admitted and not proven;
+and the plugin's JSON in all three audits. The proof line prints
+`N gapped`.
+
+**Three rules the traces forced.**
+
+1. *A gap may take over an upstream refusal, and must never overwrite a
+   rendered claim.* A cell the machine projection had already refused is
+   exactly what the marker exists to make visible, so the gap claims it and
+   the shadow ledger counts it as gapped rather than refused. A cell holding
+   a rendered observation is a conflict and the gap does not open.
+2. *An elided cell keeps its proof.* An elision says the cell needs no
+   output, which is strictly stronger than what a gap says, so the gap
+   passes over it rather than claiming it.
+3. *A control transfer cannot be gapped.* A marker cannot stand in for where
+   the program goes next: C must return a value from a value-returning
+   function, and leaving the statement out would fall off the end. A refusal
+   at a `Return`, `Branch`, `CBranch` or `BranchInd` therefore still refuses
+   the function. This is why the `implementation.rs:1324` return-boundary
+   class is not covered by the backstop and had to be fixed at its cause
+   (the loader-hook interface, and the carrier walks).
+
+**Ordering, and why structuring can run twice.** The fold marks cells as it
+renders, so a gap opened at the moment of refusal can find that a statement
+reading the unproven value has already claimed one of its cells. Nothing is
+wrong with the gap; it was learned too late. The escaped refusal is recorded
+in a gap plan keyed by its anchor instruction, the journal is rolled back,
+and structuring runs again with the whole closure skipped before any of it
+can render. The plan only grows and is a subset of the graph's instructions,
+so the retries are bounded by the graph; a function that renders never
+retries at all.
+
+**What it is worth so far.** The locked corpus stays 54/54 with zero gaps,
+and the verifier now fails any gap in a locked cell (`raw=gapped`,
+`zero_gapped` in the effect and observation quality rules): those
+fifty-four functions are fully proven or they are a regression. The local
+census is unchanged at 100 refusals, because every function whose lowering
+refusal is now gapped immediately meets the next unproven thing:
+`fcn_b302` (bzip2 -O0) gaps five memory-renderer refusals and then refuses
+`PlannedElidedValueRendered`, where `certified_memory_address_expr` asks for
+the expression of a stack-slot address the plan elided; the `sum_array`
+fixture gaps its SIMD operations and then refuses placement's
+`missing_definition`. Both are the stack-aggregate class (item C2), now
+reachable rather than hidden behind an earlier refusal. The DecBench census
+records `gapped`, `fully_proven`, `gap_ops` and `gap_causes` at schema
+version 2, and `census_decbench.py` prints proven beside coverage so a rise
+paid for in gaps cannot read as progress.
