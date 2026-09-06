@@ -7,7 +7,6 @@ members = [
     "crates/r2sleigh-cli",
     "crates/r2source",
     "crates/r2ssa",
-    "crates/r2sym",
     "crates/r2types",
     "crates/r2engine",
     "crates/r2dec",

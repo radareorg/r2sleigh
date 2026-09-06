@@ -13564,3 +13564,70 @@ Until the selector is provable, five functions stop at
 `r2dec residual: switch control mismatch` and then at the linear form's refusal
 of a multi-way dispatch: `gz_open` in both minigzip builds, and three in
 bzip2 -O0.
+
+## The symbolic crate is deleted
+
+`r2sym` was 42,395 lines: a symbolic executor, a solver interface, path
+exploration, a summary registry, virtual-machine and native-worker artifact
+models, and a role registry that mapped worker kinds to signature hints. The
+engine compiled an artifact from it for every function analysed.
+
+**What it was contributing.** Measured by switching artifact compilation off
+and diffing every rendered body across the six local binaries: 692 functions,
+179 of which differ, and 178 of those differ by exactly one line --
+
+```c
+/* summary return unresolved; value intentionally not reconstructed */
+```
+
+The 179th differs in how one member access is spelled, and the form without the
+artifact is the better of the two. The refusal sets are identical on all six
+binaries. The cost was about twelve per cent of wall time on bzip2 -O0, plus
+the z3 dependency in three crates.
+
+That measurement is the one that mattered, and it is worth repeating the method:
+counting call sites made `r2sym` look load-bearing, because most of its callers
+were inside machinery that had itself stopped reaching the page. Diffing the
+*output* is what settled it. The user's ruling was to delete it rather than keep
+it or stop compiling it by default, on the standing rule that a subsystem
+nothing reaches is deleted rather than left in the tree.
+
+**What went with it.** The route module's whole preference cascade -- virtual
+machine summary, summary islands, structured worker, linear worker, semantic
+fallback -- collapses to one function returning the standard route.
+`AnalysisPlans`, `DecompileCapabilityView`, the semantic fields on
+`FunctionFacts` and on the writeback request, the role registry, the worker and
+region type-hint collectors, the semantic slot profiles, the engine's symbolic
+phase and cancellation token, and the semantic fields of the engine's JSON. Two
+things were kept by moving them: the interprocedural summary's own type
+projection, which is r2ssa evidence that happened to live in a struct named
+after the symbolic crate, and radare2's flag-name normalisation, which is a
+string rule about `sym.`/`dbg.` prefixes and `.isra.0` suffixes rather than a
+symbolic fact and is now `plain_function_name` in the engine's route module.
+
+**Net.** 52,134 lines removed against 456 added, across 49 files, with the
+z3 dependency dropped from `r2dec`, `r2engine` and the plugin.
+
+### What the deletion actually cost, measured against a rebuilt old plugin
+
+The locked corpus came back 54/54 raw and differential with two snapshot
+mismatches, both `murmur3_32` (arm64 -O1 and -O2). Rather than bless them on
+reasoning, the previous plugin was rebuilt from `HEAD` in a worktree and the
+function rendered with it. The whole difference is one line:
+
+```c
+-  uint32_t tmp_24e00_2 = *(uint32_t*)tmp_7400_2;
++  uint32_t tmp_24e00_2 = (uint32_t)*(int32_t*)tmp_7400_2;
+```
+
+The value is the same and the differential gate proves the behaviour is, but
+the old spelling is the better one: a four-byte load through a `uint32_t*`
+rather than through an `int32_t*` with a conversion back. The element type came
+from the symbolic slot profiles, and with those gone a four-byte load falls back
+to `int32_t`.
+
+That fallback is the thing to fix, and it is now visible where before it was
+masked: nothing about this load proves it is signed, so defaulting a load's
+element type to a signed integer asserts something the machine did not say. It
+is one line on one corpus function today; the same default applies wherever a
+symbolic hint used to cover it.

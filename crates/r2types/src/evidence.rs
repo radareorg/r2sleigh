@@ -1389,17 +1389,14 @@ mod tests {
                 },
             ],
         };
-        let mut facts = crate::FunctionFacts::new(
-            crate::FunctionTypeFacts {
-                signature_certificate: crate::SignatureCertificate::from_signature(
-                    &signature,
-                    [crate::SignatureCertificateSource::LocalInference],
-                ),
-                merged_signature: Some(signature),
-                ..crate::FunctionTypeFacts::default()
-            },
-            None,
-        );
+        let mut facts = crate::FunctionFacts::new(crate::FunctionTypeFacts {
+            signature_certificate: crate::SignatureCertificate::from_signature(
+                &signature,
+                [crate::SignatureCertificateSource::LocalInference],
+            ),
+            merged_signature: Some(signature),
+            ..crate::FunctionTypeFacts::default()
+        });
         facts.apply_recovered_evidence_types(&source, 64);
         let written = facts
             .type_facts()
@@ -1504,34 +1501,31 @@ mod tests {
             base: ExternalStackBase::StackPointer,
             offset: -8,
         };
-        let mut facts = crate::FunctionFacts::new(
-            crate::FunctionTypeFacts {
-                signature_certificate: crate::SignatureCertificate::from_signature(
-                    &signature,
-                    [crate::SignatureCertificateSource::LocalInference],
-                ),
-                merged_signature: Some(signature),
-                stack_slots: BTreeMap::from([(
-                    slot,
-                    crate::ExternalStackSlotSpec {
-                        name: "length_home".to_string(),
-                        ty: Some(signed.clone()),
-                        role: crate::ExternalStackSlotRole::Local,
-                        ..crate::ExternalStackSlotSpec::default()
-                    },
-                )]),
-                visible_bindings: vec![crate::VisibleBinding {
+        let mut facts = crate::FunctionFacts::new(crate::FunctionTypeFacts {
+            signature_certificate: crate::SignatureCertificate::from_signature(
+                &signature,
+                [crate::SignatureCertificateSource::LocalInference],
+            ),
+            merged_signature: Some(signature),
+            stack_slots: BTreeMap::from([(
+                slot,
+                crate::ExternalStackSlotSpec {
                     name: "length_home".to_string(),
-                    ty: Some(signed),
-                    kind: crate::VisibleBindingKind::StackObject,
-                    stack_slot: Some(slot),
-                    param_index: None,
-                    source_reg: None,
-                }],
-                ..crate::FunctionTypeFacts::default()
-            },
-            None,
-        );
+                    ty: Some(signed.clone()),
+                    role: crate::ExternalStackSlotRole::Local,
+                    ..crate::ExternalStackSlotSpec::default()
+                },
+            )]),
+            visible_bindings: vec![crate::VisibleBinding {
+                name: "length_home".to_string(),
+                ty: Some(signed),
+                kind: crate::VisibleBindingKind::StackObject,
+                stack_slot: Some(slot),
+                param_index: None,
+                source_reg: None,
+            }],
+            ..crate::FunctionTypeFacts::default()
+        });
         facts.apply_recovered_evidence_types(&source, 64);
 
         let type_facts = facts.type_facts();

@@ -31,18 +31,6 @@ impl ParamSlotResolver {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AnalysisPlans {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub artifact_build: Option<r2sym::ArtifactBuildPlan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub query: Option<r2sym::QueryPlan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub type_plan: Option<r2sym::TypePlan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub decompile: Option<r2sym::DecompilePlan>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionCallsiteFacts {
     pub by_callsite: BTreeMap<CallsiteKey, CallsiteArgumentFacts>,
@@ -1354,20 +1342,6 @@ pub struct StackCallArgumentLocationFact {
     pub source_inst: Option<r2ssa::InstId>,
 }
 
-impl AnalysisPlans {
-    pub fn from_semantics(semantics: Option<&r2sym::SemanticArtifactReport>) -> Self {
-        let Some(semantics) = semantics else {
-            return Self::default();
-        };
-        Self {
-            artifact_build: Some(semantics.build_plan()),
-            query: Some(semantics.query_plan()),
-            type_plan: Some(semantics.type_plan()),
-            decompile: Some(semantics.decompile_plan()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct InterprocSummaryView {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1434,29 +1408,6 @@ pub struct SummaryOutParamFact {
     pub param_index: usize,
     pub evidence: OutParamCertificateEvidence,
     pub source: OutParamCertificateSource,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DecompileCapabilityView {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub plan: Option<r2sym::DecompilePlan>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub slice_class: Option<r2sym::SliceClass>,
-    pub skipped_large_cfg: bool,
-    pub has_native_regions: bool,
-    pub has_summary_islands: bool,
-    pub has_primary_summary_islands: bool,
-    pub summary_island_count: usize,
-    pub primary_summary_island_count: usize,
-    pub generic_memory_summary_count: usize,
-    pub has_memory_read_write_summary_pair: bool,
-    pub actionable_region_count: usize,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ambiguous_targets: Vec<u64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub residual_reasons: Vec<r2sym::ResidualReason>,
-    pub assumption_conflicted: bool,
-    pub summary_conflicted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1582,7 +1533,6 @@ impl InterprocSummaryView {
 #[derive(Debug, Clone, Default)]
 pub struct FunctionFacts {
     types: FunctionTypeFacts,
-    semantics: Option<r2sym::SemanticArtifact>,
     interproc_summary: Option<r2ssa::PreparedInterprocSummarySet>,
     decompile_route: Option<DecompileRouteFacts>,
     input_quality: Option<FunctionInputQualityFacts>,
@@ -1596,7 +1546,6 @@ pub struct FunctionFacts {
     control: FunctionControlFacts,
     render: FunctionRenderFacts,
     assumptions: r2ssa::AssumptionSet,
-    plans: AnalysisPlans,
     summary_view: InterprocSummaryView,
     diagnostics: Vec<String>,
     assumption_usage: r2ssa::AssumptionUsageReport,
@@ -1678,9 +1627,6 @@ impl SourceOwnedFunctionFacts {
         report.canonicalize_type_facts();
         if report.assumptions() != &source.facts().assumptions
             || report
-                .semantic_artifact()
-                .is_some_and(|artifact| !artifact.shares_artifact(source.as_ref()))
-            || report
                 .prepared_interproc_summary()
                 .is_some_and(|summary| !summary.matches_root(&source))
         {
@@ -1752,25 +1698,7 @@ impl SourceOwnedFunctionFacts {
         } else {
             reason
         };
-        let compatible = match kind {
-            DecompileRouteKind::Standard | DecompileRouteKind::FallbackComment => true,
-            DecompileRouteKind::VmSummary => report
-                .semantic_report()
-                .and_then(r2sym::SemanticArtifactReport::vm_body)
-                .is_some(),
-            DecompileRouteKind::StructuredWorker => report
-                .semantic_report()
-                .and_then(r2sym::SemanticArtifactReport::native_body)
-                .is_some_and(|body| !body.regions.is_empty()),
-            DecompileRouteKind::SummaryIslands => report
-                .semantic_report()
-                .and_then(r2sym::SemanticArtifactReport::native_body)
-                .is_some_and(r2sym::NativeArtifactBody::has_summary_islands),
-            DecompileRouteKind::LinearWorker => report
-                .semantic_report()
-                .and_then(r2sym::SemanticArtifactReport::native_body)
-                .is_some_and(|body| !body.summary.worker_summaries.is_empty()),
-        };
+        let compatible = true;
         let (kind, reason, fallback_comment) = if compatible {
             (kind, reason, fallback_comment)
         } else {
@@ -2065,12 +1993,9 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
 }
 
 impl FunctionFacts {
-    pub fn new(types: FunctionTypeFacts, semantics: Option<r2sym::SemanticArtifact>) -> Self {
-        let plans =
-            AnalysisPlans::from_semantics(semantics.as_ref().map(r2sym::SemanticArtifact::report));
+    pub fn new(types: FunctionTypeFacts) -> Self {
         Self {
             types,
-            semantics,
             interproc_summary: None,
             decompile_route: None,
             input_quality: None,
@@ -2082,7 +2007,6 @@ impl FunctionFacts {
             control: FunctionControlFacts::default(),
             render: FunctionRenderFacts::default(),
             assumptions: r2ssa::AssumptionSet::default(),
-            plans,
             summary_view: InterprocSummaryView::default(),
             diagnostics: Vec::new(),
             assumption_usage: r2ssa::AssumptionUsageReport::default(),
@@ -2104,11 +2028,6 @@ impl FunctionFacts {
         mut self,
         summary: r2ssa::PreparedInterprocSummarySet,
     ) -> Self {
-        if self.semantics.as_ref().is_some_and(|semantics| {
-            !std::sync::Arc::ptr_eq(&semantics.shared_prepared(), summary.root())
-        }) {
-            return self;
-        }
         let Ok(summary_view) = InterprocSummaryView::new(Some(summary.report().clone())) else {
             self.summary_view = InterprocSummaryView::default();
             self.interproc_summary = None;
@@ -2474,33 +2393,21 @@ impl FunctionFacts {
             })
     }
 
-    pub(crate) fn set_semantics(&mut self, semantics: Option<r2sym::SemanticArtifact>) {
-        if semantics.as_ref().is_some_and(|semantics| {
-            self.interproc_summary.as_ref().is_some_and(|summary| {
-                !std::sync::Arc::ptr_eq(&semantics.shared_prepared(), summary.root())
-            })
-        }) {
-            self.interproc_summary = None;
-            self.summary_view = InterprocSummaryView::default();
-        }
-        self.semantics = semantics;
-        self.refresh_plans();
+    pub fn summary_rollup(&self) -> Option<&SummaryEffectRollup> {
+        self.summary_view.rollup.as_ref()
     }
 
-    pub fn refresh_plans(&mut self) {
-        self.plans = AnalysisPlans::from_semantics(
-            self.semantics.as_ref().map(r2sym::SemanticArtifact::report),
-        );
+    #[cfg(test)]
+    pub fn __test_set_summary_rollup(&mut self, rollup: SummaryEffectRollup) {
+        self.summary_view.rollup = Some(rollup);
     }
 
     pub fn canonicalize_type_facts(&mut self) {
         self.types = std::mem::take(&mut self.types).canonicalized();
-        self.refresh_plans();
     }
 
     pub fn replace_type_facts(&mut self, types: FunctionTypeFacts) {
         self.types = types.canonicalized();
-        self.refresh_plans();
     }
 
     pub fn normalize_field_certificates_from_external_layout(&mut self) {
@@ -2812,10 +2719,6 @@ impl FunctionFacts {
         &self.assumptions
     }
 
-    pub fn plans(&self) -> &AnalysisPlans {
-        &self.plans
-    }
-
     pub fn summary_view(&self) -> &InterprocSummaryView {
         &self.summary_view
     }
@@ -2826,22 +2729,6 @@ impl FunctionFacts {
 
     pub fn assumption_usage(&self) -> &r2ssa::AssumptionUsageReport {
         &self.assumption_usage
-    }
-
-    pub fn type_plan(&self) -> Option<r2sym::TypePlan> {
-        self.plans.type_plan.clone()
-    }
-
-    pub fn decompile_plan(&self) -> Option<r2sym::DecompilePlan> {
-        self.plans.decompile.clone()
-    }
-
-    pub fn query_plan(&self) -> Option<r2sym::QueryPlan> {
-        self.plans.query.clone()
-    }
-
-    pub fn artifact_build_plan(&self) -> Option<r2sym::ArtifactBuildPlan> {
-        self.plans.artifact_build.clone()
     }
 
     pub fn apply_signature_projection(
@@ -3572,79 +3459,6 @@ impl FunctionFacts {
 
     pub fn prepared_interproc_summary(&self) -> Option<&r2ssa::PreparedInterprocSummarySet> {
         self.interproc_summary.as_ref()
-    }
-
-    pub fn semantic_artifact(&self) -> Option<&r2sym::SemanticArtifact> {
-        self.semantics.as_ref()
-    }
-
-    pub fn semantic_report(&self) -> Option<&r2sym::SemanticArtifactReport> {
-        self.semantics.as_ref().map(r2sym::SemanticArtifact::report)
-    }
-
-    pub fn summary_rollup(&self) -> Option<&SummaryEffectRollup> {
-        self.summary_view.rollup.as_ref()
-    }
-
-    #[cfg(test)]
-    pub fn __test_set_summary_rollup(&mut self, rollup: SummaryEffectRollup) {
-        self.summary_view.rollup = Some(rollup);
-    }
-
-    pub fn has_assumption_conflicts(&self) -> bool {
-        !self.assumption_usage.conflicts.is_empty()
-    }
-
-    pub fn has_applied_assumptions(&self) -> bool {
-        !self.assumption_usage.applied.is_empty()
-    }
-
-    pub fn has_summary_conflicts(&self) -> bool {
-        self.summary_view
-            .diagnostics()
-            .is_some_and(|diagnostics| !diagnostics.converged)
-    }
-
-    pub fn decompile_capability(&self) -> DecompileCapabilityView {
-        let mut capability = DecompileCapabilityView {
-            plan: self.decompile_plan(),
-            assumption_conflicted: self.has_assumption_conflicts(),
-            summary_conflicted: self.has_summary_conflicts(),
-            ..DecompileCapabilityView::default()
-        };
-        let Some(semantics) = self.semantic_artifact() else {
-            return capability;
-        };
-        capability.slice_class = semantics.slice_class();
-        capability.skipped_large_cfg = semantics.diagnostics.skipped_large_cfg;
-        capability.has_native_regions = semantics
-            .native_body()
-            .is_some_and(|body| !body.regions.is_empty());
-        capability.has_summary_islands = semantics
-            .native_body()
-            .is_some_and(r2sym::NativeArtifactBody::has_summary_islands);
-        capability.has_primary_summary_islands = semantics
-            .native_body()
-            .is_some_and(r2sym::NativeArtifactBody::has_primary_summary_islands);
-        capability.summary_island_count = semantics
-            .native_body()
-            .map(r2sym::NativeArtifactBody::summary_island_count)
-            .unwrap_or(0);
-        capability.primary_summary_island_count = semantics
-            .native_body()
-            .map(r2sym::NativeArtifactBody::primary_summary_island_count)
-            .unwrap_or(0);
-        capability.generic_memory_summary_count = semantics
-            .native_body()
-            .map(r2sym::NativeArtifactBody::generic_memory_summary_count)
-            .unwrap_or(0);
-        capability.has_memory_read_write_summary_pair = semantics
-            .native_body()
-            .is_some_and(r2sym::NativeArtifactBody::has_memory_read_write_summary_pair);
-        capability.actionable_region_count = semantics.actionable_regions().len();
-        capability.ambiguous_targets = semantics.ambiguous_targets();
-        capability.residual_reasons = semantics.diagnostics.residual_reasons.clone();
-        capability
     }
 }
 
@@ -5532,17 +5346,14 @@ mod tests {
             }),
             params: Vec::new(),
         };
-        let mut facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(signature.clone()),
-                signature_certificate: crate::SignatureCertificate::from_signature(
-                    &signature,
-                    [crate::SignatureCertificateSource::ExternalContext],
-                ),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        );
+        let mut facts = FunctionFacts::new(FunctionTypeFacts {
+            merged_signature: Some(signature.clone()),
+            signature_certificate: crate::SignatureCertificate::from_signature(
+                &signature,
+                [crate::SignatureCertificateSource::ExternalContext],
+            ),
+            ..FunctionTypeFacts::default()
+        });
         assert!(!facts.apply_exact_source_return_type(&source));
         assert!(
             facts
@@ -6097,17 +5908,14 @@ mod tests {
                 }),
             }],
         };
-        let mut facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(signature.clone()),
-                signature_certificate: crate::SignatureCertificate::from_signature(
-                    &signature,
-                    [crate::SignatureCertificateSource::LocalInference],
-                ),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+        let mut facts = FunctionFacts::new(FunctionTypeFacts {
+            merged_signature: Some(signature.clone()),
+            signature_certificate: crate::SignatureCertificate::from_signature(
+                &signature,
+                [crate::SignatureCertificateSource::LocalInference],
+            ),
+            ..FunctionTypeFacts::default()
+        })
         .with_callee_resolution(resolution)
         .with_callsites(callsites)
         .with_render(render);
@@ -6797,7 +6605,7 @@ mod tests {
             }],
             ..FunctionTypeFacts::default()
         };
-        let mut facts = FunctionFacts::new(type_facts, None);
+        let mut facts = FunctionFacts::new(type_facts);
 
         facts.attach_prepared_decompile_evidence(&prepared);
         facts.populate_member_access_render_facts_from_field_certificates(
@@ -6874,7 +6682,7 @@ mod tests {
             ],
             ..FunctionTypeFacts::default()
         };
-        let mut facts = FunctionFacts::new(type_facts, None);
+        let mut facts = FunctionFacts::new(type_facts);
 
         facts.attach_prepared_decompile_evidence(&prepared);
         let upstream_carrier = prepared
@@ -6949,7 +6757,7 @@ mod tests {
             }],
             ..FunctionTypeFacts::default()
         };
-        let mut facts = FunctionFacts::new(type_facts, None);
+        let mut facts = FunctionFacts::new(type_facts);
 
         facts.attach_prepared_decompile_evidence(&prepared);
         facts.populate_member_access_render_facts_from_field_certificates(
@@ -6988,7 +6796,7 @@ mod tests {
             }],
             ..FunctionTypeFacts::default()
         };
-        let mut facts = FunctionFacts::new(type_facts, None);
+        let mut facts = FunctionFacts::new(type_facts);
 
         facts.attach_prepared_decompile_evidence(&prepared);
         facts.populate_member_access_render_facts_from_field_certificates(
@@ -7012,7 +6820,7 @@ mod tests {
             }],
             ..FunctionTypeFacts::default()
         };
-        let mut matching_facts = FunctionFacts::new(matching_type_facts, None);
+        let mut matching_facts = FunctionFacts::new(matching_type_facts);
 
         matching_facts.attach_prepared_decompile_evidence(&prepared);
         matching_facts.populate_member_access_render_facts_from_field_certificates(
@@ -7125,17 +6933,14 @@ mod tests {
                 }),
             }],
         };
-        let mut facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(signature.clone()),
-                signature_certificate: crate::SignatureCertificate::from_signature(
-                    &signature,
-                    [crate::SignatureCertificateSource::ExternalContext],
-                ),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        );
+        let mut facts = FunctionFacts::new(FunctionTypeFacts {
+            merged_signature: Some(signature.clone()),
+            signature_certificate: crate::SignatureCertificate::from_signature(
+                &signature,
+                [crate::SignatureCertificateSource::ExternalContext],
+            ),
+            ..FunctionTypeFacts::default()
+        });
         facts.attach_prepared_decompile_evidence(&prepared);
         facts.populate_certified_parameter_exprs(&prepared, &x86_stack_home_param_slots(&prepared));
         let render = facts.render().expect("certified render facts");
@@ -7421,7 +7226,7 @@ mod tests {
     #[test]
     fn field_certificates_fail_closed_without_param_slot_resolver() {
         let prepared = member_load_prepared_for_register(&x86_stack_home_arch(), 0x10);
-        let mut facts = FunctionFacts::new(field_certificate_type_facts(0, 8), None);
+        let mut facts = FunctionFacts::new(field_certificate_type_facts(0, 8));
 
         facts.attach_prepared_decompile_evidence(&prepared);
         facts.populate_member_access_render_facts_from_field_certificates(
@@ -7490,7 +7295,7 @@ mod tests {
             }],
             ..FunctionTypeFacts::default()
         };
-        let mut facts = FunctionFacts::new(type_facts, None);
+        let mut facts = FunctionFacts::new(type_facts);
 
         facts.attach_prepared_decompile_evidence(&prepared);
         facts.populate_member_access_render_facts_from_field_certificates(
@@ -7518,7 +7323,7 @@ mod tests {
             }],
             ..FunctionTypeFacts::default()
         };
-        let mut facts = FunctionFacts::new(type_facts, None);
+        let mut facts = FunctionFacts::new(type_facts);
 
         facts.attach_prepared_decompile_evidence(&prepared);
         facts.populate_member_access_render_facts_from_field_certificates(
@@ -7597,7 +7402,7 @@ mod tests {
             }],
             ..FunctionTypeFacts::default()
         };
-        let mut facts = FunctionFacts::new(type_facts, None);
+        let mut facts = FunctionFacts::new(type_facts);
 
         facts.attach_prepared_decompile_evidence(&prepared);
         facts.populate_certified_parameter_exprs(&prepared, &x86_stack_home_param_slots(&prepared));
@@ -7668,7 +7473,7 @@ mod tests {
             ..FunctionTypeFacts::default()
         };
 
-        let mut wrong_slot_facts = FunctionFacts::new(type_facts_for_slot(0), None);
+        let mut wrong_slot_facts = FunctionFacts::new(type_facts_for_slot(0));
         wrong_slot_facts.attach_prepared_decompile_evidence(&prepared);
         wrong_slot_facts.populate_member_access_render_facts_from_field_certificates(
             &prepared,
@@ -7681,7 +7486,7 @@ mod tests {
             "scalar-array member candidate from rsi must not render with a slot 0 certificate"
         );
 
-        let mut matching_slot_facts = FunctionFacts::new(type_facts_for_slot(1), None);
+        let mut matching_slot_facts = FunctionFacts::new(type_facts_for_slot(1));
         matching_slot_facts.attach_prepared_decompile_evidence(&prepared);
         matching_slot_facts.populate_member_access_render_facts_from_field_certificates(
             &prepared,
@@ -7958,26 +7763,23 @@ mod tests {
     #[test]
     fn function_facts_authorizes_stack_owner_render_by_object_type_and_name() {
         let object = r2ssa::ObjectId(11);
-        let facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                visible_bindings: vec![crate::VisibleBinding {
-                    name: "local_buf".to_string(),
-                    ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
-                        bits: 8,
-                        signedness: crate::Signedness::Unsigned,
-                    }))),
-                    kind: VisibleBindingKind::Local,
-                    stack_slot: Some(StackSlotKey {
-                        base: ExternalStackBase::FramePointer,
-                        offset: -8,
-                    }),
-                    param_index: None,
-                    source_reg: None,
-                }],
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+        let facts = FunctionFacts::new(FunctionTypeFacts {
+            visible_bindings: vec![crate::VisibleBinding {
+                name: "local_buf".to_string(),
+                ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
+                    bits: 8,
+                    signedness: crate::Signedness::Unsigned,
+                }))),
+                kind: VisibleBindingKind::Local,
+                stack_slot: Some(StackSlotKey {
+                    base: ExternalStackBase::FramePointer,
+                    offset: -8,
+                }),
+                param_index: None,
+                source_reg: None,
+            }],
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([(
             object,
             r2ssa::StackAddressBase::FramePointer,
@@ -8220,42 +8022,39 @@ mod tests {
     #[test]
     fn function_facts_authorizes_stack_param_owner_render_only_for_params() {
         let object = r2ssa::ObjectId(13);
-        let facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                visible_bindings: vec![
-                    crate::VisibleBinding {
-                        name: "stack_arg".to_string(),
-                        ty: Some(CTypeLike::Int {
-                            bits: 64,
-                            signedness: crate::Signedness::Signed,
-                        }),
-                        kind: VisibleBindingKind::Param,
-                        stack_slot: Some(StackSlotKey {
-                            base: ExternalStackBase::StackPointer,
-                            offset: 8,
-                        }),
-                        param_index: Some(6),
-                        source_reg: None,
-                    },
-                    crate::VisibleBinding {
-                        name: "local_alias".to_string(),
-                        ty: Some(CTypeLike::Int {
-                            bits: 64,
-                            signedness: crate::Signedness::Signed,
-                        }),
-                        kind: VisibleBindingKind::Local,
-                        stack_slot: Some(StackSlotKey {
-                            base: ExternalStackBase::StackPointer,
-                            offset: 8,
-                        }),
-                        param_index: None,
-                        source_reg: None,
-                    },
-                ],
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+        let facts = FunctionFacts::new(FunctionTypeFacts {
+            visible_bindings: vec![
+                crate::VisibleBinding {
+                    name: "stack_arg".to_string(),
+                    ty: Some(CTypeLike::Int {
+                        bits: 64,
+                        signedness: crate::Signedness::Signed,
+                    }),
+                    kind: VisibleBindingKind::Param,
+                    stack_slot: Some(StackSlotKey {
+                        base: ExternalStackBase::StackPointer,
+                        offset: 8,
+                    }),
+                    param_index: Some(6),
+                    source_reg: None,
+                },
+                crate::VisibleBinding {
+                    name: "local_alias".to_string(),
+                    ty: Some(CTypeLike::Int {
+                        bits: 64,
+                        signedness: crate::Signedness::Signed,
+                    }),
+                    kind: VisibleBindingKind::Local,
+                    stack_slot: Some(StackSlotKey {
+                        base: ExternalStackBase::StackPointer,
+                        offset: 8,
+                    }),
+                    param_index: None,
+                    source_reg: None,
+                },
+            ],
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([(
             object,
             r2ssa::StackAddressBase::StackPointer,
@@ -8281,42 +8080,39 @@ mod tests {
             "the stack parameter path still requires the exact offset"
         );
 
-        let ambiguous = FunctionFacts::new(
-            FunctionTypeFacts {
-                visible_bindings: vec![
-                    crate::VisibleBinding {
-                        name: "left".to_string(),
-                        ty: Some(CTypeLike::Int {
-                            bits: 64,
-                            signedness: crate::Signedness::Signed,
-                        }),
-                        kind: VisibleBindingKind::Param,
-                        stack_slot: Some(StackSlotKey {
-                            base: ExternalStackBase::StackPointer,
-                            offset: 8,
-                        }),
-                        param_index: Some(6),
-                        source_reg: None,
-                    },
-                    crate::VisibleBinding {
-                        name: "right".to_string(),
-                        ty: Some(CTypeLike::Int {
-                            bits: 64,
-                            signedness: crate::Signedness::Signed,
-                        }),
-                        kind: VisibleBindingKind::Param,
-                        stack_slot: Some(StackSlotKey {
-                            base: ExternalStackBase::StackPointer,
-                            offset: 8,
-                        }),
-                        param_index: Some(6),
-                        source_reg: None,
-                    },
-                ],
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+        let ambiguous = FunctionFacts::new(FunctionTypeFacts {
+            visible_bindings: vec![
+                crate::VisibleBinding {
+                    name: "left".to_string(),
+                    ty: Some(CTypeLike::Int {
+                        bits: 64,
+                        signedness: crate::Signedness::Signed,
+                    }),
+                    kind: VisibleBindingKind::Param,
+                    stack_slot: Some(StackSlotKey {
+                        base: ExternalStackBase::StackPointer,
+                        offset: 8,
+                    }),
+                    param_index: Some(6),
+                    source_reg: None,
+                },
+                crate::VisibleBinding {
+                    name: "right".to_string(),
+                    ty: Some(CTypeLike::Int {
+                        bits: 64,
+                        signedness: crate::Signedness::Signed,
+                    }),
+                    kind: VisibleBindingKind::Param,
+                    stack_slot: Some(StackSlotKey {
+                        base: ExternalStackBase::StackPointer,
+                        offset: 8,
+                    }),
+                    param_index: Some(6),
+                    source_reg: None,
+                },
+            ],
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([(
             object,
             r2ssa::StackAddressBase::StackPointer,
@@ -8329,43 +8125,40 @@ mod tests {
             "ambiguous typed parameter names at one stack offset must not be rendered"
         );
 
-        let canonical_slot = FunctionFacts::new(
-            FunctionTypeFacts {
-                visible_bindings: vec![crate::VisibleBinding {
-                    name: "arg6".to_string(),
+        let canonical_slot = FunctionFacts::new(FunctionTypeFacts {
+            visible_bindings: vec![crate::VisibleBinding {
+                name: "arg6".to_string(),
+                ty: Some(CTypeLike::Int {
+                    bits: 64,
+                    signedness: crate::Signedness::Signed,
+                }),
+                kind: VisibleBindingKind::Param,
+                stack_slot: Some(StackSlotKey {
+                    base: ExternalStackBase::StackPointer,
+                    offset: 8,
+                }),
+                param_index: Some(6),
+                source_reg: None,
+            }],
+            stack_slots: BTreeMap::from([(
+                StackSlotKey {
+                    base: ExternalStackBase::StackPointer,
+                    offset: 8,
+                },
+                crate::ExternalStackSlotSpec {
+                    name: "arg_8h".to_string(),
                     ty: Some(CTypeLike::Int {
                         bits: 64,
                         signedness: crate::Signedness::Signed,
                     }),
-                    kind: VisibleBindingKind::Param,
-                    stack_slot: Some(StackSlotKey {
-                        base: ExternalStackBase::StackPointer,
-                        offset: 8,
-                    }),
+                    role: ExternalStackSlotRole::StackArg,
                     param_index: Some(6),
+                    param_name: Some("arg7".to_string()),
                     source_reg: None,
-                }],
-                stack_slots: BTreeMap::from([(
-                    StackSlotKey {
-                        base: ExternalStackBase::StackPointer,
-                        offset: 8,
-                    },
-                    crate::ExternalStackSlotSpec {
-                        name: "arg_8h".to_string(),
-                        ty: Some(CTypeLike::Int {
-                            bits: 64,
-                            signedness: crate::Signedness::Signed,
-                        }),
-                        role: ExternalStackSlotRole::StackArg,
-                        param_index: Some(6),
-                        param_name: Some("arg7".to_string()),
-                        source_reg: None,
-                    },
-                )]),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+                },
+            )]),
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([(
             object,
             r2ssa::StackAddressBase::StackPointer,
@@ -8376,38 +8169,35 @@ mod tests {
             .expect("canonical stack slot name should authorize");
         assert_eq!(authorization.name, "arg7");
 
-        let param_home = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(FunctionSignatureSpec {
-                    ret_type: Some(CTypeLike::Int {
-                        bits: 32,
-                        signedness: crate::Signedness::Signed,
-                    }),
-                    params: vec![FunctionParamSpec {
-                        name: "node".to_string(),
-                        ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Struct(
-                            "Node".to_string(),
-                        )))),
-                    }],
+        let param_home = FunctionFacts::new(FunctionTypeFacts {
+            merged_signature: Some(FunctionSignatureSpec {
+                ret_type: Some(CTypeLike::Int {
+                    bits: 32,
+                    signedness: crate::Signedness::Signed,
                 }),
-                stack_slots: BTreeMap::from([(
-                    StackSlotKey {
-                        base: ExternalStackBase::FramePointer,
-                        offset: -8,
-                    },
-                    crate::ExternalStackSlotSpec {
-                        name: "node_home".to_string(),
-                        ty: None,
-                        role: ExternalStackSlotRole::ParamHome,
-                        param_index: Some(0),
-                        param_name: Some("node".to_string()),
-                        source_reg: Some("rdi".to_string()),
-                    },
-                )]),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+                params: vec![FunctionParamSpec {
+                    name: "node".to_string(),
+                    ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Struct(
+                        "Node".to_string(),
+                    )))),
+                }],
+            }),
+            stack_slots: BTreeMap::from([(
+                StackSlotKey {
+                    base: ExternalStackBase::FramePointer,
+                    offset: -8,
+                },
+                crate::ExternalStackSlotSpec {
+                    name: "node_home".to_string(),
+                    ty: None,
+                    role: ExternalStackSlotRole::ParamHome,
+                    param_index: Some(0),
+                    param_name: Some("node".to_string()),
+                    source_reg: Some("rdi".to_string()),
+                },
+            )]),
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([(
             object,
             r2ssa::StackAddressBase::FramePointer,
@@ -8418,48 +8208,45 @@ mod tests {
             .expect("typed parameter home should authorize original parameter owner");
         assert_eq!(authorization.name, "node");
 
-        let stale_named_param_home = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(FunctionSignatureSpec {
-                    ret_type: Some(CTypeLike::Int {
-                        bits: 32,
-                        signedness: crate::Signedness::Signed,
-                    }),
-                    params: vec![
-                        FunctionParamSpec {
-                            name: "arg0".to_string(),
-                            ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
-                                bits: 32,
-                                signedness: crate::Signedness::Signed,
-                            }))),
-                        },
-                        FunctionParamSpec {
-                            name: "arg1".to_string(),
-                            ty: Some(CTypeLike::Int {
-                                bits: 32,
-                                signedness: crate::Signedness::Signed,
-                            }),
-                        },
-                    ],
+        let stale_named_param_home = FunctionFacts::new(FunctionTypeFacts {
+            merged_signature: Some(FunctionSignatureSpec {
+                ret_type: Some(CTypeLike::Int {
+                    bits: 32,
+                    signedness: crate::Signedness::Signed,
                 }),
-                stack_slots: BTreeMap::from([(
-                    StackSlotKey {
-                        base: ExternalStackBase::FramePointer,
-                        offset: -8,
+                params: vec![
+                    FunctionParamSpec {
+                        name: "arg0".to_string(),
+                        ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
+                            bits: 32,
+                            signedness: crate::Signedness::Signed,
+                        }))),
                     },
-                    crate::ExternalStackSlotSpec {
-                        name: "arg1_home".to_string(),
-                        ty: None,
-                        role: ExternalStackSlotRole::ParamHome,
-                        param_index: Some(0),
-                        param_name: Some("arg1".to_string()),
-                        source_reg: Some("rdi".to_string()),
+                    FunctionParamSpec {
+                        name: "arg1".to_string(),
+                        ty: Some(CTypeLike::Int {
+                            bits: 32,
+                            signedness: crate::Signedness::Signed,
+                        }),
                     },
-                )]),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+                ],
+            }),
+            stack_slots: BTreeMap::from([(
+                StackSlotKey {
+                    base: ExternalStackBase::FramePointer,
+                    offset: -8,
+                },
+                crate::ExternalStackSlotSpec {
+                    name: "arg1_home".to_string(),
+                    ty: None,
+                    role: ExternalStackSlotRole::ParamHome,
+                    param_index: Some(0),
+                    param_name: Some("arg1".to_string()),
+                    source_reg: Some("rdi".to_string()),
+                },
+            )]),
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([(
             object,
             r2ssa::StackAddressBase::FramePointer,
@@ -8507,13 +8294,10 @@ mod tests {
                 ..crate::ExternalStackSlotSpec::default()
             },
         );
-        let ambiguous = FunctionFacts::new(
-            FunctionTypeFacts {
-                stack_slots: BTreeMap::from([typed_slot.clone()]),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+        let ambiguous = FunctionFacts::new(FunctionTypeFacts {
+            stack_slots: BTreeMap::from([typed_slot.clone()]),
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([
             (
                 r2ssa::ObjectId(1),
@@ -8533,19 +8317,16 @@ mod tests {
             "offset-only bridge must refuse duplicate render objects"
         );
 
-        let unknown_role = FunctionFacts::new(
-            FunctionTypeFacts {
-                stack_slots: BTreeMap::from([(
-                    typed_slot.0,
-                    crate::ExternalStackSlotSpec {
-                        role: ExternalStackSlotRole::Unknown,
-                        ..typed_slot.1.clone()
-                    },
-                )]),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+        let unknown_role = FunctionFacts::new(FunctionTypeFacts {
+            stack_slots: BTreeMap::from([(
+                typed_slot.0,
+                crate::ExternalStackSlotSpec {
+                    role: ExternalStackSlotRole::Unknown,
+                    ..typed_slot.1.clone()
+                },
+            )]),
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([(
             r2ssa::ObjectId(3),
             r2ssa::StackAddressBase::StackPointer,
@@ -8558,19 +8339,16 @@ mod tests {
             "unknown stack-slot roles are not enough for certified owner rendering"
         );
 
-        let untyped = FunctionFacts::new(
-            FunctionTypeFacts {
-                stack_slots: BTreeMap::from([(
-                    typed_slot.0,
-                    crate::ExternalStackSlotSpec {
-                        ty: Some(CTypeLike::Unknown),
-                        ..typed_slot.1
-                    },
-                )]),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        )
+        let untyped = FunctionFacts::new(FunctionTypeFacts {
+            stack_slots: BTreeMap::from([(
+                typed_slot.0,
+                crate::ExternalStackSlotSpec {
+                    ty: Some(CTypeLike::Unknown),
+                    ..typed_slot.1
+                },
+            )]),
+            ..FunctionTypeFacts::default()
+        })
         .with_render(test_render_with_stack_slots([(
             r2ssa::ObjectId(4),
             r2ssa::StackAddressBase::StackPointer,
@@ -8603,17 +8381,14 @@ mod tests {
                 }))),
             }],
         };
-        let mut facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(base_signature.clone()),
-                signature_certificate: crate::SignatureCertificate::from_signature(
-                    &base_signature,
-                    [crate::SignatureCertificateSource::ExternalContext],
-                ),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        );
+        let mut facts = FunctionFacts::new(FunctionTypeFacts {
+            merged_signature: Some(base_signature.clone()),
+            signature_certificate: crate::SignatureCertificate::from_signature(
+                &base_signature,
+                [crate::SignatureCertificateSource::ExternalContext],
+            ),
+            ..FunctionTypeFacts::default()
+        });
 
         assert!(!facts.apply_decompile_type_override(FunctionTypeFacts {
             merged_signature: Some(override_signature.clone()),

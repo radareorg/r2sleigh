@@ -77,18 +77,6 @@ pub enum OutParamCertificateSource {
         stable_id: u64,
         anchor: u64,
     },
-    NativeWorkerSummary {
-        stable_id: u64,
-        anchor: u64,
-        summary_kind: r2sym::NativeWorkerSummaryKind,
-        param_index: usize,
-    },
-    NativeRegionSummary {
-        stable_id: u64,
-        anchor: u64,
-        summary_kind: r2sym::NativeWorkerSummaryKind,
-        param_index: usize,
-    },
     InterprocSummaryEffect {
         function_id: u64,
         evidence: OutParamCertificateEvidence,
@@ -111,18 +99,6 @@ impl OutParamCertificate {
         !self.evidence.is_empty()
             && self.sources.iter().any(|source| match source {
                 OutParamCertificateSource::SemanticClaim { .. } => true,
-                OutParamCertificateSource::NativeWorkerSummary { param_index, .. } => {
-                    *param_index == self.param_index
-                        && self
-                            .evidence
-                            .contains(&OutParamCertificateEvidence::NativeWorkerWrite)
-                }
-                OutParamCertificateSource::NativeRegionSummary { param_index, .. } => {
-                    *param_index == self.param_index
-                        && self
-                            .evidence
-                            .contains(&OutParamCertificateEvidence::NativeRegionWrite)
-                }
                 OutParamCertificateSource::InterprocSummaryEffect {
                     evidence,
                     param_index,
@@ -1747,103 +1723,6 @@ mod tests {
 
         assert!(facts.render_authorized_signature().is_some());
         assert!(facts.writeback_authorized_signature().is_none());
-    }
-
-    #[test]
-    fn out_param_certificate_requires_source_identity() {
-        let unsourced = OutParamCertificate {
-            param_index: 0,
-            param_name: "out".to_string(),
-            pointee_type: Some("int".to_string()),
-            evidence: vec![OutParamCertificateEvidence::InterprocArgWrite],
-            sources: Vec::new(),
-        };
-        assert!(!unsourced.has_source_identity());
-
-        let mismatched_source = OutParamCertificate {
-            sources: vec![OutParamCertificateSource::InterprocSummaryEffect {
-                function_id: 0x401000,
-                evidence: OutParamCertificateEvidence::InterprocMemoryWrite,
-                param_index: 1,
-                effect_index: 0,
-            }],
-            ..unsourced.clone()
-        };
-        assert!(!mismatched_source.has_source_identity());
-
-        let sourced = OutParamCertificate {
-            sources: vec![OutParamCertificateSource::InterprocSummaryEffect {
-                function_id: 0x401000,
-                evidence: OutParamCertificateEvidence::InterprocArgWrite,
-                param_index: 0,
-                effect_index: 0,
-            }],
-            ..unsourced.clone()
-        };
-        assert!(sourced.has_source_identity());
-
-        let mismatched_native_param = OutParamCertificate {
-            param_index: 0,
-            param_name: "out".to_string(),
-            pointee_type: Some("int".to_string()),
-            evidence: vec![OutParamCertificateEvidence::NativeWorkerWrite],
-            sources: vec![OutParamCertificateSource::NativeWorkerSummary {
-                stable_id: 0x55,
-                anchor: 0x401000,
-                summary_kind: r2sym::NativeWorkerSummaryKind::MemoryWrite,
-                param_index: 1,
-            }],
-        };
-        assert!(!mismatched_native_param.has_source_identity());
-
-        let mismatched_native_evidence = OutParamCertificate {
-            evidence: vec![OutParamCertificateEvidence::NativeRegionWrite],
-            sources: vec![OutParamCertificateSource::NativeWorkerSummary {
-                stable_id: 0x55,
-                anchor: 0x401000,
-                summary_kind: r2sym::NativeWorkerSummaryKind::MemoryWrite,
-                param_index: 0,
-            }],
-            ..mismatched_native_param
-        };
-        assert!(!mismatched_native_evidence.has_source_identity());
-    }
-
-    #[test]
-    fn builder_rejects_unsourced_out_param_certificates() {
-        let unsourced = OutParamCertificate {
-            param_index: 0,
-            param_name: "out".to_string(),
-            pointee_type: Some("int".to_string()),
-            evidence: vec![OutParamCertificateEvidence::InterprocArgWrite],
-            sources: Vec::new(),
-        };
-        let sourced = OutParamCertificate {
-            param_index: 1,
-            param_name: "written".to_string(),
-            pointee_type: Some("char".to_string()),
-            evidence: vec![OutParamCertificateEvidence::NativeWorkerWrite],
-            sources: vec![OutParamCertificateSource::NativeWorkerSummary {
-                stable_id: 0x55,
-                anchor: 0x401000,
-                summary_kind: r2sym::NativeWorkerSummaryKind::MemoryWrite,
-                param_index: 1,
-            }],
-        };
-
-        let facts = FunctionTypeFacts::builder(FunctionTypeFactInputs {
-            out_param_certificates: vec![unsourced, sourced.clone()],
-            ..FunctionTypeFactInputs::default()
-        })
-        .build();
-
-        assert_eq!(facts.out_param_certificates, vec![sourced]);
-        assert_eq!(
-            facts
-                .source_authorized_out_param_certificates()
-                .collect::<Vec<_>>(),
-            facts.out_param_certificates.iter().collect::<Vec<_>>()
-        );
     }
 
     #[test]

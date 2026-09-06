@@ -9,7 +9,6 @@ description = "Native decompiler for r2sleigh"
 r2il = { path = "../r2il" }
 r2ssa = { path = "../r2ssa" }
 r2rewrite = { path = "../r2rewrite" }
-r2sym = { path = "../r2sym" }
 r2types = { path = "../r2types" }
 postcard.workspace = true
 serde.workspace = true
@@ -21,4 +20,3 @@ default = []
 r2sleigh-lift = { path = "../r2sleigh-lift", features = ["arm", "x86"] }
 r2source = { path = "../r2source" }
 serde_json.workspace = true
-z3.workspace = true

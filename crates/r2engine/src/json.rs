@@ -130,7 +130,6 @@ pub struct EngineTypeWritebackJsonCore {
     pub certified_stack_slot_offsets: Vec<i64>,
     pub struct_decls: Vec<EngineStructDeclCandidateJson>,
     pub global_type_links: Vec<EngineGlobalTypeLinkCandidateJson>,
-    pub plans: r2types::AnalysisPlans,
     #[serde(skip_serializing_if = "r2ssa::AssumptionSet::is_empty")]
     pub assumptions: r2ssa::AssumptionSet,
     #[serde(skip_serializing_if = "r2types::AssumptionUsageReport::is_empty")]
@@ -162,13 +161,10 @@ pub struct EngineFunctionAnalysisReportJsonCore {
     pub function_name: String,
     pub function_addr: u64,
     pub cfg_risk: EngineCfgRiskSummaryJson,
-    pub plans: r2types::AnalysisPlans,
     #[serde(skip_serializing_if = "r2ssa::AssumptionSet::is_empty")]
     pub assumptions: r2ssa::AssumptionSet,
     #[serde(skip_serializing_if = "r2types::AssumptionUsageReport::is_empty")]
     pub assumption_usage: r2types::AssumptionUsageReport,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub semantic_build_plan: Option<r2sym::ArtifactBuildPlan>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_route: Option<EngineDecompileRouteJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,10 +215,6 @@ pub struct EngineInferredTypeWritebackJson {
     pub core: EngineTypeWritebackJsonCore,
     pub interproc: EngineInterprocSummaryJson,
     pub semantic_status: EngineSemanticStatusJson,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub semantics: Option<r2sym::SemanticArtifactReport>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compiled_semantics: Option<r2sym::CompiledSemanticInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phase_timings: Vec<EnginePhaseTimingJson>,
 }
@@ -231,8 +223,6 @@ pub struct EngineInferredTypeWritebackJson {
 pub struct EngineFunctionAnalysisSessionReportJson {
     #[serde(flatten)]
     pub core: EngineFunctionAnalysisReportJsonCore,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub semantic: Option<r2sym::CompiledSemanticInfo>,
     pub type_writeback: EngineInferredTypeWritebackJson,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phase_timings: Vec<EnginePhaseTimingJson>,
@@ -366,7 +356,6 @@ pub fn type_writeback_json_core(
                 source: candidate.source.as_str().to_string(),
             })
             .collect(),
-        plans: payload.plans,
         assumptions: payload.assumptions,
         assumption_usage: payload.assumption_usage,
         mutation_plan: payload.mutation_plan,
@@ -381,45 +370,27 @@ pub fn type_writeback_json_core(
 pub fn type_writeback_report_json(
     payload: EngineTypeWritebackPayload,
     interproc: EngineInterprocSummaryJson,
-    semantics: Option<r2sym::SemanticArtifactReport>,
-    compiled_semantics: Option<r2sym::CompiledSemanticInfo>,
 ) -> EngineInferredTypeWritebackJson {
-    let semantic_status = semantic_status_json(semantics.as_ref(), None);
     EngineInferredTypeWritebackJson {
         core: type_writeback_json_core(payload),
         interproc,
-        semantic_status,
-        semantics,
-        compiled_semantics,
+        semantic_status: semantic_status_json(None),
         phase_timings: empty_engine_phase_timings(),
     }
 }
 
-fn semantic_status_json(
-    semantics: Option<&r2sym::SemanticArtifactReport>,
-    fallback_reason: Option<String>,
-) -> EngineSemanticStatusJson {
-    match semantics {
-        Some(artifact) => EngineSemanticStatusJson {
-            available: true,
-            reason: format!(
-                "{} {}",
-                semantic_granularity_label(artifact.granularity),
-                semantic_report_mode_label(artifact)
-            ),
-        },
-        None => EngineSemanticStatusJson {
-            available: false,
-            reason: fallback_reason.unwrap_or_else(|| "semantic artifact unavailable".to_string()),
-        },
+/// The engine no longer compiles a symbolic artifact, so this always reports
+/// that none is available, with whatever the route said as the reason.
+fn semantic_status_json(fallback_reason: Option<String>) -> EngineSemanticStatusJson {
+    EngineSemanticStatusJson {
+        available: false,
+        reason: fallback_reason.unwrap_or_else(|| "no symbolic artifact is compiled".to_string()),
     }
 }
 
 pub fn type_writeback_report_json_from_function_analysis(
     request: EngineFunctionAnalysisTypeWritebackJsonRequest<'_>,
 ) -> EngineInferredTypeWritebackJson {
-    let semantics = request.report.semantic_report.clone();
-    let compiled_semantics = request.report.compiled_semantics.clone();
     let mut report = type_writeback_report_json(
         request.report.type_writeback.clone(),
         interproc_summary_json(EngineInterprocSummaryJsonInput {
@@ -430,11 +401,8 @@ pub fn type_writeback_report_json_from_function_analysis(
             summary: request.report.current_summary.as_ref(),
             scope_report: request.scope_report,
         }),
-        semantics,
-        compiled_semantics,
     );
     report.semantic_status = semantic_status_json(
-        report.semantics.as_ref(),
         request
             .report
             .semantic_route
@@ -520,10 +488,8 @@ pub fn function_analysis_report_json_core(
         function_name: payload.function_name.clone(),
         function_addr: payload.function_addr,
         cfg_risk: cfg_risk_summary_json(payload.cfg_summary),
-        plans: payload.plans.clone(),
         assumptions: payload.assumptions.clone(),
         assumption_usage: payload.assumption_usage.clone(),
-        semantic_build_plan: payload.semantic_build_plan.clone(),
         semantic_route: payload.semantic_route.as_ref().map(decompile_route_json),
         summary_diagnostics: payload.summary_diagnostics.clone(),
         prefer_bounded_type_plan: payload.prefer_bounded_type_plan,
@@ -538,7 +504,6 @@ pub fn function_analysis_session_report_json(
     type_writeback.phase_timings = normalize_engine_phase_timings(type_writeback.phase_timings);
     EngineFunctionAnalysisSessionReportJson {
         core: function_analysis_report_json_core(payload),
-        semantic: payload.compiled_semantics.clone(),
         type_writeback,
         phase_timings: normalize_engine_phase_timings(phase_timings),
     }

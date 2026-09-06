@@ -12,7 +12,6 @@ pub(crate) mod model;
 pub(crate) mod oracle;
 pub(crate) mod prepare;
 mod register_identity;
-pub(crate) mod role_registry;
 pub(crate) mod signature;
 pub(crate) mod signature_infer;
 mod signedness;
@@ -74,18 +73,18 @@ pub use facts::{
     summary_hint_can_replace_weak_existing,
 };
 pub use function_facts::{
-    AnalysisPlans, ArrayAccessRenderFact, BranchPredicateFact, CallArgumentValueFact,
-    CallResultFact, CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact,
-    CertifiedEffect, CertifiedEffectKind, CertifiedEntity, CertifiedExpr,
-    ControlBlockAssumptionFact, DecompileCapabilityView, DecompileRouteFacts, DecompileRouteKind,
-    ExpressionRenderFact, FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts,
-    FunctionControlFacts, FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts,
-    InterprocSummaryView, LoopStructureFact, MemberAccessRenderFact, MemoryAccessRenderFact,
-    MemoryOpSiteKey, OpSiteKey, PredicateComparisonFact, RegisterCallArgumentLocationFact,
-    ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
-    StackCallArgumentLocationFact, StackSlotOwnerRenderAuthorization, SummaryEffectRollup,
-    SummaryHelperView, SummaryOutParamFact, SwitchSelectorFact, admit_declaration_type,
-    declaration_type_width_bits, exact_source_return_type,
+    ArrayAccessRenderFact, BranchPredicateFact, CallArgumentValueFact, CallResultFact,
+    CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact, CertifiedEffect,
+    CertifiedEffectKind, CertifiedEntity, CertifiedExpr, ControlBlockAssumptionFact,
+    DecompileRouteFacts, DecompileRouteKind, ExpressionRenderFact, FunctionCallRenderFacts,
+    FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts, FunctionFacts,
+    FunctionInputQualityFacts, FunctionRenderFacts, InterprocSummaryView, LoopStructureFact,
+    MemberAccessRenderFact, MemoryAccessRenderFact, MemoryOpSiteKey, OpSiteKey,
+    PredicateComparisonFact, RegisterCallArgumentLocationFact, ReturnValueRenderFact,
+    SourceOwnedCalleeSignature, SourceOwnedFunctionFacts, StackCallArgumentLocationFact,
+    StackSlotOwnerRenderAuthorization, SummaryEffectRollup, SummaryHelperView, SummaryOutParamFact,
+    SwitchSelectorFact, admit_declaration_type, declaration_type_width_bits,
+    exact_source_return_type,
 };
 pub use inference::{CombinedTypeOracle, TypeInference, register_alias_names};
 pub use model::{Signedness, StructField, StructShape, Type, TypeArena, TypeId};
@@ -102,10 +101,6 @@ pub use prepare::{
 pub use r2source::DisplayNames;
 pub use r2ssa::AssumptionUsageReport;
 pub use register_identity::RegisterIdentity;
-pub use role_registry::{
-    signature_hint_for_role_identity, signature_hint_for_summary_kinds,
-    type_projection_for_role_identity,
-};
 pub use signature::{ResolvedSignature, SignatureRegistry};
 pub use signature_infer::{
     RecoveredSignatureParam, SignatureParamCandidate, SignatureTypeEvidence,
@@ -134,9 +129,8 @@ pub use writeback::{
     build_source_owned_type_writeback_analysis, callconv_writeback_arch_supported,
     canonicalize_writeback_apply_type_name, infer_local_struct_artifacts_from_ssa,
     inferred_signature_to_function_type_facts, local_field_accesses_named,
-    semantic_artifact_prefers_bounded_type_plan, signature_certificate_source_names,
-    signature_register_arg_duplicate_delete_required, signature_register_arg_rename_decision,
-    signature_register_arg_stack_conflict_delete_required,
+    signature_certificate_source_names, signature_register_arg_duplicate_delete_required,
+    signature_register_arg_rename_decision, signature_register_arg_stack_conflict_delete_required,
     signature_register_arg_type_apply_required, signature_register_arg_var_score,
     signature_writeback_action_decision, signature_writeback_arch_supported,
     signature_writeback_size_eligible, type_writeback_global_type_link_apply_decision,

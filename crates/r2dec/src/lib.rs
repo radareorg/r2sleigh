@@ -31,8 +31,6 @@ pub(crate) mod analysis;
 pub mod ast;
 mod binding_plan;
 pub(crate) mod codegen;
-#[cfg(test)]
-pub(crate) mod consumer_linear;
 pub(crate) mod consumer_structured;
 pub mod control;
 mod effect_ledger;
@@ -81,142 +79,6 @@ pub(crate) use structure::ControlFlowStructurer;
 #[cfg(test)]
 pub(crate) fn certified_memory_result_name(access: r2ssa::StructuredAccessId) -> String {
     format!("memory_value_{}_{}", access.inst.0, access.ordinal)
-}
-
-fn format_vm_target_list(targets: &[u64]) -> String {
-    if targets.is_empty() {
-        return "[]".to_string();
-    }
-    let rendered = targets
-        .iter()
-        .map(|target| format!("0x{:x}", target))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{rendered}]")
-}
-
-fn format_vm_value_expr(value: &r2sym::VmValueExpr) -> String {
-    match value {
-        r2sym::VmValueExpr::Const(value) => format!("0x{value:x}"),
-        r2sym::VmValueExpr::Var(name) | r2sym::VmValueExpr::Expr(name) => name.clone(),
-        r2sym::VmValueExpr::Unary { op, arg } => {
-            let op = match op {
-                r2sym::VmUnaryOp::Neg => "-",
-                r2sym::VmUnaryOp::BitNot => "~",
-                r2sym::VmUnaryOp::BoolNot => "!",
-            };
-            format!("({}{})", op, format_vm_value_expr(arg))
-        }
-        r2sym::VmValueExpr::Binary { op, lhs, rhs } => {
-            let op = match op {
-                r2sym::VmBinaryOp::Add => "+",
-                r2sym::VmBinaryOp::Sub => "-",
-                r2sym::VmBinaryOp::Mul => "*",
-                r2sym::VmBinaryOp::Div => "/",
-                r2sym::VmBinaryOp::Rem => "%",
-                r2sym::VmBinaryOp::And => "&",
-                r2sym::VmBinaryOp::Or => "|",
-                r2sym::VmBinaryOp::Xor => "^",
-                r2sym::VmBinaryOp::Shl => "<<",
-                r2sym::VmBinaryOp::LShr | r2sym::VmBinaryOp::AShr => ">>",
-                r2sym::VmBinaryOp::Eq => "==",
-                r2sym::VmBinaryOp::Ne => "!=",
-                r2sym::VmBinaryOp::Lt | r2sym::VmBinaryOp::SLt => "<",
-                r2sym::VmBinaryOp::Le | r2sym::VmBinaryOp::SLe => "<=",
-                r2sym::VmBinaryOp::BoolAnd => "&&",
-                r2sym::VmBinaryOp::BoolOr => "||",
-            };
-            format!(
-                "({} {} {})",
-                format_vm_value_expr(lhs),
-                op,
-                format_vm_value_expr(rhs)
-            )
-        }
-        r2sym::VmValueExpr::Select {
-            cond,
-            if_true,
-            if_false,
-        } => format!(
-            "({} ? {} : {})",
-            format_vm_value_expr(cond),
-            format_vm_value_expr(if_true),
-            format_vm_value_expr(if_false)
-        ),
-    }
-}
-
-fn format_vm_state_updates(updates: &[r2sym::VmStateUpdate]) -> String {
-    if updates.is_empty() {
-        return "[]".to_string();
-    }
-    let rendered = updates
-        .iter()
-        .map(|update| format!("{}={}", update.output, format_vm_value_expr(&update.value)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{rendered}]")
-}
-
-fn format_vm_guarded_exits(guards: &[r2sym::VmGuardedExit]) -> String {
-    if guards.is_empty() {
-        return "[]".to_string();
-    }
-    let rendered = guards
-        .iter()
-        .map(|guard| format!("0x{:x}:{}", guard.target, guard.guard.expr))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{rendered}]")
-}
-
-fn format_semantic_memory_address(address: &r2sym::SemanticMemoryAddress) -> String {
-    if address.is_exact_offset() {
-        return format!("{:#x}", address.offset_lo());
-    }
-    if address.terms().is_empty() {
-        return format!(
-            "bounded({:#x}..{:#x})",
-            address.offset_lo(),
-            address.offset_hi()
-        );
-    }
-    let terms = address
-        .terms()
-        .iter()
-        .map(|term| format!("v{}*{}", term.value.0, term.coefficient))
-        .collect::<Vec<_>>()
-        .join(" + ");
-    format!("affine({terms}; offset={})", address.offset_lo())
-}
-
-fn format_vm_memory_conditions(conditions: &[r2sym::VmMemoryCondition]) -> String {
-    if conditions.is_empty() {
-        return "[]".to_string();
-    }
-    let rendered = conditions
-        .iter()
-        .map(|condition| {
-            let region = condition.region.name.clone();
-            let address = format_semantic_memory_address(&condition.address);
-            let binding = condition
-                .binding
-                .as_deref()
-                .map(|binding| format!(" -> {binding}"))
-                .unwrap_or_default();
-            let value = condition
-                .value_expr
-                .as_deref()
-                .map(|value| format!(" = {value}"))
-                .unwrap_or_default();
-            format!(
-                "{}@[{}]/{}:{}{}{}",
-                region, address, condition.size, condition.expr, binding, value,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{rendered}]")
 }
 
 pub(crate) fn sanitize_comment_text(text: &str) -> String {
@@ -412,13 +274,6 @@ fn x86_extended_register_label(lower: &str) -> bool {
         && matches!(suffix, "" | "b" | "w" | "d")
 }
 
-pub(crate) fn format_vm_summary_kind(kind: r2sym::InterpreterKind) -> &'static str {
-    match kind {
-        r2sym::InterpreterKind::SwitchDispatch => "switch_dispatch",
-        r2sym::InterpreterKind::IndirectDispatch => "indirect_dispatch",
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn is_autogenerated_function_name(name: &str) -> bool {
     r2source::display_names::is_generated_function_name(name)
@@ -430,43 +285,6 @@ pub fn block_guard_fallback_comment(func_name: &str, blocks: usize, max_blocks: 
 
 pub fn artifact_guard_fallback_comment(func_name: &str, reason: &str) -> String {
     planner::artifact_guard_fallback_comment(func_name, reason)
-}
-
-fn append_semantic_summary_return_to_function_if_needed(
-    func: &mut CFunction,
-    function_facts: &FunctionFacts,
-    semantic_report: Option<&r2sym::SemanticArtifactReport>,
-) {
-    append_semantic_summary_return_comment_to_function_if_needed(
-        func,
-        function_facts,
-        semantic_report,
-    );
-}
-
-fn append_semantic_summary_return_comment_to_function_if_needed(
-    func: &mut CFunction,
-    function_facts: &FunctionFacts,
-    semantic_report: Option<&r2sym::SemanticArtifactReport>,
-) {
-    if matches!(func.ret_type, CType::Void | CType::Unknown) {
-        return;
-    }
-    if func.body.iter().any(summary_stmt_contains_return) {
-        return;
-    }
-    let Some(semantic_artifact) = semantic_report else {
-        return;
-    };
-    if semantic_summary_return_expr(function_facts, semantic_artifact).is_some() {
-        func.body.push(CStmt::comment(
-            "summary return value intentionally not reconstructed as executable C".to_string(),
-        ));
-    } else {
-        func.body.push(CStmt::comment(
-            "summary return unresolved; value intentionally not reconstructed".to_string(),
-        ));
-    }
 }
 
 /// Count the residual markers the structurer left in a rendered body.
@@ -795,66 +613,6 @@ fn residual_function_for_render_boundary(func_name: &str, reason: &str) -> CFunc
     func
 }
 
-fn summary_stmt_contains_return(stmt: &CStmt) -> bool {
-    match stmt.unobserved() {
-        CStmt::Return(_) => true,
-        CStmt::Block(stmts) => stmts.iter().any(summary_stmt_contains_return),
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            summary_stmt_contains_return(then_body)
-                || else_body
-                    .as_ref()
-                    .is_some_and(|body| summary_stmt_contains_return(body))
-        }
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            summary_stmt_contains_return(body)
-        }
-        CStmt::For { init, body, .. } => {
-            init.as_ref()
-                .is_some_and(|stmt| summary_stmt_contains_return(stmt))
-                || summary_stmt_contains_return(body)
-        }
-        CStmt::Switch { cases, default, .. } => {
-            cases
-                .iter()
-                .any(|case| case.body.iter().any(summary_stmt_contains_return))
-                || default
-                    .as_ref()
-                    .is_some_and(|stmts| stmts.iter().any(summary_stmt_contains_return))
-        }
-        _ => false,
-    }
-}
-
-fn semantic_summary_return_expr(
-    function_facts: &FunctionFacts,
-    _semantic_artifact: &r2sym::SemanticArtifactReport,
-) -> Option<CExpr> {
-    summary_rollup_return_expr(function_facts)
-}
-
-fn summary_rollup_return_expr(function_facts: &FunctionFacts) -> Option<CExpr> {
-    let relation = function_facts
-        .summary_rollup()?
-        .root_return_relation
-        .as_ref()?;
-    match relation {
-        // A summary rollup describes interprocedural effects, but it is not a
-        // render-node proof for the returned expression. Keep the relation
-        // visible in comments and residualize until a return certificate owns
-        // the exact value.
-        r2ssa::SummaryReturnRelation::Unknown
-        | r2ssa::SummaryReturnRelation::Void
-        | r2ssa::SummaryReturnRelation::Arg(_)
-        | r2ssa::SummaryReturnRelation::Const(_)
-        | r2ssa::SummaryReturnRelation::HeapAlloc
-        | r2ssa::SummaryReturnRelation::Global(_) => None,
-    }
-}
-
 pub fn normalize_sig_arch_name(arch: Option<&r2il::ArchSpec>) -> Option<String> {
     let arch = arch?;
     let lower = arch.name.to_ascii_lowercase();
@@ -1080,10 +838,6 @@ struct DecompilerContext {
 impl DecompilerContext {
     fn type_facts(&self) -> &FunctionTypeFacts {
         self.function_facts.type_facts()
-    }
-
-    fn semantic_report(&self) -> Option<&r2sym::SemanticArtifactReport> {
-        self.function_facts.semantic_report()
     }
 
     fn from_source_owned(
@@ -3039,245 +2793,6 @@ impl Decompiler {
         decompiler.build_function_internal_with_control(input, work)
     }
 
-    pub(crate) fn prepend_comment(stmt: CStmt, text: String) -> CStmt {
-        let (semantic, observations) = stmt.into_semantic_with_observations();
-        let comment = CStmt::comment(text);
-        match semantic {
-            CStmt::Empty => CStmt::Block(vec![comment]),
-            CStmt::Block(mut stmts) => {
-                // Inserting a new sibling splits the observed block position;
-                // no existing child is an exact owner for its outer markers.
-                // Nested child observations remain intact.
-                stmts.insert(0, comment);
-                CStmt::Block(stmts)
-            }
-            other => CStmt::Block(vec![comment, observations.reapply(other)]),
-        }
-    }
-
-    fn semantic_vm_summary_comment(&self) -> Option<String> {
-        let vm_body = self.context.semantic_report()?.vm_body()?;
-        let vm_step = vm_body
-            .step_summary
-            .as_ref()
-            .or(vm_body.transfer_summary.as_ref())?;
-        let exact_transfers = vm_step
-            .transfers
-            .iter()
-            .filter(|transfer| transfer.evidence().allows_hard_proof())
-            .count();
-        let likely_transfers = vm_step
-            .transfers
-            .iter()
-            .filter(|transfer| matches!(transfer.confidence(), r2sym::SemanticConfidence::Likely))
-            .count();
-        let heuristic_transfers = vm_step
-            .transfers
-            .iter()
-            .filter(|transfer| {
-                matches!(transfer.confidence(), r2sym::SemanticConfidence::Heuristic)
-            })
-            .count();
-        let redispatch_transfers = vm_step
-            .transfers
-            .iter()
-            .filter(|transfer| transfer.redispatch)
-            .count();
-        let returning_transfers = vm_step
-            .transfers
-            .iter()
-            .filter(|transfer| transfer.may_return)
-            .count();
-        let selector_updates = vm_step
-            .transfers
-            .iter()
-            .filter(|transfer| transfer.selector_update.is_some())
-            .count();
-        let exact_exit_guards = vm_step
-            .transfers
-            .iter()
-            .flat_map(|transfer| transfer.exit_guards.iter())
-            .filter(|guard| guard.guard.evidence().allows_hard_proof())
-            .count();
-        let total_read_effects: usize = vm_step
-            .handler_memory_read_effects
-            .values()
-            .map(Vec::len)
-            .sum();
-        let total_write_effects: usize = vm_step
-            .handler_memory_write_effects
-            .values()
-            .map(Vec::len)
-            .sum();
-        let total_reads: usize = vm_step.handler_memory_reads.values().copied().sum();
-        let total_writes: usize = vm_step.handler_memory_writes.values().copied().sum();
-
-        let mut out = String::new();
-        let _ = writeln!(&mut out, "r2dec semantic summary: vm_summary");
-        let _ = writeln!(
-            &mut out,
-            "kind={} dispatch_header=0x{:x} loop_header=0x{:x} selector={} targets={} default_target={} latches={} step_blocks={} transfers={} exact_transfers={} likely_transfers={} heuristic_transfers={} redispatch_transfers={} returning_transfers={} selector_updates={} exact_exit_guards={} total_reads={} total_writes={} total_read_effects={} total_write_effects={}",
-            format_vm_summary_kind(vm_step.kind),
-            vm_step.dispatch_header,
-            vm_step.loop_header,
-            vm_step.selector.as_deref().unwrap_or("<unknown>"),
-            vm_step.dispatch_targets.len(),
-            vm_step
-                .default_target
-                .map(|target| format!("0x{:x}", target))
-                .unwrap_or_else(|| "none".to_string()),
-            vm_step.loop_latches.len(),
-            vm_step.step_blocks.len(),
-            vm_step.transfers.len(),
-            exact_transfers,
-            likely_transfers,
-            heuristic_transfers,
-            redispatch_transfers,
-            returning_transfers,
-            selector_updates,
-            exact_exit_guards,
-            total_reads,
-            total_writes,
-            total_read_effects,
-            total_write_effects,
-        );
-        if !vm_step.state_inputs.is_empty() || !vm_step.state_outputs.is_empty() {
-            let _ = writeln!(
-                &mut out,
-                "state_inputs=[{}] state_outputs=[{}]",
-                vm_step.state_inputs.join(", "),
-                vm_step.state_outputs.join(", "),
-            );
-        }
-
-        let transfer_preview = vm_step.transfers.iter().take(4).collect::<Vec<_>>();
-        if !transfer_preview.is_empty() {
-            for transfer in transfer_preview {
-                let selector_update = transfer
-                    .selector_update
-                    .as_ref()
-                    .map(|update| format!("{}={}", update.output, update.expr))
-                    .unwrap_or_else(|| "none".to_string());
-                let _ = writeln!(
-                    &mut out,
-                    "transfer handler=0x{:x} cases={} blocks={} exits={} exit_guards={} updates={} selector_update={} reads={} writes={} exact={} confidence={:?} reasons={} residual_guards={} residual_memory={} redispatch={} return={} truncated={}",
-                    transfer.handler_target,
-                    format_vm_target_list(&transfer.case_values),
-                    format_vm_target_list(&transfer.region_blocks),
-                    format_vm_target_list(&transfer.exit_targets),
-                    format_vm_guarded_exits(&transfer.exit_guards),
-                    format_vm_state_updates(&transfer.state_updates),
-                    selector_update,
-                    format_vm_memory_conditions(&transfer.memory_reads),
-                    format_vm_memory_conditions(&transfer.memory_writes),
-                    transfer.evidence().allows_hard_proof(),
-                    transfer.confidence(),
-                    format_args!("{:?}", transfer.evidence().reasons),
-                    transfer.residual_guards,
-                    transfer.residual_memory_effects,
-                    transfer.redispatch,
-                    transfer.may_return,
-                    transfer.truncated,
-                );
-            }
-        }
-
-        let mut preview_handlers = vm_step.handler_regions.keys().copied().collect::<Vec<_>>();
-        preview_handlers.sort_unstable();
-        for handler in preview_handlers.into_iter().take(4) {
-            let regions = vm_step
-                .handler_regions
-                .get(&handler)
-                .map(|regions| format_vm_target_list(regions))
-                .unwrap_or_else(|| "[]".to_string());
-            let cases = vm_step
-                .case_values_by_target
-                .get(&handler)
-                .map(|values| format_vm_target_list(values))
-                .unwrap_or_else(|| "[]".to_string());
-            let updates = vm_step
-                .handler_state_updates
-                .get(&handler)
-                .map(|updates| format_vm_state_updates(updates))
-                .unwrap_or_else(|| "[]".to_string());
-            let inputs = vm_step
-                .handler_state_inputs
-                .get(&handler)
-                .map(|values| format!("[{}]", values.join(", ")))
-                .unwrap_or_else(|| "[]".to_string());
-            let outputs = vm_step
-                .handler_state_outputs
-                .get(&handler)
-                .map(|values| format!("[{}]", values.join(", ")))
-                .unwrap_or_else(|| "[]".to_string());
-            let exits = vm_step
-                .handler_exit_targets
-                .get(&handler)
-                .map(|values| format_vm_target_list(values))
-                .unwrap_or_else(|| "[]".to_string());
-            let guards = vm_step
-                .handler_exit_guards
-                .get(&handler)
-                .map(|values| format_vm_guarded_exits(values))
-                .unwrap_or_else(|| "[]".to_string());
-            let read_effects = vm_step
-                .handler_memory_read_effects
-                .get(&handler)
-                .map(|values| format_vm_memory_conditions(values))
-                .unwrap_or_else(|| "[]".to_string());
-            let write_effects = vm_step
-                .handler_memory_write_effects
-                .get(&handler)
-                .map(|values| format_vm_memory_conditions(values))
-                .unwrap_or_else(|| "[]".to_string());
-            let _ = writeln!(
-                &mut out,
-                "handler 0x{:x}: regions={} cases={} inputs={} outputs={} updates={} reads={} writes={} read_effects={} write_effects={} calls={} branches={} exits={} guards={}",
-                handler,
-                regions,
-                cases,
-                inputs,
-                outputs,
-                updates,
-                vm_step
-                    .handler_memory_reads
-                    .get(&handler)
-                    .copied()
-                    .unwrap_or(0),
-                vm_step
-                    .handler_memory_writes
-                    .get(&handler)
-                    .copied()
-                    .unwrap_or(0),
-                read_effects,
-                write_effects,
-                vm_step.handler_calls.get(&handler).copied().unwrap_or(0),
-                vm_step
-                    .handler_conditional_branches
-                    .get(&handler)
-                    .copied()
-                    .unwrap_or(0),
-                exits,
-                guards,
-            );
-        }
-
-        if !vm_step.redispatch_handlers.is_empty()
-            || !vm_step.returning_handlers.is_empty()
-            || !vm_step.truncated_handlers.is_empty()
-        {
-            let _ = writeln!(
-                &mut out,
-                "redispatch_handlers={} returning_handlers={} truncated_handlers={}",
-                format_vm_target_list(&vm_step.redispatch_handlers),
-                format_vm_target_list(&vm_step.returning_handlers),
-                format_vm_target_list(&vm_step.truncated_handlers),
-            );
-        }
-
-        Some(out.trim_end().to_string())
-    }
-
     fn linearize_function_body(
         &self,
         func: &SSAFunction,
@@ -3496,6 +3011,23 @@ impl Decompiler {
             None,
         );
         fold_ctx.observe_effect_stmt(&obligations, stmt)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepend_comment(stmt: CStmt, text: String) -> CStmt {
+        let (semantic, observations) = stmt.into_semantic_with_observations();
+        let comment = CStmt::comment(text);
+        match semantic {
+            CStmt::Empty => CStmt::Block(vec![comment]),
+            CStmt::Block(mut stmts) => {
+                // Inserting a new sibling splits the observed block position;
+                // no existing child is an exact owner for its outer markers.
+                // Nested child observations remain intact.
+                stmts.insert(0, comment);
+                CStmt::Block(stmts)
+            }
+            other => CStmt::Block(vec![comment, observations.reapply(other)]),
+        }
     }
 
     fn build_function_internal_with_control<'a>(
@@ -4075,11 +3607,7 @@ impl Decompiler {
                 refusal,
             ));
         }
-        let (mut body_stmt, structured_regions) = routed_body.into_marked_body();
-
-        if let Some(comment) = self.semantic_vm_summary_comment() {
-            body_stmt = Self::prepend_comment(body_stmt, comment);
-        }
+        let (body_stmt, structured_regions) = routed_body.into_marked_body();
 
         // Build the C function
         // Convert body to statements
@@ -4106,12 +3634,6 @@ impl Decompiler {
             // is a recovered empty list rather than an unknown one.
             params_known: true,
         };
-        append_semantic_summary_return_to_function_if_needed(
-            &mut c_function,
-            &self.context.function_facts,
-            self.context.function_facts.semantic_report(),
-        );
-
         let display = self.context.function_facts.display_names();
         let strings = display.strings();
         let data_symbols = display.symbols();
@@ -5219,48 +4741,6 @@ fn typed_integer_literal_expr(value: u64, is_signed: bool, bits: u32) -> CExpr {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn test_native_semantic_report(
-    stage: r2sym::RefinementStage,
-    granularity: r2sym::ArtifactGranularity,
-    slice_class: r2sym::SliceClass,
-    skipped_large_cfg: bool,
-    residual_reasons: Vec<r2sym::ResidualReason>,
-    regions: Vec<r2sym::SemanticRegion>,
-) -> r2sym::SemanticArtifactReport {
-    let regions = regions
-        .into_iter()
-        .map(|region| (region.key(), region))
-        .collect();
-    r2sym::SemanticArtifactReport {
-        schema_version: r2sym::SEMANTIC_ARTIFACT_SCHEMA_VERSION,
-        stage,
-        granularity,
-        execution: r2sym::ExecutionModel::Native,
-        body: r2sym::SemanticArtifactBody::Native(r2sym::NativeArtifactBody {
-            summary: r2sym::NativeFunctionSummary {
-                slice_class,
-                role_identity: None,
-                closure_functions: 0,
-                helper_functions: 0,
-                region_summaries: Vec::new(),
-                worker_summaries: Vec::new(),
-            },
-            regions,
-        }),
-        diagnostics: r2sym::SemanticArtifactDiagnostics {
-            branches_evaluated: 0,
-            branches_pruned: 0,
-            branches_unknown: 0,
-            skipped_missing_arch: false,
-            skipped_large_cfg,
-            residual_reasons,
-            interpreter: None,
-            ambiguous_targets: Vec::new(),
-        },
-    }
-}
-
 /// Every label a `goto` in this statement names.
 fn collect_goto_targets(statement: &CStmt, into: &mut std::collections::BTreeSet<String>) {
     match statement {
@@ -5464,40 +4944,8 @@ mod tests {
         RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
     };
     use r2ssa::SSAFunction;
-    use r2types::{FunctionFacts, FunctionParamSpec, FunctionSignatureSpec, FunctionTypeFacts};
+    use r2types::{FunctionParamSpec, FunctionSignatureSpec};
     use std::collections::{BTreeMap, HashMap};
-
-    /// The names a fixture in this module declares.
-    fn test_table() -> std::cell::RefCell<crate::symbol::SymbolTable> {
-        std::cell::RefCell::new(crate::symbol::SymbolTable::new())
-    }
-
-    #[test]
-    fn semantic_memory_address_format_preserves_identity_kind() {
-        assert_eq!(
-            format_semantic_memory_address(&r2sym::SemanticMemoryAddress::exact(4)),
-            "0x4"
-        );
-        assert_eq!(
-            format_semantic_memory_address(
-                &r2sym::SemanticMemoryAddress::bounded(4, 8).expect("bounded address")
-            ),
-            "bounded(0x4..0x8)"
-        );
-        assert_eq!(
-            format_semantic_memory_address(
-                &r2sym::SemanticMemoryAddress::affine(
-                    vec![r2ssa::AffineAddressTerm {
-                        value: r2ssa::ValueId(7),
-                        coefficient: 40,
-                    }],
-                    4,
-                )
-                .expect("affine address")
-            ),
-            "affine(v7*40; offset=4)"
-        );
-    }
 
     fn empty_fold_context_for_linearization<'a>() -> FoldingContext<'a> {
         let arch = Box::leak(Box::new(FoldArchConfig {
@@ -6500,40 +5948,6 @@ mod tests {
     }
 
     #[test]
-    fn decompiler_input_retains_exact_source_owner_and_foreign_semantics_never_reach_it() {
-        let arch = test_arch_for_decompile();
-        let ops = vec![R2ILOp::Return {
-            target: Varnode::constant(0, 8),
-        }];
-        let requested = Arc::new(prepared_from_ops(ops.clone(), &arch));
-        let foreign = Arc::new(prepared_from_ops(ops, &arch));
-        let artifact =
-            r2sym::compile_semantic_artifact_default(&z3::Context::thread_local(), &foreign);
-        let request = r2types::TypeWritebackAnalysisRequest::new(
-            Arc::clone(&requested),
-            r2types::ParsedExternalContext::default(),
-        )
-        .expect("source-owned request");
-        assert_eq!(
-            request
-                .with_semantic_artifact(artifact)
-                .expect_err("foreign semantics must be rejected before r2dec"),
-            r2types::TypeWritebackAnalysisError::ForeignSemanticArtifact
-        );
-        let input = source_owned_decompiler_input(
-            Arc::clone(&requested),
-            (
-                r2types::DecompileRouteKind::Standard,
-                "otherwise renderable",
-                None,
-            ),
-        );
-
-        assert!(input.source_owned_facts().shares_source(&requested));
-        assert!(std::ptr::eq(input.prepared_ssa(), requested.as_ref()));
-    }
-
-    #[test]
     fn context_projection_preserves_the_exact_sealed_report() {
         let arch = test_arch_for_decompile();
         let prepared = prepared_from_ops(
@@ -6620,8 +6034,12 @@ mod tests {
         );
     }
 
+    /// A route kind is a label on advice, and advice does not have to be
+    /// backed by a symbolic artifact to be recorded. The pipeline that used to
+    /// require one is gone, so the finalization accepts every kind and the
+    /// native certificates decide what renders.
     #[test]
-    fn decompile_finalization_refuses_summary_routes_without_bound_semantics() {
+    fn decompile_finalization_accepts_every_route_kind() {
         let arch = test_arch_for_decompile();
         for route in [
             (
@@ -6643,18 +6061,18 @@ mod tests {
                 }],
                 &arch,
             );
-            let error = source_owned_type_analysis(prepared)
+            let finalized = source_owned_type_analysis(prepared)
                 .finalize_for_decompile(r2types::DecompileFinalization {
                     kind: route.0,
                     reason: route.1.to_string(),
                     fallback_comment: None,
                 })
-                .expect_err("summary route without bound semantics must fail before r2dec");
+                .expect("a route kind is advice and is always recordable");
 
             assert_eq!(
-                error,
-                r2types::TypeWritebackAnalysisError::IncompatibleDecompileRoute,
-                "summary route without bound semantics must fail closed for {:?}",
+                finalized.report().decompile_route().map(|facts| facts.kind),
+                Some(route.0),
+                "the route is recorded as given for {:?}",
                 route.0,
             );
         }
@@ -7395,220 +6813,6 @@ mod tests {
                 && comment.contains("stack slot")
                 && comment.contains("temporary"),
             "sanitized comment should preserve actionable categories, got {comment}"
-        );
-    }
-
-    #[test]
-    fn semantic_summary_return_guard_fills_nonvoid_body_without_return() {
-        let symbols = test_table();
-        let mut semantic_artifact = test_native_semantic_report(
-            r2sym::RefinementStage::Compiled,
-            r2sym::ArtifactGranularity::Regioned,
-            r2sym::SliceClass::GenericLarge,
-            false,
-            Vec::new(),
-            Vec::new(),
-        );
-        let r2sym::SemanticArtifactBody::Native(native) = &mut semantic_artifact.body else {
-            panic!("expected native artifact");
-        };
-        native
-            .summary
-            .worker_summaries
-            .push(r2sym::NativeWorkerSummary {
-                anchor: 0x401080,
-                kind: r2sym::NativeWorkerSummaryKind::MemoryRead,
-                dst: None,
-                src: None,
-                memory: Some(r2ssa::SummaryMemoryLocation {
-                    region: r2ssa::SummaryMemoryRegion::Unknown,
-                    range: None,
-                }),
-                len: None,
-                allocation: None,
-                lifetime: None,
-                sync: None,
-                atomic: None,
-                parser: None,
-                loop_summary: None,
-                evidence: r2sym::SemanticEvidence::likely(
-                    r2sym::SemanticEvidenceReason::SummaryBudget,
-                )
-                .with_coverage(r2sym::SemanticEvidenceCoverage::Bounded),
-            });
-        let function_facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(signature_spec(
-                    Some(CType::ptr(CType::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    })),
-                    Vec::new(),
-                )),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        );
-        let mut func = CFunction {
-            externs: Vec::new(),
-            extern_objects: Vec::new(),
-            name: "dbg.gettext_quote".to_string(),
-            ret_type: CType::ptr(CType::Int {
-                bits: 8,
-                signedness: r2types::Signedness::Signed,
-            }),
-            params: Vec::new(),
-            params_known: true,
-            locals: Vec::new(),
-            body: vec![CStmt::Expr(CExpr::call(
-                CExpr::var(crate::symbol::declare(&symbols, "sym.rpl_mbrtoc32")),
-                Vec::new(),
-            ))],
-            symbols: std::rc::Rc::new(symbols),
-        };
-
-        append_semantic_summary_return_to_function_if_needed(
-            &mut func,
-            &function_facts,
-            Some(&semantic_artifact),
-        );
-
-        assert!(
-            matches!(func.body.last(), Some(CStmt::Comment(text)) if text.contains("summary return unresolved"))
-        );
-        assert!(
-            !func
-                .body
-                .iter()
-                .any(|stmt| matches!(stmt, CStmt::Return(_))),
-            "expected unresolved summary return to stay non-executable, got {func:?}"
-        );
-    }
-
-    #[test]
-    fn raw_summary_report_does_not_invent_executable_return() {
-        let symbols = test_table();
-        let semantic_artifact = test_native_semantic_report(
-            r2sym::RefinementStage::Compiled,
-            r2sym::ArtifactGranularity::WholeFunction,
-            r2sym::SliceClass::Worker,
-            false,
-            Vec::new(),
-            Vec::new(),
-        );
-        let function_facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(signature_spec(
-                    Some(CType::ptr(CType::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    })),
-                    vec![(
-                        "buf",
-                        Some(CType::ptr(CType::Int {
-                            bits: 8,
-                            signedness: r2types::Signedness::Signed,
-                        })),
-                    )],
-                )),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        );
-        let mut func = CFunction {
-            externs: Vec::new(),
-            extern_objects: Vec::new(),
-            name: "dbg.return_arg_summary".to_string(),
-            ret_type: CType::ptr(CType::Int {
-                bits: 8,
-                signedness: r2types::Signedness::Signed,
-            }),
-            params: Vec::new(),
-            params_known: true,
-            locals: Vec::new(),
-            body: vec![CStmt::Expr(CExpr::call(
-                CExpr::var(crate::symbol::declare(&symbols, "summary_worker")),
-                Vec::new(),
-            ))],
-            symbols: std::rc::Rc::new(symbols),
-        };
-
-        append_semantic_summary_return_to_function_if_needed(
-            &mut func,
-            &function_facts,
-            Some(&semantic_artifact),
-        );
-
-        assert!(
-            matches!(func.body.last(), Some(CStmt::Comment(text)) if text.contains("summary return unresolved"))
-        );
-        assert!(
-            !func
-                .body
-                .iter()
-                .any(|stmt| matches!(stmt, CStmt::Return(_))),
-            "raw summary rollups must not invent executable return C, got {func:?}"
-        );
-    }
-
-    #[test]
-    fn certified_standard_summary_return_guard_does_not_invent_executable_return() {
-        let symbols = test_table();
-        let semantic_artifact = test_native_semantic_report(
-            r2sym::RefinementStage::Compiled,
-            r2sym::ArtifactGranularity::WholeFunction,
-            r2sym::SliceClass::Worker,
-            false,
-            Vec::new(),
-            Vec::new(),
-        );
-        let function_facts = FunctionFacts::new(
-            FunctionTypeFacts {
-                merged_signature: Some(signature_spec(
-                    Some(CType::ptr(CType::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    })),
-                    vec![("n", Some(CType::Typedef("size_t".to_string())))],
-                )),
-                ..FunctionTypeFacts::default()
-            },
-            None,
-        );
-        let body = vec![CStmt::Expr(CExpr::call(
-            crate::symbol::var_ref(&symbols, "sym.imp.malloc"),
-            vec![crate::symbol::var_ref(&symbols, "n")],
-        ))];
-        let mut func = CFunction {
-            externs: Vec::new(),
-            extern_objects: Vec::new(),
-            name: "dbg.alloc_wrapper2".to_string(),
-            ret_type: CType::ptr(CType::Int {
-                bits: 8,
-                signedness: r2types::Signedness::Signed,
-            }),
-            params: Vec::new(),
-            params_known: true,
-            locals: Vec::new(),
-            body,
-            symbols: std::rc::Rc::new(symbols),
-        };
-
-        append_semantic_summary_return_comment_to_function_if_needed(
-            &mut func,
-            &function_facts,
-            Some(&semantic_artifact),
-        );
-
-        assert!(
-            matches!(func.body.last(), Some(CStmt::Comment(text)) if text.contains("summary return unresolved"))
-        );
-        assert!(
-            !func
-                .body
-                .iter()
-                .any(|stmt| matches!(stmt, CStmt::Return(_))),
-            "certified standard mode must not invent summary returns, got {func:?}"
         );
     }
 

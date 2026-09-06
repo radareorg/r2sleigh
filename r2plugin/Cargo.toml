@@ -15,12 +15,10 @@ r2source = { path = "../crates/r2source" }
 r2sleigh-lift = { path = "../crates/r2sleigh-lift", default-features = false }
 r2sleigh-export = { path = "../crates/r2sleigh-export" }
 r2ssa = { path = "../crates/r2ssa" }
-r2sym = { path = "../crates/r2sym" }
 r2types = { path = "../crates/r2types" }
 r2engine = { path = "../crates/r2engine" }
 serde.workspace = true
 serde_json.workspace = true
-z3.workspace = true
 
 [dev-dependencies]
 r2dec = { path = "../crates/r2dec" }
