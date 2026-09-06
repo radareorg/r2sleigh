@@ -13363,3 +13363,60 @@ The lesson worth keeping: a red check on a PR is not evidence that the PR is
 wrong. Two of the three failing jobs here were upstream's own breakage
 inherited through the base commit, and one was mine; separating them took
 reading master's own runs rather than only the branch's.
+
+### The plugin reads the DWARF now; the fork deletion is one test short
+
+The user ruled that the plugin reads the debug information itself and that
+the evidence machinery is cut from upstream. The first half is done and
+committed; the second is written, measured and not landed, for one reason
+recorded below.
+
+**What the fork was carrying.** Two facts, in side tables on `RAnal`: which
+formal a stack home is in the order the caller passes them
+(`r_anal_var_exact_formal_get`, backed by `exact_formal_proofs` and a
+base64 `dwarf-stack-home-v1` record written into the `dwarf` namespace), and
+which register the debug information names as a function's frame base
+(`r_anal_dwarf_function_frame_pointer_get`, backed by
+`dwarf_frame_pointer_proofs`). Together with their producers in
+`dwarf_process.c` they are 2,847 of the integration PR's lines.
+
+**What replaces them.** `r2plugin/dwarf_facts.c` walks the debug information
+entries through the public `r_bin_dwarf_parse_abbrev` and
+`r_bin_dwarf_parse_info`, caching one parse per binary file. A subprogram's
+formals are the entries one level below it in document order, and an unnamed
+formal keeps its position because it still shifts the ones after it. The
+frame base answers only for a single `DW_OP_regN` naming the architecture's
+base pointer, for the architectures this decompiler lifts. The ordinal is
+still certified rather than trusted: the variable must be an argument
+radare2 placed, sitting where the debug information put it, with radare2's
+own argument number equal to the position the entries give.
+
+Two traps worth remembering. `R_MODE_PRINT` is zero, so a parse asked for
+with mode `0` writes both tables to stdout, into the middle of the
+decompiler's output; pass `R_MODE_SET`. And this radare2 has no `RVector`
+any more.
+
+**Both facts are inert on the corpus.** Before writing any of it, the two
+were stubbed out and the census retaken: refusal counts unchanged on all six
+binaries, and the rendered output identical to the character. They are not
+carrying recovery today because they only fire for a stack-passed argument,
+which none of these rendered functions has. They were reproduced anyway
+rather than dropped, because the case is real for i386 and for functions
+past the register arguments.
+
+**Why the fork deletion is not committed.** With the tables and their
+producers removed the fork builds, the corpus renders byte-identically, and
+`db/anal` plus `db/formats/dwarf` come to 979 passing. One upstream test
+fails: `db/formats/dwarf` "DWARF mismatch preserves registered type and
+stable name" expects no `fcnlink` for a function whose registered type the
+user overrode, and one appears. The cause is localized but not fixed: the
+fork published its staged function links only when every function's
+frame-pointer proof staged as well, a global condition that withheld all
+links for a run, and that is what made this test pass here. Upstream reaches
+zero by its own `preserve_existing` rule; the fork's staging is more
+permissive and the gate was hiding it. The fix belongs in the staging
+condition, not in restoring the gate. The cut is saved as
+`fork-dwarf-cut.patch` in the session scratchpad, 1,117 lines, and the fork
+is restored meanwhile: it still carries the machinery, but nothing consumes
+it any more, so the deletion is now a pure subtraction whenever that
+condition is understood.
