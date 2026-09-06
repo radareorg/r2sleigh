@@ -13284,3 +13284,11 @@ makes the frame's resources unproven, the ABI model incoherent and the return
 boundary incomplete, so the function was refused for a word that says nothing
 about width. The size parser now strips qualifiers with the same helper the
 type graph already used. Census U: 79 to 78.
+
+**`unobserved_binding_read` already has its evidence.** The audit site prints
+`binding-symbol-observed` with the binding, its spelling, the values it owns,
+and the markers elsewhere in the journal that would have authorised it.
+`uInt64_toAscii` (bzip2 -O0) refuses on `stack_m56`, whose authorising stack
+access marker sits at observation 559 and not on the node being audited, so
+the question for that class is why the marker did not survive onto the
+audited node rather than why it is missing.
