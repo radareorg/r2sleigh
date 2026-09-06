@@ -272,26 +272,30 @@ fn evaluate_op_sccp(op: &SSAOp, lattice: &HashMap<VarKey, LatticeValue>) -> Latt
     }
 
     let mut has_top = false;
+    let mut has_bottom = false;
     let mut temp_consts = HashMap::new();
     for src in op.sources() {
         match get_lattice_value(src, lattice) {
-            LatticeValue::Bottom => return LatticeValue::Bottom,
-            LatticeValue::Top => {
-                has_top = true;
-            }
+            LatticeValue::Bottom => has_bottom = true,
+            LatticeValue::Top => has_top = true,
             LatticeValue::Const(c) => {
                 temp_consts.insert(VarKey::from_var(src), c);
             }
         }
     }
 
-    if has_top {
-        return LatticeValue::Top;
+    // An absorbing constant decides the result without the other operand,
+    // so it is tried before an unknown operand is allowed to make the
+    // result unknown; the evaluator answers only from the constants it has.
+    if let Some(c) = eval_const_op(op, &temp_consts) {
+        return LatticeValue::Const(c);
     }
-
-    match eval_const_op(op, &temp_consts) {
-        Some(c) => LatticeValue::Const(c),
-        None => LatticeValue::Bottom,
+    if has_bottom {
+        LatticeValue::Bottom
+    } else if has_top {
+        LatticeValue::Top
+    } else {
+        LatticeValue::Bottom
     }
 }
 
@@ -547,10 +551,11 @@ fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
             let (a, b) = binary(a, b)?;
             a.wrapping_sub(b)
         }
-        IntMult { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a.wrapping_mul(b)
-        }
+        IntMult { a, b, .. } => match (unary(a), unary(b)) {
+            (Some(0), _) | (_, Some(0)) => 0,
+            (Some(a), Some(b)) => a.wrapping_mul(b),
+            _ => return None,
+        },
         IntDiv { a, b, .. } => {
             let (a, b) = binary(a, b)?;
             if b == 0 {
@@ -581,14 +586,19 @@ fn eval_const_op(op: &SSAOp, consts: &HashMap<VarKey, u64>) -> Option<u64> {
             let signed = sign_extend(a, bits) % sign_extend(b, bits);
             signed as u64
         }
-        IntAnd { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a & b
-        }
-        IntOr { a, b, .. } => {
-            let (a, b) = binary(a, b)?;
-            a | b
-        }
+        // Absorbing elements are constants whatever the other operand holds:
+        // `and x, 0` is 0, `or x, -1` is all ones, `mul x, 0` is 0. Without
+        // them a write like `or rax, -1` reads the entry carrier for nothing.
+        IntAnd { a, b, .. } => match (unary(a), unary(b)) {
+            (Some(0), _) | (_, Some(0)) => 0,
+            (Some(a), Some(b)) => a & b,
+            _ => return None,
+        },
+        IntOr { a, b, .. } => match (unary(a), unary(b)) {
+            (Some(v), _) | (_, Some(v)) if v & mask == mask => mask,
+            (Some(a), Some(b)) => a | b,
+            _ => return None,
+        },
         IntXor { a, b, .. } => {
             let (a, b) = binary(a, b)?;
             a ^ b
@@ -1074,6 +1084,9 @@ fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
         IntOr { a, b, .. } => match (const_of(a), const_of(b)) {
             (Some(0), _) => make_copy(b),
             (_, Some(0)) => make_copy(a),
+            // All ones absorbs: `or rax, -1` is the constant whatever `rax` held.
+            (Some(av), _) if av == mask => make_const(mask),
+            (_, Some(bv)) if bv == mask => make_const(mask),
             (Some(av), Some(bv)) => make_const(av | bv),
             _ => return None,
         },
@@ -1769,6 +1782,49 @@ mod sccp_tests {
         let mut renamed = SSAVar::constant(0x2a, 8);
         renamed.name = "renamed-value".to_string();
         assert_eq!(const_value(&renamed), Some(0x2a));
+    }
+
+    #[test]
+    fn sccp_absorbing_constant_folds_without_the_other_operand() {
+        // `or rax, -1` on an entry value: the result is all ones whatever
+        // `rax` held, so the entry carrier is not a reader of the return.
+        let func = raw_func(vec![R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntOr {
+                    dst: make_reg(0, 8),
+                    a: make_reg(0, 8),
+                    b: make_const(u64::MAX, 8),
+                },
+                R2ILOp::IntAnd {
+                    dst: make_reg(1, 4),
+                    a: make_reg(1, 4),
+                    b: make_const(0, 4),
+                },
+                R2ILOp::IntMult {
+                    dst: make_reg(2, 4),
+                    a: make_const(0, 4),
+                    b: make_reg(2, 4),
+                },
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+            op_metadata: Default::default(),
+        }]);
+
+        let (consts, _) = sccp(&func);
+        assert!(
+            consts.values().any(|v| *v == u64::MAX),
+            "SCCP should fold `x | -1` to all ones: {consts:?}"
+        );
+        assert_eq!(
+            consts.values().filter(|v| **v == 0).count(),
+            2,
+            "SCCP should fold `x & 0` and `0 * x` to zero: {consts:?}"
+        );
     }
 
     #[test]
