@@ -13212,3 +13212,67 @@ claims less than the call site proved and C23 removed it.
 
 Local census: 91 to 79 refusals, twelve newly rendered, nothing newly
 refused.
+
+### Where the local census stands, and what the residue is now
+
+Six binaries, refusals per binary in the order minigzip -O0/-O2,
+bzip2 -O0/-O2, bzip2recover -O0/-O2:
+
+    N (start of session)  19 28 30 27  8 6 = 118
+    P (B-batch)           17 21 27 23  7 5 = 100
+    S (native-first)      15 20 21 23  7 5 =  91
+    T (tail transfers)    13 18 19 21  5 3 =  79
+
+Nothing was newly refused at any step. The ranked residue at T:
+
+    16  native declaration placement refused: missing_definition
+    11  observation journal: PlannedElidedValueRendered
+     8  OpLowering(implementation.rs:1349)
+     6  BindingPlanBuild
+     5  unrepresentable operation
+     5  native declaration placement refused: unobserved_binding_read
+     5  engine refusal: function exceeds the engine complexity limit
+     4  observation journal: RenderedValueRequired
+     2  UnownedBindingSymbol
+     2  stack_access_read_before_assignment
+     2  region_does_not_dominate_occurrence
+
+**The first two are one class: stack aggregates, item C2.** The trace is now
+complete and the fix is not, so nothing of it is in the tree. Objects are
+minted per exact `(base, offset)`, so `statBuf` at `rbp-0xa0` and
+`statBuf.st_mode` at `rbp-0x88` are two objects: the second is an anonymous
+`stack_m144` with no declaration, and the escape recorded when `&statBuf`
+was passed to `lstat` does not cover it. Placement then refuses
+`missing_definition`.
+
+Mapping an interior position to its containing declared slot is written and
+was measured on `notAStandardFile`: it makes the two one object and moves the
+refusal to `PlannedElidedValueRendered`, because the access still asks for
+the address expression of a value the plan elides once the object is a named
+local. So the containing-slot rule is worth nothing without the member
+projection beside it, and it was reverted rather than left in the tree; the
+patch is `c2-containing-slot.patch` in the session scratchpad. What has to
+land with it: an `AggregateAccessProjection` rooted at a stack object and its
+slot's logical type (today the projection is rooted only at a parameter
+pointer, `aggregate_access.rs`), the projection identity widened from
+`Parameter(u32)` to include `StackObject(ObjectId)`, `FieldAccessCertificate`
+and `member_render_facts_for_memory` following it, and
+`member_access_expr` choosing `.` from the declared type rather than from
+expression shape. `compressStream`'s 5000-byte `ibuf` is the same class with
+an array rather than a struct.
+
+Two of the sixteen `missing_definition` functions are not this class at all:
+`entry0` reads the caller's stack above the entry stack pointer (`pop rsi`,
+`mov rdx, rsp`), which no definition in the function writes because the
+kernel wrote it.
+
+**`BindingPlanBuild` is traceable now.** The first instance, `outOfMemory`
+at -O2, is an unstructured control cycle at 0x4947 that the obligation
+seeding cannot express; the binding plan is the messenger. The five
+completeness conditions each say which one failed under
+`R2DEC_TRACE_REFUSAL` now.
+
+**The engine complexity limit and the deadline are the cost class, item P1.**
+Five functions hit the limit, and `deflate` hits the request deadline during
+structuring since the semantic route stopped refusing it early. The rule
+stands: the phase that is slow is the defect.
