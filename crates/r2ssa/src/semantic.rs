@@ -7837,10 +7837,9 @@ pub(crate) fn exact_logical_return_projection(
                 return None;
             }
             // The carrier's own definition is one extension of the logical
-            // width. Every way of failing that test is a fall-through to the
-            // frontier walk below, not a refusal: this used to be written
-            // inline with `?`, so a carrier defined by a merge left the whole
-            // function before anything else could look at it.
+            // width: certify the extension's input, which is the logical value
+            // itself and usually the named local, so the return names it
+            // rather than casting the carrier.
             if let Some(input) = exact_single_extension_logical_input(
                 graph,
                 boundary.value,
@@ -7849,37 +7848,23 @@ pub(crate) fn exact_logical_return_projection(
             ) {
                 return Some((input, logical_width, Some(logical)));
             }
-            // The carrier's definition is not itself the extension. Follow the
-            // copies and merges it arrives through: where every definition
-            // that reaches the return extends the logical width, the carrier
-            // holds the logical value on every path, and the return is exact.
-            //
-            // A function whose returns merge -- which is most of them once the
-            // compiler is optimising -- has a phi in the return register, and
-            // requiring the extension to be the immediate producer refused it.
-            // That was the largest single refusal in the benchmark.
-            //
-            // The carrier is what is certified here rather than one frontier
-            // value, because a merge has several and the certificate names
-            // one. The render site narrows it against the declared return
-            // type, which is the same spelling the direct narrow lane above
-            // produces.
-            if carrier_reaches_only_logical_extensions(
-                graph,
-                boundary.value,
-                logical_storage,
-                logical_width,
-            ) {
-                return Some((boundary.value, logical_width, Some(logical)));
-            }
+            // Otherwise the carrier holds the logical value in its low lane
+            // whatever defined it -- a load, a call result, a full-width
+            // computation, a merge of any of those -- because a caller of a
+            // narrow return reads only that lane and the bits above it are
+            // undefined by the convention. Certify the carrier at the logical
+            // width; the render narrows it against the declared return type,
+            // which is the conversion the source itself wrote
+            // (`return (z_crc_t)data;`). Requiring every path to be an
+            // extension refused the merged returns of most optimised
+            // functions and every `return f(x);`, for no bit a caller could
+            // observe.
             r2il::refusal_evidence!(
                 "return-logical-projection",
-                "LowBits width {} of {:?}: value {:?} is {} bytes at {:?}, defined by {}",
+                "LowBits width {} of {:?}: carrier {:?} certified at the logical width, defined by {}",
                 logical_width,
                 storage,
                 boundary.value,
-                physical_value.var.size,
-                physical_value.canonical_storage,
                 graph
                     .def_inst(boundary.value)
                     .and_then(|id| graph.inst(id))
@@ -7888,7 +7873,7 @@ pub(crate) fn exact_logical_return_projection(
                         |inst| format!("{:?}", inst.payload)
                     )
             );
-            None
+            Some((boundary.value, logical_width, Some(logical)))
         }
         kind => {
             r2il::refusal_evidence!(
@@ -7933,83 +7918,6 @@ fn exact_single_extension_logical_input(
         && *src == logical_value.var
         && logical_value.var.size == logical_width)
         .then_some(*input)
-}
-
-/// Whether every definition reaching `carrier` extends exactly `logical_width`
-/// bytes of `logical_storage` into it.
-///
-/// The walk follows the two operations that move a value without changing it,
-/// `Copy` and `Phi`, and stops at anything else. A definition that is not an
-/// extension of the logical width -- a full-width computation, a load, a call
-/// result, a constant -- answers `false` for the whole carrier, because then
-/// some path leaves bits in it that the declared logical type does not
-/// account for.
-///
-/// The visited set makes a loop terminate: a carrier defined by a phi that
-/// reaches itself contributes nothing new on the second visit, so a cycle
-/// whose other edges all extend is admitted, and one whose other edges do not
-/// is refused by those edges.
-fn carrier_reaches_only_logical_extensions(
-    graph: &SsaGraph,
-    carrier: ValueId,
-    logical_storage: CanonicalStorageId,
-    logical_width: u32,
-) -> bool {
-    let Some(logical_bits) = logical_width.checked_mul(8) else {
-        return false;
-    };
-    let mut pending = vec![carrier];
-    let mut visited = BTreeSet::new();
-    let mut extensions = 0usize;
-    while let Some(value) = pending.pop() {
-        if !visited.insert(value) {
-            continue;
-        }
-        // A constant whose bits above the logical width are zero *is* the
-        // zero-extension of its own low bits, so it needs no extension
-        // instruction to prove it. This is what `return Z_STREAM_ERROR;`
-        // compiles to: `mov eax, 0xfffffffe`, which the lift states as an
-        // eight-byte constant copy into the carrier and which zeroes the
-        // upper half exactly as a `zext` would.
-        if let Some(constant) = graph
-            .value(value)
-            .and_then(|value| value.var.constant_bits())
-        {
-            if logical_bits >= 64 || constant >> logical_bits == 0 {
-                extensions += 1;
-                continue;
-            }
-            return false;
-        }
-        let Some(inst) = graph.def_inst(value).and_then(|id| graph.inst(id)) else {
-            return false;
-        };
-        let InstPayload::Op(op) = &inst.payload else {
-            return false;
-        };
-        match op {
-            SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. } => {
-                let Some(source) = graph.value_id_for_var(src).and_then(|id| graph.value(id))
-                else {
-                    return false;
-                };
-                if source.var.size != logical_width
-                    || source.canonical_storage != Some(logical_storage)
-                {
-                    return false;
-                }
-                extensions += 1;
-            }
-            SSAOp::Copy { .. } | SSAOp::Phi { .. } => {
-                if inst.inputs.is_empty() {
-                    return false;
-                }
-                pending.extend(inst.inputs.iter().copied());
-            }
-            _ => return false,
-        }
-    }
-    extensions > 0
 }
 
 fn return_carrier_for_boundary_value(
@@ -13440,7 +13348,9 @@ mod tests {
     /// its upper bits are not zero, so the carrier is not the zero-extension
     /// of the declared return and nothing proves what the return holds.
     #[test]
-    fn low_bit_return_certificate_refuses_a_constant_wider_than_the_logical_width() {
+    fn low_bit_return_certificate_narrows_a_constant_wider_than_the_logical_width() {
+        // `mov rax, 0x100000007` before an `int` return: the caller reads the
+        // low lane, 7, and the certificate names the carrier at that width.
         let artifact = constant_low_return_artifact(0x1_0000_0007);
         let boundary = artifact
             .facts()
@@ -13450,11 +13360,23 @@ mod tests {
             .next()
             .expect("return boundary");
         assert!(boundary.complete);
-        assert!(artifact.certificates().returns.is_empty());
+        let [physical] = boundary.values.as_slice() else {
+            panic!("one boundary value");
+        };
+        let certificate = artifact
+            .certificates()
+            .returns
+            .first()
+            .expect("carrier return certificate");
+        assert_eq!(certificate.value, physical.value);
+        assert_eq!(certificate.width, 4);
     }
 
     #[test]
-    fn low_bit_return_certificate_refuses_a_full_write_without_exact_extension_input() {
+    fn low_bit_return_certificate_narrows_a_full_write_to_the_carrier() {
+        // A full write of the carrier that was never an extension of the
+        // logical width still returns its low lane: the certificate names
+        // the carrier, and the render narrows it to the declared type.
         let artifact = exact_signed_low_return_artifact(false);
         let boundary = artifact
             .facts()
@@ -13465,7 +13387,16 @@ mod tests {
             .expect("return boundary");
         assert!(boundary.complete);
         assert!(boundary.register_compositions.is_empty());
-        assert!(artifact.certificates().returns.is_empty());
+        let [physical] = boundary.values.as_slice() else {
+            panic!("one boundary value");
+        };
+        let certificate = artifact
+            .certificates()
+            .returns
+            .first()
+            .expect("carrier return certificate");
+        assert_eq!(certificate.value, physical.value);
+        assert_eq!(certificate.width, 4);
     }
 
     #[test]
