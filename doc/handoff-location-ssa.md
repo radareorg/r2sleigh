@@ -12700,3 +12700,226 @@ argument is then a register the caller wrote that the callee does not read,
 and its obligation still has to be discharged rather than dropped. That is a
 question about which source owns the arity and what becomes of the surplus
 argument, and it should be put to the user rather than settled in passing.
+
+
+## Session 2026-09-06: the `missing_definition` class, end to end
+
+The sweep7 census ranked `missing_definition` (124 declined functions) as
+the largest remaining placement refusal. Every instance was traced to its
+defining instruction on the local binaries (`minigzip`, `bzip2`,
+`bzip2recover`, `example` at -O0/-O2, the DecBench builds), and the 124 fall
+into exactly three classes, none of which is a placement defect:
+
+| class | instances | source |
+| --- | --- | --- |
+| a register an earlier call clobbered, read as the caller's own value | -O2 zlib, ~9 functions × 4 binaries | GCC `-fipa-ra`: the callee's body never writes the register, so the caller keeps its value live across the call; construction defined it anyway |
+| the return register read after a call whose callee has no prototype | `gz*` (lseek64, `__errno_location`), bzip2 (`stat`, `utime`, `fdopen`, `__ctype_b_loc`) | radare2's type database lacks the prototype; and an import thunk's *recovered* interface claimed `void` for a body that merely jumps |
+| a parameter the convention passes on the stack, read from its slot | `deflateInit2_` (8 params), bzip2's 7-parameter functions, `_start` | the interface could not represent a stack-located parameter at all |
+
+### What landed (commits `9610d4e1` and `196d571b`)
+
+**Preserved carriers.** A callee's return boundary now states which
+convention-clobbered registers its body leaves untouched
+(`SourceBoundaryFacts::preserved_call_carriers`: no instruction defines an
+overlapping storage and every exit is a return). `CalleeFacts` carries the
+set, the plugin passes it to root construction as
+`r2ssa::CalleePreservedCarriers`, and `append_call_boundary_defs` emits no
+`CallDefine` for a preserved register at a direct call to that callee. The
+list of registers in question has one owner
+(`function::call_clobbered_register_defs`), read by construction and by the
+machine context's `call_clobbered_carriers()`. Depth is one: a callee's own
+calls clobber the full list because the callee artifact is prepared without
+its callees' facts. No DecBench instance needed the transitive case.
+
+Three assumptions the boundary walks made about calls had to go with it:
+a call is a barrier only for the stack pointer (`ReachingAbiPolicy::transfer_carrier`);
+a `CallDefine` value is never a convention-fallback argument
+(`value_is_call_clobber`); an untouched entry register is an argument only
+where this function's interface declares a parameter there.
+
+**Unknown tail targets.** `recover_interface` refuses (`TailResult::Unproven`)
+when any tail transfer reaches a body without a complete prototype, instead of
+minting `void` with no parameters from a body that writes nothing. Callers of
+such thunks fall through to the machine-evidence boundary.
+
+**radare2 prototypes.** Upstream PR #26672 adds `lseek`, `stat`, `fdopen`,
+`fchown`, `utime`, `fseeko`/`ftello`, the LFS `*64` aliases,
+`__errno_location`, `__ctype_*_loc`, `__cxa_finalize`, the `_FORTIFY_SOURCE`
+`__*_chk` family, and defines `off_t`/`ssize_t`/`off64_t`. The `__isoc99_*`
+scanf entries were dropped: radare2 already canonicalises those to `scanf`.
+
+**Stack-located parameters** (wire format 10). `SourceParameterLocation`
+{Register, Stack{offset,size}} on both `SourceAbiParameterSpec` and
+`SourceCallArgumentSpec`; `SourceStackSlotRole::Parameter{parameter_index}`
+marks the slot that *is* the parameter. Formal offsets are entry-relative
+(+8 is the first slot on x86-64), call-site offsets are from the stack
+pointer at the call, and `argument_location_matches_parameter` translates
+between them by the callee's `stack_pointer_delta_bytes`. On the engine side
+`reaching_stack_argument_before_call` finds the outgoing store by the
+entry-relative coordinate of the stack pointer *entering* the call, which
+construction already records as the `CallRestore` source; the binding plan
+binds a `Parameter` slot to the parameter's binding, so its reads are reads
+of a caller-supplied value. The capture links a stack parameter's DWARF slot
+to its signature parameter by declaration name (radare2 gives such a variable
+no formal ordinal) and now derives a register home's parameter index from the
+home register itself rather than from radare2's variable order, which
+mislabels `level` in `deflateInit2_` and had every home off by one.
+
+The caller side was silently wrong before this: `deflateInit_` rendered
+`deflateInit2_(strm, level, 8, 15, 8, 0)` with the two stack arguments
+dropped and the callee declared six-ary. The outgoing-store scan filtered
+objects at entry-relative offset `< 0`, which is where every outgoing
+argument lives in a function with a frame.
+
+### Open, in priority order
+
+1. **DWARF links withheld for `typedef void` parameters** (fork
+   `dwarf_process.c`, `dwarf_type_reference_is_exact`): a named typedef with
+   no `DW_AT_type` is a typedef of `void`; the rule treated it as inexact, so
+   all eleven bzip2 entry points taking or returning `BZFILE *` had no linked
+   prototype and fell into the `implementation.rs:1324` population. Fixed on
+   the fork branch with a unit test (`test_dwarf5_typedef_of_void_parameter_is_exact`).
+2. **Out-of-line instances of inlined functions** (`snocString` at -O2:
+   `exact_decl=0 decl_corrupt=1`): the concrete DIE carries
+   `DW_AT_abstract_origin` and `dwarf_exact_abstract_formals_biject` refuses.
+   Untraced beyond that; `R2_DEBUG=1 r2 -qc 'a:sla; aaa'` prints the six
+   link terms per function.
+3. **`implementation.rs:1324` with a linked interface** (zlib -O0:
+   `gz_avail gz_read fixedtables crc32_z gzgetc gzputc`; -O2: `longest_match
+   build_tree gzoffset deflateResetKeep inflateReset2`): not the interface,
+   so the boundary walk. The `addFlagsFromEnvVar` trace (argument 1 in RSI
+   has no reaching value at a merge) points at `reaching_abi_value_before`
+   re-deriving what renaming already knows; the principled fix is to record
+   each call's implicit register reads at construction and consume them.
+4. `BZ2_bzWriteClose64`-style callers whose *own* signature is unlinked had
+   no entry-relative stack roots; `SSAFunction::stack_pointer_carrier` now
+   seeds the stack pointer's root from the machine roles regardless of the
+   interface.
+
+### Found after the class-C commit
+
+**The stack-protector shape at `implementation.rs:1324`.** With the
+interface linked, `gz_avail` (zlib -O0) still refused: the return boundary
+was complete (`kind=Register`, `values=0`) but no value reached it
+(`return-register-unreachable`, `reaching-abi-value: 0x2f57 has no phi for
+EAX and its predecessors disagree`). The return block's two predecessors are
+the canary-check fall-through and the block that calls `__stack_chk_fail`.
+radare2 knows that callee never returns and gives its block no successor
+(`afb` shows no jump and no fail edge); the SSA CFG manufactured one anyway,
+because `analyze_terminator` (`crates/r2ssa/src/cfg.rs`) gave every `Call`
+a fall-through to the block end, and nothing consumed the source's declared
+successors: `OwnedFunctionBlock::successors()` was validated in `r2source`
+and read by no one. The clobbering `CallDefine EAX` on the dead edge then
+merged with the real return value at a block that has no phi for it, and
+every canary-protected function returning a value at -O0 fell into this.
+
+The lift owns where an instruction transfers control; whether a call comes
+back is a fact about the callee, and a trap's lack of successor is not in
+the p-code at all. `DeclaredSuccessors` (`cfg.rs`) carries the source's
+block graph into `CFG::from_blocks_with_declared_successors`; only the chunk
+that ends where the source block ends consults it, and only for sequential
+continuation (a conditional branch's false edge stays the machine's). It is
+threaded through `prepare_with_callee_interfaces` and every constructor
+below it; the no-source constructors pass `None` and behave as before.
+Evidence `declared-successors` names each withheld continuation.
+
+**Call sites were correlated by ordinal.** `calls.rs:207` (68 in sweep8) and
+`calls.rs:154` (40) both came from one defect: the machine context listed the
+raw input's call sites sorted by address and numbered them, the semantic pass
+numbered the prepared SSA's calls in block-order, and `CallSiteId(n)` on one
+side was assumed to be `CallSiteId(n)` on the other, checked only by block
+address. Any function whose SSA block order is not its address order -- every
+function with a loop or a forward branch -- had the interfaces of its later
+calls attached to the wrong sites or to none. A site with no interface fell
+through to the convention fallback (`semantic.rs:3838`), which counted every
+argument register written before the call: `write` became 4-ary at its second
+site in `gz_comp`, `memcpy` 0-ary at its third in `updatewindow`, and the two
+declarations of one callee then refused the function. The fix names a call by
+the instruction it was lifted from: `SourceCallSiteIdentity` is now
+`(instruction, target)`, the four transfer ops (`Call`, `CallInd`, `Branch`,
+`BranchInd`) carry `instruction: Option<u64>` from rename onward, and the
+machine context keys its raw sites by instruction. Nothing is ordinal any
+more; a synthetic transfer (an SCCP-collapsed conditional branch) has no
+instruction and is nobody's call site. Test blocks that never said which
+instruction an op came from now stamp their transfers (`R2ILBlock::
+stamp_instruction`), because a call site is known by exactly that.
+
+**radare2 recovered frame-pointer variables in frameless functions.**
+`longest_match` at -O2 keeps `s` in `rbp` and reads its fields as
+`[rbp+0x50]`; radare2's `r_core_anal_fcn` knows the function has no frame and
+deletes the `rbp`-relative variables it extracted, but `afva` and the type
+passes `aaa` runs re-extracted them, so the function arrived with eight
+phantom arguments, no complete slot roles, an incoherent ABI model and an
+`implementation.rs:1324` refusal. Fixed at the extraction (`r_anal_extract_vars`
+consults `fcn->bp_frame`) on the fork (8711ecd6ed) and as an upstream PR from
+`pr/bp-frame-vars`; upstream's own `db/anal/x86_32` expectation for `entry0`
+carried three of these phantoms and is corrected by the same change.
+`longest_match` renders; minigzip-O2 52→51 and bzip2-O2 45→41 refusals before
+the identity fix landed.
+
+**A body heuristic overrode the prototype's arity class.** With call sites
+correlated correctly, `gzsetparams` refused on a variadic argument count for
+its call to `deflateParams`, which is not variadic. The capture ORed
+`fcn->is_variadic` -- radare2's heuristic, which fires on any `test al, al`
+in the body -- into the call-site interface beside the signature's own
+ellipsis test, and did the same for the function's own interface. Both now
+take the signature's word alone; the heuristic is not a fact about the
+prototype and never overrides one.
+
+**Census after the identity fix (K vs J):** minigzip -O2 51→39, -O0 36→28,
+bzip2 -O2 41→39, bzip2recover −1 at both levels, nothing newly refused once
+the variadic flag was corrected.
+
+**Open: `BZ2_bzReadOpen` at -O2** now reaches placement and reads a stack
+binding nothing writes (`placement-missing-definition BindingId(8)`, one
+`StackAccess`); its stack slots translate against no entry-relative root
+(`stack-slot-translation ... root=None` at frame offsets around −10080),
+so the stack pointer's root is missing for a function whose interface is
+linked. Untraced beyond that.
+
+
+### State
+
+Commits on `arch/location-ssa`: `9610d4e1` (preserved carriers, unknown tail
+targets), `196d571b` (stack-located parameters, wire format 10), `fcfe8cbb`
+(declared successors), `df61932a` (call sites named by instruction),
+`adc21868` (arity class from the signature). Fork
+`anal/subregister-argument-spills`: `128a64759b` and `7b7489a9c9` (typedef of
+void, exact and saved), `fe071e2aed` (no frame-pointer variables without a
+frame; the `x86_32` expectation corrected). Upstream: #26672 (libc
+prototypes) merged; #26673 (typedef of void) and #26674 (frame-pointer
+variables) open, both CI-green at the time of writing.
+
+Sweep8 (`9610d4e1`): coverage 1067/1759 = 60.7% (sweep7 54.8%), nothing
+newly refused; sweep9 (`196d571b`) was still evaluating when this was
+written and no sweep has yet measured the three commits above. Locally the
+refusal counts went H→K: minigzip -O2 52→38 (with the variadic fix),
+-O0 44→28, bzip2 -O2 45→39, -O0 50→47, bzip2recover 12→11 and 13→12.
+
+The differential gate is 54/54 raw and differential. `diag=wrong` moved from
+seven cells to eight, but the membership changed: `arm64_O2` `murmur3_32` and
+`xxhash32` and `x64_O2 crc32_bitwise` now pass, and `x64_O1 pearson`,
+`x64_O1 xxhash32`, `x64_O2 murmur3_32`, `x64_O2 xxhash32` are new. Every one
+passes `raw` and `differential`; the diagnostic C is the verifier's own
+retype (`uint64_t` → `long` across 116 locals on `xxhash32`, after which
+the -O2 loop times out), the same canary recorded above, and it is the
+rewrite that stops surviving. The snapshot baseline stays unblessed.
+
+### Next, in order
+
+1. A sweep on `adc21868`, and the census retaken: `calls.rs:207` (68) and
+   `:154` (40) should be gone with `implementation.rs:1324` at -O0; what is
+   left of `:1324` at -O2 is the `roles=0` class the frame-pointer fix
+   addresses (`build_tree`, `deflateResetKeep`, `gzoffset`, `inflateReset2`,
+   `BZ2_bzCompressEnd`, ...).
+2. `implementation.rs:1368` (45): the extension-frontier certificate for a
+   merged return (`exact_logical_return_projection`), the plan's part A.
+3. `BindingPlanBuild` (43), the missing program-variable (37) and
+   `unrepresentable` (26), each still needing its first trace.
+4. `BZ2_bzReadOpen` above; `gzprintf` (`va_list` typedef chain ending at
+   `__builtin_va_list`, size 0); `BZ2_bzWriteOpen`/`ReadOpen` refusing the
+   type graph on `FILE *` → incomplete `_IO_marker`; `snocString`'s abstract
+   origin; the `OverlappingStackSlots` decode errors (6 minigzip-O2, 10
+   bzip2-O2) from duplicate radare2-inferred locals.
+5. `register_tm_clones`/`deregister_tm_clones` (36, every binary):
+   `ExactUseRequiresRenderedOccurrence`, one shape, untraced.
