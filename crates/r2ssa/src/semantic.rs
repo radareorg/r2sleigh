@@ -4462,8 +4462,17 @@ fn reaching_abi_return_register_in_block(
     let block = function.get_block(block_addr)?;
     let mut reverse_overlays = Vec::new();
 
+    r2il::refusal_evidence!(
+        "return-register-walk",
+        "({block_addr:#x}, {boundary_op_index}) of {} ops, looking for {storage:?}",
+        block.ops.len()
+    );
     for (op_index, op) in block.ops.get(..boundary_op_index)?.iter().enumerate().rev() {
         if crate::reaching_rules::op_ends_reaching_walk(op) {
+            r2il::refusal_evidence!(
+                "return-register-walk",
+                "({block_addr:#x}, {op_index}) ends the walk: {op:?}"
+            );
             return None;
         }
         if op.dst().is_none() {
@@ -4502,6 +4511,11 @@ fn reaching_abi_return_register_in_block(
             return Some(ReachingAbiReturnRegister::Composition(composition));
         }
         let offset_bytes = contained_register_storage_offset(storage, dst_storage)?;
+        // A call's alias clobber (`CallDefine EAX` beside `CallDefine RAX`)
+        // is the same event as the carrier's, not a partial write over it.
+        if matches!(op, SSAOp::CallDefine { .. }) {
+            continue;
+        }
         reverse_overlays.push(SourceReturnRegisterOverlayFact {
             definition,
             offset_bytes,
@@ -4519,6 +4533,11 @@ fn reaching_abi_return_register_in_block(
         )
         .map(ReachingAbiReturnRegister::Exact)
     } else {
+        r2il::refusal_evidence!(
+            "return-register-walk",
+            "({block_addr:#x}, {boundary_op_index}) has {} partial overlays of {storage:?} and no full definition",
+            reverse_overlays.len()
+        );
         None
     }
 }
@@ -4770,6 +4789,11 @@ fn reaching_abi_value_before(
     let mut path_visited = visited.clone();
     path_visited.insert(block_addr);
     let block = function.get_block(block_addr)?;
+    r2il::refusal_evidence!(
+        "reaching-abi-value",
+        "walk ({block_addr:#x}, {boundary_op_index}) of {} ops for {storage:?}",
+        block.ops.len()
+    );
     for (op_index, op) in block.ops.get(..boundary_op_index)?.iter().enumerate().rev() {
         // A call's clobbers are the `CallDefine`s that follow it, each a
         // definition the overlap check below sees; the call itself is a
@@ -4781,6 +4805,10 @@ fn reaching_abi_value_before(
                         .transfer_carrier
                         .is_some_and(|carrier| register_storages_overlap(carrier, storage))))
         {
+            r2il::refusal_evidence!(
+                "reaching-abi-value",
+                "({block_addr:#x}, {op_index}) is a barrier for {storage:?}: {op:?}"
+            );
             return None;
         }
         if op.dst().is_none() {
@@ -4790,12 +4818,30 @@ fn reaching_abi_value_before(
             continue;
         };
         let Some(dst_storage) = graph.inst(producer).and_then(|inst| inst.canonical_storage) else {
+            // A definition with no canonical storage is invisible to this
+            // walk, and the walk then answers with an older definition or the
+            // entry carrier as if nothing had been written here. Say so.
+            r2il::refusal_evidence!(
+                "reaching-abi-value",
+                "({block_addr:#x}, {op_index}) defines {:?} with no canonical storage; skipped while looking for {storage:?}",
+                op.dst()
+            );
             continue;
         };
         if !register_storages_overlap(dst_storage, storage) {
             continue;
         }
         if dst_storage != storage {
+            // A call defines every clobbered carrier and every alias of it
+            // as one event: `CallDefine RAX` and `CallDefine EAX` are the
+            // same clobber seen at two widths, not a full write followed by a
+            // partial one. The alias is skipped so the walk reaches the
+            // carrier's own definition in the same group.
+            if matches!(op, SSAOp::CallDefine { .. })
+                && contained_register_storage_offset(storage, dst_storage).is_some()
+            {
+                continue;
+            }
             // A later overlapping slice means an older exact-width definition
             // is not the value at this boundary. Generic boundary recovery has
             // no implicit register-merge semantics, so it must fail closed.
@@ -4807,6 +4853,11 @@ fn reaching_abi_value_before(
             );
             return None;
         }
+        r2il::refusal_evidence!(
+            "reaching-abi-value",
+            "({block_addr:#x}, {op_index}) defines {storage:?}: {:?}",
+            graph.inst(producer).and_then(|inst| inst.output)
+        );
         return graph
             .inst(producer)
             .and_then(|inst| inst.output)
@@ -4833,12 +4884,21 @@ fn reaching_abi_value_before(
             .then_some(ReachingAbiState::Value(*first));
     }
     if !phi_insts.is_empty() {
+        r2il::refusal_evidence!(
+            "reaching-abi-value",
+            "{block_addr:#x} has {} phis for {storage:?}",
+            phi_insts.len()
+        );
         return None;
     }
     let predecessors = function.predecessors(block_addr);
     if predecessors.is_empty() {
         let block_id = graph.block_by_addr.get(&block_addr)?;
         if *block_id != graph.entry {
+            r2il::refusal_evidence!(
+                "reaching-abi-value",
+                "{block_addr:#x} has no predecessors and is not the entry"
+            );
             return None;
         }
         let candidates = graph
@@ -4852,6 +4912,11 @@ fn reaching_abi_value_before(
             })
             .map(|value| value.id)
             .collect::<Vec<_>>();
+        r2il::refusal_evidence!(
+            "reaching-abi-value",
+            "{storage:?} reaches the entry from {block_addr:#x}: {} entry candidates",
+            candidates.len()
+        );
         return match candidates.as_slice() {
             [value] => Some(ReachingAbiState::Value(*value)),
             [] => Some(ReachingAbiState::PreservedEntry),
