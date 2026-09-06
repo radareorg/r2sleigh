@@ -3733,26 +3733,12 @@ fn render_engine_decompile_request<C: r2ssa::SsaWorkControl>(
     control: &C,
 ) -> Result<EngineRenderedDecompile, EngineRenderExecutionStop> {
     poll_engine_render_control(control, EnginePhase::Rendering)?;
-    if let Some(output) = render_semantic_route(
-        &request.function_name,
-        request.function_facts(),
-        &request.render_target,
-    ) {
-        poll_engine_render_control(control, EnginePhase::Rendering)?;
-        return Ok(EngineRenderedDecompile {
-            product: EngineRenderedProduct::Ready(Box::new(ReadyEngineRenderedProduct {
-                output,
-                binding_audit: BindingShadowAuditOutcome::NotRun,
-                effect_obligations: EffectObligationAudit::NOT_RUN,
-                placement_audit: PlacementAudit::NotRun,
-                render_refusal: None,
-            })),
-            semantic_kernel_warnings: Vec::new(),
-            structuring_executed: false,
-            stopped: None,
-        });
-    }
-
+    // The route's own comment used to be returned here, as the whole
+    // rendering, before the decompiler was constructed. It carried no audit,
+    // no ledger and no refusal, so a function answered this way was reported
+    // as rendered and fully proven while nothing about it had been proven at
+    // all. The route is advice about the function; only the native
+    // certificates answer for it.
     let input = decompiler_input_for_engine_request(request);
     // Keep a rendering the decompiler reached before it stopped. Discarding it
     // reports a function that ran out of budget as one that produced nothing,
@@ -4874,14 +4860,6 @@ fn certified_out_param_labels(type_facts: &FunctionTypeFacts) -> Vec<String> {
             }
         })
         .collect()
-}
-
-pub fn render_semantic_route(
-    function_name: &str,
-    function_facts: &FunctionFacts,
-    _config: &EngineRenderTarget,
-) -> Option<String> {
-    decompile_route_output_from_function_facts(function_name, function_facts)
 }
 
 fn current_interproc_summary(

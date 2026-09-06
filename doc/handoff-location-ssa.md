@@ -13420,3 +13420,72 @@ condition, not in restoring the gate. The cut is saved as
 is restored meanwhile: it still carries the machinery, but nothing consumes
 it any more, so the deletion is now a pure subtraction whenever that
 condition is understood.
+
+## Only the native certificates answer for a function
+
+The engine and the decompiler each carried a shortcut that returned prose
+before the native pipeline was asked anything. The engine's
+`render_engine_decompile_request` called `render_semantic_route` first and,
+whenever the route facts carried a fallback comment, returned that comment as
+the whole rendering -- with `BindingShadowAuditOutcome::NotRun`,
+`EffectObligationAudit::NOT_RUN`, `PlacementAudit::NotRun` and no refusal. The
+decompiler mirrored it twice, in `prepare_decompile_with_control` and in
+`build_product_from_input_with_control`, turning the four summary route kinds
+into a two-comment body:
+
+```c
+/* r2dec summary: summary_route for ... */
+/* render contract: summary facts only; no executable native C reconstructed */
+```
+
+Nothing downstream could tell that body from a rendered function. The census
+counted it as rendered, DecBench's raw runner counted it as rendered and as
+fully proven, and the proof line had nothing to say because no ledger had been
+built. Nine functions across the six local binaries were reported this way.
+
+**The rule.** The semantic artifact and the route derived from it are evidence
+about a function; they are not permission to render one and not a refusal of
+one. Only the native certificates answer. What the route still supplies is what
+a reader gets *after* native lowering refuses, which is the refusal's own
+comment, and the advisory annotations the artifact still contributes to a
+rendered body.
+
+**What this cost and what it bought.** Six of the nine functions now refuse for
+a named, traceable cause, which is the honest answer and puts them back in the
+census where the work can find them. Three of them render:
+`unRLE_obuf_to_output_FAST` at 1 313 lines with 2 419 source obligations of
+which none is refused, `unRLE_obuf_to_output_SMALL`, and `BZ2_bzRead`. Local
+refusals move 78 to 84 and the nine prose bodies to zero, so the six-binary
+rendered count is unchanged while the coverage it reports is now true.
+
+**What was deleted with it.** `consumer_summary.rs` and `consumer_vm.rs`
+entirely, the two public entry points nothing called
+(`render_semantic_worker_summary`, `render_vm_semantic_summary`), the route
+predicates and residual builders, `render_semantic_route`, and the 28 tests
+that pinned the prose. `primary_body_for_semantic_route` lost its route
+argument -- every arm had already converged on the same native body -- and is
+now `primary_native_body`. That is 5 100 lines removed against 150 added.
+
+### A hostile function name reaches the declaration, not only a comment
+
+Deleting the pre-emption exposed a defect it had been hiding. A source name is
+arbitrary bytes -- a radare2 flag, an ELF symbol, a DWARF string -- and the
+rendering spelled it straight into the C declaration. The functions carrying
+such a name had never rendered before, so the fixture that proves it
+(`raw_fallback_comments_regenerate_and_sanitize_hostile_text`, with the name
+`bad */\nint injected`) had only ever exercised the comment path. With native
+lowering reaching it, the name closed the type comment in front of it and
+opened a second function inside the output.
+
+The fix is one owner. `rendered_function_name` in `r2dec` is the only place
+that decides what a function is called in the output, and it sanitizes through
+`r2types::sanitize_c_identifier`, falling back to the `sub_<addr>` form when
+nothing of the name survives. Twelve hand-rolled copies of
+`func.name.clone().unwrap_or_else(...)` now call it.
+
+`sanitize_c_identifier` itself had three near-identical private copies in
+`r2types` (`writeback.rs`, `context.rs`, `signature_infer.rs`). They are one
+public function now, and the consolidation fixed a live difference: the
+`signature_infer` copy trimmed leading and trailing underscores, so a DWARF
+parameter named `_x` was renamed `x` and `_init` would have been renamed
+`init`. Leading and trailing underscores are part of a name and are kept.

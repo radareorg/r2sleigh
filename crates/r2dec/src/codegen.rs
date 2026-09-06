@@ -2,10 +2,9 @@
 //!
 //! This module generates readable C source code from the AST.
 
-use crate::ast::{
-    BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp, has_render_observations,
-    stmt_has_render_observations,
-};
+#[cfg(test)]
+use crate::ast::stmt_has_render_observations;
+use crate::ast::{BinaryOp, CExpr, CFunction, CStmt, CType, UnaryOp, has_render_observations};
 use crate::observation_journal::ObservationSealAuthority;
 
 /// Threshold for detecting 64-bit negative values stored as unsigned.
@@ -272,6 +271,7 @@ impl CodeGenerator {
     }
 
     /// Generate code for a statement.
+    #[cfg(test)]
     pub(crate) fn generate_stmt(&mut self, stmt: &CStmt) -> String {
         assert!(
             !stmt_has_render_observations(stmt),

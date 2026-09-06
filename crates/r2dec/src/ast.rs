@@ -1456,6 +1456,7 @@ pub(crate) fn expr_has_render_observations(expr: &CExpr) -> bool {
 }
 
 /// Whether one statement subtree contains any render observation marker.
+#[cfg(test)]
 pub(crate) fn stmt_has_render_observations(stmt: &CStmt) -> bool {
     let mut found = false;
     let never = visit_stmt_observations(stmt, &mut |_| {

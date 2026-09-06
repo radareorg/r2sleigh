@@ -1,5 +1,6 @@
 #[cfg(test)]
 use r2ssa::SSAVar;
+#[cfg(test)]
 use r2ssa::SSAVarNameKind;
 
 #[cfg(test)]
@@ -24,6 +25,7 @@ pub(crate) fn parse_const_value(name: &str) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn ssa_name_kind(name: &str) -> SSAVarNameKind {
     let lower = name.to_ascii_lowercase();
     SSAVarNameKind::classify(&lower)
@@ -42,6 +44,7 @@ pub(crate) fn is_temporary_or_memory_name(name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn is_temporary_constant_or_memory_name(name: &str) -> bool {
     matches!(
         ssa_name_kind(name),
