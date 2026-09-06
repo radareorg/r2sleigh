@@ -13349,8 +13349,17 @@ predicate and the plugin's own copy ask it. The local census is unchanged at
 
 **PR status.** #26672 (POSIX and glibc prototypes) and #26674 (frame-pointer
 variables) are merged. #26673 (typedef of void) was merged by hand as
-`a38d49c28a`. #26675 (lstat) was closed for a failing test: the
-`db/cmd/cmd_k` snapshot of the type database still expected
-`func.lstat.ret=void`, and it is reopened as #26679 with the snapshot
-updated in the same commit. #26676 is updated with the narrowed fix and a
-reply explaining the regression.
+`a38d49c28a`. #26675 (lstat) was closed for a failing test, the
+`db/cmd/cmd_k` snapshot that still expected `func.lstat.ret=void`; the
+maintainer then took the change himself with the snapshot, so master carries
+both and the reopened #26679 was redundant and is closed. #26676 carries the
+narrowed fix and is green: every remaining CI failure on both branches was
+`test/db/esil/arm_32, line 3580: Test without CMDS key`, a malformed record
+on the older master the branches were based on that upstream's 6.2.2 release
+commit repaired, so rebasing cleared it. All twenty checks pass and it is
+mergeable.
+
+The lesson worth keeping: a red check on a PR is not evidence that the PR is
+wrong. Two of the three failing jobs here were upstream's own breakage
+inherited through the base commit, and one was mine; separating them took
+reading master's own runs rather than only the branch's.
