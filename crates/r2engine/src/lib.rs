@@ -4249,11 +4249,10 @@ fn maybe_compile_semantic_artifact_for_analysis(
     interproc_summaries: Option<&r2ssa::PreparedInterprocSummarySet>,
     execution: &r2sym::SymExecutionControl,
 ) -> Option<r2sym::SemanticArtifact> {
-    let root_summary = interproc_summaries.and_then(prepared_root_summary);
-    if should_probe_native_worker_summary_before_full_semantics(ssa_func, root_summary) {
+    if should_probe_native_worker_summary_before_full_semantics(ssa_func) {
         let vm_route_evidence = r2sym::has_strong_vm_evidence(ssa_func);
         if !vm_route_evidence
-            && should_skip_unbounded_semantic_artifact_after_worker_preprobe(ssa_func, root_summary)
+            && should_skip_unbounded_semantic_artifact_after_worker_preprobe(ssa_func)
         {
             return None;
         }
@@ -4278,16 +4277,7 @@ fn maybe_compile_semantic_artifact_for_analysis(
     ))
 }
 
-fn should_skip_unbounded_semantic_artifact_after_worker_preprobe(
-    ssa_func: &SsaArtifact,
-    root_summary: Option<&r2ssa::FunctionSemanticSummary>,
-) -> bool {
-    if root_summary.is_some_and(|summary| {
-        let policy = r2sym::native_worker_summary_route_policy_for_summary(summary.id.0, summary);
-        policy.should_use_direct_summary() || policy.should_prefer_full()
-    }) {
-        return false;
-    }
+fn should_skip_unbounded_semantic_artifact_after_worker_preprobe(ssa_func: &SsaArtifact) -> bool {
     if r2sym::has_strong_vm_evidence(ssa_func) {
         return false;
     }
@@ -4301,7 +4291,6 @@ fn compile_semantic_artifact_for_analysis(
     interproc_summaries: Option<&r2ssa::PreparedInterprocSummarySet>,
     execution: &r2sym::SymExecutionControl,
 ) -> r2sym::SemanticArtifact {
-    let root_summary = interproc_summaries.and_then(prepared_root_summary);
     let vm_route_evidence = r2sym::has_strong_vm_evidence(ssa_func);
     if !vm_route_evidence
         && let Some(summaries) = interproc_summaries
@@ -4311,7 +4300,7 @@ fn compile_semantic_artifact_for_analysis(
         return artifact;
     }
     if !vm_route_evidence
-        && should_probe_native_worker_summary_before_full_semantics(ssa_func, root_summary)
+        && should_probe_native_worker_summary_before_full_semantics(ssa_func)
         && let Some(artifact) =
             r2sym::compile_native_worker_summary_artifact(ssa_func, interproc_summaries, false)
         && artifact
@@ -4331,24 +4320,7 @@ fn compile_semantic_artifact_for_analysis(
     artifact
 }
 
-fn prepared_root_summary(
-    summaries: &r2ssa::PreparedInterprocSummarySet,
-) -> Option<&r2ssa::FunctionSemanticSummary> {
-    let report = summaries.report();
-    report.root.and_then(|root| report.summaries.get(&root))
-}
-
-fn should_probe_native_worker_summary_before_full_semantics(
-    ssa_func: &SsaArtifact,
-    root_summary: Option<&r2ssa::FunctionSemanticSummary>,
-) -> bool {
-    if root_summary.is_some_and(|summary| {
-        let policy = r2sym::native_worker_summary_route_policy_for_summary(summary.id.0, summary);
-        policy.should_use_direct_summary() || policy.should_prefer_full()
-    }) {
-        return true;
-    }
-
+fn should_probe_native_worker_summary_before_full_semantics(ssa_func: &SsaArtifact) -> bool {
     let cfg = ssa_func.function().cfg_risk_summary();
     if cfg.block_count == 0 || cfg.block_count > 64 {
         return false;
@@ -7494,11 +7466,10 @@ mod tests {
             .with_name("dbg.straight_worker");
 
         assert!(should_probe_native_worker_summary_before_full_semantics(
-            &loop_ssa, None
+            &loop_ssa
         ));
         assert!(!should_probe_native_worker_summary_before_full_semantics(
-            &straight_ssa,
-            None
+            &straight_ssa
         ));
     }
 
@@ -7520,7 +7491,7 @@ mod tests {
             .with_name("dbg.flag_expanded_loop_worker");
 
         assert!(should_probe_native_worker_summary_before_full_semantics(
-            &loop_ssa, None
+            &loop_ssa
         ));
     }
 
@@ -7537,7 +7508,7 @@ mod tests {
                 .with_name("dbg.loop_worker_without_summary"),
         );
 
-        assert!(should_skip_unbounded_semantic_artifact_after_worker_preprobe(&loop_ssa, None));
+        assert!(should_skip_unbounded_semantic_artifact_after_worker_preprobe(&loop_ssa));
         assert!(
             maybe_compile_semantic_artifact_for_analysis(
                 &loop_ssa,
@@ -7559,13 +7530,13 @@ mod tests {
         );
 
         assert!(should_probe_native_worker_summary_before_full_semantics(
-            &vm_ssa, None
+            &vm_ssa
         ));
         assert!(
             r2sym::has_strong_vm_evidence(&vm_ssa),
             "test fixture must carry enough structural VM evidence to justify bypassing the refusal gate"
         );
-        assert!(!should_skip_unbounded_semantic_artifact_after_worker_preprobe(&vm_ssa, None));
+        assert!(!should_skip_unbounded_semantic_artifact_after_worker_preprobe(&vm_ssa));
 
         let artifact = maybe_compile_semantic_artifact_for_analysis(
             &vm_ssa,

@@ -1687,20 +1687,6 @@ fn residual_function_for_summary_route_boundary(
     func
 }
 
-fn summary_only_semantics_standard_render_residual_reason(
-    route: Option<&DecompileRouteFacts>,
-    semantics: Option<&r2sym::SemanticArtifactReport>,
-) -> Option<String> {
-    let route = route?;
-    if route.kind != r2types::DecompileRouteKind::Standard {
-        return None;
-    }
-    let semantics = semantics?;
-    (semantics.granularity == r2sym::ArtifactGranularity::SummaryOnly).then(|| {
-        "r2dec residual: summary-only semantic artifact cannot authorize Standard executable C; route must stay summary/residual until native CFG/control/dataflow facts are certified".to_string()
-    })
-}
-
 fn missing_decompile_route_residual_comment(func_name: &str) -> String {
     artifact_guard_fallback_comment(
         func_name,
@@ -3818,16 +3804,6 @@ impl Decompiler {
                 DecompileBindingAudit::not_run(artifact_guard_fallback_comment(&func_name, reason)),
             ));
         }
-        if let Some(reason) = summary_only_semantics_standard_render_residual_reason(
-            function_facts.decompile_route(),
-            function_facts.semantic_report(),
-        ) {
-            return Ok(PreparedDecompile::Immediate(
-                DecompileBindingAudit::not_run(artifact_guard_fallback_comment(
-                    &func_name, &reason,
-                )),
-            ));
-        }
         if let Some(output) =
             self.vm_summary_output_for_route(&func_name, function_facts, semantic_route)
         {
@@ -4027,14 +4003,6 @@ impl Decompiler {
         if let Some(reason) = route_fallback_reason(semantic_route) {
             return Ok(InternalBuildProduct::residual(
                 residual_function_for_render_boundary(&func_name, reason),
-            ));
-        }
-        if let Some(reason) = summary_only_semantics_standard_render_residual_reason(
-            decompiler.context.function_facts.decompile_route(),
-            decompiler.context.function_facts.semantic_report(),
-        ) {
-            return Ok(InternalBuildProduct::residual(
-                residual_function_for_render_boundary(&func_name, &reason),
             ));
         }
         if route_is_summary_boundary(semantic_route) {
@@ -7918,34 +7886,6 @@ mod tests {
                 .any(|stmt| matches!(stmt, CStmt::Return(_))),
             "fallback route AST must not contain executable returns: {:?}",
             built.body
-        );
-    }
-
-    #[test]
-    fn report_only_standard_summary_semantics_residualizes() {
-        let semantic_report = test_native_semantic_report(
-            r2sym::RefinementStage::Compiled,
-            r2sym::ArtifactGranularity::SummaryOnly,
-            r2sym::SliceClass::Worker,
-            false,
-            Vec::new(),
-            Vec::new(),
-        );
-        let route = test_decompile_route(
-            r2types::DecompileRouteKind::Standard,
-            "bad standard route over summary-only semantics",
-            None,
-        );
-        let reason = summary_only_semantics_standard_render_residual_reason(
-            Some(&route),
-            Some(&semantic_report),
-        )
-        .expect("summary-only report must reject Standard rendering");
-
-        assert!(
-            reason
-                .contains("summary-only semantic artifact cannot authorize Standard executable C"),
-            "summary-only semantics must reject Standard output, got: {reason}"
         );
     }
 

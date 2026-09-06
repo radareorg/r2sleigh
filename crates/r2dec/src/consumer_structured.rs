@@ -42,24 +42,17 @@ where
     F: FnMut() -> ControlFlowStructureResult<Vec<CStmt>>,
     R: FnMut(),
 {
+    // Every route renders natively. The semantic artifact says what a slice
+    // looks like from the interpreter's side; it is evidence about the
+    // function, not permission to render one, and a summary that pre-empted
+    // the native attempt turned a body the certificates could have proven
+    // into two lines of prose. What the route still decides is what a reader
+    // gets when native lowering refuses, which is the refusal's own comment.
     match route.kind {
-        r2types::DecompileRouteKind::StructuredWorker => Ok(RoutedBody {
-            body_stmt: Some(semantic_worker_comment_only_body(
-                "structured_worker",
-                crate::route_reason(route),
-            )),
-            structured_body: None,
-        }),
-        r2types::DecompileRouteKind::LinearWorker | r2types::DecompileRouteKind::SummaryIslands => {
-            Ok(RoutedBody {
-                body_stmt: Some(semantic_worker_comment_only_body(
-                    "summary_route",
-                    crate::route_reason(route),
-                )),
-                structured_body: None,
-            })
-        }
-        r2types::DecompileRouteKind::VmSummary
+        r2types::DecompileRouteKind::StructuredWorker
+        | r2types::DecompileRouteKind::LinearWorker
+        | r2types::DecompileRouteKind::SummaryIslands
+        | r2types::DecompileRouteKind::VmSummary
         | r2types::DecompileRouteKind::FallbackComment
         | r2types::DecompileRouteKind::Standard => {
             let structured = structurer.structure_with_regions();
@@ -102,17 +95,4 @@ where
             }
         }
     }
-}
-
-pub(crate) fn semantic_worker_comment_only_body(route: &str, reason: &str) -> CStmt {
-    CStmt::Block(vec![
-        CStmt::comment(format!(
-            "r2dec summary: {} for {}",
-            route,
-            crate::sanitize_comment_text(reason)
-        )),
-        CStmt::comment(
-            "render contract: summary facts only; no executable native C reconstructed".to_string(),
-        ),
-    ])
 }

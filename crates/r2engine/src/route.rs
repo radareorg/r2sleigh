@@ -401,26 +401,11 @@ pub(crate) fn semantic_route_plan_from_context(
             None,
         );
     }
-    if let Some(artifact) = context.function_facts.semantic_artifact()
-        && artifact.execution == r2sym::ExecutionModel::Native
-        && artifact.granularity == r2sym::ArtifactGranularity::SummaryOnly
-    {
-        let comment = crate::semantic_fallback_comment_for_facts(
-            context.func_name,
-            context.function_facts,
-        )
-        .unwrap_or_else(|| {
-            crate::artifact_guard_fallback_comment(
-                context.func_name,
-                "summary-only semantic report is advisory and cannot authorize executable C",
-            )
-        });
-        return provisional_decompile_route(
-            r2types::DecompileRouteKind::FallbackComment,
-            Some(comment.clone()),
-            Some(comment),
-        );
-    }
+    // A summary-only semantic artifact used to stop the rendering here, before
+    // the native pipeline was asked anything. That is the wrong precedence: the
+    // semantic report is advisory, and only the native certificates can refuse
+    // a function. The artifact still enriches what renders, and its comment is
+    // still what a reader gets when native lowering refuses.
     if let Some(comment) =
         preferred_semantic_fallback_comment(context.func_name, context.function_facts)
     {
@@ -458,15 +443,6 @@ pub(crate) fn semantic_route_plan_from_context(
         .filter(|_| context.has_renderable_semantic_claims())
     {
         return route;
-    }
-    if let Some(comment) =
-        preferred_unrenderable_summary_fallback_comment(context.func_name, context.function_facts)
-    {
-        return provisional_decompile_route(
-            r2types::DecompileRouteKind::FallbackComment,
-            Some(comment.clone()),
-            Some(comment),
-        );
     }
     provisional_decompile_route(r2types::DecompileRouteKind::Standard, None, None)
 }
@@ -669,36 +645,6 @@ fn preferred_semantic_fallback_comment(
         return crate::semantic_fallback_comment_for_facts(func_name, function_facts);
     }
     None
-}
-
-fn preferred_unrenderable_summary_fallback_comment(
-    func_name: &str,
-    function_facts: &FunctionFacts,
-) -> Option<String> {
-    let artifact = function_facts.semantic_artifact()?;
-    if artifact.granularity != r2sym::ArtifactGranularity::SummaryOnly
-        || artifact.diagnostics.skipped_large_cfg
-        || !matches!(
-            artifact.decompile_plan(),
-            r2sym::DecompilePlan::NativeLinear { .. }
-        )
-    {
-        return None;
-    }
-    let native = artifact.native_body()?;
-    if native_body_has_renderable_worker_summary(native) {
-        return None;
-    }
-    Some(
-        crate::semantic_fallback_comment_for_facts(func_name, function_facts).unwrap_or_else(
-            || {
-                crate::artifact_guard_fallback_comment(
-                    func_name,
-                    "summary-only native linear artifact without renderable worker summary",
-                )
-            },
-        ),
-    )
 }
 
 fn preferred_semantic_linearization_reason(context: &EngineRouteContext<'_>) -> Option<String> {

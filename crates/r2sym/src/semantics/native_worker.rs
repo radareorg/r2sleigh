@@ -149,16 +149,6 @@ pub struct NativeWorkerSummaryRoutePolicy {
 }
 
 impl NativeWorkerSummaryRoutePolicy {
-    pub fn should_use_direct_summary(&self) -> bool {
-        self.kind == NativeWorkerSummaryRouteKind::DirectSummary
-            && self.has_certificate_for_kind(NativeWorkerSummaryRouteKind::DirectSummary)
-    }
-
-    pub fn should_prefer_full(&self) -> bool {
-        self.kind == NativeWorkerSummaryRouteKind::PreferFull
-            && self.has_certificate_for_kind(NativeWorkerSummaryRouteKind::PreferFull)
-    }
-
     pub fn has_route_certificate(&self) -> bool {
         self.has_certificate_for_kind(self.kind)
     }
@@ -7980,8 +7970,6 @@ mod tests {
             .collect::<Vec<_>>();
         for policy in &policies {
             assert_eq!(policy.kind, NativeWorkerSummaryRouteKind::Standard);
-            assert!(!policy.should_use_direct_summary());
-            assert!(!policy.should_prefer_full());
             assert!(
                 !policy
                     .applicability
@@ -8087,7 +8075,6 @@ mod tests {
 
         assert_eq!(policy.kind, NativeWorkerSummaryRouteKind::Standard);
         assert!(!policy.has_route_certificate());
-        assert!(!policy.should_use_direct_summary());
     }
 
     #[test]
@@ -8110,7 +8097,6 @@ mod tests {
 
         assert_eq!(policy.kind, NativeWorkerSummaryRouteKind::Standard);
         assert!(!policy.has_route_certificate());
-        assert!(!policy.should_use_direct_summary());
     }
 
     #[test]
@@ -8124,7 +8110,6 @@ mod tests {
         let policy = native_worker_summary_route_policy_for_summary(0x401000, &summary);
 
         assert_eq!(policy.kind, NativeWorkerSummaryRouteKind::Standard);
-        assert!(!policy.should_use_direct_summary());
         assert!(
             policy.certificate.is_none(),
             "unrelated structural evidence must not certify the error_tail route"
