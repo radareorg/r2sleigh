@@ -13329,3 +13329,28 @@ functions: `missing_definition` 59, `OpLowering(implementation.rs:1349)` 27,
 `unrepresentable operation` 13, the structuring deadline 10,
 `region_does_not_dominate_occurrence` 10. Stack aggregates are 78 of the
 230, which confirms C2 as the next item at wide scale and not only locally.
+
+### Upstream review: the type-namespace fix was too broad
+
+radare2's maintainer read the type-namespace PR (#26676) and found a
+regression, correctly. Making `r_type_func_exist` consult `func.NAME.*`
+changed the question the DWARF importer asks with it: on reimport it saw the
+leftover `func.Mammal.ret` from the first pass, concluded the name was still
+free of a collision, and left a constructor's typed name on the `Mammal`
+struct tag, so the prototype degraded from `Mammal *this` to `int64_t arg1`.
+That was the single unexpected failure in the branch's CI.
+
+The two questions are now apart, upstream and in the fork.
+`r_type_func_exist` is the kind-key question the importer needs;
+`r_type_func_prototype_exist` is the prototype question, and only
+`type_func_lookup`, the signature lookup in `fcn.c`, the address-linked
+predicate and the plugin's own copy ask it. The local census is unchanged at
+78 refusals, so the narrower rule keeps everything the broad one gained.
+
+**PR status.** #26672 (POSIX and glibc prototypes) and #26674 (frame-pointer
+variables) are merged. #26673 (typedef of void) was merged by hand as
+`a38d49c28a`. #26675 (lstat) was closed for a failing test: the
+`db/cmd/cmd_k` snapshot of the type database still expected
+`func.lstat.ret=void`, and it is reopened as #26679 with the snapshot
+updated in the same commit. #26676 is updated with the narrowed fix and a
+reply explaining the regression.
