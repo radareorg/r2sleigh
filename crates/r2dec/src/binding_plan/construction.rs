@@ -986,7 +986,12 @@ impl BindingPlan {
                     );
                     continue;
                 }
-                match source_slot.role() {
+                match super::rules::effective_stack_slot_role(
+                    source_owned,
+                    &source_slot,
+                    *base,
+                    *offset,
+                ) {
                     r2ssa::SourceStackSlotRole::Local => {
                         let Some(binding) = BindingId::from_dense_index(bindings.len()) else {
                             return Err(BindingPlanBuildError::TooManyBindings {
@@ -1039,6 +1044,43 @@ impl BindingPlan {
                                 *object,
                                 StackObjectDisposition::Refused {
                                     reason: StackObjectRefusal::ParameterHomeWidthMismatch {
+                                        object: *object,
+                                        parameter_index,
+                                        slot_width_bits: width_bits,
+                                        parameter_width_bits,
+                                    },
+                                },
+                            );
+                            continue;
+                        }
+                        stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
+                    }
+                    // A parameter the convention passes on the stack is its
+                    // own slot: the object is the parameter, so it takes the
+                    // parameter's binding, and every read of it is a read of
+                    // a value the caller supplied.
+                    r2ssa::SourceStackSlotRole::Parameter { parameter_index } => {
+                        let Some(ParameterDisposition::Bound {
+                            binding,
+                            width_bits: parameter_width_bits,
+                        }) = parameters.get(parameter_index as usize).copied().flatten()
+                        else {
+                            stack_objects.insert(
+                                *object,
+                                StackObjectDisposition::Refused {
+                                    reason: StackObjectRefusal::StackParameterUnavailable {
+                                        object: *object,
+                                        parameter_index,
+                                    },
+                                },
+                            );
+                            continue;
+                        };
+                        if parameter_width_bits != width_bits {
+                            stack_objects.insert(
+                                *object,
+                                StackObjectDisposition::Refused {
+                                    reason: StackObjectRefusal::StackParameterWidthMismatch {
                                         object: *object,
                                         parameter_index,
                                         slot_width_bits: width_bits,

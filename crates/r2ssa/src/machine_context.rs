@@ -24,8 +24,8 @@ pub use r2source::{
     SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection,
     SourceConventionSlots, SourceFunctionInterface, SourceFunctionInterfaceError,
     SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError,
-    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
-    SourceType, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
+    SourceParameterLocation, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
+    SourceStackSlotSpec, SourceType, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
     SourceVariadicArgumentCountRule, StackAddressBase,
 };
 
@@ -171,12 +171,18 @@ impl MachineAbiModel {
         let Some(interface) = interface else {
             return Self::unavailable();
         };
+        // The register slots only: a parameter the convention passes on the
+        // stack is a frame object, and the object model answers for it.
         let argument_registers = interface
             .parameters()
             .iter()
-            .map(|parameter| MachineAbiRegisterSlot {
-                index: parameter.index(),
-                storage: parameter.storage(),
+            .filter_map(|parameter| {
+                parameter
+                    .register_storage()
+                    .map(|storage| MachineAbiRegisterSlot {
+                        index: parameter.index(),
+                        storage,
+                    })
             })
             .collect::<Vec<_>>();
         let return_registers = match interface.return_kind() {
@@ -650,6 +656,23 @@ fn write_memory_endianness(
     });
 }
 
+fn write_parameter_location_identity(
+    writer: &mut MachineContextIdentityWriter,
+    location: SourceParameterLocation,
+) {
+    match location {
+        SourceParameterLocation::Register(storage) => {
+            writer.u8(0);
+            writer.storage(storage);
+        }
+        SourceParameterLocation::Stack { offset, size_bytes } => {
+            writer.u8(1);
+            writer.i64(offset);
+            writer.u32(size_bytes);
+        }
+    }
+}
+
 fn write_abi_class(writer: &mut MachineContextIdentityWriter, abi_class: SourceAbiClass) {
     writer.u8(match abi_class {
         SourceAbiClass::Unknown => 0,
@@ -753,7 +776,7 @@ fn write_function_interface(
     writer.usize(interface.parameters().len());
     for parameter in interface.parameters() {
         writer.u32(parameter.index());
-        writer.storage(parameter.storage());
+        write_parameter_location_identity(writer, parameter.location());
     }
     match interface.return_kind() {
         SourceFunctionReturn::Void => writer.u8(0),
@@ -782,6 +805,10 @@ fn write_function_interface(
                 writer.u8(3);
                 writer.u32(parameter_index);
                 writer.storage(home_storage);
+            }
+            SourceStackSlotRole::Parameter { parameter_index } => {
+                writer.u8(4);
+                writer.u32(parameter_index);
             }
         }
     }
@@ -821,7 +848,7 @@ fn write_call_site_interface(
     writer.usize(interface.arguments().len());
     for argument in interface.arguments() {
         writer.u32(argument.index());
-        writer.storage(argument.storage());
+        write_parameter_location_identity(writer, argument.location());
     }
     writer.bool(interface.is_variadic());
     match interface.variadic_argument_count_rule() {
@@ -1002,7 +1029,7 @@ impl SourceMachineContext {
             let declared_storages_exist = interface
                 .parameters()
                 .iter()
-                .map(SourceAbiParameterSpec::storage)
+                .filter_map(SourceAbiParameterSpec::register_storage)
                 .chain(match interface.return_kind() {
                     SourceFunctionReturn::Void => None,
                     SourceFunctionReturn::Register { storage } => Some(storage),
@@ -1095,7 +1122,7 @@ impl SourceMachineContext {
             let carriers_exist = interface
                 .arguments()
                 .iter()
-                .map(|argument| argument.storage())
+                .filter_map(|argument| argument.register_storage())
                 .chain(match interface.result() {
                     SourceCallResult::Void => None,
                     SourceCallResult::Register { storage } => Some(storage),

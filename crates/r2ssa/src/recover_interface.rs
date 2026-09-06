@@ -13,7 +13,8 @@ use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SourceAbiParameterSpec, SourceCallArgumentSpec,
     SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface, SourceCarrierKind,
     SourceCarrierProjection, SourceConventionSlots, SourceFunctionInterface, SourceFunctionReturn,
-    SourceLogicalValue, SourceMachineRoles, SourceType, SourceTypeGraph, SourceTypeKind,
+    SourceLogicalValue, SourceMachineRoles, SourceParameterLocation, SourceType, SourceTypeGraph,
+    SourceTypeKind,
 };
 
 use crate::function::SSAFunction;
@@ -658,10 +659,26 @@ pub fn mint_recovered_call_site_interface(
     identity: SourceCallSiteIdentity,
     revision_identity: &[u8],
 ) -> Option<SourceCallSiteInterface> {
-    let arguments = callee
-        .parameters()
-        .iter()
-        .map(|parameter| SourceCallArgumentSpec::new(parameter.index(), parameter.storage()));
+    // A stack parameter is named from the callee's entry stack pointer; the
+    // call site names the same slot from its own stack pointer before the
+    // transfer spends the return-address slot the callee's mechanism states.
+    let spent = callee.return_mechanism().map_or(0, |mechanism| {
+        i64::from(mechanism.stack_pointer_delta_bytes())
+    });
+    let arguments = callee.parameters().iter().map(|parameter| {
+        let location = match parameter.location() {
+            SourceParameterLocation::Register(storage) => {
+                SourceParameterLocation::Register(storage)
+            }
+            SourceParameterLocation::Stack { offset, size_bytes } => {
+                SourceParameterLocation::Stack {
+                    offset: offset.saturating_sub(spent),
+                    size_bytes,
+                }
+            }
+        };
+        SourceCallArgumentSpec::with_location(parameter.index(), location)
+    });
     let result = match callee.return_kind() {
         SourceFunctionReturn::Void => SourceCallResult::Void,
         SourceFunctionReturn::Register { storage } => SourceCallResult::Register { storage },

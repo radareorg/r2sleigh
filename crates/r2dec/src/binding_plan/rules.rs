@@ -72,6 +72,45 @@ pub(super) enum ParameterCandidate {
 /// overwrote the reason, the other kept it -- so the seal refused every
 /// function in which a slot was claimed three times, for a plan that was
 /// right. One statement here is what keeps them from disagreeing again.
+/// The role a declared slot plays for the object at `base`+`offset`.
+///
+/// A slot the source marks as a stack parameter's own storage is that only
+/// where it sits at the coordinate the convention gives the parameter. A
+/// debugger's location list can give the same variable a second frame slot
+/// over a later range, and the source carries both under the parameter's
+/// index; the second is a local the function copied the parameter into, and
+/// binding it to the parameter would make two objects one symbol.
+pub(super) fn effective_stack_slot_role(
+    source_owned: &SourceOwnedFunctionFacts,
+    slot: &r2ssa::SourceStackSlotSpec,
+    base: r2ssa::StackAddressBase,
+    offset: i64,
+) -> r2ssa::SourceStackSlotRole {
+    let role = slot.role();
+    let r2ssa::SourceStackSlotRole::Parameter { parameter_index } = role else {
+        return role;
+    };
+    let declared = source_owned
+        .source()
+        .machine_context()
+        .function_interface()
+        .and_then(|interface| {
+            interface
+                .parameters()
+                .iter()
+                .find(|parameter| parameter.index() == parameter_index)
+        })
+        .and_then(|parameter| parameter.location().stack());
+    match declared {
+        Some((declared_offset, _))
+            if base == r2ssa::StackAddressBase::StackPointer && declared_offset == offset =>
+        {
+            role
+        }
+        _ => r2ssa::SourceStackSlotRole::Local,
+    }
+}
+
 pub(super) fn parameter_candidates(
     source_owned: &SourceOwnedFunctionFacts,
 ) -> Vec<Option<ParameterCandidate>> {
@@ -91,7 +130,7 @@ pub(super) fn parameter_candidates(
                     }
                     r2ssa::SourceCarrierKind::Full => None,
                 })
-                .unwrap_or(parameter.storage().size);
+                .unwrap_or(parameter.location().size_bytes());
             insert_formal_parameter_candidate(&mut candidates, parameter.index(), width_bytes);
         }
     }

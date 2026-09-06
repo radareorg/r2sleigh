@@ -3328,7 +3328,7 @@ fn variadic_callsite_arguments(
             .arguments()
             .iter()
             .zip(slots)
-            .any(|(argument, slot)| argument.storage() != *slot)
+            .any(|(argument, slot)| argument.register_storage() != Some(*slot))
     {
         return Err(VariadicCallsiteArgumentCountRefusal::CallingConventionMismatch);
     }
@@ -3415,6 +3415,118 @@ struct ConventionCallBoundary {
 /// Where the convention itself is unknown there is no ground to stand on, and
 /// the boundary stays incomplete: the function refuses, which is the honest
 /// answer and the one this leaves in place for that case alone.
+/// The entry-relative position of the stack pointer as a call instruction
+/// finds it, before the instruction's own p-code spends anything.
+///
+/// Construction records exactly that carrier as the source of the
+/// `CallRestore` it emits after the call, so no instruction boundary has to
+/// be reconstructed here. A call the convention does not restore has no such
+/// record, and the position is then unknown.
+fn call_entering_stack_pointer_offset(
+    function: &SSAFunction,
+    block: &crate::function::SSABlock,
+    call_op_index: usize,
+) -> Option<i64> {
+    let Some(entering) = block
+        .ops
+        .get(call_op_index.checked_add(1)?..)?
+        .iter()
+        .take_while(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
+        .find_map(|op| match op {
+            SSAOp::CallRestore { src, .. } => Some(src),
+            _ => None,
+        })
+    else {
+        r2il::refusal_evidence!(
+            "call-entering-stack-pointer",
+            "call at ({:#x}, {call_op_index}) has no restore recording the carrier it found",
+            block.addr
+        );
+        return None;
+    };
+    let Some(root) = resolve_entry_stack_root(function.decompile_prep_facts(), entering) else {
+        r2il::refusal_evidence!(
+            "call-entering-stack-pointer",
+            "call at ({:#x}, {call_op_index}) found {entering}, which has no entry-relative root; \
+             the function has {} entry-relative and {} declared-base roots",
+            block.addr,
+            function
+                .decompile_prep_facts()
+                .map_or(0, |facts| facts.entry_stack_address_roots.len()),
+            function
+                .decompile_prep_facts()
+                .map_or(0, |facts| facts.stack_address_roots.len())
+        );
+        return None;
+    };
+    (root.base == StackAddressBase::StackPointer).then_some(root.offset)
+}
+
+/// The value a call reads from one slot of its outgoing argument area.
+///
+/// `offset` names the slot from the stack pointer as the call instruction
+/// finds it, before the instruction's own p-code spends the return-address
+/// slot. Construction records exactly that carrier as the source of the
+/// `CallRestore` it emits after the call, so the slot's entry-relative
+/// coordinate is that carrier's entry-relative position plus the offset. The
+/// value is the last store to exactly that coordinate at exactly that width in
+/// the run of operations since the previous call, which is where a compiler
+/// materialises the arguments it cannot pass in registers. Returns the value
+/// and the slot's entry-relative coordinate.
+fn reaching_stack_argument_before_call(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    block_addr: u64,
+    call_op_index: usize,
+    offset: i64,
+    size_bytes: u32,
+) -> Option<(ValueId, i64)> {
+    let block = function.get_block(block_addr)?;
+    let Some(entering) = call_entering_stack_pointer_offset(function, block, call_op_index) else {
+        r2il::refusal_evidence!(
+            "call-argument-stack-store",
+            "callsite ({block_addr:#x}, {call_op_index}) has no entry-relative stack pointer entering the call"
+        );
+        return None;
+    };
+    let entry_offset = entering.checked_add(offset)?;
+    for op in block.ops.get(..call_op_index)?.iter().rev() {
+        match op {
+            SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::CallOther { .. } => return None,
+            SSAOp::Store {
+                space: SpaceId::Ram,
+                addr,
+                val,
+            } => {
+                let Some(root) = resolve_entry_stack_root(function.decompile_prep_facts(), addr)
+                else {
+                    r2il::refusal_evidence!(
+                        "call-argument-stack-store",
+                        "callsite ({block_addr:#x}, {call_op_index}) store through {addr} has no entry-relative root (wanted {entry_offset})"
+                    );
+                    continue;
+                };
+                if root.base != StackAddressBase::StackPointer || root.offset != entry_offset {
+                    continue;
+                }
+                if val.size != size_bytes {
+                    r2il::refusal_evidence!(
+                        "call-argument-stack-store",
+                        "callsite ({block_addr:#x}, {call_op_index}) store at entry offset {entry_offset} is {} bytes, slot is {size_bytes}",
+                        val.size
+                    );
+                    return None;
+                }
+                return graph
+                    .value_id_for_var(val)
+                    .map(|value| (value, entry_offset));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn convention_call_boundary(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -3431,10 +3543,11 @@ fn convention_call_boundary(
         machine_context
             .function_interface()
             .is_some_and(|interface| {
-                interface
-                    .parameters()
-                    .iter()
-                    .any(|parameter| register_storages_overlap(parameter.storage(), storage))
+                interface.parameters().iter().any(|parameter| {
+                    parameter
+                        .register_storage()
+                        .is_some_and(|carrier| register_storages_overlap(carrier, storage))
+                })
             })
     };
     let mut arguments = Vec::new();
@@ -3595,36 +3708,59 @@ fn collect_source_boundary_facts(
                 let fixed_arguments = interface
                     .arguments()
                     .iter()
-                    .map(|argument| {
-                        // An argument the function passes straight through from
-                        // its own entry has no definition here and is never read
-                        // explicitly, so no SSA value names it. That is a
-                        // description of where the value comes from, not a
-                        // failure to find it.
-                        let found = reaching_abi_argument_in_block(
-                            function,
-                            graph,
-                            machine_context,
-                            &entry_values,
-                            block_addr,
-                            op_index,
-                            argument.storage(),
-                        );
-                        if found.is_none() {
-                            r2il::refusal_evidence!(
-                                "call-argument",
-                                "callsite ({block_addr:#x}, {op_index}) argument {} in {:?} has no reaching value",
-                                argument.index(),
-                                argument.storage()
+                    .map(|argument| match argument.location() {
+                        r2source::SourceParameterLocation::Register(storage) => {
+                            // An argument the function passes straight through
+                            // from its own entry has no definition here and is
+                            // never read explicitly, so no SSA value names it.
+                            // That is a description of where the value comes
+                            // from, not a failure to find it.
+                            let found = reaching_abi_argument_in_block(
+                                function,
+                                graph,
+                                machine_context,
+                                &entry_values,
+                                block_addr,
+                                op_index,
+                                storage,
                             );
+                            if found.is_none() {
+                                r2il::refusal_evidence!(
+                                    "call-argument",
+                                    "callsite ({block_addr:#x}, {op_index}) argument {} in {:?} has no reaching value",
+                                    argument.index(),
+                                    storage
+                                );
+                            }
+                            found.map(|value| SourceCallArgumentFact {
+                                slot: CallBoundarySlot::Register {
+                                    index: argument.index(),
+                                    storage,
+                                },
+                                value,
+                            })
                         }
-                        found.map(|value| SourceCallArgumentFact {
-                            slot: CallBoundarySlot::Register {
-                                index: argument.index(),
-                                storage: argument.storage(),
-                            },
-                            value,
-                        })
+                        r2source::SourceParameterLocation::Stack { offset, size_bytes } => {
+                            let found = reaching_stack_argument_before_call(
+                                function,
+                                graph,
+                                block_addr,
+                                op_index,
+                                offset,
+                                size_bytes,
+                            );
+                            if found.is_none() {
+                                r2il::refusal_evidence!(
+                                    "call-argument",
+                                    "callsite ({block_addr:#x}, {op_index}) argument {} at stack +{offset} ({size_bytes} bytes) has no reaching store",
+                                    argument.index()
+                                );
+                            }
+                            found.map(|(value, entry_offset)| SourceCallArgumentFact {
+                                slot: CallBoundarySlot::Stack(entry_offset),
+                                value: SourceCallArgumentValue::Value(value),
+                            })
+                        }
                     })
                     .collect::<Vec<_>>();
                 let results = match (call_site.transfer, interface.result()) {
@@ -3909,7 +4045,9 @@ fn source_formal_parameter_projections(
         .iter()
         .enumerate()
         .filter_map(|(parameter_position, parameter)| {
-            let abi_storage = parameter.storage();
+            // A parameter the convention passes on the stack is a frame
+            // object rather than an entry register; the object model owns it.
+            let abi_storage = parameter.register_storage()?;
             if machine_context
                 .abi_model()
                 .argument_registers()
@@ -5593,7 +5731,9 @@ fn collect_stack_frame_round_trip_certificates(
             .and_then(SourceMachineContext::function_interface)
             .is_some_and(|interface| {
                 interface.parameters().iter().any(|parameter| {
-                    register_storages_overlap(storage, parameter.storage())
+                    parameter
+                        .register_storage()
+                        .is_some_and(|carrier| register_storages_overlap(storage, carrier))
                 }) || matches!(
                     interface.return_kind(),
                     SourceFunctionReturn::Register { storage: result }
@@ -6859,9 +6999,79 @@ fn collect_prepared_function_certificates(
                 .get(id)
                 .filter(|boundary| boundary.at == fact.at);
             let complete_boundary = boundary.filter(|boundary| boundary.complete);
-            let (argument_values, mut argument_certificates) = complete_boundary
+            let (mut argument_certificates, declared_stack_arguments) = complete_boundary
                 .map(|boundary| exact_register_call_arguments(boundary, graph))
                 .unwrap_or_default();
+            // A stack argument the prototype declared: the boundary proved
+            // which value reaches which coordinate, and the outgoing-store
+            // scan names the object and access that carry it. One without
+            // an object is a slot this function never wrote, and the call
+            // is then not fully described.
+            let mut declared_stack_complete = true;
+            for declared in &declared_stack_arguments {
+                match stack_argument_values.iter().find(|stack_arg| {
+                    stack_arg.stack_offset == declared.entry_offset
+                        && stack_arg.value == declared.value
+                }) {
+                    Some(stack_arg) => {
+                        let Some(access) = structured.memory_accesses.get(&stack_arg.memory_access)
+                        else {
+                            declared_stack_complete = false;
+                            break;
+                        };
+                        argument_certificates.push(CallArgumentCertificate {
+                            index: declared.index,
+                            value: declared.value,
+                            location: CallArgumentLocation::Stack {
+                                object: access.object,
+                                offset: stack_arg.stack_offset,
+                                memory_access: stack_arg.memory_access,
+                            },
+                            source_inst: Some(stack_arg.memory_access.inst),
+                        });
+                    }
+                    None => {
+                        r2il::refusal_evidence!(
+                            "call-argument-stack-object",
+                            "callsite ({block_addr:#x}, {op_index}) argument {} at entry offset {} has no outgoing store object among {:?}",
+                            declared.index,
+                            declared.entry_offset,
+                            stack_argument_values
+                                .iter()
+                                .map(|argument| argument.stack_offset)
+                                .collect::<Vec<_>>()
+                        );
+                        declared_stack_complete = false;
+                        break;
+                    }
+                }
+            }
+            if !declared_stack_complete {
+                argument_certificates.clear();
+            }
+            argument_certificates.sort_by_key(|argument| argument.index);
+            let argument_values = argument_certificates
+                .iter()
+                .map(|argument| argument.value)
+                .collect::<Vec<_>>();
+            // Only the slots a prototype declared are arguments. The scan
+            // sees every store above the call's stack pointer, and in a
+            // function with a frame that is also the register save area a
+            // variadic prologue fills and every spill below it; claiming
+            // those as call inputs made the ledger read values whose
+            // objects it had already proven dead.
+            let stack_argument_values = stack_argument_values
+                .into_iter()
+                .filter(|stack_arg| {
+                    argument_certificates.iter().any(|argument| {
+                        matches!(
+                            argument.location,
+                            CallArgumentLocation::Stack { memory_access, .. }
+                                if memory_access == stack_arg.memory_access
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
             // The prototype and its callsite-count disposition must survive an
             // incomplete boundary: that incompleteness is exactly what lets a
             // renderer refuse an unresolved variadic format explicitly.
@@ -6874,35 +7084,6 @@ fn collect_prepared_function_certificates(
                         boundary.variadic_argument_count_refusal,
                     )
                 });
-            // A proven variadic count currently authorizes the convention's
-            // exact register prefix only. Do not append the old outgoing-store
-            // scan and accidentally duplicate or renumber its arguments.
-            let stack_argument_values = if variadic {
-                Vec::new()
-            } else {
-                stack_argument_values
-            };
-            if !variadic {
-                let appended = collect_stack_call_argument_certificates(
-                    &stack_argument_values,
-                    structured,
-                );
-                if !appended.is_empty() {
-                    r2il::refusal_evidence!(
-                        "call-argument-stack-append",
-                        "callsite ({block_addr:#x}, {op_index}) has {} register arguments from a {} boundary declaring {:?}; the outgoing-store scan appends {} more at offsets {:?}",
-                        argument_certificates.len(),
-                        if complete_boundary.is_some() { "complete" } else { "incomplete" },
-                        fixed_argument_count,
-                        appended.len(),
-                        stack_argument_values
-                            .iter()
-                            .map(|argument| argument.stack_offset)
-                            .collect::<Vec<_>>()
-                    );
-                }
-                argument_certificates.extend(appended);
-            }
             callsites_by_inst.insert(fact.at, *id);
             (
                 *id,
@@ -10376,7 +10557,7 @@ fn collect_call_sites(
 fn exact_register_call_arguments(
     boundary: &SourceCallBoundaryFact,
     graph: &SsaGraph,
-) -> (Vec<ValueId>, Vec<CallArgumentCertificate>) {
+) -> (Vec<CallArgumentCertificate>, Vec<BoundaryStackArgument>) {
     macro_rules! give_up {
         ($reason:literal $(, $arg:expr)* $(,)?) => {{
             r2il::refusal_evidence!(
@@ -10390,9 +10571,24 @@ fn exact_register_call_arguments(
         }};
     }
     let mut by_index = BTreeMap::new();
-    for argument in &boundary.arguments {
+    let mut stack_by_index = BTreeMap::new();
+    for (position, argument) in boundary.arguments.iter().enumerate() {
         let CallBoundarySlot::Register { index, storage } = argument.slot else {
-            give_up!("slot {:?} is not a register", argument.slot);
+            // An argument the convention passes on the stack: the boundary
+            // proved the value and the slot's entry-relative coordinate, and
+            // the object model names the slot's object for the certificate.
+            let (CallBoundarySlot::Stack(entry_offset), SourceCallArgumentValue::Value(value)) =
+                (argument.slot, argument.value)
+            else {
+                give_up!("slot {:?} is {:?}", argument.slot, argument.value);
+            };
+            if stack_by_index
+                .insert(position, (value, entry_offset))
+                .is_some()
+            {
+                give_up!("stack slot {} is claimed twice", position);
+            }
+            continue;
         };
         let SourceCallArgumentValue::Value(value) = argument.value else {
             give_up!("slot {} at {:?} is {:?}", index, storage, argument.value);
@@ -10427,12 +10623,38 @@ fn exact_register_call_arguments(
             give_up!("slot {} is claimed twice", index);
         }
     }
-    if by_index.keys().copied().ne(0..by_index.len()) {
-        give_up!("slots {:?} are not contiguous", by_index.keys());
+    if by_index
+        .keys()
+        .chain(stack_by_index.keys())
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .ne(0..by_index.len() + stack_by_index.len())
+    {
+        give_up!(
+            "slots {:?} and stack slots {:?} are not contiguous",
+            by_index.keys(),
+            stack_by_index.keys()
+        );
     }
     let certificates = by_index.into_values().collect::<Vec<_>>();
-    let values = certificates.iter().map(|argument| argument.value).collect();
-    (values, certificates)
+    let stack = stack_by_index
+        .into_iter()
+        .map(|(index, (value, entry_offset))| BoundaryStackArgument {
+            index,
+            value,
+            entry_offset,
+        })
+        .collect();
+    (certificates, stack)
+}
+
+/// One stack-passed argument a complete boundary proved, awaiting the object
+/// model's name for its slot.
+struct BoundaryStackArgument {
+    index: usize,
+    value: ValueId,
+    entry_offset: i64,
 }
 
 fn collect_stack_call_argument_values(
@@ -10449,6 +10671,13 @@ fn collect_stack_call_argument_values(
         return Vec::new();
     };
 
+    // Outgoing slots sit at and above the stack pointer as the call
+    // instruction finds it. Objects are keyed by their entry-relative
+    // position, so the boundary is that pointer's entry-relative position:
+    // anything below it is this function's own frame, not an argument.
+    let Some(entering) = call_entering_stack_pointer_offset(function, block, op_idx) else {
+        return Vec::new();
+    };
     let mut by_offset = BTreeMap::<i64, StackCallArgumentCertificate>::new();
     for (producer_idx, op) in block.ops[..op_idx].iter().enumerate().rev() {
         if matches!(
@@ -10481,7 +10710,7 @@ fn collect_stack_call_argument_values(
             let Some(offset) = stack_pointer_object_offset(objects, access.object) else {
                 continue;
             };
-            if offset < 0 {
+            if offset < entering {
                 continue;
             }
             by_offset
@@ -10495,29 +10724,6 @@ fn collect_stack_call_argument_values(
     }
 
     by_offset.into_values().collect()
-}
-
-fn collect_stack_call_argument_certificates(
-    stack_argument_values: &[StackCallArgumentCertificate],
-    structured: &StructuredDataflowFacts,
-) -> Vec<CallArgumentCertificate> {
-    stack_argument_values
-        .iter()
-        .enumerate()
-        .filter_map(|(index, stack_arg)| {
-            let access = structured.memory_accesses.get(&stack_arg.memory_access)?;
-            Some(CallArgumentCertificate {
-                index,
-                value: stack_arg.value,
-                location: CallArgumentLocation::Stack {
-                    object: access.object,
-                    offset: stack_arg.stack_offset,
-                    memory_access: stack_arg.memory_access,
-                },
-                source_inst: Some(stack_arg.memory_access.inst),
-            })
-        })
-        .collect()
 }
 
 fn stack_pointer_object_offset(objects: &ObjectModel, object: ObjectId) -> Option<i64> {

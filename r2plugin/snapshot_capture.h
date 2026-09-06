@@ -210,6 +210,15 @@ typedef struct r_anal_snapshot_parameter_t {
 	RAnalSnapshotRegisterStorage storage;
 	RAnalSnapshotTypeId logical_type_id;
 	RAnalSnapshotCarrierProjection carrier;
+	/* Where the convention places the parameter when it is not a register:
+	 * a slot in the caller-owned argument area. For a function's own
+	 * parameter the offset is from the stack pointer at entry, past the
+	 * return-address slot the call left there; for a call site's argument it
+	 * is from the stack pointer at the call instruction. `storage` is empty
+	 * for such a parameter. */
+	bool on_stack;
+	st64 stack_offset;
+	ut32 stack_size;
 } RAnalSnapshotParameter;
 
 typedef enum {

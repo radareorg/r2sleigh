@@ -1776,6 +1776,9 @@ static ut64 function_snapshot_hash_interface(ut64 hash, const RAnalFunctionInter
 		const RAnalSnapshotParameter *parameter = &interface->parameters[i];
 		hash = function_context_hash_mix (hash, parameter->index);
 		hash = function_snapshot_hash_storage (hash, &parameter->storage);
+		hash = function_context_hash_mix (hash, parameter->on_stack? 1: 0);
+		hash = function_context_hash_mix (hash, (ut64)parameter->stack_offset);
+		hash = function_context_hash_mix (hash, parameter->stack_size);
 		hash = function_context_hash_mix (hash, parameter->logical_type_id);
 		hash = function_context_hash_mix (hash, parameter->carrier.kind);
 		hash = function_context_hash_mix (hash, parameter->carrier.offset_bits);
@@ -1853,6 +1856,9 @@ static ut64 function_snapshot_hash_call_interface(ut64 hash, const RAnalCallSite
 	for (i = 0; i < interface->num_arguments; i++) {
 		hash = function_context_hash_mix (hash, interface->arguments[i].index);
 		hash = function_snapshot_hash_storage (hash, &interface->arguments[i].storage);
+		hash = function_context_hash_mix (hash, interface->arguments[i].on_stack? 1: 0);
+		hash = function_context_hash_mix (hash, (ut64)interface->arguments[i].stack_offset);
+		hash = function_context_hash_mix (hash, interface->arguments[i].stack_size);
 		hash = function_context_hash_mix (hash, interface->arguments[i].logical_type_id);
 		hash = function_context_hash_mix (hash, interface->arguments[i].carrier.kind);
 		hash = function_context_hash_mix (hash, interface->arguments[i].carrier.offset_bits);
@@ -2169,6 +2175,28 @@ static bool snapshot_parameter_storages_overlap(
 	const RAnalSnapshotParameter *parameters, size_t count) {
 	size_t i, j;
 	for (i = 0; i < count; i++) {
+		if (parameters[i].on_stack) {
+			/* Two stack slots overlap when their byte ranges do; a stack
+			 * slot and a register never do. */
+			st64 left_end;
+			if (r_add_overflow (parameters[i].stack_offset,
+					(st64)parameters[i].stack_size, &left_end)) {
+				return true;
+			}
+			for (j = i + 1; j < count; j++) {
+				st64 right_end;
+				if (!parameters[j].on_stack) {
+					continue;
+				}
+				if (r_add_overflow (parameters[j].stack_offset,
+						(st64)parameters[j].stack_size, &right_end)
+					|| (parameters[i].stack_offset < right_end
+						&& parameters[j].stack_offset < left_end)) {
+					return true;
+				}
+			}
+			continue;
+		}
 		ut64 left_end;
 		if (r_add_overflow (parameters[i].storage.offset,
 				(ut64)parameters[i].storage.size, &left_end)) {
@@ -2176,6 +2204,9 @@ static bool snapshot_parameter_storages_overlap(
 		}
 		for (j = i + 1; j < count; j++) {
 			ut64 right_end;
+			if (parameters[j].on_stack) {
+				continue;
+			}
 			if (r_add_overflow (parameters[j].storage.offset,
 					(ut64)parameters[j].storage.size, &right_end)
 				|| (parameters[i].storage.offset < right_end
@@ -2185,6 +2216,97 @@ static bool snapshot_parameter_storages_overlap(
 		}
 	}
 	return false;
+}
+/* A parameter home is the slot a register parameter is spilled to, and the
+ * parameter it spills is the one the convention hands in that register. The
+ * index radare2 attaches to the register variable counts the register
+ * variables it happened to recover, which is a different sequence whenever it
+ * missed or mislabelled one; the home then names a parameter whose register
+ * is another, and the consumer refuses the whole interface as contradictory.
+ * The register itself is the identity, so the index is taken from the
+ * parameter whose storage it is. A home whose register is no parameter's is
+ * not a home. */
+static void snapshot_relink_register_homes(RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface) {
+	RListIter *iter;
+	RAnalFcnSlot *slot;
+	r_list_foreach (ctx->fcn_slots, iter, slot) {
+		if (!slot || slot->role != R_ANAL_FCN_SLOT_HOME || !slot->home_reg_size) {
+			continue;
+		}
+		int found = -1;
+		size_t i;
+		for (i = 0; i < interface->num_parameters; i++) {
+			const RAnalSnapshotParameter *parameter = &interface->parameters[i];
+			if (parameter->on_stack || !parameter->storage.size
+				|| parameter->storage.offset != slot->home_reg_offset
+				|| parameter->storage.size != slot->home_reg_size) {
+				continue;
+			}
+			if (found >= 0) {
+				found = -1;
+				break;
+			}
+			found = (int)i;
+		}
+		if (found < 0) {
+			slot->role = R_ANAL_FCN_SLOT_UNKNOWN;
+			slot->arg_index = -1;
+			continue;
+		}
+		slot->arg_index = found;
+	}
+}
+/* A parameter the convention passes on the stack has no register home, so
+ * radare2 gives its stack variable no formal ordinal. The variable and the
+ * parameter come from the same declaration and carry the same name, which is
+ * the link the ordinal would have carried; the consumer still checks that the
+ * slot sits where the convention puts that parameter. */
+static void snapshot_link_stack_parameter_slots(RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface) {
+	RListIter *iter;
+	RAnalFcnSlot *slot;
+	r_list_foreach (ctx->fcn_slots, iter, slot) {
+		/* Only a variable DWARF declared: radare2's own stack analysis also
+		 * names positive-offset accesses `arg_XXh`, and at -O2 it invents a
+		 * second, wider `stream_size` at another frame offset, which the
+		 * name would otherwise link to the same parameter twice. */
+		if (!slot || slot->role != R_ANAL_FCN_SLOT_ARG || slot->arg_index >= 0
+			|| R_STR_ISEMPTY (slot->name) || !slot->dwarf_declared) {
+			continue;
+		}
+		int found = -1;
+		size_t i;
+		for (i = 0; i < interface->num_parameters; i++) {
+			const RAnalSnapshotParameter *parameter = &interface->parameters[i];
+			if (!parameter->on_stack || R_STR_ISEMPTY (parameter->name)
+				|| strcmp (parameter->name, slot->name)) {
+				continue;
+			}
+			if (found >= 0) {
+				/* Two parameters of one name link nothing. */
+				found = -1;
+				break;
+			}
+			found = (int)i;
+		}
+		slot->arg_index = found;
+	}
+}
+/* A parameter the convention passes in the argument area rather than in a
+ * register. The convention names the slot from the stack pointer at the call
+ * instruction; `callee_view` names it instead from the stack pointer at the
+ * callee's entry, past the return-address slot the call left there, which is
+ * the coordinate the callee's own loads use. */
+static bool snapshot_stack_parameter_collect(RAnal *anal, const char *calling_convention,
+	int index, int count, bool callee_view, RAnalSnapshotParameter *parameter) {
+	RAnalCCArgSlot slot = {0};
+	if (!r_anal_cc_argslot (anal, calling_convention, index, count, callee_view, &slot)
+		|| slot.reg || slot.size <= 0) {
+		return false;
+	}
+	parameter->on_stack = true;
+	parameter->stack_offset = slot.off;
+	parameter->stack_size = (ut32)slot.size;
+	return true;
 }
 static bool snapshot_register_storages_overlap(
 	const RAnalSnapshotRegisterStorage *left,
@@ -2385,6 +2507,31 @@ static bool snapshot_stack_slot_roles_complete(
 				|| slot->home_reg_size) {
 				snapshot_stack_slot_role_report (slot, "local carries a formal's fields");
 				return false;
+			}
+			continue;
+		}
+		if (slot->role == R_ANAL_FCN_SLOT_ARG) {
+			/* A parameter the convention passes on the stack: the slot is
+			 * the parameter's own storage, not a home for a register one.
+			 * One slot per parameter, and the parameter must say it lives
+			 * on the stack. */
+			if (slot->arg_index < 0
+				|| (size_t)slot->arg_index >= interface->num_parameters
+				|| !interface->parameters[slot->arg_index].on_stack) {
+				snapshot_stack_slot_role_report (slot, "argument slot names no stack parameter");
+				return false;
+			}
+			RListIter *earlier_iter;
+			RAnalFcnSlot *earlier;
+			r_list_foreach (ctx->fcn_slots, earlier_iter, earlier) {
+				if (earlier == slot) {
+					break;
+				}
+				if (earlier && earlier->role == R_ANAL_FCN_SLOT_ARG
+					&& earlier->arg_index == slot->arg_index) {
+					snapshot_stack_slot_role_report (slot, "a second slot for one stack parameter");
+					return false;
+				}
 			}
 			continue;
 		}
@@ -2626,6 +2773,12 @@ static bool function_interface_snapshot_collect(
 		const char *place = r_anal_cc_argloc (
 			anal, calling_convention, (int)index, 0, (int)parameter_count);
 		RAnalCCArgSlot slot = {0};
+		if (R_STR_ISNOTEMPTY (place) && *place == '^'
+			&& snapshot_stack_parameter_collect (anal, calling_convention,
+				(int)index, (int)parameter_count, true, snapshot_parameter)) {
+			index++;
+			continue;
+		}
 		if (R_STR_ISEMPTY (place) || *place == '^' || *place == '{'
 			|| !r_anal_cc_argslot (anal, calling_convention,
 				(int)index, (int)parameter_count, false, &slot)
@@ -2648,6 +2801,8 @@ static bool function_interface_snapshot_collect(
 		|| snapshot_parameter_storages_overlap (interface->parameters, parameter_count)) {
 		parameters_complete = false;
 	}
+	snapshot_link_stack_parameter_slots (ctx, interface);
+	snapshot_relink_register_homes (ctx, interface);
 	if (!snapshot_promote_exact_dwarf_stack_homes (
 			anal, fcn, ctx, interface, calling_convention)) {
 		return false;
@@ -2702,6 +2857,16 @@ static bool function_interface_snapshot_collect(
 		&& interface->stack_resources_complete
 		&& snapshot_stack_slot_roles_complete (ctx, interface);
 	interface->complete = physical_interface_complete;
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		// Five terms decide whether the interface is exact, and a consumer
+		// only sees the variant they produced.
+		eprintf ("R2SLEIGH_INTERFACE addr=0x%" PFMT64x " parameters=%d return=%d"
+			" return_address=%d stack_pointer=%d resources=%d roles=%d\n",
+			fcn->addr, parameters_complete? 1: 0, return_complete? 1: 0,
+			return_address_complete? 1: 0, stack_pointer_complete? 1: 0,
+			interface->stack_resources_complete? 1: 0,
+			interface->stack_slot_roles_complete? 1: 0);
+	}
 	return true;
 }
 static void snapshot_return_mechanism_collect(RAnal *anal, const RAnalFunction *fcn,
@@ -3797,13 +3962,24 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 			free (spec);
 			return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 		}
-		char *pointee = r_str_trim_ndup (spec, (size_t)(star - spec));
+		char *spelled_pointee = r_str_trim_ndup (spec, (size_t)(star - spec));
 		free (spec);
-		if (!pointee) {
+		if (!spelled_pointee) {
 			return SNAPSHOT_TYPE_GRAPH_NO_MEMORY;
 		}
-		snapshot_type_strip_qualifiers (pointee);
-		r_str_trim (pointee);
+		snapshot_type_strip_qualifiers (spelled_pointee);
+		r_str_trim (spelled_pointee);
+		// The pointee is placed by what it is, not by what it is called: a
+		// typedef of void points at nothing the graph describes, and a
+		// typedef of an anonymous struct is that struct. Unaliasing only the
+		// whole spelling left `BZFILE *` and `EState *` unrooted, and with
+		// them every prototype of the bzip2 stream API.
+		char *pointee = NULL;
+		result = snapshot_type_unalias (builder, spelled_pointee, &pointee);
+		free (spelled_pointee);
+		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+			return result;
+		}
 		if (!strcmp (pointee, "void")) {
 			// `void *` points at an object the graph does not describe.
 			result = snapshot_type_add_opaque (builder, R_ANAL_SNAPSHOT_TYPE_VOID, &target_id);
@@ -4271,6 +4447,12 @@ static bool call_site_interface_snapshot_collect_one(
 		const char *place = r_anal_cc_argloc (
 			anal, calling_convention, (int)index, 0, (int)argument_count);
 		RAnalCCArgSlot slot = {0};
+		if (R_STR_ISNOTEMPTY (place) && *place == '^'
+			&& snapshot_stack_parameter_collect (anal, calling_convention,
+				(int)index, (int)argument_count, false, snapshot_argument)) {
+			index++;
+			continue;
+		}
 		if (R_STR_ISEMPTY (place) || *place == '^' || *place == '{'
 			|| !r_anal_cc_argslot (anal, calling_convention,
 				(int)index, (int)argument_count, false, &slot)

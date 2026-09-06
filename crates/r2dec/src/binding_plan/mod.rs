@@ -1001,6 +1001,20 @@ pub(crate) enum StackObjectRefusal {
         slot_width_bits: u32,
         parameter_width_bits: u32,
     },
+    /// The slot is a stack-passed parameter's own storage, but the parameter
+    /// it names has no binding.
+    StackParameterUnavailable {
+        object: r2ssa::ObjectId,
+        parameter_index: u32,
+    },
+    /// The slot is a stack-passed parameter's own storage, but its width is
+    /// not the parameter's declared width.
+    StackParameterWidthMismatch {
+        object: r2ssa::ObjectId,
+        parameter_index: u32,
+        slot_width_bits: u32,
+        parameter_width_bits: u32,
+    },
 }
 
 /// Exact disposition of one source-certified ABI parameter slot.

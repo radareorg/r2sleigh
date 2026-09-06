@@ -203,7 +203,7 @@ pub(crate) fn collect_aggregate_access_projections(
         if parameter.index() != parameter_index {
             continue;
         }
-        if expression.parameter_storage != Some(parameter.storage()) {
+        if expression.parameter_storage != parameter.register_storage() {
             continue;
         }
         let pointer_type_id = logical_value.type_id();

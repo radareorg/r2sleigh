@@ -939,7 +939,7 @@ fn function_type_matches_source_interface(
                 interface
                     .parameters()
                     .get(index)
-                    .map(|parameter| u64::from(parameter.storage().size) * 8)
+                    .map(|parameter| u64::from(parameter.location().size_bytes()) * 8)
             });
         expected_bits == Some(actual_bits)
     });
@@ -2047,7 +2047,7 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
             .find(|candidate| candidate.index() == *index)?;
         let graph_value = source.graph().value(parameter.value)?;
         if parameter.index != *index
-            || parameter.abi_storage != source_parameter.storage()
+            || Some(parameter.abi_storage) != source_parameter.register_storage()
             || parameter.abi_storage != abi_slot.storage()
             || graph_value.canonical_storage != Some(parameter.graph_storage)
             || graph_value.var.size != parameter.graph_storage.size

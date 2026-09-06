@@ -1273,7 +1273,9 @@ fn exact_source_argument_slot_for_register(source: &SsaArtifact, register: &str)
         return None;
     }
     let mut matches = interface.parameters().iter().filter(|parameter| {
-        let parameter_storage = parameter.storage();
+        let Some(parameter_storage) = parameter.register_storage() else {
+            return false;
+        };
         if parameter_storage.space != register_storage.space
             || parameter_storage.offset != register_storage.offset
             || register_storage.size > parameter_storage.size

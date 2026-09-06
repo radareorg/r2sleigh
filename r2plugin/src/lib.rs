@@ -6767,7 +6767,9 @@ mod integration_tests {
                             (*parameter == index as u32)
                                 .then_some(u64::from(size.saturating_mul(8)))
                         })
-                        .unwrap_or_else(|| u64::from(storage.storage().size.saturating_mul(8)));
+                        .unwrap_or_else(|| {
+                            u64::from(storage.location().size_bytes().saturating_mul(8))
+                        });
                     let (type_id, kind) = match width_bits {
                         32 => (0, r2ssa::SourceCarrierKind::LowBits),
                         64 => (1, r2ssa::SourceCarrierKind::Full),

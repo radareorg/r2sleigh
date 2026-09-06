@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 9;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 10;
 const SNAPSHOT_WIRE_MIN_FORMAT_VERSION: u32 = 1;
 
 /// Bytes of fixed header preceding the string table.
@@ -349,9 +349,9 @@ use crate::contracts::{
     SourceAggregateLayout, SourceAggregateMember, SourceCallArgumentSpec,
     SourceCallPreservedCarriers, SourceCallResult, SourceCarrierKind, SourceCarrierProjection,
     SourceConventionSlots, SourceFunctionInterface, SourceFunctionReturn, SourceLogicalValue,
-    SourceMachineRoles, SourceRegisterName, SourceReturnMechanism, SourceRoleRegisterNames,
-    SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec,
-    SourceType, SourceTypeGraph, SourceTypeKind, StackAddressBase,
+    SourceMachineRoles, SourceParameterLocation, SourceRegisterName, SourceReturnMechanism,
+    SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
+    SourceStackSlotSpec, SourceType, SourceTypeGraph, SourceTypeKind, StackAddressBase,
 };
 use crate::{
     AdvisoryCallPrototype, AdvisoryCallSite, AdvisoryCallTransfer, AdvisorySuccessor,
@@ -1229,7 +1229,7 @@ pub fn write_call_prototype(
     writer.u32(count);
     for argument in prototype.arguments.iter() {
         writer.u32(argument.index());
-        write_storage(writer, argument.storage());
+        write_parameter_location(writer, argument.location());
     }
     writer.bool(prototype.variadic);
     writer.bool(prototype.noreturn);
@@ -1245,8 +1245,8 @@ pub fn read_call_prototype(
     let mut arguments = Vec::with_capacity(count.min(256));
     for _ in 0..count {
         let index = reader.u32()?;
-        let storage = read_storage(reader)?;
-        arguments.push(SourceCallArgumentSpec::new(index, storage));
+        let location = read_parameter_location(reader)?;
+        arguments.push(SourceCallArgumentSpec::with_location(index, location));
     }
     let variadic = reader.bool()?;
     let noreturn = reader.bool()?;
@@ -1370,17 +1370,59 @@ pub fn read_logical_value(
     Ok(SourceLogicalValue::new(type_id, carrier))
 }
 
+const LOCATION_REGISTER: u8 = 0;
+const LOCATION_STACK: u8 = 1;
+
+/// A parameter or argument location. Formats before 10 carried only a
+/// register storage; from 10 on a tag says which kind follows.
+pub fn write_parameter_location(
+    writer: &mut SnapshotWireWriter,
+    location: SourceParameterLocation,
+) {
+    match location {
+        SourceParameterLocation::Register(storage) => {
+            writer.u8(LOCATION_REGISTER);
+            write_storage(writer, storage);
+        }
+        SourceParameterLocation::Stack { offset, size_bytes } => {
+            writer.u8(LOCATION_STACK);
+            writer.i64(offset);
+            writer.u32(size_bytes);
+        }
+    }
+}
+
+pub fn read_parameter_location(
+    reader: &mut SnapshotWireReader<'_>,
+) -> Result<SourceParameterLocation, SnapshotWireError> {
+    if reader.format_version() < 10 {
+        return Ok(SourceParameterLocation::Register(read_storage(reader)?));
+    }
+    match reader.u8()? {
+        LOCATION_REGISTER => Ok(SourceParameterLocation::Register(read_storage(reader)?)),
+        LOCATION_STACK => {
+            let offset = reader.i64()?;
+            let size_bytes = reader.u32()?;
+            Ok(SourceParameterLocation::Stack { offset, size_bytes })
+        }
+        tag => Err(SnapshotWireError::UnknownDiscriminant {
+            record: "parameter location",
+            tag: u64::from(tag),
+        }),
+    }
+}
+
 pub fn write_abi_parameter(writer: &mut SnapshotWireWriter, parameter: &SourceAbiParameterSpec) {
     writer.u32(parameter.index());
-    write_storage(writer, parameter.storage());
+    write_parameter_location(writer, parameter.location());
 }
 
 pub fn read_abi_parameter(
     reader: &mut SnapshotWireReader<'_>,
 ) -> Result<SourceAbiParameterSpec, SnapshotWireError> {
     let index = reader.u32()?;
-    let storage = read_storage(reader)?;
-    Ok(SourceAbiParameterSpec::new(index, storage))
+    let location = read_parameter_location(reader)?;
+    Ok(SourceAbiParameterSpec::with_location(index, location))
 }
 
 pub fn write_function_return(writer: &mut SnapshotWireWriter, kind: &SourceFunctionReturn) {
@@ -1649,6 +1691,7 @@ const BASE_STACK_POINTER: u8 = 1;
 const ROLE_UNCLASSIFIED: u8 = 0;
 const ROLE_LOCAL: u8 = 1;
 const ROLE_PARAMETER_HOME: u8 = 2;
+const ROLE_PARAMETER: u8 = 3;
 
 pub fn write_stack_slot(writer: &mut SnapshotWireWriter, slot: &SourceStackSlotSpec) {
     writer.u8(match slot.base() {
@@ -1668,6 +1711,10 @@ pub fn write_stack_slot(writer: &mut SnapshotWireWriter, slot: &SourceStackSlotS
             writer.u8(ROLE_PARAMETER_HOME);
             writer.u32(parameter_index);
             write_storage(writer, home_storage);
+        }
+        SourceStackSlotRole::Parameter { parameter_index } => {
+            writer.u8(ROLE_PARAMETER);
+            writer.u32(parameter_index);
         }
     }
     // The slot's node in the type graph, or the invalid id when it has none.
@@ -1705,6 +1752,16 @@ pub fn read_stack_slot(
                 size_bytes,
                 parameter_index,
                 home_storage,
+            )
+        }
+        ROLE_PARAMETER if reader.format_version() >= 10 => {
+            let parameter_index = reader.u32()?;
+            SourceStackSlotSpec::new_parameter(
+                base,
+                base_storage,
+                offset,
+                size_bytes,
+                parameter_index,
             )
         }
         tag => {
@@ -3134,6 +3191,7 @@ mod tests {
                 1,
                 storage,
             ),
+            SourceStackSlotSpec::new_parameter(StackAddressBase::StackPointer, storage, 8, 8, 6),
         ];
         for slot in slots {
             let mut writer = SnapshotWireWriter::new();
@@ -3168,17 +3226,28 @@ mod tests {
 
     #[test]
     fn every_interface_variant_round_trips() {
+        // Two register parameters and one the convention passes on the
+        // stack, whose own slot sits above the return address at entry.
         let params = vec![
             SourceAbiParameterSpec::new(0, reg(0x38, 8)),
             SourceAbiParameterSpec::new(1, reg(0x30, 8)),
+            SourceAbiParameterSpec::on_stack(2, 8, 8),
         ];
-        let slots = vec![SourceStackSlotSpec::new_local(
-            StackAddressBase::FramePointer,
-            reg(0x20, 8),
-            -8,
-            4,
-        )];
+        let slots = vec![
+            SourceStackSlotSpec::new_local(StackAddressBase::FramePointer, reg(0x20, 8), -8, 4),
+            SourceStackSlotSpec::new_parameter(
+                StackAddressBase::StackPointer,
+                reg(0x20, 8),
+                8,
+                8,
+                2,
+            ),
+        ];
         let logical = vec![
+            SourceLogicalValue::new(
+                1,
+                SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
+            ),
             SourceLogicalValue::new(
                 1,
                 SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),

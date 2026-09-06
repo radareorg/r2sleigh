@@ -1783,6 +1783,14 @@ pub struct SSAFunction {
     /// source publishes it for functions whose interface it withholds, and
     /// those are the ones that need it.
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
+    /// The architectural stack pointer, as the machine roles name it.
+    ///
+    /// The roles know it for every function, including one whose signature
+    /// the source never linked or whose declared slots are not exact; the
+    /// interface's copy is absent or withheld for exactly those, and the
+    /// entry-relative position of anything derived from the stack pointer is
+    /// a machine fact that does not wait on either.
+    stack_pointer_carrier: Option<CanonicalStorageId>,
     /// The function's name (if known).
     pub name: Option<String>,
     /// Entry point address.
@@ -1816,6 +1824,7 @@ impl Clone for SSAFunction {
     fn clone(&self) -> Self {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
+            stack_pointer_carrier: self.stack_pointer_carrier,
             name: self.name.clone(),
             entry: self.entry,
             cfg: self.cfg.clone(),
@@ -2358,6 +2367,7 @@ impl SSAFunction {
         let block_order = cfg.reverse_postorder();
         Self {
             call_preserved_carriers: None,
+            stack_pointer_carrier: None,
             name: None,
             entry,
             cfg,
@@ -2452,6 +2462,7 @@ impl SSAFunction {
             control,
         )?;
         func.call_preserved_carriers = call_preserved_carriers;
+        func.stack_pointer_carrier = stack_pointer_carrier;
         func.prepare_for_decompile_with_interface_and_control(
             &crate::optimize::DecompilePrepConfig::default(),
             function_interface,
@@ -2680,6 +2691,7 @@ impl SSAFunction {
 
         let mut function = Self {
             call_preserved_carriers: None,
+            stack_pointer_carrier: None,
             name: None,
             entry,
             cfg,
@@ -3429,40 +3441,48 @@ impl SSAFunction {
         let mut facts = DecompilePrepFacts::default();
         let mut declared_stack_bases = BTreeMap::new();
         let mut entry_stack_address_size = None;
+        // The stack pointer is a machine fact: the roles name it for every
+        // function, and the entry-relative position of anything derived from
+        // it does not wait on a linked signature or exact slot roles. Only the
+        // declared slots' bases come from the interface, and only where its
+        // roles are exact.
+        if let Some(storage) = function_interface
+            .and_then(SourceFunctionInterface::stack_pointer_storage)
+            .or(self.stack_pointer_carrier)
+        {
+            declared_stack_bases.insert(storage, StackAddressBase::StackPointer);
+            if entry_stack_roots_are_stable {
+                entry_stack_address_size = Some(storage.size);
+            }
+        }
         if let Some(interface) = function_interface.filter(|interface| {
             interface.stack_slot_roles_complete()
                 && interface.stack_pointer_storage().is_some()
                 && interface.return_address_storage().is_some()
         }) {
-            if let Some(storage) = interface.stack_pointer_storage() {
-                declared_stack_bases.insert(storage, StackAddressBase::StackPointer);
-                if entry_stack_roots_are_stable {
-                    entry_stack_address_size = Some(storage.size);
-                }
-            }
             for slot in interface.stack_slots() {
                 declared_stack_bases.insert(slot.base_storage(), slot.base());
             }
-            for var in self.canonical_storage_by_var.keys() {
-                if var.version != 0 {
-                    continue;
-                }
-                let Some(storage) = self.canonical_storage_for_var(var) else {
-                    continue;
-                };
-                if let Some(base) = declared_stack_bases.get(&storage).copied() {
-                    facts
-                        .stack_address_roots
-                        .insert(var.clone(), StackAddressRoot { base, offset: 0 });
-                    if entry_stack_roots_are_stable && base == StackAddressBase::StackPointer {
-                        facts.entry_stack_address_roots.insert(
-                            var.clone(),
-                            StackAddressRoot {
-                                base: StackAddressBase::StackPointer,
-                                offset: 0,
-                            },
-                        );
-                    }
+        }
+        for var in self.canonical_storage_by_var.keys() {
+            if var.version != 0 {
+                continue;
+            }
+            let Some(storage) = self.canonical_storage_for_var(var) else {
+                continue;
+            };
+            if let Some(base) = declared_stack_bases.get(&storage).copied() {
+                facts
+                    .stack_address_roots
+                    .insert(var.clone(), StackAddressRoot { base, offset: 0 });
+                if entry_stack_roots_are_stable && base == StackAddressBase::StackPointer {
+                    facts.entry_stack_address_roots.insert(
+                        var.clone(),
+                        StackAddressRoot {
+                            base: StackAddressBase::StackPointer,
+                            offset: 0,
+                        },
+                    );
                 }
             }
         }
@@ -12653,6 +12673,156 @@ mod tests {
                 storage: slot(8),
             }],
             "{second:?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer() {
+        // sp -= 8; [sp] = rdi        -- the caller materialises an argument
+        // sp -= 8; [sp] = ret; call  -- the call instruction spends its slot
+        // The prototype says argument 0 sits at +0 from the stack pointer as
+        // the call finds it, which is the slot the first store filled.
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("rax", 0, 8));
+        arch.add_register(RegisterDef::new("rdi", 8, 8));
+        arch.add_register(RegisterDef::new("rip", 16, 8));
+        arch.add_register(RegisterDef::new("rsp", 32, 8));
+        let storage = |offset, size| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        let sp = make_reg(32, 8);
+        let target = make_ram(0x2000, 8);
+        let ops = vec![
+            R2ILOp::IntSub {
+                dst: sp.clone(),
+                a: sp.clone(),
+                b: make_const(8, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: sp.clone(),
+                val: make_reg(8, 8),
+            },
+            R2ILOp::IntSub {
+                dst: sp.clone(),
+                a: sp.clone(),
+                b: make_const(8, 8),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: sp.clone(),
+                val: make_const(0x100d, 8),
+            },
+            R2ILOp::Call {
+                target: target.clone(),
+            },
+            R2ILOp::Return {
+                target: make_reg(16, 8),
+            },
+        ];
+        let call_index = 4;
+        let mut op_metadata = std::collections::BTreeMap::new();
+        for (index, instruction_addr) in [0x1000u64, 0x1000, 0x1008, 0x1008, 0x1008, 0x100d]
+            .into_iter()
+            .enumerate()
+        {
+            op_metadata.insert(
+                index,
+                r2il::OpMetadata {
+                    instruction_addr: Some(instruction_addr),
+                    ..Default::default()
+                },
+            );
+        }
+        let block = R2ILBlock {
+            addr: 0x1000,
+            size: 16,
+            ops,
+            switch_info: None,
+            op_metadata,
+        };
+        let interface = SourceFunctionInterface::new_exact(
+            b"stack-argument".to_vec(),
+            "test-stack-abi",
+            [SourceAbiParameterSpec::new(0, storage(8, 8))],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .and_then(|interface| interface.with_return_address_storage(storage(16, 8)))
+        .and_then(|interface| interface.with_stack_pointer_storage(storage(32, 8)))
+        .expect("caller interface");
+        let roles = SourceMachineRoles::new(Some(storage(16, 8)), Some(storage(32, 8)))
+            .expect("machine roles")
+            .with_call_preserved_carriers(SourceCallPreservedCarriers::new(true, true));
+        let identity = SourceCallSiteIdentity::new(
+            0x1000,
+            call_index,
+            CanonicalStorageId::from_varnode(&target),
+        );
+        let call_interface = SourceCallSiteInterface::new(
+            b"stack-argument".to_vec(),
+            identity,
+            true,
+            "test-stack-abi",
+            [SourceCallArgumentSpec::on_stack(0, 0, 8)],
+            false,
+            false,
+            SourceCallResult::Void,
+        )
+        .expect("callsite interface");
+        let artifact = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+            &[block],
+            Some(&arch),
+            Some(interface),
+            roles,
+            vec![call_interface],
+        )
+        .expect("artifact");
+        let facts = artifact.facts();
+        let call = facts
+            .call_sites
+            .by_id
+            .values()
+            .find(|call| call.direct_target == Some(0x2000))
+            .expect("call site");
+        let boundary = facts.boundaries.calls.get(&call.id).expect("boundary");
+        assert!(boundary.complete, "{boundary:?}");
+        let [argument] = boundary.arguments.as_slice() else {
+            panic!("one stack argument: {boundary:?}");
+        };
+        assert_eq!(
+            argument.slot,
+            crate::semantic::CallBoundarySlot::Stack(-8),
+            "{boundary:?}"
+        );
+        let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value else {
+            panic!("{boundary:?}");
+        };
+        assert_eq!(
+            artifact
+                .graph()
+                .value(value)
+                .map(|value| value.var.name.as_str()),
+            Some("rdi"),
+            "the argument is what the first store put in the slot"
+        );
+        let certificate = artifact
+            .callsite_certificate_for_op(0x1000, call_index)
+            .expect("callsite certificate");
+        assert!(
+            matches!(
+                certificate.argument_certificates.as_slice(),
+                [crate::semantic::CallArgumentCertificate {
+                    index: 0,
+                    location: crate::semantic::CallArgumentLocation::Stack { offset: -8, .. },
+                    ..
+                }]
+            ),
+            "{:?}",
+            certificate.argument_certificates
         );
     }
 }

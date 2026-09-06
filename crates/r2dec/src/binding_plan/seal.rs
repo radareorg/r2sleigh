@@ -1129,7 +1129,12 @@ impl BindingPlan {
                         }
                         continue;
                     };
-                    match source_slot.role() {
+                    match super::rules::effective_stack_slot_role(
+                        source_owned,
+                        &source_slot,
+                        base,
+                        offset,
+                    ) {
                         r2ssa::SourceStackSlotRole::Local => {
                             let Some(binding) = BindingId::from_dense_index(binding_index) else {
                                 return Err(BindingPlanBuildError::TooManyBindings {
@@ -1197,6 +1202,33 @@ impl BindingPlan {
                                 },
                             },
                         },
+                        r2ssa::SourceStackSlotRole::Parameter { parameter_index } => {
+                            match self.parameter_disposition(parameter_index) {
+                                Some(ParameterDisposition::Bound {
+                                    binding,
+                                    width_bits: parameter_width_bits,
+                                }) if parameter_width_bits == width_bits => {
+                                    StackObjectDisposition::Bound { binding }
+                                }
+                                Some(ParameterDisposition::Bound {
+                                    width_bits: parameter_width_bits,
+                                    ..
+                                }) => StackObjectDisposition::Refused {
+                                    reason: StackObjectRefusal::StackParameterWidthMismatch {
+                                        object,
+                                        parameter_index,
+                                        slot_width_bits: width_bits,
+                                        parameter_width_bits,
+                                    },
+                                },
+                                _ => StackObjectDisposition::Refused {
+                                    reason: StackObjectRefusal::StackParameterUnavailable {
+                                        object,
+                                        parameter_index,
+                                    },
+                                },
+                            }
+                        }
                         r2ssa::SourceStackSlotRole::UnclassifiedResource => {
                             StackObjectDisposition::Refused {
                                 reason: StackObjectRefusal::UnclassifiedSourceRole { object },

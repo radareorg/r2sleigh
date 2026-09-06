@@ -475,6 +475,33 @@ bool r2sleigh_wire_write_snapshot_prefix(R2SleighWireWriter *writer, const void 
 #define WALK_ROLE_UNCLASSIFIED 0
 #define WALK_ROLE_LOCAL 1
 #define WALK_ROLE_PARAMETER_HOME 2
+#define WALK_ROLE_PARAMETER 3
+
+#define WALK_LOCATION_REGISTER 0
+#define WALK_LOCATION_STACK 1
+
+static void walk_storage(R2SleighWireWriter *writer, const RAnalSnapshotRegisterStorage *storage);
+
+/* Where a parameter or an argument lives: a register, or a slot in the
+ * argument area named by its offset and width. */
+static void walk_parameter_location(R2SleighWireWriter *writer, const RAnalSnapshotParameter *parameter) {
+	if (parameter->on_stack) {
+		r2sleigh_wire_u8 (writer, WALK_LOCATION_STACK);
+		r2sleigh_wire_i64 (writer, parameter->stack_offset);
+		r2sleigh_wire_u32 (writer, parameter->stack_size);
+		return;
+	}
+	r2sleigh_wire_u8 (writer, WALK_LOCATION_REGISTER);
+	walk_storage (writer, &parameter->storage);
+}
+
+/* Whether a stack slot is the storage of a parameter the convention passes
+ * on the stack, by the argument index radare2 gave the slot. */
+static bool walk_slot_is_stack_parameter(const RAnalFcnSlot *slot, const RAnalFunctionInterfaceSnapshot *interface) {
+	return slot->role == R_ANAL_FCN_SLOT_ARG && slot->arg_index >= 0
+		&& interface && (size_t)slot->arg_index < interface->num_parameters
+		&& interface->parameters[slot->arg_index].on_stack;
+}
 #define WALK_GROWTH_LOWER 0
 #define WALK_GROWTH_HIGHER 1
 #define WALK_MECHANISM_STACKED 0
@@ -610,14 +637,15 @@ static bool walk_call_site(R2SleighWireWriter *writer,
 	for (size_t i = 0; i < call->num_arguments; i++) {
 		const RAnalSnapshotParameter *argument = &call->arguments[i];
 		r2sleigh_wire_u32 (writer, argument->index);
-		walk_storage (writer, &argument->storage);
+		walk_parameter_location (writer, argument);
 	}
 	r2sleigh_wire_bool (writer, call->variadic);
 	r2sleigh_wire_bool (writer, call->noreturn);
 	return walk_result_kind (writer, call->result_kind, &call->result_storage);
 }
 
-static bool walk_stack_slot(R2SleighWireWriter *writer, const RAnalFcnSlot *slot, bool exact_types) {
+static bool walk_stack_slot(R2SleighWireWriter *writer, const RAnalFcnSlot *slot, bool exact_types,
+		const RAnalFunctionInterfaceSnapshot *interface) {
 	uint8_t base_tag = 0;
 	if (!walk_stack_slot_base_tag (slot->base, &base_tag)) {
 		return false;
@@ -652,7 +680,12 @@ static bool walk_stack_slot(R2SleighWireWriter *writer, const RAnalFcnSlot *slot
 		walk_storage (writer, &home);
 		break;
 	default:
-		/* ARG and UNKNOWN carry no home authority, so both stay
+		if (walk_slot_is_stack_parameter (slot, interface)) {
+			r2sleigh_wire_u8 (writer, WALK_ROLE_PARAMETER);
+			r2sleigh_wire_u32 (writer, (uint32_t)slot->arg_index);
+			break;
+		}
+		/* Any other ARG, and UNKNOWN, carry no home authority, so both stay
 		 * unclassified rather than being promoted to a parameter home. */
 		r2sleigh_wire_u8 (writer, WALK_ROLE_UNCLASSIFIED);
 		break;
@@ -784,7 +817,7 @@ static bool walk_interface(R2SleighWireWriter *writer,
 	for (size_t i = 0; i < interface->num_parameters; i++) {
 		const RAnalSnapshotParameter *parameter = &interface->parameters[i];
 		r2sleigh_wire_u32 (writer, parameter->index);
-		walk_storage (writer, &parameter->storage);
+		walk_parameter_location (writer, parameter);
 	}
 	if (!walk_result_kind (writer, interface->return_kind, &interface->return_storage)) {
 		return false;
@@ -799,7 +832,7 @@ static bool walk_interface(R2SleighWireWriter *writer,
 	r2sleigh_wire_u32 (writer, (uint32_t)num_slots);
 	for (size_t i = 0; i < num_slots; i++) {
 		const RAnalFcnSlot *slot = walk_stack_slot_at (snapshot, i);
-		if (!slot || !walk_stack_slot (writer, slot, exact_types)) {
+		if (!slot || !walk_stack_slot (writer, slot, exact_types, interface)) {
 			return false;
 		}
 	}

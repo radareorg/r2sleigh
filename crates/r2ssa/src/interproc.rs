@@ -2423,7 +2423,7 @@ fn tracked_call_carriers(prepared: &SsaArtifact, abi: &AbiProfile) -> BTreeSet<C
                 .call_site_interfaces()
                 .values()
                 .flat_map(|interface| interface.arguments())
-                .map(|argument| CallCarrierKey::Storage(argument.storage())),
+                .filter_map(|argument| argument.register_storage().map(CallCarrierKey::Storage)),
         )
         .collect()
 }
@@ -2478,7 +2478,7 @@ fn call_argument_carriers(
         interface
             .arguments()
             .iter()
-            .map(|argument| CallCarrierKey::Storage(argument.storage()))
+            .filter_map(|argument| argument.register_storage().map(CallCarrierKey::Storage))
             .collect()
     })
 }

@@ -539,7 +539,9 @@ mod tests {
                 r2ssa::SourceAbiParameterSpec::new(index as u32, storage(offset))
             })
             .collect::<Vec<_>>();
-        let home_storage = parameters[parameter_index as usize].storage();
+        let home_storage = parameters[parameter_index as usize]
+            .register_storage()
+            .expect("register parameter");
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"r2dec-fold-pipeline-param-home-v1".to_vec(),
             "sysv64",
@@ -1806,6 +1808,89 @@ mod tests {
     #[test]
     fn observed_indirect_call_marks_only_graph_target_input() {
         assert_observed_call_marks_only_graph_target(true);
+    }
+
+    #[test]
+    fn a_parameter_passed_on_the_stack_is_read_as_the_parameter() {
+        // A seventh argument on x86-64 SysV arrives above the return address,
+        // at +8 from the stack pointer at entry. The function reads it and
+        // returns it. That read is a read of the parameter, not of a local
+        // nothing ever assigned, so the function renders with seven formals
+        // and no refusal.
+        let arch = make_test_arch_x86_64();
+        let storage = |offset| r2ssa::CanonicalStorageId {
+            space: r2ssa::CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let mut block = R2ILBlock::new(0x1500, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x100, 8),
+            a: Varnode::register(0x28, 8),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::register(0, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x100, 8),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::register(0x30, 8),
+        });
+        let parameters = [0x10u64, 0x18, 0x38, 0x40, 0x48, 0x50]
+            .into_iter()
+            .enumerate()
+            .map(|(index, offset)| r2ssa::SourceAbiParameterSpec::new(index as u32, storage(offset)))
+            .chain([r2ssa::SourceAbiParameterSpec::on_stack(6, 8, 8)])
+            .collect::<Vec<_>>();
+        let interface = r2ssa::SourceFunctionInterface::new_exact(
+            b"r2dec-fold-pipeline-stack-parameter-v1".to_vec(),
+            "sysv64",
+            parameters,
+            r2ssa::SourceFunctionReturn::Register {
+                storage: storage(0),
+            },
+            [r2ssa::SourceStackSlotSpec::new_parameter(
+                r2ssa::StackAddressBase::StackPointer,
+                storage(0x28),
+                8,
+                8,
+                6,
+            )],
+        )
+        .and_then(|interface| interface.with_return_address_storage(storage(0x30)))
+        .and_then(|interface| interface.with_stack_pointer_storage(storage(0x28)))
+        .expect("exact source interface with a stack parameter");
+        let prepared = SourceOwnedPreparedFixture::new(
+            r2ssa::SsaArtifact::for_decompile_with_interfaces_and_tail_calls(
+                std::slice::from_ref(&block),
+                Some(&arch),
+                Some(interface),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("prepared SSA should build")
+            .with_name("seventh"),
+        );
+        let input = crate::DecompilerInput::new(prepared.facts.clone());
+        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
+            .decompile_input_with_binding_audit(&input);
+        assert_eq!(audit.render_refusal(), None, "{}", audit.output());
+        let signature = audit
+            .output()
+            .lines()
+            .find(|line| line.contains("seventh("))
+            .expect("signature line");
+        assert_eq!(
+            signature.matches(',').count(),
+            6,
+            "seven formals in the signature: {signature}"
+        );
+        assert!(
+            !audit.output().contains("stack_p"),
+            "the slot is the parameter, not a local: {}",
+            audit.output()
+        );
     }
 
     #[test]

@@ -130,9 +130,9 @@ pub use machine_context::{
     SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection,
     SourceConventionSlots, SourceFunctionInterface, SourceFunctionInterfaceError,
     SourceFunctionReturn, SourceLogicalValue, SourceMachineContext, SourceMachineRoles,
-    SourceMachineRolesError, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceType, SourceTypeGraph, SourceTypeGraphError, SourceTypeKind,
-    SourceVariadicArgumentCountRule,
+    SourceMachineRolesError, SourceParameterLocation, SourceStackAllocationContract,
+    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeGraph,
+    SourceTypeGraphError, SourceTypeKind, SourceVariadicArgumentCountRule,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, ObligationCoverageReport,

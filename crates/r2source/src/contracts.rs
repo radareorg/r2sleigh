@@ -684,24 +684,117 @@ impl SourceTypeGraph {
     }
 }
 
-/// One explicit full-width register parameter in a function snapshot.
+/// Where one parameter or argument lives at a call boundary.
+///
+/// A convention places its first arguments in registers and the rest in the
+/// caller-owned argument area on the stack. Both are the same kind of fact --
+/// the caller wrote the value there and the callee reads it from there -- so
+/// both are one location and neither is an incomplete version of the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SourceParameterLocation {
+    Register(CanonicalStorageId),
+    /// A slot in the argument area. For a function's own parameter the offset
+    /// is from the stack pointer as the function was entered, so the first
+    /// slot on x86-64 sits at +8 above the return address; for a call-site
+    /// argument it is from the stack pointer at the call instruction, before
+    /// the transfer spends anything, so the first slot sits at +0.
+    Stack {
+        offset: i64,
+        size_bytes: u32,
+    },
+}
+
+impl SourceParameterLocation {
+    pub const fn register(self) -> Option<CanonicalStorageId> {
+        match self {
+            Self::Register(storage) => Some(storage),
+            Self::Stack { .. } => None,
+        }
+    }
+
+    pub const fn stack(self) -> Option<(i64, u32)> {
+        match self {
+            Self::Register(_) => None,
+            Self::Stack { offset, size_bytes } => Some((offset, size_bytes)),
+        }
+    }
+
+    /// The width of the carrier in bytes.
+    pub const fn size_bytes(self) -> u32 {
+        match self {
+            Self::Register(storage) => storage.size,
+            Self::Stack { size_bytes, .. } => size_bytes,
+        }
+    }
+
+    fn is_valid(self) -> bool {
+        match self {
+            Self::Register(storage) => valid_register_storage(storage),
+            Self::Stack { offset, size_bytes } => {
+                size_bytes > 0 && offset.checked_add(i64::from(size_bytes)).is_some()
+            }
+        }
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Register(a), Self::Register(b)) => register_storages_overlap(a, b),
+            (
+                Self::Stack {
+                    offset: a,
+                    size_bytes: a_size,
+                },
+                Self::Stack {
+                    offset: b,
+                    size_bytes: b_size,
+                },
+            ) => a < b.saturating_add(i64::from(b_size)) && b < a.saturating_add(i64::from(a_size)),
+            _ => false,
+        }
+    }
+}
+
+/// One explicit parameter in a function snapshot, at the location the
+/// convention gives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SourceAbiParameterSpec {
     index: u32,
-    storage: CanonicalStorageId,
+    location: SourceParameterLocation,
 }
 
 impl SourceAbiParameterSpec {
+    /// A parameter passed in a register.
     pub const fn new(index: u32, storage: CanonicalStorageId) -> Self {
-        Self { index, storage }
+        Self {
+            index,
+            location: SourceParameterLocation::Register(storage),
+        }
+    }
+
+    /// A parameter passed in the argument area, `offset` bytes above the
+    /// stack pointer at entry.
+    pub const fn on_stack(index: u32, offset: i64, size_bytes: u32) -> Self {
+        Self {
+            index,
+            location: SourceParameterLocation::Stack { offset, size_bytes },
+        }
+    }
+
+    pub const fn with_location(index: u32, location: SourceParameterLocation) -> Self {
+        Self { index, location }
     }
 
     pub const fn index(&self) -> u32 {
         self.index
     }
 
-    pub const fn storage(&self) -> CanonicalStorageId {
-        self.storage
+    pub const fn location(&self) -> SourceParameterLocation {
+        self.location
+    }
+
+    /// The register this parameter arrives in, when it arrives in one.
+    pub const fn register_storage(&self) -> Option<CanonicalStorageId> {
+        self.location.register()
     }
 }
 
@@ -871,6 +964,13 @@ pub enum SourceStackSlotRole {
         parameter_index: u32,
         home_storage: CanonicalStorageId,
     },
+    /// The slot is the parameter itself: the caller wrote the value into the
+    /// argument area and this function reads it from there. Unlike a home,
+    /// nothing in this body ever assigns it, and a read of it is a read of
+    /// the parameter.
+    Parameter {
+        parameter_index: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -937,6 +1037,24 @@ impl SourceStackSlotSpec {
                 parameter_index,
                 home_storage,
             },
+            logical_type: None,
+        }
+    }
+
+    /// A slot that is a stack-passed parameter's own storage.
+    pub const fn new_parameter(
+        base: StackAddressBase,
+        base_storage: CanonicalStorageId,
+        offset: i64,
+        size_bytes: u32,
+        parameter_index: u32,
+    ) -> Self {
+        Self {
+            base,
+            base_storage,
+            offset,
+            size_bytes,
+            role: SourceStackSlotRole::Parameter { parameter_index },
             logical_type: None,
         }
     }
@@ -1282,7 +1400,7 @@ impl SourceFunctionInterface {
         }
         if parameters
             .iter()
-            .any(|parameter| !valid_register_storage(parameter.storage))
+            .any(|parameter| !parameter.location.is_valid())
             || matches!(
                 return_kind,
                 SourceFunctionReturn::Register { storage }
@@ -1294,7 +1412,7 @@ impl SourceFunctionInterface {
         if parameters.iter().enumerate().any(|(index, parameter)| {
             parameters[index.saturating_add(1)..]
                 .iter()
-                .any(|other| register_storages_overlap(parameter.storage, other.storage))
+                .any(|other| parameter.location.overlaps(other.location))
         }) {
             return Err(SourceFunctionInterfaceError::OverlappingRegisterStorages);
         }
@@ -1318,13 +1436,25 @@ impl SourceFunctionInterface {
         }) {
             return Err(SourceFunctionInterfaceError::InvalidStackSlot);
         }
-        if stack_slots.windows(2).any(|pair| {
+        if let Some(pair) = stack_slots.windows(2).find(|pair| {
             pair[0].base == pair[1].base
                 && pair[0]
                     .offset
                     .checked_add(i64::from(pair[0].size_bytes))
                     .is_none_or(|end| end > pair[1].offset)
         }) {
+            r2il::refusal_evidence!(
+                "stack-slot-overlap",
+                "slot at {:?}{:+} ({} bytes, {:?}) overlaps slot at {:?}{:+} ({} bytes, {:?})",
+                pair[0].base,
+                pair[0].offset,
+                pair[0].size_bytes,
+                pair[0].role,
+                pair[1].base,
+                pair[1].offset,
+                pair[1].size_bytes,
+                pair[1].role
+            );
             return Err(SourceFunctionInterfaceError::OverlappingStackSlots);
         }
         let mut parameter_homes = BTreeSet::new();
@@ -1332,10 +1462,51 @@ impl SourceFunctionInterface {
             match slot.role {
                 SourceStackSlotRole::UnclassifiedResource => {
                     if require_exact_stack_slot_roles {
+                        r2il::refusal_evidence!(
+                            "stack-slot-role",
+                            "slot at {:?}{:+} ({} bytes) is unclassified in an interface whose roles are stated exact",
+                            slot.base,
+                            slot.offset,
+                            slot.size_bytes
+                        );
                         return Err(SourceFunctionInterfaceError::InvalidStackSlotRole);
                     }
                 }
                 SourceStackSlotRole::Local => {}
+                SourceStackSlotRole::Parameter { parameter_index } => {
+                    // The slot is a parameter the convention passes on the
+                    // stack, and the parameter must say it lives there with
+                    // a carrier the slot fits in. More than one slot may
+                    // name the same parameter: a debugger's location list
+                    // gives the variable a second frame slot over a later
+                    // range, and which slot is the parameter's own is decided
+                    // by position once the frame is known, not here.
+                    let Ok(parameter_index_usize) = usize::try_from(parameter_index) else {
+                        return Err(SourceFunctionInterfaceError::InvalidStackSlotRole);
+                    };
+                    if parameters
+                        .get(parameter_index_usize)
+                        .is_none_or(|parameter| {
+                            parameter.index != parameter_index
+                                || parameter.location.stack().is_none_or(|(_, size_bytes)| {
+                                    slot.size_bytes == 0 || slot.size_bytes > size_bytes
+                                })
+                        })
+                    {
+                        r2il::refusal_evidence!(
+                            "stack-slot-role",
+                            "slot at {:?}{:+} ({} bytes) names parameter {} which is {:?}",
+                            slot.base,
+                            slot.offset,
+                            slot.size_bytes,
+                            parameter_index,
+                            parameters
+                                .get(parameter_index_usize)
+                                .map(|parameter| parameter.location)
+                        );
+                        return Err(SourceFunctionInterfaceError::InvalidStackSlotRole);
+                    }
+                }
                 SourceStackSlotRole::ParameterHome {
                     parameter_index,
                     home_storage,
@@ -1348,10 +1519,23 @@ impl SourceFunctionInterface {
                             .get(parameter_index_usize)
                             .is_none_or(|parameter| {
                                 parameter.index != parameter_index
-                                    || parameter.storage != home_storage
+                                    || parameter.register_storage() != Some(home_storage)
                             })
                         || !parameter_homes.insert(parameter_index)
                     {
+                        r2il::refusal_evidence!(
+                            "stack-slot-role",
+                            "home at {:?}{:+} ({} bytes) for parameter {} in {:?} names {:?}; already claimed: {}",
+                            slot.base,
+                            slot.offset,
+                            slot.size_bytes,
+                            parameter_index,
+                            home_storage,
+                            parameters
+                                .get(parameter_index_usize)
+                                .map(|parameter| parameter.location),
+                            parameter_homes.contains(&parameter_index)
+                        );
                         return Err(SourceFunctionInterfaceError::InvalidStackSlotRole);
                     }
                 }
@@ -1381,7 +1565,7 @@ impl SourceFunctionInterface {
                     .iter()
                     .zip(&parameters)
                     .any(|(value, parameter)| {
-                        !graph.validates_logical_value(*value, parameter.storage.size)
+                        !graph.validates_logical_value(*value, parameter.location.size_bytes())
                     })
                 {
                     return Err(SourceFunctionInterfaceError::InvalidLogicalTypes {
@@ -1473,6 +1657,40 @@ impl SourceFunctionInterface {
         self.abi_class
     }
 
+    /// Whether a call site's argument location names the same carrier as one
+    /// of this function's parameters.
+    ///
+    /// A register is the same register on both sides. A stack slot is named
+    /// from the caller's stack pointer at the call and from this function's
+    /// stack pointer at entry, and the two differ by exactly what the
+    /// transfer spends -- the return-address slot the return mechanism
+    /// states, or nothing where the address travels in a register.
+    pub fn argument_location_matches_parameter(
+        &self,
+        argument: SourceParameterLocation,
+        parameter: SourceParameterLocation,
+    ) -> bool {
+        match (argument, parameter) {
+            (SourceParameterLocation::Register(a), SourceParameterLocation::Register(b)) => a == b,
+            (
+                SourceParameterLocation::Stack {
+                    offset: call_offset,
+                    size_bytes: call_size,
+                },
+                SourceParameterLocation::Stack {
+                    offset: entry_offset,
+                    size_bytes: entry_size,
+                },
+            ) => {
+                let spent = self.return_mechanism.map_or(0, |mechanism| {
+                    i64::from(mechanism.stack_pointer_delta_bytes())
+                });
+                call_size == entry_size && call_offset.checked_add(spent) == Some(entry_offset)
+            }
+            _ => false,
+        }
+    }
+
     pub const fn parameters(&self) -> &[SourceAbiParameterSpec] {
         &self.parameters
     }
@@ -1486,7 +1704,7 @@ impl SourceFunctionInterface {
             && !self
                 .parameters
                 .iter()
-                .map(SourceAbiParameterSpec::storage)
+                .filter_map(SourceAbiParameterSpec::register_storage)
                 .chain(match self.return_kind {
                     SourceFunctionReturn::Void => None,
                     SourceFunctionReturn::Register { storage } => Some(storage),
@@ -1500,7 +1718,9 @@ impl SourceFunctionInterface {
                 )
                 .chain(self.stack_slots.iter().filter_map(|slot| match slot.role {
                     SourceStackSlotRole::ParameterHome { home_storage, .. } => Some(home_storage),
-                    SourceStackSlotRole::UnclassifiedResource | SourceStackSlotRole::Local => None,
+                    SourceStackSlotRole::UnclassifiedResource
+                    | SourceStackSlotRole::Local
+                    | SourceStackSlotRole::Parameter { .. } => None,
                 }))
                 .any(|other| register_storages_overlap(storage, other))
     }
@@ -1509,7 +1729,7 @@ impl SourceFunctionInterface {
         let overlaps_non_stack_role = self
             .parameters
             .iter()
-            .map(SourceAbiParameterSpec::storage)
+            .filter_map(SourceAbiParameterSpec::register_storage)
             .chain(match self.return_kind {
                 SourceFunctionReturn::Void => None,
                 SourceFunctionReturn::Register { storage } => Some(storage),
@@ -1518,7 +1738,9 @@ impl SourceFunctionInterface {
             .chain(self.frame_pointer_storage)
             .chain(self.stack_slots.iter().filter_map(|slot| match slot.role {
                 SourceStackSlotRole::ParameterHome { home_storage, .. } => Some(home_storage),
-                SourceStackSlotRole::UnclassifiedResource | SourceStackSlotRole::Local => None,
+                SourceStackSlotRole::UnclassifiedResource
+                | SourceStackSlotRole::Local
+                | SourceStackSlotRole::Parameter { .. } => None,
             }))
             .chain(
                 self.stack_slots
@@ -1545,7 +1767,7 @@ impl SourceFunctionInterface {
         let overlaps_non_frame_role = self
             .parameters
             .iter()
-            .map(SourceAbiParameterSpec::storage)
+            .filter_map(SourceAbiParameterSpec::register_storage)
             .chain(match self.return_kind {
                 SourceFunctionReturn::Void => None,
                 SourceFunctionReturn::Register { storage } => Some(storage),
@@ -1554,7 +1776,9 @@ impl SourceFunctionInterface {
             .chain(self.stack_pointer_storage)
             .chain(self.stack_slots.iter().filter_map(|slot| match slot.role {
                 SourceStackSlotRole::ParameterHome { home_storage, .. } => Some(home_storage),
-                SourceStackSlotRole::UnclassifiedResource | SourceStackSlotRole::Local => None,
+                SourceStackSlotRole::UnclassifiedResource
+                | SourceStackSlotRole::Local
+                | SourceStackSlotRole::Parameter { .. } => None,
             }))
             .chain(
                 self.stack_slots
@@ -1777,7 +2001,7 @@ impl SourceFunctionInterface {
         let overlaps_source_carrier = self
             .parameters
             .iter()
-            .map(SourceAbiParameterSpec::storage)
+            .filter_map(SourceAbiParameterSpec::register_storage)
             .chain(match self.return_kind {
                 SourceFunctionReturn::Void => None,
                 SourceFunctionReturn::Register { storage } => Some(storage),
@@ -1792,7 +2016,9 @@ impl SourceFunctionInterface {
             )
             .chain(self.stack_slots.iter().filter_map(|slot| match slot.role {
                 SourceStackSlotRole::ParameterHome { home_storage, .. } => Some(home_storage),
-                SourceStackSlotRole::UnclassifiedResource | SourceStackSlotRole::Local => None,
+                SourceStackSlotRole::UnclassifiedResource
+                | SourceStackSlotRole::Local
+                | SourceStackSlotRole::Parameter { .. } => None,
             }))
             .any(|other| register_storages_overlap(storage, other));
         (!overlaps_source_carrier).then_some(storage)
@@ -1892,20 +2118,42 @@ impl SourceCallSiteIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SourceCallArgumentSpec {
     index: u32,
-    storage: CanonicalStorageId,
+    location: SourceParameterLocation,
 }
 
 impl SourceCallArgumentSpec {
+    /// An argument passed in a register.
     pub const fn new(index: u32, storage: CanonicalStorageId) -> Self {
-        Self { index, storage }
+        Self {
+            index,
+            location: SourceParameterLocation::Register(storage),
+        }
+    }
+
+    /// An argument passed in the argument area, `offset` bytes above the
+    /// stack pointer at the call instruction.
+    pub const fn on_stack(index: u32, offset: i64, size_bytes: u32) -> Self {
+        Self {
+            index,
+            location: SourceParameterLocation::Stack { offset, size_bytes },
+        }
+    }
+
+    pub const fn with_location(index: u32, location: SourceParameterLocation) -> Self {
+        Self { index, location }
     }
 
     pub const fn index(self) -> u32 {
         self.index
     }
 
-    pub const fn storage(self) -> CanonicalStorageId {
-        self.storage
+    pub const fn location(self) -> SourceParameterLocation {
+        self.location
+    }
+
+    /// The register this argument is passed in, when it is passed in one.
+    pub const fn register_storage(self) -> Option<CanonicalStorageId> {
+        self.location.register()
     }
 }
 
@@ -2010,7 +2258,7 @@ impl SourceCallSiteInterface {
         }
         if arguments
             .iter()
-            .any(|argument| !valid_register_storage(argument.storage))
+            .any(|argument| !argument.location.is_valid())
             || matches!(
                 result,
                 SourceCallResult::Register { storage } if !valid_register_storage(storage)
@@ -2021,7 +2269,7 @@ impl SourceCallSiteInterface {
         if arguments.iter().enumerate().any(|(index, argument)| {
             arguments[index.saturating_add(1)..]
                 .iter()
-                .any(|other| register_storages_overlap(argument.storage, other.storage))
+                .any(|other| argument.location.overlaps(other.location))
         }) {
             return Err(SourceCallSiteInterfaceError::OverlappingRegisterStorages);
         }
@@ -2067,7 +2315,10 @@ impl SourceCallSiteInterface {
                 .zip(callee.parameters())
                 .all(|(argument, parameter)| {
                     argument.index() == parameter.index()
-                        && argument.storage() == parameter.storage()
+                        && callee.argument_location_matches_parameter(
+                            argument.location(),
+                            parameter.location(),
+                        )
                 });
         if !carriers_match {
             return Err(SourceCallSiteInterfaceError::IncompatibleCalleeInterface);

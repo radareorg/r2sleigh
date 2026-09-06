@@ -2141,7 +2141,8 @@ fn trusted_stack_slot_names(
             r2ssa::SourceStackSlotRole::UnclassifiedResource => {
                 r2types::ExternalStackSlotRole::Unknown
             }
-            r2ssa::SourceStackSlotRole::ParameterHome { .. } => continue,
+            r2ssa::SourceStackSlotRole::ParameterHome { .. }
+            | r2ssa::SourceStackSlotRole::Parameter { .. } => continue,
         };
         slots.insert(
             r2types::StackSlotKey {
