@@ -708,6 +708,14 @@ static bool fcn_context_append_slot_callee(RAnal *anal, RList *callees, ut64 cal
 	callee->linkage = reloc->import? R_ANAL_FCN_CALLEE_IMPORTED
 		: reloc->symbol? R_ANAL_FCN_CALLEE_INTERNAL: R_ANAL_FCN_CALLEE_UNKNOWN;
 	callee->signature = r_anal_function_signature_from_type_name (anal, name);
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		char *key = r_type_func_key (anal->sdb_types, name);
+		eprintf ("R2SLEIGH_SLOT call=0x%" PFMT64x " slot=0x%" PFMT64x " name=%s signature=%d key=%s exist=%d kind=%s\n",
+			call_addr, slot, name, callee->signature? 1: 0, key? key: "(none)",
+			r_type_func_exist (anal->sdb_types, name),
+			r_str_get (sdb_const_get (anal->sdb_types, name, 0)));
+		free (key);
+	}
 	callee->transfer = R_ANAL_CALL_TRANSFER_TAIL_SLOT;
 	r_list_append (callees, callee);
 	return true;
@@ -1322,6 +1330,26 @@ static bool function_image_string_literals_collect(RAnal *anal,
 			RAnalRef *ref;
 			R_VEC_FOREACH (refs, ref) {
 				const char *text = r_meta_get_string (anal, R_META_TYPE_STRING, ref->addr);
+				/* A reference into the middle of a string names its suffix,
+				 * which is a string literal of its own: `" "` at the tail of
+				 * "\n    " is what `fprintf (stderr, " ")` passes. The
+				 * analysis recorded the whole as one string and trimmed the
+				 * text it kept, so the suffix is read from the bytes the
+				 * record covers, up to its end. */
+				char suffix[64] = {0};
+				if (!text) {
+					RIntervalNode *node = r_meta_get_in (anal, ref->addr, R_META_TYPE_STRING);
+					if (node && ref->addr > node->start && ref->addr < node->end
+						&& anal->iob.io && anal->iob.read_at) {
+						const ut64 span = R_MIN (node->end - ref->addr, sizeof (suffix) - 1);
+						if (anal->iob.read_at (anal->iob.io, ref->addr, (ut8 *)suffix, (int)span)) {
+							suffix[span] = 0;
+							if (*suffix && r_str_is_printable (suffix)) {
+								text = suffix;
+							}
+						}
+					}
+				}
 				if (!text || !*text) {
 					continue;
 				}
@@ -5580,27 +5608,27 @@ beach:
 
 static char *function_signature_try_type_name(Sdb *types, const char *candidate) {
 	R_RETURN_VAL_IF_FAIL (types && candidate && *candidate, NULL);
+	/* The prototype namespace decides whether a name has a prototype. The
+	 * kind key `NAME=func` shares its name with struct, union and enum tags,
+	 * which C keeps apart from ordinary identifiers: a program that declares
+	 * `struct stat` and calls `stat()` -- every program that calls stat --
+	 * has `stat=struct` written over `stat=func` once its DWARF is read, and
+	 * the prototype still recorded under `func.stat.*` went unfound. */
 	char *name = r_type_func_key (types, candidate);
 	if (name) {
-		const char *kind = sdb_const_get (types, name, 0);
-		if (kind && !strcmp (kind, "func")) {
+		if (r_type_func_exist (types, name)) {
 			return name;
 		}
 		free (name);
 	}
 	name = r_type_func_guess (types, candidate);
 	if (name) {
-		const char *kind = sdb_const_get (types, name, 0);
-		if (kind && !strcmp (kind, "func")) {
+		if (r_type_func_exist (types, name)) {
 			return name;
 		}
 		free (name);
 	}
-	const char *kind = sdb_const_get (types, candidate, 0);
-	if (kind && !strcmp (kind, "func")) {
-		return strdup (candidate);
-	}
-	return NULL;
+	return r_type_func_exist (types, candidate)? strdup (candidate): NULL;
 }
 
 static int var_ptr_comparator(RAnalVar * const *a, RAnalVar * const *b) {
