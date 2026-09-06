@@ -711,7 +711,7 @@ static bool fcn_context_append_slot_callee(RAnal *anal, RList *callees, ut64 cal
 		char *key = r_type_func_key (anal->sdb_types, name);
 		eprintf ("R2SLEIGH_SLOT call=0x%" PFMT64x " slot=0x%" PFMT64x " name=%s signature=%d key=%s exist=%d kind=%s\n",
 			call_addr, slot, name, callee->signature? 1: 0, key? key: "(none)",
-			r_type_func_exist (anal->sdb_types, name),
+			r_type_func_prototype_exist (anal->sdb_types, name),
 			r_str_get (sdb_const_get (anal->sdb_types, name, 0)));
 		free (key);
 	}
@@ -5636,19 +5636,19 @@ static char *function_signature_try_type_name(Sdb *types, const char *candidate)
 	 * the prototype still recorded under `func.stat.*` went unfound. */
 	char *name = r_type_func_key (types, candidate);
 	if (name) {
-		if (r_type_func_exist (types, name)) {
+		if (r_type_func_prototype_exist (types, name)) {
 			return name;
 		}
 		free (name);
 	}
 	name = r_type_func_guess (types, candidate);
 	if (name) {
-		if (r_type_func_exist (types, name)) {
+		if (r_type_func_prototype_exist (types, name)) {
 			return name;
 		}
 		free (name);
 	}
-	return r_type_func_exist (types, candidate)? strdup (candidate): NULL;
+	return r_type_func_prototype_exist (types, candidate)? strdup (candidate): NULL;
 }
 
 static int var_ptr_comparator(RAnalVar * const *a, RAnalVar * const *b) {
