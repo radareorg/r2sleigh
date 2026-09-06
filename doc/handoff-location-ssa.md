@@ -13538,3 +13538,29 @@ already right; the region tree and `crate::ast::SwitchCase` are what still
 assume one value per arm. Until then the literal comparison in
 `structure_switch_region` is the honest answer: rendering `case 1:` for an arm
 that also serves 2 through 67 would send those values to the default.
+
+### The switch region now carries every label, and the selector is the blocker
+
+`Region::Switch` holds `cases: Vec<(Vec<u64>, Box<Region>)>` -- every value
+that reaches an arm, not the first. `structure_switch_region` emits one `case`
+label per value with the body under the last, which is what C means by
+`case 1: case 2: body;`, and both the certified-control comparison and the
+render proof expand per value so a shared arm can match the control fact at
+all. Pinned by `a_switch_arm_keeps_every_case_value_that_reaches_it`.
+
+That is not yet visible on the corpus, because the layer below still refuses.
+`gz_open`'s dispatch at `0x2187` reaches `get_switch_expression`, which finds
+its single indirect branch and then finds the control fact carries no selector:
+`infer_switch_selector_var` walks thirteen steps back from the dispatch operand
+-- `RAX_31` at `0x2187` op 14, through the table load, into `0x2171` -- and
+ends in one of the address-walk arms with nothing to show. The walk now prints
+every step it takes and every way it gives up, so the next session reads the
+chain rather than searching for it. What the walk is missing is the shape of a
+jump-table dispatch whose index is computed in a *different* block from the
+load: `is_stack_slot_address_var` and the sum/scaled arms all assume the index
+and the load sit together.
+
+Until the selector is provable, five functions stop at
+`r2dec residual: switch control mismatch` and then at the linear form's refusal
+of a multi-way dispatch: `gz_open` in both minigzip builds, and three in
+bzip2 -O0.

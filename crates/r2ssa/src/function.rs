@@ -3927,10 +3927,16 @@ impl SSAFunction {
     /// Get the switch-selector SSA value that drives a switch block, if recoverable.
     pub fn infer_switch_selector_var(&self, block_addr: u64) -> Option<SSAVar> {
         let block = self.get_block(block_addr)?;
-        let target = block.ops.iter().rev().find_map(|op| match op {
+        let Some(target) = block.ops.iter().rev().find_map(|op| match op {
             SSAOp::BranchInd { target, .. } => Some(target),
             _ => None,
-        })?;
+        }) else {
+            r2il::refusal_evidence!(
+                "switch-selector-walk",
+                "{block_addr:#x} has no indirect branch to walk back from"
+            );
+            return None;
+        };
         self.infer_switch_selector_var_from_value(target, 0)
     }
 
@@ -3963,13 +3969,31 @@ impl SSAFunction {
         }
 
         let Some((block_addr, location)) = self.find_def(var) else {
-            return (!Self::is_constish_switch_value(var)).then(|| var.clone());
+            let constish = Self::is_constish_switch_value(var);
+            if constish {
+                r2il::refusal_evidence!(
+                    "switch-selector-walk",
+                    "{} has no definition and reads as a constant",
+                    var.display_name()
+                );
+            }
+            return (!constish).then(|| var.clone());
         };
         let DefLocation::Op(op_idx) = location else {
+            r2il::refusal_evidence!(
+                "switch-selector-walk",
+                "{} is defined by a merge in {block_addr:#x}, which the walk does not cross",
+                var.display_name()
+            );
             return None;
         };
         let block = self.get_block(block_addr)?;
         let op = block.ops.get(op_idx)?;
+        r2il::refusal_evidence!(
+            "switch-selector-walk",
+            "step {depth}: {} defined at {block_addr:#x} op {op_idx}",
+            var.display_name()
+        );
         match op {
             SSAOp::Copy { src, .. }
             | SSAOp::IntZExt { src, .. }
@@ -3997,7 +4021,17 @@ impl SSAFunction {
             // result, and walking past it loses the mask: murmur3's tail
             // rendered `switch (arg1)`, which a 61-byte message matches none of.
             SSAOp::IntAnd { .. } => Some(var.clone()),
-            _ => None,
+            // The walk that finds nothing is the one worth naming: a switch
+            // whose selector is unproven cannot structure, and the reader was
+            // told only "unrepresentable operation" several layers later.
+            other => {
+                r2il::refusal_evidence!(
+                    "switch-selector-walk",
+                    "{} defined at {block_addr:#x} op {op_idx} by {other:?} is not a selector step",
+                    var.display_name()
+                );
+                None
+            }
         }
     }
 
@@ -4011,6 +4045,11 @@ impl SSAFunction {
         };
         let block = self.get_block(block_addr)?;
         let op = block.ops.get(op_idx)?;
+        r2il::refusal_evidence!(
+            "switch-selector-walk",
+            "address step {depth}: {} defined at {block_addr:#x} op {op_idx}",
+            addr.display_name()
+        );
         match op {
             SSAOp::Copy { src, .. }
             | SSAOp::IntZExt { src, .. }

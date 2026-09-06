@@ -425,7 +425,7 @@ impl<'a, 's> ControlBdd<'a, 's> {
 struct SwitchRegionView<'r> {
     entry_block: u64,
     switch_block: u64,
-    cases: &'r [(Option<u64>, Box<Region>)],
+    cases: &'r [(Vec<u64>, Box<Region>)],
     default: Option<&'r Region>,
     merge_block: Option<u64>,
     prefix_regions: &'r [Region],
@@ -830,7 +830,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         &mut self,
         anchor: u64,
         selector: ValueId,
-        cases: &[(Option<u64>, Box<Region>)],
+        cases: &[(Vec<u64>, Box<Region>)],
         default: Option<&Region>,
     ) {
         let proof = self.switch_render_proof(anchor, selector, cases, default);
@@ -841,12 +841,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         &self,
         anchor: u64,
         selector: ValueId,
-        cases: &[(Option<u64>, Box<Region>)],
+        cases: &[(Vec<u64>, Box<Region>)],
         default: Option<&Region>,
     ) -> ControlRenderProof {
         let mut switch_cases = cases
             .iter()
-            .filter_map(|(value, region)| value.map(|value| (value, region.entry())))
+            .flat_map(|(values, region)| values.iter().map(move |value| (*value, region.entry())))
             .collect::<Vec<_>>();
         switch_cases.sort_unstable();
         let switch_default = default.map(Region::entry);
@@ -1840,6 +1840,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         switch_addr: u64,
     ) -> ControlFlowStructureResult<Option<(CExpr, ValueId)>> {
         let Some(block) = self.func.get_block(switch_addr) else {
+            r2il::refusal_evidence!("switch-selector", "{switch_addr:#x} is not a block");
             return Ok(None);
         };
         // The dispatch is not always the block's last operation. Materializing
@@ -1854,9 +1855,14 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             }
         });
         let Some((op_idx, target)) = dispatches.next() else {
+            r2il::refusal_evidence!("switch-selector", "{switch_addr:#x} has no indirect branch");
             return Ok(None);
         };
         if dispatches.next().is_some() {
+            r2il::refusal_evidence!(
+                "switch-selector",
+                "{switch_addr:#x} has more than one indirect branch"
+            );
             return Ok(None);
         }
         let Some(fact) = self
@@ -1864,12 +1870,22 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .control_facts()
             .and_then(|facts| facts.switch_for_block(switch_addr))
         else {
+            r2il::refusal_evidence!("switch-selector", "{switch_addr:#x} has no control fact");
             return Ok(None);
         };
         if fact.block_addr != switch_addr {
+            r2il::refusal_evidence!(
+                "switch-selector",
+                "{switch_addr:#x} control fact names block {:#x}",
+                fact.block_addr
+            );
             return Ok(None);
         }
         let Some(selector) = fact.selector else {
+            r2il::refusal_evidence!(
+                "switch-selector",
+                "{switch_addr:#x} control fact carries no selector value"
+            );
             return Ok(None);
         };
         // The dispatch operand is not the selector, and requiring it to be was
@@ -1916,18 +1932,20 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     fn structure_switch_region(
         &mut self,
         switch_block: u64,
-        cases: &[(Option<u64>, Box<Region>)],
+        cases: &[(Vec<u64>, Box<Region>)],
         default: Option<&Region>,
         merge_block: Option<u64>,
     ) -> ControlFlowStructureResult<CStmt> {
         let merge_owned_by_ancestor =
             merge_block.is_some_and(|merge| self.deferred_merge_blocks.contains(&merge));
         let Some((switch_expr, switch_selector)) = self.get_switch_expression(switch_block)? else {
+            r2il::refusal_evidence!("switch-region", "no selector at {switch_block:#x}");
             return Ok(CStmt::Block(vec![CStmt::comment(format!(
                 "r2dec residual: unresolved switch selector at 0x{switch_block:x}"
             ))]));
         };
-        if cases.iter().any(|(case_value, _)| case_value.is_none()) {
+        if cases.iter().any(|(case_values, _)| case_values.is_empty()) {
+            r2il::refusal_evidence!("switch-region", "an arm has no value at {switch_block:#x}");
             return Ok(CStmt::Block(vec![CStmt::comment(format!(
                 "r2dec residual: unresolved switch case value at 0x{switch_block:x}"
             ))]));
@@ -1937,13 +1955,18 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .control_facts()
             .and_then(|facts| facts.switch_for_block(switch_block))
         else {
+            r2il::refusal_evidence!("switch-region", "no control fact at {switch_block:#x}");
             return Ok(CStmt::Block(vec![CStmt::comment(format!(
                 "r2dec residual: unresolved switch control fact at 0x{switch_block:x}"
             ))]));
         };
+        // One entry per value, not per arm: `case 1: case 2:` before one body
+        // is two entries in the certified control fact and has to be two here,
+        // or the arm renders under its first label alone and every other value
+        // it serves falls to the default.
         let mut rendered_cases = cases
             .iter()
-            .filter_map(|(value, region)| value.map(|value| (value, region.entry())))
+            .flat_map(|(values, region)| values.iter().map(move |value| (*value, region.entry())))
             .collect::<Vec<_>>();
         rendered_cases.sort_unstable();
         // A case whose target is where the switch converges is an empty case.
@@ -1960,6 +1983,14 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .collect::<Vec<_>>();
         certified_cases.sort_unstable();
         if rendered_cases != certified_cases || default.map(Region::entry) != control_fact.default {
+            r2il::refusal_evidence!(
+                "switch-region",
+                "control mismatch at {switch_block:#x}: rendered {} certified {} rendered_default {:?} certified_default {:?}",
+                rendered_cases.len(),
+                certified_cases.len(),
+                default.map(Region::entry),
+                control_fact.default
+            );
             return Ok(CStmt::Block(vec![CStmt::comment(format!(
                 "r2dec residual: switch control mismatch at 0x{switch_block:x}"
             ))]));
@@ -1976,7 +2007,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // the tail was ever mixed in.
         let case_entries: std::collections::HashSet<u64> = cases
             .iter()
-            .filter(|(value, _)| value.is_some())
+            .filter(|(values, _)| !values.is_empty())
             .map(|(_, region)| region.entry())
             .collect();
         // Which case values reach each body. A case that falls into the next
@@ -1986,10 +2017,10 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // that union -- and a body guarded by its own value alone does not
         // match it, which is what left the switch structured and uncovered.
         let mut falls_into = std::collections::BTreeMap::<u64, Vec<u64>>::new();
-        for (case_value, case_region) in cases {
-            let Some(case_value) = case_value else {
+        for (case_values, case_region) in cases {
+            if case_values.is_empty() {
                 continue;
-            };
+            }
             let region_blocks: std::collections::HashSet<u64> =
                 case_region.blocks().into_iter().collect();
             let successor_entry = region_blocks.iter().find_map(|block| {
@@ -2001,19 +2032,22 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             falls_into
                 .entry(case_region.entry())
                 .or_default()
-                .push(*case_value);
+                .extend(case_values.iter().copied());
             if let Some(entry) = successor_entry {
-                falls_into.entry(entry).or_default().push(*case_value);
+                falls_into
+                    .entry(entry)
+                    .or_default()
+                    .extend(case_values.iter().copied());
             }
         }
         // Transitively: case 3 falls into case 2 which falls into case 1, so
         // case 1's body runs for all three.
         for _ in 0..cases.len() {
             let snapshot = falls_into.clone();
-            for (case_value, case_region) in cases {
-                let Some(case_value) = case_value else {
+            for (case_values, case_region) in cases {
+                if case_values.is_empty() {
                     continue;
-                };
+                }
                 let region_blocks: std::collections::HashSet<u64> =
                     case_region.blocks().into_iter().collect();
                 let Some(entry) = region_blocks.iter().find_map(|block| {
@@ -2027,7 +2061,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 let carried = snapshot
                     .get(&case_region.entry())
                     .cloned()
-                    .unwrap_or_else(|| vec![*case_value]);
+                    .unwrap_or_else(|| case_values.clone());
                 falls_into.entry(entry).or_default().extend(carried);
             }
         }
@@ -2037,12 +2071,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
 
         let mut switch_cases = Vec::new();
-        for (case_value, case_region) in cases {
+        for (case_values, case_region) in cases {
             let outer_domains = self.active_domains.clone();
-            let Some(case_value) = case_value else {
+            let Some((&last_value, leading_values)) = case_values.split_last() else {
                 continue;
             };
-            let value_expr = CExpr::IntLit(*case_value as i64);
+            let value_expr = CExpr::IntLit(last_value as i64);
             let region_blocks: std::collections::HashSet<u64> =
                 case_region.blocks().into_iter().collect();
             let falls_through = region_blocks.iter().any(|block| {
@@ -2070,6 +2104,15 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             } else {
                 vec![case_stmt, CStmt::Break]
             };
+            // An arm several values reach is several labels with one body,
+            // which is what C spells `case 1: case 2: body;`. The empty ones
+            // come first so the body stays under the last label.
+            for value in leading_values {
+                switch_cases.push(crate::ast::SwitchCase {
+                    value: CExpr::IntLit(*value as i64),
+                    body: Vec::new(),
+                });
+            }
             switch_cases.push(crate::ast::SwitchCase {
                 value: value_expr,
                 body,

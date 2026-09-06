@@ -10086,9 +10086,19 @@ fn collect_predicate_facts(function: &SSAFunction, graph: &SsaGraph) -> Predicat
                     block_addr,
                     SwitchPredicateFact {
                         block_addr,
-                        selector: function
-                            .infer_switch_selector_var(block.addr)
-                            .and_then(|selector| graph.value_id_for_var(&selector)),
+                        selector: function.infer_switch_selector_var(block.addr).and_then(
+                            |selector| {
+                                let value = graph.value_id_for_var(&selector);
+                                if value.is_none() {
+                                    r2il::refusal_evidence!(
+                                        "switch-selector-walk",
+                                        "{block_addr:#x} selector {} has no value in the graph",
+                                        selector.display_name()
+                                    );
+                                }
+                                value
+                            },
+                        ),
                         cases: cases.clone(),
                         default: *default,
                     },

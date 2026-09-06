@@ -72,8 +72,15 @@ pub enum Region {
     Switch {
         /// The block containing the switch expression.
         switch_block: u64,
-        /// Case targets: (case_value, case_region).
-        cases: Vec<(Option<u64>, Box<Region>)>,
+        /// Case targets: (every value that reaches this arm, case_region).
+        ///
+        /// A C switch arm can carry several labels -- `case 1: case 2:` before
+        /// one body -- and a jump table routinely gives one arm dozens of
+        /// values. Keeping only the first renamed the arm: the values that
+        /// were dropped would fall to the default instead of running the body
+        /// the machine sends them to. An empty vector means the arm has no
+        /// canonical value at all, which refuses.
+        cases: Vec<(Vec<u64>, Box<Region>)>,
         /// Default case region (if any).
         default: Option<Box<Region>>,
         /// The merge block after the switch (if any).
@@ -1009,12 +1016,10 @@ impl<'a> RegionAnalyzer<'a> {
             if Some(target) == merge || Some(target) == default_target {
                 continue;
             }
-            // Use the first value for this target
-            let case_value = values.first().copied();
             let case_region = Box::new(self.analyze_region_recursive(target));
-            cases.push((case_value, case_region));
+            cases.push((values.clone(), case_region));
         }
-        cases.sort_by_key(|(value, _)| value.unwrap_or(u64::MAX));
+        cases.sort_by_key(|(values, _)| values.first().copied().unwrap_or(u64::MAX));
 
         // Build default region if we have one
         let default = default_target.map(|addr| Box::new(self.analyze_region_recursive(addr)));
@@ -1055,9 +1060,9 @@ impl<'a> RegionAnalyzer<'a> {
                 continue;
             }
             let case_region = Box::new(self.analyze_region_recursive(target));
-            cases.push((values.first().copied(), case_region));
+            cases.push((values.clone(), case_region));
         }
-        cases.sort_by_key(|(v, _)| v.unwrap_or(u64::MAX));
+        cases.sort_by_key(|(values, _)| values.first().copied().unwrap_or(u64::MAX));
 
         let default_region = default
             .filter(|t| Some(*t) != merge)
@@ -1461,7 +1466,7 @@ impl<'a> RegionAnalyzer<'a> {
                                         .node_region(target_node)
                                         .unwrap_or(Region::Block(target_block))
                                 });
-                            cases.push((values.first().copied(), Box::new(case_region)));
+                            cases.push((values.clone(), Box::new(case_region)));
                         }
                         let default_region = default
                             .and_then(|addr| graph.node_for_block(addr))
@@ -3795,6 +3800,51 @@ mod tests {
 
         assert_eq!(pairs, vec![(433, 0x1004), (437, 0x1040)]);
         assert_eq!(info.default, Some(0x1040));
+    }
+
+    /// An arm several case values reach keeps all of them.
+    ///
+    /// It used to keep the first -- "Use the first value for this target" --
+    /// and the values that were dropped would have fallen to the default
+    /// instead of running the body the jump table sends them to. zlib's
+    /// `gz_open` has sixty-seven values on one arm.
+    #[test]
+    fn a_switch_arm_keeps_every_case_value_that_reaches_it() {
+        let mut dispatch = R2ILBlock::new(0x1000, 4);
+        dispatch.push(R2ILOp::Nop);
+        let mut shared = R2ILBlock::new(0x1010, 4);
+        shared.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+        let mut other = R2ILBlock::new(0x1020, 4);
+        other.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+        let mut default = R2ILBlock::new(0x1030, 4);
+        default.push(R2ILOp::Return {
+            target: Varnode::register(0, 8),
+        });
+
+        let mut func = SSAFunction::from_blocks_raw_no_arch(&[dispatch, shared, other, default])
+            .expect("ssa function");
+        func.cfg_mut().set_terminator(
+            0x1000,
+            BlockTerminator::Switch {
+                cases: vec![(0, 0x1010), (1, 0x1010), (2, 0x1010), (3, 0x1020)],
+                default: Some(0x1030),
+            },
+        );
+
+        let mut analyzer = RegionAnalyzer::new(&func);
+        let region = analyzer.analyze();
+        let Region::Switch { cases, .. } = &region else {
+            panic!("switch region, got {region:?}");
+        };
+        let values = cases
+            .iter()
+            .map(|(values, region)| (values.clone(), region.entry()))
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![(vec![0, 1, 2], 0x1010), (vec![3], 0x1020)]);
     }
 
     fn build_nested_switch_cfg_without_entry_switch() -> SSAFunction {
