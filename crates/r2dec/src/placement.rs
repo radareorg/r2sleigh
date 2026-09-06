@@ -846,7 +846,8 @@ fn collect_stmt_observation_regions(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
 }
 
@@ -1426,7 +1427,8 @@ fn collect_stmt_observation_scopes(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {
             record_completion_observations(&leading, current, targets, order, scoped);
         }
     }
@@ -1698,7 +1700,8 @@ fn audit_statement(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
     Ok(())
 }
@@ -2914,7 +2917,8 @@ fn insert_region_declarations_in_stmt(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => 0,
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => 0,
     }
 }
 
@@ -3345,7 +3349,8 @@ fn inline_exact_write_in_stmt(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => 0,
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => 0,
     }
 }
 

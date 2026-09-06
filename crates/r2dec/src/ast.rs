@@ -976,6 +976,44 @@ pub enum CStmt {
     Label(String),
     /// Comment.
     Comment(String),
+    /// A cell the renderer could not prove, marked where it stands.
+    ///
+    /// The gap is the honest alternative to refusing the whole function: the
+    /// operations it covers are accounted for in the obligation ledger under
+    /// [`r2ssa::ledger::Outcome::Gapped`], the reader and the compiler both
+    /// see that something is missing here, and nothing downstream may treat
+    /// the function as fully proven.
+    Gap(GapMarker),
+}
+
+/// What one marked gap covers and why it is there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GapMarker {
+    /// The refusal that opened the gap, in its diagnostic spelling.
+    pub kind: String,
+    /// Where in the decompiler the refusal was decided, as `file.rs:line`.
+    pub origin: String,
+    /// The block whose operation could not be proven.
+    pub block_addr: u64,
+    /// The index of that operation within the block.
+    pub op_idx: usize,
+    /// How many graph instructions this one marker accounts for.
+    pub ops: usize,
+}
+
+impl std::fmt::Display for GapMarker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "r2dec gap: {} at {:#x}:{} covering {} op{} ({})",
+            self.kind,
+            self.block_addr,
+            self.op_idx,
+            self.ops,
+            if self.ops == 1 { "" } else { "s" },
+            self.origin
+        )
+    }
 }
 
 /// Ordered observation metadata peeled from the outside of one statement.
@@ -1664,7 +1702,8 @@ pub(crate) fn remap_render_observation_ids<E>(
             | CStmt::Continue
             | CStmt::Goto(_)
             | CStmt::Label(_)
-            | CStmt::Comment(_) => {}
+            | CStmt::Comment(_)
+            | CStmt::Gap(_) => {}
         }
         Ok(())
     }
@@ -1954,7 +1993,8 @@ fn visit_stmt_observations<E>(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
     Ok(())
 }
@@ -2040,7 +2080,8 @@ fn inspect_stmt_observations<E>(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
     Ok(())
 }
@@ -2200,7 +2241,8 @@ fn strip_stmt_observations(stmt: &mut CStmt) {
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
 }
 

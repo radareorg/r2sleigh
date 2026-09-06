@@ -250,6 +250,15 @@ pub enum Outcome {
         layer: LedgerLayer,
         reason: RefusalReason,
     },
+    /// Covered by a marked gap in the output at this operation site.
+    ///
+    /// A gap is not a discharge and not a refusal. The renderer could not
+    /// prove this cell, said so in the output where a reader and a compiler
+    /// both see it, and accounted for the obligations the marker covers. The
+    /// closure equation therefore still balances, while
+    /// [`LedgerClosure::is_fully_proven`] is false: a gapped function is
+    /// rendered, not proven.
+    Gapped { block_addr: u64, op_idx: usize },
     /// No layer recorded a fate, which is a decompiler defect rather than a property of the input.
     Unattributed,
 }
@@ -281,6 +290,7 @@ pub struct LedgerClosure {
     pub rendered: usize,
     pub elided: usize,
     pub refused: usize,
+    pub gapped: usize,
     pub unattributed: usize,
     pub conflicts: usize,
 }
@@ -291,9 +301,18 @@ impl LedgerClosure {
         self.unattributed == 0 && self.accounted() == self.total
     }
 
-    /// How many obligations the four columns name between them.
+    /// Whether every obligation was discharged or proven unnecessary.
+    ///
+    /// A closed ledger with gaps is an honest account of a function the
+    /// renderer could not fully prove, which is a weaker statement than this
+    /// one and must never be reported as the same thing.
+    pub fn is_fully_proven(&self) -> bool {
+        self.is_closed() && self.gapped == 0 && self.refused == 0 && self.conflicts == 0
+    }
+
+    /// How many obligations the five columns name between them.
     pub fn accounted(&self) -> usize {
-        self.rendered + self.elided + self.refused + self.unattributed
+        self.rendered + self.elided + self.refused + self.gapped + self.unattributed
     }
 }
 
@@ -435,6 +454,12 @@ impl ObligationLedger {
                         eprintln!("obligation refused {id:?} {outcome:?}");
                     }
                 }
+                Outcome::Gapped { .. } => {
+                    closure.gapped += 1;
+                    if trace {
+                        eprintln!("obligation gapped {id:?} {outcome:?}");
+                    }
+                }
                 Outcome::Unattributed => {
                     closure.unattributed += 1;
                     if trace {
@@ -527,6 +552,46 @@ mod tests {
             (1, 1, 1)
         );
         assert_eq!(closure.unattributed, 1);
+    }
+
+    #[test]
+    fn a_gapped_obligation_closes_the_ledger_without_proving_it() {
+        // A marked gap accounts for its cell: the closure equation balances
+        // and nothing is left unattributed, but the function is not proven.
+        let ids = [
+            obligation(0, SemanticObligationKind::ObservableMemoryRead),
+            obligation(1, SemanticObligationKind::Trap),
+        ];
+        let mut ledger = ledger_of(&ids);
+        ledger.record(
+            ids[0],
+            Outcome::Rendered {
+                block_addr: 0x1000,
+                op_idx: 0,
+            },
+        );
+        ledger.record(
+            ids[1],
+            Outcome::Gapped {
+                block_addr: 0x1000,
+                op_idx: 1,
+            },
+        );
+
+        let closure = ledger.close();
+        assert_eq!(closure.gapped, 1);
+        assert_eq!(closure.accounted(), closure.total);
+        assert!(closure.is_closed());
+        assert!(!closure.is_fully_proven());
+        assert_eq!(closure.refused, 0);
+    }
+
+    #[test]
+    fn a_ledger_with_no_gaps_and_no_refusals_is_fully_proven() {
+        let ids = [obligation(0, SemanticObligationKind::LiveValueProducer)];
+        let mut ledger = ledger_of(&ids);
+        ledger.record(ids[0], Outcome::Elided(ElisionReason::StackFrame));
+        assert!(ledger.close().is_fully_proven());
     }
 
     #[test]

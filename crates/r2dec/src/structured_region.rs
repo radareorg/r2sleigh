@@ -472,7 +472,8 @@ fn validate_final_region_markers(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
     Ok(())
 }
@@ -861,7 +862,8 @@ fn seal_stmt_children(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => Ok(()),
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => Ok(()),
     }
 }
 
@@ -937,7 +939,8 @@ fn visit_occurrences<'a>(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
 }
 
@@ -1022,7 +1025,8 @@ fn visit_scoped_stmt<'a>(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
 }
 
@@ -1067,7 +1071,8 @@ fn strip_region_markers(stmt: &mut CStmt) {
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
 }
 

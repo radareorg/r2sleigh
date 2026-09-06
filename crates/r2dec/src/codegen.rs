@@ -465,6 +465,15 @@ impl CodeGenerator {
                     self.output.push_str(" */\n");
                 }
             }
+            CStmt::Gap(marker) => {
+                // A gap is always written, whatever the comment configuration
+                // says: it is the record that this cell is unproven, and a
+                // rendering that dropped it would claim more than was proven.
+                self.emit_indent();
+                self.output.push_str("/* ");
+                self.emit_comment_text(&marker.to_string());
+                self.output.push_str(" */\n");
+            }
             CStmt::Observed { .. } => unreachable!("unobserved statement expected"),
         }
     }
@@ -890,7 +899,8 @@ fn prepare_stmt_for_emission(stmt: &CStmt) -> CStmt {
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => stmt.clone(),
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => stmt.clone(),
     }
 }
 

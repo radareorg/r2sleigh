@@ -395,7 +395,8 @@ fn check_scope(
             | CStmt::Continue
             | CStmt::Goto(_)
             | CStmt::Label(_)
-            | CStmt::Comment(_) => {}
+            | CStmt::Comment(_)
+            | CStmt::Gap(_) => {}
         }
     }
 }

@@ -1407,6 +1407,12 @@ fn note_unproven_constructs(
                 "{detail}; {} source obligations: {} rendered, {} elided, {} refused",
                 closure.total, closure.rendered, closure.elided, closure.refused
             );
+            // A gapped function is rendered, not proven. The count says how
+            // many obligations a marked gap accounts for, so the proof line
+            // never reads as clean when part of the body went unproven.
+            if closure.gapped > 0 {
+                let _ = write!(&mut line, ", {} gapped", closure.gapped);
+            }
             // The column that used to have no name. Saying nothing here is what let a
             // gutted body report as clean, so it is spelled out whenever it is not zero.
             if closure.unattributed > 0 {
@@ -1478,7 +1484,9 @@ fn note_unproven_constructs(
 fn count_body_statements(stmts: &[CStmt]) -> usize {
     fn visit(stmt: &CStmt) -> usize {
         match stmt.unobserved() {
-            CStmt::Comment(_) | CStmt::Empty => 0,
+            // A gap marks a cell that was not rendered; it is not one of
+            // the statements the proof line counts as body.
+            CStmt::Comment(_) | CStmt::Empty | CStmt::Gap(_) => 0,
             CStmt::Block(inner) => inner.iter().map(visit).sum(),
             CStmt::If {
                 then_body,
@@ -5287,7 +5295,8 @@ fn void_function_has_value_return(func: &CFunction) -> bool {
             | CStmt::Goto(_)
             | CStmt::Label(_)
             | CStmt::Return(None)
-            | CStmt::Comment(_) => false,
+            | CStmt::Comment(_)
+            | CStmt::Gap(_) => false,
         }
     }
 
@@ -5358,6 +5367,7 @@ pub(crate) fn collect_stmt_var_names(stmts: &[CStmt]) -> HashSet<crate::symbol::
             | CStmt::Break
             | CStmt::Continue
             | CStmt::Comment(_)
+            | CStmt::Gap(_)
             | CStmt::Goto(_)
             | CStmt::Label(_) => {}
             CStmt::Expr(expr) => collect_expr_var_names(expr, out),
@@ -5847,7 +5857,8 @@ fn fold_constant_arithmetic_in_stmt(
         | CStmt::Continue
         | CStmt::Goto(_)
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
         CStmt::Expr(expr) => fold_expr(expr),
         CStmt::Decl { ty, init, .. } => {
             if let Some(init) = init {
@@ -6292,7 +6303,8 @@ fn collect_goto_targets(statement: &CStmt, into: &mut std::collections::BTreeSet
         | CStmt::Break
         | CStmt::Continue
         | CStmt::Label(_)
-        | CStmt::Comment(_) => {}
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
     }
 }
 
