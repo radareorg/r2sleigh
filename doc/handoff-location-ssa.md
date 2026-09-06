@@ -13631,3 +13631,49 @@ masked: nothing about this load proves it is signed, so defaulting a load's
 element type to a signed integer asserts something the machine did not say. It
 is one line on one corpus function today; the same default applies wherever a
 symbolic hint used to cover it.
+
+## Cutting the artifact store from the fork: what it removes and why it is not landed
+
+The fork's `libr` exports 79 symbols upstream does not. The plugin calls ten:
+`r_anal_cc_location_uses`, `r_anal_function_dirty_epoch`,
+`r_anal_function_get/set_assumptions_json`,
+`r_anal_function_get_signature_current`,
+`r_anal_function_has_address_linked_signature_current`,
+`r_anal_types_dirty_epoch`, `r_anal_types_snapshot_free`, `r_type_func_key`
+and `r_type_func_prototype_exist`. Of the remaining 69, seven have no caller
+at all inside radare2 either, and three of those seven are the DWARF facts the
+plugin now reads for itself.
+
+The largest fork-only block is the analysis-artifact store: `canal_artifacts.c`
+at 1,324 lines, the flag, metadata and owned-xref shadow stores inside
+`flag.c`, `meta.c` and `xrefs.c` at about 1,700 changed lines, the private
+headers, the driver in `canal.c` and the artifact entry in the project format.
+Nothing the plugin uses reaches any of it, and `r_core_anal_plugin_data_refs`,
+the only public entry point into the driver, has no caller anywhere.
+
+The cut is written and saved as `fork-cut-artifact-store.patch` in the session
+scratchpad, 4,462 diff lines. **It is not landed, because it is wrong as
+written.** It reverts `flag.c`, `meta.c` and `xrefs.c` to their upstream
+versions, and the fork's *public* headers still carry fork-added fields for
+those subsystems. The result builds and then crashes at load:
+
+```
+rasm2 -a v850 -d 01fb        # exit 139
+EXC_BAD_ACCESS in libr_anal.dylib CWISS_RawIter_SkipEmptyOrDeleted
+```
+
+`rasm2 -L` lists zero plugins on the cut build and 91 on an identically
+configured build of the same commit without the cut. The fork's own suite goes
+from 3 failures to 16, and the extra thirteen are the load failure showing up
+as disassembler and command tests.
+
+**What the correct cut looks like.** Do not revert the three files. Remove only
+the shadow-store and owned-xref additions from the fork's own versions of them,
+and remove the matching fields from `r_flag.h` and `r_anal.h` in the same
+change, so the headers and the sources stay in step. The rest of the cut --
+`canal_artifacts.c`, the `canal.c` driver, the `cmd_open.inc.c` reset, the
+project entry, `r_core_priv.h`, `r_flag_priv.h` and the public artifact API in
+`r_core.h` -- is already correct in the patch and can be reused. The baseline to
+compare against is a fresh build of the same commit in its own worktree: the
+installed radare2 on this machine is from an older commit and gives a different
+failure set, which is what first made the cut look worse than it is.
