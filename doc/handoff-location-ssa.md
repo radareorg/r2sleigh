@@ -13131,3 +13131,40 @@ reachable rather than hidden behind an earlier refusal. The DecBench census
 records `gapped`, `fully_proven`, `gap_ops` and `gap_causes` at schema
 version 2, and `census_decbench.py` prints proven beside coverage so a rise
 paid for in gaps cannot read as progress.
+
+### The semantic artifact stopped pre-empting the native attempt
+
+Eleven functions in the local census carried
+`semantic fallback: worker slice in compiled mode`, and none of them had been
+offered to the native pipeline at all. Three separate places decided that on
+the strength of the r2sym artifact alone: the route's summary-only branch,
+the unrenderable-summary branch beside it, and the mirrored refusal inside
+r2dec that turned a Standard route over a summary-only artifact into a
+residual comment. A fourth, `primary_body_for_semantic_route`, gave the
+worker and summary-island routes a two-line comment body instead of calling
+the structurer.
+
+All four are gone. The rule is that the semantic report is evidence about a
+function, not permission to render one: it may enrich a rendering and it may
+supply the comment a reader gets when native lowering refuses, but only the
+native certificates may refuse. Every route now structures.
+
+With that, `deflate_stored`, `deflate`'s siblings and seven others render:
+the local census went 100 to 91 refusals over the six binaries, with nothing
+newly refused.
+
+Two things surfaced behind the guard, both worth naming.
+
+**A cost defect, item P1.** `deflate` (minigzip -O0, `0x652f`) now reaches
+the structurer and exceeds the engine request deadline there. That is the
+same class as `adler32_combine_` on the benchmark host: the deadline is not
+the answer, the phase that is slow is the defect. It was previously invisible
+because the route refused the function before any of it ran.
+
+**The dead route policy is deleted.**
+`native_worker_summary_route_policy_from_applicability` only ever built
+`Standard`, so `should_use_direct_summary` and `should_prefer_full` were
+constant false and the four escape hatches reading them were unreachable:
+two in `compile_native_worker_summary_artifact`, two in the engine's
+pre-probe predicates, which no longer take a root summary at all. The
+`native_worker` tests that asserted the falseness are removed with them.
