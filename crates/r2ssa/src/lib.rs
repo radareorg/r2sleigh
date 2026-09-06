@@ -68,7 +68,7 @@ pub use assumption::{
     AssumptionSet, AssumptionSubject, AssumptionUsageReport, AssumptionValue,
 };
 pub use block::SSABlock;
-pub use cfg::{BasicBlock, BlockTerminator, CFG, CFGEdge};
+pub use cfg::{BasicBlock, BlockTerminator, CFG, CFGEdge, DeclaredSuccessors};
 pub use control::{
     SsaCancellationToken, SsaExecutionControl, SsaExecutionStopReason, SsaPrepareError,
     SsaWorkControl,

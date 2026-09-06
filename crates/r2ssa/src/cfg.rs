@@ -3,7 +3,7 @@
 //! This module provides a CFG data structure built from r2il blocks,
 //! which is the foundation for inter-procedural SSA analysis.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -72,8 +72,50 @@ pub enum BlockTerminator {
     IndirectCall { fallthrough: Option<u64> },
     /// Return from function.
     Return,
-    /// No terminator (incomplete block).
+    /// No successor: the block leaves the function, or the source declared
+    /// it terminal.
     None,
+}
+
+/// The successors the source declares for each of its blocks.
+///
+/// The lift knows where an instruction transfers control; it cannot know
+/// whether a call comes back, because that is a fact about the callee. The
+/// source's block graph carries it: a block whose last instruction calls a
+/// function that never returns has no successor, and a block that ends in a
+/// trap has none either. Keyed by block address, each entry holds every
+/// address the source says control can continue to from that block.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredSuccessors {
+    by_block: BTreeMap<u64, BTreeSet<u64>>,
+}
+
+impl DeclaredSuccessors {
+    pub fn from_source_image(image: &r2source::OwnedFunctionImage) -> Self {
+        let mut declared = Self::default();
+        for block in image.blocks() {
+            declared.insert(
+                block.address(),
+                block
+                    .successors()
+                    .iter()
+                    .map(|successor| successor.target()),
+            );
+        }
+        declared
+    }
+
+    pub fn insert(&mut self, block: u64, successors: impl IntoIterator<Item = u64>) {
+        self.by_block.entry(block).or_default().extend(successors);
+    }
+
+    /// Whether the source lets control run off the end of `block` into
+    /// `next`. `None` where the source said nothing about the block.
+    fn continues_to(&self, block: u64, next: u64) -> Option<bool> {
+        self.by_block
+            .get(&block)
+            .map(|successors| successors.contains(&next))
+    }
 }
 
 impl BasicBlock {
@@ -92,6 +134,14 @@ impl BasicBlock {
 
     /// Create a basic block from an r2il block.
     pub fn from_r2il(block: &R2ILBlock) -> Self {
+        Self::from_r2il_continuing(block, true)
+    }
+
+    /// Create a basic block from an r2il block, where `continues` says whether
+    /// control may run off its end into the next address. That is a fact the
+    /// operations do not carry: a call's return depends on the callee, and a
+    /// trap has no successor at all.
+    fn from_r2il_continuing(block: &R2ILBlock, continues: bool) -> Self {
         // Check if this block has switch info
         let terminator = if let Some(ref switch_info) = block.switch_info {
             // Use switch terminator with cases from switch_info
@@ -105,7 +155,7 @@ impl BasicBlock {
                 default: switch_info.default_target,
             }
         } else {
-            Self::analyze_terminator(&block.ops, block.addr + block.size as u64)
+            Self::analyze_terminator(&block.ops, block.addr + block.size as u64, continues)
         };
 
         Self {
@@ -147,7 +197,17 @@ impl BasicBlock {
     }
 
     /// Analyze the operations to determine the block terminator.
-    fn analyze_terminator(ops: &[R2ILOp], fallthrough_addr: u64) -> BlockTerminator {
+    ///
+    /// A conditional branch's false edge is the machine's own: the instruction
+    /// falls through when the condition fails. Continuation after a call, or
+    /// after an operation with no transfer at all, is not, and `continues`
+    /// decides it.
+    fn analyze_terminator(
+        ops: &[R2ILOp],
+        fallthrough_addr: u64,
+        continues: bool,
+    ) -> BlockTerminator {
+        let continuation = continues.then_some(fallthrough_addr);
         // Look for control flow operations at the end
         for op in ops.iter().rev() {
             match op {
@@ -174,16 +234,16 @@ impl BasicBlock {
                     if let Some(addr) = Self::extract_const_addr(target) {
                         return BlockTerminator::Call {
                             target: addr,
-                            fallthrough: Some(fallthrough_addr),
+                            fallthrough: continuation,
                         };
                     }
                     return BlockTerminator::IndirectCall {
-                        fallthrough: Some(fallthrough_addr),
+                        fallthrough: continuation,
                     };
                 }
                 R2ILOp::CallInd { .. } => {
                     return BlockTerminator::IndirectCall {
-                        fallthrough: Some(fallthrough_addr),
+                        fallthrough: continuation,
                     };
                 }
                 R2ILOp::Return { .. } => {
@@ -194,9 +254,11 @@ impl BasicBlock {
             }
         }
 
-        // No control flow op found - falls through
-        BlockTerminator::Fallthrough {
-            next: fallthrough_addr,
+        // No control flow op found: the block runs on to the next address,
+        // unless the source declared it terminal.
+        match continuation {
+            Some(next) => BlockTerminator::Fallthrough { next },
+            None => BlockTerminator::None,
         }
     }
 
@@ -434,6 +496,19 @@ impl CFG {
     ///
     /// The blocks should be in address order and represent a complete function.
     pub fn from_blocks(blocks: &[R2ILBlock]) -> Option<Self> {
+        Self::from_blocks_with_declared_successors(blocks, None)
+    }
+
+    /// Build the graph from lifted blocks, letting the source's declared
+    /// successors decide where a block continues past its last instruction.
+    ///
+    /// Only the chunk that ends where the source block ends consults the
+    /// declaration: a split inside a block is a target the lift found, and
+    /// control reaching it sequentially is the source block's own extent.
+    pub fn from_blocks_with_declared_successors(
+        blocks: &[R2ILBlock],
+        declared: Option<&DeclaredSuccessors>,
+    ) -> Option<Self> {
         if blocks.is_empty() {
             return None;
         }
@@ -441,15 +516,32 @@ impl CFG {
         let entry = blocks[0].addr;
         let mut cfg = Self::new(entry);
 
-        let normalized_blocks = blocks
-            .iter()
-            .flat_map(split_internal_control_flow_targets)
-            .collect::<Vec<_>>();
-
-        // First pass: add all blocks as nodes
-        for block in &normalized_blocks {
-            let bb = BasicBlock::from_r2il(block);
-            cfg.add_block(bb);
+        for block in blocks {
+            let end = block.addr + block.size as u64;
+            let continues = declared.and_then(|declared| declared.continues_to(block.addr, end));
+            for chunk in split_internal_control_flow_targets(block) {
+                let chunk_end = chunk.addr + chunk.size as u64;
+                let chunk_continues = chunk_end != end || continues.unwrap_or(true);
+                let bb = BasicBlock::from_r2il_continuing(&chunk, chunk_continues);
+                if !chunk_continues
+                    && matches!(
+                        bb.terminator,
+                        BlockTerminator::Call {
+                            fallthrough: None,
+                            ..
+                        } | BlockTerminator::IndirectCall { fallthrough: None }
+                            | BlockTerminator::None
+                    )
+                {
+                    r2il::refusal_evidence!(
+                        "declared-successors",
+                        "block {:#x} does not continue to {:#x}: the source declares no successor there",
+                        chunk.addr,
+                        end
+                    );
+                }
+                cfg.add_block(bb);
+            }
         }
 
         cfg.rebuild_edges();
@@ -854,6 +946,87 @@ mod tests {
         assert_eq!(bb.addr, 0x1000);
         assert_eq!(bb.terminator, BlockTerminator::Fallthrough { next: 0x1004 });
         assert_eq!(bb.successors(), vec![0x1004]);
+    }
+
+    #[test]
+    fn a_call_continues_only_where_the_source_declares_a_successor() {
+        // `call __stack_chk_fail; ret`: the machine falls through after any
+        // call, but the callee never returns, and the source's block graph
+        // says so by giving the call's block no successor.
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 5,
+                ops: vec![R2ILOp::Call {
+                    target: make_ram(0x5000, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1005,
+                size: 1,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0x1006, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let undeclared = CFG::from_blocks(&blocks).expect("cfg");
+        assert_eq!(undeclared.successors(0x1000), vec![0x1005]);
+
+        let mut returns = DeclaredSuccessors::default();
+        returns.insert(0x1000, [0x1005]);
+        let continuing =
+            CFG::from_blocks_with_declared_successors(&blocks, Some(&returns)).expect("cfg");
+        assert_eq!(continuing.successors(0x1000), vec![0x1005]);
+
+        let mut noreturn = DeclaredSuccessors::default();
+        noreturn.insert(0x1000, []);
+        let terminal =
+            CFG::from_blocks_with_declared_successors(&blocks, Some(&noreturn)).expect("cfg");
+        assert!(terminal.successors(0x1000).is_empty());
+        assert_eq!(
+            terminal.get_block(0x1000).expect("call block").terminator,
+            BlockTerminator::Call {
+                target: 0x5000,
+                fallthrough: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_block_with_no_transfer_is_terminal_when_the_source_says_so() {
+        // A trap ends its block without a control operation; the machine
+        // would run on, and the source says nothing follows.
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::Nop],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 1,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0x1005, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+        let mut trap = DeclaredSuccessors::default();
+        trap.insert(0x1000, []);
+        let cfg = CFG::from_blocks_with_declared_successors(&blocks, Some(&trap)).expect("cfg");
+        assert!(cfg.successors(0x1000).is_empty());
+        assert_eq!(
+            cfg.get_block(0x1000).expect("trap block").terminator,
+            BlockTerminator::None
+        );
     }
 
     #[test]

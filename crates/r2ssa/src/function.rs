@@ -555,6 +555,7 @@ impl SsaArtifact {
                 machine_context.machine_roles().call_preserved_carriers(),
                 machine_context.stack_pointer_carrier(),
                 &CalleePreservedCarriers::new(),
+                None,
                 &UncheckedSsaWorkControl,
             )
             .ok()?,
@@ -613,6 +614,7 @@ impl SsaArtifact {
                 machine_context.machine_roles().call_preserved_carriers(),
                 machine_context.stack_pointer_carrier(),
                 callee_preserved_carriers,
+                None,
                 &UncheckedSsaWorkControl,
             )
             .ok()?,
@@ -664,6 +666,7 @@ impl SsaArtifact {
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
+            None,
             control,
         )?;
         control.poll()?;
@@ -717,6 +720,7 @@ impl SsaArtifact {
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
+            None,
             control,
         )?;
         if function.entry != lifted.authority().layout().entry_addr() {
@@ -1475,6 +1479,10 @@ impl TrustedSsaArtifact {
             .map(|block| block.block().clone())
             .collect::<Vec<_>>();
         let native_spans = genuine_native_instruction_spans(genuine);
+        // Where each block may continue past its last instruction is the
+        // source's to say: a call's return is a fact about the callee, which
+        // the lifted operations cannot carry.
+        let declared_successors = crate::cfg::DeclaredSuccessors::from_source_image(source.image());
         // The machine context already models an absent interface: it becomes an
         // unavailable, incoherent ABI model, and every consumer filters on
         // coherence. Refusing here instead would suppress the whole function
@@ -1557,6 +1565,7 @@ impl TrustedSsaArtifact {
                             .call_preserved_carriers(),
                         provisional_machine_context.stack_pointer_carrier(),
                         callee_preserved_carriers,
+                        Some(&declared_successors),
                         control,
                     )
                 else {
@@ -1618,6 +1627,7 @@ impl TrustedSsaArtifact {
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             callee_preserved_carriers,
+            Some(&declared_successors),
             control,
         )?;
         // What the source calls this function. A name radare2 derived from the
@@ -2432,10 +2442,12 @@ impl SSAFunction {
             None,
             None,
             &CalleePreservedCarriers::new(),
+            None,
             control,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_blocks_for_decompile_with_interface_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
@@ -2443,6 +2455,7 @@ impl SSAFunction {
         call_preserved_carriers: Option<SourceCallPreservedCarriers>,
         stack_pointer_carrier: Option<CanonicalStorageId>,
         callee_preserved_carriers: &CalleePreservedCarriers,
+        declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
@@ -2459,6 +2472,7 @@ impl SSAFunction {
             arch,
             stack_pointer_restored_by_callee,
             callee_preserved_carriers,
+            declared_successors,
             control,
         )?;
         func.call_preserved_carriers = call_preserved_carriers;
@@ -2494,7 +2508,8 @@ impl SSAFunction {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
-        let mut func = Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, control)?;
+        let mut func =
+            Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, control)?;
         let cfg = crate::optimize::OptimizationConfig {
             max_iterations: 1,
             enable_sccp: true,
@@ -2553,7 +2568,7 @@ impl SSAFunction {
         arch: Option<&ArchSpec>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, control)
+        Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, control)
     }
 
     /// Build raw SSA prepared with decompiler-safe call boundaries.
@@ -2576,6 +2591,7 @@ impl SSAFunction {
             arch,
             None,
             &CalleePreservedCarriers::new(),
+            None,
             control,
         )
     }
@@ -2586,6 +2602,7 @@ impl SSAFunction {
         arch: Option<&ArchSpec>,
         stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
         callee_preserved_carriers: &CalleePreservedCarriers,
+        declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         let policy = decompile_call_boundary_config(
@@ -2593,13 +2610,20 @@ impl SSAFunction {
             stack_pointer_restored_by_callee,
             callee_preserved_carriers.clone(),
         );
-        Self::from_blocks_raw_with_policy_and_control(blocks, arch, policy.as_ref(), control)
+        Self::from_blocks_raw_with_policy_and_control(
+            blocks,
+            arch,
+            policy.as_ref(),
+            declared_successors,
+            control,
+        )
     }
 
     fn from_blocks_raw_with_policy_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
         call_boundaries: Option<&CallBoundaryConfig>,
+        declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
@@ -2608,7 +2632,8 @@ impl SSAFunction {
         }
 
         // Build CFG
-        let cfg = CFG::from_blocks(blocks).ok_or_else(malformed_ssa_input)?;
+        let cfg = CFG::from_blocks_with_declared_successors(blocks, declared_successors)
+            .ok_or_else(malformed_ssa_input)?;
         control.poll()?;
         let entry = cfg.entry;
 
@@ -7921,6 +7946,7 @@ mod tests {
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
+            None,
             &UncheckedSsaWorkControl,
         )
         .expect("decompile SSA");
@@ -8083,6 +8109,7 @@ mod tests {
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
+            None,
             &UncheckedSsaWorkControl,
         )
         .expect("decompile SSA");
@@ -12641,6 +12668,7 @@ mod tests {
             None,
             None,
             &CalleePreservedCarriers::new(),
+            None,
             &UncheckedSsaWorkControl,
         )
         .expect("decompile SSA");
