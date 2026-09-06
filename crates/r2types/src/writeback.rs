@@ -11,7 +11,7 @@ use r2ssa::{
 use crate::context::{
     ExternalRegisterParamSpec, ExternalStackBase, ExternalStackSlotRole, ExternalStackVarSpec,
     ParsedExternalContext, StackSlotKey, apply_main_signature_override,
-    canonical_main_signature_spec, is_generic_arg_name,
+    canonical_main_signature_spec, is_generic_arg_name, sanitize_c_identifier,
 };
 use crate::convert::{CTypeLike, parse_c_type_like, render_c_type_like};
 use crate::external::{
@@ -11496,29 +11496,6 @@ fn is_generic_type_string(ty: &str) -> bool {
 
 fn is_low_signal_storage_scalar_type(ty: &str, ptr_bits: u32) -> bool {
     parse_c_type_like(ty, ptr_bits).is_some_and(|parsed| matches!(parsed, CTypeLike::Int { .. }))
-}
-
-fn sanitize_c_identifier(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut out = String::with_capacity(trimmed.len());
-    for ch in trimmed.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        out.insert(0, '_');
-    }
-    if out.chars().all(|c| c == '_') {
-        None
-    } else {
-        Some(out)
-    }
 }
 
 fn is_low_quality_stack_name(name: &str) -> bool {

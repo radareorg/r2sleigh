@@ -43,6 +43,7 @@ pub use context::{
     canonical_main_signature_spec, function_type_facts_from_parsed_context, is_c_main_function,
     is_generic_arg_name, merge_signature_with_register_params, normalize_function_basename,
     parse_external_assumption_payload_json, parse_external_context, parse_external_context_json,
+    sanitize_c_identifier,
 };
 pub use convert::{CTypeLike, parse_c_type_like, render_c_type_like, to_c_type_like};
 pub use data_object::{

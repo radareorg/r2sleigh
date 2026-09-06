@@ -1420,26 +1420,7 @@ pub fn compute_signature_confidence(
     confidence.clamp(0, 100) as u8
 }
 
-fn sanitize_c_identifier(name: &str) -> Option<String> {
-    let mut out = String::with_capacity(name.len());
-    for (idx, ch) in name.chars().enumerate() {
-        let mapped = if ch.is_ascii_alphanumeric() || ch == '_' {
-            ch
-        } else {
-            '_'
-        };
-        if idx == 0 && mapped.is_ascii_digit() {
-            out.push('_');
-        }
-        out.push(mapped);
-    }
-    let trimmed = out.trim_matches('_').to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
+use crate::context::sanitize_c_identifier;
 
 fn uniquify_name(base: String, used: &mut HashSet<String>) -> String {
     if used.insert(base.clone()) {

@@ -1306,7 +1306,19 @@ fn normalize_aggregate_name(name: &str, prefix: &str) -> String {
         .to_string()
 }
 
-fn sanitize_c_identifier(name: &str) -> Option<String> {
+/// The C identifier a source name renders as, or `None` when nothing of the
+/// name survives.
+///
+/// Every rendered identifier passes through here: parameter and variable
+/// names, the names the writeback declares, and the rendered function's own
+/// name. A source name is arbitrary bytes -- a radare2 flag, a DWARF string --
+/// and a name that is not a C identifier makes the whole rendering invalid C,
+/// so the one place that answers "what does this name spell" is this function.
+///
+/// A leading or trailing underscore is part of the name and is kept: `_init`
+/// is a real symbol, and trimming it renamed the function to something the
+/// binary does not contain.
+pub fn sanitize_c_identifier(name: &str) -> Option<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return None;
