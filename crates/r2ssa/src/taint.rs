@@ -607,11 +607,13 @@ mod tests {
 
         let call_op = SSAOp::Call {
             target: make_var("const:0x1000", 0),
+            instruction: None,
         };
         assert!(policy.is_sink(&call_op, 0));
 
         let call_ind_op = SSAOp::CallInd {
             target: make_var("RAX", 1),
+            instruction: None,
         };
         assert!(policy.is_sink(&call_ind_op, 0));
 
@@ -638,6 +640,7 @@ mod tests {
 
         let call_op = SSAOp::Call {
             target: make_var("const:0x1000", 0),
+            instruction: None,
         };
         assert!(!policy.is_sink(&call_op, 0));
 
@@ -702,7 +705,15 @@ mod tests {
             addr: 0x2000,
             size: 2,
             switch_info: None,
-            op_metadata: Default::default(),
+            op_metadata: [(
+                1,
+                r2il::OpMetadata {
+                    instruction_addr: Some(0x2001),
+                    ..r2il::OpMetadata::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
             ops: vec![
                 R2ILOp::Copy {
                     dst: make_reg(56, 8),
@@ -721,8 +732,7 @@ mod tests {
         let call_interface = SourceCallSiteInterface::new(
             b"taint-exact-callsite".to_vec(),
             SourceCallSiteIdentity::new(
-                0x2000,
-                1,
+                0x2001,
                 CanonicalStorageId {
                     space: CanonicalStorageSpace::Constant,
                     offset: 0x402000,
@@ -921,6 +931,7 @@ mod tests {
 
         let call = SSAOp::Call {
             target: SSAVar::new("const:0x1000", 0, 8),
+            instruction: None,
         };
         assert!(!policy.is_sink(&call, 0));
 

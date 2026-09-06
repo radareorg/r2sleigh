@@ -886,8 +886,11 @@ fn apply_sccp_results(
         {
             if rw.take_true {
                 if let SSAOp::CBranch { target, .. } = op {
+                    // The branch that remains was never a call site the source
+                    // named, so it keeps no instruction identity.
                     *op = SSAOp::Branch {
                         target: target.clone(),
+                        instruction: None,
                     };
                 }
             } else {
@@ -1473,21 +1476,37 @@ where
             dst: dst.clone(),
             src: map(src),
         },
-        Branch { target } => Branch {
+        Branch {
+            target,
+            instruction,
+        } => Branch {
             target: map(target),
+            instruction: *instruction,
         },
         CBranch { target, cond } => CBranch {
             target: map(target),
             cond: map(cond),
         },
-        BranchInd { target } => BranchInd {
+        BranchInd {
+            target,
+            instruction,
+        } => BranchInd {
             target: map(target),
+            instruction: *instruction,
         },
-        Call { target } => Call {
+        Call {
+            target,
+            instruction,
+        } => Call {
             target: map(target),
+            instruction: *instruction,
         },
-        CallInd { target } => CallInd {
+        CallInd {
+            target,
+            instruction,
+        } => CallInd {
             target: map(target),
+            instruction: *instruction,
         },
         CallDefine { dst } => CallDefine { dst: dst.clone() },
         CallRestore { dst, src } => CallRestore {

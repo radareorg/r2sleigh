@@ -564,7 +564,7 @@ pub(super) fn certified_direct_control_target_sites(
             }
             let target = match &inst.payload {
                 r2ssa::InstPayload::Op(
-                    r2ssa::SSAOp::Branch { target } | r2ssa::SSAOp::CBranch { target, .. },
+                    r2ssa::SSAOp::Branch { target, .. } | r2ssa::SSAOp::CBranch { target, .. },
                 ) => target,
                 // A resolved jump table is control too. The structured form
                 // prints `switch` on the selector and puts each case where its
@@ -572,7 +572,7 @@ pub(super) fn certified_direct_control_target_sites(
                 // expressed by the topology exactly as a direct branch's is.
                 // Only where the switch is certified: an indirect branch nobody
                 // resolved keeps its ordinary rendering contract.
-                r2ssa::InstPayload::Op(r2ssa::SSAOp::BranchInd { target }) => {
+                r2ssa::InstPayload::Op(r2ssa::SSAOp::BranchInd { target, .. }) => {
                     let block_addr = graph.block(inst.block).map(|block| block.addr);
                     if !block_addr
                         .is_some_and(|addr| source.certificates().switches.contains_key(&addr))

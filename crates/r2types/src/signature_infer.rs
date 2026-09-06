@@ -1030,14 +1030,13 @@ fn infer_signature_return_type_from_tail_boundaries(
     ptr_bits: u32,
 ) -> (CTypeLike, SignatureTypeEvidence) {
     let evidence = SignatureTypeEvidence::default();
-    let context = prepared.machine_context();
     let mut agreed: Option<CTypeLike> = None;
     let mut saw_tail = false;
     for certificate in prepared.facts().certificates.callsites.values() {
         if certificate.transfer != r2ssa::CallSiteTransfer::TailCall {
             continue;
         }
-        let Some(interface) = context.call_site_interface(certificate.call_site) else {
+        let Some(interface) = prepared.call_site_interface(certificate.call_site) else {
             return (CTypeLike::Unknown, evidence);
         };
         saw_tail = true;

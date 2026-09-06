@@ -1995,7 +1995,7 @@ impl<'a> FoldingContext<'a> {
                 let rhs = CExpr::cast(ty.clone(), input(0, src)?);
                 self.assign_typed(lhs, rhs, Some(CValue::Typed(ty)))
             }
-            SSAOp::Call { target } => {
+            SSAOp::Call { target, .. } => {
                 // Note: Call arguments are handled by op_to_stmt_with_args().
 
                 let func_expr = match (self.current_block_addr.get(), self.current_op_idx.get()) {
@@ -2012,7 +2012,7 @@ impl<'a> FoldingContext<'a> {
                 let call = CExpr::call(func_expr, vec![]);
                 self.call_statement_unless_result_is_named(call)
             }
-            SSAOp::CallInd { target } => {
+            SSAOp::CallInd { target, .. } => {
                 // Note: Call arguments are handled by op_to_stmt_with_args().
 
                 let func_expr = match (self.current_block_addr.get(), self.current_op_idx.get()) {

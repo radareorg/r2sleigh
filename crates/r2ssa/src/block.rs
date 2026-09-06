@@ -120,8 +120,11 @@ pub fn to_ssa(block: &R2ILBlock, disasm: &Disassembler) -> SSABlock {
     let mut ctx = SSAContext::new();
     let mut ssa_block = SSABlock::new(block.addr, block.size);
 
-    for op in &block.ops {
-        let ssa_op = convert_op(op, disasm, &mut ctx);
+    for (op_index, op) in block.ops.iter().enumerate() {
+        let instruction = block
+            .op_metadata(op_index)
+            .and_then(|metadata| metadata.instruction_addr);
+        let ssa_op = convert_op(op, instruction, disasm, &mut ctx);
         ctx.commit_deferred_versions();
         ssa_block.push(ssa_op);
     }
@@ -165,7 +168,12 @@ fn write_var(vn: &Varnode, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAVa
 }
 
 /// Convert an R2ILOp to an SSAOp.
-fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp {
+fn convert_op(
+    op: &R2ILOp,
+    instruction: Option<u64>,
+    disasm: &Disassembler,
+    ctx: &mut SSAContext,
+) -> SSAOp {
     use R2ILOp::*;
 
     match op {
@@ -453,6 +461,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
 
         Branch { target } => SSAOp::Branch {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         CBranch { target, cond } => SSAOp::CBranch {
@@ -462,14 +471,17 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
 
         BranchInd { target } => SSAOp::BranchInd {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         Call { target } => SSAOp::Call {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         CallInd { target } => SSAOp::CallInd {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         Return { target } => SSAOp::Return {

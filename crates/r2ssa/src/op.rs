@@ -199,20 +199,42 @@ pub enum SSAOp {
     Lzcount { dst: SSAVar, src: SSAVar },
 
     // ========== Control Flow ==========
-    /// Unconditional branch to target
-    Branch { target: SSAVar },
+    /// Unconditional branch to target.
+    ///
+    /// `instruction` is the native instruction the transfer was lifted from,
+    /// absent for a synthetic transfer. It is the one coordinate of a call or
+    /// tail transfer that every later rewrite of the operation stream leaves
+    /// alone, so it is how a fact recorded against the raw input finds this
+    /// operation again.
+    Branch {
+        target: SSAVar,
+        #[serde(default)]
+        instruction: Option<u64>,
+    },
 
     /// Conditional branch: if (cond) goto target
     CBranch { target: SSAVar, cond: SSAVar },
 
     /// Indirect branch: goto *target
-    BranchInd { target: SSAVar },
+    BranchInd {
+        target: SSAVar,
+        #[serde(default)]
+        instruction: Option<u64>,
+    },
 
     /// Call a subroutine
-    Call { target: SSAVar },
+    Call {
+        target: SSAVar,
+        #[serde(default)]
+        instruction: Option<u64>,
+    },
 
     /// Indirect call: call *target
-    CallInd { target: SSAVar },
+    CallInd {
+        target: SSAVar,
+        #[serde(default)]
+        instruction: Option<u64>,
+    },
 
     /// Fresh unknown register value defined by a call boundary.
     ///
@@ -625,10 +647,10 @@ impl SSAOp {
                 f(offset);
             }
 
-            Branch { target }
-            | BranchInd { target }
-            | Call { target }
-            | CallInd { target }
+            Branch { target, .. }
+            | BranchInd { target, .. }
+            | Call { target, .. }
+            | CallInd { target, .. }
             | Return { target } => f(target),
 
             CBranch { target, cond } => {
@@ -837,11 +859,11 @@ impl std::fmt::Display for SSAOp {
             }
             SSAOp::PopCount { dst, src } => write!(f, "{} = POPCOUNT({})", dst, src),
             SSAOp::Lzcount { dst, src } => write!(f, "{} = LZCOUNT({})", dst, src),
-            SSAOp::Branch { target } => write!(f, "BRANCH {}", target),
+            SSAOp::Branch { target, .. } => write!(f, "BRANCH {}", target),
             SSAOp::CBranch { target, cond } => write!(f, "CBRANCH {} if {}", target, cond),
-            SSAOp::BranchInd { target } => write!(f, "BRANCHIND {}", target),
-            SSAOp::Call { target } => write!(f, "CALL {}", target),
-            SSAOp::CallInd { target } => write!(f, "CALLIND {}", target),
+            SSAOp::BranchInd { target, .. } => write!(f, "BRANCHIND {}", target),
+            SSAOp::Call { target, .. } => write!(f, "CALL {}", target),
+            SSAOp::CallInd { target, .. } => write!(f, "CALLIND {}", target),
             SSAOp::CallDefine { dst } => write!(f, "{} = CALLDEF", dst),
             SSAOp::CallRestore { dst, src } => write!(f, "{} = CALLRESTORE {}", dst, src),
             SSAOp::Return { target } => write!(f, "RETURN {}", target),

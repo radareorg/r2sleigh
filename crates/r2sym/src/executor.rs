@@ -799,7 +799,7 @@ impl<'ctx> SymExecutor<'ctx> {
             }
 
             // ==================== Control Flow ====================
-            Branch { target } => {
+            Branch { target, .. } => {
                 let target_val = self.read_control_target_var(state, target);
                 if let Some(addr) = target_val.as_concrete() {
                     state.set_static_execution_pc(addr);
@@ -848,7 +848,7 @@ impl<'ctx> SymExecutor<'ctx> {
                 }
             }
 
-            BranchInd { target } => {
+            BranchInd { target, .. } => {
                 let target_val = self.read_control_target_var(state, target);
                 if let Some(addr) = target_val.as_concrete() {
                     self.set_indirect_execution_pc(state, addr);
@@ -859,7 +859,7 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            Call { target } => {
+            Call { target, .. } => {
                 let target_val = self.read_control_target_var(state, target);
                 if let Some(addr) = target_val.as_concrete() {
                     if let Some(binding) = self.call_hooks.get(&addr) {
@@ -883,7 +883,7 @@ impl<'ctx> SymExecutor<'ctx> {
                 Ok(vec![])
             }
 
-            CallInd { target } => {
+            CallInd { target, .. } => {
                 let target_carrier = self.read_control_target_carrier(state, target);
                 if let Some(addr) = target_carrier.value.as_concrete() {
                     let provenance_addr = target_carrier
@@ -2277,6 +2277,7 @@ mod tests {
                 &mut branch,
                 &SSAOp::Branch {
                     target: SSAVar::new("MISSING", 0, 8),
+                    instruction: None,
                 },
             )
             .expect("unresolved branch should terminate cleanly");
@@ -3241,6 +3242,7 @@ mod tests {
 
         let op = SSAOp::CallInd {
             target: SSAVar::new("tmp", 0, 8),
+            instruction: None,
         };
 
         executor
@@ -3255,6 +3257,7 @@ mod tests {
         let mut executor = SymExecutor::new(&ctx);
         let op = SSAOp::Call {
             target: SSAVar::constant(0x401000, 8),
+            instruction: None,
         };
 
         let mut state = SymState::new(&ctx, 0x1000);
@@ -3296,6 +3299,7 @@ mod tests {
             ops: vec![
                 SSAOp::Call {
                     target: SSAVar::constant(0x401000, 8),
+                    instruction: None,
                 },
                 SSAOp::Copy {
                     dst: SSAVar::new("RAX", 1, 8),
@@ -3413,6 +3417,7 @@ mod tests {
                 &mut state,
                 &SSAOp::CallInd {
                     target: SSAVar::new("tmp:import", 0, 8),
+                    instruction: None,
                 },
             )
             .expect("callind should execute through source provenance");

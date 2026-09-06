@@ -4022,6 +4022,7 @@ mod tests {
         ];
         func.get_block_mut(0x1004).expect("hop0").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1008", 0, 8),
+            instruction: None,
         }];
         func.get_block_mut(0x1008).expect("cmp1").ops = vec![
             SSAOp::IntSub {
@@ -4041,6 +4042,7 @@ mod tests {
         ];
         func.get_block_mut(0x100c).expect("hop1").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1010", 0, 8),
+            instruction: None,
         }];
         func.get_block_mut(0x1010).expect("cmp2").ops = vec![
             SSAOp::IntSub {
@@ -4060,6 +4062,7 @@ mod tests {
         ];
         func.get_block_mut(0x1014).expect("hop2").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1018", 0, 8),
+            instruction: None,
         }];
         func.get_block_mut(0x1018).expect("cmp3").ops = vec![
             SSAOp::IntSub {
@@ -4079,6 +4082,7 @@ mod tests {
         ];
         func.get_block_mut(0x101c).expect("hop3").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1140", 0, 8),
+            instruction: None,
         }];
         for (addr, dst_name) in [
             (0x1100, "tmp:case0"),
@@ -4094,6 +4098,7 @@ mod tests {
                 },
                 SSAOp::Branch {
                     target: SSAVar::new("ram:1200", 0, 8),
+                    instruction: None,
                 },
             ];
         }

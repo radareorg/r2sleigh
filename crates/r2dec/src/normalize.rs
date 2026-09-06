@@ -2377,6 +2377,7 @@ mod tests {
             },
             SSAOp::Branch {
                 target: SSAVar::new("ram:1004", 0, 8),
+                instruction: None,
             },
         ];
         func.get_block_mut(0x1004).expect("header").phis = vec![PhiNode {
@@ -2386,6 +2387,7 @@ mod tests {
         }];
         func.get_block_mut(0x1004).expect("header").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1008", 0, 8),
+            instruction: None,
         }];
         func.get_block_mut(0x1008).expect("latch").ops = vec![
             SSAOp::IntAdd {
@@ -2436,6 +2438,7 @@ mod tests {
             },
             SSAOp::Branch {
                 target: SSAVar::new("ram:1004", 0, 8),
+                instruction: None,
             },
         ];
         func.get_block_mut(0x1004).expect("header").phis = vec![PhiNode {
@@ -2445,6 +2448,7 @@ mod tests {
         }];
         func.get_block_mut(0x1004).expect("header").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1008", 0, 8),
+            instruction: None,
         }];
         func.get_block_mut(0x1008).expect("latch").ops = vec![SSAOp::CBranch {
             target: SSAVar::new("ram:1004", 0, 8),
@@ -2490,6 +2494,7 @@ mod tests {
             },
             SSAOp::Branch {
                 target: SSAVar::new("ram:1004", 0, 8),
+                instruction: None,
             },
         ];
         func.get_block_mut(0x1004).expect("header").phis = vec![PhiNode {
@@ -2499,6 +2504,7 @@ mod tests {
         }];
         func.get_block_mut(0x1004).expect("header").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1008", 0, 8),
+            instruction: None,
         }];
         func.get_block_mut(0x1008).expect("latch").ops = vec![
             SSAOp::IntAdd {
@@ -2638,6 +2644,7 @@ mod tests {
             },
             SSAOp::Branch {
                 target: SSAVar::new("ram:1004", 0, 8),
+                instruction: None,
             },
         ];
         func.get_block_mut(0x1004).expect("header").phis = vec![PhiNode {
@@ -2647,6 +2654,7 @@ mod tests {
         }];
         func.get_block_mut(0x1004).expect("header").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1008", 0, 8),
+            instruction: None,
         }];
         func.get_block_mut(0x1008).expect("latch").ops = vec![
             SSAOp::IntAdd {
@@ -2694,6 +2702,7 @@ mod tests {
             },
             SSAOp::Branch {
                 target: SSAVar::new("ram:1004", 0, 8),
+                instruction: None,
             },
         ];
         func.get_block_mut(0x1004).expect("header").phis = vec![

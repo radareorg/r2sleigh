@@ -989,7 +989,7 @@ impl TypeInference {
         for block in func.blocks() {
             for (call_idx, op) in block.ops.iter().enumerate() {
                 let target = match op {
-                    SSAOp::Call { target } | SSAOp::CallInd { target } => target,
+                    SSAOp::Call { target, .. } | SSAOp::CallInd { target, .. } => target,
                     _ => continue,
                 };
 

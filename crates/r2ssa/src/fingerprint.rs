@@ -119,6 +119,16 @@ fn hash_stack_root(writer: &mut FingerprintWriter, root: StackAddressRoot) {
     writer.i64(root.offset);
 }
 
+fn write_instruction(writer: &mut FingerprintWriter, instruction: Option<u64>) {
+    match instruction {
+        Some(instruction) => {
+            writer.tag(1);
+            writer.u64(instruction);
+        }
+        None => writer.tag(0),
+    }
+}
+
 fn hash_storage(writer: &mut FingerprintWriter, storage: Option<CanonicalStorageId>) {
     let Some(storage) = storage else {
         writer.tag(0);
@@ -276,11 +286,23 @@ fn hash_op(writer: &mut FingerprintWriter, op: &SSAOp) {
         }
         PopCount { .. } => writer.tag(43),
         Lzcount { .. } => writer.tag(44),
-        Branch { .. } => writer.tag(45),
+        Branch { instruction, .. } => {
+            writer.tag(45);
+            write_instruction(writer, *instruction);
+        }
         CBranch { .. } => writer.tag(46),
-        BranchInd { .. } => writer.tag(47),
-        Call { .. } => writer.tag(48),
-        CallInd { .. } => writer.tag(49),
+        BranchInd { instruction, .. } => {
+            writer.tag(47);
+            write_instruction(writer, *instruction);
+        }
+        Call { instruction, .. } => {
+            writer.tag(48);
+            write_instruction(writer, *instruction);
+        }
+        CallInd { instruction, .. } => {
+            writer.tag(49);
+            write_instruction(writer, *instruction);
+        }
         CallDefine { .. } => writer.tag(50),
         CallRestore { .. } => writer.tag(84),
         Return { .. } => writer.tag(51),

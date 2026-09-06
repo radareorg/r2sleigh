@@ -1435,7 +1435,7 @@ impl<'ctx> PathExplorer<'ctx> {
             .ops
             .iter()
             .filter_map(|op| match op {
-                SSAOp::Call { target } => loops::parse_address_var(target),
+                SSAOp::Call { target, .. } => loops::parse_address_var(target),
                 _ => None,
             })
             .filter(|target| self.executor.call_hook_tag(*target).is_none())

@@ -3690,14 +3690,12 @@ fn collect_source_boundary_facts(
             // callsite interface may change this state to complete.
             complete: false,
         };
-        if let Some((machine_context, interface)) = machine_context
-            .and_then(|context| {
-                context
-                    .call_site_interface(call_site.id)
-                    .map(|interface| (context, interface))
-            })
-            .filter(|(_, interface)| call_site.raw_identity == Some(interface.identity()))
-        {
+        if let Some((machine_context, interface)) = machine_context.and_then(|context| {
+            call_site
+                .raw_identity
+                .and_then(|identity| context.call_site_interface(identity))
+                .map(|interface| (context, interface))
+        }) {
             boundary.calling_convention = Some(interface.calling_convention().to_string());
             boundary.variadic = Some(interface.is_variadic());
             boundary.noreturn = Some(interface.is_noreturn());
@@ -3836,6 +3834,22 @@ fn collect_source_boundary_facts(
                 }
                 boundary.complete = arguments_complete && results_complete;
             }
+        }
+        if !boundary.complete
+            && boundary.calling_convention.is_none()
+            && let Some(machine_context) = machine_context
+            && let Some((block_addr, op_index)) = graph.op_site_for_inst(call_site.at)
+        {
+            r2il::refusal_evidence!(
+                "call-boundary-fallback",
+                "callsite ({block_addr:#x}, {op_index}) raw_identity={:?} interface={}",
+                call_site.raw_identity,
+                call_site
+                    .raw_identity
+                    .is_some_and(|identity| machine_context
+                        .call_site_interface(identity)
+                        .is_some())
+            );
         }
         if !boundary.complete
             && boundary.calling_convention.is_none()
@@ -10487,32 +10501,41 @@ fn collect_call_sites(
 
         for (op_idx, op) in block.ops.iter().enumerate() {
             let id = CallSiteId(next_id);
+            // The transfer names the instruction it was lifted from, and the
+            // raw input names which of its instructions are call sites; that
+            // is the whole correlation. A transfer with no instruction is
+            // synthetic and belongs to no source-described site.
+            let instruction = match op {
+                SSAOp::Call { instruction, .. }
+                | SSAOp::CallInd { instruction, .. }
+                | SSAOp::Branch { instruction, .. }
+                | SSAOp::BranchInd { instruction, .. } => *instruction,
+                _ => None,
+            };
             let raw_identity = machine_context
-                .and_then(|context| context.raw_call_site_identity(id))
-                .filter(|identity| identity.block_addr() == block_addr);
+                .zip(instruction)
+                .and_then(|(context, instruction)| context.raw_call_site_at(instruction));
             let (target, transfer) = match op {
-                SSAOp::Call { target } | SSAOp::CallInd { target } => {
+                SSAOp::Call { target, .. } | SSAOp::CallInd { target, .. } => {
                     (target.clone(), CallSiteTransfer::Call)
                 }
-                SSAOp::Branch { target } | SSAOp::BranchInd { target }
+                SSAOp::Branch { target, .. } | SSAOp::BranchInd { target, .. }
                     if machine_context.is_some_and(|context| {
-                        context.is_tail_call_site(id)
-                            && raw_identity.is_some_and(|identity| {
-                                identity.op_index() == op_idx
-                                    && match op {
-                                        SSAOp::Branch { .. } => graph
-                                            .value_id_for_var(target)
-                                            .and_then(|value| graph.value(value))
-                                            .is_some_and(|value| {
-                                                value.canonical_storage == Some(identity.target())
-                                            }),
-                                        SSAOp::BranchInd { .. } => {
-                                            identity.target().space
-                                                == crate::CanonicalStorageSpace::Ram
-                                        }
-                                        _ => false,
+                        raw_identity.is_some_and(|identity| {
+                            context.is_tail_call_site(identity)
+                                && match op {
+                                    SSAOp::Branch { .. } => graph
+                                        .value_id_for_var(target)
+                                        .and_then(|value| graph.value(value))
+                                        .is_some_and(|value| {
+                                            value.canonical_storage == Some(identity.target())
+                                        }),
+                                    SSAOp::BranchInd { .. } => {
+                                        identity.target().space == crate::CanonicalStorageSpace::Ram
                                     }
-                            })
+                                    _ => false,
+                                }
+                        })
                     }) =>
                 {
                     (target.clone(), CallSiteTransfer::TailCall)

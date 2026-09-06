@@ -1847,7 +1847,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // taking the last op then found one of those and declined, which is one
         // of the two reasons no real jump table has ever structured.
         let mut dispatches = block.ops.iter().enumerate().filter_map(|(index, op)| {
-            if let SSAOp::BranchInd { target } = op {
+            if let SSAOp::BranchInd { target, .. } = op {
                 Some((index, target))
             } else {
                 None

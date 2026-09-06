@@ -1452,7 +1452,7 @@ impl<'a> FoldingContext<'a> {
             LowerMode::Stmt => {
                 if frame.with_call_args {
                     match op {
-                        SSAOp::Call { target } => {
+                        SSAOp::Call { target, .. } => {
                             let Some((source_block, source_op_idx)) = frame.source_call_site else {
                                 return Err(OpLoweringRefusal::missing_machine_projection());
                             };
@@ -1481,7 +1481,7 @@ impl<'a> FoldingContext<'a> {
                                 ),
                             );
                         }
-                        SSAOp::CallInd { target } => {
+                        SSAOp::CallInd { target, .. } => {
                             let Some((source_block, source_op_idx)) = frame.source_call_site else {
                                 return Err(OpLoweringRefusal::missing_machine_projection());
                             };
@@ -1518,7 +1518,7 @@ impl<'a> FoldingContext<'a> {
                         }
                         // A tail call is certified through either branch
                         // shape; the thunk `jmp [reloc.X]` is the indirect one.
-                        SSAOp::Branch { target } | SSAOp::BranchInd { target }
+                        SSAOp::Branch { target, .. } | SSAOp::BranchInd { target, .. }
                             if frame.source_call_site.is_some_and(|(block_addr, op_idx)| {
                                 self.certified_call_render_fact_for_op(block_addr, op_idx)
                                     .is_some_and(|fact| fact.disposition.is_terminal_return())
@@ -1710,9 +1710,13 @@ mod typed_output_contract_tests {
         }));
         assert!(!operation_requires_final_write_projection(&SSAOp::Call {
             target: input.clone(),
+            instruction: None,
         }));
         assert!(!operation_requires_final_write_projection(
-            &SSAOp::CallInd { target: input }
+            &SSAOp::CallInd {
+                target: input,
+                instruction: None
+            }
         ));
     }
 }

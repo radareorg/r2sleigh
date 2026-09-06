@@ -397,7 +397,13 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         carrier_entering_instruction = Some(ctx.read_var(identity));
                     }
                 }
-                let renamed_op = rename_op(op, ctx, &mut defined_vars, reg_names);
+                let renamed_op = rename_op(
+                    op,
+                    block.op_instruction_addr(op_idx),
+                    ctx,
+                    &mut defined_vars,
+                    reg_names,
+                );
                 record_renamed_op_storage(op, &renamed_op, result);
                 result.blocks.get_mut(&block_addr).unwrap().push(renamed_op);
 
@@ -655,6 +661,7 @@ fn write_varnode(
 
 fn rename_op(
     op: &r2il::R2ILOp,
+    instruction: Option<u64>,
     ctx: &mut RenameContext,
     defined_vars: &mut Vec<RenameIdentity>,
     reg_names: Option<&RegisterNameMap>,
@@ -788,7 +795,10 @@ fn rename_op(
 
         Branch { target } => {
             let target_ssa = read_varnode(target, ctx, reg_names);
-            SSAOp::Branch { target: target_ssa }
+            SSAOp::Branch {
+                target: target_ssa,
+                instruction,
+            }
         }
 
         CBranch { target, cond } => {
@@ -802,17 +812,26 @@ fn rename_op(
 
         BranchInd { target } => {
             let target_ssa = read_varnode(target, ctx, reg_names);
-            SSAOp::BranchInd { target: target_ssa }
+            SSAOp::BranchInd {
+                target: target_ssa,
+                instruction,
+            }
         }
 
         Call { target } => {
             let target_ssa = read_varnode(target, ctx, reg_names);
-            SSAOp::Call { target: target_ssa }
+            SSAOp::Call {
+                target: target_ssa,
+                instruction,
+            }
         }
 
         CallInd { target } => {
             let target_ssa = read_varnode(target, ctx, reg_names);
-            SSAOp::CallInd { target: target_ssa }
+            SSAOp::CallInd {
+                target: target_ssa,
+                instruction,
+            }
         }
 
         Return { target } => {

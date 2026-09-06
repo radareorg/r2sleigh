@@ -126,7 +126,7 @@ impl EngineSourceSnapshot {
             if !identities.insert(identity) {
                 return Err(EngineSourceSnapshotError::DuplicateCallSiteIdentity);
             }
-            if !locations.insert((identity.block_addr(), identity.op_index())) {
+            if !locations.insert(identity.instruction()) {
                 return Err(EngineSourceSnapshotError::DuplicateCallSiteLocation);
             }
         }
@@ -5038,6 +5038,7 @@ mod tests {
         block.push(r2il::R2ILOp::Call {
             target: r2il::Varnode::constant(target, 8),
         });
+        block.stamp_instruction(0, addr);
         block.push(r2il::R2ILOp::Return {
             target: r2il::Varnode::constant(0, 8),
         });
@@ -5050,11 +5051,11 @@ mod tests {
         op_index: usize,
         target: u64,
     ) -> r2ssa::SourceCallSiteInterface {
+        // Test transfers are lifted from instruction `block_addr + op_index`.
         r2ssa::SourceCallSiteInterface::new(
             revision_identity.to_vec(),
             r2ssa::SourceCallSiteIdentity::new(
-                block_addr,
-                op_index,
+                block_addr + op_index as u64,
                 r2ssa::CanonicalStorageId {
                     space: r2ssa::CanonicalStorageSpace::Constant,
                     offset: target,

@@ -123,6 +123,15 @@ impl<'a> FoldingContext<'a> {
                 .variadic_argument_count_evidence
                 .filter(|evidence| evidence.total_argument_count == args.values.len())
                 .ok_or_else(|| {
+                    r2il::refusal_evidence!(
+                        "variadic-callsite-count",
+                        "callsite=({block_addr:#x}, {op_idx}) target={:?} arguments={} fixed_argument_count={:?} count_evidence={:?} count_refusal={:?}",
+                        cert.direct_target,
+                        args.values.len(),
+                        cert.fixed_argument_count,
+                        cert.variadic_argument_count_evidence,
+                        cert.variadic_argument_count_refusal
+                    );
                     OpLoweringRefusal::variadic_callsite_argument_count(
                         cert.variadic_argument_count_refusal.unwrap_or(
                             r2ssa::VariadicCallsiteArgumentCountRefusal::MissingFormatParameter,
@@ -195,6 +204,19 @@ impl<'a> FoldingContext<'a> {
             .entry(declaration.name.clone())
         {
             std::collections::btree_map::Entry::Vacant(slot) => {
+                r2il::refusal_evidence!(
+                    "callee-declaration",
+                    "callsite=({block_addr:#x}, {op_idx}) name={} signature={} fixed_argument_count={:?} arguments={:?} disposition={:?} declaration={:?}",
+                    declaration.name,
+                    cert.callee_signature.is_some(),
+                    cert.fixed_argument_count,
+                    cert.argument_values
+                        .iter()
+                        .map(|argument| (argument.index, argument.value))
+                        .collect::<Vec<_>>(),
+                    render_fact.disposition,
+                    declaration
+                );
                 slot.insert(declaration);
                 Ok(())
             }
@@ -202,9 +224,34 @@ impl<'a> FoldingContext<'a> {
             // declaration between them. Keeping the first, which is what a
             // name-keyed insert does, declares one call's shape and leaves the
             // other contradicting it.
-            std::collections::btree_map::Entry::Occupied(slot) => (*slot.get() == declaration)
-                .then_some(())
-                .ok_or_else(|| OpLoweringRefusal::missing_machine_projection()),
+            std::collections::btree_map::Entry::Occupied(slot) => {
+                if *slot.get() == declaration {
+                    return Ok(());
+                }
+                r2il::refusal_evidence!(
+                    "callee-declaration-conflict",
+                    "callsite=({block_addr:#x}, {op_idx}) name={} signature={} fixed_argument_count={:?} arguments={:?} registers={:?} stack={:?} disposition={:?} first={:?} this={:?}",
+                    declaration.name,
+                    cert.callee_signature.is_some(),
+                    cert.fixed_argument_count,
+                    cert.argument_values
+                        .iter()
+                        .map(|argument| (argument.index, argument.value))
+                        .collect::<Vec<_>>(),
+                    cert.register_argument_locations
+                        .iter()
+                        .map(|argument| (argument.index, argument.storage))
+                        .collect::<Vec<_>>(),
+                    cert.stack_argument_locations
+                        .iter()
+                        .map(|argument| (argument.index, argument.value))
+                        .collect::<Vec<_>>(),
+                    render_fact.disposition,
+                    slot.get(),
+                    declaration
+                );
+                Err(OpLoweringRefusal::missing_machine_projection())
+            }
         }
     }
 
@@ -344,6 +391,14 @@ impl<'a> FoldingContext<'a> {
         if render_fact.disposition == r2types::CallsiteRenderDisposition::Residualized
             && cert.variadic
         {
+            r2il::refusal_evidence!(
+                "variadic-callsite-residualized",
+                "callsite=({block_addr:#x}, {op_idx}) target={:?} fixed_argument_count={:?} count_evidence={:?} count_refusal={:?}",
+                cert.direct_target,
+                cert.fixed_argument_count,
+                cert.variadic_argument_count_evidence,
+                cert.variadic_argument_count_refusal
+            );
             return Err(OpLoweringRefusal::variadic_callsite_argument_count(
                 cert.variadic_argument_count_refusal
                     .unwrap_or(r2ssa::VariadicCallsiteArgumentCountRefusal::MissingFormatParameter),

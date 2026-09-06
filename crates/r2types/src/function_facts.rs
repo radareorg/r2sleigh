@@ -2193,7 +2193,6 @@ impl FunctionFacts {
                 continue;
             };
             let same_interface = source
-                .machine_context()
                 .call_site_interface(arguments.call_site_id)
                 .and_then(r2ssa::SourceCallSiteInterface::exact_callee_interface)
                 .is_some_and(|interface| interface == &signature.interface);
@@ -5590,11 +5589,7 @@ mod tests {
         let call_site = r2ssa::CallSiteFact {
             id: call_site_id,
             at,
-            raw_identity: Some(r2ssa::SourceCallSiteIdentity::new(
-                0x401000,
-                2,
-                target_storage,
-            )),
+            raw_identity: Some(r2ssa::SourceCallSiteIdentity::new(0x401002, target_storage)),
             target,
             direct_target: Some(0x402000),
             fallthrough: None,
@@ -6365,6 +6360,7 @@ mod tests {
     #[test]
     fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
         let mut block = R2ILBlock::new(0x401000, 4);
+        block.stamp_instruction(0, 0x401000);
         block.push(R2ILOp::Call {
             target: Varnode::constant(0x402000, 8),
         });
@@ -6390,7 +6386,7 @@ mod tests {
         };
         let call_interface = r2ssa::SourceCallSiteInterface::new(
             b"certified-call-result-fixture".to_vec(),
-            r2ssa::SourceCallSiteIdentity::new(0x401000, 0, target_storage),
+            r2ssa::SourceCallSiteIdentity::new(0x401000, target_storage),
             true,
             "sysv64",
             [],
@@ -6439,6 +6435,7 @@ mod tests {
     #[test]
     fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
         let mut block = R2ILBlock::new(0x401000, 4);
+        block.stamp_instruction(0, 0x401000);
         let target = Varnode::constant(0x402000, 8);
         block.push(R2ILOp::Call {
             target: target.clone(),
@@ -6490,7 +6487,6 @@ mod tests {
             revision,
             r2ssa::SourceCallSiteIdentity::new(
                 0x401000,
-                0,
                 r2ssa::CanonicalStorageId::from_varnode(&target),
             ),
             true,

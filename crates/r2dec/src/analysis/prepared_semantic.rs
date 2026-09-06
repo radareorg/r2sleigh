@@ -3600,6 +3600,7 @@ mod tests {
         block.push(R2ILOp::Call {
             target: Varnode::constant(0x401000, 8),
         });
+        block.stamp_instruction(2, 0x1002);
         block.push(R2ILOp::Return {
             target: Varnode::constant(0, 8),
         });
@@ -3626,8 +3627,7 @@ mod tests {
         let call_interface = r2ssa::SourceCallSiteInterface::new(
             revision.to_vec(),
             r2ssa::SourceCallSiteIdentity::new(
-                0x1000,
-                2,
+                0x1002,
                 r2ssa::CanonicalStorageId::from_varnode(&call_target),
             ),
             true,

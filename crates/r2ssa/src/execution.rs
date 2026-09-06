@@ -1245,14 +1245,26 @@ mod tests {
             },
             SSAOp::PopCount { dst: v(), src: v() },
             SSAOp::Lzcount { dst: v(), src: v() },
-            SSAOp::Branch { target: v() },
+            SSAOp::Branch {
+                target: v(),
+                instruction: None,
+            },
             SSAOp::CBranch {
                 target: v(),
                 cond: v(),
             },
-            SSAOp::BranchInd { target: v() },
-            SSAOp::Call { target: v() },
-            SSAOp::CallInd { target: v() },
+            SSAOp::BranchInd {
+                target: v(),
+                instruction: None,
+            },
+            SSAOp::Call {
+                target: v(),
+                instruction: None,
+            },
+            SSAOp::CallInd {
+                target: v(),
+                instruction: None,
+            },
             SSAOp::CallDefine { dst: v() },
             SSAOp::Return { target: v() },
             SSAOp::FloatAdd {

@@ -967,6 +967,19 @@ impl SsaArtifact {
         &self.machine_context
     }
 
+    /// The source's interface for one of this function's call sites.
+    ///
+    /// A call site is known to the source by the instruction it was lifted
+    /// from, which the call-site fact carries as its raw identity.
+    pub fn call_site_interface(&self, call_site: CallSiteId) -> Option<&SourceCallSiteInterface> {
+        self.facts
+            .call_sites
+            .by_id
+            .get(&call_site)?
+            .raw_identity
+            .and_then(|identity| self.machine_context.call_site_interface(identity))
+    }
+
     pub const fn aggregate_accesses(&self) -> &AggregateAccessProjectionFacts {
         &self.aggregate_accesses
     }
@@ -1293,41 +1306,31 @@ fn unique_call_site_identity(
             .enumerate()
             .filter_map(move |(op_index, op)| {
                 let target = match (call.transfer(), op) {
-                    (r2source::AdvisoryCallTransfer::Call, R2ILOp::Call { target }) => target,
+                    (r2source::AdvisoryCallTransfer::Call, R2ILOp::Call { target }) => {
+                        CanonicalStorageId::from_varnode(target)
+                    }
                     (r2source::AdvisoryCallTransfer::TailJump, R2ILOp::Branch { target })
                         if op_index + 1 == block.ops.len() =>
                     {
-                        target
+                        CanonicalStorageId::from_varnode(target)
                     }
-                    (r2source::AdvisoryCallTransfer::TailSlot, R2ILOp::BranchInd { target })
-                        if crate::machine_context::terminal_indirect_loaded_slot(
-                            block, op_index,
-                        )
-                        .is_some_and(|slot| slot.offset == call.target_address()) =>
+                    (r2source::AdvisoryCallTransfer::TailSlot, R2ILOp::BranchInd { .. })
+                        if op_index + 1 == block.ops.len() =>
                     {
-                        let instruction = block
-                            .op_metadata(op_index)
-                            .and_then(|metadata| metadata.instruction_addr)?;
-                        let slot =
-                            crate::machine_context::terminal_indirect_loaded_slot(block, op_index)?;
-                        return (instruction == call.instruction_address())
-                            .then(|| SourceCallSiteIdentity::new(block.addr, op_index, slot));
+                        crate::machine_context::terminal_indirect_loaded_slot(block, op_index)?
                     }
                     _ => return None,
                 };
                 let instruction = block
                     .op_metadata(op_index)
                     .and_then(|metadata| metadata.instruction_addr)?;
-                let storage = CanonicalStorageId::from_varnode(target);
                 (instruction == call.instruction_address()
-                    && storage.offset == call.target_address())
-                .then(|| SourceCallSiteIdentity::new(block.addr, op_index, storage))
+                    && target.offset == call.target_address())
+                .then(|| SourceCallSiteIdentity::new(instruction, target))
             })
     });
-    match (matches.next(), matches.next()) {
-        (Some(identity), None) => Some(identity),
-        _ => None,
-    }
+    let identity = matches.next()?;
+    matches.next().is_none().then_some(identity)
 }
 
 #[derive(Clone)]
@@ -1368,6 +1371,15 @@ fn correlate_call_site_interfaces(
         // agree. radare2 reports no prototype for most local functions; in
         // that case the callee-derived interface supplies both layers.
         let recovered = callee_interfaces.get(&call.target_address());
+        r2il::refusal_evidence!(
+            "call-site-correlation",
+            "advisory {:?} at {:#x} target {:#x} prototype_arguments={:?} callee_interface={}",
+            call.transfer(),
+            call.instruction_address(),
+            call.target_address(),
+            call.prototype().map(|prototype| prototype.arguments.len()),
+            recovered.is_some()
+        );
         let Some(prototype) = call.prototype() else {
             let Some(callee) = recovered else {
                 continue;
@@ -3901,7 +3913,7 @@ impl SSAFunction {
     pub fn infer_switch_selector_var(&self, block_addr: u64) -> Option<SSAVar> {
         let block = self.get_block(block_addr)?;
         let target = block.ops.iter().rev().find_map(|op| match op {
-            SSAOp::BranchInd { target } => Some(target),
+            SSAOp::BranchInd { target, .. } => Some(target),
             _ => None,
         })?;
         self.infer_switch_selector_var_from_value(target, 0)
@@ -5567,8 +5579,7 @@ mod tests {
         let tail = advisory_call_site(0x1000, 0x5000, 1);
         let identity = unique_call_site_identity(&[branch.clone()], &tail)
             .expect("exact terminal branch is the source-proven callsite");
-        assert_eq!(identity.block_addr(), 0x1000);
-        assert_eq!(identity.op_index(), 0);
+        assert_eq!(identity.instruction(), 0x1000);
         assert_eq!(identity.target().offset, 0x5000);
 
         let ordinary_call = advisory_call_site(0x1000, 0x5000, 0);
@@ -5659,8 +5670,9 @@ mod tests {
         block.push(R2ILOp::Branch {
             target: target.clone(),
         });
+        block.stamp_instruction(0, 0x1000);
         let identity =
-            SourceCallSiteIdentity::new(block.addr, 0, CanonicalStorageId::from_varnode(&target));
+            SourceCallSiteIdentity::new(0x1000, CanonicalStorageId::from_varnode(&target));
         let interface = SourceCallSiteInterface::new(
             b"tail-jump".to_vec(),
             identity,
@@ -5725,6 +5737,7 @@ mod tests {
         direct_ram.push(R2ILOp::BranchInd {
             target: Varnode::ram(slot, 8),
         });
+        direct_ram.stamp_instruction(0, 0x1600);
 
         let address = Varnode::unique(0x6500, 8);
         let loaded = Varnode::register(0x4080, 8);
@@ -5745,9 +5758,12 @@ mod tests {
             src: loaded,
         });
         through_register.push(R2ILOp::BranchInd { target: pc });
+        through_register.stamp_instruction(3, 0x260c);
 
-        for (block, op_index) in [(direct_ram, 0), (through_register, 3)] {
-            let identity = SourceCallSiteIdentity::new(block.addr, op_index, target_storage);
+        for (block, op_index, instruction) in
+            [(direct_ram, 0, 0x1600), (through_register, 3, 0x260c)]
+        {
+            let identity = SourceCallSiteIdentity::new(instruction, target_storage);
             let interface = SourceCallSiteInterface::new(
                 b"tail-slot".to_vec(),
                 identity,
@@ -7890,19 +7906,20 @@ mod tests {
         ops.push(R2ILOp::Return {
             target: make_const(0, 8),
         });
-        let blocks = vec![R2ILBlock {
+        let mut block = R2ILBlock {
             addr: 0x1600,
             size: 4,
             ops,
             switch_info: None,
             op_metadata: Default::default(),
-        }];
+        };
+        block.stamp_instruction(call_index, 0x1600 + call_index as u64);
+        let blocks = vec![block];
 
         let mut interface = SourceCallSiteInterface::new(
             b"variadic-tail".to_vec(),
             SourceCallSiteIdentity::new(
-                0x1600,
-                call_index,
+                0x1600 + call_index as u64,
                 CanonicalStorageId {
                     space: CanonicalStorageSpace::Constant,
                     offset: 0x2000,
@@ -8017,7 +8034,7 @@ mod tests {
         let target = make_const(0x2000, 8);
         let first_call_index = 4;
         let second_call_index = 9;
-        let blocks = vec![R2ILBlock {
+        let mut blocks = vec![R2ILBlock {
             addr: 0x1680,
             size: 11,
             ops: vec![
@@ -8066,12 +8083,13 @@ mod tests {
             switch_info: None,
             op_metadata: Default::default(),
         }];
-        let interface = |op_index| {
+        blocks[0].stamp_instruction(first_call_index, 0x1680 + first_call_index as u64);
+        blocks[0].stamp_instruction(second_call_index, 0x1680 + second_call_index as u64);
+        let interface = |op_index: usize| {
             SourceCallSiteInterface::new(
                 b"same-variadic-callee".to_vec(),
                 SourceCallSiteIdentity::new(
-                    0x1680,
-                    op_index,
+                    0x1680 + op_index as u64,
                     CanonicalStorageId::from_varnode(&target),
                 ),
                 true,
@@ -8202,7 +8220,7 @@ mod tests {
         };
         let revision = b"preserved-entry-call-argument";
         let target = make_const(0x401000, 8);
-        let blocks = [R2ILBlock {
+        let mut blocks = [R2ILBlock {
             addr: 0x1600,
             size: 4,
             ops: vec![R2ILOp::Call {
@@ -8211,6 +8229,7 @@ mod tests {
             switch_info: None,
             op_metadata: Default::default(),
         }];
+        blocks[0].stamp_instruction(0, 0x1600);
         let function_interface = SourceFunctionInterface::new_exact(
             revision.to_vec(),
             "aapcs64",
@@ -8223,7 +8242,7 @@ mod tests {
         .expect("exact function interface");
         let call_interface = SourceCallSiteInterface::new(
             revision.to_vec(),
-            SourceCallSiteIdentity::new(0x1600, 0, CanonicalStorageId::from_varnode(&target)),
+            SourceCallSiteIdentity::new(0x1600, CanonicalStorageId::from_varnode(&target)),
             true,
             "aapcs64",
             [SourceCallArgumentSpec::new(0, argument_storage)],
@@ -8304,7 +8323,7 @@ mod tests {
                 register.name = if register.size == 8 { "rdx" } else { "edx" }.to_string();
             }
         }
-        let blocks = vec![R2ILBlock {
+        let mut blocks = vec![R2ILBlock {
             addr: 0x1600,
             size: 4,
             ops: vec![
@@ -8327,6 +8346,7 @@ mod tests {
             switch_info: None,
             op_metadata: Default::default(),
         }];
+        blocks[0].stamp_instruction(2, 0x1602);
 
         let argument_storage = CanonicalStorageId {
             space: CanonicalStorageSpace::Register,
@@ -8336,8 +8356,7 @@ mod tests {
         let call_interface = SourceCallSiteInterface::new(
             b"renamed-register-call-args".to_vec(),
             SourceCallSiteIdentity::new(
-                0x1600,
-                2,
+                0x1602,
                 CanonicalStorageId {
                     space: CanonicalStorageSpace::Constant,
                     offset: 0x2000,
@@ -9160,6 +9179,7 @@ mod tests {
             },
             SSAOp::Branch {
                 target: SSAVar::new("ram:1810", 0, 8),
+                instruction: None,
             },
         ];
         function.get_block_mut(0x1814).expect("loop exit").ops = vec![SSAOp::Return {
@@ -9473,6 +9493,7 @@ mod tests {
         }];
         function.get_block_mut(0x1a40).expect("exit bypass").ops = vec![SSAOp::Branch {
             target: SSAVar::new("ram:1a50", 0, 8),
+            instruction: None,
         }];
         function.get_block_mut(0x1a50).expect("final exit").phis = vec![PhiNode {
             dst: chained_result.clone(),
@@ -9681,6 +9702,7 @@ mod tests {
                 },
                 SSAOp::Branch {
                     target: SSAVar::new("ram:1b10", 0, 8),
+                    instruction: None,
                 },
             ]
         } else {
@@ -9702,6 +9724,7 @@ mod tests {
                 },
                 SSAOp::Branch {
                     target: SSAVar::new("ram:1b10", 0, 8),
+                    instruction: None,
                 },
             ]
         };
@@ -12785,11 +12808,8 @@ mod tests {
         let roles = SourceMachineRoles::new(Some(storage(16, 8)), Some(storage(32, 8)))
             .expect("machine roles")
             .with_call_preserved_carriers(SourceCallPreservedCarriers::new(true, true));
-        let identity = SourceCallSiteIdentity::new(
-            0x1000,
-            call_index,
-            CanonicalStorageId::from_varnode(&target),
-        );
+        let identity =
+            SourceCallSiteIdentity::new(0x1008, CanonicalStorageId::from_varnode(&target));
         let call_interface = SourceCallSiteInterface::new(
             b"stack-argument".to_vec(),
             identity,

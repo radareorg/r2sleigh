@@ -574,7 +574,7 @@ fn resolve_indirect_calls_in_graph<T: PointerTable>(
         for (op_index, op) in block.ops.iter().enumerate() {
             // A tail call through a table is a branch, not a call, and it
             // reaches the same set of functions either way.
-            let (SSAOp::CallInd { target } | SSAOp::BranchInd { target }) = op else {
+            let (SSAOp::CallInd { target, .. } | SSAOp::BranchInd { target, .. }) = op else {
                 continue;
             };
             let Some(call_inst) = graph
@@ -799,6 +799,7 @@ mod tests {
                     },
                     SSAOp::CallInd {
                         target: callee.clone(),
+                        instruction: None,
                     },
                 ],
             },
@@ -938,6 +939,7 @@ mod tests {
                     },
                     SSAOp::BranchInd {
                         target: callee.clone(),
+                        instruction: None,
                     },
                 ],
             },
@@ -1002,6 +1004,7 @@ mod tests {
                 },
                 SSAOp::CallInd {
                     target: callee.clone(),
+                    instruction: None,
                 },
             ],
         }];
@@ -1068,7 +1071,10 @@ mod tests {
                         space: r2il::SpaceId::Ram,
                         addr: address,
                     },
-                    SSAOp::CallInd { target: callee },
+                    SSAOp::CallInd {
+                        target: callee,
+                        instruction: None,
+                    },
                 ],
             },
         ];

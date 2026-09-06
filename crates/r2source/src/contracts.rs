@@ -2083,30 +2083,31 @@ fn register_storages_overlap(left: CanonicalStorageId, right: CanonicalStorageId
     left.offset < right_end && right.offset < left_end
 }
 
-/// Stable identity of one call in the raw lifted input, before SSA inserts
-/// synthetic call-boundary definitions.
+/// Stable identity of one call in the lifted input: the native instruction
+/// the transfer was lifted from, and the storage it transfers to.
+///
+/// An instruction address survives everything SSA construction does to the
+/// operation stream -- block splitting, the synthetic call-boundary
+/// definitions, every rewrite that drops or reorders operations -- which is
+/// what lets a fact recorded against the raw input find its operation in the
+/// prepared function. A position in a block does not survive any of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SourceCallSiteIdentity {
-    block_addr: u64,
-    op_index: usize,
+    instruction: u64,
     target: CanonicalStorageId,
 }
 
 impl SourceCallSiteIdentity {
-    pub const fn new(block_addr: u64, op_index: usize, target: CanonicalStorageId) -> Self {
+    pub const fn new(instruction: u64, target: CanonicalStorageId) -> Self {
         Self {
-            block_addr,
-            op_index,
+            instruction,
             target,
         }
     }
 
-    pub const fn block_addr(self) -> u64 {
-        self.block_addr
-    }
-
-    pub const fn op_index(self) -> usize {
-        self.op_index
+    /// Address of the native instruction the transfer was lifted from.
+    pub const fn instruction(self) -> u64 {
+        self.instruction
     }
 
     pub const fn target(self) -> CanonicalStorageId {
@@ -2440,7 +2441,6 @@ mod tests {
             b"abi-class-callsite".to_vec(),
             SourceCallSiteIdentity::new(
                 0x1000,
-                0,
                 CanonicalStorageId {
                     space: CanonicalStorageSpace::Constant,
                     offset: 0x2000,
@@ -2512,7 +2512,6 @@ mod tests {
     fn a_format_count_rule_is_checked_against_the_variadic_fixed_prefix() {
         let identity = SourceCallSiteIdentity::new(
             0x1000,
-            0,
             CanonicalStorageId {
                 space: CanonicalStorageSpace::Constant,
                 offset: 0x2000,

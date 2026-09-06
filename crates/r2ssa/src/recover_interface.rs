@@ -842,10 +842,11 @@ mod tests {
         block.push(R2ILOp::Return {
             target: Varnode::constant(0, 8),
         });
+        block.stamp_instruction(0, 0x1000);
         let blocks = [block];
         let call_interface = SourceCallSiteInterface::new(
             b"contextual-preserved-entry".to_vec(),
-            SourceCallSiteIdentity::new(0x1000, 0, CanonicalStorageId::from_varnode(&target)),
+            SourceCallSiteIdentity::new(0x1000, CanonicalStorageId::from_varnode(&target)),
             true,
             "arm64",
             [SourceCallArgumentSpec::new(0, register(0, 8))],
@@ -965,8 +966,7 @@ mod tests {
         let callsite = mint_recovered_call_site_interface(
             &interface,
             SourceCallSiteIdentity::new(
-                0x2000,
-                3,
+                0x2003,
                 CanonicalStorageId {
                     space: CanonicalStorageSpace::Constant,
                     offset: 0x4000,
@@ -1127,7 +1127,8 @@ mod tests {
             addr: Varnode::constant(slot, 8),
         });
         block.push(R2ILOp::BranchInd { target: loaded });
-        let identity = SourceCallSiteIdentity::new(0x1000, 1, slot_storage);
+        block.stamp_instruction(1, 0x1001);
+        let identity = SourceCallSiteIdentity::new(0x1001, slot_storage);
         let function =
             SSAFunction::from_blocks_for_decompile(std::slice::from_ref(&block), Some(&arch))
                 .expect("thunk ssa");

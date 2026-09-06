@@ -1607,16 +1607,16 @@ mod tests {
         }
     }
 
+    /// Name the transfer at `op_index` of `block` as lifted from instruction
+    /// `block.addr + op_index`, and return the identity that names it.
     fn direct_call_identity(
-        block_addr: u64,
+        block: &mut R2ILBlock,
         op_index: usize,
         target: &Varnode,
     ) -> SourceCallSiteIdentity {
-        SourceCallSiteIdentity::new(
-            block_addr,
-            op_index,
-            CanonicalStorageId::from_varnode(target),
-        )
+        let instruction = block.addr + op_index as u64;
+        block.stamp_instruction(op_index, instruction);
+        SourceCallSiteIdentity::new(instruction, CanonicalStorageId::from_varnode(target))
     }
 
     fn call_interface(
@@ -1798,7 +1798,7 @@ mod tests {
         assert!(missing_call.arguments.is_empty());
         assert!(missing_call.results.is_empty());
 
-        let identity = direct_call_identity(0x3040, 0, &target);
+        let identity = direct_call_identity(&mut block, 0, &target);
         let explicit = SsaArtifact::raw_with_interfaces(
             &[block.clone()],
             Some(&arch),
@@ -1873,7 +1873,7 @@ mod tests {
         });
         let interface = call_interface(
             b"call-revision-2",
-            direct_call_identity(0x3080, 1, &target),
+            direct_call_identity(&mut block, 1, &target),
             true,
             [SourceCallArgumentSpec::new(0, argument_storage)],
             false,
@@ -2015,7 +2015,7 @@ mod tests {
         block.push(R2ILOp::Call {
             target: target.clone(),
         });
-        let identity = direct_call_identity(0x30c0, 0, &target);
+        let identity = direct_call_identity(&mut block, 0, &target);
         let valid = call_interface(
             b"call-revision-3",
             identity,
@@ -2046,7 +2046,6 @@ mod tests {
             b"call-revision-3",
             SourceCallSiteIdentity::new(
                 0x30c0,
-                0,
                 CanonicalStorageId::from_varnode(&Varnode::ram(0x4300, 8)),
             ),
             true,
@@ -2106,9 +2105,10 @@ mod tests {
         indirect_block.push(R2ILOp::CallInd {
             target: target.clone(),
         });
+        let indirect_identity = direct_call_identity(&mut indirect_block, 0, &target);
         let indirect_interface = call_interface(
             b"call-revision-4",
-            direct_call_identity(0x3100, 0, &target),
+            indirect_identity,
             true,
             [],
             false,
@@ -2131,7 +2131,7 @@ mod tests {
         assert!(indirect_call.call_site.eq(&crate::semantic::CallSiteId(0)));
         assert_eq!(
             indirect.facts().call_sites.by_id[&crate::semantic::CallSiteId(0)].raw_identity,
-            Some(direct_call_identity(0x3100, 0, &target))
+            Some(indirect_identity)
         );
         assert!(indirect_call.complete);
         assert!(indirect_call.arguments.is_empty());
@@ -2152,7 +2152,7 @@ mod tests {
         .expect("function interface");
         let mismatched_call = call_interface(
             b"other-revision",
-            direct_call_identity(0x3140, 0, &direct_target),
+            direct_call_identity(&mut direct_block, 0, &direct_target),
             true,
             [],
             false,

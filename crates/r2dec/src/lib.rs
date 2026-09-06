@@ -5221,10 +5221,7 @@ fn evidence_return_type(source: &r2ssa::SsaArtifact, evidence: &r2types::Evidenc
         if certificate.transfer != r2ssa::CallSiteTransfer::TailCall {
             continue;
         }
-        let Some(interface) = source
-            .machine_context()
-            .call_site_interface(certificate.call_site)
-        else {
+        let Some(interface) = source.call_site_interface(certificate.call_site) else {
             return CType::Unknown;
         };
         saw_tail = true;

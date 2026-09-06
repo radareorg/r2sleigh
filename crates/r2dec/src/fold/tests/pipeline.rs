@@ -201,11 +201,49 @@ mod tests {
         prepared_from_r2il_blocks_with_call_arguments(blocks, arch, 0)
     }
 
+    /// Test blocks rarely say which instruction an operation came from, and
+    /// a call site is known by exactly that. Give every transfer that lacks
+    /// one the address `block.addr + op_index`, so the identities minted here
+    /// name operations the prepared function can find again.
+    fn with_transfers_stamped(blocks: &[R2ILBlock]) -> Vec<R2ILBlock> {
+        blocks
+            .iter()
+            .cloned()
+            .map(|mut block| {
+                for op_index in 0..block.ops.len() {
+                    let is_transfer = matches!(
+                        block.ops[op_index],
+                        R2ILOp::Call { .. }
+                            | R2ILOp::CallInd { .. }
+                            | R2ILOp::Branch { .. }
+                            | R2ILOp::BranchInd { .. }
+                    );
+                    let unstamped = block
+                        .op_metadata(op_index)
+                        .and_then(|metadata| metadata.instruction_addr)
+                        .is_none();
+                    if is_transfer && unstamped {
+                        block.stamp_instruction(op_index, block.addr + op_index as u64);
+                    }
+                }
+                block
+            })
+            .collect()
+    }
+
+    fn transfer_instruction(block: &R2ILBlock, op_index: usize) -> u64 {
+        block
+            .op_metadata(op_index)
+            .and_then(|metadata| metadata.instruction_addr)
+            .expect("test transfers are stamped with their instruction")
+    }
+
     fn prepared_from_r2il_blocks_with_call_arguments(
         blocks: &[R2ILBlock],
         arch: &ArchSpec,
         call_argument_count: usize,
     ) -> SourceOwnedPreparedFixture {
+        let blocks = &with_transfers_stamped(blocks);
         let storage = |offset| r2ssa::CanonicalStorageId {
             space: r2ssa::CanonicalStorageSpace::Register,
             offset,
@@ -263,8 +301,7 @@ mod tests {
                         r2ssa::SourceCallSiteInterface::new(
                             revision.to_vec(),
                             r2ssa::SourceCallSiteIdentity::new(
-                                block.addr,
-                                op_index,
+                                transfer_instruction(block, op_index),
                                 r2ssa::CanonicalStorageId::from_varnode(target),
                             ),
                             true,
@@ -311,6 +348,7 @@ mod tests {
         argument_count: usize,
         returns_value: bool,
     ) -> SourceOwnedPreparedFixture {
+        let blocks = &with_transfers_stamped(blocks);
         let storage = |offset| r2ssa::CanonicalStorageId {
             space: r2ssa::CanonicalStorageSpace::Register,
             offset,
@@ -349,8 +387,10 @@ mod tests {
                     let R2ILOp::BranchInd { .. } = op else {
                         return None;
                     };
-                    let identity =
-                        r2ssa::SourceCallSiteIdentity::new(block.addr, op_index, slot_storage);
+                    let identity = r2ssa::SourceCallSiteIdentity::new(
+                        transfer_instruction(block, op_index),
+                        slot_storage,
+                    );
                     let interface = r2ssa::SourceCallSiteInterface::new(
                         revision.to_vec(),
                         identity,
@@ -2084,6 +2124,7 @@ mod tests {
             .op_to_stmt_impl(
                 &SSAOp::CallInd {
                     target: make_var("X16", 0, 8),
+                    instruction: None,
                 },
                 &super::LowerFrame::for_expr(),
             )
@@ -2136,6 +2177,7 @@ mod tests {
             ctx.op_to_stmt_with_args(
                 &SSAOp::Call {
                     target: make_var("X16", 0, 8),
+                    instruction: None,
                 },
                 source_call.0,
                 source_call.1,
@@ -2155,6 +2197,7 @@ mod tests {
             ctx.op_to_stmt_with_args(
                 &SSAOp::CallInd {
                     target: make_var("X16", 0, 8),
+                    instruction: None,
                 },
                 source_call.0,
                 source_call.1,
@@ -2661,6 +2704,7 @@ mod tests {
             },
             SSAOp::Branch {
                 target: make_var("ram:100c", 0, 8),
+                instruction: None,
             },
         ];
         func.get_block_mut(0x1008).expect("else").ops = vec![SSAOp::Copy {
@@ -2774,7 +2818,7 @@ mod tests {
         });
 
         let block = prepared.function().get_block(0x1000).expect("entry");
-        let SSAOp::Call { target } = &block.ops[1] else {
+        let SSAOp::Call { target, .. } = &block.ops[1] else {
             panic!("expected call op, got {:?}", block.ops[1]);
         };
 

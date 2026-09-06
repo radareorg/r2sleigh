@@ -1733,7 +1733,7 @@ fn exact_call_result_storage(
     prepared: &SsaArtifact,
     call_site: CallSiteId,
 ) -> Option<crate::CanonicalStorageId> {
-    let interface = prepared.machine_context().call_site_interface(call_site)?;
+    let interface = prepared.call_site_interface(call_site)?;
     if !interface.is_complete() {
         return None;
     }
@@ -2469,11 +2469,10 @@ fn call_argument_carriers(
     abi: &AbiProfile,
     call_id: CallSiteId,
 ) -> Option<Vec<CallCarrierKey>> {
-    let machine = prepared.machine_context();
     if !abi.is_source_owned() {
         return None;
     }
-    let interface = machine.call_site_interface(call_id)?;
+    let interface = prepared.call_site_interface(call_id)?;
     interface.is_complete().then(|| {
         interface
             .arguments()
@@ -2489,7 +2488,6 @@ fn unknown_call_arguments(
     call_id: CallSiteId,
 ) -> Vec<SummaryOperand> {
     let count = prepared
-        .machine_context()
         .call_site_interface(call_id)
         .map(|interface| interface.arguments().len())
         .unwrap_or_else(|| abi.argument_count());
@@ -3112,14 +3110,25 @@ mod tests {
         }
     }
 
+    /// A test block whose transfers are lifted from instruction
+    /// `addr + op_index`, so a call site identity can name them.
     fn block(addr: u64, ops: Vec<R2ILOp>) -> R2ILBlock {
-        R2ILBlock {
+        let mut block = R2ILBlock {
             addr,
             size: 4,
             ops,
             switch_info: None,
             op_metadata: Default::default(),
+        };
+        for op_index in 0..block.ops.len() {
+            if matches!(
+                block.ops[op_index],
+                R2ILOp::Call { .. } | R2ILOp::CallInd { .. } | R2ILOp::Branch { .. }
+            ) {
+                block.stamp_instruction(op_index, addr + op_index as u64);
+            }
         }
+        block
     }
 
     fn register_storage(offset: u64) -> crate::CanonicalStorageId {
@@ -3186,8 +3195,10 @@ mod tests {
                             crate::SourceCallSiteInterface::new(
                                 revision.to_vec(),
                                 crate::SourceCallSiteIdentity::new(
-                                    block.addr,
-                                    op_index,
+                                    block
+                                        .op_metadata(op_index)
+                                        .and_then(|metadata| metadata.instruction_addr)
+                                        .expect("test transfers are lifted from an instruction"),
                                     crate::CanonicalStorageId::from_varnode(target),
                                 ),
                                 true,
@@ -3496,7 +3507,6 @@ mod tests {
             revision.to_vec(),
             crate::SourceCallSiteIdentity::new(
                 0x4000,
-                0,
                 crate::CanonicalStorageId::from_varnode(&target),
             ),
             true,
@@ -5058,7 +5068,6 @@ mod tests {
                 revision.to_vec(),
                 crate::SourceCallSiteIdentity::new(
                     0x7000,
-                    0,
                     crate::CanonicalStorageId::from_varnode(&target),
                 ),
                 complete,
@@ -5254,8 +5263,7 @@ mod tests {
             crate::SourceCallSiteInterface::new(
                 revision.to_vec(),
                 crate::SourceCallSiteIdentity::new(
-                    0x6000,
-                    1,
+                    0x6001,
                     crate::CanonicalStorageId::from_varnode(&target),
                 ),
                 complete,

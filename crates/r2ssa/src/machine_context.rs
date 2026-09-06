@@ -15,7 +15,6 @@ use serde::Serialize;
 
 use crate::function::SSAFunction;
 use crate::op::SSAOp;
-use crate::semantic::CallSiteId;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
@@ -535,8 +534,10 @@ pub struct SourceMachineContext {
     /// Exact source-owned register geometry; no write policy is stored here.
     register_geometry_state: MachineRegisterGeometryState,
     register_projections: Box<[RegisterProjection]>,
-    raw_call_sites_by_id: BTreeMap<CallSiteId, SourceCallSiteIdentity>,
-    tail_call_sites: BTreeSet<CallSiteId>,
+    /// Every call site the raw lifted input has, by the instruction it was
+    /// lifted from.
+    raw_call_sites: BTreeMap<u64, SourceCallSiteIdentity>,
+    tail_call_sites: BTreeSet<SourceCallSiteIdentity>,
     call_site_interfaces: BTreeMap<SourceCallSiteIdentity, SourceCallSiteInterface>,
     /// Literal bytes captured by the same immutable source transaction as the
     /// callsite interfaces. Unlike display strings, these participate in
@@ -831,8 +832,7 @@ fn write_call_identity(
     writer: &mut MachineContextIdentityWriter,
     identity: SourceCallSiteIdentity,
 ) {
-    writer.u64(identity.block_addr());
-    writer.usize(identity.op_index());
+    writer.u64(identity.instruction());
     writer.storage(identity.target());
 }
 
@@ -1100,12 +1100,8 @@ impl SourceMachineContext {
             }
             abi_model.coherent &= coherent;
         }
-        let (raw_call_sites_by_id, tail_call_sites) =
+        let (raw_call_sites, tail_call_sites) =
             collect_raw_call_site_identities(blocks, &tail_call_identities);
-        let raw_call_sites = raw_call_sites_by_id
-            .values()
-            .copied()
-            .collect::<BTreeSet<_>>();
         let expected_call_site_revision = function_interface
             .as_ref()
             .map(|interface| interface.revision_identity().to_vec().into_boxed_slice())
@@ -1118,7 +1114,7 @@ impl SourceMachineContext {
         let mut claimed_sites = BTreeSet::new();
         for interface in call_site_interfaces {
             let identity = interface.identity();
-            let site = (identity.block_addr(), identity.op_index());
+            let site = identity.instruction();
             let carriers_exist = interface
                 .arguments()
                 .iter()
@@ -1137,12 +1133,23 @@ impl SourceMachineContext {
             // hold up and keep the rest, rather than withholding every
             // interface because one of them was wrong: interfaces are already
             // stored per identity, so there is nothing shared to protect.
-            if interface.schema_version() != SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION
-                || expected_call_site_revision.as_deref() != Some(interface.revision_identity())
-                || !raw_call_sites.contains(&identity)
-                || !claimed_sites.insert(site)
-                || !carriers_exist
-            {
+            let schema_ok = interface.schema_version() == SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION;
+            let revision_ok =
+                expected_call_site_revision.as_deref() == Some(interface.revision_identity());
+            let site_known = raw_call_sites.get(&identity.instruction()) == Some(&identity);
+            let site_unclaimed = claimed_sites.insert(site);
+            if !schema_ok || !revision_ok || !site_known || !site_unclaimed || !carriers_exist {
+                r2il::refusal_evidence!(
+                    "call-site-interface-dropped",
+                    "site {:#x} target {:?}: schema={schema_ok} revision={revision_ok} known={site_known} unclaimed={site_unclaimed} carriers={carriers_exist} arguments={:?}",
+                    identity.instruction(),
+                    identity.target(),
+                    interface
+                        .arguments()
+                        .iter()
+                        .map(|argument| argument.location())
+                        .collect::<Vec<_>>()
+                );
                 call_site_interfaces_by_identity.remove(&identity);
                 continue;
             }
@@ -1180,7 +1187,7 @@ impl SourceMachineContext {
             call_clobbered_carriers,
             register_geometry_state,
             register_projections,
-            raw_call_sites_by_id,
+            raw_call_sites,
             tail_call_sites,
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
@@ -1397,16 +1404,18 @@ impl SourceMachineContext {
             .and_then(|index| self.register_projections.get(index))
     }
 
-    pub const fn raw_call_sites_by_id(&self) -> &BTreeMap<CallSiteId, SourceCallSiteIdentity> {
-        &self.raw_call_sites_by_id
+    /// Every call site of the raw lifted input, by instruction.
+    pub const fn raw_call_sites(&self) -> &BTreeMap<u64, SourceCallSiteIdentity> {
+        &self.raw_call_sites
     }
 
-    pub fn raw_call_site_identity(&self, call_site: CallSiteId) -> Option<SourceCallSiteIdentity> {
-        self.raw_call_sites_by_id.get(&call_site).copied()
+    /// The call site lifted from `instruction`, if that instruction is one.
+    pub fn raw_call_site_at(&self, instruction: u64) -> Option<SourceCallSiteIdentity> {
+        self.raw_call_sites.get(&instruction).copied()
     }
 
-    pub fn is_tail_call_site(&self, call_site: CallSiteId) -> bool {
-        self.tail_call_sites.contains(&call_site)
+    pub fn is_tail_call_site(&self, identity: SourceCallSiteIdentity) -> bool {
+        self.tail_call_sites.contains(&identity)
     }
 
     pub const fn call_site_interfaces(
@@ -1415,9 +1424,11 @@ impl SourceMachineContext {
         &self.call_site_interfaces
     }
 
-    pub fn call_site_interface(&self, call_site: CallSiteId) -> Option<&SourceCallSiteInterface> {
-        self.raw_call_site_identity(call_site)
-            .and_then(|identity| self.call_site_interfaces.get(&identity))
+    pub fn call_site_interface(
+        &self,
+        identity: SourceCallSiteIdentity,
+    ) -> Option<&SourceCallSiteInterface> {
+        self.call_site_interfaces.get(&identity)
     }
 
     /// Retain literal contents from the exact source snapshot before semantic
@@ -1584,11 +1595,10 @@ impl SourceMachineContext {
             }
         }
 
-        writer.usize(self.raw_call_sites_by_id.len());
-        for (call_site, identity) in &self.raw_call_sites_by_id {
-            writer.u32(call_site.0);
+        writer.usize(self.raw_call_sites.len());
+        for identity in self.raw_call_sites.values() {
             write_call_identity(&mut writer, *identity);
-            writer.bool(self.tail_call_sites.contains(call_site));
+            writer.bool(self.tail_call_sites.contains(identity));
         }
         writer.usize(self.call_site_interfaces.len());
         for interface in self.call_site_interfaces.values() {
@@ -1682,90 +1692,88 @@ fn ssa_memory_space(op: &SSAOp) -> Option<SpaceId> {
     }
 }
 
+/// Every transfer in the raw lifted input that can be a call site, keyed by
+/// the instruction it was lifted from, with the subset the source proved to be
+/// a tail transfer.
+///
+/// A call or indirect call is a site by itself. A branch is one only where
+/// the source correlated it with a tail transfer, and then only when the
+/// lifted operation at that instruction is the terminal branch the identity
+/// names. Two transfers lifted from one instruction leave that instruction
+/// with no identity at all: nothing downstream could tell which one a fact
+/// was recorded against.
 fn collect_raw_call_site_identities(
     blocks: &[R2ILBlock],
     tail_call_identities: &[SourceCallSiteIdentity],
 ) -> (
-    BTreeMap<CallSiteId, SourceCallSiteIdentity>,
-    BTreeSet<CallSiteId>,
+    BTreeMap<u64, SourceCallSiteIdentity>,
+    BTreeSet<SourceCallSiteIdentity>,
 ) {
-    let tail_call_identities = tail_call_identities
+    let authorized_tail_calls = tail_call_identities
         .iter()
         .copied()
-        .filter(|identity| {
-            blocks.iter().any(|block| {
-                identity.block_addr() == block.addr
-                    && identity.op_index() + 1 == block.ops.len()
-                    && match block.ops.get(identity.op_index()) {
-                        Some(R2ILOp::Branch { target }) => {
-                            CanonicalStorageId::from_varnode(target) == identity.target()
-                        }
-                        Some(R2ILOp::BranchInd { .. }) => {
-                            terminal_indirect_loaded_slot(block, identity.op_index())
-                                == Some(identity.target())
-                        }
-                        _ => false,
-                    }
-            })
-        })
         .collect::<BTreeSet<_>>();
-    let authorized_tail_calls = &tail_call_identities;
-    let mut raw_calls = blocks
-        .iter()
-        .flat_map(|block| {
-            block
-                .ops
-                .iter()
-                .enumerate()
-                .filter_map(move |(op_index, op)| {
-                    let identity = match op {
-                        R2ILOp::Call { target } | R2ILOp::CallInd { target } => {
-                            SourceCallSiteIdentity::new(
-                                block.addr,
-                                op_index,
-                                CanonicalStorageId::from_varnode(target),
-                            )
-                        }
-                        R2ILOp::Branch { target } => {
-                            let identity = SourceCallSiteIdentity::new(
-                                block.addr,
-                                op_index,
-                                CanonicalStorageId::from_varnode(target),
-                            );
-                            if !authorized_tail_calls.contains(&identity) {
-                                return None;
-                            }
-                            identity
-                        }
-                        R2ILOp::BranchInd { .. } => {
-                            let target = terminal_indirect_loaded_slot(block, op_index)?;
-                            let identity =
-                                SourceCallSiteIdentity::new(block.addr, op_index, target);
-                            if !authorized_tail_calls.contains(&identity) {
-                                return None;
-                            }
-                            identity
-                        }
-                        _ => return None,
-                    };
-                    Some((block.addr, op_index, identity))
-                })
-        })
-        .collect::<Vec<_>>();
-    raw_calls.sort_unstable_by_key(|(block_addr, op_index, _)| (*block_addr, *op_index));
-    let mut by_id = BTreeMap::new();
+    let mut by_instruction: BTreeMap<u64, Option<SourceCallSiteIdentity>> = BTreeMap::new();
     let mut tails = BTreeSet::new();
-    for (index, (_, _, identity)) in raw_calls.into_iter().enumerate() {
-        let Ok(index) = u32::try_from(index) else {
-            break;
-        };
-        let call_site = CallSiteId(index);
-        if tail_call_identities.contains(&identity) {
-            tails.insert(call_site);
+    for block in blocks {
+        for (op_index, op) in block.ops.iter().enumerate() {
+            let Some(instruction) = block
+                .op_metadata(op_index)
+                .and_then(|metadata| metadata.instruction_addr)
+            else {
+                continue;
+            };
+            let identity = match op {
+                R2ILOp::Call { target } | R2ILOp::CallInd { target } => {
+                    SourceCallSiteIdentity::new(
+                        instruction,
+                        CanonicalStorageId::from_varnode(target),
+                    )
+                }
+                R2ILOp::Branch { target } if op_index + 1 == block.ops.len() => {
+                    let identity = SourceCallSiteIdentity::new(
+                        instruction,
+                        CanonicalStorageId::from_varnode(target),
+                    );
+                    if !authorized_tail_calls.contains(&identity) {
+                        continue;
+                    }
+                    tails.insert(identity);
+                    identity
+                }
+                R2ILOp::BranchInd { .. } if op_index + 1 == block.ops.len() => {
+                    let Some(target) = terminal_indirect_loaded_slot(block, op_index) else {
+                        continue;
+                    };
+                    let identity = SourceCallSiteIdentity::new(instruction, target);
+                    if !authorized_tail_calls.contains(&identity) {
+                        continue;
+                    }
+                    tails.insert(identity);
+                    identity
+                }
+                _ => continue,
+            };
+            match by_instruction.entry(instruction) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(Some(identity));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    r2il::refusal_evidence!(
+                        "call-site-identity",
+                        "instruction {instruction:#x} lifts to more than one transfer; none of them is a call site"
+                    );
+                    slot.insert(None);
+                }
+            }
         }
-        by_id.insert(call_site, identity);
     }
-    (by_id, tails)
+    let by_instruction = by_instruction
+        .into_iter()
+        .filter_map(|(instruction, identity)| identity.map(|identity| (instruction, identity)))
+        .collect::<BTreeMap<_, _>>();
+    tails.retain(|identity| by_instruction.get(&identity.instruction()) == Some(identity));
+    (by_instruction, tails)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2299,7 +2307,8 @@ mod tests {
         let target = Varnode::register(16, 8);
         let mut call_block = R2ILBlock::new(0x4000, 1);
         call_block.push(R2ILOp::Call { target });
-        let identity = SourceCallSiteIdentity::new(0x4000, 0, register_storage(16, 8));
+        call_block.stamp_instruction(0, 0x4000);
+        let identity = SourceCallSiteIdentity::new(0x4000, register_storage(16, 8));
         let call_interface = |complete| {
             SourceCallSiteInterface::new(
                 b"machine-context-call-v1".to_vec(),
@@ -3236,7 +3245,6 @@ mod tests {
     fn callsite_interface_rejects_bad_order_overlap_and_noreturn_result() {
         let identity = SourceCallSiteIdentity::new(
             0x1000,
-            0,
             CanonicalStorageId {
                 space: CanonicalStorageSpace::Ram,
                 offset: 0x2000,
@@ -3290,7 +3298,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_callsite_ids_are_sorted_and_retain_exact_direct_and_indirect_targets() {
+    fn raw_call_sites_are_keyed_by_the_instruction_they_were_lifted_from() {
         let low_target = Varnode::ram(0x3000, 8);
         let high_target = Varnode::ram(0x4000, 8);
         let indirect_target = Varnode::register(0x18, 8);
@@ -3298,39 +3306,58 @@ mod tests {
         high.push(R2ILOp::Call {
             target: high_target.clone(),
         });
+        high.stamp_instruction(0, 0x2000);
         high.push(R2ILOp::CallInd {
             target: indirect_target.clone(),
         });
+        high.stamp_instruction(1, 0x2002);
         let mut low = R2ILBlock::new(0x1000, 4);
+        low.push(R2ILOp::Call {
+            target: low_target.clone(),
+        });
+        low.stamp_instruction(0, 0x1000);
+        // A transfer nothing lifted from an instruction is nobody's call site.
         low.push(R2ILOp::Call {
             target: low_target.clone(),
         });
 
         let context = SourceMachineContext::from_blocks(&[high, low], None);
         assert_eq!(
-            context.raw_call_site_identity(CallSiteId(0)),
+            context.raw_call_site_at(0x1000),
             Some(SourceCallSiteIdentity::new(
                 0x1000,
-                0,
                 CanonicalStorageId::from_varnode(&low_target),
             ))
         );
         assert_eq!(
-            context.raw_call_site_identity(CallSiteId(1)),
+            context.raw_call_site_at(0x2000),
             Some(SourceCallSiteIdentity::new(
                 0x2000,
-                0,
                 CanonicalStorageId::from_varnode(&high_target),
             ))
         );
         assert_eq!(
-            context.raw_call_site_identity(CallSiteId(2)),
+            context.raw_call_site_at(0x2002),
             Some(SourceCallSiteIdentity::new(
-                0x2000,
-                1,
+                0x2002,
                 CanonicalStorageId::from_varnode(&indirect_target),
             ))
         );
+        assert_eq!(context.raw_call_sites().len(), 3);
+    }
+
+    #[test]
+    fn an_instruction_lifting_to_two_transfers_is_no_call_site() {
+        let target = Varnode::ram(0x3000, 8);
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Call {
+            target: target.clone(),
+        });
+        block.stamp_instruction(0, 0x1000);
+        block.push(R2ILOp::Call { target });
+        block.stamp_instruction(1, 0x1000);
+        let context = SourceMachineContext::from_blocks(&[block], None);
+        assert_eq!(context.raw_call_site_at(0x1000), None);
     }
 
     #[test]
@@ -3340,8 +3367,9 @@ mod tests {
         block.push(R2ILOp::Branch {
             target: target.clone(),
         });
+        block.stamp_instruction(0, 0x1000);
         let identity =
-            SourceCallSiteIdentity::new(block.addr, 0, CanonicalStorageId::from_varnode(&target));
+            SourceCallSiteIdentity::new(0x1000, CanonicalStorageId::from_varnode(&target));
         let context = SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
             &[block.clone()],
             None,
@@ -3351,15 +3379,11 @@ mod tests {
             Vec::new(),
             vec![identity],
         );
-        assert_eq!(
-            context.raw_call_site_identity(CallSiteId(0)),
-            Some(identity)
-        );
-        assert!(context.is_tail_call_site(CallSiteId(0)));
+        assert_eq!(context.raw_call_site_at(0x1000), Some(identity));
+        assert!(context.is_tail_call_site(identity));
 
         let wrong_target = SourceCallSiteIdentity::new(
-            block.addr,
-            0,
+            0x1000,
             CanonicalStorageId {
                 offset: 0x5004,
                 ..identity.target()
@@ -3374,8 +3398,8 @@ mod tests {
             Vec::new(),
             vec![wrong_target],
         );
-        assert!(unproved.raw_call_sites_by_id().is_empty());
-        assert!(!unproved.is_tail_call_site(CallSiteId(0)));
+        assert!(unproved.raw_call_sites().is_empty());
+        assert!(!unproved.is_tail_call_site(wrong_target));
     }
 
     #[test]

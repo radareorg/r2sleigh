@@ -1277,6 +1277,15 @@ impl R2ILBlock {
         }
     }
 
+    /// Record the native instruction the operation at `op_index` was lifted
+    /// from, keeping whatever other metadata it already carries.
+    pub fn stamp_instruction(&mut self, op_index: usize, instruction_addr: u64) {
+        self.op_metadata
+            .entry(op_index)
+            .or_default()
+            .instruction_addr = Some(instruction_addr);
+    }
+
     /// Set metadata for an operation index.
     pub fn set_op_metadata(&mut self, op_index: usize, meta: OpMetadata) {
         self.op_metadata.insert(op_index, meta);
