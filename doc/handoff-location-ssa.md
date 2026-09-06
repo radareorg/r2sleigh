@@ -12992,3 +12992,73 @@ stack objects supply it.
 **Open: `BZ2_bzReadOpen` at -O2** reads a stack binding at the frame
 allocation itself (`StackAccess` at the `sub rsp` instruction), with
 `stack-slot-translation ... root=None` for its slots.
+
+### Later: the B-batch (argument walk, absorbing folds, short literals, the loader hook)
+
+Four traced classes landed together, each with a pinned test; the local
+census went from 118 refusals (N: 19/28/30/27/8/6 over minigzip -O0/-O2,
+bzip2 -O0/-O2, bzip2recover -O0/-O2) to 100 (P: 17/21/27/23/7/5), with
+nothing newly refused at any step.
+
+**`CallDefine` alias pairs in the ABI walks.** A call's clobber is one event
+recorded twice, as `CallDefine RAX` and `CallDefine EAX`. The reaching walks
+(`reaching_abi_value_before`, `reaching_abi_return_register_in_block` in
+`crates/r2ssa/src/semantic.rs`) treated the narrower alias as a slice write
+of the carrier and refused; now a `CallDefine` of a register contained in
+the storage being walked is skipped, and the full-width definition is
+found. `gzoffset`/`gzoffset64` passed the return boundary on this.
+
+**Absorbing constants fold without the other operand.** `or rax, -1` read
+the entry `RAX` for nothing and the renderer then needed a value for the
+entry carrier (`RenderedValueRequired`). SCCP's evaluator
+(`crates/r2ssa/src/optimize.rs`, `eval_const_op` and `evaluate_op_sccp`) now
+answers `x & 0`, `x | all-ones` and `x * 0` from the constant alone, and
+the driver tries that before an unknown operand makes the result unknown.
+Test: `sccp_absorbing_constant_folds_without_the_other_operand`.
+
+**A referenced literal shorter than the string scanner's minimum.** `testf`
+passes `"ok\n"` to `fprintf`; radare2's scanner starts at four bytes, so no
+string record existed and the variadic count refused
+`FormatArgumentNotLiteral`. The capture
+(`function_image_string_literals_collect`, `r2plugin/snapshot_capture.c`)
+now reads the bytes at a referenced address inside a read-only mapping when
+no record covers it, up to the terminator and bounded by the mapping, and
+accepts newlines in both this and the suffix rule. The two silent refusal
+paths in `variadic_callsite_argument_count` now print
+`variadic-format-literal` evidence.
+
+**The loader hook's result is discarded, and the wire now says so.** The
+capture computed a `return_arity` for the `DT_INIT` function and hashed it,
+but the walker never wrote it and the engine never read it, so `_init`
+recovered a register result from a live-out `rax` and refused at
+`implementation.rs:1324`. Replaced by `RAnalSnapshotLoaderRole`
+(`NONE`/`INIT`/`FINI`, from `R_BIN_SYM_INIT`/`R_BIN_SYM_FINI`), one byte
+after the function address at wire format 11, decoded into
+`FunctionIdentity::loader_role()` (`crates/r2source`), and consumed by
+`recover_interface_inner` (`crates/r2ssa/src/recover_interface.rs`): a hook's
+result is void by the loader's contract, an unproven tail result on a hook
+is no longer a refusal, and parameters stay whatever the body reads. The
+dead `RAnalSnapshotReturnArity`, `snapshot_signature_return_arity` and
+`RAnalSnapshotSignatureView` are deleted. `_init` renders
+`void sym__init(void)` with the `__gmon_start__` guard and `_fini` renders
+empty on every binary. Tests: `a_loader_hook_has_a_void_result_...`
+(r2ssa), `a_format_10_identity_carries_no_loader_role` and
+`an_unknown_loader_role_is_refused` (r2source).
+
+**A void function's tail call declares its callee void** (`cadvise`,
+`crates/r2types/src/function_facts.rs`): a `TailCall` disposition in a
+function whose interface returns void is `TerminalVoidReturn` whatever the
+callee's result kind.
+
+**Moved, not solved.** `testf` now refuses `read_before_assignment` on
+`stack_m176`/`stack_m144`: it is the stack-aggregate class (`struct stat`
+local), item C2. `gzoffset64` renders with the linearised tier ("rendered
+control-domain occurrences do not exactly cover block 0x3613"), a structure
+quality item. `_init`'s `__gmon_start__` counts one refused data-object type
+(`extern char[]` loaded as a code pointer).
+
+**Also found.** The `sum_array` lift fixture (`r2plugin/tests/plain_o2_lift_v3.json`)
+had drifted since `df61932a`, which named call sites by their instruction and
+so changed the prepared SSA of the one block holding a call. The plugin crate
+is not in the usual `cargo test -p ...` set, so nothing caught it; the fixture
+is re-blessed and `-p r2sleigh-plugin` belongs in the gate command from now on.
