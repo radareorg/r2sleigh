@@ -165,6 +165,22 @@ pub(crate) struct FoldingContext<'a> {
     /// expression-returning, so an exact projection failure records this flag
     /// and the operation boundary discards the whole candidate AST.
     pub(crate) pending_lowering_refusal: Cell<Option<crate::fold::op_lower::OpLoweringRefusal>>,
+    /// Source instructions a marked gap already accounts for.
+    ///
+    /// A gap owns a closure that can reach into blocks this fold has not
+    /// walked yet, so the set outlives the block it was opened in: an
+    /// operation inside it must not also render, or one cell would have two
+    /// answers.
+    pub(crate) gapped_sites: std::cell::RefCell<std::collections::BTreeSet<InstId>>,
+    /// Gaps a previous structuring attempt learned about, by the instruction
+    /// each one is anchored at.
+    ///
+    /// A planned gap is opened when the fold reaches its anchor, not when the
+    /// refusal is met: that is the whole point of planning it, since by the
+    /// time the refusal was met a reader had already claimed its cells.
+    pub(crate) gap_anchors: std::cell::RefCell<
+        std::collections::BTreeMap<InstId, crate::fold::op_lower::OpLoweringRefusal>,
+    >,
 }
 
 impl FoldArchConfig {
@@ -186,6 +202,14 @@ impl FoldArchConfig {
     }
 }
 
+/// What one marked gap covers: the source instructions it owns and the cells
+/// those instructions still owe.
+pub(crate) struct GapClosure {
+    pub(crate) ops: usize,
+    pub(crate) sites: BTreeSet<InstId>,
+    pub(crate) cells: Vec<crate::observation_journal::GapCell>,
+}
+
 impl<'a> FoldingContext<'a> {
     pub(crate) fn from_inputs(inputs: FoldInputs<'a>) -> Self {
         Self {
@@ -204,6 +228,8 @@ impl<'a> FoldingContext<'a> {
             callee_declarations: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             observation_error: std::cell::RefCell::new(None),
             pending_lowering_refusal: Cell::new(None),
+            gapped_sites: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            gap_anchors: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -233,6 +259,268 @@ impl<'a> FoldingContext<'a> {
                 block_addr,
             ),
         )
+    }
+
+    /// Every source cell one marked gap accounts for, from the operation that
+    /// could not be lowered.
+    ///
+    /// The closure is forced by what a gap means. The refused operation is
+    /// unproven, so every value it defines is unproven, so every statement
+    /// that reads one of those values is unproven too: rendering a reader of
+    /// a value nothing produced would name a variable no statement assigns.
+    /// That is the forward direction. Backwards, a producer the plan inlines
+    /// exists only inside its readers; when all of them are inside the gap it
+    /// has no other occurrence, and the gap owns it. Both are taken to a fixed
+    /// point, and nothing else is owned: a value defined outside keeps its own
+    /// occurrence and only its use here is gapped.
+    pub(crate) fn gap_closure(&self, block_addr: u64, op_idx: usize) -> Option<GapClosure> {
+        let prepared = self.inputs.prepared_ssa?;
+        let names = self.inputs.binding_names?;
+        let graph = prepared.graph();
+        let Some(seed) = self.source_inst_for_normalized_op(block_addr, op_idx) else {
+            r2il::refusal_evidence!(
+                "gap",
+                "the operation at {block_addr:#x}:{op_idx} has no source instruction to anchor \
+                 a gap on"
+            );
+            return None;
+        };
+
+        // A gap stands in for computation and for effects, never for where
+        // the program goes next. A return whose value cannot be proven has no
+        // honest marked form: C must return something, and leaving the
+        // statement out would fall off the end of a value-returning function.
+        // The same holds for a transfer. Those refusals stand.
+        if let Some(r2ssa::graph::InstPayload::Op(op)) = graph.inst(seed).map(|inst| &inst.payload)
+            && matches!(
+                op,
+                r2ssa::SSAOp::Return { .. }
+                    | r2ssa::SSAOp::Branch { .. }
+                    | r2ssa::SSAOp::CBranch { .. }
+                    | r2ssa::SSAOp::BranchInd { .. }
+            )
+        {
+            r2il::refusal_evidence!(
+                "gap",
+                "the operation at {block_addr:#x}:{op_idx} is a control transfer, which a \
+                 marker cannot stand in for"
+            );
+            return None;
+        }
+
+        let mut owned: BTreeSet<InstId> = BTreeSet::new();
+        owned.insert(seed);
+        let mut worklist = vec![seed];
+        while let Some(inst) = worklist.pop() {
+            let Some(instruction) = graph.inst(inst) else {
+                continue;
+            };
+            // Forward: a statement that reads an unproven value is unproven.
+            if let Some(output) = instruction.output
+                && matches!(
+                    names.disposition_for_value(output),
+                    Some(
+                        crate::binding_plan::ValueDisposition::Bound { .. }
+                            | crate::binding_plan::ValueDisposition::Inline { .. }
+                    )
+                )
+            {
+                for site in graph.use_sites(output) {
+                    if owned.insert(site.inst) {
+                        worklist.push(site.inst);
+                    }
+                }
+            }
+            // Backward: an inline producer read only from inside the gap has
+            // nowhere else to be rendered.
+            for input in instruction.inputs.iter().copied() {
+                let Some(definition) = graph.def_inst(input) else {
+                    continue;
+                };
+                if owned.contains(&definition)
+                    || !matches!(
+                        names.disposition_for_value(input),
+                        Some(crate::binding_plan::ValueDisposition::Inline { .. })
+                    )
+                    || !graph
+                        .use_sites(input)
+                        .iter()
+                        .all(|site| owned.contains(&site.inst))
+                {
+                    continue;
+                }
+                owned.insert(definition);
+                worklist.push(definition);
+            }
+        }
+
+        let mut cells = Vec::new();
+        let mut claimed_values: BTreeSet<ValueId> = BTreeSet::new();
+        for inst in &owned {
+            let Some(instruction) = graph.inst(*inst) else {
+                continue;
+            };
+            if let Some(output) = instruction.output {
+                cells.push(crate::observation_journal::GapCell::Write(*inst));
+                if claimed_values.insert(output) {
+                    cells.push(crate::observation_journal::GapCell::Value(output));
+                }
+            }
+            for (input_idx, input) in instruction.inputs.iter().copied().enumerate() {
+                cells.push(crate::observation_journal::GapCell::Use {
+                    site: UseSite {
+                        inst: *inst,
+                        input_idx,
+                    },
+                    block: block_addr,
+                });
+                // A value the caller supplied has no defining statement to
+                // answer for it; its cell is answered wherever it is read. If
+                // every one of those reads is inside the gap, the gap is the
+                // only place left that can account for it.
+                if graph.def_inst(input).is_none()
+                    && graph
+                        .use_sites(input)
+                        .iter()
+                        .all(|site| owned.contains(&site.inst))
+                    && claimed_values.insert(input)
+                {
+                    cells.push(crate::observation_journal::GapCell::Value(input));
+                }
+            }
+        }
+        for (id, obligation) in prepared.obligations().obligations() {
+            if obligation
+                .source
+                .graph_inst()
+                .is_some_and(|inst| owned.contains(&inst))
+            {
+                cells.push(crate::observation_journal::GapCell::Effect(*id));
+            }
+        }
+        Some(GapClosure {
+            ops: owned.len(),
+            sites: owned,
+            cells,
+        })
+    }
+
+    /// Add the operation whose refusal just escaped the fold to the gap plan.
+    ///
+    /// The fold marks its cells as it renders, so a gap opened at the moment
+    /// of refusal can find a reader has already claimed one of them. Nothing
+    /// is wrong with the gap; it was learned too late. Recording its closure
+    /// here lets the next attempt skip the whole closure before any of it
+    /// renders, which is the only ordering in which those cells are free.
+    ///
+    /// Returns whether the plan grew, so a caller that retries can stop when
+    /// the refusal is one no gap can cover.
+    pub(crate) fn plan_gap_for_escaped_refusal(
+        &self,
+        refusal: crate::fold::op_lower::OpLoweringRefusal,
+    ) -> bool {
+        let (Some(block_addr), Some(op_idx)) =
+            (self.current_block_addr.get(), self.current_op_idx.get())
+        else {
+            return false;
+        };
+        let Some(anchor) = self.source_inst_for_normalized_op(block_addr, op_idx) else {
+            return false;
+        };
+        let Some(closure) = self.gap_closure(block_addr, op_idx) else {
+            return false;
+        };
+        if self.gap_anchors.borrow().contains_key(&anchor) {
+            return false;
+        }
+        self.gap_anchors.borrow_mut().insert(anchor, refusal);
+        self.gapped_sites.borrow_mut().extend(closure.sites);
+        r2il::refusal_evidence!(
+            "gap",
+            "planning a gap at {block_addr:#x}:{op_idx} over {} ops before the next \
+             structuring attempt",
+            closure.ops
+        );
+        true
+    }
+
+    /// The gap a previous attempt planned at this operation, if any.
+    pub(crate) fn planned_gap_at(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> Option<crate::fold::op_lower::OpLoweringRefusal> {
+        let anchor = self.source_inst_for_normalized_op(block_addr, op_idx)?;
+        self.gap_anchors.borrow().get(&anchor).copied()
+    }
+
+    /// Whether a marked gap accounts for the definition of this value, which
+    /// means no statement in the output assigns it.
+    pub(crate) fn value_is_gapped(&self, value: ValueId) -> bool {
+        let Some(prepared) = self.inputs.prepared_ssa else {
+            return false;
+        };
+        prepared
+            .graph()
+            .def_inst(value)
+            .is_some_and(|inst| self.gapped_sites.borrow().contains(&inst))
+    }
+
+    /// Open a marked gap for a refusal, or refuse as before when the journal
+    /// cannot account for one of its cells.
+    ///
+    /// A gap that could not mark every cell it covers is worse than a refusal:
+    /// the cells it missed would seal as unaccounted and the failure would be
+    /// reported as a decompiler defect rather than as the unproven operation
+    /// it is. So the marking is all or nothing.
+    pub(crate) fn open_gap(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+        refusal: crate::analysis::lower::OpLoweringRefusal,
+    ) -> Option<(crate::ast::CStmt, BTreeSet<InstId>)> {
+        let Some(journal) = self.inputs.observation_journal else {
+            r2il::refusal_evidence!(
+                "gap",
+                "no observation journal at {block_addr:#x}:{op_idx}, so nothing can account \
+                 for the cells a gap would cover"
+            );
+            return None;
+        };
+        let Some(closure) = self.gap_closure(block_addr, op_idx) else {
+            r2il::refusal_evidence!(
+                "gap",
+                "no closure for the refusal at {block_addr:#x}:{op_idx}"
+            );
+            return None;
+        };
+        let anchor = crate::shadow_report::GapAnchor {
+            block_addr,
+            op_idx: u32::try_from(op_idx).ok()?,
+        };
+        let marker = crate::ast::GapMarker {
+            kind: refusal.kind().to_string(),
+            origin: refusal.origin_site(),
+            block_addr,
+            op_idx,
+            ops: closure.ops,
+        };
+        match journal
+            .borrow_mut()
+            .gap_stmt(anchor, marker, &closure.cells)
+        {
+            Ok(stmt) => Some((stmt, closure.sites)),
+            Err(error) => {
+                r2il::refusal_evidence!(
+                    "gap",
+                    "the journal refused {} cells over {} ops at {block_addr:#x}:{op_idx}: {error:?}",
+                    closure.cells.len(),
+                    closure.ops
+                );
+                self.retain_first_observation_error(error);
+                None
+            }
+        }
     }
 
     pub(super) fn retain_first_observation_error(

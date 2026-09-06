@@ -2005,6 +2005,63 @@ mod tests {
     }
 
     #[test]
+    fn a_marked_gap_keeps_the_provable_statements_around_it() {
+        // The point of the backstop: one operation nobody can prove no longer
+        // costs the whole function. The statements before and after it render,
+        // and the gap stands between them saying what is missing.
+        let arch = make_test_arch_x86_64();
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::IntAdd {
+            dst: Varnode::register(0x10, 8),
+            a: Varnode::register(0x18, 8),
+            b: Varnode::constant(7, 8),
+        });
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x2000, 8),
+            val: Varnode::register(0x10, 8),
+        });
+        entry.push(R2ILOp::CallOther {
+            output: Some(Varnode::unique(0x20, 8)),
+            userop: 7,
+            inputs: vec![Varnode::register(0x28, 8)],
+        });
+        entry.push(R2ILOp::IntAdd {
+            dst: Varnode::register(0x30, 8),
+            a: Varnode::register(0x10, 8),
+            b: Varnode::constant(9, 8),
+        });
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x2008, 8),
+            val: Varnode::register(0x30, 8),
+        });
+        let prepared = prepared_from_r2il_blocks(&[entry], &arch).with_name("gap_between");
+        let input = crate::DecompilerInput::new(prepared.facts.clone());
+        let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
+            .decompile_input_with_binding_audit(&input);
+        let output = audit.output();
+
+        assert_eq!(audit.render_refusal(), None, "{output}");
+        let gaps = output.matches("r2dec gap:").count();
+        assert_eq!(gaps, 1, "one operation refused, so one marker: {output}");
+        assert_eq!(
+            output.matches(" + 7").count(),
+            1,
+            "the statement before the gap still renders: {output}"
+        );
+        assert_eq!(
+            output.matches(" + 9").count(),
+            1,
+            "and so does the statement after it: {output}"
+        );
+        assert!(
+            output.contains("gapped"),
+            "the proof line reports the gap: {output}"
+        );
+    }
+
+    #[test]
     fn opaque_pipeline_refusal_retains_the_upstream_machine_failures() {
         let arch = make_test_arch_x86_64();
         let mut entry = R2ILBlock::new(0x1000, 4);
@@ -2039,22 +2096,44 @@ mod tests {
         let input = crate::DecompilerInput::new(prepared.facts.clone());
         let audit = crate::Decompiler::new(crate::DecompilerConfig::x86_64())
             .decompile_input_with_binding_audit(&input);
+
+        // An operation the machine projection cannot represent is marked
+        // where it stands rather than taking the function down with it. The
+        // cells it owns move from the refused column, which nothing in the
+        // output accounted for, to the gap column, which the output states.
+        let crate::BindingShadowAuditOutcome::Complete {
+            ledger,
+            observations,
+        } = audit.binding_shadow()
+        else {
+            panic!("a marked gap accounts for the opaque operations: {audit:?}");
+        };
+        assert_eq!(ledger.values.refused, 0);
+        assert_eq!(ledger.uses.refused, 0);
+        assert_eq!(ledger.writes.refused, 0);
+        assert!(ledger.values.gapped > 0 && ledger.writes.gapped > 0);
+        assert!(!ledger.values.is_fully_proven());
+        assert_eq!(observations.values.unaccounted, 0);
+        assert_eq!(observations.writes.gapped, 2, "both opaque writes are gapped");
+
+        let effects = audit.effect_obligations();
         assert_eq!(
-            audit.binding_shadow(),
-            crate::BindingShadowAuditOutcome::NotRun,
-            "an upstream machine refusal must stop before a renderer shadow audit"
+            effects.disposition,
+            crate::EffectObligationDisposition::Gapped,
+            "the obligations the gap covers are admitted and not proven"
         );
-        assert_eq!(
-            audit.effect_obligations(),
-            crate::EffectObligationAudit::NOT_RUN,
-            "an upstream machine refusal must stop before effect accounting"
-        );
+        assert!(effects.gapped > 0 && effects.refused == 0 && effects.unaccounted == 0);
+        assert!(effects.is_admitted() && !effects.is_fully_proven());
+
         assert_eq!(
             audit.render_refusal(),
-            Some(crate::DecompileRenderRefusal::MissingMachineProjectionAuthorization(
-                crate::MachineProjectionRefusalOrigin::op_lowering(),
-            )),
-            "the production path must preserve the upstream machine authorization refusal"
+            None,
+            "a marked gap is not a rendering refusal"
+        );
+        assert!(
+            audit.output().contains("r2dec gap: machine-projection"),
+            "the output says which operations it could not prove: {}",
+            audit.output()
         );
         assert!(
             !audit.output().contains("callother(") && !audit.output().contains("CPUID"),

@@ -305,6 +305,7 @@ RENDER_REFUSAL_KINDS = {
     "unrepresentable_control_flow",
     "unrepresentable_operation",
 }
+GAP_MARKER = re.compile(r"/\* (r2dec gap: [^*]*) \*/")
 BINDING_AUDIT_LINE = re.compile(
     rf"^{re.escape(BINDING_AUDIT_PREFIX)}(?P<payload>[^\r\n]*)(?:\r?\n|$)",
     re.MULTILINE,
@@ -613,6 +614,7 @@ def _score_counted_binding_audit(
             "rendered",
             "justified_elision",
             "refused",
+            "gapped",
             "unaccounted",
         ),
         context="binding audit observations",
@@ -629,6 +631,7 @@ def _score_counted_binding_audit(
             "both_wrong_different",
             "unclassified",
             "refused",
+            "gapped",
         ),
         context="binding audit shadow",
     )
@@ -638,6 +641,7 @@ def _score_counted_binding_audit(
         == counts["rendered"]
         + counts["justified_elision"]
         + counts["refused"]
+        + counts["gapped"]
         + counts["unaccounted"]
         for domain, counts in observations.items()
     }
@@ -650,16 +654,20 @@ def _score_counted_binding_audit(
         + counts["both_wrong_equal"]
         + counts["both_wrong_different"]
         + counts["unclassified"]
+        + counts["gapped"]
         for domain, counts in shadow.items()
     }
     totals_match = {
         domain: observations[domain]["total"] == shadow[domain]["total"]
         for domain in BINDING_AUDIT_DOMAINS
     }
+    # A locked cell is fully proven or it is a regression, so a gap counts
+    # against quality here exactly as a refusal does.
     observation_quality = {
         domain: observation_equations[domain]
         and counts["unaccounted"] == 0
         and counts["refused"] == 0
+        and counts["gapped"] == 0
         for domain, counts in observations.items()
     }
     shadow_quality = {
@@ -669,6 +677,7 @@ def _score_counted_binding_audit(
         and counts["both_wrong_different"] == 0
         and counts["unclassified"] == 0
         and counts["refused"] == 0
+        and counts["gapped"] == 0
         for domain, counts in shadow.items()
     }
     canonical_total = sum(
@@ -720,6 +729,7 @@ def _score_observation_only_binding_audit(
             "rendered",
             "justified_elision",
             "refused",
+            "gapped",
             "unaccounted",
         ),
         context="binding audit observations",
@@ -729,12 +739,14 @@ def _score_observation_only_binding_audit(
         == counts["rendered"]
         + counts["justified_elision"]
         + counts["refused"]
+        + counts["gapped"]
         + counts["unaccounted"]
         for domain, counts in observations.items()
     }
     quality = {
         domain: equations[domain]
         and counts["refused"] == 0
+        and counts["gapped"] == 0
         and counts["unaccounted"] == 0
         for domain, counts in observations.items()
     }
@@ -762,6 +774,7 @@ def _validate_effect_obligations(value: Any) -> dict[str, Any]:
             "rendered",
             "justified_elision",
             "refused",
+            "gapped",
             "unaccounted",
             "conflicts",
         },
@@ -769,13 +782,14 @@ def _validate_effect_obligations(value: Any) -> dict[str, Any]:
     )
     if isinstance(effect["schema_version"], bool) or effect["schema_version"] != 1:
         raise BindingAuditFormatError("effect obligations schema_version must be 1")
-    if effect["status"] not in {"admitted", "refused", "not_run"}:
+    if effect["status"] not in {"admitted", "gapped", "refused", "not_run"}:
         raise BindingAuditFormatError("effect obligations status is invalid")
     for field in (
         "total",
         "rendered",
         "justified_elision",
         "refused",
+        "gapped",
         "unaccounted",
         "conflicts",
     ):
@@ -789,16 +803,23 @@ def _score_effect_obligations(envelope: dict[str, Any]) -> dict[str, Any]:
         effect["rendered"]
         + effect["justified_elision"]
         + effect["refused"]
+        + effect["gapped"]
         + effect["unaccounted"]
     )
     quality = {
+        # A gapped body is admitted by the renderer and is not a pass in a
+        # locked cell: these functions are fully proven or they are a
+        # regression.
         "admitted": effect["status"] == "admitted",
+        "zero_gapped": effect["gapped"] == 0,
         "equation_balanced": equation_balanced,
         "zero_refused": effect["refused"] == 0,
         "zero_unaccounted": effect["unaccounted"] == 0,
         "zero_conflicts": effect["conflicts"] == 0,
     }
-    if effect["status"] == "refused":
+    if effect["status"] == "gapped":
+        score_status = "gapped"
+    elif effect["status"] == "refused":
         score_status = "refused"
     elif effect["status"] == "not_run":
         score_status = "not_run"
@@ -2445,6 +2466,24 @@ def verify(args: argparse.Namespace) -> dict[str, Any]:
             continue
 
         entry["machine_noise"] = _score_machine_noise(raw_source, args.config)
+
+        # A marked gap is an honest rendering of a cell the decompiler could
+        # not prove, and it is still not a pass here: these fifty-four
+        # functions are the ones whose every cell has been proven, and a gap
+        # appearing in one is a regression the lock exists to catch.
+        gap_markers = GAP_MARKER.findall(raw_source)
+        entry["generation"]["gap_count"] = len(gap_markers)
+        if gap_markers:
+            entry["generation"]["gaps"] = gap_markers
+            entry["raw"] = {"status": "gapped", "gaps": gap_markers}
+            entry["diagnostic"] = {"status": "blocked_gap", "rewrites": []}
+            entry["differential"] = {
+                "status": "blocked_gap",
+                "basis": None,
+                "cases": [],
+            }
+            entries.append(entry)
+            continue
 
         raw_path = raw_dir / f"{corpus_prefix}{args.config}_{name}.c"
         raw_path.write_text(raw_source)

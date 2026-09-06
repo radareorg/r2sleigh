@@ -30,8 +30,8 @@ use crate::normalize::{
     NormalizedOpSite,
 };
 use crate::shadow_report::{
-    LegacyAnalysisSnapshot, LegacyBindingId, LegacyUseCell, LegacyUseObservation, LegacyValueCell,
-    LegacyValueObservation, LegacyWriteCell, LegacyWriteObservation,
+    GapAnchor, LegacyAnalysisSnapshot, LegacyBindingId, LegacyUseCell, LegacyUseObservation,
+    LegacyValueCell, LegacyValueObservation, LegacyWriteCell, LegacyWriteObservation,
 };
 use crate::symbol::{SymbolId, SymbolTable};
 use crate::{
@@ -122,12 +122,36 @@ enum ObservationTarget {
         binding: crate::binding_plan::BindingId,
         symbol: SymbolId,
     },
+    /// One cell a marked gap accounts for.
+    ///
+    /// The gap statement carries one of these per cell in its closure, so a
+    /// gapped cell is a typed observation rather than an empty slot. That
+    /// distinction is what lets the seal keep refusing a statement that was
+    /// silently dropped while admitting one the output says is missing.
+    Gapped {
+        anchor: GapAnchor,
+        cell: GapCell,
+    },
     /// One exact cell from the source-owned semantic obligation inventory.
     ///
     /// Unlike the legacy fold-side proof vector, this target belongs to one
     /// concrete AST occurrence. If a later rewrite deletes that occurrence,
     /// the final inspection never visits this target and therefore cannot
     /// count the obligation as rendered.
+    Effect(SemanticObligationId),
+}
+
+/// One cell covered by a marked gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GapCell {
+    Value(ValueId),
+    /// `block` is where the operation consuming the use would have been
+    /// emitted, which placement needs to keep the definition it reads alive.
+    Use {
+        site: UseSite,
+        block: u64,
+    },
+    Write(InstId),
     Effect(SemanticObligationId),
 }
 
@@ -611,6 +635,10 @@ pub(crate) struct LegacyObservationDomainCoverage {
     pub(crate) rendered: usize,
     pub(crate) justified_elision: usize,
     pub(crate) refused: usize,
+    /// Cells a marked gap accounts for. Disjoint from the other four: the
+    /// renderer neither rendered them nor proved them unnecessary, and said
+    /// so in the output.
+    pub(crate) gapped: usize,
     pub(crate) unaccounted: usize,
 }
 
@@ -620,6 +648,7 @@ impl LegacyObservationDomainCoverage {
         rendered: usize,
         justified_elision: usize,
         refused: usize,
+        gapped: usize,
         unaccounted: usize,
     ) -> Self {
         Self {
@@ -627,6 +656,7 @@ impl LegacyObservationDomainCoverage {
             rendered,
             justified_elision,
             refused,
+            gapped,
             unaccounted,
         }
     }
@@ -635,6 +665,7 @@ impl LegacyObservationDomainCoverage {
         self.rendered
             .checked_add(self.justified_elision)
             .and_then(|count| count.checked_add(self.refused))
+            .and_then(|count| count.checked_add(self.gapped))
             .and_then(|count| count.checked_add(self.unaccounted))
             == Some(self.total)
     }
@@ -706,6 +737,7 @@ impl SealedLegacyObservations {
 pub(crate) struct SurvivingEffectObservations {
     occurrences: BTreeMap<SemanticObligationId, EffectOccurrences>,
     coalesced_carriers: Box<CoalescedCarrierEffectElisions>,
+    gapped: BTreeSet<SemanticObligationId>,
 }
 
 /// How often one source obligation was rendered, and whether the copies stand
@@ -729,6 +761,15 @@ struct CoalescedCarrierEffectElisions {
 }
 
 impl SurvivingEffectObservations {
+    /// Whether a marked gap in the output accounts for this obligation.
+    ///
+    /// Asked before any zero-occurrence elision rule, because a gapped
+    /// obligation has no occurrence for exactly the reason the gap states,
+    /// and calling that an elision would claim it was proven unnecessary.
+    pub(crate) fn gapped_effect(&self, id: SemanticObligationId) -> bool {
+        self.gapped.contains(&id)
+    }
+
     pub(crate) fn occurrence_count(&self, id: SemanticObligationId) -> Option<usize> {
         self.occurrences
             .get(&id)
@@ -853,6 +894,12 @@ pub(crate) struct LegacyObservationJournal {
     /// Obligations whose duplicate occurrences the region tree proved to
     /// exclude one another.
     exclusive_duplicate_effects: BTreeSet<SemanticObligationId>,
+    /// Obligations a marked gap accounts for.
+    ///
+    /// Kept apart from `effect_occurrences` on purpose: a gap is not an
+    /// occurrence, so a shared tail cloned onto two paths cannot turn one
+    /// gapped obligation into a duplicate rendering.
+    gapped_effects: BTreeSet<SemanticObligationId>,
     targets: Vec<ObservationTarget>,
 }
 
@@ -1634,7 +1681,31 @@ impl LegacyObservationJournal {
                     symbol: *symbol,
                 },
             ),
-            ObservationTarget::Value(_) | ObservationTarget::Effect(_) => {
+            // A gapped read of a bound value is still a read: placement must
+            // keep the definition it names, or the gap would silently delete
+            // a store the marker only said was unproven.
+            ObservationTarget::Gapped {
+                cell: GapCell::Use { site, block },
+                ..
+            } => Some(
+                self.source
+                    .graph()
+                    .inst(site.inst)
+                    .and_then(|inst| inst.inputs.get(site.input_idx))
+                    .and_then(|value| self.plan.disposition(*value))
+                    .and_then(|disposition| {
+                        matches!(disposition, ValueDisposition::Bound { .. }).then_some(
+                            crate::placement::PlacementObservationTarget::Use {
+                                site: *site,
+                                block: *block,
+                            },
+                        )
+                    })
+                    .unwrap_or(crate::placement::PlacementObservationTarget::Other),
+            ),
+            ObservationTarget::Gapped { .. }
+            | ObservationTarget::Value(_)
+            | ObservationTarget::Effect(_) => {
                 Some(crate::placement::PlacementObservationTarget::Other)
             }
         }
@@ -1984,6 +2055,7 @@ impl LegacyObservationJournal {
             effect_occurrences,
             effect_occurrence_regions: BTreeMap::new(),
             exclusive_duplicate_effects: BTreeSet::new(),
+            gapped_effects: BTreeSet::new(),
             targets: Vec::new(),
         };
         journal.record_upstream_nonrendered_dispositions(source, origins)?;
@@ -3239,7 +3311,12 @@ impl LegacyObservationJournal {
                 ObservationTarget::Effect(obligation) => {
                     self.placement_elided_effects.insert(obligation);
                 }
-                ObservationTarget::StackAccess { .. }
+                // A gapped cell is already accounted by the gap. Placement
+                // removing the marker changes nothing about that: the cell was
+                // never going to be rendered, and the elision rule above would
+                // claim it had been proven unnecessary.
+                ObservationTarget::Gapped { .. }
+                | ObservationTarget::StackAccess { .. }
                 | ObservationTarget::CertifiedValueRead { .. }
                 | ObservationTarget::CertifiedArrayIndexRead { .. }
                 | ObservationTarget::EscapedStackAddress { .. } => {}
@@ -3557,6 +3634,111 @@ impl LegacyObservationJournal {
         Ok(marked)
     }
 
+    /// Mark one gap statement with every cell it accounts for.
+    ///
+    /// The cells come from the caller's closure of the refusal, and each one
+    /// is attached to this single occurrence. A cell already answered by a
+    /// rendered occurrence is a conflict at the seal rather than a silent
+    /// second answer, which is what keeps a gap from covering for a statement
+    /// that in fact rendered.
+    pub(crate) fn gap_stmt(
+        &mut self,
+        anchor: GapAnchor,
+        marker: crate::ast::GapMarker,
+        cells: &[GapCell],
+    ) -> Result<CStmt, LegacyObservationJournalError> {
+        // Three answers a cell can already hold, and the gap treats each
+        // differently.
+        //
+        // An upstream refusal is what the gap exists to make visible: the
+        // machine projection could give the operation no semantics, and until
+        // now the output said nothing about that. The gap takes that cell
+        // over, so a reader sees a marker where there was silence.
+        //
+        // An elision is a proof that the cell needs no output, which is a
+        // stronger statement than the gap's and stays: the gap simply does
+        // not claim it.
+        //
+        // Anything else is a rendered claim, and a gap that overwrote one
+        // would be covering for output that exists.
+        let mut claimed = Vec::with_capacity(cells.len());
+        for cell in cells {
+            match *cell {
+                GapCell::Value(value) => {
+                    let slot = self.value_slot_mut(value)?;
+                    match slot {
+                        None => {}
+                        Some(LegacyValueObservation::Refused(_)) => *slot = None,
+                        Some(LegacyValueObservation::Elided(_)) => continue,
+                        Some(_) => {
+                            return Err(LegacyObservationJournalError::ConflictingValue(value));
+                        }
+                    }
+                }
+                GapCell::Use { site, .. } => {
+                    let slot = self
+                        .uses
+                        .get_mut(site.inst.0 as usize)
+                        .and_then(|row| row.get_mut(site.input_idx))
+                        .ok_or(LegacyObservationJournalError::InvalidUse(site))?;
+                    match slot {
+                        None => {}
+                        Some(LegacyUseObservation::Refused(_)) => *slot = None,
+                        Some(LegacyUseObservation::Elided(_)) => continue,
+                        Some(_) => {
+                            return Err(LegacyObservationJournalError::ConflictingUse(site));
+                        }
+                    }
+                }
+                GapCell::Write(inst) => {
+                    if !self
+                        .write_has_output
+                        .get(inst.0 as usize)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let slot = self
+                        .writes
+                        .get_mut(inst.0 as usize)
+                        .ok_or(LegacyObservationJournalError::InvalidWrite(inst))?;
+                    match slot {
+                        None => {}
+                        Some(LegacyWriteObservation::Refused(_)) => *slot = None,
+                        Some(LegacyWriteObservation::Elided(_)) => continue,
+                        Some(existing) => {
+                            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                                eprintln!("gapped write {inst:?}: already recorded {existing:?}");
+                            }
+                            return Err(LegacyObservationJournalError::ConflictingWrite(inst));
+                        }
+                    }
+                }
+                GapCell::Effect(obligation) => {
+                    if !self.effect_occurrences.contains_key(&obligation) {
+                        return Err(LegacyObservationJournalError::InvalidEffectObligation(
+                            obligation,
+                        ));
+                    }
+                }
+            }
+            claimed.push(*cell);
+        }
+        let targets = claimed
+            .iter()
+            .map(|cell| ObservationTarget::Gapped {
+                anchor,
+                cell: *cell,
+            })
+            .collect();
+        let mut marked = CStmt::Gap(marker);
+        for id in self.allocate_many(targets)? {
+            marked = CStmt::observed(id, marked);
+        }
+        Ok(marked)
+    }
+
     /// Attach only the implicit effects a composite statement's children do
     /// not already own.
     ///
@@ -3768,6 +3950,7 @@ impl LegacyObservationJournal {
                     )
                 })
                 .collect(),
+            gapped: self.gapped_effects,
             coalesced_carriers: Box::new(CoalescedCarrierEffectElisions {
                 coalesced_carrier_uses: self.coalesced_carrier_uses,
                 coalesced_carrier_phis: self.coalesced_carrier_phi_writes,
@@ -3821,6 +4004,7 @@ impl LegacyObservationJournal {
         let mut writes = std::mem::take(&mut self.writes);
         let mut effect_occurrences = std::mem::take(&mut self.effect_occurrences);
         let mut effect_occurrence_regions = std::mem::take(&mut self.effect_occurrence_regions);
+        let mut gapped_effects = std::mem::take(&mut self.gapped_effects);
         let targets = &self.targets;
         let value_is_literal = &self.value_is_literal;
         let plan = &self.plan;
@@ -3927,6 +4111,39 @@ impl LegacyObservationJournal {
                         inst, observation, ..
                     } => record_same(&mut writes[inst.0 as usize], observation)
                         .map_err(|()| LegacyObservationJournalError::ConflictingWrite(inst)),
+                    // The gap's own cells. Recorded with the same
+                    // `record_same` the rendered cells use, so a cell claimed
+                    // by both a gap and a rendering is a conflict rather than
+                    // a silent overwrite.
+                    ObservationTarget::Gapped { anchor, cell } => match cell {
+                        GapCell::Value(value) => {
+                            let slot = &mut values[value.0 as usize];
+                            record_same(slot, LegacyValueObservation::Gap(anchor))
+                                .map_err(|()| LegacyObservationJournalError::ConflictingValue(value))
+                        }
+                        GapCell::Use { site, .. } => {
+                            let slot = &mut uses[site.inst.0 as usize][site.input_idx];
+                            record_same(slot, LegacyUseObservation::Gap(anchor)).map_err(|()| {
+                                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                                    eprintln!(
+                                        "gapped use {site:?} at {anchor:?}: already recorded {slot:?}"
+                                    );
+                                }
+                                LegacyObservationJournalError::ConflictingUse(site)
+                            })
+                        }
+                        GapCell::Write(inst) => {
+                            record_same(&mut writes[inst.0 as usize], LegacyWriteObservation::Gap(anchor))
+                                .map_err(|()| LegacyObservationJournalError::ConflictingWrite(inst))
+                        }
+                        // Never an occurrence: an obligation the gap covers was
+                        // not performed by the output, and counting it as one
+                        // would let a cloned shared tail report it twice.
+                        GapCell::Effect(effect) => {
+                            gapped_effects.insert(effect);
+                            Ok(())
+                        }
+                    },
                     ObservationTarget::StackAccess { .. }
                     | ObservationTarget::EscapedStackAddress { .. } => Ok(()),
                     ObservationTarget::Effect(effect) => {
@@ -3973,6 +4190,7 @@ impl LegacyObservationJournal {
         self.writes = writes;
         self.effect_occurrences = effect_occurrences;
         self.effect_occurrence_regions = effect_occurrence_regions;
+        self.gapped_effects = gapped_effects;
         // Placement has the final word on which statements survive. Apply its
         // exact removals before deciding whether a coalesced output has any
         // rendered consumer; doing this in the opposite order mistakes a
@@ -4040,6 +4258,11 @@ impl LegacyObservationJournal {
             .iter()
             .filter(|cell| matches!(cell, Some(LegacyValueObservation::Refused(_))))
             .count();
+        let value_gapped = self
+            .values
+            .iter()
+            .filter(|cell| matches!(cell, Some(LegacyValueObservation::Gap(_))))
+            .count();
         let value_unaccounted = self.values.iter().filter(|cell| cell.is_none()).count();
 
         let use_total = self.uses.iter().map(|row| row.len()).sum();
@@ -4065,6 +4288,12 @@ impl LegacyObservationJournal {
             .iter()
             .flat_map(|row| row.iter())
             .filter(|cell| matches!(cell, Some(LegacyUseObservation::Elided(_))))
+            .count();
+        let use_gapped = self
+            .uses
+            .iter()
+            .flat_map(|row| row.iter())
+            .filter(|cell| matches!(cell, Some(LegacyUseObservation::Gap(_))))
             .count();
         let use_unaccounted = self
             .uses
@@ -4102,6 +4331,14 @@ impl LegacyObservationJournal {
                 **has_output && matches!(cell, Some(LegacyWriteObservation::Elided(_)))
             })
             .count();
+        let write_gapped = self
+            .writes
+            .iter()
+            .zip(self.write_has_output.iter())
+            .filter(|(cell, has_output)| {
+                **has_output && matches!(cell, Some(LegacyWriteObservation::Gap(_)))
+            })
+            .count();
         let write_unaccounted = self
             .writes
             .iter()
@@ -4115,6 +4352,7 @@ impl LegacyObservationJournal {
                 value_rendered,
                 value_justified_elision,
                 value_refused,
+                value_gapped,
                 value_unaccounted,
             ),
             uses: LegacyObservationDomainCoverage::from_counts(
@@ -4122,6 +4360,7 @@ impl LegacyObservationJournal {
                 use_rendered,
                 use_justified_elision,
                 use_refused,
+                use_gapped,
                 use_unaccounted,
             ),
             writes: LegacyObservationDomainCoverage::from_counts(
@@ -4129,6 +4368,7 @@ impl LegacyObservationJournal {
                 write_rendered,
                 write_justified_elision,
                 write_refused,
+                write_gapped,
                 write_unaccounted,
             ),
         }
@@ -4185,6 +4425,7 @@ impl LegacyObservationJournal {
                     )
                 })
                 .collect(),
+            gapped: std::mem::take(&mut self.gapped_effects),
             coalesced_carriers: Box::new(CoalescedCarrierEffectElisions {
                 coalesced_carrier_uses: std::mem::take(&mut self.coalesced_carrier_uses),
                 coalesced_carrier_phis: std::mem::take(&mut self.coalesced_carrier_phi_writes),

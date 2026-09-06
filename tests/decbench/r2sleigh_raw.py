@@ -83,6 +83,12 @@ _REFUSAL = re.compile(r"/\* r2dec fallback: skipped decompilation for \S+ \((?P<
 # decompiler producing very poor C rather than as a plugin that never loaded.
 _NO_DECOMPILER = "r2pm -ci r2dec"
 
+# What the renderer prints where it could not prove a cell. The function is
+# rendered and is not fully proven; both facts belong in the census, because a
+# body that is mostly gap must never read as the same result as a body whose
+# every cell carries a certificate.
+_GAP = re.compile(r"/\* r2dec gap: (?P<kind>[^ ]+) at (?P<site>\S+) covering (?P<ops>\d+) op")
+
 _R2_FLAGS = ("-e", "scr.color=0", "-e", "bin.relocs.apply=true", "-q")
 
 # radare2 prefixes a function flag with where it learned the name -- `dbg.` from
@@ -366,6 +372,7 @@ class RawR2SleighDecompiler(Decompiler):
 
         rendered: dict[str, FunctionDecompilation] = {}
         declined: dict[str, str] = {}
+        gapped: dict[str, list[dict[str, str]]] = {}
         decompile: _R2Run | None = None
         unreached = 0
 
@@ -413,6 +420,9 @@ class RawR2SleighDecompiler(Decompiler):
                 code = body.strip()
                 if not code:
                     continue
+                gaps = [match.groupdict() for match in _GAP.finditer(code)]
+                if gaps:
+                    gapped[_source_name(name)] = gaps
                 source_name = _source_name(name)
                 code = _retitle(code, name, source_name)
                 rendered[source_name] = FunctionDecompilation(
@@ -451,7 +461,7 @@ class RawR2SleighDecompiler(Decompiler):
                     "harness: no function reached the decompiler; "
                     f"the candidate list was emptied {emptied} ({trail})"
                 )
-        _write_refusal_census(output_dir, binary_path, declined, len(rendered))
+        _write_refusal_census(output_dir, binary_path, declined, gapped, len(rendered))
 
         ended_early = discovery.ended_early or (decompile is not None and decompile.ended_early)
 
@@ -491,6 +501,7 @@ def _write_refusal_census(
     output_dir: Path | None,
     binary_path: Path,
     declined: dict[str, str],
+    gapped: dict[str, list[dict[str, str]]],
     rendered: int,
 ) -> None:
     """Record why each function was declined, beside the run's own results.
@@ -524,14 +535,28 @@ def _write_refusal_census(
         counts: dict[str, int] = {}
         for cause in declined.values():
             counts[cause] = counts.get(cause, 0) + 1
+        gap_causes: dict[str, int] = {}
+        gap_ops = 0
+        for gaps in gapped.values():
+            for gap in gaps:
+                gap_causes[gap["kind"]] = gap_causes.get(gap["kind"], 0) + 1
+                gap_ops += int(gap["ops"])
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "binary": binary_path.name,
             "binary_path": str(binary_path),
             "rendered": rendered,
             "declined": len(declined),
             "causes": dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))),
             "by_function": dict(sorted(declined.items())),
+            # A rendered function with a marked gap is counted in `rendered`
+            # and again here. `fully_proven` is what a reader wants beside
+            # coverage: the functions whose every cell carries a certificate.
+            "gapped": len(gapped),
+            "fully_proven": rendered - len(gapped),
+            "gap_ops": gap_ops,
+            "gap_causes": dict(sorted(gap_causes.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "gaps_by_function": dict(sorted(gapped.items())),
         }
         # Named from the whole path, not the binary's name. One run decompiles
         # the same names at every optimization level -- zlib builds `example`

@@ -1265,6 +1265,31 @@ impl<'a> FoldingContext<'a> {
 
         for (op_idx, op) in block.ops.iter().enumerate() {
             self.current_op_idx.set(Some(op_idx));
+            // A gap a previous attempt planned is opened here, at its anchor,
+            // before any of the operations it covers can render and claim a
+            // cell it has to account for.
+            if let Some(refusal) = self.planned_gap_at(block.addr, op_idx) {
+                let Some((stmt, owned)) = self.open_gap(block.addr, op_idx, refusal) else {
+                    return Err(refusal);
+                };
+                self.gapped_sites.borrow_mut().extend(owned);
+                stmts.push(FoldedOpStmt {
+                    site: self
+                        .normalized_site(block.addr, op_idx)
+                        .ok_or_else(OpLoweringRefusal::missing_machine_projection)?,
+                    stmt,
+                });
+                continue;
+            }
+            // An operation a marked gap already covers has no statement of its
+            // own: the gap answered for its cells, and rendering it here would
+            // put a second answer on them.
+            if self
+                .source_inst_for_normalized_op(block.addr, op_idx)
+                .is_some_and(|inst| self.gapped_sites.borrow().contains(&inst))
+            {
+                continue;
+            }
             if self.is_inlined_single_use_call_result(block, op_idx, op) {
                 continue;
             }
@@ -1445,7 +1470,27 @@ impl<'a> FoldingContext<'a> {
                 }
             }
 
-            if let Some(stmt) = self.op_to_stmt_with_args(op, block.addr, op_idx)? {
+            let lowered = match self.op_to_stmt_with_args(op, block.addr, op_idx) {
+                Ok(lowered) => lowered,
+                // The operation could not be proven. Say so where it stands
+                // and keep rendering the rest of the function, provided the
+                // journal can account for every cell the gap covers; when it
+                // cannot, the refusal stands as it did before.
+                Err(refusal) => {
+                    let Some((stmt, owned)) = self.open_gap(block.addr, op_idx, refusal) else {
+                        return Err(refusal);
+                    };
+                    self.gapped_sites.borrow_mut().extend(owned);
+                    stmts.push(FoldedOpStmt {
+                        site: self
+                            .normalized_site(block.addr, op_idx)
+                            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?,
+                        stmt,
+                    });
+                    continue;
+                }
+            };
+            if let Some(stmt) = lowered {
                 let is_return = matches!(stmt.unobserved(), CStmt::Return(_));
                 stmts.push(FoldedOpStmt {
                     site: self

@@ -10,6 +10,10 @@ pub(super) fn classify_sides(
     observations_equal: bool,
 ) -> ShadowClassification {
     match (old, shadow) {
+        // A gapped cell is one the renderer marked as unproven. It is neither
+        // agreement nor drift between the two accounts, and it is the one
+        // classification that survives whatever the other side says.
+        (SideJudgment::Gapped, _) | (_, SideJudgment::Gapped) => ShadowClassification::Gapped,
         (SideJudgment::Correct, SideJudgment::Correct) => ShadowClassification::AgreeCorrect,
         (SideJudgment::Wrong(_), SideJudgment::Correct) => ShadowClassification::OldWrong,
         (SideJudgment::Correct, SideJudgment::Wrong(_)) => ShadowClassification::ShadowWrong,
@@ -55,6 +59,7 @@ enum NormalizedValueObservation {
     InlineNonLiteral,
     Elided(r2ssa::ledger::ElisionReason),
     Refused(ValueRefusal),
+    Gap(GapAnchor),
     LegacyAbsent,
 }
 
@@ -64,6 +69,7 @@ enum NormalizedUseObservation {
     MemoryAddress(r2ssa::MachineValueUse),
     Elided(r2ssa::ledger::ElisionReason),
     Refused(MachineUseRefusal),
+    Gap(GapAnchor),
     LegacyAbsent,
 }
 
@@ -72,6 +78,7 @@ enum NormalizedWriteObservation {
     Exact(MachineWriteProjection),
     Elided(r2ssa::ledger::ElisionReason),
     Refused(MachineWriteRefusal),
+    Gap(GapAnchor),
     LegacyAbsent,
 }
 
@@ -401,6 +408,7 @@ fn normalized_legacy_value(
         }
         LegacyValueObservation::Elided(reason) => Ok(NormalizedValueObservation::Elided(reason)),
         LegacyValueObservation::Refused(reason) => Ok(NormalizedValueObservation::Refused(reason)),
+        LegacyValueObservation::Gap(anchor) => Ok(NormalizedValueObservation::Gap(anchor)),
         LegacyValueObservation::LegacyAbsent => Ok(NormalizedValueObservation::LegacyAbsent),
     }
 }
@@ -439,6 +447,10 @@ fn judge_value(
         return SideJudgment::Correct;
     }
     match observed {
+        // A gap is not a claim about this cell and so cannot disagree with
+        // one. It is the renderer saying it could not prove the cell, which
+        // the report carries as its own classification.
+        NormalizedValueObservation::Gap(_) => SideJudgment::Gapped,
         NormalizedValueObservation::LegacyAbsent => SideJudgment::Wrong(WrongReason::LegacyAbsent),
         NormalizedValueObservation::Bound(_)
             if matches!(canonical, NormalizedValueObservation::Bound(_)) =>
@@ -475,6 +487,7 @@ fn normalized_legacy_use(observation: LegacyUseObservation) -> NormalizedUseObse
         }
         LegacyUseObservation::Elided(reason) => NormalizedUseObservation::Elided(reason),
         LegacyUseObservation::Refused(reason) => NormalizedUseObservation::Refused(reason),
+        LegacyUseObservation::Gap(anchor) => NormalizedUseObservation::Gap(anchor),
         LegacyUseObservation::LegacyAbsent => NormalizedUseObservation::LegacyAbsent,
     }
 }
@@ -485,6 +498,8 @@ fn judge_use(
 ) -> SideJudgment {
     if observed == canonical {
         SideJudgment::Correct
+    } else if matches!(observed, NormalizedUseObservation::Gap(_)) {
+        SideJudgment::Gapped
     } else if matches!(observed, NormalizedUseObservation::LegacyAbsent) {
         SideJudgment::Wrong(WrongReason::LegacyAbsent)
     } else {
@@ -513,6 +528,7 @@ fn normalized_legacy_write(observation: LegacyWriteObservation) -> NormalizedWri
         LegacyWriteObservation::Exact(write) => NormalizedWriteObservation::Exact(write),
         LegacyWriteObservation::Elided(reason) => NormalizedWriteObservation::Elided(reason),
         LegacyWriteObservation::Refused(reason) => NormalizedWriteObservation::Refused(reason),
+        LegacyWriteObservation::Gap(anchor) => NormalizedWriteObservation::Gap(anchor),
         LegacyWriteObservation::LegacyAbsent => NormalizedWriteObservation::LegacyAbsent,
     }
 }
@@ -523,6 +539,8 @@ fn judge_write(
 ) -> SideJudgment {
     if observed == canonical {
         SideJudgment::Correct
+    } else if matches!(observed, NormalizedWriteObservation::Gap(_)) {
+        SideJudgment::Gapped
     } else if matches!(observed, NormalizedWriteObservation::LegacyAbsent) {
         SideJudgment::Wrong(WrongReason::LegacyAbsent)
     } else {

@@ -348,6 +348,16 @@ pub(crate) fn build_obligation_ledger(
         let count = effects
             .occurrence_count(id)
             .expect("effect observation domain is opened from this source inventory");
+        // Asked before the count. A gapped obligation has no occurrence
+        // because the output says it could not be proven, and every rule
+        // below reads a zero count as evidence that the obligation was
+        // unnecessary -- which would turn the gap into a silent elision.
+        if effects.gapped_effect(id) {
+            if let Some((block_addr, op_idx)) = rendered_site(id) {
+                let _ = ledger.record(id, Outcome::Gapped { block_addr, op_idx });
+            }
+            continue;
+        }
         let outcome = match count {
             0 => traced_zero_occurrence_outcome(prepared, origins, effects, id),
             1 => rendered_site(id)

@@ -2121,6 +2121,9 @@ pub struct BindingShadowDomainAudit {
     pub both_wrong_different: usize,
     pub unclassified: usize,
     pub refused: usize,
+    /// Cells a marked gap accounts for: neither account claimed them, and the
+    /// output says so where they stand.
+    pub gapped: usize,
 }
 
 impl BindingShadowDomainAudit {
@@ -2137,12 +2140,18 @@ impl BindingShadowDomainAudit {
         let Some(classified) = classified.checked_add(both_wrong) else {
             return false;
         };
+        let Some(classified) = classified.checked_add(self.gapped) else {
+            return false;
+        };
         let Some(accounted) = classified.checked_add(self.unclassified) else {
             return false;
         };
         self.total == self.observed && self.observed == accounted
     }
 
+    /// Quality admits a marked gap and refuses everything else that is not
+    /// proven. A gap is an accounted cell whose absence the output states; a
+    /// caller that needs a fully proven body reads `is_fully_proven`.
     pub const fn passes_quality(self) -> bool {
         self.equations_hold()
             && self.shadow_wrong == 0
@@ -2150,6 +2159,10 @@ impl BindingShadowDomainAudit {
             && self.both_wrong_different == 0
             && self.unclassified == 0
             && self.refused == 0
+    }
+
+    pub const fn is_fully_proven(self) -> bool {
+        self.passes_quality() && self.gapped == 0
     }
 }
 
@@ -2165,6 +2178,7 @@ impl From<crate::shadow_report::DomainLedger> for BindingShadowDomainAudit {
             both_wrong_different: ledger.both_wrong_different,
             unclassified: ledger.unclassified,
             refused: ledger.refused,
+            gapped: ledger.gapped,
         }
     }
 }
@@ -2181,6 +2195,8 @@ pub struct BindingObservationDomainAudit {
     pub rendered: usize,
     pub justified_elision: usize,
     pub refused: usize,
+    /// Cells a marked gap accounts for, which are admitted and not proven.
+    pub gapped: usize,
     pub unaccounted: usize,
 }
 
@@ -2190,6 +2206,9 @@ impl BindingObservationDomainAudit {
             return false;
         };
         let Some(accounted) = accounted.checked_add(self.refused) else {
+            return false;
+        };
+        let Some(accounted) = accounted.checked_add(self.gapped) else {
             return false;
         };
         let Some(accounted) = accounted.checked_add(self.unaccounted) else {
@@ -2205,6 +2224,10 @@ impl BindingObservationDomainAudit {
     pub const fn passes_quality(self) -> bool {
         self.is_complete() && self.refused == 0
     }
+
+    pub const fn is_fully_proven(self) -> bool {
+        self.passes_quality() && self.gapped == 0
+    }
 }
 
 impl From<crate::observation_journal::LegacyObservationDomainCoverage>
@@ -2216,6 +2239,7 @@ impl From<crate::observation_journal::LegacyObservationDomainCoverage>
             rendered: coverage.rendered,
             justified_elision: coverage.justified_elision,
             refused: coverage.refused,
+            gapped: coverage.gapped,
             unaccounted: coverage.unaccounted,
         }
     }
@@ -2803,6 +2827,9 @@ impl BindingShadowAuditOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectObligationDisposition {
     Admitted,
+    /// Admitted with marked gaps: every obligation is accounted, and the ones
+    /// a gap covers were not discharged. The body is rendered, not proven.
+    Gapped,
     Refused,
     /// The selected route never entered the native Standard renderer.
     NotRun,
@@ -2816,6 +2843,8 @@ pub struct EffectObligationAudit {
     pub rendered: usize,
     pub justified_elision: usize,
     pub refused: usize,
+    /// Obligations a marked gap accounts for.
+    pub gapped: usize,
     pub unaccounted: usize,
     pub conflicts: usize,
     /// First refused obligation in canonical source order, for diagnostics.
@@ -2833,6 +2862,7 @@ impl EffectObligationAudit {
         rendered: 0,
         justified_elision: 0,
         refused: 0,
+        gapped: 0,
         unaccounted: 0,
         conflicts: 0,
         refused_obligation: None,
@@ -2847,15 +2877,16 @@ impl EffectObligationAudit {
             && closure.conflicts == 0
             && closure.is_closed();
         Self {
-            disposition: if admitted {
-                EffectObligationDisposition::Admitted
-            } else {
-                EffectObligationDisposition::Refused
+            disposition: match (admitted, closure.gapped) {
+                (true, 0) => EffectObligationDisposition::Admitted,
+                (true, _) => EffectObligationDisposition::Gapped,
+                (false, _) => EffectObligationDisposition::Refused,
             },
             total: closure.total,
             rendered: closure.rendered,
             justified_elision: closure.elided,
             refused: closure.refused,
+            gapped: closure.gapped,
             unaccounted: closure.unattributed,
             conflicts: closure.conflicts,
             refused_obligation: ledger.entries().find_map(|(id, outcome)| {
@@ -2866,7 +2897,17 @@ impl EffectObligationAudit {
         }
     }
 
+    /// Whether the body may be emitted: every obligation is accounted for,
+    /// with the ones a gap covers marked in the output rather than dropped.
     pub const fn is_admitted(self) -> bool {
+        matches!(
+            self.disposition,
+            EffectObligationDisposition::Admitted | EffectObligationDisposition::Gapped
+        )
+    }
+
+    /// Whether every obligation was discharged or proven unnecessary.
+    pub const fn is_fully_proven(self) -> bool {
         matches!(self.disposition, EffectObligationDisposition::Admitted)
     }
 }
@@ -3245,6 +3286,10 @@ impl DecompileRenderRefusal {
     }
 }
 
+// The refusal is `Copy` and callers compare it, so its observation audit is
+// carried by value rather than boxed; the gap column pushed that audit just
+// past the lint's threshold.
+#[allow(clippy::result_large_err)]
 fn validate_sealed_region_occurrence_counts(
     occurrences: usize,
     region_nodes: usize,
@@ -3256,6 +3301,7 @@ fn validate_sealed_region_occurrence_counts(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_sealed_region_occurrence_coverage(
     body: &crate::structured_region::SealedStructuredBody,
 ) -> Result<(), DecompileRenderRefusal> {
@@ -4976,52 +5022,86 @@ impl Decompiler {
         }
         crate::stage_timing::mark("fold");
         structuring_work.poll()?;
-        // Structure control flow (primary path: folded)
-        let mut structurer =
-            ControlFlowStructurer::new_with_control(func, &fold_ctx, structuring_work)?;
-        let tentative_observation_checkpoint = observation_journal.borrow().checkpoint();
-        let tentative_observation_error = fold_ctx.observation_error.borrow().clone();
+        // Structure control flow (primary path: folded).
+        //
+        // A refusal that escapes here is one the fold could not turn into a
+        // marked gap, and there is exactly one reason it cannot: a statement
+        // that reads the unproven value had already rendered, so the gap's
+        // cells were claimed. Nothing about the refusal has changed, only
+        // when it was learned. So the site is added to the gap plan and the
+        // whole structuring is run again from a rolled-back journal, with
+        // that operation and its readers skipped before either can render.
+        // The plan only grows and it is a subset of the graph's
+        // instructions, so the retries are bounded by the graph.
+        let structure_attempt_bound = prepared.graph().insts.len().saturating_add(1);
+        let structure_checkpoint = observation_journal.borrow().checkpoint();
+        let structure_observation_error = fold_ctx.observation_error.borrow().clone();
+        let mut structure_attempt = 0usize;
+        let routed_body = loop {
+            structure_attempt += 1;
+            let mut structurer =
+                ControlFlowStructurer::new_with_control(func, &fold_ctx, structuring_work)?;
+            let tentative_observation_checkpoint = observation_journal.borrow().checkpoint();
+            let tentative_observation_error = fold_ctx.observation_error.borrow().clone();
 
-        let routed_body = match consumer_structured::primary_body_for_semantic_route(
-            semantic_route,
-            &mut structurer,
-            || self.linearize_function_body(func, &fold_ctx),
-            || {
-                observation_journal
-                    .borrow_mut()
-                    .rollback(tentative_observation_checkpoint);
-                *fold_ctx.observation_error.borrow_mut() = tentative_observation_error.clone();
-            },
-        ) {
-            Ok(body) => body,
-            Err(structure::ControlFlowStructureError::Lowering(refusal)) => {
-                debug_log_render_contract_error(prepared, "control-structure-lowering", &refusal);
-                let function = residual_function_for_render_boundary(
-                    &func
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| format!("sub_{:x}", func.entry)),
-                    &format!("operation lowering refusal: {refusal:?}"),
-                );
-                return Ok(InternalBuildProduct::refused(function, refusal.into()));
-            }
-            Err(structure::ControlFlowStructureError::StructuredRegion(error)) => {
-                debug_log_render_contract_error(prepared, "structured-region", &error);
-                return Ok(InternalBuildProduct::refused(
-                    residual_function_for_render_boundary(
+            match consumer_structured::primary_body_for_semantic_route(
+                semantic_route,
+                &mut structurer,
+                || self.linearize_function_body(func, &fold_ctx),
+                || {
+                    observation_journal
+                        .borrow_mut()
+                        .rollback(tentative_observation_checkpoint);
+                    *fold_ctx.observation_error.borrow_mut() = tentative_observation_error.clone();
+                },
+            ) {
+                Ok(body) => {
+                    if let Some(stop) = structurer.execution_stop() {
+                        return Err(stop);
+                    }
+                    break body;
+                }
+                Err(structure::ControlFlowStructureError::Lowering(refusal)) => {
+                    if structure_attempt < structure_attempt_bound
+                        && fold_ctx.plan_gap_for_escaped_refusal(refusal)
+                    {
+                        observation_journal
+                            .borrow_mut()
+                            .rollback(structure_checkpoint);
+                        *fold_ctx.observation_error.borrow_mut() =
+                            structure_observation_error.clone();
+                        fold_ctx.folded_blocks.borrow_mut().clear();
+                        continue;
+                    }
+                    debug_log_render_contract_error(
+                        prepared,
+                        "control-structure-lowering",
+                        &refusal,
+                    );
+                    let function = residual_function_for_render_boundary(
                         &func
                             .name
                             .clone()
                             .unwrap_or_else(|| format!("sub_{:x}", func.entry)),
-                        &format!("structured-region refusal: {error:?}"),
-                    ),
-                    DecompileRenderRefusal::UnrepresentableControlFlow,
-                ));
+                        &format!("operation lowering refusal: {refusal:?}"),
+                    );
+                    return Ok(InternalBuildProduct::refused(function, refusal.into()));
+                }
+                Err(structure::ControlFlowStructureError::StructuredRegion(error)) => {
+                    debug_log_render_contract_error(prepared, "structured-region", &error);
+                    return Ok(InternalBuildProduct::refused(
+                        residual_function_for_render_boundary(
+                            &func
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| format!("sub_{:x}", func.entry)),
+                            &format!("structured-region refusal: {error:?}"),
+                        ),
+                        DecompileRenderRefusal::UnrepresentableControlFlow,
+                    ));
+                }
             }
         };
-        if let Some(stop) = structurer.execution_stop() {
-            return Err(stop);
-        }
         structuring_work.poll()?;
         if let Some(structured_body) = routed_body.structured_body()
             && let Err(refusal) = validate_sealed_region_occurrence_coverage(structured_body)

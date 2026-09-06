@@ -128,4 +128,28 @@ impl OpLoweringRefusal {
     pub(crate) fn unrepresentable_operation() -> Self {
         Self::UnrepresentableOperation(Self::note("unrepresentable-operation"))
     }
+
+    /// The refusal's diagnostic name, as a marked gap spells it.
+    pub(crate) const fn kind(self) -> &'static str {
+        match self {
+            Self::MissingMachineProjectionAuthorization(_) => "machine-projection",
+            Self::MissingProgramVariableAuthorization(_) => "program-variable",
+            Self::UnrepresentableOperation(_) => "unrepresentable-operation",
+            Self::VariadicCallsiteArgumentCount(refusal) => refusal.kind(),
+        }
+    }
+
+    /// Where in the decompiler the refusal was decided, as `file.rs:line`.
+    pub(crate) fn origin_site(self) -> String {
+        match self {
+            Self::MissingMachineProjectionAuthorization(origin)
+            | Self::MissingProgramVariableAuthorization(origin)
+            | Self::UnrepresentableOperation(origin) => {
+                format!("{}:{}", origin.site().file(), origin.site().line())
+            }
+            // A variadic count refusal is decided by the source facts rather
+            // than at a lowering site, so it has no location to name.
+            Self::VariadicCallsiteArgumentCount(_) => "source callsite facts".to_string(),
+        }
+    }
 }

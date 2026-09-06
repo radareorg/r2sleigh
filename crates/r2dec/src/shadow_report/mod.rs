@@ -28,6 +28,17 @@ use crate::binding_plan::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct LegacyBindingId(pub(crate) u32);
 
+/// Which marked gap accounts for a cell.
+///
+/// A gap covers a closure of graph instructions rather than one cell, so every
+/// cell it accounts for names the same anchor. Two gaps in one body are
+/// therefore distinguishable, and a cell can never be claimed by both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct GapAnchor {
+    pub(crate) block_addr: u64,
+    pub(crate) op_idx: u32,
+}
+
 /// What the legacy value analysis claimed for one dense `ValueId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegacyValueObservation {
@@ -39,6 +50,8 @@ pub(crate) enum LegacyValueObservation {
     InlineNonLiteral,
     Elided(r2ssa::ledger::ElisionReason),
     Refused(ValueRefusal),
+    /// Covered by the marked gap anchored here; unproven and said so.
+    Gap(GapAnchor),
     LegacyAbsent,
 }
 
@@ -52,6 +65,8 @@ pub(crate) enum LegacyUseObservation {
     MemoryAddress(MachineValueUse),
     Elided(r2ssa::ledger::ElisionReason),
     Refused(MachineUseRefusal),
+    /// Covered by the marked gap anchored here; unproven and said so.
+    Gap(GapAnchor),
     LegacyAbsent,
 }
 
@@ -63,6 +78,8 @@ pub(crate) enum LegacyWriteObservation {
     Exact(MachineWriteProjection),
     Elided(r2ssa::ledger::ElisionReason),
     Refused(MachineWriteRefusal),
+    /// Covered by the marked gap anchored here; unproven and said so.
+    Gap(GapAnchor),
     LegacyAbsent,
 }
 
@@ -207,6 +224,8 @@ pub(crate) enum WrongReason {
 pub(crate) enum SideJudgment {
     Correct,
     Wrong(WrongReason),
+    /// The renderer marked this cell as unproven rather than claiming it.
+    Gapped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +244,8 @@ pub(crate) enum ShadowClassification {
     OldWrong,
     ShadowWrong,
     BothWrong(BothWrongRelation),
+    /// Covered by a marked gap in the output, so neither side claimed it.
+    Gapped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +299,8 @@ pub(crate) struct DomainLedger {
     pub(crate) both_wrong_different: usize,
     pub(crate) unclassified: usize,
     pub(crate) refused: usize,
+    /// Cells a marked gap accounts for. Admitted, and never proven.
+    pub(crate) gapped: usize,
 }
 
 impl DomainLedger {
@@ -291,7 +314,13 @@ impl DomainLedger {
         };
         for cell in cells {
             ledger.observed += 1;
-            ledger.refused += usize::from(cell.canonical_kind == CanonicalDispositionKind::Refused);
+            // A canonical refusal the output marks as a gap is counted in the
+            // gap column, not here: the refused column is what nothing in the
+            // output accounts for.
+            ledger.refused += usize::from(
+                cell.canonical_kind == CanonicalDispositionKind::Refused
+                    && cell.classification != ShadowClassification::Gapped,
+            );
             match cell.classification {
                 ShadowClassification::AgreeCorrect => ledger.agree_correct += 1,
                 ShadowClassification::OldWrong => ledger.old_wrong += 1,
@@ -302,6 +331,7 @@ impl DomainLedger {
                 ShadowClassification::BothWrong(BothWrongRelation::Different) => {
                     ledger.both_wrong_different += 1;
                 }
+                ShadowClassification::Gapped => ledger.gapped += 1,
             }
         }
         ledger
@@ -313,6 +343,7 @@ impl DomainLedger {
             + self.shadow_wrong
             + self.both_wrong_equal
             + self.both_wrong_different
+            + self.gapped
     }
 
     pub(crate) const fn both_wrong(self) -> usize {
@@ -327,7 +358,11 @@ impl DomainLedger {
         self.total == self.observed
             && self.observed == self.classified() + self.unclassified
             && self.classified()
-                == self.agree_correct + self.old_wrong + self.shadow_wrong + self.both_wrong()
+                == self.agree_correct
+                    + self.old_wrong
+                    + self.shadow_wrong
+                    + self.both_wrong()
+                    + self.gapped
             && self.both_wrong() == self.both_wrong_equal + self.both_wrong_different
     }
 

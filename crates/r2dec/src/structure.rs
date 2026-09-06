@@ -3429,6 +3429,14 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let predicate_id = predicate.map(|(id, _)| id);
         let condition_value = predicate.map(|(_, value)| value);
 
+        // A condition a marked gap covers has no rendered definition, so
+        // spelling it here would put a name in an `if` that no statement
+        // assigns. The branch is unresolved for the same reason the gap
+        // exists, and the caller's existing residual path says so.
+        if condition_value.is_some_and(|value| self.fold_ctx.value_is_gapped(value)) {
+            return (None, predicate_id, condition_value);
+        }
+
         if let Some(cond) = self.fold_ctx.extract_condition_from_block(block) {
             if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
                 let table = self.fold_ctx.symbols.borrow();

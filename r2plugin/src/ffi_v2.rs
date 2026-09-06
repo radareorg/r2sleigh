@@ -1598,6 +1598,7 @@ fn binding_shadow_domain_json(domain: r2engine::BindingShadowDomainAudit) -> ser
         "both_wrong_different": domain.both_wrong_different,
         "unclassified": domain.unclassified,
         "refused": domain.refused,
+        "gapped": domain.gapped,
     })
 }
 
@@ -1617,6 +1618,7 @@ fn binding_observation_domain_json(
         "rendered": domain.rendered,
         "justified_elision": domain.justified_elision,
         "refused": domain.refused,
+        "gapped": domain.gapped,
         "unaccounted": domain.unaccounted,
     })
 }
@@ -2349,6 +2351,7 @@ fn effect_obligations_json(audit: Option<r2engine::EffectObligationAudit>) -> se
     };
     let status = match audit.disposition {
         r2engine::EffectObligationDisposition::Admitted => "admitted",
+        r2engine::EffectObligationDisposition::Gapped => "gapped",
         r2engine::EffectObligationDisposition::Refused => "refused",
         r2engine::EffectObligationDisposition::NotRun => "not_run",
     };
@@ -2359,6 +2362,7 @@ fn effect_obligations_json(audit: Option<r2engine::EffectObligationAudit>) -> se
         "rendered": audit.rendered,
         "justified_elision": audit.justified_elision,
         "refused": audit.refused,
+        "gapped": audit.gapped,
         "unaccounted": audit.unaccounted,
         "conflicts": audit.conflicts,
     })
@@ -4120,6 +4124,7 @@ mod tests {
             both_wrong_different: 0,
             unclassified: 0,
             refused,
+            gapped: 0,
         }
     }
 
@@ -4142,6 +4147,7 @@ mod tests {
             rendered,
             justified_elision,
             refused,
+            gapped: 0,
             unaccounted,
         }
     }
@@ -5094,6 +5100,7 @@ mod tests {
             rendered: 7,
             justified_elision: 6,
             refused: 0,
+            gapped: 0,
             unaccounted: 0,
             conflicts: 0,
             refused_obligation: None,
@@ -5107,9 +5114,10 @@ mod tests {
         assert_eq!(admitted_json["rendered"], 7);
         assert_eq!(admitted_json["justified_elision"], 6);
         assert_eq!(admitted_json["refused"], 0);
+        assert_eq!(admitted_json["gapped"], 0);
         assert_eq!(admitted_json["unaccounted"], 0);
         assert_eq!(admitted_json["conflicts"], 0);
-        assert_eq!(admitted_json.as_object().map(serde_json::Map::len), Some(8));
+        assert_eq!(admitted_json.as_object().map(serde_json::Map::len), Some(9));
 
         let refused = r2engine::EffectObligationAudit {
             disposition: r2engine::EffectObligationDisposition::Refused,
@@ -5117,6 +5125,7 @@ mod tests {
             rendered: 4,
             justified_elision: 1,
             refused: 2,
+            gapped: 0,
             unaccounted: 1,
             conflicts: 1,
             refused_obligation: None,
@@ -5154,6 +5163,7 @@ mod tests {
             rendered: 0,
             justified_elision: 0,
             refused: 1,
+            gapped: 0,
             unaccounted: 0,
             conflicts: 0,
             refused_obligation: None,

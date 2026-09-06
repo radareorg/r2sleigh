@@ -8505,26 +8505,36 @@ mod integration_tests {
             });
         assert_eq!(len_home.name, "arg1");
         // The SIMD worker contains machine operations whose exact C projection
-        // is unavailable. That upstream refusal precedes placement; the saved
-        // frame-pointer object must not be reached through a fabricated local.
-        assert_eq!(response.placement_audit, r2engine::PlacementAudit::NotRun);
-        assert_eq!(
-            response.binding_audit,
-            r2engine::BindingShadowAuditOutcome::NotRun
-        );
-        assert_eq!(
-            response.render_refusal,
-            Some(
-                r2engine::DecompileRenderRefusal::MissingMachineProjectionAuthorization(
-                    r2dec::MachineProjectionRefusalOrigin::op_lowering(),
+        // is unavailable. Those are marked as gaps now, so the rendering gets
+        // as far as declaration placement, which refuses for its own reason:
+        // a binding nothing writes. Either way the saved frame-pointer object
+        // must not be reached through a fabricated local, which is what the
+        // output assertions below check.
+        assert!(
+            matches!(
+                response.placement_audit,
+                r2engine::PlacementAudit::Refused(
+                    r2engine::PlacementAuditRefusal::MissingDefinition { .. }
                 )
-            )
+            ),
+            "placement refuses the binding nothing writes: {:?}",
+            response.placement_audit
+        );
+        assert!(
+            matches!(
+                response.render_refusal,
+                Some(r2engine::DecompileRenderRefusal::DeclarationPlacement(
+                    r2engine::PlacementAuditRefusal::MissingDefinition { .. }
+                ))
+            ),
+            "the refusal names the layer that made it: {:?}",
+            response.render_refusal
         );
         assert!(
             response.output.starts_with("/* r2dec fallback:")
                 && response
                     .output
-                    .contains("native rendering refused: missing machine projection authorization")
+                    .contains("native declaration placement refused: missing_definition")
                 && !response.output.contains("for (int32_t var_14h = 0;")
                 && !response.output.contains("return var_10h;"),
             "certified facts must remain inspectable while the unprojected machine operation leaves only a fallback comment; output={} render_facts={:?}",

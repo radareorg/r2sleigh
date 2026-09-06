@@ -69,33 +69,53 @@ def report(payloads: list[dict], top: int) -> None:
         print("no functions observed in any census", file=sys.stderr)
         return
 
-    by_cell: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0])
+    by_cell: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0, 0])
     causes: collections.Counter[str] = collections.Counter()
+    gap_causes: collections.Counter[str] = collections.Counter()
+    gapped = 0
+    gap_ops = 0
     for payload in payloads:
         cell = by_cell[_cell(payload)]
         cell[0] += payload.get("rendered", 0)
         cell[1] += payload.get("declined", 0)
+        cell[2] += payload.get("gapped", 0)
         causes.update(payload.get("causes", {}))
+        gap_causes.update(payload.get("gap_causes", {}))
+        gapped += payload.get("gapped", 0)
+        gap_ops += payload.get("gap_ops", 0)
 
     print(f"binaries   {len(payloads)}")
     print(f"observed   {observed} functions")
     print(f"coverage   {rendered}/{observed} = {rendered / observed:.3f}")
+    # Coverage counts a function the renderer produced C for. A function with a
+    # marked gap is one of those and is not proven, so the two are printed
+    # together: a rise in coverage paid for entirely in gaps is not progress.
+    proven = rendered - gapped
+    print(f"proven     {proven}/{observed} = {proven / observed:.3f}"
+          f"  ({gapped} gapped, {gap_ops} ops)")
     print()
 
     print("by cell")
     for name in sorted(by_cell):
-        rend, decl = by_cell[name]
+        rend, decl, gaps = by_cell[name]
         total = rend + decl
         share = rend / total if total else 0.0
-        print(f"  {name:<24} {rend:>5}/{total:<5} = {share:.3f}")
+        suffix = f"  {gaps} gapped" if gaps else ""
+        print(f"  {name:<24} {rend:>5}/{total:<5} = {share:.3f}{suffix}")
     print()
 
     harness = [(c, n) for c, n in causes.items() if c.startswith(HARNESS)]
     proof = [(c, n) for c, n in causes.items() if not c.startswith(HARNESS)]
 
-    for title, rows in (("harness failures", harness), ("refusal causes", proof)):
+    gap_rows = list(gap_causes.items())
+    for title, rows in (
+        ("harness failures", harness),
+        ("refusal causes", proof),
+        ("gap causes", gap_rows),
+    ):
         lost = sum(n for _, n in rows)
-        print(f"{title}: {lost} functions, {lost / observed:.3f} of all observed")
+        unit = "gaps" if title == "gap causes" else "functions"
+        print(f"{title}: {lost} {unit}, {lost / observed:.3f} of all observed")
         for cause, count in sorted(rows, key=lambda kv: (-kv[1], kv[0]))[:top]:
             print(f"  {count:>5}  {count / observed:.3f}  {cause}")
         if not rows:
