@@ -13292,3 +13292,37 @@ and the markers elsewhere in the journal that would have authorised it.
 access marker sits at observation 559 and not on the node being audited, so
 the question for that class is why the marker did not survive onto the
 audited node rather than why it is missing.
+
+### Sweep 11
+
+The sweep ran the whole decompilation half and then its local driver was
+killed by host memory pressure while angr scored bzip2, so the comparison
+covers zlib only. What survived is the refusal census for all eighteen
+binaries and the scored zlib comparison.
+
+**Coverage 1420/1650 = 86.1%**, from 1246/1764 = 70.6% at sweep10. The
+denominators differ because sweep10 carried harness failures and this run
+reports none, so the honest comparison is the rate rather than the counts.
+By cell: zlib -O0 90.5%, zlib -O2 83.6%, bzip2 -O0 81.2%, bzip2 -O2 65.7%.
+`fully_proven` equals coverage: no function on the wide corpus rendered a
+marked gap, which matches the local census and says the backstop is a
+backstop rather than a crutch.
+
+**Against angr on the scored zlib functions** (1550 functions, r2sleigh
+produced 1281 to angr's 1484): angr leads on `byte_match` (0.369 to 0.242)
+and on graph edit distance (11.6 to 13.9), and r2sleigh leads on
+`type_match` (0.284 to 0.361 by mean, but 121 perfect scores to angr's 83).
+The graph distance and byte match are both measuring how close the rendered
+control flow and text are to the source, which is the quality gap the
+machine-shaped renderings already showed locally: `crc32_bitwise` renders a
+proven `while (tmp_11f80_2 = stack_m40, ...)` where the source wrote a plain
+loop. That is the next axis after coverage, and it is a rendering question
+rather than a recovery one.
+
+**The wide residue ranks as the local one does**, over 230 refused
+functions: `missing_definition` 59, `OpLowering(implementation.rs:1349)` 27,
+`PlannedElidedValueRendered` 19, the complexity limit 15, `BindingPlanBuild`
+14, `unobserved_binding_read` 13, `RenderedValueRequired` 13,
+`unrepresentable operation` 13, the structuring deadline 10,
+`region_does_not_dominate_occurrence` 10. Stack aggregates are 78 of the
+230, which confirms C2 as the next item at wide scale and not only locally.
