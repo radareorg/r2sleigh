@@ -13276,3 +13276,11 @@ completeness conditions each say which one failed under
 Five functions hit the limit, and `deflate` hits the request deadline during
 structuring since the semantic route stopped refusing it early. The rule
 stands: the phase that is slow is the defect.
+
+**A qualifier is not an extent.** `fixedtables` in zlib holds
+`code const[512] const lenfix`, and the parser that sizes an array slot found
+` const` after the closing bracket and refused the spelling. One unsized slot
+makes the frame's resources unproven, the ABI model incoherent and the return
+boundary incomplete, so the function was refused for a word that says nothing
+about width. The size parser now strips qualifiers with the same helper the
+type graph already used. Census U: 79 to 78.
