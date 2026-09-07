@@ -1394,6 +1394,23 @@ impl<'a> RegionAnalyzer<'a> {
                     } else {
                         None
                     };
+                    // An arm the composer could not take is an arm nothing
+                    // will write, and the block-coverage check downstream can
+                    // only report the address, never which branch lost it.
+                    if then_region.is_none() && Some(true_succ) != merge {
+                        r2il::refusal_evidence!(
+                            "branch-arm",
+                            "{cond_block:#x} has no region for its true arm {:?}",
+                            graph.node_entry(true_succ)
+                        );
+                    }
+                    if else_region.is_none() && Some(false_succ) != merge {
+                        r2il::refusal_evidence!(
+                            "branch-arm",
+                            "{cond_block:#x} has no region for its false arm {:?}",
+                            graph.node_entry(false_succ)
+                        );
+                    }
                     let branch_region = match (then_region, else_region) {
                         (Some(then_r), Some(else_r)) => Region::IfThenElse {
                             cond_block,
