@@ -6,6 +6,24 @@ fn binding_declaration_width(ty: &CType, ptr_bits: u32) -> Option<u32> {
     super::rules::declaration_type_width(ty, ptr_bits)
 }
 
+impl BindingPlan {
+    /// The width a parameter's home slot has to hold, through the one rule.
+    fn parameter_home_width(
+        &self,
+        binding: BindingId,
+        carrier_width_bits: u32,
+        ptr_bits: u32,
+    ) -> u32 {
+        self.binding(binding).map_or(carrier_width_bits, |bound| {
+            super::rules::parameter_home_width(
+                bound.declaration_type(),
+                carrier_width_bits,
+                ptr_bits,
+            )
+        })
+    }
+}
+
 /// Resolve the certificate relation independently of construction's union-find.
 ///
 /// The graph is bipartite: values point to every exact upstream certificate that
@@ -1234,18 +1252,27 @@ impl BindingPlan {
                             Some(ParameterDisposition::Bound {
                                 binding,
                                 width_bits: parameter_width_bits,
-                            }) if parameter_width_bits == width_bits => {
+                            }) if self.parameter_home_width(
+                                binding,
+                                parameter_width_bits,
+                                ptr_bits,
+                            ) == width_bits =>
+                            {
                                 StackObjectDisposition::Bound { binding }
                             }
                             Some(ParameterDisposition::Bound {
+                                binding,
                                 width_bits: parameter_width_bits,
-                                ..
                             }) => StackObjectDisposition::Refused {
                                 reason: StackObjectRefusal::ParameterHomeWidthMismatch {
                                     object,
                                     parameter_index,
                                     slot_width_bits: width_bits,
-                                    parameter_width_bits,
+                                    parameter_width_bits: self.parameter_home_width(
+                                        binding,
+                                        parameter_width_bits,
+                                        ptr_bits,
+                                    ),
                                 },
                             },
                             _ => StackObjectDisposition::Refused {
