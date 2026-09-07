@@ -2831,20 +2831,50 @@ pub(crate) fn private_stack_objects(
         })
         .count();
     if unplaced > 0 {
+        // Name the addresses, not only the count: the repair is to place them,
+        // and a count alone leaves the next reader searching for which.
+        let named = ram_accesses
+            .iter()
+            .filter(|access| {
+                objects
+                    .object(access.object)
+                    .is_some_and(|fact| matches!(fact.kind, ObjectKind::EscapedUnknown { .. }))
+            })
+            .take(6)
+            .map(|access| {
+                format!(
+                    "{:?}@{:#x}:{}",
+                    access.address, access.block_addr, access.op_index
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         r2il::refusal_evidence!(
             "private-stack-objects",
-            "no slot is private: {unplaced} of {} ram accesses reach memory the model could not place",
+            "no slot is private: {unplaced} of {} ram accesses reach memory the model could not place: {named}",
             ram_accesses.len()
         );
         return private;
     }
     let mut addresses_by_object = BTreeMap::<ObjectId, BTreeSet<ValueId>>::new();
+    // Every value that names some stack address. Arithmetic from one slot's
+    // base to another slot's address stays inside the frame and is not escape.
+    let mut stack_addresses = BTreeSet::<ValueId>::new();
     for (key, object) in &objects.value_objects {
-        if key.space == SpaceId::Ram {
-            addresses_by_object
-                .entry(*object)
-                .or_default()
-                .insert(key.value);
+        if key.space != SpaceId::Ram {
+            continue;
+        }
+        addresses_by_object
+            .entry(*object)
+            .or_default()
+            .insert(key.value);
+        if objects.object(*object).is_some_and(|fact| {
+            matches!(
+                fact.kind,
+                ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. }
+            )
+        }) {
+            stack_addresses.insert(key.value);
         }
     }
     for (object, fact) in &objects.objects {
@@ -2875,12 +2905,12 @@ pub(crate) fn private_stack_objects(
                 if addresses_this_object {
                     return false;
                 }
-                // Address arithmetic that stays inside the object is not an
-                // escape; its result is another address of the same object.
+                // Address arithmetic that lands on another frame address is
+                // not an escape; the frame pointer itself is the common case.
                 let stays_inside = graph
                     .inst(site.inst)
                     .and_then(|inst| inst.output)
-                    .is_some_and(|output| addresses.contains(&output));
+                    .is_some_and(|output| stack_addresses.contains(&output));
                 !stays_inside
             })
         });
