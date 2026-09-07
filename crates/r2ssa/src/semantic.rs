@@ -4168,16 +4168,15 @@ fn collect_source_boundary_facts(
                 let stack_pointer_storage = machine_context.stack_pointer_carrier();
                 let return_address_storage = machine_context.return_address_carrier();
                 let return_slots = machine_context.abi_model().return_registers();
-                match abi_is_coherent
-                    .then(|| {
-                        machine_context
-                            .function_interface()
-                            .map(|interface| interface.return_kind())
-                    })
-                    .flatten()
+                // A void return carries no values, so nothing about it is an
+                // ABI question: there is no carrier to resolve and no
+                // convention to be coherent about. Only a returned value is.
+                match machine_context
+                    .function_interface()
+                    .map(|interface| interface.return_kind())
                 {
                     Some(SourceFunctionReturn::Void) => complete = true,
-                    Some(SourceFunctionReturn::Register { .. }) => {
+                    Some(SourceFunctionReturn::Register { .. }) if abi_is_coherent => {
                         if let Some((block_addr, op_index)) = graph.op_site_for_inst(inst.id) {
                             for slot in return_slots {
                                 match reaching_source_return_register_in_block(
