@@ -14953,3 +14953,36 @@ that genuinely narrow should report. And the carry must be applied per sequence
 element rather than to the merge alone, because the block after a switch inside
 a loop body is written by `structure_block_stmts_into` flattening the sequence,
 not by any of the merge-writing sites.
+
+### `ParameterHomeWidthMismatch` is radare2 widening a four-byte slot
+
+The largest remaining reason a stack object has no program variable, at 225
+reports across the six binaries, is now the *other* direction of the mismatch:
+an eight-byte slot for a four-byte parameter. It is not the plan's doing.
+
+`myMalloc(Int32 n)` in bzip2 stores its parameter with `mov dword [rbp-0x14],
+edi` -- four bytes -- and radare2 agrees when asked with `aa`:
+`int32_t var_14h @ rbp-0x14`. Run `aaa` and the type-propagation pass renames
+and retypes it to `size_t size @ rbp-0x14`, because the slot's value is later
+widened and passed to `malloc`, whose parameter is `size_t size`. Eight bytes
+over a four-byte slot, and the parameter home then fails its width check, the
+object loses its variable, and the function refuses.
+
+**A width guard was written, tested and reverted.** Refusing a propagated type
+wider than the incumbent -- restricted to scalar-to-scalar, pointers exempt
+because a pointer is a stronger fact than an access width, and to stack slots
+because a register argument is as wide as its register -- gives the right type
+here and recovers one function on `bzip2-O0`. It leaves six failures in
+`db/anal`, `db/cmd/types` and `db/cmd/types2`, of which four are exactly this
+change and would be expectation updates, and **two are a real loss**: an
+`arg size_t arg4 @ rcx` becomes `int64_t`, because that argument was getting its
+`size_t` indirectly through the slot the guard now leaves alone.
+
+So the width is a symptom of the actual defect, which is that the propagation
+ignores the conversion between the slot and the argument. `mov eax, dword [n];
+cdqe; mov rdi, rax; call malloc` passes a *widened copy*, not the slot, and the
+callee's parameter type describes the copy. Propagating it onto the slot is only
+sound when the value reaches the argument unconverted -- which the ESIL trace the
+pass already builds could answer. That is the fix, it belongs in its own upstream
+pull request, and it is worth doing: this is behind the two largest refusal
+classes the plugin has left.
