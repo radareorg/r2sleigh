@@ -14636,3 +14636,40 @@ depended on iteration order. And the general lesson is the one the standing
 instruction already gives: before putting a fork to the user, check whether the
 branches differ on what the system should do or only on which compromise to
 accept because something upstream is broken. This was the second.
+
+### The type graph was losing itself on three spellings
+
+Every parameter and the return type is a root of a function's type graph, and
+one unrooted root drops all of them -- so what the consumer sees is a function
+whose parameters have only their carrier widths. That is upstream of both of the
+largest refusal classes: a parameter with no declared width fails its home
+slot's width check, the slot loses its program variable, the memory renderer
+falls through to asking for the address value, and the plan has elided that as
+`DeadStackBase`.
+
+Three spellings did it, and none of them said so. The builder had eleven silent
+`UNSUPPORTED` returns; each now names the stage, the spelling and the reason,
+which is how all three were found in one pass.
+
+- **A declaration-only aggregate.** `FILE` reaches `struct _IO_marker *`, and
+  glibc never defines `_IO_marker`. A pointer does not need its pointee's
+  layout, and the graph already had the opaque node that `void *` and function
+  pointers use; a declaration-only aggregate now takes it, distinguished from an
+  ambiguous name or a capacity limit so that a real layout is never silently
+  dropped. The by-value path still refuses, correctly.
+- **A two-dimensional array member.** `UChar[6][258]`, of which bzip2's `EState`
+  holds three, read as one bracket group and then failed on the second. An array
+  of arrays is one run of the innermost element, so the extent is the product.
+- **`signed int`.** The database files the type under `int`; `signed` is
+  redundant everywhere but before `char`, and the syntax scan has already taken
+  the kind from it, so the width lookup retries without it.
+
+**Still open here:** a *root* whose spelling is an array, such as a local
+declared `UChar[5000]`. The graph has no array node kind, so the slot keeps no
+node -- which costs that slot its declared type but deliberately does not fail
+the graph. Giving the graph an array kind reaches the wire format and the
+consumer, and is the next thing in this area.
+
+Local six-binary census over the session: 111 refusals to 95. `_init` (six, one
+per binary), `entry0` (six), `bsPutBit`-shaped functions and everything taking
+an `EState *`.
