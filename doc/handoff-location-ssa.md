@@ -14697,30 +14697,28 @@ in two places, which is what a loop condition rendered both in a body prefix and
 in the `while` header does. The inlining guard counts rendered readers, sees
 two, and binds.
 
-The second statement is the `if` itself. `structure_region`'s `IfThenElse` arm
-reads
+**The obvious explanation is wrong, and this was checked.** `structure_region`'s
+`IfThenElse` arm folds the condition out of `cond_block` and then renders the
+*same block* as the prefix, which looks like two chances to spell the same
+operand. It is not what happens: instrumenting `exact_branch_input_expr` with
+its caller shows the condition for that block built exactly **once**. The
+condition also already goes through the plan -- `planned_input_expr_at` -- so a
+bound operand is named by its symbol there, not re-rendered.
 
-```rust
-let (cond, ..) = self.get_branch_condition_with_predicate(*cond_block);
-...
-let if_stmt = ... CStmt::if_stmt(cond, then_stmt, else_stmt);
-let mut prefix = self.structure_block_prefix_stmts(*cond_block)?;
-prefix.push(if_stmt);
-```
+So the second observation identifier for that use site is issued somewhere else.
+The place to look is the folded-definition accounting in
+`observation_journal.rs`: for each definition folded into a rendered expression
+it pushes a `Use` target for *every* operand of that definition, which would
+register a use that is also observed directly a second time. That is a
+hypothesis, not a verified cause -- what is verified is that two identifiers
+exist for one machine use, in two different rendered statements, and that a
+duplicated condition build is not the reason.
 
--- the condition is folded out of `cond_block`, and then the *same block* is
-rendered as the prefix. `extract_condition_from_block` builds the condition from
-the SSA without consulting the binding plan, so an operand the plan bound is
-spelled out again inside the condition instead of by its symbol, and the machine
-use behind it is observed once in the prefix statement and once in the `if`.
-
-That makes it a case of the rewriting rule this project already settled -- a
-folded obligation's occurrence *moves* with the expression -- except that here
-it is duplicated rather than moved. The fix is that the condition goes through
-the same planned-value path the statements do, so a bound operand is named
-rather than re-rendered; counting one machine use once in the inlining guard
-would hide the duplication rather than remove it. Six functions locally, plus
-whatever the duplicated evaluation costs in rendered output elsewhere.
+Whatever issues the second identifier, the rule to restore is the one this
+project already settled: a folded obligation's occurrence *moves* with its
+expression rather than being duplicated. Counting one machine use once in the
+inlining guard would hide the duplication instead of removing it. Six functions
+locally.
 
 The evidence now prints the statement alongside the block and the use site,
 which is the only reason the two could be told apart from a single use recorded
