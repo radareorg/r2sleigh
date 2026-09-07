@@ -14440,3 +14440,121 @@ whether radare2 should hand out a variable type spelling its own database
 cannot size. The integration pull request is 1,984 lines with 26 comment blocks
 over two lines. The snapshot baseline has seven mismatched cells awaiting one
 reviewed blessing, and six `diag=wrong` canaries predate all of this.
+
+## Session of 8 September: the switch chain, `_init`, and parameter homes
+
+Five things landed and two open questions were produced. The measurement is a
+local six-binary census (`tests/corpus` binaries plus minigzip, bzip2 and
+bzip2recover at -O0 and -O2), which is the fastest honest signal available
+without a remote sweep.
+
+### The switch chain, answered three layers deep
+
+The premise carried into this session was wrong twice over, and both
+corrections are worth keeping.
+
+`gz_open`'s switch was never missing its target set or its bound: all 78 cases
+are certified and the control-transfer obligation is discharged. What was
+missing is the **selector value**, and the cause was one arm of
+`infer_switch_selector_var`, which accepted a load as the selector only when the
+address is a frame address. `switch (*p)` with `p` a local pointer sent the walk
+into the address computation, where it fell off an unmatched arm in silence. A
+table load carries its index inside the address and is still tried first; a
+plain dereference does not, and then the value read is the selector.
+
+With the selector found, three more layers answered in turn, each a silent drop:
+
+- A case that **leaves the enclosing loop** has no node in the loop body's
+  working graph; a transfer node stands for the edge and owns no blocks, so
+  resolving a case target through `block_to_node` alone dropped it. The
+  consistency check then refused the whole switch for a count that did not
+  match.
+- An **exit continuation** was rendered with the loop still in the active
+  domain, so every block it placed failed the domain check. The goto and
+  shared-exit paths already transformed the domain; the inline path did not.
+- The **control-coverage proof** bailed out of its BDD for any function
+  containing a switch anywhere, accepting only a single occurrence whose guard
+  vector was literally the canonical one. It has an encoding now: a switch's
+  arms are pairwise disjoint and exhaustive, which a chain of fresh booleans
+  states exactly -- arm `i` is the first whose variable holds -- so both the
+  reachability recurrence and a rendered `SwitchArm` guard branch on the same
+  variables.
+
+**`gz_open` still refuses**, at the fourth layer, and the evidence now names it
+precisely: block `0x223c`, the switch's merge, is rendered under two occurrences
+that both carry `0x2171=false` and the switch-arm guard, while its canonical
+domain carries none of those guards. The third path into it -- the digit arm at
+`0x2158`, which jumps to the merge without passing through the switch -- reaches
+that block by a `goto` and contributes no occurrence. **The general statement is
+that a rendered site's domain must be the union of the domains of everything
+that reaches it, gotos included**; today `transfer_target_domains` records only
+loop-exit transfers and joins them only at region entries. That is the next
+thing to do here and it is architectural, not a repair.
+
+The switch-coverage change costs exactly one function on the local census
+(`minigzip-O0 fcn_125b5`, which then fails `region_does_not_dominate_occurrence`
+at `0x1267d`) and nothing on the others.
+
+### `_init` refused in every binary because radare2 never read DT_INIT
+
+The loader-role mechanism in `snapshot_capture.c` compares `R_BIN_SYM_INIT` and
+`R_BIN_SYM_FINI` against the function address, and the note carried into this
+session said the FINI comparison matched and the INIT one did not. Neither
+matched. `Elf_(get_init_offset)` and `Elf_(get_fini_offset)` recognise exactly
+one shape -- a `push <imm32>` at a fixed offset inside `_start`, which is how a
+32-bit x86 crt0 passed the hook addresses -- so on x86-64 both return
+`UT64_MAX`, and the dynamic section's own `DT_INIT` and `DT_FINI` were walked
+past. `DT_FINI` was listed among the tags the parser deliberately ignores and
+`DT_INIT` fell through to the default.
+
+Reading both is one field each. It is a plain radare2 correctness fix unrelated
+to Sleigh, so it sits on its own branch, `bin/elf-init-fini-from-dynamic`, off
+`upstream/master`, cherry-picked into the integration branch so the local build
+has it. **It has not been raised as a pull request yet.** It removes six
+refusals, one per binary.
+
+### A parameter's home slot is the width it was declared
+
+`ParameterHomeWidthMismatch` compared a home slot against the *carrier* width:
+`rsi` is eight bytes whatever it carries, so every `int` parameter of every
+unoptimized function failed it, the slot lost its program variable, and the
+memory renderer fell through to asking for the address value -- a stack geometry
+root the plan elides as `DeadStackBase`. That is why
+`PlannedElidedValueRendered` was the largest refusal class in the census: it
+named neither the slot nor the parameter.
+
+**Open question, and it is the user's to settle.** The binding still carries the
+register's width, because `apply_parameter_declaration_types` will not admit a
+declaration whose width differs from it, so an `Int32` parameter is still
+declared as a machine word. Admitting the narrow declaration is the same
+question the return certificate already answered -- a declared narrow value in a
+wider carrier is the declared value, and the carrier is the carrier -- and it
+was written and measured here: it recovers the functions above and costs three
+others, which lose their stack objects to `missing program-variable
+authorization` because the object and binding widths then disagree at owners the
+change does not reach. It is not in the tree. Landing it means changing those
+owners in the same commit rather than relaxing one of them.
+
+### Evidence that did not exist
+
+Nine refusals that named nothing now name what a trace needs, and this is what
+made the four items above findable in one session rather than several: the four
+switch-case drops, the coverage refusal's two guard vectors written by block
+address rather than predicate identifier, a return with no boundary fact at all
+as distinct from one that disagrees, the region and block of a dominance
+failure, the elided value with its elision reason *and the caller that asked for
+it by name* (`#[track_caller]` on `planned_value_expr`), and the exit-continuation
+domain transform's refusal.
+
+### Measurement notes
+
+`scratchpad/census-at.sh` builds a plugin at a given commit into a detached
+worktree and censuses the six binaries with `L`-loaded plugins, so a
+before-and-after is now one command. It needs
+`LOCAL_R2_DIR=/Users/slowpotato/code/fork/radare2`, because the Makefile's
+`../../radare2` default does not resolve from a worktree and the build silently
+falls back to system radare2 headers.
+
+A per-function `pdd` is **not** representative: several functions render alone
+and refuse inside a whole-binary run, because analysis state accumulates across
+`aaa` and the earlier functions. Verify in the batch.
