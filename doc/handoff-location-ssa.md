@@ -13847,3 +13847,50 @@ five are `Cannot open`: `aarch64-got-etrel.o`, `i386-crel-implicit.o`,
 repository, which is itself current with its own master. They arrived with
 upstream's newer tests during the rebase and are missing fixtures rather than
 code regressions. That is the honest baseline to compare against from here.
+
+## The integration pull request is integration surface only
+
+**No further standalone radare2 pull requests are warranted.** Every candidate
+was tested against the same question -- does radare2 need this, independent of
+r2sleigh -- and each answered no:
+
+- **`on_fcn_delete` taking the core from the anal bind** looked like a null
+  dereference fix, because `r_anal_set_user_ptr` is defined in `anal.c` and
+  seemed to have no caller. It has one, `core.c:2687`, so upstream's cast is
+  correct and the fork's change exists only to satisfy an r2sleigh unit test
+  that sets the user pointer to its own context. Not a fix; kept as integration
+  surface, or better, the test should stop hijacking the pointer.
+- **ELF `DT_INIT`** in `get_init_offset` reads authoritatively where upstream
+  scans x86 prologue bytes. Removing it and rebuilding `libr_bin` gave
+  byte-identical `iee` output on all three PPC fixtures that carry the tag, so
+  it changes nothing observable. Removed rather than proposed.
+- **`r_type_set_link_expression`** was a refactor whose only caller was the
+  function it was extracted from. Removed.
+- **`get_reloc_at` on the bin bind** is a real capability addition, but the only
+  consumer is the plugin's snapshot capture, which makes it integration surface
+  by the same test -- it belongs in this pull request, not a separate one.
+
+Twelve radare2 fixes have already gone out separately and eight are merged.
+That work is done.
+
+**Dead blocks removed**, listed in the commit: the DWARF link ownership model
+(~260 lines whose table nothing published into), the `get_data_refs` hook across
+both repositories, the ELF tag, the link-expression refactor, and a declaration
+left without a definition.
+
+**Final shape: 38 files, +2,767 / −1,078**, from +11,602 at the start. Every
+fork-only export now has a caller -- nine in the plugin, eleven inside radare2.
+
+| Stage | Added |
+|---|---:|
+| Before the rebase | 11,602 |
+| After the rebase | 11,587 |
+| After the DWARF cut | 8,341 |
+| After the artifact-store cut | 4,275 |
+| After deleting the uncalled API | 3,361 |
+| After the dead blocks | **2,767** |
+
+**The one thing still worth doing**, and it is not a cut: `test_anal_decompiler.c`
+sets `anal->user` to its own context, which is why `core.c`'s fcn-delete
+callback was changed. Fix the test to leave the user pointer alone and
+`core.c` goes back to upstream's, taking five more lines with it.

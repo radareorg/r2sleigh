@@ -606,11 +606,10 @@ static bool sleigh_v2_analysis_result_release(R2SleighAnalysisResultV2 **result)
  *
  * `sla.profilej` reports per function and only for the stages a decompile
  * walks. The analysis callbacks are a different population: `op` runs per
- * instruction and several times over for one byte, `analyze_fcn` and
- * `get_data_refs` run per function, and none of the three had ever been
- * separated from the others. Measured on bzip2recover, they are together
- * about five times the proof sweep, so knowing only their sum is knowing the
- * wrong thing.
+ * instruction and several times over for one byte, and `analyze_fcn` runs
+ * per function; neither had ever been separated from the others. Measured on
+ * bzip2recover, they are together about five times the proof sweep, so
+ * knowing only their sum is knowing the wrong thing.
  *
  * One counter and one accumulator per site, printed once at `fini` when
  * `R2SLEIGH_TIMING` asks. Reading the clock twice per instruction is the whole
@@ -625,7 +624,6 @@ typedef enum {
 	SLEIGH_CB_OP_ESIL,
 	SLEIGH_CB_OP_VAL,
 	SLEIGH_CB_ANALYZE_FCN,
-	SLEIGH_CB_DATA_REFS,
 	SLEIGH_CB_POST_ANALYSIS,
 	SLEIGH_CB_ELIGIBLE,
 	SLEIGH_CB_CONTEXT_CREATE,
@@ -638,7 +636,7 @@ typedef enum {
 
 static const char *const sleigh_callback_names[SLEIGH_CB_COUNT] = {
 	"op", "op.context", "op.lift", "op.disasm", "op.esil", "op.val",
-	"analyze_fcn", "get_data_refs", "post_analysis",
+	"analyze_fcn", "post_analysis",
 	"eligible", "context.create", "context.regprofile",
 	"snapshot.walk", "snapshot.reuse", "proof.engine"
 };
@@ -859,7 +857,6 @@ void r2sleigh_set_arch_override(const char *arch) {
 	sleigh_arch_override = strdup (arch);
 }
 
-static bool sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn, R_OUT RVecAnalRef **refs);
 static bool collect_data_refs_from_typed(
 	RAnal *anal,
 	RAnalFunction *fcn,
@@ -4778,90 +4775,6 @@ static bool sleigh_analyze_fcn(RAnal *anal, RAnalFunction *fcn) {
 	return ok;
 }
 
-static bool sleigh_get_data_refs_inner(RAnal *anal, RAnalFunction *fcn, R_OUT RVecAnalRef **refs);
-
-static bool sleigh_get_data_refs(RAnal *anal, RAnalFunction *fcn, R_OUT RVecAnalRef **refs) {
-	const ut64 started = sleigh_callback_start ();
-	const bool ok = sleigh_get_data_refs_inner (anal, fcn, refs);
-	sleigh_callback_end (SLEIGH_CB_DATA_REFS, started);
-	return ok;
-}
-
-static bool sleigh_get_data_refs_inner(RAnal *anal, RAnalFunction *fcn, R_OUT RVecAnalRef **refs) {
-	if (!refs) {
-		return false;
-	}
-	*refs = NULL;
-	if (!refs) {
-		return false;
-	}
-	*refs = NULL;
-	if (!fcn || !anal) {
-		return false;
-	}
-	if (!auto_callback_allows_function (
-		anal,
-		fcn,
-		R2SLEIGH_AUTO_CALLBACK_DATA_REFS_V2,
-		"get_data_refs")) {
-		return false;
-	}
-
-	R2ILContext *ctx = get_context (anal);
-	if (!ctx) {
-		return false;
-	}
-
-	BlockArray blocks;
-	if (!lift_function_blocks (anal, fcn, ctx, &blocks)) {
-		return false;
-	}
-
-	RVecAnalRef *found = NULL;
-	RVecAnalRef *result = NULL;
-	R2SleighAnalysisResultV2 *typed_refs = NULL;
-	R2SleighAnalysisResultViewV2 typed_view = {0};
-	uint32_t typed_status = sleigh_v2_analysis_query (R2SLEIGH_QUERY_DATA_REFS_V2,
-		ctx, (const R2ILBlock *const *)blocks.blocks, blocks.count, fcn->addr,
-		&typed_refs, &typed_view);
-	if (typed_status != R2SLEIGH_STATUS_OK_V2) {
-		goto beach;
-	}
-	size_t typed_count = typed_view.primary_count;
-	if (!typed_count) {
-		goto beach;
-	}
-	const R2SleighDataRef *typed_items = (const R2SleighDataRef *)typed_view.primary;
-	if (!typed_items) {
-		goto beach;
-	}
-	size_t ref_count = 0;
-	if (!collect_data_refs_from_typed (
-			anal, fcn, typed_items, typed_count, NULL, &ref_count)) {
-		goto beach;
-	}
-	if (!ref_count) {
-		goto beach;
-	}
-	result = RVecAnalRef_new ();
-	if (!result || !RVecAnalRef_reserve (result, ref_count)) {
-		goto beach;
-	}
-	size_t written = 0;
-	if (!collect_data_refs_from_typed (
-			anal, fcn, typed_items, typed_count, result, &written)
-			|| written != ref_count) {
-		goto beach;
-	}
-	found = result;
-	result = NULL;
-beach:
-	RVecAnalRef_free (result);
-	(void)sleigh_v2_analysis_result_release (&typed_refs);
-	block_array_free (&blocks);
-	*refs = found;
-	return found != NULL;
-}
 
 typedef struct {
 	size_t sink_hits;
@@ -5555,7 +5468,6 @@ RAnalPlugin r_anal_plugin_sleigh = {
 	/* Deep integration callbacks */
 	.pre_analysis = sleigh_pre_analysis,
 	.analyze_fcn = sleigh_analyze_fcn,
-	.get_data_refs = sleigh_get_data_refs,
 	.post_analysis = sleigh_post_analysis,
 	.decompile = sleigh_decompile,
 };
