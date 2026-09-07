@@ -14033,3 +14033,25 @@ free and typed accessors, the vtable fields, roughly 40 lines across
 `ffi_v2.rs`, `r_anal_sleigh.c`, `r2sleigh_api_v2.h` and the engine. The Rust
 test that pinned its cast ordering is removed, because the code it described is
 gone; the rest of the surface is still there and should go with it.
+
+### Assumptions proposed upstream: radareorg/radare2#26683
+
+Option (c) from the placement discussion. The feature is extracted onto
+upstream master with no r2sleigh dependency: the epoch bump in the setter
+becomes `R_DIRTY_SET`, which is what upstream uses for the same purpose, and
+nothing else in the patch touches fork-added code. 139 lines across
+`r_anal.h`, `function.c`, `cmd_anal.inc.c`, `canal.c` and the tests.
+
+The argument made in the pull request is that radare2 has no per-function
+statement that survives a project and that another pass can read back --
+`ahr` pins a value at an address for ESIL, which is a different thing -- and
+that the payload is deliberately uninterpreted so more than one producer can
+use it. The interest is disclosed rather than hidden.
+
+If it is rejected, the fallback is to keep it in the fork as it is today; the
+integration pull request is unchanged either way until the outcome is known.
+The two other placement items are already resolved, as deletions rather than
+moves.
+
+**Upstream pull requests open from this work:** #26676 (prototype versus kind
+key), #26682 (xref ref-count invalidation), #26683 (per-function assumptions).
