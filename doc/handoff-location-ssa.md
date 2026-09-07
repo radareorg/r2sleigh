@@ -14558,3 +14558,51 @@ falls back to system radare2 headers.
 A per-function `pdd` is **not** representative: several functions render alone
 and refuse inside a whole-binary run, because analysis state accumulates across
 `aaa` and the earlier functions. Verify in the batch.
+
+### `entry0` refuses because a `pop` that produces a live value is elided
+
+`entry0` (ELF `_start`) refuses with `missing_definition` in every binary, and
+the trace runs like this. The read is `BindingId(3)`, read once and never
+written; the value is `tmp:55400_2 = LOAD [ram] RSP_0`, which is the `pop rsi`
+that takes **argc** off the process stack. `RSP_0` is the entry stack pointer
+and the memory it reads is version 0 of `ObjectId(1)` at `Exact(0)` -- entry
+memory, which the memory SSA already labels as having no defining instruction.
+
+The value *does* have a defining instruction, so the value-level
+`caller_supplied` rule ("a member with no defining instruction entered this
+function already holding its value") does not apply. What is missing is the
+write: `pop` is claimed by the stack-geometry certificate, and every geometry
+instruction with an output has its write elided as `DeadStackBase`
+(`rules.rs`, the `stack_geometry.insts` loop). A `pop` is two effects -- a load
+and a stack-pointer adjustment -- and only the second is geometry. Eliding the
+first loses the value the program actually read.
+
+**Measured and reverted:** treating a stack object at or above the entry stack
+pointer as caller storage, so it is entry-declared rather than missing a
+definition. It is the right statement -- the frame grows down, so storage at or
+above the entry stack pointer is the caller's, exactly as a version-0 register
+is -- but it is inert on the six local binaries, because the binding that
+refuses here holds the *loaded value*, not the stack object. It changed nothing
+and did not stay.
+
+The fix is in the geometry certificate: a `pop` whose loaded value is live is
+not purely stack geometry, and its output write must not be elided.
+
+### Two upstream pull requests moved
+
+`26682` (xref ref-count invalidation) had changes requested with two designs
+offered; the reviewer preferred the generation counter, and that is what is
+pushed now. The ref manager carries a `gen` bumped on add and remove,
+`RAnalFcnMeta` remembers the generation its counts were computed at, and the
+count functions reset when they disagree. Nothing is looked up on the write
+path, so shared blocks, block-less functions and the `fcn`-known branch are all
+covered by construction rather than by a second tree walk. `aa; ?t aar` on
+/bin/bash is 0.333s, level with master, against 0.65s for the lookup-per-xref
+version. Three tests cover an xref added and removed inside a function, an xref
+to a function with no blocks, and a callee whose count has to see the call a
+later `af` discovers.
+
+`26686` is new: reading `DT_INIT` and `DT_FINI` from the dynamic section.
+
+`26629` (argument sequences) has a reviewer note that they will look again but
+do not want it in 6.2.2, so it is waiting rather than blocked.
