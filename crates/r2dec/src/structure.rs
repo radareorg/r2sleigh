@@ -247,9 +247,19 @@ enum BddOp {
     Or,
 }
 
+/// What a control-coverage BDD branches on.
+///
+/// A switch partitions control k ways, which no single boolean predicate
+/// expresses, so its arms get variables of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum CoverageVar {
+    Branch(PredicateId),
+    SwitchArm { block_addr: u64, index: usize },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct BddNode {
-    variable: PredicateId,
+    variable: CoverageVar,
     low: usize,
     high: usize,
 }
@@ -310,7 +320,7 @@ impl<'a, 's> ControlBdd<'a, 's> {
         self.nodes.len().saturating_sub(2)
     }
 
-    fn variable(&mut self, variable: PredicateId, truth: bool) -> Result<usize, String> {
+    fn variable(&mut self, variable: CoverageVar, truth: bool) -> Result<usize, String> {
         let positive = self.make_node(variable, BDD_FALSE, BDD_TRUE)?;
         if truth {
             Ok(positive)
@@ -321,7 +331,7 @@ impl<'a, 's> ControlBdd<'a, 's> {
 
     fn make_node(
         &mut self,
-        variable: PredicateId,
+        variable: CoverageVar,
         low: usize,
         high: usize,
     ) -> Result<usize, String> {
@@ -1183,6 +1193,58 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
     }
 
+    /// The arm guard the block after a switch is rendered under.
+    ///
+    /// An arm that returns or jumps away never reaches the merge, so the values
+    /// that do are the ones whose bodies converge there.
+    fn converging_switch_arm_guard(
+        &self,
+        switch_block: u64,
+        merge_addr: u64,
+        cases: &[(Vec<u64>, Box<Region>)],
+        default: Option<&Region>,
+        falls_into: &BTreeMap<u64, Vec<u64>>,
+    ) -> Option<ControlGuard> {
+        let reaches_merge = |region: &Region| {
+            region
+                .blocks()
+                .iter()
+                .any(|block| self.func.successors(*block).contains(&merge_addr))
+        };
+        let mut case_values = Vec::new();
+        let mut includes_default = default.is_some_and(reaches_merge);
+        for (values, region) in cases {
+            if !reaches_merge(region) {
+                continue;
+            }
+            match falls_into.get(&region.entry()) {
+                Some(reaching) => case_values.extend(reaching.iter().copied()),
+                None => case_values.extend(values.iter().copied()),
+            }
+        }
+        // A case whose target is the merge has no arm of its own; the composer
+        // drops it, and C falls past the switch for exactly those values.
+        if let Some(fact) = self
+            .fold_ctx
+            .control_facts()
+            .and_then(|facts| facts.switch_for_block(switch_block))
+        {
+            case_values.extend(
+                fact.cases
+                    .iter()
+                    .filter_map(|(value, target)| (*target == merge_addr).then_some(*value)),
+            );
+            includes_default |= fact.default == Some(merge_addr);
+        }
+        case_values.sort_unstable();
+        case_values.dedup();
+        (!case_values.is_empty() || includes_default).then_some(ControlGuard::SwitchArm {
+            block_addr: switch_block,
+            case_values,
+            includes_default,
+        })
+    }
+
     /// Widen the switch arm the active domains carry to every value that
     /// reaches this body, which is what falling through means.
     fn widen_switch_arm_values(domains: &mut [RenderedBlockDomain], reaching: &[u64]) {
@@ -1608,7 +1670,20 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                                 stmts.push(CStmt::Goto(label));
                                 return Ok(CStmt::Block(stmts));
                             }
-                            match self.exit_continuation_stmt(*target) {
+                            // These blocks run after the loop is left, so
+                            // they are rendered in the domain the exit carries
+                            // rather than the loop body's.
+                            let outer_domains = self.active_domains.clone();
+                            match self.transfer_target_domains_for(*loop_header, *target) {
+                                Ok(domains) => self.active_domains = domains,
+                                Err(reason) => {
+                                    self.safety_reason = Some(reason);
+                                    return Ok(CStmt::Empty);
+                                }
+                            }
+                            let continuation = self.exit_continuation_stmt(*target);
+                            self.active_domains = outer_domains;
+                            match continuation {
                                 Ok(stmt) => return Ok(stmt),
                                 Err(ExitContinuationError::Structure(error)) => return Err(error),
                                 // Two walks refused this edge: the one looking
@@ -2167,7 +2242,24 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let mut prefix = self.structure_block_prefix_stmts(switch_block)?;
         prefix.push(switch_stmt);
         if let Some(merge_addr) = merge_block.filter(|_| !merge_owned_by_ancestor) {
-            Self::append_stmt_body_flat(&mut prefix, self.structure_block(merge_addr)?);
+            // What follows the switch runs for the arms that converge here, not
+            // for the ones that leave, so it is rendered under that guard.
+            let outer_domains = self.active_domains.clone();
+            if let Some(guard) = self.converging_switch_arm_guard(
+                switch_block,
+                merge_addr,
+                cases,
+                default,
+                &falls_into,
+            ) {
+                for domain in &mut self.active_domains {
+                    domain.guards.push(guard.clone());
+                }
+                Self::normalize_rendered_domains(&mut self.active_domains);
+            }
+            let merge_stmt = self.structure_block(merge_addr);
+            self.active_domains = outer_domains;
+            Self::append_stmt_body_flat(&mut prefix, merge_stmt?);
         }
         if prefix.len() == 1 {
             Ok(prefix.into_iter().next().unwrap_or(CStmt::Empty))
@@ -2854,58 +2946,66 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
     }
 
+    /// The rendered domain an exit out of `loop_header` carries to `target`.
+    ///
+    /// Leaving a loop drops it from the domain, so this is where a transfer's
+    /// claim that it does leave is checked against the canonical facts.
+    fn transfer_target_domains_for(
+        &self,
+        loop_header: u64,
+        target: u64,
+    ) -> Result<Vec<RenderedBlockDomain>, String> {
+        let loop_id = self.exact_loop_id_for_header(loop_header)?;
+        let facts = self.fold_ctx.control_facts().ok_or_else(|| {
+            format!("missing canonical control facts for transfer target 0x{target:x}")
+        })?;
+        let target_domain = Self::exact_control_domain(&facts.control_domains, target)?;
+        if target_domain.loops.contains(&loop_id) {
+            return Err(format!(
+                "transfer to 0x{target:x} does not leave canonical loop {loop_id:?}"
+            ));
+        }
+        if self.active_domains.is_empty() {
+            return Err(format!(
+                "transfer to 0x{target:x} has no active rendered control domain"
+            ));
+        }
+        let mut transformed = self.active_domains.clone();
+        for domain in &mut transformed {
+            let before = domain.loops.len();
+            domain.loops.retain(|active| *active != loop_id);
+            if domain.loops.len() == before {
+                return Err(format!(
+                    "transfer to 0x{target:x} is outside active canonical loop {loop_id:?}"
+                ));
+            }
+        }
+        Self::normalize_rendered_domains(&mut transformed);
+        for domain in &transformed {
+            if domain.loops != target_domain.loops {
+                return Err(format!(
+                    "transformed loop domain for transfer to 0x{target:x} is {:?}, canonical target is {:?}",
+                    domain.loops, target_domain.loops
+                ));
+            }
+            if !target_domain
+                .guards
+                .iter()
+                .all(|guard| domain.guards.contains(guard))
+            {
+                return Err(format!(
+                    "transformed guard domain for transfer to 0x{target:x} omits canonical target guards"
+                ));
+            }
+        }
+        Ok(transformed)
+    }
+
     fn record_transfer_target_domain(&mut self, loop_header: u64, target: u64) -> bool {
         if self.safety_reason.is_some() {
             return false;
         }
-        let result = (|| -> Result<Vec<RenderedBlockDomain>, String> {
-            let loop_id = self.exact_loop_id_for_header(loop_header)?;
-            let facts = self.fold_ctx.control_facts().ok_or_else(|| {
-                format!("missing canonical control facts for transfer target 0x{target:x}")
-            })?;
-            let target_domain = Self::exact_control_domain(&facts.control_domains, target)?;
-            if target_domain.loops.contains(&loop_id) {
-                return Err(format!(
-                    "transfer to 0x{target:x} does not leave canonical loop {:?}",
-                    loop_id
-                ));
-            }
-            if self.active_domains.is_empty() {
-                return Err(format!(
-                    "transfer to 0x{target:x} has no active rendered control domain"
-                ));
-            }
-            let mut transformed = self.active_domains.clone();
-            for domain in &mut transformed {
-                let before = domain.loops.len();
-                domain.loops.retain(|active| *active != loop_id);
-                if domain.loops.len() == before {
-                    return Err(format!(
-                        "transfer to 0x{target:x} is outside active canonical loop {:?}",
-                        loop_id
-                    ));
-                }
-            }
-            Self::normalize_rendered_domains(&mut transformed);
-            for domain in &transformed {
-                if domain.loops != target_domain.loops {
-                    return Err(format!(
-                        "transformed loop domain for transfer to 0x{target:x} is {:?}, canonical target is {:?}",
-                        domain.loops, target_domain.loops
-                    ));
-                }
-                if !target_domain
-                    .guards
-                    .iter()
-                    .all(|guard| domain.guards.contains(guard))
-                {
-                    return Err(format!(
-                        "transformed guard domain for transfer to 0x{target:x} omits canonical target guards"
-                    ));
-                }
-            }
-            Ok(transformed)
-        })();
+        let result = self.transfer_target_domains_for(loop_header, target);
         match result {
             Ok(transformed) => {
                 let target_domains = self.transfer_target_domains.entry(target).or_default();
@@ -3280,6 +3380,68 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         assignments.saturating_mul(formula_slots)
     }
 
+    /// The arms a switch guard admits, by the case values it carries.
+    ///
+    /// A guard names the values the selector took, and several of them can
+    /// leave by the same edge or by different ones, so this is a set.
+    fn switch_guard_targets(
+        facts: &r2types::FunctionControlFacts,
+        switch_block: u64,
+        case_values: &[u64],
+        includes_default: bool,
+    ) -> Result<BTreeSet<u64>, String> {
+        let switch = facts
+            .switches
+            .get(&switch_block)
+            .ok_or_else(|| format!("no canonical switch fact at 0x{switch_block:x}"))?;
+        let mut targets = case_values
+            .iter()
+            .map(|value| {
+                switch
+                    .cases
+                    .iter()
+                    .find(|(case, _)| case == value)
+                    .map(|(_, target)| *target)
+                    .ok_or_else(|| format!("switch at 0x{switch_block:x} has no case {value}"))
+            })
+            .collect::<Result<BTreeSet<_>, String>>()?;
+        if includes_default {
+            targets.extend(switch.default);
+        }
+        if targets.is_empty() {
+            return Err(format!("switch guard at 0x{switch_block:x} admits no arm"));
+        }
+        Ok(targets)
+    }
+
+    /// The formula selecting arm `index` of the `arity` a switch dispatches to.
+    ///
+    /// Arm `i` is the first whose variable holds, which makes the arms pairwise
+    /// disjoint and their union everything -- what a switch does, exactly.
+    fn switch_arm_formula(
+        bdd: &mut ControlBdd<'_, '_>,
+        block_addr: u64,
+        index: usize,
+        arity: usize,
+    ) -> Result<usize, String> {
+        let mut formula = BDD_TRUE;
+        for earlier in 0..index {
+            let literal = bdd.variable(
+                CoverageVar::SwitchArm {
+                    block_addr,
+                    index: earlier,
+                },
+                false,
+            )?;
+            formula = bdd.and(formula, literal)?;
+        }
+        if index + 1 < arity {
+            let literal = bdd.variable(CoverageVar::SwitchArm { block_addr, index }, true)?;
+            formula = bdd.and(formula, literal)?;
+        }
+        Ok(formula)
+    }
+
     fn rendered_branch_occurrences_cover_source(
         &mut self,
         block_addr: u64,
@@ -3289,35 +3451,9 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .fold_ctx
             .control_facts()
             .ok_or_else(|| "missing canonical control facts".to_string())?;
-        let source_domain = Self::exact_control_domain(&facts.control_domains, block_addr)?;
-        let has_switch_guard = source_domain
-            .guards
-            .iter()
-            .chain(
-                occurrences
-                    .iter()
-                    .flat_map(|occurrence| &occurrence.alternatives)
-                    .flat_map(|alternative| &alternative.guards),
-            )
-            .any(|guard| matches!(guard, ControlGuard::SwitchArm { .. }));
-        // The binary BDD below intentionally has no encoding for multi-way
-        // selector partitions. In a switch-bearing CFG, accept only a single
-        // occurrence whose canonical guard vector is exactly reproduced;
-        // duplicated/unioned switch domains remain a typed safety residual.
-        if has_switch_guard || !facts.switches.is_empty() {
-            let [occurrence] = occurrences else {
-                return Err(
-                    "multiple switch-domain occurrences require a representable disjoint-union proof"
-                        .to_string(),
-                );
-            };
-            let [alternative] = occurrence.alternatives.as_slice() else {
-                return Err(
-                    "switch-domain coverage requires one exact rendered alternative".to_string(),
-                );
-            };
-            return Ok(alternative.guards == source_domain.guards);
-        }
+        // The block needs one exact canonical domain to be provable at all; the
+        // proof below then compares reachability, not that domain's spelling.
+        Self::exact_control_domain(&facts.control_domains, block_addr)?;
         // A predicate in a completed inner loop is evaluated once per dynamic
         // iteration, not once per static CFG node. Project those predicates out
         // before comparing path coverage at a block outside that loop. Loop
@@ -3333,6 +3469,16 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             })
             .map(|predicate| predicate.id)
             .collect::<BTreeSet<_>>();
+        let varying_switches = facts
+            .switches
+            .keys()
+            .copied()
+            .filter(|switch_block| {
+                facts.loops.values().any(|loop_fact| {
+                    loop_fact.body.contains(switch_block) && !loop_fact.body.contains(&block_addr)
+                })
+            })
+            .collect::<BTreeSet<_>>();
         let reaching_blocks = self.blocks_reaching(block_addr);
         let reaching_predicates = reaching_blocks
             .iter()
@@ -3340,6 +3486,29 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .map(|predicate| predicate.id)
             .filter(|predicate| !varying_predicates.contains(predicate))
             .collect::<BTreeSet<_>>();
+        // A switch sends control exactly one of k ways. The arms in their
+        // canonical order are what both sides of the proof branch on.
+        let switch_arms = reaching_blocks
+            .iter()
+            .filter(|switch_block| !varying_switches.contains(*switch_block))
+            .filter_map(|switch_block| {
+                facts.switches.get(switch_block).map(|switch| {
+                    let mut targets = switch
+                        .cases
+                        .iter()
+                        .map(|(_, target)| *target)
+                        .chain(switch.default)
+                        .collect::<Vec<_>>();
+                    targets.sort_unstable();
+                    targets.dedup();
+                    (*switch_block, targets)
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        let switch_variables = switch_arms
+            .values()
+            .map(|targets| targets.len().saturating_sub(1))
+            .sum::<usize>();
         let rendered_formula_slots = occurrences
             .iter()
             .try_fold(1usize, |slots, occurrence| {
@@ -3352,8 +3521,10 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .len()
             .checked_add(rendered_formula_slots)
             .ok_or_else(|| "control coverage formula count overflowed".to_string())?;
-        let node_limit =
-            Self::control_coverage_node_limit(reaching_predicates.len(), formula_slots);
+        let node_limit = Self::control_coverage_node_limit(
+            reaching_predicates.len().saturating_add(switch_variables),
+            formula_slots,
+        );
         if !self.poll() {
             return Err("control coverage stopped".to_string());
         }
@@ -3374,33 +3545,80 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 }
                 let mut alternative_formula = BDD_TRUE;
                 let mut varying_assignments = BTreeMap::new();
+                let mut varying_arms = BTreeMap::new();
                 for guard in &alternative.guards {
                     if !self.poll() {
                         return Err("control coverage stopped".to_string());
                     }
-                    let ControlGuard::Branch { predicate, truth } = guard else {
-                        return Err(
-                            "aggregate proof currently requires branch-only guards".to_string()
-                        );
-                    };
-                    if varying_predicates.contains(predicate) {
-                        if varying_assignments
-                            .insert(*predicate, *truth)
-                            .is_some_and(|previous| previous != *truth)
-                        {
-                            alternative_formula = BDD_FALSE;
-                            break;
+                    match guard {
+                        ControlGuard::Branch { predicate, truth } => {
+                            if varying_predicates.contains(predicate) {
+                                if varying_assignments
+                                    .insert(*predicate, *truth)
+                                    .is_some_and(|previous| previous != *truth)
+                                {
+                                    alternative_formula = BDD_FALSE;
+                                    break;
+                                }
+                                continue;
+                            }
+                            if !reaching_predicates.contains(predicate) {
+                                return Err(format!(
+                                    "rendered domain for block 0x{block_addr:x} contains non-reaching predicate {predicate:?}"
+                                ));
+                            }
+                            let literal = bdd.variable(CoverageVar::Branch(*predicate), *truth)?;
+                            alternative_formula = bdd.and(alternative_formula, literal)?;
                         }
-                        continue;
+                        ControlGuard::SwitchArm {
+                            block_addr: switch_block,
+                            case_values,
+                            includes_default,
+                        } => {
+                            let admitted = Self::switch_guard_targets(
+                                facts,
+                                *switch_block,
+                                case_values,
+                                *includes_default,
+                            )?;
+                            if varying_switches.contains(switch_block) {
+                                let narrowed = match varying_arms.get(switch_block) {
+                                    Some(previous) => &admitted & previous,
+                                    None => admitted,
+                                };
+                                if narrowed.is_empty() {
+                                    alternative_formula = BDD_FALSE;
+                                    break;
+                                }
+                                varying_arms.insert(*switch_block, narrowed);
+                                continue;
+                            }
+                            let Some(targets) = switch_arms.get(switch_block) else {
+                                return Err(format!(
+                                    "rendered domain for block 0x{block_addr:x} names a switch at 0x{switch_block:x} the entry cannot reach"
+                                ));
+                            };
+                            let mut guard_formula = BDD_FALSE;
+                            for target in &admitted {
+                                let index =
+                                    targets.iter().position(|arm| arm == target).ok_or_else(
+                                        || {
+                                            format!(
+                                        "switch at 0x{switch_block:x} has no arm reaching 0x{target:x}"
+                                    )
+                                        },
+                                    )?;
+                                let arm = Self::switch_arm_formula(
+                                    &mut bdd,
+                                    *switch_block,
+                                    index,
+                                    targets.len(),
+                                )?;
+                                guard_formula = bdd.or(guard_formula, arm)?;
+                            }
+                            alternative_formula = bdd.and(alternative_formula, guard_formula)?;
+                        }
                     }
-                    if !reaching_predicates.contains(predicate) {
-                        return Err(format!(
-                            "rendered domain for block 0x{block_addr:x} contains non-reaching predicate {:?}",
-                            predicate
-                        ));
-                    }
-                    let literal = bdd.variable(*predicate, *truth)?;
-                    alternative_formula = bdd.and(alternative_formula, literal)?;
                 }
                 occurrence_formula = bdd.or(occurrence_formula, alternative_formula)?;
             }
@@ -3438,6 +3656,19 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 }
                 let edge_formula = if self.func.successors(from).len() <= 1 {
                     BDD_TRUE
+                } else if facts.switches.contains_key(&from) {
+                    match switch_arms.get(&from) {
+                        None => BDD_TRUE,
+                        Some(targets) => {
+                            let index =
+                                targets.iter().position(|arm| *arm == to).ok_or_else(|| {
+                                    format!(
+                                        "successor 0x{to:x} is absent from the switch at 0x{from:x}"
+                                    )
+                                })?;
+                            Self::switch_arm_formula(&mut bdd, from, index, targets.len())?
+                        }
+                    }
                 } else {
                     let predicate = facts
                         .branch_for_block(from)
@@ -3445,9 +3676,9 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     if varying_predicates.contains(&predicate.id) {
                         BDD_TRUE
                     } else if predicate.false_target == to {
-                        bdd.variable(predicate.id, false)?
+                        bdd.variable(CoverageVar::Branch(predicate.id), false)?
                     } else if predicate.true_target == to {
-                        bdd.variable(predicate.id, true)?
+                        bdd.variable(CoverageVar::Branch(predicate.id), true)?
                     } else {
                         return Err(format!(
                             "successor 0x{to:x} is absent from predicate at 0x{from:x}"
@@ -3469,6 +3700,24 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .get(&self.func.entry)
             .copied()
             .unwrap_or(BDD_FALSE);
+        if source_formula != rendered_formula {
+            // The guards on both sides are what a repair has to reconcile, and
+            // a bare "did not cover" leaves the next reader with nothing.
+            r2il::refusal_evidence!(
+                "control-coverage",
+                "{block_addr:#x} rendered {:?} against canonical {:?}",
+                occurrences
+                    .iter()
+                    .map(|occurrence| occurrence
+                        .alternatives
+                        .iter()
+                        .map(|alternative| alternative.guards.clone())
+                        .collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+                Self::exact_control_domain(&facts.control_domains, block_addr)
+                    .map(|domain| domain.guards.clone())
+            );
+        }
         Ok(source_formula == rendered_formula)
     }
 
@@ -5095,7 +5344,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
 mod tests {
     use super::{
         BDD_FALSE, BDD_TRUE, ControlBdd, ControlFlowStructureError, ControlFlowStructurer,
-        RenderedBlockDomain, RenderedBlockOccurrence,
+        CoverageVar, RenderedBlockDomain, RenderedBlockOccurrence,
     };
     use crate::ast::{
         BinaryOp, CExpr, CFunction, CStmt, CType, RenderObservationOwner, UnaryOp,
@@ -5124,8 +5373,12 @@ mod tests {
     fn control_bdd_proves_disjoint_duplicated_path_coverage() {
         let mut bdd = ControlBdd::new(64);
         let predicate = PredicateId(0);
-        let positive = bdd.variable(predicate, true).expect("positive literal");
-        let negative = bdd.variable(predicate, false).expect("negative literal");
+        let positive = bdd
+            .variable(CoverageVar::Branch(predicate), true)
+            .expect("positive literal");
+        let negative = bdd
+            .variable(CoverageVar::Branch(predicate), false)
+            .expect("negative literal");
         assert_eq!(
             bdd.and(positive, negative).expect("literal intersection"),
             BDD_FALSE
@@ -5137,10 +5390,11 @@ mod tests {
     fn control_bdd_node_limit_refusal_is_reachable() {
         let mut bdd = ControlBdd::new(1);
         let predicate = PredicateId(0);
-        bdd.variable(predicate, true).expect("first node in budget");
+        bdd.variable(CoverageVar::Branch(predicate), true)
+            .expect("first node in budget");
 
         assert!(
-            bdd.variable(predicate, false)
+            bdd.variable(CoverageVar::Branch(predicate), false)
                 .expect_err("the second distinct node must exceed a one-node budget")
                 .contains("exceeded structuring safety budget (1)")
         );

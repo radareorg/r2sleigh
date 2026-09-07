@@ -218,9 +218,20 @@ impl<'a> RegionAnalyzer<'a> {
         cases: Vec<(u64, u64)>,
         default: Option<u64>,
     ) -> Option<LocalSwitchTargets> {
+        // A case whose target left the CFG is a case the certificate still
+        // lists, so the loss is named rather than filtered away in silence.
         let cases = cases
             .into_iter()
-            .filter(|(_, target)| self.func.cfg().get_block(*target).is_some())
+            .filter(|(value, target)| {
+                let local = self.func.cfg().get_block(*target).is_some();
+                if !local {
+                    r2il::refusal_evidence!(
+                        "switch-region",
+                        "case {value} target {target:#x} is not a block of this function"
+                    );
+                }
+                local
+            })
             .collect::<Vec<_>>();
         let default = default.filter(|target| self.func.cfg().get_block(*target).is_some());
         (!cases.is_empty()).then_some((cases, default))
@@ -1448,16 +1459,32 @@ impl<'a> RegionAnalyzer<'a> {
                                     blocks: Vec::new(),
                                 };
                             }
-                            let Some(target_node) = graph.node_for_block(target_block) else {
+                            // Each drop below removes a case the certificate
+                            // still lists, so each one says which and why.
+                            let Some(target_node) =
+                                graph.node_for_switch_target(node, target_block)
+                            else {
+                                r2il::refusal_evidence!(
+                                    "switch-region",
+                                    "{switch_block:#x} drops cases {values:?}: target {target_block:#x} has no node in the collapsed graph"
+                                );
                                 continue;
                             };
                             if Some(target_node) == merge {
+                                r2il::refusal_evidence!(
+                                    "switch-region",
+                                    "{switch_block:#x} drops cases {values:?}: target {target_block:#x} is the merge"
+                                );
                                 continue;
                             }
                             if default
                                 .and_then(|addr| graph.node_for_block(addr))
                                 .is_some_and(|def_node| def_node == target_node)
                             {
+                                r2il::refusal_evidence!(
+                                    "switch-region",
+                                    "{switch_block:#x} drops cases {values:?}: target {target_block:#x} is the default"
+                                );
                                 continue;
                             }
                             let case_region =
@@ -1844,6 +1871,25 @@ impl WorkingGraph {
 
     fn node_for_block(&self, block: u64) -> Option<usize> {
         self.block_to_node.get(&block).copied()
+    }
+
+    /// The node that stands for the edge from `from` into `target`.
+    ///
+    /// A target outside the region owns no node here, and the transfer added
+    /// for the edge that leaves is what represents it.
+    fn node_for_switch_target(&self, from: usize, target: u64) -> Option<usize> {
+        if let Some(node) = self.node_for_block(target) {
+            return Some(node);
+        }
+        self.sorted_succs(from).into_iter().find(|id| {
+            matches!(
+                self.nodes.get(id).map(|node| &node.region),
+                Some(Region::Transfer {
+                    target: transferred,
+                    ..
+                }) if *transferred == target
+            )
+        })
     }
 
     fn node_region(&self, node: usize) -> Option<Region> {
