@@ -14318,3 +14318,41 @@ mentions on that binary are dominated by a contiguous run of `sub_4028xx` at
 sixteen-byte spacing, which is the procedure linkage table. radare2 names those
 `sym.imp.*` at its own load address. Whether they are skipped, renamed, or lost
 to the address mapping is what the trail will say.
+
+### The slot-read coalescing that worked and was reverted
+
+Saved as `wip-slot-reads.patch` in the session scratchpad. It goes further than
+anything landed and it is not in the tree, because it leaves the corpus unable
+to compile.
+
+Two changes. Membership stopped requiring a `StackReloadSourceCertificate`,
+which needs one reaching store and therefore excludes every variable a loop
+writes -- most of them at -O0. A full-width read of a private slot is the
+slot's value whatever store put it there, so membership comes from the
+structured accesses directly and the certificates only add the copies they
+already follow. And the load-suppression check stopped keying off that
+certificate, taking the object from the access instead.
+
+It works where it fires. `djb2` at x86-64 -O0 goes from thirty-three statements
+to twenty-five, the three-statement reload chains collapse, and the array read
+renders `stack_m16[RDX_2]` instead of loading the base into a temporary first.
+
+**Why it is reverted.** The loads in a loop *header* are not suppressed, so
+they render as `stack_m40 = stack_m40` inside the comma expression that
+`combine_loop_condition_prefix` builds, and `-Wself-assign` fails nine of the
+fifty-four corpus cells. One differential failure follows from that rather than
+from behaviour: the cell falls back to the diagnostic basis, which is one of the
+six known wrong canaries.
+
+Three attempts did not find why the header's loads miss the journal's coalesced
+sites. The fold does reach them -- `combine_loop_condition_prefix` turns folded
+statements into comma expressions and drops the empty ones, so a suppressed load
+would disappear -- which means the condition is false rather than the site being
+wrong. The candidates not yet eliminated: `loaded_stack_object` requires exactly
+one non-write access at the site and returns nothing for a site carrying more;
+and the certificate map may not hold the header's access under the block address
+the lookup uses. Either is one print away and neither was worth a fourth guess.
+
+The rule that produced the revert is the project's own: three attempts by
+different routes is iterating, and the tree does not keep a change that fails
+the gate.
