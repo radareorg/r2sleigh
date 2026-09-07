@@ -4842,27 +4842,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c_data_ref_query_refuses_mismatched_record_contract_before_cast() {
-        let source = include_str!("../r_anal_sleigh.c");
-        let table_size_check = source
-            .find("api->struct_size != sizeof (*api)")
-            .expect("C consumer must reject mismatched API tables");
-        let record_size_check = source
-            .find("api->data_ref_size != sizeof (R2SleighDataRef)")
-            .expect("C consumer must reject mismatched data-ref strides");
-        let record_schema_check = source
-            .find("api->data_ref_schema_version != R2SLEIGH_DATA_REF_SCHEMA_V2")
-            .expect("C consumer must reject mismatched data-ref schemas");
-        let record_cast = source
-            .find("const R2SleighDataRef *typed_items")
-            .expect("C consumer must retain the typed data-ref boundary");
-
-        assert!(table_size_check < record_size_check);
-        assert!(record_size_check < record_cast);
-        assert!(record_schema_check < record_cast);
-    }
-
     fn signature_param_candidate(
         name: &str,
         ty: r2types::CTypeLike,

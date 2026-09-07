@@ -14002,3 +14002,34 @@ with no demonstrated trigger**: either find the architecture that needs it, or
 drop it the way the inert ELF `DT_INIT` path was dropped. What must stay
 regardless is the `R_IPI` to `R_API` widening beside it, which is how the plugin
 reaches the function at all.
+
+## The "move to the plugin" items were already moved
+
+The audit listed about 460 lines as candidates to migrate. Checking the plugin
+first showed they had migrated already and the originals were never removed:
+
+- `snapshot_capture.c:5264` has its own `r_anal_types_snapshot_with_limits`, so
+  the whole types-snapshot walk in the fork's `type.c` -- budget, preflight,
+  clone, `types_baselist_with_limits`, the two contexts -- had no caller
+  anywhere. About 430 lines, deleted rather than moved.
+- `snapshot_capture.c` likewise carries the calling-convention record parsers,
+  `r_anal_cc_preserves_reg`, `r_anal_function_vars_cache_init_readonly` and
+  `r_anal_function_signature_from_type_name`. All deleted from the fork; the
+  sdb records stay, because the plugin reads those keys and they are true ABI
+  facts.
+
+The one call back into radare2 was `r_anal_types_snapshot_free`, which was
+`r_list_free` under another name. The plugin calls `r_list_free` now.
+
+**The lesson for the next audit.** Before proposing to move anything out of the
+fork, grep the plugin for the same symbol. Twice now the answer has been that
+the work was done and only the original was left, which turns a migration with
+risk into a deletion with none. The `R_API` census would never have found these:
+they are `static` in the plugin and `R_IPI` or unreferenced `R_API` in the fork.
+
+**A consequence to finish.** Removing the `get_data_refs` hook left the data-ref
+query dead across the FFI as well -- `R2SleighDataRef`, the schema constant, the
+free and typed accessors, the vtable fields, roughly 40 lines across
+`ffi_v2.rs`, `r_anal_sleigh.c`, `r2sleigh_api_v2.h` and the engine. The Rust
+test that pinned its cast ordering is removed, because the code it described is
+gone; the rest of the surface is still there and should go with it.
