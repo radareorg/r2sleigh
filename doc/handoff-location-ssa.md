@@ -14705,19 +14705,29 @@ its caller shows the condition for that block built exactly **once**. The
 condition also already goes through the plan -- `planned_input_expr_at` -- so a
 bound operand is named by its symbol there, not re-rendered.
 
-The second registration is not there either. Both places that push a `Use`
-target -- `observe_normalized_input_uses_expr`, which marks every exact original
-use behind a normalized input, and the folded-definition accounting, which
-pushes one per operand of a definition folded into a rendered expression -- were
-instrumented, and across the whole run that use site is registered **once**.
+Neither place that pushes a `Use` target registers it twice; instrumenting both
+shows exactly one. The second read is a **gap cell**. `placement_target` maps
+`ObservationTarget::Gapped { cell: GapCell::Use { site } }` to the same
+`PlacementObservationTarget::Use { site }` as a rendered use -- deliberately,
+because a gapped read of a bound value is still a read and placement must keep
+the definition it names -- so one machine use observed once and gap-claimed once
+arrives at placement as two readers. Probing the gapped mapping prints the site,
+and the two read pushes carry observation indices 286 and 298 for it.
 
-So the state after this session is a narrowed contradiction, which is worth more
-than a guess: one condition build, one observation target, and two reads at two
-different rendered statements. The duplication is therefore introduced between
-target registration and `collect_final_placement_occurrences`, which is where
-the next probe belongs -- the walk that scopes observation identifiers onto AST
-statements, or the identifiers being cloned with an expression after they are
-allocated.
+The mechanism is two owners for one operand. A gap opened during op lowering
+claims a `Use` cell for every operand of every instruction it owns, including
+the terminal `CBranch`; the structurer separately renders that same condition
+through `get_branch_condition_with_predicate`, which does not go through the
+lowering path that refused. The journal's conflict check is one-directional --
+a gap claiming a cell that already has an observation raises `ConflictingUse`,
+but an observation recorded onto a cell a gap already claimed does not -- so
+both answers survive, the inlining guard counts two rendered readers, the flag
+is bound rather than inlined, and its definition then has nowhere to come from.
+
+The fix is that the branch condition has one owner, not that the second read is
+deduplicated at placement. Deduplicating would leave a gap still claiming a cell
+the rendering also answers for, which is the state the conflict check exists to
+prevent in the other direction.
 
 Whatever issues the second identifier, the rule to restore is the one this
 project already settled: a folded obligation's occurrence *moves* with its
