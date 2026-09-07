@@ -14143,3 +14143,42 @@ reader, which is the narrow version that leaves the general case unimproved.
 The coalescing work is saved as `step2-slot-coalescing.patch` in the session
 scratchpad and is re-applied on top of the escape rule. The tree is at
 `b8143276` with the gate at 54 raw, differential and snapshot.
+
+### Sweep12, and a -O0 regression the sweep found
+
+Sweep12 ran on `26af8728`, before the two changes above, so it is the baseline
+for this arc rather than a measurement of it. **Coverage 1260/1604 = 78.6 per
+cent** by the plugin's own census, and 1260/1803 = 69.9 against angr's 95.1 on
+the scored population. Against sweep11's 1420/1650 = 86.1 that is a regression
+of seven and a half points, and it is entirely at -O0:
+
+| binary | sweep11 -O0 | sweep12 -O0 | sweep11 -O2 | sweep12 -O2 |
+| --- | --- | --- | --- | --- |
+| `minigzip` | 141/152 | 112/140 | 108/125 | 109/127 |
+| `libz.so` | 143/153 | 116/146 | 99/123 | 100/125 |
+| `example` | 145/162 | 114/150 | 109/128 | 110/130 |
+| `bzip2` | 81/99 | 66/98 | 35/55 | 34/55 |
+
+Two separate things are inside that. The **observed** count fell as well --
+`minigzip` at -O0 went from 152 functions to 140 -- and function discovery is
+radare2's alone, so something in the fork reduction changed what `aflj`
+reports. Separately, nineteen functions that rendered at sweep11 now refuse,
+sixteen of them at the return boundary (`implementation.rs:1349`, 2 to 16 on
+`minigzip` alone) and five at `PlannedElidedValueRendered`. Wide, the return
+boundary is 88 of the 207 -O0 refusals and `PlannedElidedValueRendered` is 39,
+where sweep11 had 13 and 14.
+
+**What is not yet known is which side owns it.** The plugin commits in the
+window include the route pre-emption removal, which deliberately converts prose
+bodies into honest refusals, and the fork commits include the DWARF evidence
+cut. Testing the newly refusing functions locally does not separate them: the
+installed radare2 is already the reduced fork, and the plugin at `60ab8d38`
+does not build against it -- `r_anal_dwarf_function_frame_pointer_get`,
+`get_data_refs` and `r_anal_types_snapshot_free` are all gone -- because the
+fork cut and the plugin's own DWARF reader landed together. Separating them
+needs the pre-reduction fork built beside the current one, from the
+`pre-rebase-04aa3797` tag, and the plugin at `60ab8d38` built against it.
+
+That measurement is the next task, and it comes before more rendering work: a
+regression of this size at -O0 is worth more than the quality arc it would
+otherwise fund.
