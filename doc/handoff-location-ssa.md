@@ -14889,7 +14889,36 @@ the architectural item this session has now reached from four directions: the
 coverage proof, the duplicated switch, the deferred merge, and the goto that
 carries no domain.
 
-### Exit-domain propagation: written, measured, reverted
+### Exit-domain propagation landed, and `gz_open` renders
+
+*(The section below records the first attempt, which was reverted. What follows
+here is what finally worked, and the two things that separated them.)*
+
+Regions now report the domain control falls out under, and a sequence hands it to
+whatever runs next. `0x223c` is written once under the union of its three routes
+-- the converging arms, the out-of-range default, and the digit path -- and the
+coverage proof closes. **`gz_open` renders its seventy-eight-case switch,
+including `case '+'`.** Local census 94 to 93.
+
+Two things separated this from the reverted attempt.
+
+**The carry has to reach `structure_loop_body`.** A loop body's sequence is
+flattened by its own loop, not by the generic `Region::Sequence` arm, and the
+block after a switch inside a loop is written there. Instrumenting for it is the
+only way to find that; three probes went to the merge-writing sites first, and
+none of them is the writer.
+
+**Silence has to mean "unchanged".** The reverted attempt had every region report
+its active domain when it had nothing else to say, which is semantically right
+and costs one clone per region -- and a switch guard carries every case value, so
+`deflate_stored` went from rendering to thirty-six seconds and over the
+structuring deadline. Reporting nothing instead, and letting the consumer leave
+the running domain alone, takes it to four and a half seconds. Only a branch arm
+clones now, and only to state the guard its own edge put on it. The deadline was
+never the defect; the clone was, which is the standing rule about cost holding
+up exactly as written.
+
+### First attempt: written, measured, reverted
 
 The item everything points at -- every route into a block contributes an
 alternative -- was implemented far enough to test, and the result narrows it
