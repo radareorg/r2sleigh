@@ -14817,3 +14817,33 @@ What the backstop needs is a reason to succeed, and the first step is knowing
 where it stops: it currently opens on op-lowering refusals only, and the
 functions it opens in are refusing at placement and in the observation journal,
 which are stages it does not cover.
+
+
+### `gz_open` explained end to end
+
+The new composer evidence closes the loop on the function this session started
+with. `0x2171` -- the block that computes the selector and does
+`sub eax, 0x2b; cmp eax, 0x4d; ja ...` -- has **no region for its true arm**,
+and that arm is `0x223c`. The switch's default is to ignore an out-of-range
+character and fall to `p++`, which is the same block the switch converges on. So
+`0x223c` is both the switch's merge and `0x2171`'s default target, the composer
+gave it to the switch, and `0x2171`'s arm was left with nothing.
+
+Three edges reach `0x223c`:
+
+1. the seventy-seven converging switch arms,
+2. `0x2171`'s default edge, when the character is out of range,
+3. the digit path at `0x2158`, which jumps straight there.
+
+The rendering accounts for the first only, which is exactly what the coverage
+proof reports: two occurrences, both carrying `0x2171=false` and the arm guard,
+against a canonical domain that carries neither. The proof is right and the
+rendering is wrong.
+
+**The general statement, now with a worked case: a rendered site's domain is the
+union of the domains of everything that reaches it.** Making that true here is
+not a local repair -- `0x223c` has to be rendered once after the whole
+`if`/`switch`, with all three edges reaching it, which means recomposing
+`0x2171` as a branch whose arm is the switch and whose merge is `0x223c`. Since
+`0x2142`/`0x214d` short-circuit into `0x2171`, the switch is currently
+duplicated into both, so this and the duplication are the same recomposition.
