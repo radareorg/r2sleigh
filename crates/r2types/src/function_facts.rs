@@ -1018,6 +1018,9 @@ pub enum CertifiedEntity {
         /// Absence grants no source-variable identity; a separate upstream
         /// callee-allocation proof is required for an anonymous C object.
         source_slot: Option<r2ssa::SourceStackSlotSpec>,
+        /// Values a reload proves to be this slot's contents at full width.
+        /// Empty where nothing loads the slot back into a register.
+        reload_values: BTreeSet<r2ssa::ValueId>,
         /// Upstream proof for a compiler-created, source-less callee-owned
         /// stack object. Consumers may use it but must not reconstruct it.
         callee_allocation: Option<r2ssa::CalleeStackAllocationCertificate>,
@@ -1063,6 +1066,24 @@ impl CertifiedEntity {
             Self::Parameter { entry_values, .. } => Some(entry_values.clone()),
             Self::LoopCarrier { members, .. } => {
                 Some(members.iter().map(|member| member.value).collect())
+            }
+            // A reload of a slot is the slot, so it and the registers that
+            // ferry it are one variable. A parameter's home is excluded: the
+            // parameter entity owns those values and decides there.
+            Self::StackSlot {
+                source_slot,
+                reload_values,
+                ..
+            } if !reload_values.is_empty()
+                && !matches!(
+                    source_slot.map(|slot| slot.role()),
+                    Some(
+                        r2ssa::SourceStackSlotRole::ParameterHome { .. }
+                            | r2ssa::SourceStackSlotRole::Parameter { .. }
+                    )
+                ) =>
+            {
+                Some(reload_values.clone())
             }
             Self::StackSlot { .. } => None,
         }
@@ -4387,6 +4408,7 @@ fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRenderFacts {
                     size: cert.size,
                     array_layout: cert.array_layout.clone(),
                     source_slot: cert.source_slot,
+                    reload_values: cert.reload_values.clone(),
                     callee_allocation: cert.callee_allocation.clone(),
                     ty: cert
                         .source_slot
@@ -5109,11 +5131,13 @@ mod tests {
             size: Some(8),
             array_layout: r2ssa::StackArrayLayoutDisposition::NotIndexed,
             source_slot: None,
+            reload_values: BTreeSet::new(),
             callee_allocation: None,
             ty: None,
         };
 
         assert_eq!(forward.coalescing_values(), reversed.coalescing_values());
+        // No source slot, so no declared local to be the contents of.
         assert_eq!(stack_slot.coalescing_values(), None);
     }
 
@@ -5550,6 +5574,7 @@ mod tests {
                             size: None,
                             array_layout: r2ssa::StackArrayLayoutDisposition::NotIndexed,
                             source_slot: None,
+                            reload_values: BTreeSet::new(),
                             callee_allocation: None,
                             ty: None,
                         },
@@ -7624,6 +7649,7 @@ mod tests {
                     size: None,
                     array_layout: r2ssa::StackArrayLayoutDisposition::NotIndexed,
                     source_slot: None,
+                    reload_values: BTreeSet::new(),
                     callee_allocation: None,
                     ty: None,
                 },

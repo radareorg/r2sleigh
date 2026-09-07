@@ -1817,6 +1817,32 @@ impl LegacyObservationJournal {
                 // it, and names the carrier it means, which is that proof. A
                 // restore the convention does not speak for is declined
                 // exactly as an unproven program copy is.
+                // A reload of a slot whose object is the value's own binding
+                // says `x = x` for the same reason a copy does: the store
+                // that filled the slot already produced this value, and the
+                // memory SSA proved nothing wrote it in between.
+                if matches!(op, r2ssa::SSAOp::Load { .. })
+                    && let Some(inst) = origins.origin(site).and_then(|origin| match origin {
+                        NormalizedOpOrigin::Original(inst) => Some(*inst),
+                        _ => None,
+                    })
+                    && let Some(output) = graph.inst(inst).and_then(|inst| inst.output)
+                    && let Some(certificate) =
+                        source.source().certificates().stack_reloads.get(&output)
+                    && certificate.reload == output
+                    && let Some(ValueDisposition::Bound {
+                        binding: value_binding,
+                    }) = plan.disposition(output)
+                    && plan.stack_object_disposition(certificate.object)
+                        == Some(StackObjectDisposition::Bound {
+                            binding: *value_binding,
+                        })
+                {
+                    coalesced_carrier_copy_sites.insert(site);
+                    coalesced_copy_outputs.insert(output);
+                    coalesced_copy_writes.insert(inst);
+                    continue;
+                }
                 let is_call_restore = matches!(op, r2ssa::SSAOp::CallRestore { .. });
                 let src = match op {
                     r2ssa::SSAOp::Copy { src, .. } => src,

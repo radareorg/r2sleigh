@@ -353,6 +353,7 @@ impl SemanticObligationInventory {
         structured: &StructuredDataflowFacts,
         boundaries: &SourceBoundaryFacts,
         machine_context: Option<&crate::SourceMachineContext>,
+        private_stack_objects: &BTreeSet<crate::ObjectId>,
     ) -> Self {
         let (canonical_ids, mut construction_failures) = collect_canonical_instruction_ids(graph);
         let mut required = BTreeMap::<
@@ -411,8 +412,18 @@ impl SemanticObligationInventory {
         }
 
         for access in structured.memory_accesses.values() {
+            // A slot no pointer outside its own accesses can name is a C
+            // object, so reading it is not an observable effect: the load
+            // produces the variable's own value and lives only while something
+            // reads it. The write stays observable -- it is the assignment,
+            // and dropping it would lose what the variable holds.
+            let private_read = !access.is_write
+                && access.provenance_complete
+                && private_stack_objects.contains(&access.object);
             let kind = if access.is_write {
                 SemanticObligationKind::ObservableMemoryWrite
+            } else if private_read {
+                SemanticObligationKind::LiveValueProducer
             } else {
                 SemanticObligationKind::ObservableMemoryRead
             };
@@ -2400,8 +2411,13 @@ mod tests {
                 complete: true,
             },
         );
-        let inventory =
-            SemanticObligationInventory::collect(graph, artifact.structured(), &boundaries, None);
+        let inventory = SemanticObligationInventory::collect(
+            graph,
+            artifact.structured(),
+            &boundaries,
+            None,
+            &BTreeSet::new(),
+        );
 
         assert!(!inventory.is_complete());
         assert!(inventory.construction_failures().iter().any(|failure| {
@@ -2516,6 +2532,7 @@ mod tests {
             artifact.structured(),
             &artifact.facts().boundaries,
             None,
+            &BTreeSet::new(),
         );
         assert!(!inventory.is_complete());
         assert!(inventory.construction_failures.iter().any(|failure| {
@@ -2559,6 +2576,7 @@ mod tests {
             artifact.structured(),
             &artifact.facts().boundaries,
             None,
+            &BTreeSet::new(),
         );
         assert_eq!(inventory.source_instruction_count(), 0);
         assert!(!inventory.unstructured_cycle_blocks().is_empty());
@@ -2642,6 +2660,7 @@ mod tests {
             &structured,
             &artifact.facts().boundaries,
             None,
+            &BTreeSet::new(),
         );
         assert!(
             inventory

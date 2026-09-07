@@ -123,6 +123,59 @@ pub(super) fn binding_components(
 /// spell it at its readers. Taking eligibility as an argument is what keeps
 /// that from being a second answerer: the inlining decision is still made in
 /// one place, and this is the partition that decision is read against.
+/// The one binding every value is bound to, when there is one.
+///
+/// An empty set, an unbound member, or two bindings all answer `None`: the
+/// caller then owns its object rather than sharing one.
+pub(super) fn unanimous_value_binding(
+    dispositions: &[ValueDisposition],
+    values: impl IntoIterator<Item = ValueId>,
+) -> Option<BindingId> {
+    let mut found = None;
+    for value in values {
+        let ValueDisposition::Bound { binding } = dispositions.get(value.0 as usize)? else {
+            return None;
+        };
+        match found {
+            Some(existing) if existing != *binding => return None,
+            _ => found = Some(*binding),
+        }
+    }
+    found
+}
+
+/// The binding a stack object takes, sharing one with the values its reloads
+/// certify as its contents where there is one.
+fn bind_stack_object(
+    bindings: &mut Vec<Binding>,
+    dispositions: &[ValueDisposition],
+    reload_values: &BTreeSet<ValueId>,
+    entity: r2ssa::SemanticId,
+    declaration_type: CType,
+    presentation_name_hint: Option<String>,
+) -> Result<BindingId, BindingPlanBuildError> {
+    if let Some(binding) = unanimous_value_binding(dispositions, reload_values.iter().copied()) {
+        let existing = &mut bindings[binding.index()];
+        existing.declaration_type = declaration_type;
+        existing.presentation_name_hint = presentation_name_hint;
+        return Ok(binding);
+    }
+    let Some(binding) = BindingId::from_dense_index(bindings.len()) else {
+        return Err(BindingPlanBuildError::TooManyBindings {
+            count: bindings.len().saturating_add(1),
+        });
+    };
+    bindings.push(Binding {
+        declaration_type,
+        certificate: BindingCertificate {
+            sources: Box::new([BindingCertificateSource::CertifiedEntity(entity)]),
+        },
+        presentation_name_hint,
+        caller_supplied: false,
+    });
+    Ok(binding)
+}
+
 pub(super) fn binding_components_with(
     source_owned: &SourceOwnedFunctionFacts,
     eligible: &[bool],
@@ -807,6 +860,7 @@ impl BindingPlan {
                     size,
                     array_layout,
                     source_slot,
+                    reload_values,
                     callee_allocation,
                     ty: _,
                 } = entity
@@ -906,13 +960,12 @@ impl BindingPlan {
                         );
                         continue;
                     }
-                    let Some(binding) = BindingId::from_dense_index(bindings.len()) else {
-                        return Err(BindingPlanBuildError::TooManyBindings {
-                            count: bindings.len().saturating_add(1),
-                        });
-                    };
-                    bindings.push(Binding {
-                        declaration_type: super::rules::declaration_type_for_stack_object(
+                    let binding = bind_stack_object(
+                        &mut bindings,
+                        &dispositions,
+                        reload_values,
+                        *id,
+                        super::rules::declaration_type_for_stack_object(
                             source_owned,
                             *object,
                             width_bits,
@@ -921,16 +974,12 @@ impl BindingPlan {
                                 .memory_model()
                                 .default_address_bits(),
                         ),
-                        certificate: BindingCertificate {
-                            sources: Box::new([BindingCertificateSource::CertifiedEntity(*id)]),
-                        },
-                        presentation_name_hint: Some(if certificate.entry_offset < 0 {
+                        Some(if certificate.entry_offset < 0 {
                             format!("stack_m{}", certificate.entry_offset.unsigned_abs())
                         } else {
                             format!("stack_p{}", certificate.entry_offset.unsigned_abs())
                         }),
-                        caller_supplied: false,
-                    });
+                    )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     continue;
                 }
@@ -938,13 +987,12 @@ impl BindingPlan {
                     // Named by the width its own accesses agree on, at the
                     // position the object model proved. A local like any other;
                     // only the origin of its geometry differs.
-                    let Some(binding) = BindingId::from_dense_index(bindings.len()) else {
-                        return Err(BindingPlanBuildError::TooManyBindings {
-                            count: bindings.len().saturating_add(1),
-                        });
-                    };
-                    bindings.push(Binding {
-                        declaration_type: super::rules::declaration_type_for_stack_object(
+                    let binding = bind_stack_object(
+                        &mut bindings,
+                        &dispositions,
+                        reload_values,
+                        *id,
+                        super::rules::declaration_type_for_stack_object(
                             source_owned,
                             *object,
                             width_bits,
@@ -953,16 +1001,12 @@ impl BindingPlan {
                                 .memory_model()
                                 .default_address_bits(),
                         ),
-                        certificate: BindingCertificate {
-                            sources: Box::new([BindingCertificateSource::CertifiedEntity(*id)]),
-                        },
-                        presentation_name_hint: Some(if *offset < 0 {
+                        Some(if *offset < 0 {
                             format!("stack_m{}", offset.unsigned_abs())
                         } else {
                             format!("stack_p{}", offset.unsigned_abs())
                         }),
-                        caller_supplied: false,
-                    });
+                    )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     continue;
                 };
@@ -993,31 +1037,28 @@ impl BindingPlan {
                     *offset,
                 ) {
                     r2ssa::SourceStackSlotRole::Local => {
-                        let Some(binding) = BindingId::from_dense_index(bindings.len()) else {
-                            return Err(BindingPlanBuildError::TooManyBindings {
-                                count: bindings.len().saturating_add(1),
-                            });
-                        };
-                        bindings.push(Binding {
-                            declaration_type: super::rules::declaration_type_for_stack_object(
-                                source_owned,
-                                *object,
-                                width_bits,
-                                source
-                                    .machine_context()
-                                    .memory_model()
-                                    .default_address_bits(),
-                            ),
-                            certificate: BindingCertificate {
-                                sources: Box::new([BindingCertificateSource::CertifiedEntity(*id)]),
-                            },
-                            presentation_name_hint: Some(if *offset < 0 {
-                                format!("stack_m{}", offset.unsigned_abs())
-                            } else {
-                                format!("stack_p{}", offset.unsigned_abs())
-                            }),
-                            caller_supplied: false,
+                        let declaration_type = super::rules::declaration_type_for_stack_object(
+                            source_owned,
+                            *object,
+                            width_bits,
+                            source
+                                .machine_context()
+                                .memory_model()
+                                .default_address_bits(),
+                        );
+                        let name_hint = Some(if *offset < 0 {
+                            format!("stack_m{}", offset.unsigned_abs())
+                        } else {
+                            format!("stack_p{}", offset.unsigned_abs())
                         });
+                        let binding = bind_stack_object(
+                            &mut bindings,
+                            &dispositions,
+                            reload_values,
+                            *id,
+                            declaration_type,
+                            name_hint,
+                        )?;
                         stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     }
                     r2ssa::SourceStackSlotRole::ParameterHome {

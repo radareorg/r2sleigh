@@ -1335,6 +1335,12 @@ pub struct StackSlotCertificate {
     /// Coordinate the source declared this slot at, when a source slot owns it.
     /// A frame-relative declaration is restated, so this is the original key.
     pub declared_at: Option<(StackAddressBase, i64)>,
+    /// Values a reload proves to be this slot's contents at their full width.
+    ///
+    /// A load whose reaching memory version is one store, at the slot's own
+    /// location and width, holds what that store wrote; so does a copy of it.
+    /// Rendering them and the slot as one variable asserts only that equality.
+    pub reload_values: BTreeSet<ValueId>,
     /// Exact proof that a source-less object lies wholly inside storage owned
     /// by this callee at every access. This is deliberately separate from a
     /// source slot: compiler-created spills and temporaries are real machine
@@ -1832,8 +1838,14 @@ impl PreparedFunctionFacts {
         phase("structured", structured.memory_accesses.len());
         let control_domains = collect_control_domain_facts(function, &predicates, &structured);
         phase("control_domains", 0);
-        let obligations =
-            SemanticObligationInventory::collect(graph, &structured, &boundaries, machine_context);
+        let private_stack_objects = private_stack_objects(graph, &objects, &structured);
+        let obligations = SemanticObligationInventory::collect(
+            graph,
+            &structured,
+            &boundaries,
+            machine_context,
+            &private_stack_objects,
+        );
         phase("obligations", 0);
         // A lifted body merges every storage live across a join, so the graph
         // records uses that carry no program observation. `DeadPhis` names
@@ -1853,6 +1865,7 @@ impl PreparedFunctionFacts {
             &call_sites,
             &structured,
             &unobserved,
+            &private_stack_objects,
         );
         phase("certificates", certificates.stack_slots.len());
         let (applied_assumption_bindings, assumption_usage) = collect_prepared_assumption_usage(
@@ -2757,6 +2770,87 @@ fn build_memory_ssa(
         defs_by_inst,
         phis_by_block,
     }
+}
+
+/// Stack objects no pointer outside their own accesses can name.
+///
+/// A slot whose address never leaves the accesses that read and write it is a
+/// C object rather than a piece of memory, so its loads and stores are variable
+/// accesses and owe no observable memory effect. The proof has two halves: no
+/// address value naming the object is used anywhere but as an access address,
+/// and nothing in the function reaches memory the model could not place, which
+/// may-aliases everything.
+pub(crate) fn private_stack_objects(
+    graph: &SsaGraph,
+    objects: &ObjectModel,
+    structured: &StructuredDataflowFacts,
+) -> BTreeSet<ObjectId> {
+    let mut private = BTreeSet::new();
+    let ram_accesses = structured
+        .memory_accesses
+        .values()
+        .filter(|access| access.space == SpaceId::Ram)
+        .collect::<Vec<_>>();
+    // An address the model could not place may name any frame slot, so no slot
+    // in this function is private once one exists.
+    if ram_accesses.iter().any(|access| {
+        objects
+            .object(access.object)
+            .is_some_and(|fact| matches!(fact.kind, ObjectKind::EscapedUnknown { .. }))
+    }) {
+        return private;
+    }
+    let mut addresses_by_object = BTreeMap::<ObjectId, BTreeSet<ValueId>>::new();
+    for (key, object) in &objects.value_objects {
+        if key.space == SpaceId::Ram {
+            addresses_by_object
+                .entry(*object)
+                .or_default()
+                .insert(key.value);
+        }
+    }
+    for (object, fact) in &objects.objects {
+        if !matches!(
+            fact.kind,
+            ObjectKind::StackSlot {
+                space: SpaceId::Ram,
+                ..
+            } | ObjectKind::FrameObject {
+                space: SpaceId::Ram,
+                ..
+            }
+        ) {
+            continue;
+        }
+        let addresses = addresses_by_object.get(object).cloned().unwrap_or_default();
+        if addresses.is_empty() {
+            continue;
+        }
+        let escapes = addresses.iter().any(|address| {
+            graph.use_sites(*address).iter().any(|site| {
+                let addresses_this_object = ram_accesses.iter().any(|access| {
+                    access.id.inst == site.inst
+                        && access.object == *object
+                        && access.address == *address
+                        && access.value != Some(*address)
+                });
+                if addresses_this_object {
+                    return false;
+                }
+                // Address arithmetic that stays inside the object is not an
+                // escape; its result is another address of the same object.
+                let stays_inside = graph
+                    .inst(site.inst)
+                    .and_then(|inst| inst.output)
+                    .is_some_and(|output| addresses.contains(&output));
+                !stays_inside
+            })
+        });
+        if !escapes {
+            private.insert(*object);
+        }
+    }
+    private
 }
 
 pub(crate) fn memory_locations_may_alias(
@@ -6815,6 +6909,7 @@ fn collect_prepared_function_certificates(
     call_sites: &CallSiteFacts,
     structured: &StructuredDataflowFacts,
     unobserved: &crate::deadphi::DeadPhis,
+    private_objects: &BTreeSet<ObjectId>,
 ) -> PreparedFunctionCertificates {
     let mut exact_stack_slots = BTreeMap::new();
     let mut declared_stack_slot_keys = BTreeMap::new();
@@ -7097,6 +7192,7 @@ fn collect_prepared_function_certificates(
                         .unwrap_or(StackArrayLayoutDisposition::NotIndexed),
                     source_slot: exact_stack_slots.get(&(base, offset)).copied(),
                     declared_at: declared_stack_slot_keys.get(&(base, offset)).copied(),
+                    reload_values: BTreeSet::new(),
                     callee_allocation: callee_stack_allocations.get(object).cloned(),
                 },
             )),
@@ -7238,6 +7334,24 @@ fn collect_prepared_function_certificates(
         );
     let stack_reloads =
         collect_stack_reload_source_certificates(function, graph, objects, memory, structured);
+    let mut stack_slots: BTreeMap<ObjectId, StackSlotCertificate> = stack_slots;
+    // A reload narrower or wider than the slot is a projection of it, not the
+    // slot's own value, so only an exact-width reload joins the slot's object.
+    for certificate in stack_reloads.values() {
+        if certificate.value_width != certificate.memory_width {
+            continue;
+        }
+        // Only a slot that is a C object joins its reloads: for anything else
+        // the load is an observable read and its statement has to stay.
+        if !private_objects.contains(&certificate.object) {
+            continue;
+        }
+        if let Some(slot) = stack_slots.get_mut(&certificate.object)
+            && slot.size == Some(certificate.memory_width)
+        {
+            slot.reload_values.insert(certificate.value);
+        }
+    }
     let (returns, returns_by_inst) =
         collect_return_value_certificates(boundaries, graph, machine_context, &stack_reloads);
 
@@ -11822,6 +11936,7 @@ mod tests {
             &facts.call_sites,
             &structured,
             artifact.unobserved_merges(),
+            &BTreeSet::new(),
         );
         assert_eq!(
             certificates
@@ -11867,6 +11982,7 @@ mod tests {
             &facts.call_sites,
             &structured,
             artifact.unobserved_merges(),
+            &BTreeSet::new(),
         );
         assert!(!certificates.stack_slots.contains_key(&access.object));
 
@@ -12352,6 +12468,7 @@ mod tests {
             &allocated_facts.call_sites,
             &incomplete_structured,
             allocated.unobserved_merges(),
+            &BTreeSet::new(),
         );
         assert!(
             incomplete
@@ -12385,6 +12502,7 @@ mod tests {
             &allocated_facts.call_sites,
             &allocated_facts.structured,
             allocated.unobserved_merges(),
+            &BTreeSet::new(),
         );
         assert!(
             overlapping

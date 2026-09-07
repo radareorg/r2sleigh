@@ -1566,6 +1566,12 @@ impl<'a> FoldingContext<'a> {
                 self.assign_typed(lhs, rhs, ty)
             }
             SSAOp::Load { dst, addr, space } => {
+                // A reload the journal sealed as saying nothing: the slot and
+                // the value it loads are one object, so the assignment is
+                // `x = x` and the store already said it.
+                if self.current_copy_has_coalesced_carrier_elision() {
+                    return Ok(None);
+                }
                 if *space != r2il::SpaceId::Ram {
                     return Ok(Some(self.certified_residual_comment(format!(
                         "unsupported exact memory load space {} at 0x{:x}:{}",

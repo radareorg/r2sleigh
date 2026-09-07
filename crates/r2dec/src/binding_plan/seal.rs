@@ -920,6 +920,7 @@ impl BindingPlan {
                     size,
                     array_layout,
                     source_slot,
+                    reload_values,
                     callee_allocation,
                     ty: _,
                 } => Some((
@@ -930,6 +931,7 @@ impl BindingPlan {
                     *size,
                     array_layout.clone(),
                     *source_slot,
+                    reload_values.clone(),
                     callee_allocation.clone(),
                 )),
                 r2types::CertifiedEntity::Parameter { .. }
@@ -944,8 +946,17 @@ impl BindingPlan {
                 },
             ));
         }
-        for (entity, object, base, offset, size, array_layout, source_slot, callee_allocation) in
-            expected_stack_objects
+        for (
+            entity,
+            object,
+            base,
+            offset,
+            size,
+            array_layout,
+            source_slot,
+            reload_values,
+            callee_allocation,
+        ) in expected_stack_objects
         {
             let exact_certificate = source.certificates().stack_slots.get(&object);
             if exact_certificate.is_none_or(|certificate| {
@@ -955,6 +966,7 @@ impl BindingPlan {
                     || certificate.size != size
                     || certificate.array_layout != array_layout
                     || certificate.source_slot != source_slot
+                    || certificate.reload_values != reload_values
                     || certificate.callee_allocation != callee_allocation
             }) {
                 return Err(BindingPlanBuildError::Seal(
@@ -1000,23 +1012,32 @@ impl BindingPlan {
                         }
                         continue;
                     };
-                    let Some(binding) = BindingId::from_dense_index(binding_index) else {
+                    let adopted = super::construction::unanimous_value_binding(
+                        &self.dispositions,
+                        reload_values.iter().copied(),
+                    );
+                    let Some(binding) =
+                        adopted.or_else(|| BindingId::from_dense_index(binding_index))
+                    else {
                         return Err(BindingPlanBuildError::TooManyBindings {
                             count: binding_index.saturating_add(1),
                         });
                     };
                     let planned =
                         self.bindings
-                            .get(binding_index)
+                            .get(binding.index())
                             .ok_or(BindingPlanBuildError::Seal(
                                 BindingPlanSourceMismatch::UnexpectedStackObjectDisposition {
                                     object,
                                 },
                             ))?;
-                    if planned.certificate.sources.as_ref()
-                        != [BindingCertificateSource::CertifiedEntity(entity)]
-                        || !actual_by_binding[binding_index].is_empty()
-                    {
+                    if !stack_object_certificate_agrees(
+                        planned,
+                        entity,
+                        adopted.is_some(),
+                        &actual_by_binding[binding.index()],
+                        &reload_values,
+                    ) {
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::StackObjectCertificate { object, binding },
                         ));
@@ -1033,7 +1054,9 @@ impl BindingPlan {
                             },
                         ));
                     }
-                    binding_index += 1;
+                    if adopted.is_none() {
+                        binding_index += 1;
+                    }
                     StackObjectDisposition::Bound { binding }
                 }
                 (None, Some(certificate)) => {
@@ -1046,27 +1069,35 @@ impl BindingPlan {
                             reason: StackObjectRefusal::MissingSourceIdentity { object },
                         }
                     } else {
-                        let Some(binding) = BindingId::from_dense_index(binding_index) else {
+                        let adopted = super::construction::unanimous_value_binding(
+                            &self.dispositions,
+                            reload_values.iter().copied(),
+                        );
+                        let Some(binding) =
+                            adopted.or_else(|| BindingId::from_dense_index(binding_index))
+                        else {
                             return Err(BindingPlanBuildError::TooManyBindings {
                                 count: binding_index.saturating_add(1),
                             });
                         };
-                        let planned =
-                            self.bindings
-                                .get(binding_index)
-                                .ok_or(BindingPlanBuildError::Seal(
-                                    BindingPlanSourceMismatch::UnexpectedStackObjectDisposition {
-                                        object,
-                                    },
-                                ))?;
+                        let planned = self.bindings.get(binding.index()).ok_or(
+                            BindingPlanBuildError::Seal(
+                                BindingPlanSourceMismatch::UnexpectedStackObjectDisposition {
+                                    object,
+                                },
+                            ),
+                        )?;
                         let width_bits = certificate
                             .size_bytes
                             .checked_mul(8)
                             .filter(|width| *width > 0);
-                        if planned.certificate.sources.as_ref()
-                            != [BindingCertificateSource::CertifiedEntity(entity)]
-                            || !actual_by_binding[binding_index].is_empty()
-                        {
+                        if !stack_object_certificate_agrees(
+                            planned,
+                            entity,
+                            adopted.is_some(),
+                            &actual_by_binding[binding.index()],
+                            &reload_values,
+                        ) {
                             return Err(BindingPlanBuildError::Seal(
                                 BindingPlanSourceMismatch::StackObjectCertificate {
                                     object,
@@ -1088,7 +1119,9 @@ impl BindingPlan {
                                 },
                             ));
                         }
-                        binding_index += 1;
+                        if adopted.is_none() {
+                            binding_index += 1;
+                        }
                         StackObjectDisposition::Bound { binding }
                     }
                 }
@@ -1136,23 +1169,35 @@ impl BindingPlan {
                         offset,
                     ) {
                         r2ssa::SourceStackSlotRole::Local => {
-                            let Some(binding) = BindingId::from_dense_index(binding_index) else {
+                            // The slot's certified reloads are one object with
+                            // it, so the object shares their binding instead of
+                            // taking one of its own.
+                            let adopted = super::construction::unanimous_value_binding(
+                                &self.dispositions,
+                                reload_values.iter().copied(),
+                            );
+                            let Some(binding) =
+                                adopted.or_else(|| BindingId::from_dense_index(binding_index))
+                            else {
                                 return Err(BindingPlanBuildError::TooManyBindings {
                                     count: binding_index.saturating_add(1),
                                 });
                             };
                             let planned =
                                 self.bindings
-                                    .get(binding_index)
+                                    .get(binding.index())
                                     .ok_or(BindingPlanBuildError::Seal(
                                     BindingPlanSourceMismatch::UnexpectedStackObjectDisposition {
                                         object,
                                     },
                                 ))?;
-                            if planned.certificate.sources.as_ref()
-                                != [BindingCertificateSource::CertifiedEntity(entity)]
-                                || !actual_by_binding[binding_index].is_empty()
-                            {
+                            if !stack_object_certificate_agrees(
+                                planned,
+                                entity,
+                                adopted.is_some(),
+                                &actual_by_binding[binding.index()],
+                                &reload_values,
+                            ) {
                                 return Err(BindingPlanBuildError::Seal(
                                     BindingPlanSourceMismatch::StackObjectCertificate {
                                         object,
@@ -1172,7 +1217,9 @@ impl BindingPlan {
                                     },
                                 ));
                             }
-                            binding_index += 1;
+                            if adopted.is_none() {
+                                binding_index += 1;
+                            }
                             StackObjectDisposition::Bound { binding }
                         }
                         r2ssa::SourceStackSlotRole::ParameterHome {
@@ -1252,5 +1299,28 @@ impl BindingPlan {
             ));
         }
         Ok(())
+    }
+}
+
+/// Whether the binding a stack object took carries the object's certificate.
+///
+/// A shared binding also holds the values the object's reloads certify, so it
+/// carries other sources beside this entity and is not empty.
+fn stack_object_certificate_agrees(
+    planned: &Binding,
+    entity: r2ssa::SemanticId,
+    adopted: bool,
+    actual: &BTreeSet<ValueId>,
+    reload_values: &BTreeSet<ValueId>,
+) -> bool {
+    if adopted {
+        planned
+            .certificate
+            .sources
+            .contains(&BindingCertificateSource::CertifiedEntity(entity))
+            && actual.is_superset(reload_values)
+    } else {
+        planned.certificate.sources.as_ref() == [BindingCertificateSource::CertifiedEntity(entity)]
+            && actual.is_empty()
     }
 }
