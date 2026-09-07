@@ -14775,3 +14775,34 @@ generalisation is that a shared join owns its forward closure -- every block
 reachable from it that no region covers and whose predecessors are all inside
 that closure -- and the closure is labelled up front and appended after the
 body, exactly as single-block joins already are.
+
+
+### The gap backstop fires often and has never saved a function
+
+The note carried into this session said the marked-gap backstop "fired zero
+times across 1604 functions". That is wrong, and it was invisible because
+`open_gap` had evidence for every way it can *fail* and none for the case where
+it succeeds. It has one now, and on `minigzip-O0` alone nine functions open a
+gap -- several gaps each, one claiming 109 cells over 25 operations.
+
+**All nine still refuse.** Disabling gap opening entirely and re-running the
+binary gives byte-identical refusals: the same twenty functions, for the same
+causes. So the backstop is not the cause of those refusals, and it is not
+rescuing anything either; it opens, claims its cells, and the function refuses
+downstream for a reason the gap does not touch.
+
+One consequence is worth keeping even though it turned out not to be the flag
+class's cause. A gap claims a `Use` cell for every operand of every operation it
+owns, and `placement_target` maps a gapped use of a bound value to the same
+`PlacementObservationTarget::Use` as a rendered one -- deliberately, so the gap
+does not silently delete the definition it names. When a cell is both gap-claimed
+and rendered, placement therefore sees two readers for one machine use. The seal
+would call that a `ConflictingUse`, but placement consumes the targets first, so
+the conflict is reported as a placement refusal instead. That double-count is
+real; it is just not what makes the `ZF` bindings miss their definitions, since
+those functions refuse identically with gaps off.
+
+What the backstop needs is a reason to succeed, and the first step is knowing
+where it stops: it currently opens on op-lowering refusals only, and the
+functions it opens in are refusing at placement and in the observation journal,
+which are stages it does not cover.

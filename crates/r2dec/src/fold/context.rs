@@ -509,7 +509,19 @@ impl<'a> FoldingContext<'a> {
             .borrow_mut()
             .gap_stmt(anchor, marker, &closure.cells)
         {
-            Ok(stmt) => Some((stmt, closure.sites)),
+            Ok(stmt) => {
+                // A gap that opens is as load-bearing as one that refuses: it
+                // claims cells, and a cell the rendering also answers is a
+                // second reader nothing else reports.
+                r2il::refusal_evidence!(
+                    "gap",
+                    "opened at {block_addr:#x}:{op_idx} for {} over {} ops, claiming {} cells",
+                    refusal.kind(),
+                    closure.ops,
+                    closure.cells.len()
+                );
+                Some((stmt, closure.sites))
+            }
             Err(error) => {
                 r2il::refusal_evidence!(
                     "gap",
