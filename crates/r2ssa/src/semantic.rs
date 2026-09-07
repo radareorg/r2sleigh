@@ -1849,7 +1849,7 @@ impl PreparedFunctionFacts {
         phase("structured", structured.memory_accesses.len());
         let control_domains = collect_control_domain_facts(function, &predicates, &structured);
         phase("control_domains", 0);
-        let private_stack_objects = private_stack_objects(graph, &objects, &structured);
+        let private_stack_objects = private_stack_objects(function, graph, &objects, &structured);
         let obligations = SemanticObligationInventory::collect(
             graph,
             &structured,
@@ -2809,7 +2809,61 @@ fn build_memory_ssa(
 /// address value naming the object is used anywhere but as an access address,
 /// and nothing in the function reaches memory the model could not place, which
 /// may-aliases everything.
+/// Whether an address is computed from the frame and constants alone.
+///
+/// The walk is backward over address arithmetic. Every leaf must be a stack
+/// root or a literal; a load, a call result or a parameter leaves it unproven.
+fn address_is_frame_derived(function: &SSAFunction, graph: &SsaGraph, address: ValueId) -> bool {
+    let facts = function.decompile_prep_facts();
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![address];
+    let mut reached_frame = false;
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        if seen.len() > graph.insts.len().saturating_add(1) {
+            return false;
+        }
+        let Some(graph_value) = graph.value(value) else {
+            return false;
+        };
+        if resolve_stack_root(facts, &graph_value.var).is_some() {
+            reached_frame = true;
+            continue;
+        }
+        if graph_value.var.constant_bits().is_some() {
+            continue;
+        }
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            return false;
+        };
+        let carries_address = match &inst.payload {
+            InstPayload::Op(op) => matches!(
+                op,
+                SSAOp::Copy { .. }
+                    | SSAOp::Cast { .. }
+                    | SSAOp::IntAdd { .. }
+                    | SSAOp::IntSub { .. }
+                    | SSAOp::IntAnd { .. }
+                    | SSAOp::IntOr { .. }
+                    | SSAOp::IntZExt { .. }
+                    | SSAOp::IntSExt { .. }
+                    | SSAOp::Trunc { .. }
+                    | SSAOp::Subpiece { .. }
+            ),
+            InstPayload::Phi { .. } => true,
+        };
+        if !carries_address {
+            return false;
+        }
+        pending.extend(inst.inputs.iter().copied());
+    }
+    reached_frame
+}
+
 pub(crate) fn private_stack_objects(
+    function: &SSAFunction,
     graph: &SsaGraph,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
@@ -2822,24 +2876,23 @@ pub(crate) fn private_stack_objects(
         .collect::<Vec<_>>();
     // An address the model could not place may name any frame slot, so no slot
     // in this function is private once one exists.
-    let unplaced = ram_accesses
-        .iter()
-        .filter(|access| {
-            objects
-                .object(access.object)
-                .is_some_and(|fact| matches!(fact.kind, ObjectKind::EscapedUnknown { .. }))
-        })
-        .count();
+    // An address the model could not place threatens privacy only when it
+    // could have come from outside; one computed from the frame cannot make a
+    // slot observable, and the alias model already withholds any certificate
+    // that would have depended on knowing which slot it names.
+    let foreign = |access: &&&StructuredMemoryAccessFact| {
+        objects
+            .object(access.object)
+            .is_some_and(|fact| matches!(fact.kind, ObjectKind::EscapedUnknown { .. }))
+            && !address_is_frame_derived(function, graph, access.address)
+    };
+    let unplaced = ram_accesses.iter().filter(foreign).count();
     if unplaced > 0 {
         // Name the addresses, not only the count: the repair is to place them,
         // and a count alone leaves the next reader searching for which.
         let named = ram_accesses
             .iter()
-            .filter(|access| {
-                objects
-                    .object(access.object)
-                    .is_some_and(|fact| matches!(fact.kind, ObjectKind::EscapedUnknown { .. }))
-            })
+            .filter(foreign)
             .take(6)
             .map(|access| {
                 format!(
