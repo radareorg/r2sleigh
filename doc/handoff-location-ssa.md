@@ -14705,14 +14705,19 @@ its caller shows the condition for that block built exactly **once**. The
 condition also already goes through the plan -- `planned_input_expr_at` -- so a
 bound operand is named by its symbol there, not re-rendered.
 
-So the second observation identifier for that use site is issued somewhere else.
-The place to look is the folded-definition accounting in
-`observation_journal.rs`: for each definition folded into a rendered expression
-it pushes a `Use` target for *every* operand of that definition, which would
-register a use that is also observed directly a second time. That is a
-hypothesis, not a verified cause -- what is verified is that two identifiers
-exist for one machine use, in two different rendered statements, and that a
-duplicated condition build is not the reason.
+The second registration is not there either. Both places that push a `Use`
+target -- `observe_normalized_input_uses_expr`, which marks every exact original
+use behind a normalized input, and the folded-definition accounting, which
+pushes one per operand of a definition folded into a rendered expression -- were
+instrumented, and across the whole run that use site is registered **once**.
+
+So the state after this session is a narrowed contradiction, which is worth more
+than a guess: one condition build, one observation target, and two reads at two
+different rendered statements. The duplication is therefore introduced between
+target registration and `collect_final_placement_occurrences`, which is where
+the next probe belongs -- the walk that scopes observation identifiers onto AST
+statements, or the identifiers being cloned with an expression after they are
+allocated.
 
 Whatever issues the second identifier, the rule to restore is the one this
 project already settled: a folded obligation's occurrence *moves* with its
