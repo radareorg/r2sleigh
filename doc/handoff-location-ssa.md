@@ -14728,3 +14728,40 @@ locally.
 The evidence now prints the statement alongside the block and the use site,
 which is the only reason the two could be told apart from a single use recorded
 twice.
+
+### Where the local census stands at the end of the session
+
+Six binaries, whole-binary runs with `scratchpad/md-census.sh`, which is the
+fastest honest signal short of a remote sweep:
+
+| binary | rendered | refused |
+| --- | --- | --- |
+| minigzip-O0 | 165/185 | 20 |
+| minigzip-O2 | 151/169 | 18 |
+| bzip2-O0 | 125/154 | 29 |
+| bzip2-O2 | 93/114 | 21 |
+| bzip2recover-O0 | 34/38 | 4 |
+| bzip2recover-O2 | 29/32 | 3 |
+| **total** | **597/692 = 0.863** | **95** |
+
+against 111 refusals when the session started measuring. The remaining classes,
+ranked: `RenderedValueRequired` 17, `PlannedElidedValueRendered` 15,
+`unrepresentable operation` 10, `missing_definition` 10, the return boundary 7,
+`BindingPlanBuild` 6, the complexity limit 5.
+
+The first two still reduce to a stack object with no program variable, and
+`ParameterHomeWidthMismatch` is still the largest reason -- but now in the other
+direction, an eight-byte slot for a four-byte parameter, which is radare2
+recording a wider variable over a parameter home rather than anything the plan
+decides. That is the same family as the overlapping-stack-variables work in
+pull request 26644.
+
+`unrepresentable operation` is now a spread rather than a single cause. The
+largest single shape in it is a block with several predecessors that then
+branches to two terminal blocks: `collect_shared_joins` requires a join to have
+no successors ("a join that carries on needs a label on whatever it carries on
+to"), so such a join is not eligible and its two arms go unrendered. The
+generalisation is that a shared join owns its forward closure -- every block
+reachable from it that no region covers and whose predecessors are all inside
+that closure -- and the closure is labelled up front and appended after the
+body, exactly as single-block joins already are.
