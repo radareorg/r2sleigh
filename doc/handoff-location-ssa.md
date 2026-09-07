@@ -13677,3 +13677,58 @@ project entry, `r_core_priv.h`, `r_flag_priv.h` and the public artifact API in
 compare against is a fresh build of the same commit in its own worktree: the
 installed radare2 on this machine is from an older commit and gives a different
 failure set, which is what first made the cut look worse than it is.
+
+## The fork is rebased and the DWARF block is gone
+
+**Rebase.** The branch sat 11 commits behind `radareorg/radare2` master and 43
+ahead. Note for future measurements: `origin` in that checkout is the personal
+fork (`0verflowme/radare2`), whose master is stale, so a diff against
+`origin/master` reports about 64,000 lines. `upstream/master` is the real base
+and reports what GitHub reports.
+
+One conflict, and it was the one to expect: upstream landed its own version of
+the typedef-of-void fix (`a38d49c28a`), which the fork also carried. Resolved to
+upstream's text, dropping the fork's duplicate. Git also dropped two commits
+whose contents were already upstream, including the `lstat` fix the maintainer
+applied himself. The fork's `strdup` null check on that path is not in
+upstream's version and is a candidate for its own one-line pull request.
+
+**The DWARF cut, complete this time.** The earlier attempt removed the four side
+tables -- exact declarations, exact formal records, exact stack locations,
+frame-pointer rebinds -- and was held back because `db/formats/dwarf` then
+failed. The reason is now clear and it was not the staging condition. The
+completeness terms guarding the function type link, `exact_decl`, `tree_exact`
+and `link_complete`, are *part of the same evidence model*. Removing the tables
+and keeping the guards left them more permissive than upstream's
+`prototype_complete`, so a link was written where upstream preserves the user's
+registered type.
+
+The importer therefore goes back to upstream's, whole, together with its unit
+test. Nothing else in the fork depends on it: the five files the cut touches --
+`anal.c`, `dwarf_process.c`, `var.c`, `r_anal.h`, `r_anal_priv.h` -- are the only
+ones that mention the model at all.
+
+**It fixes more than it removes.** `db/anal`, `db/cmd` and `db/formats` now pass
+with **zero** failures. The branch had three before: the two Ada function-info
+integrations and "dwarf float formal keeps out of the integer slots", all three
+upstream's own tests, unchanged by the fork, which the fork's importer was
+breaking. The integration PR was carrying a regression against upstream's suite
+and the cut removes it.
+
+**Plugin unaffected**, as the design predicted: it reads the debug information
+itself through `r_bin_dwarf_*`. Locked corpus 54/54 raw and differential with
+all 54 snapshots matching byte for byte.
+
+| | Added lines |
+|---|---:|
+| Before rebase | 11,602 |
+| After rebase | 11,587 |
+| After the DWARF cut | **8,341** |
+| After the artifact-store cut (still to do) | ~4,000 |
+
+The artifact store is the remaining block, and its diagnosis stands: remove the
+shadow-store and owned-xref additions from the fork's own `flag.c`, `meta.c` and
+`xrefs.c` rather than reverting those files, and drop the matching header fields
+in the same change. The DWARF cut is the precedent -- the same mistake, a partial
+removal that leaves guards or headers referring to what was removed, is what
+made both attempts fail the first time.
