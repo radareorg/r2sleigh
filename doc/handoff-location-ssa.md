@@ -15031,3 +15031,34 @@ So the discriminator is the declared type's width, which radare2 overwrites
 before the plugin ever sees it, and no rule downstream can recover it. The fix
 is the conversion-aware propagation in radare2 and nothing else. Five attempts
 across the two layers now say the same thing.
+
+
+### The other fourteen: an aggregate interior that never reaches its container
+
+Of the thirty-one functions refusing with the two journal classes, seventeen are
+the radare2 width mismatch above. The other fourteen are a different shape, and
+`notAStandardFile` in bzip2 is the clean example.
+
+It holds `struct stat statBuf` at `rbp-0xa0`, and the value the refusal names is
+the constant `0xffffffffffffff78` -- `-136`, the frame displacement of
+`statBuf.st_mode` -- elided as `DeadStackBase` while a rendered expression still
+spells it. The aggregate-interior machinery exists and is correct:
+`DeclaredStackSlots::containing` maps `StackPointer-144` to the declared slot at
+`StackPointer-168`, size 144, displacement 24, and instrumenting it shows that
+lookup happening and succeeding.
+
+**The object at the interior coordinate is created before any of that.**
+`ObjectModel::build` walks every stack address root and calls
+`ensure_stack_object` on each, and only *then* walks the address values through
+`object_for_address_value`, which is where containment is consulted. So the
+interior coordinate gets an object of its own, and the model carries a nameless
+one beside the slot that owns it. `#[track_caller]` on `ensure_stack_object`
+names the pre-creation loop as the maker.
+
+**Fixed and measured: one orphan object goes away, and nothing else changes.**
+Resolving each root through `containing` in that first loop takes
+`notAStandardFile` from four unidentified objects to three and leaves every
+census number identical across all six binaries, so it is not in the tree. The
+orphan is real and worth removing, but it is not what refuses the function --
+something else still renders that constant, and finding it is the next step
+here.
