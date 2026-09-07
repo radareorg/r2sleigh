@@ -1983,9 +1983,25 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .collect::<Vec<_>>();
         certified_cases.sort_unstable();
         if rendered_cases != certified_cases || default.map(Region::entry) != control_fact.default {
+            // Which case differs decides the repair, and a count alone leaves
+            // the next reader diffing two lists by hand.
+            let missing = certified_cases
+                .iter()
+                .filter(|entry| !rendered_cases.contains(entry))
+                .take(6)
+                .map(|(value, target)| format!("{value}=>{target:#x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let extra = rendered_cases
+                .iter()
+                .filter(|entry| !certified_cases.contains(entry))
+                .take(6)
+                .map(|(value, target)| format!("{value}=>{target:#x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
             r2il::refusal_evidence!(
                 "switch-region",
-                "control mismatch at {switch_block:#x}: rendered {} certified {} rendered_default {:?} certified_default {:?}",
+                "control mismatch at {switch_block:#x}: rendered {} certified {} rendered_default {:?} certified_default {:?} merge {merge_block:?} missing [{missing}] extra [{extra}]",
                 rendered_cases.len(),
                 certified_cases.len(),
                 default.map(Region::entry),

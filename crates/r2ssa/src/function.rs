@@ -4016,7 +4016,19 @@ impl SSAFunction {
                 if self.is_stack_slot_address_var(addr, depth + 1) {
                     Some(var.clone())
                 } else {
+                    // A table load carries the index inside its address, so
+                    // that is tried first. A plain dereference does not, and
+                    // then the byte read is itself the selector: `switch (*p)`
+                    // with `p` a local pointer is every string-scanning switch.
                     self.infer_switch_selector_var_from_address(addr, depth + 1)
+                        .or_else(|| {
+                            r2il::refusal_evidence!(
+                                "switch-selector-walk",
+                                "{} is read through an address that carries no index, so the value read is the selector",
+                                var.display_name()
+                            );
+                            Some(var.clone())
+                        })
                 }
             }
             SSAOp::IntAdd { a, b, .. } | SSAOp::IntSub { a, b, .. } => {
@@ -4074,7 +4086,16 @@ impl SSAFunction {
             SSAOp::IntMult { a, b, .. } => {
                 self.infer_switch_selector_var_from_scaled(a, b, depth + 1)
             }
-            _ => None,
+            // The address walk used to end here without a word, which is why a
+            // switch on a dereferenced pointer went unexplained for so long.
+            other => {
+                r2il::refusal_evidence!(
+                    "switch-selector-walk",
+                    "address {} defined at {block_addr:#x} op {op_idx} by {other:?} carries no index",
+                    addr.display_name()
+                );
+                None
+            }
         }
     }
 
