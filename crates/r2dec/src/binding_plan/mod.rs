@@ -1420,8 +1420,18 @@ impl BindingPlan {
     /// value on entry and therefore cannot be required to be assigned before
     /// its first read.
     pub(crate) fn binding_is_entry_declared(&self, binding: BindingId) -> Option<bool> {
-        self.binding_role(binding)
-            .map(|role| matches!(role, BindingRole::EntryValue))
+        let role = self.binding_role(binding)?;
+        if matches!(role, BindingRole::EntryValue) {
+            return Some(true);
+        }
+        // Storage above the entry stack pointer holds a value on entry for the
+        // same reason a version-0 register does: this function never wrote it.
+        Some(
+            matches!(role, BindingRole::StackObject { .. })
+                && self
+                    .binding(binding)
+                    .is_some_and(|bound| bound.caller_supplied),
+        )
     }
 
     pub(crate) fn stack_object_disposition(

@@ -153,11 +153,15 @@ fn bind_stack_object(
     entity: r2ssa::SemanticId,
     declaration_type: CType,
     presentation_name_hint: Option<String>,
+    caller_supplied: bool,
 ) -> Result<BindingId, BindingPlanBuildError> {
     if let Some(binding) = unanimous_value_binding(dispositions, reload_values.iter().copied()) {
         let existing = &mut bindings[binding.index()];
         existing.declaration_type = declaration_type;
         existing.presentation_name_hint = presentation_name_hint;
+        // Joining the caller's storage makes the binding caller-supplied; the
+        // values it already held do not make it any less so.
+        existing.caller_supplied |= caller_supplied;
         return Ok(binding);
     }
     let Some(binding) = BindingId::from_dense_index(bindings.len()) else {
@@ -171,7 +175,7 @@ fn bind_stack_object(
             sources: Box::new([BindingCertificateSource::CertifiedEntity(entity)]),
         },
         presentation_name_hint,
-        caller_supplied: false,
+        caller_supplied,
     });
     Ok(binding)
 }
@@ -987,6 +991,7 @@ impl BindingPlan {
                         } else {
                             format!("stack_p{}", certificate.entry_offset.unsigned_abs())
                         }),
+                        super::rules::stack_object_is_caller_storage(source_owned, *object),
                     )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     continue;
@@ -1014,6 +1019,7 @@ impl BindingPlan {
                         } else {
                             format!("stack_p{}", offset.unsigned_abs())
                         }),
+                        super::rules::stack_object_is_caller_storage(source_owned, *object),
                     )?;
                     stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     continue;
@@ -1066,6 +1072,7 @@ impl BindingPlan {
                             *id,
                             declaration_type,
                             name_hint,
+                            super::rules::stack_object_is_caller_storage(source_owned, *object),
                         )?;
                         stack_objects.insert(*object, StackObjectDisposition::Bound { binding });
                     }

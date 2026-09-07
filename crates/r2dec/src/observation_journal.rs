@@ -1275,10 +1275,25 @@ impl MarkedNativeDraft {
                     .filter(|write| write.binding == binding)
                     .map(|write| (write.block, write.inst))
                     .collect::<Vec<_>>();
+                // A binding with no rendered write is the common refusal, and
+                // the question is always what the plan did with the values it
+                // holds, which is knowable only here.
+                let members = (0..source.source().graph().values.len())
+                    .map(|index| r2ssa::ValueId(index as u32))
+                    .filter(|value| {
+                        matches!(
+                            placement.names.plan().disposition(*value),
+                            Some(crate::binding_plan::ValueDisposition::Bound {
+                                binding: bound
+                            }) if *bound == binding
+                        )
+                    })
+                    .map(|value| (value, source.source().graph().def_inst(value)))
+                    .collect::<Vec<_>>();
                 r2il::refusal_evidence!(
                     "placement-decision",
                     "binding={binding:?} name={name} reason={reason:?} \
-                     reads={reads:?} writes={writes:?}"
+                     reads={reads:?} writes={writes:?} members={members:?}"
                 );
             }
         }

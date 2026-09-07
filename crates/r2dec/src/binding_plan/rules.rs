@@ -80,6 +80,26 @@ pub(super) enum ParameterCandidate {
 /// over a later range, and the source carries both under the parameter's
 /// index; the second is a local the function copied the parameter into, and
 /// binding it to the parameter would make two objects one symbol.
+/// Whether a stack object sits outside this function's own frame.
+///
+/// The frame grows down from the entry stack pointer, so an object at or above
+/// it is the caller's storage: the return address, a stack-passed argument, or
+/// -- at a process entry -- what the loader left there. Nothing in this body
+/// assigns it, and requiring a definition asks for one that cannot exist.
+pub(super) fn stack_object_is_caller_storage(
+    source_owned: &SourceOwnedFunctionFacts,
+    object: r2ssa::ObjectId,
+) -> bool {
+    matches!(
+        source_owned.source().objects().object(object).map(|o| &o.kind),
+        Some(r2ssa::ObjectKind::StackSlot {
+            base: r2ssa::StackAddressBase::StackPointer,
+            offset,
+            ..
+        }) if *offset >= 0
+    )
+}
+
 pub(super) fn effective_stack_slot_role(
     source_owned: &SourceOwnedFunctionFacts,
     slot: &r2ssa::SourceStackSlotSpec,

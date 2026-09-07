@@ -710,7 +710,15 @@ impl BindingPlan {
                     let expected_caller_supplied = component
                         .members
                         .iter()
-                        .any(|value| graph.def_inst(*value).is_none());
+                        .any(|value| graph.def_inst(*value).is_none())
+                        || component.sources.iter().any(|source| match source {
+                            BindingCertificateSource::CertifiedEntity(SemanticId::StackSlot(
+                                object,
+                            )) => {
+                                super::rules::stack_object_is_caller_storage(source_owned, *object)
+                            }
+                            _ => false,
+                        });
                     if actual != &component.members
                         || binding.certificate.sources.as_ref() != expected_sources.as_slice()
                         || binding.caller_supplied != expected_caller_supplied
