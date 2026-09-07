@@ -13966,3 +13966,39 @@ The plugin reaches into `anal->iob`, `sdb_types`, `reg`, `config`, `binb`,
 read-only. It touches no private structure. The one thing it needed radare2 to
 answer rather than reach for, a relocation at an address, became
 `binb.get_reloc_at`, which is the shape the rest should keep.
+
+### One upstream fix raised, one withdrawn
+
+**Raised: radareorg/radare2#26682**, the xref invalidation. `r_anal_xrefs_set`
+and `r_anal_xref_del` cleared `meta.numcallrefs` and `meta.numrefs` by looking
+each endpoint up with `r_anal_get_function_at`, which matches only a function
+whose entry is exactly that address. An xref's source is almost always an
+instruction inside a function rather than its first one, so the common case
+invalidated nothing. Reproduced on a clean build of upstream master:
+
+```
+wx 554889e5e800000000c3
+af
+afll          # call-refs reads 1
+axC 0x20 @ 0x1
+afll          # still 1, and axq shows two CALL refs
+```
+
+Fixed with `r_anal_get_fcn_in`, with a test in `db/anal/xrefs` that fails
+before and passes after, and `db/anal` plus `db/cmd` green at 3,993 passing.
+
+**Withdrawn: the `r_anal_cc_location_uses` case comparison.** The report called
+this a second radare2 bug. It is not one, and the claim should not have been
+made without looking for the trigger. `strcmp` becoming `r_str_casecmp` needs a
+register profile and a convention table that disagree on case; radare2's own
+`cc-x86-64`, `cc-arm-64` and the rest are lowercase throughout, the Sleigh
+profiles for x86-64 and arm64 are lowercase too, and the comment justifying the
+change cites `r_anal_cc_preserves_reg`, which is the fork's own function and not
+upstream's. So there is nothing to demonstrate and nothing to file.
+
+The one line stays in the fork for now, because a Sleigh architecture I have not
+checked may spell registers differently, but it is recorded here as **a change
+with no demonstrated trigger**: either find the architecture that needs it, or
+drop it the way the inert ELF `DT_INIT` path was dropped. What must stay
+regardless is the `R_IPI` to `R_API` widening beside it, which is how the plugin
+reaches the function at all.
