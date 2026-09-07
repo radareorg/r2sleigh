@@ -301,9 +301,17 @@ pub(super) fn binding_components_with(
             // declined and the values keep their own objects, which costs an
             // assignment in the output and nothing in correctness.
             if let Some(first) = values.first().copied() {
-                if merge_would_interfere(&mut parent, &values)
-                    || super::rules::set_outlives_a_redefinition(graph, &values)
-                {
+                let interferes = merge_would_interfere(&mut parent, &values);
+                let outlives = super::rules::set_outlives_a_redefinition(graph, &values);
+                if interferes || outlives {
+                    // Which of the two declined it decides the repair, and the
+                    // consumer sees only that the values kept their own objects.
+                    r2il::refusal_evidence!(
+                        "coalescing-declined",
+                        "entity {:?} of {} values: interferes={interferes} outlives_redefinition={outlives}",
+                        entity.id(),
+                        values.len()
+                    );
                     continue;
                 }
                 for value in values.iter().copied().skip(1) {

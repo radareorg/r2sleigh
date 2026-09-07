@@ -2822,11 +2822,20 @@ pub(crate) fn private_stack_objects(
         .collect::<Vec<_>>();
     // An address the model could not place may name any frame slot, so no slot
     // in this function is private once one exists.
-    if ram_accesses.iter().any(|access| {
-        objects
-            .object(access.object)
-            .is_some_and(|fact| matches!(fact.kind, ObjectKind::EscapedUnknown { .. }))
-    }) {
+    let unplaced = ram_accesses
+        .iter()
+        .filter(|access| {
+            objects
+                .object(access.object)
+                .is_some_and(|fact| matches!(fact.kind, ObjectKind::EscapedUnknown { .. }))
+        })
+        .count();
+    if unplaced > 0 {
+        r2il::refusal_evidence!(
+            "private-stack-objects",
+            "no slot is private: {unplaced} of {} ram accesses reach memory the model could not place",
+            ram_accesses.len()
+        );
         return private;
     }
     let mut addresses_by_object = BTreeMap::<ObjectId, BTreeSet<ValueId>>::new();
@@ -2875,7 +2884,12 @@ pub(crate) fn private_stack_objects(
                 !stays_inside
             })
         });
-        if !escapes {
+        if escapes {
+            r2il::refusal_evidence!(
+                "private-stack-objects",
+                "object {object:?} is not private: an address naming it is used outside its own accesses"
+            );
+        } else {
             private.insert(*object);
         }
     }
