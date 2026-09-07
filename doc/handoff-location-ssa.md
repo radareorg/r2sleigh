@@ -14182,3 +14182,56 @@ needs the pre-reduction fork built beside the current one, from the
 That measurement is the next task, and it comes before more rendering work: a
 regression of this size at -O0 is worth more than the quality arc it would
 otherwise fund.
+
+### The -O0 regression, traced: two interface facts the DWARF cut took
+
+The sweep12 drop reproduces locally and the fork owns it. Building the
+pre-reduction fork from `pre-rebase-04aa3797` beside the current one and
+running the *same* plugin against both separates the two sides cleanly: five
+functions that sweep12 declined render under the old fork and refuse under the
+new one. The plugin is not the cause; `4c7da01b01`, which reverted the fork's
+DWARF importer to upstream's, is.
+
+The refusal is one line of evidence: `abi-model-incoherent` with
+`roles_exist=false`, `frame_pointer_slots=true frame_pointer_storage=false`,
+`slot_roles_complete=false`. An incoherent ABI model leaves every return
+boundary incomplete, which is why `implementation.rs:1349` went from 2 to 16 on
+`minigzip` at -O0 and to 88 across the eighteen binaries.
+
+**The frame pointer.** `r2sleigh_dwarf_function_frame_base` answers only for a
+`DW_AT_frame_base` that is a single `DW_OP_regN`. GCC spells it
+`DW_OP_call_frame_cfa`, which names no register, so the plugin's reader answers
+for **no function in the binary at either optimization level** -- under the old
+fork as well. The old fork did not need it: its removed side table supplied the
+fact. The repair is that the slots already carry it. Radare2 places each
+frame-pointer slot against a register and the capture records the register's
+name, offset and size, so when the debug information names no plain register
+the interface's frame-pointer storage is the base-pointer register every
+frame-pointer slot agrees on, checked against the return address, the stack
+pointer, the parameters and each slot's own base exactly as a DWARF-sourced
+candidate is.
+
+**The type spelling.** With the frame pointer restored, `slot_roles_complete`
+was still false, and `R2SLEIGH_DEBUG_INTERFACE=1` named the slot: `var_1ch type=signed int
+size=0`. `r_anal_type_bitsize` sizes `int` and not `signed int`, one unsized
+slot leaves the frame unproven against overlap, and the resources are then
+incomplete. Under the old fork radare2 typed the same variable `int`. The two
+spellings are one type in C, so a spelling that fails to size is retried
+without a redundant `signed`.
+
+Measured on `minigzip` at -O0, 185 functions: **107 rendered before, 115
+after**, against 110 for the pre-reduction fork with the plugin sweep11 ran, so
+the regression is more than recovered on that binary. Four of the five probe
+functions come back; `gzerror` stays refused for `missing_definition`.
+
+Two things worth keeping. **The evidence channel paid for itself twice**: the
+six-term `abi-model-incoherent` line and the per-slot
+`R2SLEIGH_DEBUG_INTERFACE` reports each named the failing term directly, and
+without them this was a search rather than a trace. And **a local build proves
+nothing about fork-versus-plugin unless both forks are built**: the installed
+radare2 was already the reduced fork, so the first local check pointed at the
+plugin and was wrong.
+
+Open, for upstream: whether radare2 should hand out a variable type spelling
+its own type database cannot size. Sizing `signed int` in the capture is this
+plugin reading a valid C type, not a workaround for that question.
