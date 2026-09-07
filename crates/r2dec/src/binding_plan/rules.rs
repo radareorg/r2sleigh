@@ -523,19 +523,6 @@ pub(super) fn declaration_type_width(ty: &r2types::CTypeLike, ptr_bits: u32) -> 
     r2types::declaration_type_width_bits(ty, ptr_bits)
 }
 
-/// The width a parameter's home slot has to hold.
-///
-/// A declared parameter is its declared width; the register that carried it is
-/// wider, and the slot the prologue writes is the declaration's, not the
-/// carrier's. Without a declaration the carrier is all there is to compare to.
-pub(super) fn parameter_home_width(
-    declaration_type: &r2types::CTypeLike,
-    carrier_width_bits: u32,
-    ptr_bits: u32,
-) -> u32 {
-    declaration_type_width(declaration_type, ptr_bits).unwrap_or(carrier_width_bits)
-}
-
 /// Whether a declaration describes an object of exactly this storage width.
 pub(super) fn declaration_type_describes_width(
     ty: &r2types::CTypeLike,

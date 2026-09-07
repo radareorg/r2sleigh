@@ -884,13 +884,10 @@ impl<'a> FoldingContext<'a> {
         })
     }
 
-    /// The caller is recorded so an elided value names who asked for it.
-    #[track_caller]
     pub(crate) fn planned_value_expr(
         &self,
         value: ValueId,
     ) -> Result<CExpr, crate::observation_journal::LegacyObservationJournalError> {
-        let asked_by = std::panic::Location::caller();
         let Some(names) = self.inputs.binding_names else {
             return Err(
                 crate::observation_journal::LegacyObservationJournalError::rendered_value_required(
@@ -926,22 +923,12 @@ impl<'a> FoldingContext<'a> {
                     value, rendered,
                 )))
             }
-            Ok(crate::binding_plan::PlannedValueSymbol::Elided(reason)) => {
-                // Which value, and why the plan elided it, is what separates a
-                // wrong plan from a rendering that should not have asked.
-                r2il::refusal_evidence!(
-                    "planned-elided-value-rendered",
-                    "{value:?} was elided as {reason:?} and {}:{} asked for it by name",
-                    asked_by.file(),
-                    asked_by.line()
-                );
-                Err(
-                    crate::observation_journal::LegacyObservationJournalError::PlannedElidedValueRendered {
-                        value,
-                        reason,
-                    },
-                )
-            }
+            Ok(crate::binding_plan::PlannedValueSymbol::Elided(reason)) => Err(
+                crate::observation_journal::LegacyObservationJournalError::PlannedElidedValueRendered {
+                    value,
+                    reason,
+                },
+            ),
             Ok(
                 crate::binding_plan::PlannedValueSymbol::Refused(_)
                 | crate::binding_plan::PlannedValueSymbol::Absent,

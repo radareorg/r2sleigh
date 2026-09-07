@@ -1088,20 +1088,7 @@ impl BindingPlan {
                             );
                             continue;
                         };
-                        let home_width_bits =
-                            bindings
-                                .get(binding.index())
-                                .map_or(parameter_width_bits, |bound| {
-                                    super::rules::parameter_home_width(
-                                        bound.declaration_type(),
-                                        parameter_width_bits,
-                                        source
-                                            .machine_context()
-                                            .memory_model()
-                                            .default_address_bits(),
-                                    )
-                                });
-                        if home_width_bits != width_bits {
+                        if parameter_width_bits != width_bits {
                             stack_objects.insert(
                                 *object,
                                 StackObjectDisposition::Refused {
@@ -1109,7 +1096,7 @@ impl BindingPlan {
                                         object: *object,
                                         parameter_index,
                                         slot_width_bits: width_bits,
-                                        parameter_width_bits: home_width_bits,
+                                        parameter_width_bits,
                                     },
                                 },
                             );
