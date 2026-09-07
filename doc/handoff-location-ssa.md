@@ -14055,3 +14055,91 @@ moves.
 
 **Upstream pull requests open from this work:** #26676 (prototype versus kind
 key), #26682 (xref ref-count invalidation), #26683 (per-function assumptions).
+
+## Render the program variable, not the machine location
+
+Sweep11 says coverage is no longer the binding constraint and rendered quality
+is. On the scored zlib corpus, coverage is 89.3 per cent at -O0 against angr's
+96.6 and 75.2 at -O2 against 94.8, but the DecBench union-perfect rate is 11.2
+per cent against 14.3 at -O0 and 9.6 against 5.2 at -O2. The split by
+optimisation level is the whole story: on the 703 -O0 functions both
+decompilers render, `byte_match` is 0.130 against angr's 0.454 and 435 of our
+731 rendered functions score below 0.1; on the 512 -O2 functions both render it
+is 0.423 against 0.367, with 63 perfect scores to angr's 30.
+
+We are ahead where the compiler put the program's variables in registers and
+far behind where it put them in stack slots, and that is not a coincidence. The
+rendering is in bijection with machine storage: one C variable per SSA value,
+named after the register or the frame offset that held it. At -O2 register
+allocation has already done the coalescing, so the bijection happens to match
+the source. At -O0 every source local has a stack home and every use is a
+reload, so one source variable becomes a stack pseudo-local plus a chain of
+register temporaries. The rendered `djb2` in the corpus has 33 statements and
+14 locals where the source has 4 statements and 3 variables -- and its four
+stack slots are already exactly the source's four variables.
+
+**The derivation.** Correctness does not pin the rendering. The certificates
+constrain the emitted program to assert only what the binary entails or what a
+marked source supplies, but many programs satisfy that, and the one in
+bijection with storage is a choice rather than a consequence. Define `v ≈ w`
+when the machine moves one value into the other without changing it: a
+register-to-register copy, a full-width store into a stack slot, a full-width
+load from a slot whose reaching memory version is that store. Every member of a
+class provably holds the same datum, so rendering one C variable per class
+asserts nothing new -- the equalities are theorems of the machine code. The
+class is bounded by aliasing rather than by taste, and `build_memory_ssa` with
+`memory_locations_may_alias` already computes exactly the reaching relation the
+join needs.
+
+### The declared name now reaches the renderer (`b8143276`)
+
+A stack local rendered as `stack_m40` even where radare2 held a name for the
+slot. The name is captured, travels as far as `ExternalStackSlotSpec`, and from
+there goes only into the radare2 variable writeback; `crates/r2dec` never saw
+it. `authorized_stack_slot_owner_render` is live public API with no production
+caller and its view populators are `#[cfg(test)]`.
+
+Names stay out of the semantic contracts deliberately, so the name now routes
+through `DisplayNames`, the carrier that already exists for the function names,
+the string literals and the parameter names. The coordinate needed care: a slot
+declared against the frame pointer is restated into entry-relative coordinates
+so objects can match it, and `restated` replaces the coordinate while keeping
+the width and role, so the key the display table is organised by is gone by the
+time a consumer holds the slot. `StackSlotCertificate` carries `declared_at`
+for that reason.
+
+Measured on `minigzip` at -O0 with debug information: `gz_avail` reports six
+local names supplied by radare2 and its canary slot renders as `canary`,
+`gz_decomp` reports three. The locked corpus is built without `-g`, so all
+fifty-four cells are byte-identical.
+
+### The coalescing attempt, and the question it exposed
+
+Giving `CertifiedEntity::StackSlot` a coalescing membership derived from
+`certificates().stack_reloads` -- the exact-width reloads a unique reaching
+store proves are the slot's contents -- works: the slot and its carriers become
+one binding, `gz_avail` gains `strm` and `n` as named locals and loses three
+temporaries. It also renders `stack_m32 = stack_m32;` for every reload, because
+the load's memory-read obligation needs a rendered occurrence and the statement
+is what carries it. That is correct C the corpus compiler rejects under
+`-Wself-assign`, and nine of the fifty-four cells changed.
+
+Asked what a proven non-escaping stack local's accesses are, the user ruled
+that they are **program-variable accesses rather than memory effects**. A slot
+whose address never escapes is a C object; reading a C object is not an
+observable effect, so the ledger has no business demanding exactly one rendered
+occurrence per machine load of it. A redundant reload then owes nothing and its
+statement simply goes, and reading the coalesced variable several times where
+the machine read memory once is not a duplicated effect. The escape proof is
+the condition that separates the two treatments, and a slot whose address
+reaches a callee keeps its memory treatment.
+
+Two alternatives were declined: keeping the obligations and moving the
+suppressed reload's occurrence to the consuming site, which reuses the folding
+rule but leaves an arbitrary choice of which reader carries it; and admitting a
+certified reload as inline-eligible only where it has exactly one rendered
+reader, which is the narrow version that leaves the general case unimproved.
+
+The coalescing work is saved as `step2-slot-coalescing.patch` in the session
+scratchpad and is re-applied on top of the escape rule. The tree is at
+`b8143276` with the gate at 54 raw, differential and snapshot.
