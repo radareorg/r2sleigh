@@ -3914,9 +3914,14 @@ static bool snapshot_type_align_up(ut64 value, ut64 alignment, ut64 *result) {
 	ut64 padding = remainder? alignment - remainder: 0;
 	return !r_add_overflow (value, padding, result);
 }
-static SnapshotTypeGraphResult snapshot_type_resolve_struct(
+/* OUT_UNDEFINED, when given, says the name resolved but no aggregate of that
+ * name is defined: a declaration-only type, not a malformed spelling. */
+static SnapshotTypeGraphResult snapshot_type_resolve_struct_undefined(
 	const SnapshotTypeGraphBuilder *builder, const char *type,
-	const RAnalBaseType **result_base) {
+	const RAnalBaseType **result_base, bool *out_undefined) {
+	if (out_undefined) {
+		*out_undefined = false;
+	}
 	char *spec = NULL;
 	SnapshotTypeGraphResult result = snapshot_type_unalias (builder, type, &spec);
 	if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
@@ -3945,10 +3950,19 @@ static SnapshotTypeGraphResult snapshot_type_resolve_struct(
 	}
 	free (spec);
 	if (ambiguous || !base) {
+		if (out_undefined && !ambiguous) {
+			*out_undefined = true;
+		}
 		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	*result_base = base;
 	return SNAPSHOT_TYPE_GRAPH_VALID;
+}
+
+static SnapshotTypeGraphResult snapshot_type_resolve_struct(
+	const SnapshotTypeGraphBuilder *builder, const char *type,
+	const RAnalBaseType **result_base) {
+	return snapshot_type_resolve_struct_undefined (builder, type, result_base, NULL);
 }
 static SnapshotTypeGraphResult snapshot_type_add_struct(
 	SnapshotTypeGraphBuilder *builder, const char *type,
@@ -4155,9 +4169,25 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 		} else {
 			result = snapshot_type_add_integer (builder, pointee, &target_id);
 			if (result == SNAPSHOT_TYPE_GRAPH_UNSUPPORTED) {
-				result = strchr (pointee, '*')
-					? snapshot_type_add_pointer (builder, pointee, &target_id)
-					: snapshot_type_add_struct (builder, pointee, &target_id);
+				if (strchr (pointee, '*')) {
+					result = snapshot_type_add_pointer (builder, pointee, &target_id);
+				} else {
+					// A pointee the database only declares has no layout to
+					// carry, and a pointer to it is still exactly what the
+					// spelling says. `FILE *` reaches `struct _IO_marker *`,
+					// which glibc never defines, and refusing it lost the
+					// whole graph and every logical width with it.
+					const RAnalBaseType *base = NULL;
+					bool undefined = false;
+					result = snapshot_type_resolve_struct_undefined (
+						builder, pointee, &base, &undefined);
+					result = result == SNAPSHOT_TYPE_GRAPH_VALID
+						? snapshot_type_add_struct (builder, pointee, &target_id)
+						: (undefined
+							? snapshot_type_add_opaque (builder,
+								R_ANAL_SNAPSHOT_TYPE_VOID, &target_id)
+							: result);
+				}
 			}
 		}
 		free (pointee);
