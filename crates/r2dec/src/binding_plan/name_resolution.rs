@@ -160,6 +160,26 @@ fn source_parameter_presentation<'a>(
     )
 }
 
+/// The name the source gave the slot this object occupies.
+///
+/// A frame-relative declaration was restated into entry coordinates, so the
+/// certificate's declared key is what the display table is asked about.
+fn source_stack_slot_presentation(
+    source_owned: &SourceOwnedFunctionFacts,
+    object: r2ssa::ObjectId,
+) -> Option<&str> {
+    let (base, offset) = source_owned
+        .source()
+        .certificates()
+        .stack_slots
+        .get(&object)?
+        .declared_at?;
+    source_owned
+        .report()
+        .display_names()
+        .stack_slot(base, offset)
+}
+
 fn preferred_parameter_presentation<'a>(
     signature_name: Option<&'a str>,
     display_name: Option<&'a str>,
@@ -186,6 +206,7 @@ pub(crate) struct BindingNameResolution {
     plan: Rc<BindingPlan>,
     symbols: Rc<RefCell<SymbolTable>>,
     by_binding: Box<[SymbolId]>,
+    source_named_locals: usize,
 }
 
 impl BindingNameResolution {
@@ -199,10 +220,13 @@ impl BindingNameResolution {
             .map_err(BindingNameResolutionError::Source)?;
 
         let mut by_binding = Vec::with_capacity(plan.binding_count());
+        let mut source_named_locals = 0usize;
         for (binding_id, binding) in plan.bindings() {
+            let mut stack_object = None;
             let role = match plan.binding_role(binding_id) {
                 Some(BindingRole::Parameter { slot }) => SymbolRole::Parameter(slot),
                 Some(BindingRole::StackObject { object }) => {
+                    stack_object = Some(object);
                     let entity = r2ssa::SemanticId::StackSlot(object);
                     match source_owned
                         .report()
@@ -235,7 +259,11 @@ impl BindingNameResolution {
                     slot,
                     binding.presentation_name_hint(),
                 ),
-                SymbolRole::StackLocal(_) | SymbolRole::Carrier => binding.presentation_name_hint(),
+                SymbolRole::StackLocal(_) => stack_object
+                    .and_then(|object| source_stack_slot_presentation(source_owned, object))
+                    .inspect(|_| source_named_locals += 1)
+                    .or_else(|| binding.presentation_name_hint()),
+                SymbolRole::Carrier => binding.presentation_name_hint(),
             }
             .map(c_identifier_for_presentation)
             .unwrap_or_else(|| format!("binding_{}", binding_id.index()));
@@ -252,7 +280,13 @@ impl BindingNameResolution {
             plan,
             symbols,
             by_binding: by_binding.into_boxed_slice(),
+            source_named_locals,
         })
+    }
+
+    /// Locals that took the name the source gave their slot.
+    pub(crate) const fn source_named_locals(&self) -> usize {
+        self.source_named_locals
     }
 
     /// How a symbol is spelled in the rendered C.

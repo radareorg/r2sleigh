@@ -1531,6 +1531,15 @@ impl TrustedSsaArtifact {
                 .iter()
                 .map(|name| name.to_string()),
         );
+        // Keyed by the coordinate the source declared. A frame-relative slot is
+        // restated into entry coordinates later, and the lookup translates back.
+        display_names.set_stack_slot_names(
+            source
+                .presentation()
+                .stack_slot_names()
+                .iter()
+                .map(|slot| (slot.base(), slot.offset(), slot.name().to_string())),
+        );
         // A source without a recovered prototype still describes its ABI in the
         // instructions: a register read before it is written carries a value the
         // caller supplied. Recover that rather than refusing the function, but

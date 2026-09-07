@@ -1332,6 +1332,9 @@ pub struct StackSlotCertificate {
     /// unique slot at this base and offset. Absence grants no local or
     /// parameter-home role downstream.
     pub source_slot: Option<SourceStackSlotSpec>,
+    /// Coordinate the source declared this slot at, when a source slot owns it.
+    /// A frame-relative declaration is restated, so this is the original key.
+    pub declared_at: Option<(StackAddressBase, i64)>,
     /// Exact proof that a source-less object lies wholly inside storage owned
     /// by this callee at every access. This is deliberately separate from a
     /// source slot: compiler-created spills and temporaries are real machine
@@ -6814,6 +6817,7 @@ fn collect_prepared_function_certificates(
     unobserved: &crate::deadphi::DeadPhis,
 ) -> PreparedFunctionCertificates {
     let mut exact_stack_slots = BTreeMap::new();
+    let mut declared_stack_slot_keys = BTreeMap::new();
     let mut ambiguous_stack_slots = BTreeSet::new();
     if let Some(interface) = machine_context.and_then(SourceMachineContext::function_interface) {
         for slot in interface.stack_slots() {
@@ -6821,6 +6825,7 @@ fn collect_prepared_function_certificates(
             if exact_stack_slots.insert(key, *slot).is_some() {
                 ambiguous_stack_slots.insert(key);
             }
+            declared_stack_slot_keys.insert(key, key);
             // A slot declared against the frame pointer, restated in the one
             // coordinate objects are identified in.
             //
@@ -6855,6 +6860,7 @@ fn collect_prepared_function_certificates(
                             stack_pointer,
                             entry_offset,
                         );
+                        declared_stack_slot_keys.insert(translated, key);
                         if exact_stack_slots.insert(translated, restated).is_some() {
                             r2il::refusal_evidence!(
                                 "stack-slot-translation",
@@ -6884,6 +6890,7 @@ fn collect_prepared_function_certificates(
     }
     for key in ambiguous_stack_slots {
         exact_stack_slots.remove(&key);
+        declared_stack_slot_keys.remove(&key);
     }
 
     let loops = structured
@@ -7089,6 +7096,7 @@ fn collect_prepared_function_certificates(
                         .cloned()
                         .unwrap_or(StackArrayLayoutDisposition::NotIndexed),
                     source_slot: exact_stack_slots.get(&(base, offset)).copied(),
+                    declared_at: declared_stack_slot_keys.get(&(base, offset)).copied(),
                     callee_allocation: callee_stack_allocations.get(object).cloned(),
                 },
             )),
@@ -12239,6 +12247,13 @@ mod tests {
             local_certificate.source_slot,
             Some(declared.restated(StackAddressBase::StackPointer, stack_pointer, -16)),
             "the prepared certificate must retain the declared slot's width and role at its entry position"
+        );
+        // Restating loses the coordinate the source declared, and the display
+        // table is keyed by it, so the certificate keeps it.
+        assert_eq!(
+            local_certificate.declared_at,
+            Some((StackAddressBase::FramePointer, declared.offset())),
+            "the certificate must keep the coordinate the source declared the slot at"
         );
         // Each has the width its own accesses give it, and they differ. The
         // concern this replaces was that a resource could borrow a width from

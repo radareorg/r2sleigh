@@ -1474,6 +1474,7 @@ impl SealedNativeFunction {
         &mut self,
         ledger: &r2ssa::ledger::ObligationLedger,
         radare2_variadic_format_counts: usize,
+        radare2_local_names: usize,
     ) {
         self.effect_audit = crate::EffectObligationAudit::from_ledger(ledger);
         if !self.effect_audit.is_admitted() {
@@ -1493,6 +1494,7 @@ impl SealedNativeFunction {
             &mut function,
             Some(ledger),
             radare2_variadic_format_counts,
+            radare2_local_names,
         );
         self.ready = prepare_function_for_emission(&function);
     }

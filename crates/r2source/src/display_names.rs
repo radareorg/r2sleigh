@@ -14,6 +14,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::contracts::StackAddressBase;
+
 /// Display-only names, keyed by the address they belong to.
 ///
 /// Ordered maps, because the rendered output is compared byte for byte and two
@@ -29,6 +31,9 @@ pub struct DisplayNames {
     /// by where it sits in the signature and not by a place in memory. Still a
     /// spelling and nothing more: it does not say what the parameter is for.
     parameters: Vec<String>,
+    /// The function's own stack slots, keyed by where the source declared them.
+    /// A frame-relative key is never restated here; the caller translates.
+    stack_slots: BTreeMap<(StackAddressBase, i64), String>,
 }
 
 impl DisplayNames {
@@ -42,6 +47,7 @@ impl DisplayNames {
             && self.symbols.is_empty()
             && self.strings.is_empty()
             && self.parameters.is_empty()
+            && self.stack_slots.is_empty()
     }
 
     /// Record the name of a function that starts at `addr`.
@@ -96,6 +102,31 @@ impl DisplayNames {
             .filter(|name| !name.is_empty())
     }
 
+    /// Record the names the source gave this function's stack slots.
+    ///
+    /// The key is the coordinate the source declared, not the one objects are
+    /// identified in; a caller holding a restated slot translates first.
+    pub fn set_stack_slot_names<I>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = (StackAddressBase, i64, String)>,
+    {
+        for (base, offset, name) in names {
+            if name.is_empty() {
+                continue;
+            }
+            self.stack_slots.insert((base, offset), name);
+        }
+    }
+
+    /// The name the source gave the slot declared at this coordinate.
+    pub fn stack_slot(&self, base: StackAddressBase, offset: i64) -> Option<&str> {
+        self.stack_slots.get(&(base, offset)).map(String::as_str)
+    }
+
+    pub fn stack_slots(&self) -> &BTreeMap<(StackAddressBase, i64), String> {
+        &self.stack_slots
+    }
+
     pub fn parameters(&self) -> &[String] {
         &self.parameters
     }
@@ -139,6 +170,9 @@ impl DisplayNames {
         }
         if self.parameters.is_empty() {
             self.parameters = other.parameters.clone();
+        }
+        for (key, name) in &other.stack_slots {
+            self.stack_slots.entry(*key).or_insert_with(|| name.clone());
         }
     }
 }
@@ -205,6 +239,28 @@ mod tests {
         names.insert_symbol(0x2000, "sym.imp.strcmp");
         assert_eq!(names.name_for(0x2000), Some("sym.imp.strcmp"));
         assert_eq!(names.name_for(0x2001), None);
+    }
+
+    /// A slot is identified by the coordinate the source declared it at, so
+    /// the same offset under two bases is two slots.
+    #[test]
+    fn a_stack_slot_name_answers_for_its_declared_coordinate() {
+        let mut names = DisplayNames::new();
+        names.set_stack_slot_names([
+            (StackAddressBase::FramePointer, -40, "len".to_string()),
+            (StackAddressBase::StackPointer, -40, "other".to_string()),
+            (StackAddressBase::FramePointer, -48, String::new()),
+        ]);
+        assert_eq!(
+            names.stack_slot(StackAddressBase::FramePointer, -40),
+            Some("len")
+        );
+        assert_eq!(
+            names.stack_slot(StackAddressBase::StackPointer, -40),
+            Some("other")
+        );
+        assert_eq!(names.stack_slot(StackAddressBase::FramePointer, -48), None);
+        assert_eq!(names.stack_slot(StackAddressBase::FramePointer, -8), None);
     }
 
     /// An empty spelling is not an improvement on having no name, and storing
