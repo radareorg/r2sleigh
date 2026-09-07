@@ -14673,3 +14673,37 @@ consumer, and is the next thing in this area.
 Local six-binary census over the session: 111 refusals to 95. `_init` (six, one
 per binary), `entry0` (six), `bsPutBit`-shaped functions and everything taking
 an `EState *`.
+
+### One machine use, two rendered statements: the flag class
+
+Six of the ten remaining `missing_definition` refusals are a flag -- `ZF_9`,
+`ZF_8`, `ZF_48` and so on -- read but never written. The shape is always the
+same: `test al, al` lifts to `tmp = x & x` then `ZF = tmp == 0`, and the branch
+that consumes the flag renders the comparison inline, so no statement defines
+the flag while a read of it survives.
+
+The reason the flag is *bound* rather than inlined is now visible. Its
+placement evidence reads
+
+```
+reads=[(56679, 100, Use(UseSite { inst: InstId(191), input_idx: 1 })),
+       (56679, 102, Use(UseSite { inst: InstId(191), input_idx: 1 }))]
+```
+
+-- one block, one machine use site, and **two different rendered statements**.
+The function is not duplicated (nine blocks folded, nine distinct), so this is
+one use observed twice within a single rendering: the condition reaches the page
+in two places, which is what a loop condition rendered both in a body prefix and
+in the `while` header does. The inlining guard counts rendered readers, sees
+two, and binds.
+
+That makes it a case of the rewriting rule this project already settled -- a
+folded obligation's occurrence *moves* with the expression -- except that here
+it is duplicated rather than moved. Either the second statement must not carry
+the same observation, or the reader count must count one machine use once. This
+is the next thing to do in the placement area, and it is worth six functions
+locally plus whatever the same duplication costs elsewhere.
+
+The evidence now prints the statement alongside the block and the use site,
+which is the only reason the two could be told apart from a single use recorded
+twice.

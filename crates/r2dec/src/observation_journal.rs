@@ -1267,7 +1267,7 @@ impl MarkedNativeDraft {
                     .reads()
                     .iter()
                     .filter(|read| read.binding == binding)
-                    .map(|read| (read.block, read.source))
+                    .map(|read| (read.block, read.statement, read.source))
                     .collect::<Vec<_>>();
                 let writes = occurrences
                     .writes()
