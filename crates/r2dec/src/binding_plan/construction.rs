@@ -909,8 +909,10 @@ impl BindingPlan {
                     // dataflow's, a callee allocation is a certificate's.
                     r2il::refusal_evidence!(
                         "stack-object-identity",
-                        "object={:?} source_slot={} callee_allocation={} size={:?}",
+                        "object={:?} at {:?}{:+} source_slot={} callee_allocation={} size={:?}",
                         object,
+                        base,
+                        offset,
                         source_slot.is_some(),
                         callee_allocation.is_some(),
                         size
