@@ -14766,15 +14766,26 @@ recording a wider variable over a parameter home rather than anything the plan
 decides. That is the same family as the overlapping-stack-variables work in
 pull request 26644.
 
-`unrepresentable operation` is now a spread rather than a single cause. The
-largest single shape in it is a block with several predecessors that then
-branches to two terminal blocks: `collect_shared_joins` requires a join to have
-no successors ("a join that carries on needs a label on whatever it carries on
-to"), so such a join is not eligible and its two arms go unrendered. The
-generalisation is that a shared join owns its forward closure -- every block
-reachable from it that no region covers and whose predecessors are all inside
-that closure -- and the closure is labelled up front and appended after the
-body, exactly as single-block joins already are.
+`unrepresentable operation` is now a spread rather than a single cause. Its
+largest shape is `BZ2_bzBuffToBuffCompress`: 14 of 16 blocks rendered, leaving
+`0x840a` and `0x8494`, the two terminal arms of `0x83f6`.
+
+**The obvious generalisation was built, measured and reverted.** The reading was
+that `0x83f6` is a shared join that `collect_shared_joins` rejects because it has
+successors, and that a join should own its forward closure -- every block it
+reaches that no region wrote and that nothing outside reaches -- with the whole
+closure labelled up front and written after the body. That was implemented, down
+to emitting each written-out block's terminator as `goto` or as `if (c) goto A;
+else goto B;`. It admits **zero** multi-block closures across `minigzip-O0`,
+`bzip2-O0` and `bzip2-O2`, changes no refusal, and is not in the tree.
+
+The reason is that `0x83f6` is not an eligible join and never could be: it is
+*covered*. The structuring rendered it. What it did not render are its two arms,
+each with a single predecessor, which a shared join never considers because it
+requires two. So the defect is one level up -- the region composer gave `0x83f6`
+no `IfThenElse` with those arms as regions, even though `0x83f6` is a plain
+conditional branch with four jumps into it. Why the composer dropped them is the
+next probe, and it is a question about the collapse, not about shared joins.
 
 
 ### The gap backstop fires often and has never saved a function
