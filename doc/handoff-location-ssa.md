@@ -13732,3 +13732,50 @@ shadow-store and owned-xref additions from the fork's own `flag.c`, `meta.c` and
 in the same change. The DWARF cut is the precedent -- the same mistake, a partial
 removal that leaves guards or headers referring to what was removed, is what
 made both attempts fail the first time.
+
+## The artifact store is cut, and the integration PR is 4,275 lines
+
+The store let a provider replace a scoped set of comments, flags and xrefs
+atomically, with shadow copies of the flag, metadata and xref tables to stage
+into and an owned-xref model underneath. Nothing r2sleigh uses reached it, and
+`r_core_anal_plugin_data_refs`, the only public entry into its driver, had no
+caller in the tree.
+
+**The lesson that took two failures to learn, now proven twice.** A partial
+removal that leaves anything still shaped by what was removed does not merely
+fail to build -- it builds and then misbehaves. For DWARF it was the
+completeness guards computed from the deleted evidence. Here it was a struct:
+`RefManager` in `xrefs.c` carries two fork-added members, `unowned_refs` and
+`owned_sets`, and reverting that file to upstream while other fork objects still
+saw the wider struct produced a binary that loaded zero plugins and crashed in a
+hashtable iterator with a different garbage address every run.
+
+So `xrefs.c` was cut surgically: the two members and the twenty-odd functions
+that use them are gone, while `ref_manager_new`, `ref_manager_free`,
+`xref_del_locked` and `xrefs_setf_locked` keep their bodies minus the owned
+handling. `flag.c` and `meta.c` have no such coupling and did go back to
+upstream. The test that catches this class in one second is
+`rasm2 -L | wc -l`: 91 on a sound build, 0 on a broken one.
+
+**Where the pull request stands**
+
+| | Files | Added | Deleted |
+|---|---:|---:|---:|
+| Before the rebase | 54 | 11,602 | 1,134 |
+| After the rebase | 51 | 11,587 | 1,133 |
+| After the DWARF cut | 50 | 8,341 | 1,026 |
+| After the artifact cut | **37** | **4,275** | **991** |
+
+A 63% reduction, pushed, and GitHub reports the branch mergeable. The fork suite
+(`db/anal`, `db/cmd`, `db/formats`) passes with zero failures, where the branch
+carried three before any of this. The locked corpus is 54/54 raw and
+differential with all 54 snapshots byte-identical, so the plugin is unaffected
+by either cut -- which is the point: it reads the debug information itself and
+never touched the artifact store.
+
+**What is left in the 4,275 lines** has not been classified line by line. It is
+the genuine integration surface plus the unit tests, and the next audit should
+ask of each block the same question these two cuts answered: does radare2 need
+this, or is it r2sleigh's model compiled into someone else's project. Anything
+that turns out to be a radare2 fix goes out as its own pull request, which is
+where eight of them have already gone.
