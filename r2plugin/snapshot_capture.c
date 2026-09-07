@@ -173,6 +173,53 @@ static bool snapshot_return_mechanism_equal(const RAnalSnapshotReturnMechanismVi
 static void snapshot_stack_allocation_contract_collect(RAnal *anal, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotStackAllocationContractView *view);
 static bool snapshot_stack_allocation_contract_equal( const RAnalSnapshotStackAllocationContractView *a, const RAnalSnapshotStackAllocationContractView *b);
 static bool snapshot_frame_pointer_storage_conflicts_interface( const RAnalSnapshotRegisterStorage *storage, const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx);
+// The base-pointer register every frame-pointer slot agrees on.
+//
+// Radare2 placed those slots against a register and recorded which one; taking
+// it here asserts nothing the slots do not already assert.
+static bool snapshot_frame_pointer_storage_from_slots(RAnal *anal,
+		const RAnalFunction *fcn,
+		const RAnalFcnContext *ctx,
+		const RAnalFunctionInterfaceSnapshot *interface,
+		RAnalSnapshotRegisterStorage *storage) {
+	const char *name = NULL;
+	RListIter *iter;
+	RAnalFcnSlot *slot;
+	r_list_foreach (ctx->fcn_slots, iter, slot) {
+		if (!slot || slot->base != R_ANAL_FCN_BASE_BP) {
+			continue;
+		}
+		if (!slot->base_name || !slot->base_size) {
+			return true;
+		}
+		if (name && strcmp (name, slot->base_name)) {
+			return true;
+		}
+		name = slot->base_name;
+	}
+	if (!name) {
+		return true;
+	}
+	ut32 address_size;
+	RAnalSnapshotRegisterStorage candidate = {0};
+	SnapshotStorageResult collected = snapshot_register_storage_collect (
+		anal, name, true, &candidate);
+	if (collected == SNAPSHOT_STORAGE_NO_MEMORY) {
+		return false;
+	}
+	const bool exact = collected == SNAPSHOT_STORAGE_VALID
+		&& snapshot_function_address_size (fcn, &address_size)
+		&& candidate.size == address_size
+		&& !snapshot_frame_pointer_storage_conflicts_interface (
+			&candidate, interface, ctx);
+	if (!exact) {
+		snapshot_register_storage_fini (&candidate);
+		return true;
+	}
+	*storage = candidate;
+	return true;
+}
+
 static bool snapshot_frame_pointer_storage_collect(RAnal *anal, const RAnalFunction *fcn, const RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotRegisterStorage *storage);
 static bool snapshot_frame_pointer_storage_equal( const RAnalSnapshotRegisterStorage *a, const RAnalSnapshotRegisterStorage *b);
 static int snapshot_base_type_compare(const void *left, const void *right);
@@ -583,6 +630,15 @@ static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext
 		ut64 count = 1;
 		char *element = snapshot_type_member_element_spec (slot->type, &count);
 		ut64 bits = element? r_anal_type_bitsize (anal, element): 0;
+		if (!bits && element) {
+			// `signed int` is `int` and the type database sizes only the
+			// second spelling, so a slot radare2 typed the first way had no
+			// extent and left every slot in the frame unproven against overlap.
+			const char *rest = r_str_trim_head_ro (element);
+			if (r_str_startswith (rest, "signed ")) {
+				bits = r_anal_type_bitsize (anal, rest + strlen ("signed "));
+			}
+		}
 		free (element);
 		ut64 total_bits;
 		if (bits && count && !r_mul_overflow (bits, count, &total_bits)
@@ -3121,7 +3177,11 @@ static bool snapshot_frame_pointer_storage_collect(RAnal *anal,
 	}
 	R2SleighDwarfFrameBase proof = {0};
 	if (!r2sleigh_dwarf_function_frame_base (anal, fcn->addr, &proof)) {
-		return true;
+		// GCC spells the frame base as the call-frame address, which names no
+		// register, so the slots radare2 placed against the base pointer are
+		// what says which register it is.
+		return snapshot_frame_pointer_storage_from_slots (anal, fcn, ctx,
+			interface, storage);
 	}
 	ut32 address_size;
 	RAnalSnapshotRegisterStorage candidate = {0};
