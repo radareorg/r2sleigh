@@ -14264,3 +14264,57 @@ oracles, and class recovery.
 
 None of it displaces the census. Aggregate interiors remain the top refusal
 cause at both optimisation levels.
+
+### Two chains, traced to their ends
+
+Two investigations ran to a named cause today and neither is finished, so the
+state is recorded rather than left in a session.
+
+**Why coalescing fires on some functions and not others.** Not the partition:
+the interference and redefinition checks decline nothing on the two functions
+traced. The classes are never proposed, because the slot is not proven private,
+and privacy fails for two independent reasons.
+
+The first was mine and is fixed. The escape test asked whether every use of an
+address naming an object produces another address of *that same* object, which
+the frame pointer fails immediately: it names the object at offset zero and
+every local's address is computed from it. Thirty objects on `minigzip` at -O0
+failed that way, none of them escaping anything. An address that lands on
+another frame address now stays inside the frame; handing one to a call still
+escapes. Failures fall from thirty to nineteen and nothing rendered changes.
+
+The second is open and is the interesting one. A function with any access the
+object model could not place loses privacy for every slot, because an unplaced
+address may name any frame slot. The backward slice names those accesses on
+`gz_avail`: `RSP_1 = RSP_0 + 8`, `RSP_2 = RSP_1 & -16`, `RSP_3 = RSP_2 - 8`.
+The `IntAnd` defeats the affine stack-root resolver, so every access through a
+realigned stack pointer is unplaced, and three of five accesses in that
+function are enough to disqualify the whole frame. Stack realignment is
+ordinary in optimised and unoptimised code alike, which is why `djb2` still
+renders its loop counter as three temporaries.
+
+The repair is not to place the realigned pointer as a slot, because its offset
+is unknown after the mask and a distinct object would claim a disjointness
+nothing proves. The refinement that is sound: an unplaced access disqualifies
+privacy only when its address is not provably frame-derived. A frame-derived
+address that never escapes cannot make a slot observable from outside, and if
+it may alias the slot the memory SSA already withholds the reload certificate,
+so coalescing stays sound either way. Proving "frame-derived" is a backward
+walk over arithmetic to the stack or frame register, which the slice already
+does.
+
+**Where the gap to angr actually is.** `reconcile` in `census_decbench.py` joins
+the scored results against the census and splits the 489 functions angr renders
+and we do not: 273 carry a named refusal, 216 have no census entry at all. The
+larger half is neither discovery nor refusal. On `bzip2` at -O2 radare2 finds
+114 functions, the scorer counts 106, and the adapter reported on 55. Three
+filters sit between discovery and the decompiler and each counted what it left,
+but the trail printed only when the list came out empty, so a filter that
+removed half the work said nothing. Every census now carries the trail at
+schema version 3 and the ranking prints what each stage removed.
+
+The evidence for whoever picks it up: the scored names our census never
+mentions on that binary are dominated by a contiguous run of `sub_4028xx` at
+sixteen-byte spacing, which is the procedure linkage table. radare2 names those
+`sym.imp.*` at its own load address. Whether they are skipped, renamed, or lost
+to the address mapping is what the trail will say.
