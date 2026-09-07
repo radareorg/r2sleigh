@@ -3,7 +3,10 @@
 
 import unittest
 
-from census_decbench import reconcile
+import contextlib
+import io
+
+from census_decbench import reconcile, report
 
 
 class CensusReconciliationTests(unittest.TestCase):
@@ -67,6 +70,37 @@ class CensusReconciliationTests(unittest.TestCase):
         self.assertEqual(rows["foo.constprop.0"]["alias"], {"function": "foo", "address": 16})
         self.assertEqual(rows["foo.constprop.1"]["status"], "no_census_entry")
         self.assertEqual(rows["bar.isra.0"]["matches"], [{"flag": "dbg.bar", "cause": "refused"}])
+
+
+class ReportAttritionTest(unittest.TestCase):
+    def _report(self, payloads):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            report(payloads, top=3)
+        return buffer.getvalue()
+
+    def test_each_filter_reports_what_it_removed(self):
+        text = self._report([{
+            "binary_path": "/run/out/O2/project/compiled/bin",
+            "rendered": 2,
+            "declined": 1,
+            "candidates": [
+                {"stage": "discovered", "functions": 10},
+                {"stage": "after skip-list", "functions": 7},
+                {"stage": "after source narrowing", "functions": 3},
+            ],
+        }])
+        self.assertIn("discovered 10 functions", text)
+        self.assertIn("removed      4 after source narrowing", text)
+        self.assertIn("removed      3 after skip-list", text)
+
+    def test_a_census_without_stages_reports_no_discovery(self):
+        text = self._report([{
+            "binary_path": "/run/out/O0/project/compiled/bin",
+            "rendered": 1,
+            "declined": 0,
+        }])
+        self.assertNotIn("discovered", text)
 
 
 if __name__ == "__main__":

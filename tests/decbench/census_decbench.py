@@ -184,6 +184,28 @@ def report(payloads: list[dict], top: int) -> None:
         gap_ops += payload.get("gap_ops", 0)
 
     print(f"binaries   {len(payloads)}")
+    # Discovery is what radare2 found; observed is what reached the decompiler.
+    # The difference is filters, and it was invisible before schema 3.
+    discovered = 0
+    attrition: dict[str, int] = {}
+    for payload in payloads:
+        stages = payload.get("candidates") or []
+        if not stages:
+            continue
+        discovered += stages[0].get("functions", 0)
+        previous = stages[0].get("functions", 0)
+        for stage in stages[1:]:
+            count = stage.get("functions", 0)
+            removed = previous - count
+            if removed > 0:
+                attrition[stage.get("stage", "?")] = (
+                    attrition.get(stage.get("stage", "?"), 0) + removed
+                )
+            previous = count
+    if discovered:
+        print(f"discovered {discovered} functions")
+        for stage, removed in sorted(attrition.items(), key=lambda kv: -kv[1]):
+            print(f"  removed  {removed:5} {stage}")
     print(f"observed   {observed} functions")
     print(f"coverage   {rendered}/{observed} = {rendered / observed:.3f}")
     # A gapped function is rendered but not proven, so both are printed:

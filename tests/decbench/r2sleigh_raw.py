@@ -461,7 +461,9 @@ class RawR2SleighDecompiler(Decompiler):
                     "harness: no function reached the decompiler; "
                     f"the candidate list was emptied {emptied} ({trail})"
                 )
-        _write_refusal_census(output_dir, binary_path, declined, gapped, len(rendered))
+        _write_refusal_census(
+            output_dir, binary_path, declined, gapped, len(rendered), stages
+        )
 
         ended_early = discovery.ended_early or (decompile is not None and decompile.ended_early)
 
@@ -503,6 +505,7 @@ def _write_refusal_census(
     declined: dict[str, str],
     gapped: dict[str, list[dict[str, str]]],
     rendered: int,
+    stages: list[tuple[str, int]] | None = None,
 ) -> None:
     """Record why each function was declined, beside the run's own results.
 
@@ -542,7 +545,7 @@ def _write_refusal_census(
                 gap_causes[gap["kind"]] = gap_causes.get(gap["kind"], 0) + 1
                 gap_ops += int(gap["ops"])
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "binary": binary_path.name,
             "binary_path": str(binary_path),
             "rendered": rendered,
@@ -557,6 +560,13 @@ def _write_refusal_census(
             "gap_ops": gap_ops,
             "gap_causes": dict(sorted(gap_causes.items(), key=lambda kv: (-kv[1], kv[0]))),
             "gaps_by_function": dict(sorted(gapped.items())),
+            # What each filter between discovery and the decompiler removed.
+            # Recorded always: it used to be reported only when the list emptied
+            # completely, so a filter that halved the work said nothing, and half
+            # the gap to the reference decompiler sat in that silence.
+            "candidates": [
+                {"stage": label, "functions": count} for label, count in (stages or [])
+            ],
         }
         # Named from the whole path, not the binary's name. One run decompiles
         # the same names at every optimization level -- zlib builds `example`
