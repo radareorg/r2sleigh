@@ -14697,12 +14697,30 @@ in two places, which is what a loop condition rendered both in a body prefix and
 in the `while` header does. The inlining guard counts rendered readers, sees
 two, and binds.
 
+The second statement is the `if` itself. `structure_region`'s `IfThenElse` arm
+reads
+
+```rust
+let (cond, ..) = self.get_branch_condition_with_predicate(*cond_block);
+...
+let if_stmt = ... CStmt::if_stmt(cond, then_stmt, else_stmt);
+let mut prefix = self.structure_block_prefix_stmts(*cond_block)?;
+prefix.push(if_stmt);
+```
+
+-- the condition is folded out of `cond_block`, and then the *same block* is
+rendered as the prefix. `extract_condition_from_block` builds the condition from
+the SSA without consulting the binding plan, so an operand the plan bound is
+spelled out again inside the condition instead of by its symbol, and the machine
+use behind it is observed once in the prefix statement and once in the `if`.
+
 That makes it a case of the rewriting rule this project already settled -- a
 folded obligation's occurrence *moves* with the expression -- except that here
-it is duplicated rather than moved. Either the second statement must not carry
-the same observation, or the reader count must count one machine use once. This
-is the next thing to do in the placement area, and it is worth six functions
-locally plus whatever the same duplication costs elsewhere.
+it is duplicated rather than moved. The fix is that the condition goes through
+the same planned-value path the statements do, so a bound operand is named
+rather than re-rendered; counting one machine use once in the inlining guard
+would hide the duplication rather than remove it. Six functions locally, plus
+whatever the duplicated evaluation costs in rendered output elsewhere.
 
 The evidence now prints the statement alongside the block and the use site,
 which is the only reason the two could be told apart from a single use recorded
