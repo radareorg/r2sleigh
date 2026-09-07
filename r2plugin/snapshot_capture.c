@@ -1789,7 +1789,7 @@ static void r_anal_function_snapshot_free(RAnalFunctionSnapshot *snapshot) {
 	free (snapshot->call_site_interfaces);
 	snapshot_type_graph_fini (&snapshot->type_graph);
 	function_image_snapshot_fini (&snapshot->image);
-	r_anal_types_snapshot_free (snapshot->base_types);
+	r_list_free (snapshot->base_types);
 	free (snapshot->arch_id);
 	free (snapshot->cpu_id);
 	free (snapshot->function_name);
@@ -4935,7 +4935,7 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 	}
 	RList *base_types = snapshot_type_resolver_capture (anal, limits);
 	if (!base_types || type_dirty_epoch != r_anal_types_dirty_epoch (anal)) {
-		r_anal_types_snapshot_free (base_types);
+		r_list_free (base_types);
 		SNAPSHOT_REFUSE ("the type database is unreadable or changed during capture");
 	}
 
