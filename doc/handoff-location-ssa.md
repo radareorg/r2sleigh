@@ -13894,3 +13894,75 @@ fork-only export now has a caller -- nine in the plugin, eleven inside radare2.
 sets `anal->user` to its own context, which is why `core.c`'s fcn-delete
 callback was changed. Fix the test to leave the user pointer alone and
 `core.c` goes back to upstream's, taking five more lines with it.
+
+## Where the remaining 2,767 lines belong
+
+The test for each block: **does radare2 need this inside it, or could the plugin
+do the same thing through the public API?** A second test in the other
+direction: does the plugin reach for anything that radare2 should be answering.
+
+### Must stay inside radare2 — it cannot be observed from outside
+
+| Block | Added | Why it cannot move |
+|---|---:|---|
+| Dirty epochs on `RAnal` and `RAnalFunction` | ~90 | Only radare2 knows when its own state changed. The bumps sit at every mutation site in `type.c`, `fcn.c`, `var.c`, `function.c` and `cmd_anal.inc.c`. A plugin can only poll and hash, which is what the epoch exists to avoid. |
+| `RAnalPlugin.decompile`, `r_anal_decompiler_provider`, `r_anal_decompile`, `pdd` dispatch | ~120 | The integration contract itself. Nothing else can register a decompiler. |
+| Plugin action ordering in `anplugs.c` (`anal.plugins.*`) | 91 | radare2 decides which plugin runs when. It serves four live hooks, not just ours. |
+| `r_anal_xrefs_setf` and affected-function invalidation | ~205 | radare2's own xref bookkeeping, called from `fcn.c` in three places. |
+| `r_anal_cc_location_uses` | ~40 | Called by radare2's `p/tp/types.c` and `var.c`. Already upstream; the fork only widened its visibility and fixed it. |
+| `r_anal_types_set_link`/`_offset`/`_unlink` | ~60 | Wrappers that bump the type epoch. `global.c` and `cmd_type.inc.c` call them; the epoch must move with the link. |
+| Snapshot limits header | 35 | The budget radare2 enforces on its own type walk. |
+
+### Could move to the plugin, and probably should
+
+| Block | Added | What moving costs |
+|---|---:|---|
+| The types snapshot walk in `type.c` -- budget, preflight, clone, `types_baselist_with_limits` | ~400 | Nothing but effort. It reads `anal->sdb_types`, a public field, and `r_anal_base_type_*`, public calls. The plugin already captures the function snapshot this way. Only `r_anal_types_dirty_epoch` needs to stay behind. |
+| `assumptions_json` on `RAnalFunction` plus `afA` | ~200 | This is r2sleigh's concept living on radare2's struct. Moving it means the plugin keeps its own map keyed by function address -- and loses project save/load and the `afA` commands, which is a real loss to a user. Worth keeping **only if** radare2 wants a general per-function assumption store; today nothing else produces one. |
+| `cc.c` return-mechanism and stack-allocation parsers | ~60 | They read `anal->sdb_cc`, a public field. The plugin can parse the records itself; the sdb *data* stays, because those are true ABI facts. All three are dead inside radare2 already. |
+
+Moving the first and third would take about 460 lines out of the pull request
+without losing a fact.
+
+### Still dead, and the earlier census missed it
+
+The audit only enumerated `R_API` exports. Eight fork-added **`R_IPI`**
+functions have a definition and a declaration and no caller at all --
+`r_anal_cc_preserves_reg`, `r_anal_cc_return_mechanism`,
+`r_anal_cc_stack_allocation_contract`, `r_anal_function_signature_from_type_name`,
+`r_anal_function_type_link_set`, `r_anal_function_type_link_set_owned`,
+`r_anal_function_vars_cache_init_readonly` -- about 63 lines plus their private
+helpers. A ninth, `r_anal_types_snapshot_with_limits`, is a declaration whose
+definition is already gone. **Run the census over `R_IPI` as well as `R_API`.**
+
+### Two upstream fixes the earlier pass missed
+
+Both are radare2 bugs that exist without r2sleigh, and both were hidden inside
+larger fork diffs rather than appearing as new exports.
+
+1. **Cached ref counts go stale.** `r_anal_xrefs_set` and `r_anal_xref_del`
+   invalidate `fcn->meta.numcallrefs` and `numrefs` by looking the endpoint up
+   with `r_anal_get_function_at`, which matches only a function whose *entry* is
+   exactly that address. An xref's source is almost always inside a function,
+   not at its entry, so the common case never invalidates and `afl`'s ref
+   columns report a stale count until something else clears it. The fork walks
+   the function list with `r_anal_function_contains` instead.
+2. **Register comparison is case-sensitive.** `r_anal_cc_location_uses` compared
+   with `strcmp`, and register profiles and convention tables disagree on case,
+   so `r_anal_var_get_argnum` fails to match an argument register and answers
+   -1. The fork uses `r_str_casecmp`. Two lines.
+
+### The other direction: nothing in the plugin belongs in radare2
+
+The plugin's 16,071 lines of C are the capture (6,981), the analysis plugin
+(5,482), the wire format (1,365), the DWARF reader (366) and the arch plugin
+(244). Each was placed deliberately and the placement still holds: the capture
+is r2sleigh's policy about which facts to collect, the DWARF reader exists
+because the user ruled that evidence is the plugin's to read, and the wire
+format is private to the C/Rust boundary.
+
+The plugin reaches into `anal->iob`, `sdb_types`, `reg`, `config`, `binb`,
+`lock`, `fcns`, `coreb`, `arch` and `flb` -- all public `RAnal` fields, and all
+read-only. It touches no private structure. The one thing it needed radare2 to
+answer rather than reach for, a relocation at an address, became
+`binb.get_reloc_at`, which is the shape the rest should keep.
