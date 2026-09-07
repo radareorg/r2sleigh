@@ -14888,3 +14888,39 @@ anything. **Every route into a block has to contribute an alternative**, which i
 the architectural item this session has now reached from four directions: the
 coverage proof, the duplicated switch, the deferred merge, and the goto that
 carries no domain.
+
+### Exit-domain propagation: written, measured, reverted
+
+The item everything points at -- every route into a block contributes an
+alternative -- was implemented far enough to test, and the result narrows it
+usefully rather than settling it.
+
+The design: a `region_exit_domains` carrier alongside the existing
+`completed_loop_exit`, set by the regions that *narrow* the domain on their way
+out. A switch reports the converging arms' domain; a branch reports the union of
+what fell out of its arms, with the unwritten arm contributing the edge guard to
+the merge and a terminating arm contributing nothing; a sequence carries the
+previous element's exit into the next; whoever writes a merge uses the union
+instead of its own domain.
+
+It works where it was aimed. `gz_open`'s `0x223c` coverage failure disappears --
+the block is written under the union of the three routes rather than one of them
+-- and the whole switch chain finally passes the coverage proof.
+
+**It costs more than it gains: minigzip-O0 19 to 20, bzip2-O0 29 to 30.** The
+carry has to stop at the right boundary and neither test tried is the right one.
+Letting it cross freely puts `0x2331`, a block after the loop, inside
+`LoopId(0)`. Gating it on the carried domain's loops matching the *active*
+domain stops that but also stops the carry that fixes `0x223c`. Gating on the
+*next region's canonical* loops behaves the same. So the compatibility test is
+neither of those, and finding it is the remaining work rather than the design
+being wrong.
+
+Two things are worth keeping from the attempt. The generic fallback -- a region
+that says nothing about its exit falls out under the domain it was written in --
+is wrong and breaks `while_body_and_continuation_retain_exact_header_edge_guards`
+immediately: a loop does not fall out under the domain it ran in. Only regions
+that genuinely narrow should report. And the carry must be applied per sequence
+element rather than to the merge alone, because the block after a switch inside
+a loop body is written by `structure_block_stmts_into` flattening the sequence,
+not by any of the merge-writing sites.
