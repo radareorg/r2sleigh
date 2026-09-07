@@ -14978,11 +14978,24 @@ change and would be expectation updates, and **two are a real loss**: an
 `arg size_t arg4 @ rcx` becomes `int64_t`, because that argument was getting its
 `size_t` indirectly through the slot the guard now leaves alone.
 
-So the width is a symptom of the actual defect, which is that the propagation
-ignores the conversion between the slot and the argument. `mov eax, dword [n];
+**Two narrower attempts were also measured, and both are worse.** Stopping the
+backward walk whenever it crosses an operation the pass cannot classify --
+`cdqe` is `R_ANAL_OP_TYPE_NULL`, so the walk currently steps over it as though it
+were a copy -- gives the right type *and* the right name (`Int32 var_14h`, not
+`size_t size`), and leaves thirteen failures. Requiring
+`get_src_regname_from_esil` to see a whole-value copy, since `cdqe` lifts to
+`eax,rax,=` followed by a conditional sign fill and only the first token was
+being read, leaves twenty-four and does not even fix this slot, so that is not
+the path the type reaches it by. Baseline for all of these is 1181 OK, 0 XX
+across `db/anal`, `db/cmd/types` and `db/cmd/types2`.
+
+Three syntactic tests, three worse outcomes. The actual defect is that the
+propagation ignores the conversion between the slot and the argument. `mov eax, dword [n];
 cdqe; mov rdi, rax; call malloc` passes a *widened copy*, not the slot, and the
 callee's parameter type describes the copy. Propagating it onto the slot is only
-sound when the value reaches the argument unconverted -- which the ESIL trace the
-pass already builds could answer. That is the fix, it belongs in its own upstream
-pull request, and it is worth doing: this is behind the two largest refusal
-classes the plugin has left.
+sound when the value reaches the argument unconverted. That has to come from the
+ESIL trace the pass already builds -- what the emulated value actually was at
+the call, against what the slot held -- and not from a test on the op type, the
+mnemonic or the ESIL text, all of which were tried here. It belongs in its own
+upstream pull request, and it is worth doing: this is behind the two largest
+refusal classes the plugin has left.
