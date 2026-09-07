@@ -29,9 +29,108 @@ import argparse
 import collections
 import json
 import pathlib
+import re
 import sys
 
 HARNESS = "harness:"
+FLAG_PREFIX = re.compile(r"^(?:(?:dbg|sym|fcn|loc|flirt)\.)+")
+
+
+def _binary_key(payload: dict) -> tuple[str, str, str]:
+    parts = pathlib.PurePosixPath(payload.get("binary_path", "")).parts
+    if len(parts) < 4 or parts[-2] != "compiled":
+        raise ValueError(f"cannot identify census binary: {payload.get('binary_path')}")
+    # DecBench records Path.stem, including for versioned shared libraries.
+    return parts[-3], parts[-4], pathlib.PurePosixPath(parts[-1]).stem
+
+
+def reconcile(payloads: list[dict], results: list[dict], discovery: list[dict] = ()) -> dict:
+    """Join scored misses to their own binary's census without borrowing causes."""
+    censuses = {}
+    for payload in payloads:
+        key = _binary_key(payload)
+        if key in censuses:
+            raise ValueError(f"duplicate census binary: {key}")
+        names = collections.defaultdict(list)
+        for flag, cause in sorted(payload.get("by_function", {}).items()):
+            name = FLAG_PREFIX.sub("", flag) or flag
+            names[name].append({"flag": flag, "cause": cause})
+        censuses[key] = names
+
+    aliases = {}
+    for payload in discovery:
+        key = _binary_key(payload)
+        if key in aliases:
+            raise ValueError(f"duplicate discovery binary: {key}")
+        by_address = collections.defaultdict(set)
+        for function in payload["functions"]:
+            by_address[function["addr"]].add(FLAG_PREFIX.sub("", function["name"]))
+        symbols = collections.defaultdict(set)
+        for symbol in payload["symbols"]:
+            if symbol.get("type") == "FUNC" and not symbol.get("is_imported", False):
+                symbols[symbol["name"]].add(symbol["vaddr"])
+        aliases[key] = {}
+        for name, addresses in symbols.items():
+            if len(addresses) != 1:
+                continue
+            address = next(iter(addresses))
+            owners = by_address.get(address, set())
+            if len(owners) == 1:
+                owner = next(iter(owners))
+                if owner != name:
+                    aliases[key][name] = {"function": owner, "address": address}
+
+    totals = collections.Counter()
+    binaries = {}
+    misses = []
+    seen = set()
+    for result in results:
+        for group in result.get("groups", []):
+            key = tuple(group[field] for field in ("project", "opt_level", "binary"))
+            census = censuses.get(key)
+            counts = binaries.setdefault(key, collections.Counter())
+            rendered_names = {function["function"] for function in group.get("functions", [])
+                              if function.get("decompiled", {}).get("r2sleigh")}
+            for function in group.get("functions", []):
+                name = function["function"]
+                identity = (*key, name)
+                if identity in seen:
+                    raise ValueError(f"duplicate scored function: {identity}")
+                seen.add(identity)
+                totals["scored"] += 1
+                totals["rendered"] += bool(function.get("decompiled", {}).get("r2sleigh"))
+                totals["angr_rendered"] += bool(function.get("decompiled", {}).get("angr"))
+                if function.get("decompiled", {}).get("r2sleigh"):
+                    continue
+                matches = census.get(name, []) if census is not None else []
+                alias = aliases.get(key, {}).get(name) if not matches else None
+                if alias and census is not None:
+                    matches = census.get(alias["function"], [])
+                if census is None:
+                    status = "missing_census"
+                elif len(matches) > 1:
+                    status = "ambiguous_census_name"
+                elif matches:
+                    status = "named_refusal"
+                elif alias and alias["function"] in rendered_names:
+                    status = "rendered_alias"
+                else:
+                    status = "no_census_entry"
+                totals["missed"] += 1
+                totals[status] += 1
+                counts[status] += 1
+                misses.append(dict(zip(("project", "opt_level", "binary"), key)) | {
+                    "function": name, "status": status, "matches": matches, "alias": alias,
+                })
+
+    return {
+        "totals": dict(sorted(totals.items())),
+        "by_binary": [dict(zip(("project", "opt_level", "binary"), key)) | dict(counts)
+                      for key, counts in sorted(binaries.items())],
+        "misses": sorted(misses, key=lambda row: tuple(
+            row[field] for field in ("project", "opt_level", "binary", "function")
+        )),
+    }
 
 
 def _cell(payload: dict) -> str:
@@ -129,12 +228,26 @@ def main() -> int:
                         help="directory holding r2sleigh-refusals-*.json")
     parser.add_argument("--top", type=int, default=20,
                         help="how many causes to list per category")
+    parser.add_argument("--results", type=pathlib.Path, nargs="+",
+                        help="reconcile scored JSON files and print the join as JSON")
+    parser.add_argument("--discovery", type=pathlib.Path,
+                        help="JSON list of binary_path, functions (aflj), and symbols (isj) records")
     args = parser.parse_args()
+    if args.discovery and not args.results:
+        parser.error("--discovery requires --results")
     payloads = load(args.directory)
     if not payloads:
         print(f"no census files under {args.directory}", file=sys.stderr)
         return 1
-    report(payloads, args.top)
+    if args.results:
+        try:
+            results = [json.loads(path.read_text(encoding="utf-8")) for path in args.results]
+            discovery = json.loads(args.discovery.read_text(encoding="utf-8")) if args.discovery else []
+            print(json.dumps(reconcile(payloads, results, discovery), indent=2))
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+    else:
+        report(payloads, args.top)
     return 0
 
 
