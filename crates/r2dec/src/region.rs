@@ -1753,6 +1753,13 @@ impl<'a> RegionAnalyzer<'a> {
         }
     }
 
+    /// Where a switch's arms converge.
+    ///
+    /// An arm that returns never comes back, so it has no say in where the
+    /// others meet. Intersecting over every arm let one such arm erase the
+    /// merge for all of them, and the block they do converge on was then taken
+    /// as an ordinary case -- which is how `gz_open`'s `case '+'`, a `free` and
+    /// a return, cost the switch its merge and the enclosing branch its arm.
     fn find_working_switch_merge(&self, targets: &[usize], graph: &WorkingGraph) -> Option<usize> {
         if targets.is_empty() {
             return None;
@@ -1766,14 +1773,53 @@ impl<'a> RegionAnalyzer<'a> {
             graph.collect_reachable_limited(*target, &mut reachable, 10);
             reachable_sets.push(reachable);
         }
-        let first = reachable_sets.first()?;
-        let common: HashSet<usize> = first
+        // Every arm reaching it is the exact answer, and where it exists it is
+        // the one taken: a fallthrough chain's arms are all common to the arms
+        // behind them, and only requiring the whole set keeps a case entry from
+        // being mistaken for the convergence point.
+        if let Some(first) = reachable_sets.first() {
+            let common = first
+                .iter()
+                .copied()
+                .filter(|id| reachable_sets.iter().all(|set| set.contains(id)))
+                .min_by_key(|id| graph.node_entry(*id).unwrap_or(u64::MAX));
+            if common.is_some() {
+                return common;
+            }
+        }
+        // Otherwise the arms that returned are what emptied it, and they have
+        // no say in where the rest meet. A candidate has to be reached by every
+        // arm that comes back, post-dominate each of them, and be missed only
+        // by arms that leave.
+        let leaves = |set: &HashSet<usize>| set.iter().any(|id| graph.sorted_succs(*id).is_empty());
+        reachable_sets
             .iter()
+            .flatten()
             .copied()
-            .filter(|id| reachable_sets.iter().all(|s| s.contains(id)))
-            .collect();
-        common
+            .collect::<BTreeSet<_>>()
             .into_iter()
+            .filter(|id| {
+                // A merge merges, so at least two arms arrive, and an arm that
+                // does not arrive has to be one that left.
+                reachable_sets.iter().filter(|set| set.contains(id)).count() >= 2
+                    && reachable_sets
+                        .iter()
+                        .all(|set| set.contains(id) || leaves(set))
+            })
+            .filter(|id| {
+                let Some(candidate) = graph.node_entry(*id) else {
+                    return false;
+                };
+                targets
+                    .iter()
+                    .zip(&reachable_sets)
+                    .filter(|(_, set)| set.contains(id))
+                    .all(|(target, _)| {
+                        graph
+                            .node_entry(*target)
+                            .is_some_and(|start| self.post_dominates(start, candidate))
+                    })
+            })
             .min_by_key(|id| graph.node_entry(*id).unwrap_or(u64::MAX))
     }
 
