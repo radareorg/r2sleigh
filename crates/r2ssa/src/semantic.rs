@@ -318,12 +318,21 @@ pub struct ObjectModel {
     /// scalar slot. Every stage that would otherwise assume an access sits at
     /// its object's own offset has to ask this first.
     pub indexed_addresses: BTreeMap<ValueId, ValueId>,
+    /// How far into its object an address sits, for a member of a declared
+    /// aggregate. Absent means the address is the object's own base.
+    pub interior_offsets: BTreeMap<ValueId, i64>,
 }
 
 impl ObjectModel {
     /// Whether this address reaches its object at a computed offset.
     pub fn address_is_indexed(&self, value: ValueId) -> bool {
         self.indexed_addresses.contains_key(&value)
+    }
+
+    /// How far into its object this address sits, for a declared aggregate's
+    /// member. Absent means the address is the object's own base.
+    pub fn interior_offset(&self, value: ValueId) -> Option<i64> {
+        self.interior_offsets.get(&value).copied()
     }
 
     /// The value that supplies a computed offset into an object.
@@ -1803,12 +1812,14 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         phase("call_sites", call_sites.by_id.len());
+        let declared_slots = collect_declared_stack_slots(function, machine_context);
         let (objects, memory) = collect_object_and_memory_facts(
             function,
             graph,
             &addresses,
             &call_sites,
             machine_context,
+            &declared_slots,
         );
         phase("objects", objects.objects.len());
         let predicates = collect_predicate_facts(function, graph);
@@ -1866,6 +1877,7 @@ impl PreparedFunctionFacts {
             &structured,
             &unobserved,
             &private_stack_objects,
+            &declared_slots,
         );
         phase("certificates", certificates.stack_slots.len());
         let (applied_assumption_bindings, assumption_usage) = collect_prepared_assumption_usage(
@@ -2084,9 +2096,13 @@ fn collect_prepared_assumption_usage(
 struct ObjectModelBuilder<'a> {
     facts: Option<&'a DecompilePrepFacts>,
     addresses: &'a AddressProvenanceFacts,
+    declared_slots: &'a DeclaredStackSlots,
     objects: BTreeMap<ObjectId, ObjectFact>,
     value_objects: BTreeMap<MemoryObjectKey, ObjectId>,
     indexed_addresses: BTreeMap<ValueId, ValueId>,
+    /// How far into its object an address sits, for a member of a declared
+    /// aggregate. Absent means the address is the object's own base.
+    interior_offsets: BTreeMap<ValueId, i64>,
     stack_objects: BTreeMap<StackObjectKey, ObjectId>,
     entry_stack_roots: BTreeMap<ObjectId, StackAddressRoot>,
     ambiguous_entry_stack_objects: BTreeSet<ObjectId>,
@@ -2102,6 +2118,7 @@ impl<'a> ObjectModelBuilder<'a> {
     fn new(
         facts: Option<&'a DecompilePrepFacts>,
         addresses: &'a AddressProvenanceFacts,
+        declared_slots: &'a DeclaredStackSlots,
         machine_context: Option<&SourceMachineContext>,
     ) -> Self {
         let escaped_unknown_id = ObjectId(0);
@@ -2132,9 +2149,11 @@ impl<'a> ObjectModelBuilder<'a> {
         Self {
             facts,
             addresses,
+            declared_slots,
             objects,
             value_objects: BTreeMap::new(),
             indexed_addresses: BTreeMap::new(),
+            interior_offsets: BTreeMap::new(),
             stack_objects: BTreeMap::new(),
             entry_stack_roots: BTreeMap::new(),
             ambiguous_entry_stack_objects: BTreeSet::new(),
@@ -2208,6 +2227,7 @@ impl<'a> ObjectModelBuilder<'a> {
             objects: self.objects,
             value_objects: self.value_objects,
             indexed_addresses: self.indexed_addresses,
+            interior_offsets: self.interior_offsets,
             stack_objects: self.stack_objects,
             entry_stack_roots: self.entry_stack_roots,
             address_bits_by_space: self.address_bits_by_space,
@@ -2238,8 +2258,16 @@ impl<'a> ObjectModelBuilder<'a> {
         let _ = self.ensure_escaped_unknown(space);
         let object = if space == SpaceId::Ram {
             if let Some(root) = resolve_stack_root(self.facts, value) {
+                // A member of a declared aggregate is that aggregate at an
+                // offset, so the address resolves to the slot that contains it.
+                let (root, interior) = match self.declared_slots.containing(root) {
+                    Some((container, displacement)) => (container, Some(displacement)),
+                    None => (root, None),
+                };
                 let object = self.ensure_stack_object(root);
-                if let Some(entry_root) = resolve_entry_stack_root(self.facts, value) {
+                if let Some(displacement) = interior {
+                    self.interior_offsets.insert(value_id, displacement);
+                } else if let Some(entry_root) = resolve_entry_stack_root(self.facts, value) {
                     self.record_entry_stack_root(object, entry_root);
                 }
                 object
@@ -2451,9 +2479,10 @@ fn collect_object_and_memory_facts(
     addresses: &AddressProvenanceFacts,
     call_sites: &CallSiteFacts,
     machine_context: Option<&SourceMachineContext>,
+    declared_slots: &DeclaredStackSlots,
 ) -> (ObjectModel, MemorySSAFacts) {
     let facts = function.decompile_prep_facts();
-    let builder = ObjectModelBuilder::new(facts, addresses, machine_context);
+    let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
     let object_model = builder.build(function, graph);
     let access_summaries =
         collect_access_summaries(function, graph, facts, addresses, &object_model, call_sites);
@@ -6894,23 +6923,43 @@ fn movable_for_clause_value(
         })
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "this single canonical certificate pass explicitly joins each upstream fact owner without a parallel wrapper"
-)]
-fn collect_prepared_function_certificates(
-    boundaries: &SourceBoundaryFacts,
+/// Declared stack slots, keyed by the coordinate objects are identified in.
+///
+/// One owner for the table and for the coordinate each slot was declared at,
+/// because the object model and the certificates both have to agree on it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DeclaredStackSlots {
+    pub(crate) by_key: BTreeMap<(StackAddressBase, i64), SourceStackSlotSpec>,
+    pub(crate) declared_at: BTreeMap<(StackAddressBase, i64), (StackAddressBase, i64)>,
+}
+
+impl DeclaredStackSlots {
+    /// The declared slot this coordinate falls inside, and how far into it.
+    ///
+    /// A member of a declared aggregate is that aggregate at an offset, not an
+    /// object of its own, so the address resolves to the slot that contains it.
+    fn containing(&self, root: StackAddressRoot) -> Option<(StackAddressRoot, i64)> {
+        self.by_key.iter().find_map(|((base, offset), slot)| {
+            if *base != root.base || slot.size_bytes() == 0 {
+                return None;
+            }
+            let displacement = root.offset.checked_sub(*offset)?;
+            let inside = displacement > 0 && displacement < i64::from(slot.size_bytes());
+            inside.then_some((
+                StackAddressRoot {
+                    base: *base,
+                    offset: *offset,
+                },
+                displacement,
+            ))
+        })
+    }
+}
+
+fn collect_declared_stack_slots(
     function: &SSAFunction,
-    graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
-    objects: &ObjectModel,
-    memory: &MemorySSAFacts,
-    predicates: &PredicateFacts,
-    call_sites: &CallSiteFacts,
-    structured: &StructuredDataflowFacts,
-    unobserved: &crate::deadphi::DeadPhis,
-    private_objects: &BTreeSet<ObjectId>,
-) -> PreparedFunctionCertificates {
+) -> DeclaredStackSlots {
     let mut exact_stack_slots = BTreeMap::new();
     let mut declared_stack_slot_keys = BTreeMap::new();
     let mut ambiguous_stack_slots = BTreeSet::new();
@@ -6987,6 +7036,34 @@ fn collect_prepared_function_certificates(
         exact_stack_slots.remove(&key);
         declared_stack_slot_keys.remove(&key);
     }
+    DeclaredStackSlots {
+        by_key: exact_stack_slots,
+        declared_at: declared_stack_slot_keys,
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "this single canonical certificate pass explicitly joins each upstream fact owner without a parallel wrapper"
+)]
+fn collect_prepared_function_certificates(
+    boundaries: &SourceBoundaryFacts,
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    objects: &ObjectModel,
+    memory: &MemorySSAFacts,
+    predicates: &PredicateFacts,
+    call_sites: &CallSiteFacts,
+    structured: &StructuredDataflowFacts,
+    unobserved: &crate::deadphi::DeadPhis,
+    private_objects: &BTreeSet<ObjectId>,
+    declared_slots: &DeclaredStackSlots,
+) -> PreparedFunctionCertificates {
+    let DeclaredStackSlots {
+        by_key: exact_stack_slots,
+        declared_at: declared_stack_slot_keys,
+    } = declared_slots.clone();
 
     let loops = structured
         .loops
@@ -11466,7 +11543,13 @@ fn memory_location_for_addr(
                         Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
                             | Some(ObjectKind::Global { .. })
                     ) {
-                        RelativeMemoryAddress::Exact(0)
+                        // A member sits at its displacement inside the object;
+                        // reading every access as offset zero would alias them.
+                        RelativeMemoryAddress::Exact(
+                            value_id
+                                .and_then(|value| object_model.interior_offset(value))
+                                .unwrap_or(0),
+                        )
                     } else {
                         RelativeMemoryAddress::Unknown
                     }
@@ -11795,9 +11878,11 @@ mod tests {
                 offset: -8,
             },
         );
+        let stack_declared = super::DeclaredStackSlots::default();
         let stack_objects = super::ObjectModelBuilder::new(
             Some(&stack_facts),
             stack.addresses(),
+            &stack_declared,
             Some(stack.machine_context()),
         )
         .build(stack.function(), stack.graph());
@@ -11937,6 +12022,7 @@ mod tests {
             &structured,
             artifact.unobserved_merges(),
             &BTreeSet::new(),
+            &super::DeclaredStackSlots::default(),
         );
         assert_eq!(
             certificates
@@ -11983,6 +12069,7 @@ mod tests {
             &structured,
             artifact.unobserved_merges(),
             &BTreeSet::new(),
+            &super::DeclaredStackSlots::default(),
         );
         assert!(!certificates.stack_slots.contains_key(&access.object));
 
@@ -12193,7 +12280,8 @@ mod tests {
     #[test]
     fn conflicting_entry_stack_coordinates_permanently_drop_alias_refinement() {
         let addresses = AddressProvenanceFacts::default();
-        let mut builder = ObjectModelBuilder::new(None, &addresses, None);
+        let declared = super::DeclaredStackSlots::default();
+        let mut builder = ObjectModelBuilder::new(None, &addresses, &declared, None);
         let object = ObjectId(7);
         let first = StackAddressRoot {
             base: StackAddressBase::StackPointer,
@@ -12212,6 +12300,129 @@ mod tests {
         assert!(!builder.entry_stack_roots.contains_key(&object));
         builder.record_entry_stack_root(object, first);
         assert!(!builder.entry_stack_roots.contains_key(&object));
+    }
+
+    /// A declared aggregate's members are one object at two displacements, so
+    /// they neither alias each other nor lose their positions.
+    #[test]
+    fn a_member_of_a_declared_aggregate_is_the_aggregate_at_an_offset() {
+        let sp = Varnode::register(0, 8);
+        let fp = Varnode::register(8, 8);
+        let ra = Varnode::register(16, 8);
+        let first = Varnode::unique(0x100, 8);
+        let second = Varnode::unique(0x108, 8);
+        let mut block = R2ILBlock::new(0x3700, 4);
+        block.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: sp.clone(),
+            val: fp.clone(),
+        });
+        block.push(R2ILOp::Copy {
+            dst: fp.clone(),
+            src: sp.clone(),
+        });
+        // The aggregate's base, then a member eight bytes into it.
+        block.push(R2ILOp::IntSub {
+            dst: first.clone(),
+            a: fp.clone(),
+            b: Varnode::constant(32, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: first.clone(),
+            val: Varnode::constant(1, 8),
+        });
+        block.push(R2ILOp::IntSub {
+            dst: second.clone(),
+            a: fp.clone(),
+            b: Varnode::constant(24, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: second,
+            val: Varnode::constant(2, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x110, 8),
+            space: SpaceId::Ram,
+            addr: first,
+        });
+        block.push(R2ILOp::Return { target: ra });
+
+        let mut arch = ArchSpec::new("aggregate-member-test");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("sp", 0, 8));
+        arch.add_register(RegisterDef::new("fp", 8, 8));
+        arch.add_register(RegisterDef::new("ra", 16, 8));
+        arch.add_space(r2il::AddressSpace::ram(8));
+        let storage = |offset| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let interface = SourceFunctionInterface::new_exact(
+            b"aggregate-member-revision-1".to_vec(),
+            "test-abi",
+            [],
+            SourceFunctionReturn::Void,
+            [SourceStackSlotSpec::new_local(
+                StackAddressBase::FramePointer,
+                storage(8),
+                -32,
+                16,
+            )],
+        )
+        .and_then(|interface| interface.with_return_address_storage(storage(16)))
+        .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
+        .expect("exact aggregate interface");
+        let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+            .expect("aggregate artifact");
+
+        let [base_store] = artifact
+            .memory_defs_for_op_site(0x3700, 4)
+            .expect("aggregate base definition")
+        else {
+            panic!("one definition at the aggregate's base")
+        };
+        let [member_store] = artifact
+            .memory_defs_for_op_site(0x3700, 6)
+            .expect("member definition")
+        else {
+            panic!("one definition at the member")
+        };
+        assert_eq!(
+            base_store.location.object, member_store.location.object,
+            "a member belongs to the object its aggregate owns"
+        );
+        assert_eq!(base_store.location.address, RelativeMemoryAddress::Exact(0));
+        assert_eq!(
+            member_store.location.address,
+            RelativeMemoryAddress::Exact(8),
+            "the member sits at its displacement inside the object"
+        );
+        assert!(
+            !memory_locations_may_alias(
+                artifact.objects(),
+                &base_store.location,
+                &member_store.location
+            ),
+            "two members that do not overlap must not alias"
+        );
+        let [reload] = artifact
+            .memory_uses_for_op_site(0x3700, 7)
+            .expect("base reload")
+        else {
+            panic!("one use at the aggregate's base")
+        };
+        assert_eq!(
+            reload.version, base_store.next_version,
+            "the member's store must not shadow the base's value"
+        );
     }
 
     #[test]
@@ -12469,6 +12680,7 @@ mod tests {
             &incomplete_structured,
             allocated.unobserved_merges(),
             &BTreeSet::new(),
+            &super::DeclaredStackSlots::default(),
         );
         assert!(
             incomplete
@@ -12503,6 +12715,7 @@ mod tests {
             &allocated_facts.structured,
             allocated.unobserved_merges(),
             &BTreeSet::new(),
+            &super::DeclaredStackSlots::default(),
         );
         assert!(
             overlapping

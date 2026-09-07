@@ -420,13 +420,22 @@ pub(super) fn declaration_type_for_stack_object(
     // The slot's declared type, when the source interface carries it as a
     // node of its type graph, is exact and outranks every recovered hint: it
     // is what the program declared, at the width the storage has.
-    if let Some(r2types::CertifiedEntity::StackSlot { ty: Some(ty), .. }) =
-        source_owned.report().render().and_then(|render| {
-            render
-                .certified_entities
-                .get(&r2ssa::SemanticId::stack_slot(object))
-        })
-    {
+    if let Some(r2types::CertifiedEntity::StackSlot {
+        ty: Some(ty), size, ..
+    }) = source_owned.report().render().and_then(|render| {
+        render
+            .certified_entities
+            .get(&r2ssa::SemanticId::stack_slot(object))
+    }) {
+        // An aggregate has no scalar width to check, so what vouches for it is
+        // the slot's own extent: the declaration and the extent share a source.
+        if matches!(
+            ty,
+            r2types::CTypeLike::Struct(_) | r2types::CTypeLike::Union(_)
+        ) && size.and_then(|bytes| bytes.checked_mul(8)) == Some(width_bits)
+        {
+            return ty.clone();
+        }
         return admit_declaration(ty.clone(), width_bits, ptr_bits);
     }
     let array_layout = source

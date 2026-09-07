@@ -1042,8 +1042,10 @@ impl BindingPlan {
                             BindingPlanSourceMismatch::StackObjectCertificate { object, binding },
                         ));
                     }
-                    if !super::rules::declaration_type_describes_width(
-                        &planned.declaration_type,
+                    if !stack_object_declaration_agrees(
+                        source_owned,
+                        object,
+                        planned,
                         width_bits,
                         ptr_bits,
                     ) {
@@ -1106,8 +1108,10 @@ impl BindingPlan {
                             ));
                         }
                         if width_bits.is_none_or(|width_bits| {
-                            !super::rules::declaration_type_describes_width(
-                                &planned.declaration_type,
+                            !stack_object_declaration_agrees(
+                                source_owned,
+                                object,
+                                planned,
                                 width_bits,
                                 ptr_bits,
                             )
@@ -1205,8 +1209,10 @@ impl BindingPlan {
                                     },
                                 ));
                             }
-                            if !super::rules::declaration_type_describes_width(
-                                &planned.declaration_type,
+                            if !stack_object_declaration_agrees(
+                                source_owned,
+                                object,
+                                planned,
                                 width_bits,
                                 ptr_bits,
                             ) {
@@ -1323,4 +1329,30 @@ fn stack_object_certificate_agrees(
         planned.certificate.sources.as_ref() == [BindingCertificateSource::CertifiedEntity(entity)]
             && actual.is_empty()
     }
+}
+
+/// Whether the planned declaration is the one the slot's own rule derives.
+///
+/// An aggregate has no scalar width to check, so the seal asks the site that
+/// owns the decision rather than re-deriving a width it cannot see.
+fn stack_object_declaration_agrees(
+    source_owned: &SourceOwnedFunctionFacts,
+    object: r2ssa::ObjectId,
+    planned: &Binding,
+    width_bits: u32,
+    ptr_bits: u32,
+) -> bool {
+    if matches!(
+        planned.declaration_type,
+        r2types::CTypeLike::Struct(_) | r2types::CTypeLike::Union(_)
+    ) {
+        return planned.declaration_type
+            == super::rules::declaration_type_for_stack_object(
+                source_owned,
+                object,
+                width_bits,
+                ptr_bits,
+            );
+    }
+    super::rules::declaration_type_describes_width(&planned.declaration_type, width_bits, ptr_bits)
 }
