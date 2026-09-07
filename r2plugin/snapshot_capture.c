@@ -245,6 +245,7 @@ static SnapshotTypeGraphResult snapshot_type_add_integer( SnapshotTypeGraphBuild
 static bool snapshot_type_align_up(ut64 value, ut64 alignment, ut64 *result);
 static SnapshotTypeGraphResult snapshot_type_resolve_struct( const SnapshotTypeGraphBuilder *builder, const char *type, const RAnalBaseType **result_base);
 static SnapshotTypeGraphResult snapshot_type_add_struct( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
+static void snapshot_type_root_report(const char *stage, const char *type, const char *spec, SnapshotTypeGraphResult result);
 static SnapshotTypeGraphResult snapshot_type_add_pointer( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
 static SnapshotTypeGraphResult snapshot_type_add_root( SnapshotTypeGraphBuilder *builder, const char *type, RAnalSnapshotTypeId *result_id);
 static bool snapshot_type_carrier_project( const RAnalSnapshotTypeGraph *graph, RAnalSnapshotTypeId type_id, const RAnalSnapshotRegisterStorage *storage, RAnalSnapshotCarrierProjection *projection);
@@ -3552,26 +3553,39 @@ static char *snapshot_type_member_element_spec(const char *spec, ut64 *count) {
 	if (!open) {
 		return element;
 	}
-	char *close = strchr (open, ']');
-	if (!close || close[1] != '\0' || close == open + 1) {
-		free (element);
-		return NULL;
-	}
-	*close = '\0';
-	const char *digits = open + 1;
-	const char *cursor;
-	for (cursor = digits; *cursor; cursor++) {
-		if (*cursor < '0' || *cursor > '9') {
+	// An array of arrays is laid out as one run of the innermost element, so
+	// the extent is the product of every dimension. Reading only the first
+	// left `UChar[6][258]` -- bzip2's `EState` holds three of them -- with no
+	// size, and one such member loses the whole type graph.
+	ut64 extent = 1;
+	char *cursor = open;
+	while (*cursor == '[') {
+		char *close = strchr (cursor, ']');
+		if (!close || close == cursor + 1) {
 			free (element);
 			return NULL;
 		}
+		*close = '\0';
+		const char *digits = cursor + 1;
+		const char *digit;
+		for (digit = digits; *digit; digit++) {
+			if (*digit < '0' || *digit > '9') {
+				free (element);
+				return NULL;
+			}
+		}
+		const ut64 parsed = r_num_get (NULL, digits);
+		if (!parsed || r_mul_overflow (extent, parsed, &extent)) {
+			free (element);
+			return NULL;
+		}
+		cursor = (char *)r_str_trim_head_ro (close + 1);
 	}
-	const ut64 parsed = r_num_get (NULL, digits);
-	if (!parsed) {
+	if (*cursor) {
 		free (element);
 		return NULL;
 	}
-	*count = parsed;
+	*count = extent;
 	*open = '\0';
 	r_str_trim (element);
 	if (R_STR_ISEMPTY (element)) {
@@ -3810,6 +3824,16 @@ static SnapshotTypeGraphResult snapshot_type_integer_spec(
 		bool ambiguous;
 		const RAnalBaseType *base = snapshot_type_find_bare_base (
 			builder, current, &ambiguous);
+		// `signed` is redundant on every integer but `char`, and the syntax
+		// above has already taken the kind from it. The database files the
+		// type under the spelling without it, so `signed int` -- which is how
+		// some debug info spells a plain `int` -- found no base and lost the
+		// whole graph.
+		if (!ambiguous && !base && r_str_startswith (current, "signed ")
+			&& strcmp (current, "signed char")) {
+			base = snapshot_type_find_bare_base (builder,
+				r_str_trim_head_ro (current + strlen ("signed")), &ambiguous);
+		}
 		if (ambiguous) {
 			break;
 		}
@@ -3950,6 +3974,9 @@ static SnapshotTypeGraphResult snapshot_type_resolve_struct_undefined(
 	}
 	free (spec);
 	if (ambiguous || !base) {
+		snapshot_type_root_report (ambiguous
+			? "aggregate name is ambiguous": "aggregate is not defined",
+			type, NULL, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		if (out_undefined && !ambiguous) {
 			*out_undefined = true;
 		}
@@ -3984,6 +4011,8 @@ static SnapshotTypeGraphResult snapshot_type_add_struct(
 		|| builder->graph->num_types >= UT32_MAX
 		|| builder->graph->num_aggregates >= builder->aggregate_capacity
 		|| builder->graph->num_aggregates >= UT32_MAX) {
+		snapshot_type_root_report ("aggregate exceeds the graph's capacity",
+			type, base->name, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	const size_t type_index = builder->graph->num_types++;
@@ -4018,6 +4047,8 @@ static SnapshotTypeGraphResult snapshot_type_add_struct(
 	RVecAnalTypeMember *base_members = r_anal_base_type_members (base);
 	aggregate->num_members = RVecAnalTypeMember_length (base_members);
 	if (!aggregate->num_members) {
+		snapshot_type_root_report ("aggregate has no members", type,
+			base->name, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	size_t allocation_size;
@@ -4037,11 +4068,16 @@ static SnapshotTypeGraphResult snapshot_type_add_struct(
 		if (member_index >= aggregate->num_members || !base_member
 			|| R_STR_ISEMPTY (base_member->name)
 			|| R_STR_ISEMPTY (base_member->type)) {
+			snapshot_type_root_report ("aggregate member is unnamed or untyped",
+				type, base_member? base_member->name: NULL,
+				SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 			return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 		}
 		size_t prior;
 		for (prior = 0; prior < member_index; prior++) {
 			if (!strcmp (aggregate->members[prior].name, base_member->name)) {
+				snapshot_type_root_report ("aggregate member repeats a name",
+					type, base_member->name, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 				return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 			}
 		}
@@ -4052,11 +4088,17 @@ static SnapshotTypeGraphResult snapshot_type_add_struct(
 		char *element_spec = snapshot_type_member_element_spec (
 			base_member->type, &spec_count);
 		if (!element_spec) {
+			snapshot_type_root_report ("aggregate member spelling", type,
+				base_member->type, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 			return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 		}
 		RAnalSnapshotTypeId member_type_id;
 		result = snapshot_type_add_root (
 			builder, element_spec, &member_type_id);
+		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+			snapshot_type_root_report ("aggregate member", base_member->name,
+				element_spec, result);
+		}
 		free (element_spec);
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			return result;
@@ -4067,6 +4109,10 @@ static SnapshotTypeGraphResult snapshot_type_add_struct(
 		if (base_member->bitsize
 			|| base_member->offset > UT64_MAX / 8
 			|| !member_type->size_bits) {
+			snapshot_type_root_report (base_member->bitsize
+				? "aggregate member is a bitfield"
+				: "aggregate member has no size", type, base_member->name,
+				SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 			return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 		}
 		// An array member repeats its element type. Fold that extent into the
@@ -4142,6 +4188,8 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 		// `char **` unrepresentable, and with it the argv of every main.
 		char *star = strrchr (spec, '*');
 		if (!star || *r_str_trim_head_ro (star + 1)) {
+			snapshot_type_root_report ("pointer spelling", type, spec,
+				SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 			free (spec);
 			return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 		}
@@ -4159,6 +4207,10 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 		// them every prototype of the bzip2 stream API.
 		char *pointee = NULL;
 		result = snapshot_type_unalias (builder, spelled_pointee, &pointee);
+		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+			snapshot_type_root_report ("pointee unalias", type,
+				spelled_pointee, result);
+		}
 		free (spelled_pointee);
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			return result;
@@ -4190,6 +4242,9 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 				}
 			}
 		}
+		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+			snapshot_type_root_report ("pointee", type, pointee, result);
+		}
 		free (pointee);
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 			return result;
@@ -4207,6 +4262,8 @@ static SnapshotTypeGraphResult snapshot_type_add_pointer(
 	}
 	if (builder->graph->num_types >= builder->type_capacity
 		|| builder->graph->num_types >= UT32_MAX) {
+		snapshot_type_root_report ("pointer exceeds the graph's capacity",
+			type, NULL, SNAPSHOT_TYPE_GRAPH_UNSUPPORTED);
 		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
 	}
 	RAnalSnapshotType *snapshot_type =
