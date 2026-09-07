@@ -2873,6 +2873,14 @@ impl LegacyObservationJournal {
                         | Some(ValueDisposition::Elided { .. })
                         | Some(ValueDisposition::Refused { .. })
                         | None => {
+                            // Which statement folded this operand in is what a
+                            // repair needs; the value alone says only that one
+                            // did.
+                            r2il::refusal_evidence!(
+                                "folded-operand",
+                                "{input:?} is operand {input_idx} of {definition:?} at {block:#x}, \
+                                 folded into a rendered expression"
+                            );
                             return Err(LegacyObservationJournalError::rendered_value_required(
                                 input,
                                 RenderedValueRequirementCause::NonrenderedValueDisposition,
