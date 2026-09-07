@@ -4077,6 +4077,13 @@ impl LegacyObservationJournal {
                     ObservationTarget::Value(value) => {
                         match plan.disposition(value) {
                             Some(ValueDisposition::Elided { reason, .. }) => {
+                                // Which value, and why the plan elided it, is
+                                // what separates a wrong plan from a wrong
+                                // rendering.
+                                r2il::refusal_evidence!(
+                                    "planned-elided-value-rendered",
+                                    "{value:?} was elided as {reason:?} and a statement still names it"
+                                );
                                 binding_failure = Some(
                                     LegacyObservationJournalError::PlannedElidedValueRendered {
                                         value,
