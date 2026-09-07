@@ -7509,15 +7509,39 @@ fn collect_prepared_function_certificates(
     let stack_reloads =
         collect_stack_reload_source_certificates(function, graph, objects, memory, structured);
     let mut stack_slots: BTreeMap<ObjectId, StackSlotCertificate> = stack_slots;
-    // A reload narrower or wider than the slot is a projection of it, not the
-    // slot's own value, so only an exact-width reload joins the slot's object.
-    for certificate in stack_reloads.values() {
-        if certificate.value_width != certificate.memory_width {
+    // A full-width read of a private slot is the slot's value, whatever store
+    // put it there. Requiring one reaching store as well would exclude every
+    // variable a loop writes, which is most of them at -O0.
+    for access in structured.memory_accesses.values() {
+        if access.is_write || !access.provenance_complete || access.space != SpaceId::Ram {
             continue;
         }
-        // Only a slot that is a C object joins its reloads: for anything else
-        // the load is an observable read and its statement has to stay.
-        if !private_objects.contains(&certificate.object) {
+        if !private_objects.contains(&access.object) {
+            continue;
+        }
+        let Some(value) = access.value else {
+            continue;
+        };
+        let value_width = graph
+            .value(value)
+            .map_or(access.width, |graph_value| graph_value.var.size);
+        // A read narrower or wider than the slot is a projection of it, not
+        // the slot's own value.
+        if value_width != access.width {
+            continue;
+        }
+        if let Some(slot) = stack_slots.get_mut(&access.object)
+            && slot.size == Some(access.width)
+        {
+            slot.reload_values.insert(value);
+        }
+    }
+    // And the copies of those reads, which the reload certificates already
+    // followed through the operations that preserve a value.
+    for certificate in stack_reloads.values() {
+        if certificate.value_width != certificate.memory_width
+            || !private_objects.contains(&certificate.object)
+        {
             continue;
         }
         if let Some(slot) = stack_slots.get_mut(&certificate.object)

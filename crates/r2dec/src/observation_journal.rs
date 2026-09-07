@@ -1822,18 +1822,17 @@ impl LegacyObservationJournal {
                 // that filled the slot already produced this value, and the
                 // memory SSA proved nothing wrote it in between.
                 if matches!(op, r2ssa::SSAOp::Load { .. })
-                    && let Some(inst) = origins.origin(site).and_then(|origin| match origin {
-                        NormalizedOpOrigin::Original(inst) => Some(*inst),
-                        _ => None,
-                    })
-                    && let Some(output) = graph.inst(inst).and_then(|inst| inst.output)
-                    && let Some(certificate) =
-                        source.source().certificates().stack_reloads.get(&output)
-                    && certificate.reload == output
+                    && let Some(output) = normalized_projections
+                        .get(block_id.0 as usize)
+                        .and_then(|rows| rows.get(op_idx))
+                        .and_then(|projection| projection.output)
+                        .map(|output| output.value)
+                    && let Some(inst) = graph.def_inst(output)
+                    && let Some(object) = loaded_stack_object(source.source(), graph, inst)
                     && let Some(ValueDisposition::Bound {
                         binding: value_binding,
                     }) = plan.disposition(output)
-                    && plan.stack_object_disposition(certificate.object)
+                    && plan.stack_object_disposition(object)
                         == Some(StackObjectDisposition::Bound {
                             binding: *value_binding,
                         })
@@ -4940,6 +4939,32 @@ fn visit_stmt_declarations(stmt: &CStmt, visit: &mut impl FnMut(SymbolId)) {
         | CStmt::Comment(_)
         | CStmt::Gap(_) => {}
     }
+}
+
+/// The stack object a load reads, when it reads exactly one.
+///
+/// A load whose value shares its object's binding says `x = x`, and the object
+/// is what says which binding to compare it against.
+fn loaded_stack_object(
+    source: &SsaArtifact,
+    graph: &r2ssa::SsaGraph,
+    inst: InstId,
+) -> Option<r2ssa::ObjectId> {
+    // By op site, never by the instruction's ordinal: an ordinal counts the
+    // block's phis first, so in a merge block the two differ and this lands on
+    // another op's read.
+    let (block_addr, op_idx) = graph.op_site_for_inst(inst)?;
+    let accesses = source
+        .certificates()
+        .memory_accesses_by_op
+        .get(&(block_addr, op_idx, false))?;
+    let [access] = accesses.as_slice() else {
+        return None;
+    };
+    let access = source.certificates().memory_accesses.get(access)?;
+    // Another space is another object entirely; the caller's binding check
+    // then rejects it, but saying so here keeps the question in one place.
+    (access.space == r2il::SpaceId::Ram).then_some(access.object)
 }
 
 #[cfg(test)]
