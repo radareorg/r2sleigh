@@ -3072,6 +3072,7 @@ impl Decompiler {
 
         work.poll()?;
         let prepared = input.prepared_ssa();
+        debug_log_slice(prepared);
         let func = prepared.function();
         if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
             let graph = prepared.graph();
@@ -3755,7 +3756,6 @@ impl Decompiler {
             native.effect_observations(),
         );
         debug_log_ledger(prepared, &ledger);
-        debug_log_slice(prepared);
         let radare2_variadic_format_counts = self
             .context
             .function_facts
