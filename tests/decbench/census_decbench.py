@@ -186,9 +186,8 @@ def report(payloads: list[dict], top: int) -> None:
     print(f"binaries   {len(payloads)}")
     print(f"observed   {observed} functions")
     print(f"coverage   {rendered}/{observed} = {rendered / observed:.3f}")
-    # Coverage counts a function the renderer produced C for. A function with a
-    # marked gap is one of those and is not proven, so the two are printed
-    # together: a rise in coverage paid for entirely in gaps is not progress.
+    # A gapped function is rendered but not proven, so both are printed:
+    # coverage bought entirely with gaps is not progress.
     proven = rendered - gapped
     print(f"proven     {proven}/{observed} = {proven / observed:.3f}"
           f"  ({gapped} gapped, {gap_ops} ops)")
