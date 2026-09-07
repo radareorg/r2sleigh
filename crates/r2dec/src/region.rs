@@ -1648,7 +1648,8 @@ impl<'a> RegionAnalyzer<'a> {
         let mut false_reachable = HashSet::new();
         graph.collect_reachable_limited(false_target, &mut false_reachable, 10);
         let mut common: Vec<usize> = true_reachable
-            .into_iter()
+            .iter()
+            .copied()
             .filter(|id| false_reachable.contains(id))
             .filter(|id| {
                 let Some(candidate) = graph.node_entry(*id) else {
@@ -1661,6 +1662,22 @@ impl<'a> RegionAnalyzer<'a> {
                 })
             })
             .collect();
+        // Post-dominance asks that every path through the arm arrive, and a
+        // path that returns never arrives anywhere. Where that is the only
+        // reason the strict test failed, an arm still converges: every node it
+        // reaches either reaches the candidate too or ends the function.
+        if common.is_empty() {
+            common = true_reachable
+                .iter()
+                .copied()
+                .filter(|id| false_reachable.contains(id))
+                .filter(|id| {
+                    [true_target, false_target]
+                        .into_iter()
+                        .all(|target| self.working_arm_converges(target, *id, graph))
+                })
+                .collect();
+        }
         common.sort_by_key(|id| {
             let true_distance = self
                 .working_shortest_distance(true_target, *id, graph)
@@ -1675,6 +1692,21 @@ impl<'a> RegionAnalyzer<'a> {
             )
         });
         common.into_iter().next()
+    }
+
+    /// Whether everything this arm reaches either reaches `candidate` too or
+    /// ends the function, which is what a path that returns does instead of
+    /// arriving.
+    fn working_arm_converges(&self, target: usize, candidate: usize, graph: &WorkingGraph) -> bool {
+        let mut reachable = HashSet::new();
+        graph.collect_reachable_limited(target, &mut reachable, 10);
+        reachable.iter().all(|node| {
+            *node == candidate
+                || graph.sorted_succs(*node).is_empty()
+                || self
+                    .working_shortest_distance(*node, candidate, graph)
+                    .is_some()
+        })
     }
 
     /// Case entries are lexical boundaries even when an earlier case reaches
