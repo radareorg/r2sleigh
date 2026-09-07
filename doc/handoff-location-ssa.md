@@ -13779,3 +13779,71 @@ ask of each block the same question these two cuts answered: does radare2 need
 this, or is it r2sleigh's model compiled into someone else's project. Anything
 that turns out to be a radare2 fix goes out as its own pull request, which is
 where eight of them have already gone.
+
+## Audit of what remains in the integration pull request
+
+The question asked of every block: does radare2 need this, or is it r2sleigh's
+model compiled into someone else's project. The mechanical form of it is the
+symbol census -- what the fork's `libr` exports that upstream does not,
+intersected with what the plugin references and what radare2 calls itself.
+
+**Nine exports had no call site anywhere and are deleted.** The largest was the
+mutation API, `r_anal_apply_mutations` and its atomic form with the validation,
+preparation and rollback machinery behind them: about 450 lines in `function.c`
+and 30 in `r_anal.h`. The plugin applies signature, variable and type changes
+through the individual setters and never batched them. With it went
+`r_anal_cc_fparg`, `r_anal_types_set_link_expression`,
+`r_anal_function_context_hash`, `r_core_function_context_hash`, the data-refs
+collector, and two declarations the DWARF cut had left without definitions.
+
+`r_anal_decompile` also had no caller, but it is the right API rather than dead
+weight -- `pdd` was reaching through to `provider->decompile` itself -- so it is
+wired up instead of removed.
+
+**Where the pull request now stands: 37 files, +3,361 / −1,019**, down from
++11,602. Fork-only exports: 79 before any of this, 22 now, of which the plugin
+calls nine.
+
+| Block | Added | Verdict |
+|---|---:|---|
+| `type.c` types snapshot and links | 528 | Integration surface the plugin reads |
+| `test_anal_decompiler.c` | 396 | Tests for the provider API |
+| `function.c` assumptions, callconv, snapshot | 374 | Integration surface |
+| `test_anal_function.c` | 357 | Tests |
+| `anal.c` DWARF link ownership | 258 | **Dead after the DWARF cut -- see below** |
+| `xrefs.c` affected-function invalidation | 205 | Integration surface |
+| `test_anal_types.c` | 172 | Tests |
+| `cc.c` `r_anal_cc_location_uses` and parsers | 170 | Integration surface |
+| `fcn.c` current-signature queries | 143 | Integration surface |
+| `cmd_anal.inc.c` the `afA` assumption commands | 117 | User-facing feature |
+| `cmd_print.inc.c` the `pdd` provider path | 83 | User-facing feature |
+| `anplugs.c` plugin action selection | 94 | Integration surface |
+| `bin.c`, `elf.c`, `utype.c` and friends | ~60 | **Radare2 fixes -- own pull requests** |
+
+**The next cut, measured and not yet made.** `anal.c`'s 258 lines are the DWARF
+function-link ownership model: an authority table with poisoned, owned and
+unowned marks, a generation counter, publish and revoke. With `dwarf_process.c`
+back to upstream nothing publishes into it, so five of its seven entry points
+have zero call sites and the table is always empty. The two survivors read an
+empty table: `r_anal_dwarf_function_link_is_current` answers `true` whenever no
+authority is recorded, which is upstream's own semantics, so the model's whole
+effect today is to be absent. Deleting it takes `anal.c` to nearly nothing and
+simplifies `fcn.c`'s two call sites.
+
+**Also dead, and spanning both repositories.** The `get_data_refs` plugin hook
+is declared on `RAnalPlugin`, selectable through `anal.plugins.datarefs`, and
+reported by `Lc`, and nothing invokes it -- its only caller was the artifact
+store's driver. The plugin implements `sleigh_get_data_refs` for it. Removing
+the hook, the action enum value, the config variable and the plugin's
+implementation is one change that has to touch both repositories at once, which
+is why it is not in this pass.
+
+**A correction about the fork's test baseline.** The three worktree runs that
+reported zero failures were measured where `test/bins` was unpopulated, because
+`git worktree add` does not fetch submodules. A clean build of the main checkout
+reports five failures -- two ELF relocation tests and three PTX ones -- and all
+five are `Cannot open`: `aarch64-got-etrel.o`, `i386-crel-implicit.o`,
+`ptx_ops.o` and `kernel2.o` are absent from this checkout of the binaries
+repository, which is itself current with its own master. They arrived with
+upstream's newer tests during the rebase and are missing fixtures rather than
+code regressions. That is the honest baseline to compare against from here.
