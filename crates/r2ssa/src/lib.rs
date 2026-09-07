@@ -50,6 +50,7 @@ pub(crate) mod reaching_rules;
 pub mod recover_interface;
 pub(crate) mod rename;
 pub(crate) mod semantic;
+mod slice;
 pub mod span;
 pub mod taint;
 pub(crate) mod var;
@@ -175,5 +176,6 @@ pub use semantic::{
     VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal,
     VariadicCallsiteArgumentCountSource,
 };
+pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};
 pub use var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar, SSAVarNameKind};

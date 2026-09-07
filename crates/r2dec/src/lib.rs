@@ -504,6 +504,23 @@ pub(crate) fn unowned_report_requested() -> bool {
 /// a reader that a function is short without saying short of what. This names the
 /// kinds left undecided, the reasons given for eliding, and the layer behind every
 /// refusal, which is what turns those numbers into a place to start.
+/// Print the backward slice of the seed `R2SLEIGH_SLICE` names, if it is set.
+///
+/// The question every trace ends at is where a value came from; this answers it
+/// in one run instead of a rebuild per layer.
+fn debug_log_slice(prepared: &r2ssa::SsaArtifact) {
+    let Some(seed) = std::env::var_os("R2SLEIGH_SLICE") else {
+        return;
+    };
+    let Some(seed) = seed.to_str() else {
+        return;
+    };
+    match r2ssa::resolve_slice_seed(prepared, seed) {
+        Ok(seed) => eprintln!("{}", r2ssa::backward_slice(prepared, seed)),
+        Err(error) => eprintln!("r2sleigh: slice seed {seed:?}: {error}"),
+    }
+}
+
 fn debug_log_ledger(prepared: &r2ssa::SsaArtifact, ledger: &r2ssa::ledger::ObligationLedger) {
     if !unowned_report_requested() {
         return;
@@ -3738,6 +3755,7 @@ impl Decompiler {
             native.effect_observations(),
         );
         debug_log_ledger(prepared, &ledger);
+        debug_log_slice(prepared);
         let radare2_variadic_format_counts = self
             .context
             .function_facts
