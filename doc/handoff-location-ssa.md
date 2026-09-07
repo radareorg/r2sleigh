@@ -14847,3 +14847,44 @@ not a local repair -- `0x223c` has to be rendered once after the whole
 `0x2171` as a branch whose arm is the switch and whose merge is `0x223c`. Since
 `0x2142`/`0x214d` short-circuit into `0x2171`, the switch is currently
 duplicated into both, so this and the duplication are the same recomposition.
+
+### `gz_open`: two merge fixes landed, and why the third did not
+
+Two fallbacks landed, both guarded so the exact rule still decides wherever it
+can, and both stemming from the same observation: **a path that returns never
+arrives, so it cannot fail an "every path arrives" test.**
+
+- `find_working_switch_merge` intersected the reachable sets of every arm, so
+  `case '+'` -- a `free` and a return -- emptied the intersection and the switch
+  got no merge. The fallback asks for a block at least two arms reach, missed
+  only by arms that leave, post-dominating every arm that reaches it.
+- `find_working_merge_point` requires the candidate to post-dominate both arms.
+  The fallback accepts a candidate both arms reach where everything either arm
+  reaches either reaches the candidate too or ends the function.
+
+Together they take `gz_open` from two occurrences of `0x223c` carrying arm
+guards its canonical domain never had, to **one occurrence under exactly the
+canonical domain**, and they recover `fcn_125b5` on `minigzip-O0` -- the one
+function the switch-coverage encoding earlier in this session had cost. Local
+census 95 to 94.
+
+**The third step was written and reverted, and the reason is the useful part.**
+With the merge now owned by the enclosing branch rather than the switch, the
+switch's converging-arm guard no longer reaches the rendered occurrence, so the
+proof still fails: reaching `0x223c` requires not having taken `case '+'`, and
+the rendered domain no longer says so. Handing the guard from the switch to
+whoever writes the merge was implemented -- through `deferred_merge_guards`, and
+it took three attempts to find the actual writer, which is
+`structure_block_stmts_into` flattening a loop body's sequence, not any of the
+merge-writing sites. It works, and it is wrong: conjoining the arm guard makes
+the domain say the block runs *only* for converging arms, when the digit path at
+`0x2158` and the out-of-range default both reach it without any switch guard at
+all.
+
+So the rendered domain of `0x223c` is neither `P ∧ ¬arm('+')` nor `P`. It is the
+union of three routes, and `active_domains` already holds alternatives for
+exactly that -- what is missing is that only one of the three routes records
+anything. **Every route into a block has to contribute an alternative**, which is
+the architectural item this session has now reached from four directions: the
+coverage proof, the duplicated switch, the deferred merge, and the goto that
+carries no domain.
