@@ -14999,3 +14999,35 @@ the call, against what the slot held -- and not from a test on the op type, the
 mnemonic or the ESIL text, all of which were tried here. It belongs in its own
 upstream pull request, and it is worth doing: this is behind the two largest
 refusal classes the plugin has left.
+
+
+### Two plugin-side attempts at the same class, both measured and reverted
+
+Having established that the width mismatch is radare2 retyping a four-byte slot,
+the obvious next question is whether the plugin can defend itself without a
+radare2 change. It cannot, and the two ways it might have are worth recording
+because both look right on paper.
+
+**The DWARF flag does not discriminate.** `RAnalFcnSlot` carries
+`dwarf_declared`, the capture already uses it to gate type-graph roots, and the
+standing rule says radare2's inferred types stay evidence while declarations are
+exact -- so gating the slot's size on it should keep an inferred width from
+outranking the object's measured accesses. The flag was carried across the wire
+(a full round trip, format 12) and the size chain gated on it: **no change at
+all**, because the flag says *the slot* was declared, not that *its type*
+survived. `myMalloc`'s slot is the DWARF-declared home of `Int32 n`; the type
+propagation overwrote the type and left the flag alone. The wire field went back
+out again, since an unused field with a version bump is worse than none.
+
+**Preferring the measured accesses is worse.** The comment above the size chain
+already argues the case -- "every access reaching it at one width, with complete
+provenance, is a fact about the program rather than an opinion about it" -- and
+reordering so the accesses win costs three functions: `bzip2-O0` 29 to 31 and
+`minigzip-O0` 18 to 19. A variable accessed only through its low half is
+genuinely wider than its accesses, and the stated size is right more often than
+it is wrong.
+
+So the discriminator is the declared type's width, which radare2 overwrites
+before the plugin ever sees it, and no rule downstream can recover it. The fix
+is the conversion-aware propagation in radare2 and nothing else. Five attempts
+across the two layers now say the same thing.
