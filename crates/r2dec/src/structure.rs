@@ -190,6 +190,12 @@ pub(crate) struct ControlFlowStructurer<'a, 'o> {
     /// loop normally. A following lexical region consumes this before adding
     /// the loop condition's exit edge.
     completed_loop_exit: Option<RenderedLoopExit>,
+    /// The domains under which control falls out of the region just written.
+    ///
+    /// A block several regions fall into is written once, and it runs for the
+    /// union of what reached it rather than for the domain of whoever owns it.
+    /// Only a region that narrows the domain on its way out reports one.
+    region_exit_domains: Option<Vec<RenderedBlockDomain>>,
     /// Every lexical domain in which a source block was emitted. Shared CFG
     /// blocks may be duplicated by structuring, so coverage is checked only
     /// after all occurrences are known.
@@ -464,6 +470,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             shared_joins: BTreeSet::new(),
             active_domains: vec![RenderedBlockDomain::default()],
             completed_loop_exit: None,
+            region_exit_domains: None,
             rendered_block_domains: BTreeMap::new(),
             retain_region_markers: false,
             structured_region_blocks: BTreeSet::new(),
@@ -500,6 +507,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             shared_joins: BTreeSet::new(),
             active_domains: vec![RenderedBlockDomain::default()],
             completed_loop_exit: None,
+            region_exit_domains: None,
             rendered_block_domains: BTreeMap::new(),
             retain_region_markers: false,
             structured_region_blocks: BTreeSet::new(),
@@ -1174,11 +1182,21 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             return Ok(CStmt::Empty);
         }
         self.completed_loop_exit = None;
+        self.region_exit_domains = None;
         let inherited_domains = self.active_domains.clone();
         if let Some(domains) = self.transfer_target_domains.remove(&region.entry()) {
             self.certify_transfer_domain_join(region.entry(), domains);
         }
         let stmt = self.structure_region_in_active_domains(region)?;
+        // A loop is left by its own exit test. Whatever narrowed inside the
+        // body stopped mattering at the back edge, and letting it escape would
+        // put the block after the loop inside it.
+        if matches!(
+            region,
+            Region::WhileLoop { .. } | Region::DoWhileLoop { .. } | Region::MultiExit { .. }
+        ) {
+            self.region_exit_domains = None;
+        }
         self.active_domains = inherited_domains;
         if Self::trailing_loop_condition_block(region).is_none() {
             self.completed_loop_exit = None;
@@ -1411,12 +1429,21 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             Region::Block(addr) => self.structure_block(*addr)?,
             Region::Sequence(regions) => {
                 let mut stmts = Vec::with_capacity(regions.len());
+                let outer_domains = self.active_domains.clone();
+                let mut carried: Option<Vec<RenderedBlockDomain>> = None;
                 for (index, region) in regions.iter().enumerate() {
                     let deferred_merge = Self::sequence_owned_merge(regions, index);
                     if let Some(merge) = deferred_merge {
                         self.deferred_merge_blocks.push(merge);
                     }
+                    // What runs next runs for whatever fell out of what ran
+                    // before, which stops being the domain the sequence started
+                    // in as soon as a branch or a switch narrows it.
+                    if let Some(domains) = carried.take().filter(|d| !d.is_empty()) {
+                        self.active_domains = domains;
+                    }
                     let stmt = self.structure_region(region)?;
+                    carried = self.region_exit_domains.take();
                     if let Some(merge) = deferred_merge
                         && !self.release_deferred_merge(merge)
                     {
@@ -1432,6 +1459,8 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                         return Ok(CStmt::Empty);
                     }
                 }
+                self.active_domains = outer_domains;
+                self.region_exit_domains = carried;
                 if stmts.is_empty() {
                     CStmt::Empty
                 } else if stmts.len() == 1 {
@@ -1485,10 +1514,29 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     self.deferred_merge_blocks.push(*merge);
                 }
                 let then_stmt = self.structure_branch_region(*cond_block, then_region)?;
+                let mut arm_exits = self.region_exit_domains.take().unwrap_or_default();
                 let else_stmt = match else_region.as_ref() {
-                    Some(region) => Some(self.structure_branch_region(*cond_block, region)?),
-                    None => None,
+                    Some(region) => {
+                        let stmt = self.structure_branch_region(*cond_block, region)?;
+                        arm_exits.extend(self.region_exit_domains.take().unwrap_or_default());
+                        Some(stmt)
+                    }
+                    None => {
+                        // The arm that is not written falls straight through to
+                        // the merge, under the guard that edge carries.
+                        let mut fallthrough = self.active_domains.clone();
+                        if let Some(guard) = merge_block.and_then(|merge| {
+                            self.exact_control_guard_for_edge(*cond_block, merge).ok()?
+                        }) {
+                            for domain in &mut fallthrough {
+                                domain.guards.push(guard.clone());
+                            }
+                        }
+                        arm_exits.extend(fallthrough);
+                        None
+                    }
                 };
+                Self::normalize_rendered_domains(&mut arm_exits);
                 if let Some(merge) = merge_block
                     && !self.release_deferred_merge(*merge)
                 {
@@ -1508,7 +1556,19 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     && !branches_terminate
                     && !merge_owned_by_ancestor
                 {
-                    Self::append_stmt_body_flat(&mut prefix, self.structure_block(*merge_addr)?);
+                    // The merge runs for whatever fell out of the arms, which
+                    // is not the domain this branch was written in: an arm that
+                    // returned contributes nothing, and one that went through a
+                    // switch contributes only its converging cases.
+                    let outer_domains = self.active_domains.clone();
+                    if !arm_exits.is_empty() {
+                        self.active_domains = arm_exits.clone();
+                    }
+                    let merge_stmt = self.structure_block(*merge_addr);
+                    self.active_domains = outer_domains;
+                    Self::append_stmt_body_flat(&mut prefix, merge_stmt?);
+                } else {
+                    self.region_exit_domains = (!arm_exits.is_empty()).then_some(arm_exits);
                 }
                 if prefix.len() == 1 {
                     prefix.into_iter().next().unwrap_or(CStmt::Empty)
@@ -1749,7 +1809,13 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             self.safety_reason = Some(reason);
             return Ok(CStmt::Empty);
         }
+        // Straight-line code reports nothing because nothing narrowed, and then
+        // the arm falls out under the guard this edge put on it.
+        let arm_domains = self.active_domains.clone();
         let stmt = self.structure_region(region);
+        if self.region_exit_domains.is_none() {
+            self.region_exit_domains = Some(arm_domains);
+        }
         self.active_domains = outer_domains;
         stmt
     }
@@ -2245,6 +2311,19 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
 
         let mut prefix = self.structure_block_prefix_stmts(switch_block)?;
         prefix.push(switch_stmt);
+        // Whether it writes the block after itself or hands it on, a switch
+        // falls out under the arms that converge and not under the ones that
+        // left.
+        if let Some(guard) = merge_block.and_then(|merge_addr| {
+            self.converging_switch_arm_guard(switch_block, merge_addr, cases, default, &falls_into)
+        }) {
+            let mut exit = self.active_domains.clone();
+            for domain in &mut exit {
+                domain.guards.push(guard.clone());
+            }
+            Self::normalize_rendered_domains(&mut exit);
+            self.region_exit_domains = Some(exit);
+        }
         if let Some(merge_addr) = merge_block.filter(|_| !merge_owned_by_ancestor) {
             // What follows the switch runs for the arms that converge here, not
             // for the ones that leave, so it is rendered under that guard.
@@ -2637,20 +2716,29 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // into one continuous list instead of wrapping each in CStmt::Block.
         if let Region::Sequence(regions) = body {
             let mut all_stmts = Vec::new();
+            let outer_domains = self.active_domains.clone();
+            let mut carried: Option<Vec<RenderedBlockDomain>> = None;
             for (index, region) in regions.iter().enumerate() {
                 let deferred_merge = Self::sequence_owned_merge(regions, index);
                 if let Some(merge) = deferred_merge {
                     self.deferred_merge_blocks.push(merge);
+                }
+                // The same rule as any other sequence: what runs next runs for
+                // whatever fell out of what ran before.
+                if let Some(domains) = carried.take().filter(|d| !d.is_empty()) {
+                    self.active_domains = domains;
                 }
                 match region {
                     Region::Block(addr) => {
                         self.completed_loop_exit = None;
                         // Inline the block's statements directly
                         self.structure_block_stmts_into(*addr, &mut all_stmts)?;
+                        carried = None;
                     }
                     _ => {
                         // Non-block region: structure normally and append
                         let stmt = self.structure_region(region)?;
+                        carried = self.region_exit_domains.take();
                         if !matches!(stmt, CStmt::Empty) {
                             all_stmts.push(stmt);
                         }
@@ -2668,6 +2756,8 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     return Ok(CStmt::Empty);
                 }
             }
+            self.active_domains = outer_domains;
+            self.region_exit_domains = carried;
             if all_stmts.is_empty() {
                 Ok(CStmt::Empty)
             } else if all_stmts.len() == 1 {
