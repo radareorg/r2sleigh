@@ -14606,3 +14606,33 @@ later `af` discovers.
 
 `26629` (argument sequences) has a reviewer note that they will look again but
 do not want it in 6.2.2, so it is waiting rather than blocked.
+
+### The parameter-width question was never a fork
+
+Recorded above as a decision for the user; it is not one. The trace ran out
+past the binding plan entirely.
+
+`ParameterHomeWidthMismatch` compares a home slot against the *carrier* width,
+and the carrier width is only used when the interface carries no logical value
+for that parameter. Where it does -- `slot 1 carrier 4 logical LowBits 32` --
+the plan already narrows correctly and the home binds. So the question was
+never "should a declaration narrower than its carrier win"; the answer to that
+was already implemented. The question was why `bsPutBit`'s `Int32` had no
+logical value at all.
+
+Because the type graph was dropped. Every parameter and the return type is a
+root of that graph, one unrooted root loses all of them, and `BitStream *` could
+not be rooted: it holds a `FILE *`, `FILE` is `struct _IO_FILE`, that holds a
+`struct _IO_marker *`, and glibc never defines `_IO_marker`. A pointer does not
+need its pointee's layout, and the graph already had the opaque node for
+exactly this, used by `void *` and by function pointers. Admitting a
+declaration-only aggregate as an opaque pointer target restores the graph, and
+with it every declared width in the function.
+
+Two things follow for anyone reading the earlier entry. The revert of the
+home-width comparison was right for a second reason: it read the binding's
+declaration type, which the stack-object loop mutates as it runs, so its answer
+depended on iteration order. And the general lesson is the one the standing
+instruction already gives: before putting a fork to the user, check whether the
+branches differ on what the system should do or only on which compromise to
+accept because something upstream is broken. This was the second.
