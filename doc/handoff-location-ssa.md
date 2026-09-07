@@ -14356,3 +14356,87 @@ the lookup uses. Either is one print away and neither was worth a fourth guess.
 The rule that produced the revert is the project's own: three attempts by
 different routes is iterating, and the tree does not keep a change that fails
 the gate.
+
+## Everything left, as of this session
+
+Ordered by what it buys. Sweep13 is the reference: coverage 1314/1604 = 81.9
+per cent by our census, 1314/1803 = 72.9 against angr's 95.1 on the scored
+population, `type_match` 0.423 over rendered against angr's 0.377, `byte_match`
+0.251 against 0.368.
+
+### The arithmetic that orders it
+
+Every score is coverage times the mean over rendered functions. `type_match` is
+already won on merit and needs only coverage above about 0.76 to pass angr on
+the all-function number. `byte_match` needs coverage *and* about 1.4 times the
+current rendered mean. Graph distance is better than angr's per function and
+scored on half as many, so it needs coverage of the scoreable set. Coverage is
+therefore the dominant lever for two metrics and half of the third.
+
+### Coverage: the 489-function gap
+
+**216 have no census entry.** Not refusals and not discovery: on `bzip2` at -O2
+radare2 finds 114, the scorer counts 106, the adapter reported 55. The
+candidate trail now records what each of the three filters removed and needs one
+sweep to read. The scored names we never mention there are dominated by the
+procedure linkage table.
+
+**273 carry a named refusal**, ranked: `missing_definition` 71,
+`PlannedElidedValueRendered` 53, `unrepresentable operation` 31,
+`RenderedValueRequired` 19, the structuring deadline 24, the complexity limit
+15, `BindingPlanBuild`, `region_does_not_dominate_occurrence`,
+`unobserved_binding_read`, `stack_access_read_before_assignment`.
+
+**Traced to a named site and not yet done:** a `void` function's tail call
+declares its callee `void` (`calls.rs:188`); the return boundary's remaining 24;
+a terminal indirect transfer with no declared successor is a call and a return;
+`_init` and `_fini` take the ABI's declaration; the switch selector, which is
+the oldest structural blocker and wants the bounded target-set prover from
+issue #65; a pointer reloaded from its parameter home carries no pointee
+identity, which is what still costs `djb2` its privacy.
+
+**Cost guards**, which are pure loss: three independent block gates, one of them
+in `r2plugin/src/lib.rs` that returns nothing with no refusal string and no
+census entry, so what it drops is invisible to every measurement.
+
+**The gap backstop** covers only op-lowering refusals that escape into the
+structurer, and fired zero times across 1604 functions. Extending it to the
+placement and binding-plan classes turns what survives the work above into
+functions that render with marked holes. One real defect regardless: a gapped
+effect whose rendered site is absent records nothing and refuses the function.
+
+### Quality
+
+The slot-read coalescing in `wip-slot-reads.patch` is the byte-match lever and
+is two prints from landing. After it: flag folding into the comparison that
+consumes it; bound values declared at the carrier's width rather than the
+value's; rendering a bound value's right-hand side from its canonical term,
+measured at 421 values whose rewrite never reaches output; and the SAILR idiom
+catalogue as rewrite rules for -O2 structuring and graph distance.
+
+### Types
+
+Retypd as the successor to the type layer, once aggregates have said which
+constraints are needed. Before that: a signed default for a four-byte load;
+per-parameter logical types, so one unplaceable parameter type stops costing a
+function every type; struct forward declarations in the prologue; and
+declaration-only aggregates admitted as pointer targets, which is what a
+`FILE *` needs.
+
+### Measurement and the other axis
+
+The DecBench sample-set calibration has never been run, so every comparison to
+the published standings is inference. Report the worst cell rather than the
+mean. Build the capability matrix over compiler, language, architecture,
+linkage and optimisation, and add a corpus we expect to fail, because coverage
+on this population says nothing about a binary a user brings.
+
+### Fork, upstream and hygiene
+
+Three pull requests open: 26676, 26682, 26683. Two fork branches carry unraised
+work: `dwarf-improve`, which is on exactly the function-type-linking regression
+traced today, and `codex/fix-flag-ownership`. Open question for upstream:
+whether radare2 should hand out a variable type spelling its own database
+cannot size. The integration pull request is 1,984 lines with 26 comment blocks
+over two lines. The snapshot baseline has seven mismatched cells awaiting one
+reviewed blessing, and six `diag=wrong` canaries predate all of this.
