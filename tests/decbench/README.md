@@ -92,15 +92,15 @@ Running it from this repository
 the result with `baseline.json`, per function and per metric. Its default is the
 acceptance population, not a smoke test: every TOML under `projects/sailr` (26
 at the time this contract was written), every binary each project produces,
-and `O0`, `O1`, and `O2`:
+and `O0` and `O2`:
 
 ```
-tests/decbench/run_decbench.sh                    # full 26 x 3 sweep
+tests/decbench/run_decbench.sh                    # full 26 x 2 sweep
 tests/decbench/run_decbench.sh --accept-baseline  # merge the sweep into the record
 
 # bounded verification or investigation (selection is printed in the report)
 tests/decbench/run_decbench.sh \
-  --project bzip2 --project zlib --opt-level O0 --opt-level O1
+  --project bzip2 --project zlib --opt-level O0 --opt-level O2
 
 # deterministic zero-based shards; merge their generated JSON afterward
 tests/decbench/run_decbench.sh --shard 0/2
@@ -166,11 +166,23 @@ and per cell, so adding a metric such as `vj_ged` invalidates only cells that
 have never measured it rather than treating an older three-metric row as a
 complete reference.
 
-The final cost line measures end-to-end wall time, the peak size of the
-garbage-collected run directory, the peak host disk consumption observed while
-a project is live, and the retained host disk change. The 26-by-3 projection
-uses the observed project/optimization-cell rate and is deliberately labeled an
-extrapolation rather than a promise about differently sized projects.
+The final cost line measures wall time from script entry through final cleanup
+and disk sampling, including preflight, synchronization, builds, and references.
+It also reports seconds for fork build (including synchronization and install),
+plugin build/install, r2sleigh decompilation, angr reference decompilation,
+evaluation of both decompilers, and local merge/report generation. Skipped
+phases report zero; resumed projects do not contribute time from earlier runs.
+
+Decompile and reference seconds measure the union of worker intervals for each
+backend, not summed worker CPU time. Their intervals can overlap because both
+backends share the worker pool. The phase figures are therefore not additive;
+project compilation, transfers, and other orchestration also contribute to wall
+time. Per-project `*.phases.tsv` artifacts retain the monotonic intervals.
+
+The existing disk figures remain: peak run directory size, peak host disk
+consumption observed while a project is live, and retained host disk change.
+The 26-by-2 projection uses the observed project/optimization-cell rate and is
+an extrapolation rather than a promise about differently sized projects.
 
 The required metrics are `byte_match`, `ged`, `vj_ged`, and `type_match`.
 Current DecBench upstream contains the VJ implementation but does not register

@@ -20,6 +20,7 @@ import decbench.metrics  # noqa: F401
 from decbench.metrics.base import Metric
 from decbench.metrics.registry import MetricRegistry, register_metric
 from decbench.models.metrics import AggregationType, MetricValue
+from phase_timing import install_phase_timing
 
 
 def register_tree_backend() -> None:
@@ -94,6 +95,7 @@ def register_vj_ged_if_needed() -> None:
 
 register_tree_backend()
 register_vj_ged_if_needed()
+install_phase_timing()
 
 if __name__ == "__main__":
     from decbench.cli import main

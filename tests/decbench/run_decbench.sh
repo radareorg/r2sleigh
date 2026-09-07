@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Measure this tree over every DecBench sailr project and optimization level.
-#
-# Defaults are the acceptance population: all 26 sailr projects at O0/O1/O2.
-# One DecBench invocation owns every selected optimization of a project, so its
-# compiled binaries are shared by r2sleigh and (when needed) the cached angr
-# reference. Completed projects are checkpointed independently for resume.
+# Measure all 26 sailr projects at O0/O2 with shared compiled binaries.
+# Checkpoint completed projects independently for resume.
 set -euo pipefail
+readonly run_started=$(date -u +%s)
+fork_build_seconds=0
+plugin_build_seconds=0
+decompile_seconds=0
+reference_seconds=0
+evaluate_seconds=0
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 host=${R2SLEIGH_DECBENCH_HOST:-contabo}
@@ -31,7 +33,7 @@ usage() {
     cat <<'EOF'
 usage: tests/decbench/run_decbench.sh [options]
 
-Sweep selection (defaults to all 26 sailr projects at O0, O1 and O2):
+Sweep selection (defaults to all 26 sailr projects at O0 and O2):
   --project NAME       select a project; repeatable
   --opt-level OPT      select O0, O1 or O2; repeatable
   --shard INDEX/COUNT  select a deterministic zero-based project shard
@@ -305,7 +307,6 @@ if (( plan_only )); then
     exit 0
 fi
 
-run_started=$(date -u +%s)
 disk_available_before=$(ssh "${ssh_keepalive[@]}" "$host" \
     "df -B1 --output=avail '$run_root' | tail -1 | tr -d ' '")
 tree_commit=$(git -C "$root" rev-parse HEAD)
@@ -415,6 +416,7 @@ if [[ -d $fork_local/.git ]]; then
     have=$(ssh "${ssh_keepalive[@]}" "$host" \
         "cat '$fork_remote/.r2sleigh-synced-from' 2>/dev/null" || true)
     if [[ $want != "$have" ]]; then
+        phase_started=$(date -u +%s)
         echo "radare2 fork: syncing and rebuilding $want"
         git -C "$fork_local" ls-files -z \
             | rsync -a -e "ssh ${ssh_keepalive[*]}" --files-from=- --from0 \
@@ -430,6 +432,7 @@ make install >/tmp/r2-install.log 2>&1 || { tail -20 /tmp/r2-install.log; exit 7
 printf '%s\n' "$WANT" > "$FORK_REMOTE/.r2sleigh-synced-from"
 radare2 -v | head -1
 REMOTE
+        fork_build_seconds=$(( $(date -u +%s) - phase_started ))
     else
         echo "radare2 fork: host already at $want"
     fi
@@ -445,6 +448,7 @@ lib=$(find "$HOME/.local/share/radare2/plugins" -name 'libr2sleigh_plugin.*' -pr
 [ -n "$lib" ] && grep -a -q "$WITNESS" "$lib"
 VERIFY
 then
+    phase_started=$(date -u +%s)
     ssh "${ssh_keepalive[@]}" "$host" \
         "REMOTE='$remote' PRIVATE_HOME='$private_home' FORK_REMOTE='$fork_remote' WITNESS='$witness' bash -s" <<'INSTALL'
 set -euo pipefail
@@ -478,10 +482,12 @@ if [ "${loaded:-0}" -eq 0 ]; then
 fi
 echo "installed $lib, witness present, plugin loads"
 INSTALL
+    plugin_build_seconds=$(( $(date -u +%s) - phase_started ))
 else
     echo "resumed plugin install, witness present"
 fi
 
+mkdir -p "$artifact_root/raw"
 for ((project_index = 0; project_index < ${#projects[@]}; project_index++)); do
     project=${projects[$project_index]}
     include_reference=${project_reference_flags[$project_index]}
@@ -548,6 +554,8 @@ for opt in "${opts[@]}"; do cmd+=(-O "$opt"); done
 cmd+=(-d r2sleigh)
 if [ "$INCLUDE_REFERENCE" = 1 ]; then cmd+=(-d angr); fi
 cmd+=(-m ged -m vj_ged -m byte_match -m type_match -j "$WORKERS" -o "$work/out")
+export R2SLEIGH_DECBENCH_PHASE_LOG="$REMOTE/logs/$PROJECT.phases.tsv"
+: >"$R2SLEIGH_DECBENCH_PHASE_LOG"
 set +e
 "${cmd[@]}" 2>&1 | tee "$REMOTE/logs/$PROJECT.log" | sed "s/^/  $PROJECT: /"
 status=${PIPESTATUS[0]}
@@ -565,9 +573,15 @@ printf '%s\t%s\t%s\n' "$PROJECT" "$((ended - started))" "$bytes" \
 printf '%s\n' "$ended" >"$REMOTE/completed/$PROJECT"
 rm -rf -- "$work"
 RUN
+    scp "${ssh_keepalive[@]}" -q "$host:$remote/logs/$project.phases.tsv" \
+        "$artifact_root/$project.phases.tsv"
+    read -r project_decompile project_reference project_evaluate < <(
+        python3 "$root/tests/decbench/phase_timing.py" "$artifact_root/$project.phases.tsv"
+    )
+    decompile_seconds=$(awk -v a="$decompile_seconds" -v b="$project_decompile" 'BEGIN { printf "%.3f", a + b }')
+    reference_seconds=$(awk -v a="$reference_seconds" -v b="$project_reference" 'BEGIN { printf "%.3f", a + b }')
+    evaluate_seconds=$(awk -v a="$evaluate_seconds" -v b="$project_evaluate" 'BEGIN { printf "%.3f", a + b }')
 done
-
-mkdir -p "$artifact_root/raw"
 for project in "${projects[@]}"; do
     scp "${ssh_keepalive[@]}" -q "$host:$remote/results/$project.json" \
         "$artifact_root/raw/$project.json"
@@ -610,6 +624,7 @@ if (( actual_witness_checks != expected_witness_checks )); then
 fi
 echo "witness checks: $actual_witness_checks/$expected_witness_checks project/opt runs"
 
+phase_started=$(date -u +%s)
 merge_args=(--output "$artifact_root/function_results.json")
 for project in "${projects[@]}"; do
     merge_args+=(--input "$artifact_root/raw/$project.json")
@@ -629,6 +644,7 @@ set +e
 python3 "$root/tests/decbench/report_decbench.py" "${report_args[@]}"
 report_status=$?
 set -e
+merge_seconds=$(( $(date -u +%s) - phase_started ))
 
 if (( keep_remote )); then
     ssh "${ssh_keepalive[@]}" "$host" \
@@ -640,8 +656,6 @@ else
 fi
 trap - EXIT
 
-run_finished=$(date -u +%s)
-wall_seconds=$((run_finished - run_started))
 disk_available_after=$(ssh "${ssh_keepalive[@]}" "$host" "df -B1 --output=avail '$run_root' | tail -1 | tr -d ' '")
 peak_run_bytes=$(awk 'BEGIN { m=0 } { if ($2 > m) m=$2 } END { print m }' "$artifact_root"/*.disk.tsv)
 min_disk_available=$(awk 'BEGIN { m=0 } { if (m == 0 || $3 < m) m=$3 } END { print m }' \
@@ -651,14 +665,16 @@ retained_host_disk_bytes=$((disk_available_before - disk_available_after))
 if (( peak_host_disk_bytes < 0 )); then peak_host_disk_bytes=0; fi
 if (( retained_host_disk_bytes < 0 )); then retained_host_disk_bytes=0; fi
 selected_cells=$(( ${#projects[@]} * ${#requested_opts[@]} ))
-full_cells=$(( expected_project_count * 3 ))
+full_cells=$(( expected_project_count * 2 ))
+wall_seconds=$(( $(date -u +%s) - run_started ))
 full_wall_seconds=$(( wall_seconds * full_cells / selected_cells ))
-printf 'cost: end-to-end wall %ss; peak run directory %.2f GiB; peak host disk %.2f GiB; retained host disk %.2f GiB\n' \
-    "$wall_seconds" \
+printf 'cost: end-to-end wall %ss; fork build %ss; plugin build %ss; decompile %ss; reference %ss; evaluate %ss; merge %ss; decompile/reference may overlap; peak run directory %.2f GiB; peak host disk %.2f GiB; retained host disk %.2f GiB\n' \
+    "$wall_seconds" "$fork_build_seconds" "$plugin_build_seconds" \
+    "$decompile_seconds" "$reference_seconds" "$evaluate_seconds" "$merge_seconds" \
     "$(awk -v n="$peak_run_bytes" 'BEGIN { print n / 1073741824 }')" \
     "$(awk -v n="$peak_host_disk_bytes" 'BEGIN { print n / 1073741824 }')" \
     "$(awk -v n="$retained_host_disk_bytes" 'BEGIN { print n / 1073741824 }')"
-printf 'full 26x3 extrapolation: %.2f hours serial; %.2f GiB peak with per-project GC\n' \
+printf 'full 26x2 extrapolation: %.2f hours serial; %.2f GiB peak with per-project GC\n' \
     "$(awk -v n="$full_wall_seconds" 'BEGIN { print n / 3600 }')" \
     "$(awk -v n="$peak_run_bytes" 'BEGIN { print n / 1073741824 }')"
 exit "$report_status"
