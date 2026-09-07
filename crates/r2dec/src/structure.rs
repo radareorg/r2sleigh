@@ -1677,6 +1677,10 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                             match self.transfer_target_domains_for(*loop_header, *target) {
                                 Ok(domains) => self.active_domains = domains,
                                 Err(reason) => {
+                                    r2il::refusal_evidence!(
+                                        "exit-continuation-domain",
+                                        "0x{source:x} -> 0x{target:x} out of loop 0x{loop_header:x}: {reason}"
+                                    );
                                     self.safety_reason = Some(reason);
                                     return Ok(CStmt::Empty);
                                 }
@@ -3380,6 +3384,39 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         assignments.saturating_mul(formula_slots)
     }
 
+    /// A guard vector written by the blocks it names.
+    ///
+    /// A predicate identifier alone cannot be resolved by the next reader, and
+    /// the block it asks its question at can.
+    fn describe_guards(facts: &r2types::FunctionControlFacts, guards: &[ControlGuard]) -> String {
+        guards
+            .iter()
+            .map(|guard| match guard {
+                ControlGuard::Branch { predicate, truth } => {
+                    let block = facts
+                        .branch_predicates
+                        .values()
+                        .find(|fact| fact.id == *predicate)
+                        .map(|fact| fact.block_addr);
+                    match block {
+                        Some(block) => format!("{block:#x}={truth}"),
+                        None => format!("{predicate:?}={truth}"),
+                    }
+                }
+                ControlGuard::SwitchArm {
+                    block_addr,
+                    case_values,
+                    includes_default,
+                } => format!(
+                    "{block_addr:#x}:{}{}",
+                    case_values.len(),
+                    if *includes_default { "+default" } else { "" }
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The arms a switch guard admits, by the case values it carries.
     ///
     /// A guard names the values the selector took, and several of them can
@@ -3705,17 +3742,18 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             // a bare "did not cover" leaves the next reader with nothing.
             r2il::refusal_evidence!(
                 "control-coverage",
-                "{block_addr:#x} rendered {:?} against canonical {:?}",
+                "{block_addr:#x} rendered {:?} against canonical {}",
                 occurrences
                     .iter()
                     .map(|occurrence| occurrence
                         .alternatives
                         .iter()
-                        .map(|alternative| alternative.guards.clone())
+                        .map(|alternative| Self::describe_guards(facts, &alternative.guards))
                         .collect::<Vec<_>>())
                     .collect::<Vec<_>>(),
                 Self::exact_control_domain(&facts.control_domains, block_addr)
-                    .map(|domain| domain.guards.clone())
+                    .map(|domain| Self::describe_guards(facts, &domain.guards))
+                    .unwrap_or_else(|reason| reason)
             );
         }
         Ok(source_formula == rendered_formula)

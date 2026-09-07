@@ -3751,6 +3751,13 @@ fn validate_occurrence<C: PlacementControlFlow + ?Sized>(
         return Err(PlacementAnalysisError::BlockOutsideFunction { block });
     }
     if !cfg.dominates(node.entry(), block) {
+        // A region identifier says nothing on its own; the entry it fails to
+        // dominate from is what a trace needs.
+        r2il::refusal_evidence!(
+            "placement-dominance",
+            "binding {binding:?} occurs at {block:#x}, which region {region:?} at {:#x} does not dominate",
+            node.entry()
+        );
         return Err(PlacementAnalysisError::RegionDoesNotDominateOccurrence { region, block });
     }
     Ok(())

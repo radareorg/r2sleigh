@@ -1334,9 +1334,19 @@ impl<'a> FoldingContext<'a> {
             }
 
             if let SSAOp::Return { .. } = op {
-                let (source_inst, boundary) = self
-                    .source_return_boundary_for_normalized_op(block.addr, op_idx)
-                    .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+                // No boundary fact at all is a different failure from one that
+                // disagrees, and both used to arrive as the same refusal.
+                let Some((source_inst, boundary)) =
+                    self.source_return_boundary_for_normalized_op(block.addr, op_idx)
+                else {
+                    r2il::refusal_evidence!(
+                        "return-boundary",
+                        "no boundary fact for the return at {:#x} op {op_idx}, source inst {:?}",
+                        block.addr,
+                        self.source_inst_for_normalized_op(block.addr, op_idx)
+                    );
+                    return Err(OpLoweringRefusal::missing_machine_projection());
+                };
                 if boundary.at != source_inst || !boundary.complete {
                     r2il::refusal_evidence!(
                         "return-boundary",
