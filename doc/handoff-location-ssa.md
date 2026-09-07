@@ -15059,6 +15059,21 @@ names the pre-creation loop as the maker.
 Resolving each root through `containing` in that first loop takes
 `notAStandardFile` from four unidentified objects to three and leaves every
 census number identical across all six binaries, so it is not in the tree. The
-orphan is real and worth removing, but it is not what refuses the function --
-something else still renders that constant, and finding it is the next step
-here.
+orphan is real and worth removing, but it is not what refuses the function.
+
+**What does is the load itself.** The refusal now names the folded statement:
+the constant is operand 1 of the instruction at `0x3ec4`, which radare2
+disassembles as `mov eax, dword [statBuf.st_mode]` -- it has resolved the member
+by name already. The certified memory renderer never sees it. There is no
+`memory-access-expression` refusal from that op, so the load is not taking the
+certified path at all, and the generic lowering renders the address arithmetic,
+geometry constant included, in place of `statBuf.st_mode`.
+
+Everything that path needs is present. The type graph is complete for this
+function -- nine types, two aggregates, `logical_complete=1` -- so `stat`'s
+layout is there. Every structured access carries `provenance_complete = true`.
+`containing` maps the interior coordinate to the declared slot, and is observed
+doing so. So the question is narrow and well posed for whoever picks it up:
+**what gate keeps a load whose address resolves into a declared aggregate from
+reaching `certified_memory_access_expr`?** That is one probe on the `Load` arm of
+the op lowering, and it stands in front of fourteen functions.
