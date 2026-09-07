@@ -14235,3 +14235,32 @@ plugin and was wrong.
 Open, for upstream: whether radare2 should hand out a variable type spelling
 its own type database cannot size. Sizing `signed int` in the capture is this
 plugin reading a valid C type, not a workaround for that question.
+
+### What the field has built, and what of it applies here
+
+Recorded as issue #65 rather than in full here, because it is a standing
+decision rather than a session's finding. The short form: a survey of value-set
+analysis, path-sensitive execution, constraint-based type recovery, structuring
+work and deobfuscation was filtered against three properties this project has
+and most decompilers do not. A technique must produce a certificate or enter as
+a marked fact; it must discharge an obligation the ledger already tracks; and
+it must not require execution, because a fact from a concrete run is
+existential where we need a universal one.
+
+Five things survive that filter, in this order: a backward slice over our own
+SSA as an internal tool, which changes no output and makes every trace cheaper;
+a switch-target bound prover written as a query behind the existing refusal
+rather than as a phase, which is the symex lesson applied before it is
+repeated; SAILR's idiom catalogue expressed as rewrite rules in the harness
+that already holds ninety-three of them; Retypd as the eventual successor to
+the type layer, once aggregates have said which constraints are needed; and
+library identification, measured before it is invested in, because a wrong
+signature match is a wrong prototype asserted without a mark.
+
+What is refused is recorded with its reason, so the question is settled rather
+than re-argued: anything requiring execution, state merging, under-constrained
+symbolic execution, machine-learned naming, Datalog reassembly, synthesis
+oracles, and class recovery.
+
+None of it displaces the census. Aggregate interiors remain the top refusal
+cause at both optimisation levels.
