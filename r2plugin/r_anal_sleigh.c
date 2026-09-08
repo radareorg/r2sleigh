@@ -1367,27 +1367,6 @@ static bool block_array_free(BlockArray *arr) {
 }
 
 
-static char *sleigh_collect_function_assumptions_json(RAnal *anal, RAnalFunction *fcn) {
-	char *assumptions_json;
-
-	if (!anal || !fcn) {
-		return strdup ("[]");
-	}
-	assumptions_json = r_anal_function_get_assumptions_json (anal, fcn);
-	if (R_STR_ISEMPTY (assumptions_json)) {
-		free (assumptions_json);
-		return strdup ("[]");
-	}
-	return assumptions_json;
-}
-
-static const char *skip_cmd_spaces(const char *s) {
-	while (s && *s == ' ') {
-		s++;
-	}
-	return s;
-}
-
 static bool read_block_bytes_for_lifting(
 	RAnal *anal,
 	const RAnalBlock *bb,
@@ -1435,81 +1414,6 @@ static bool read_block_bytes_for_lifting(
 	*out_len = read_len;
 	*out_lift_size = lift_size;
 	return true;
-}
-
-static bool parse_sym_target_expr(RCore *core, const char *expr, ut64 *target) {
-	if (!core || !core->num || !expr || !*expr || !target) {
-		return false;
-	}
-	if (!r_num_is_valid_input (core->num, expr)) {
-		return false;
-	}
-	*target = r_num_math (core->num, expr);
-	return true;
-}
-
-static RAnalFunction *resolve_function_target_by_name(RAnal *anal, const char *target_name) {
-	if (!anal || !target_name || !*target_name) {
-		return NULL;
-	}
-
-	RAnalFunction *fcn = r_anal_get_function_byname (anal, target_name);
-	if (fcn) {
-		return fcn;
-	}
-
-	char *trimmed = r_str_trim_dup (target_name);
-	if (!trimmed || !*trimmed) {
-		free (trimmed);
-		return NULL;
-	}
-
-	char *base = trimmed;
-	for (;;) {
-		if (r_str_startswith (base, "dbg.")) {
-			base += 4;
-			continue;
-		}
-		if (r_str_startswith (base, "sym.")) {
-			base += 4;
-			continue;
-		}
-		if (r_str_startswith (base, "fcn.")) {
-			base += 4;
-			continue;
-		}
-		break;
-	}
-
-	const char *plain = (*base == '_')? base + 1: base;
-	char *candidates[] = {
-		strdup (base),
-		*plain? strdup (plain): NULL,
-		r_str_newf ("sym.%s", base),
-		*plain? r_str_newf ("sym.%s", plain): NULL,
-		*plain? r_str_newf ("sym._%s", plain): NULL,
-		r_str_newf ("dbg.%s", base),
-		*plain? r_str_newf ("dbg.%s", plain): NULL,
-		r_str_newf ("fcn.%s", base),
-		*plain? r_str_newf ("fcn.%s", plain): NULL,
-		(*base == '_')? strdup (plain): r_str_newf ("_%s", plain),
-	};
-	size_t i;
-	for (i = 0; i < R_ARRAY_SIZE (candidates); i++) {
-		const char *candidate = candidates[i];
-		if (!candidate || !*candidate) {
-			continue;
-		}
-		fcn = r_anal_get_function_byname (anal, candidate);
-		if (fcn) {
-			break;
-		}
-	}
-	for (i = 0; i < R_ARRAY_SIZE (candidates); i++) {
-		free (candidates[i]);
-	}
-	free (trimmed);
-	return fcn;
 }
 
 static int function_bb_count(const RAnalFunction *fcn) {
@@ -1570,72 +1474,6 @@ static bool auto_callback_allows_function(
 		fcn? fcn->addr: 0,
 		fcn? function_bb_count (fcn): -1);
 	return false;
-}
-
-static RAnalFunction *materialize_function_at(RAnal *anal, ut64 addr) {
-	RAnalFunction *fcn;
-	int ret;
-	RCore *core;
-
-	if (!anal || addr == UT64_MAX) {
-		return NULL;
-	}
-
-	fcn = r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
-	if (fcn) {
-		return fcn;
-	}
-
-	core = anal->coreb.core;
-	if (core) {
-		if (r_core_anal_fcn (core, addr, UT64_MAX, R_ANAL_REF_TYPE_NULL, 1)) {
-			fcn = r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
-			if (fcn) {
-				return fcn;
-			}
-		}
-	}
-
-	fcn = r_anal_create_function (anal, NULL, addr, R_ANAL_FCN_TYPE_FCN, NULL);
-	if (!fcn) {
-		return r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
-	}
-
-	ret = r_anal_function (anal, fcn, addr, R_ANAL_REF_TYPE_NULL);
-	if ((ret < 0 && ret != R_ANAL_RET_END) || function_bb_count (fcn) <= 0) {
-		if (!r_anal_function_delete (anal, fcn)) {
-			r_anal_function_free (fcn);
-		}
-		return NULL;
-	}
-
-	return r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
-}
-
-static RAnalFunction *resolve_or_materialize_function_target(RCore *core, RAnal *anal, const char *target_arg) {
-	ut64 target_addr = 0;
-	RAnalFunction *fcn;
-
-	if (!core || !anal || !target_arg || !*target_arg) {
-		return NULL;
-	}
-
-	fcn = resolve_function_target_by_name (anal, target_arg);
-	if (fcn) {
-		return fcn;
-	}
-
-	if (!parse_sym_target_expr (core, target_arg, &target_addr)) {
-		return NULL;
-	}
-	return materialize_function_at (anal, target_addr);
-}
-
-static RAnalFunction *resolve_or_materialize_current_function(RCore *core, RAnal *anal) {
-	if (!core || !anal) {
-		return NULL;
-	}
-	return materialize_function_at (anal, core->addr);
 }
 
 static bool vec_has_reg(const RVecRArchValue *vec, const char *reg_name) {
@@ -3670,7 +3508,7 @@ static bool cmd_matches_exact_or_arg(const char *cmd, const char *prefix) {
 }
 
 // What the debug namespace covers: reports about the engine's own workings.
-// Configuring the plugin and reading a function's assumptions are neither.
+// Configuring the plugin is not.
 static bool sleigh_direct_sla_debug_only_command(const char *cmd) {
 	if (!cmd) {
 		return false;
@@ -3806,8 +3644,6 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		if (cons) {
 			r_cons_println (cons, "| a:sla                 - show r2sleigh status");
 			r_cons_println (cons, "| a:sla.arch [name]     - show or set the lifted architecture");
-			r_cons_println (cons, "| a:sla.assumptions[-]  - show or clear a function's assumptions");
-			r_cons_println (cons, "| a:sla.assumej <json>  - set a function's assumptions");
 			r_cons_println (cons, "| a:sla.profilej        - per-function stage timings");
 			r_cons_println (cons, "| a:sla.debug.*         - engine inspection (json, opvals, mem,");
 			r_cons_println (cons, "|                         ssa[.func[.opt]], defuse.func, dom, cfg[.json],");
@@ -3824,86 +3660,6 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		}
 		free (profile_json);
 		return strdup("");
-	}
-
-	if (!strcmp (cmd, "sla.assumptions-") || (!strncmp (cmd, "sla.assumptions-", 16) && isspace ((unsigned char)cmd[16]))) {
-		const char *target_arg = skip_cmd_spaces (cmd + 16);
-		RAnalFunction *fcn = (target_arg && *target_arg)
-			? resolve_or_materialize_function_target (core, anal, target_arg)
-			: resolve_or_materialize_current_function (core, anal);
-		if (!fcn) {
-			if (target_arg && *target_arg) {
-				R_LOG_ERROR ("r2sleigh: function target not found: %s", target_arg);
-			} else {
-				R_LOG_ERROR ("r2sleigh: no function at current address");
-			}
-			return strdup ("");
-		}
-		if (!r_anal_function_set_assumptions_json (anal, fcn, "")) {
-			R_LOG_ERROR ("r2sleigh: failed to clear assumptions for 0x%"PFMT64x, fcn->addr);
-			return strdup ("");
-		}
-		if (cons) {
-			r_cons_println (cons, "[]");
-		}
-		return strdup ("");
-	}
-
-	if (!strncmp (cmd, "sla.assumptions", 15) && (!cmd[15] || isspace ((unsigned char)cmd[15]))) {
-		const char *target_arg = skip_cmd_spaces (cmd + 15);
-		RAnalFunction *fcn = (target_arg && *target_arg)
-			? resolve_or_materialize_function_target (core, anal, target_arg)
-			: resolve_or_materialize_current_function (core, anal);
-		char *assumptions_json;
-		if (!fcn) {
-			if (target_arg && *target_arg) {
-				R_LOG_ERROR ("r2sleigh: function target not found: %s", target_arg);
-			} else {
-				R_LOG_ERROR ("r2sleigh: no function at current address");
-			}
-			return strdup ("");
-		}
-		assumptions_json = sleigh_collect_function_assumptions_json (anal, fcn);
-		if (cons) {
-			r_cons_printf (cons, "%s\n", assumptions_json? assumptions_json: "[]");
-		}
-		free (assumptions_json);
-		return strdup ("");
-	}
-
-	if (!strncmp (cmd, "sla.assumej", 11) && (!cmd[11] || isspace ((unsigned char)cmd[11]))) {
-		const char *arg = skip_cmd_spaces (cmd + 11);
-		RAnalFunction *fcn;
-		char *assumptions_json;
-
-		if (!arg || !*arg) {
-			if (cons) {
-				r_cons_println (cons, "Usage: a:sla.assumej <json-array>");
-			}
-			return strdup ("");
-		}
-		fcn = resolve_or_materialize_current_function (core, anal);
-		if (!fcn) {
-			R_LOG_ERROR ("r2sleigh: no function at current address");
-			return strdup ("");
-		}
-		assumptions_json = strdup (arg);
-		if (!assumptions_json) {
-			return strdup ("");
-		}
-		r_str_unescape (assumptions_json);
-		if (!r_anal_function_set_assumptions_json (anal, fcn, assumptions_json)) {
-			R_LOG_ERROR ("r2sleigh: invalid assumptions json array");
-			free (assumptions_json);
-			return strdup ("");
-		}
-		free (assumptions_json);
-		assumptions_json = sleigh_collect_function_assumptions_json (anal, fcn);
-		if (cons) {
-			r_cons_printf (cons, "%s\n", assumptions_json? assumptions_json: "[]");
-		}
-		free (assumptions_json);
-		return strdup ("");
 	}
 
 	if (!strncmp (cmd, "sla.arch", 8)) {

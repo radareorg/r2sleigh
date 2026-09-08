@@ -11104,6 +11104,8 @@ fn r2plugin_legacy_debug_command_redirects_stay_deleted() {
         "sleigh_decompile_execute",
         "sla.vars",
         "sla.defuse\"",
+        "sla.assum",
+        "assumptions_json",
         // The body of a data-refs callback radare2 has no slot for.
         "collect_data_refs_from_typed",
         "data_ref_type_from_json",
@@ -11116,7 +11118,7 @@ fn r2plugin_legacy_debug_command_redirects_stay_deleted() {
     }
     // Configuration is not engine inspection, and was unreachable while the
     // gate said it was.
-    for name in ["sla.arch", "sla.assumptions", "sla.assumej", "sla.profilej", "sla.info"] {
+    for name in ["sla.arch", "sla.profilej", "sla.info"] {
         let gate = c_source
             .split("static bool sleigh_direct_sla_debug_only_command")
             .nth(1)

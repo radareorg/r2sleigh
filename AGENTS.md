@@ -680,7 +680,7 @@ Do not claim the seam is fixed without both sides being green.
 Treat this as two tiers:
 
 - public / user-facing
-  - `a:sla`, `a:sla.arch`, `a:sla.assumptions[-]`, `a:sla.assumej`, `a:sla.profilej`
+  - `a:sla`, `a:sla.arch`, `a:sla.profilej`
   - `pd:s`, `pdD`
 - debug / engine inspection
   - low-level IL / SSA / facts / plan / replay / path listing commands

@@ -62,7 +62,6 @@ fn configuration_commands_are_not_gated_behind_the_debug_namespace() {
         "a:sla",
         "a:sla.info",
         "a:sla.arch",
-        "a:sla.assumptions",
         "a:sla.profilej",
     ] {
         let result = r2_cmd(vuln_test_binary(), &format!("aaa; s entry0; {command}"));

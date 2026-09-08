@@ -39,8 +39,6 @@ Command Reference
 Configuration and status:
 - a:sla, a:sla.info -- Status and loaded architecture
 - a:sla.arch [name] -- Get/set architecture
-- a:sla.assumptions[-] [fn] -- Show or clear a function's assumptions
-- a:sla.assumej <json> -- Set a function's assumptions
 - a:sla.profilej -- Per-function stage timings
 
 Instruction-Level:

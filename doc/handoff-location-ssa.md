@@ -15773,3 +15773,35 @@ until the case is known. Deleting it is the last step, not an early one.
 
 Order for the next attempt: find the emission site above, land parts 1-3 with the
 old mechanisms still in place and measure, and only then delete them.
+
+## The assumptions store had no consumer at either end
+
+Upstream declined `afAj` (radareorg/radare2#26683) on the grounds that radare2
+cannot act on an uninterpreted per-function JSON blob: it would be a public API
+whose only consumer is out of tree. Checking that claim against this side made
+it stronger. The chain is broken at every link:
+
+* `snapshot_capture.c` never reads the field, and the wire never carries it.
+* `r2source` has no assumption concept at all.
+* `FunctionFacts::assumptions` is `AssumptionSet::default()`, always empty.
+* `r2ssa::AssumptionSet` is real machinery, exercised only by its own tests.
+
+So `a:sla.assumptions`, `a:sla.assumptions-` and `a:sla.assumej` wrote a JSON
+array onto the function and read the same array back, and no decompilation ever
+depended on what they held. The two halves -- radare2's store and the engine's
+assumption machinery -- were never connected to each other.
+
+Both are gone. The fork loses `RAnalFunction::assumptions_json`, three exported
+APIs, the `afA` commands, the `af*` project line and two tests; the plugin loses
+the three commands, the collector and the target-resolution chain they were the
+only callers of. Census 614/692 unchanged, corpus gates unchanged, radare2's own
+suite back to its five pre-existing failures.
+
+This corrects a judgement made earlier the same day. Ungating these three as
+"configuration rather than engine inspection" was true and beside the point:
+they configured nothing that anything read, so the honest reading was that they
+were dead, not misfiled. Reachability was the wrong question to ask first.
+
+The one useful thing to come out of the review is a radare2 bug worth its own
+pull request: `aep*` is never emitted by `r_core_project_save_script`, so ESIL
+pins do not survive a project.
