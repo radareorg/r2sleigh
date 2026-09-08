@@ -17672,3 +17672,48 @@ symbol, and the only observation at that occurrence is the write. The base of an
 indexed assignment is the assignment's target, not a read of it; the index is
 the read, and it belongs to a different binding. That is the defect, and it has
 one right answer rather than being a fork.
+
+### The headline finding: the type graph rejects every array
+
+`snapshot_type_spec_rejected` in `r2plugin/snapshot_capture.c` returns true for
+any spec containing `[` or `]`. So no array type ever enters the snapshot type
+graph, and `RAnalSnapshotTypeKind` has no array kind to put one in;
+`SourceTypeKind` on the engine side has none either.
+
+The consequence is not a missing type here and there. A declared stack array
+loses its slot entirely, so:
+
+- it loses its DWARF name. `dbg.generateMTFValues` declares `yy : UChar[256]`
+  at rbp-304, and the binding for it is `stack_m312` with type
+  `Int { bits: 8 }` -- a machine name and a scalar.
+- placement's `subscript_base_is_array_stack_object` requires
+  `CType::Array(_, Some(_))`, so `yy[i] = x` has its base audited as a *read*
+  of the symbol when the only observation there is the write. That is the
+  `unobserved_binding_read` class, seven local and seventeen DecBench.
+- the accesses render through the memory path as pointer casts. Every one of
+  the 1660 subscripts in the local corpus is of the form
+  `((uint8_t*)RSI_1)[96]`, not one is a declared array. That spelling is what
+  `byte_match` is scoring against real C, and it is the metric coverage alone
+  will not win.
+
+The debug interface now prints every captured slot with its base, offset, size
+and whether it is an aggregate, which is how this was found:
+
+    r2sleigh: slot fcn=dbg.generateMTFValues yy type=UChar[256] size=256 offset=-304 base=0 valid=1 aggregate=1
+    r2sleigh: type root refused: fcn=dbg.generateMTFValues: unalias: type=UChar[256] resolved= result=0
+
+The slot is captured correctly and its type is then refused.
+
+**What closing it needs**, in order: an array kind in
+`RAnalSnapshotTypeKind` carrying an element type id and a count; the same in
+`SourceTypeKind`; encode and decode for it in the snapshot wire; a case in
+`snapshot_type_add_root` that parses `T[N]`, resolves `T` and emits the node;
+and the mapping to `CType::Array` in `r2types`. Placement and rendering already
+handle `CType::Array(_, Some(_))`, so the far end is in place. This is a wire
+change, which the plugin owns, and it is the largest single lever left.
+
+A second, smaller thing this trace turned up: `yy` is captured with
+`base=0` (frame pointer) and offset -304, while the engine's object for it is
+at entry-relative -312. The eight bytes are the pushed frame pointer. Whether
+the engine or the capture owns that conversion should be settled while the
+array work is done, since both bear on matching an object to its declared slot.

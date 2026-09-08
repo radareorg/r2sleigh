@@ -712,6 +712,12 @@ static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext
 	}
 	// An aggregate's extent exceeds any single access, so it stands; a scalar's
 	// tightest sound claim is the narrower of its type and its accesses.
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		eprintf ("r2sleigh: slot fcn=%s %s type=%s size=%u offset=%" PFMT64d " base=%d valid=%d aggregate=%d\n",
+			r_str_get (fcn->name), r_str_get (slot->name), r_str_get (slot->type),
+			slot->size, slot->offset, (int)slot->base, slot->offset_valid? 1: 0,
+			(int)type_is_aggregate);
+	}
 	if (!type_is_aggregate) {
 		bool dereferenced = false;
 		const ut32 measured = fcn_context_slot_measured_extent (anal, fcn, var, &dereferenced);

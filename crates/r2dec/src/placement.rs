@@ -2062,8 +2062,13 @@ fn audit_program_symbol(
         .collect::<Vec<_>>();
     r2il::refusal_evidence!(
         "binding-symbol-observed",
-        "{access:?} binding={binding:?} name={:?} members={:?} authorizing_elsewhere={elsewhere:?} active={:?}",
+        "{access:?} binding={binding:?} name={:?} role={:?} type={:?} members={:?} authorizing_elsewhere={elsewhere:?} active={:?}",
         names.spelling(symbol),
+        names.plan().binding_role(binding),
+        names
+            .plan()
+            .binding(binding)
+            .map(|binding| format!("{:?}", binding.declaration_type())),
         (0..source.graph().values.len())
             .filter(|index| {
                 u32::try_from(*index).ok().is_some_and(|index| {
