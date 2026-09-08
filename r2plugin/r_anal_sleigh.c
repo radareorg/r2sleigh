@@ -992,33 +992,6 @@ static bool sleigh_engine_v2_phase_status_is_valid(uint32_t status) {
 
 #define SLEIGH_DECJ_SCHEMA_VERSION 1
 
-static char *sleigh_engine_v2_error_json(const char *state, uint32_t status, const char *message) {
-	PJ *pj = pj_new ();
-	if (!pj) {
-		return NULL;
-	}
-	pj_o (pj);
-	pj_kn (pj, "schema_version", SLEIGH_DECJ_SCHEMA_VERSION);
-	pj_ks (pj, "request_kind", "decompile");
-	pj_kn (pj, "request_kind_code", R2SLEIGH_REQUEST_DECOMPILE_V2);
-	pj_ks (pj, "outcome", "error");
-	pj_knull (pj, "outcome_code");
-	pj_knull (pj, "rendered_output");
-	pj_knull (pj, "diagnostics");
-	pj_ka (pj, "phase_timings");
-	pj_end (pj);
-	pj_kn (pj, "ffi_conversion_elapsed_us", 0);
-	pj_kb (pj, "refused", false);
-	pj_ko (pj, "error");
-	pj_ks (pj, "state", state? state: "unknown");
-	pj_kn (pj, "status", status);
-	pj_ks (pj, "message", message? message: "V2 decompile request failed");
-	pj_end (pj);
-	pj_end (pj);
-	return pj_drain (pj);
-}
-
-
 static bool sleigh_json_is_single_object(const char *text, size_t len) {
 	if (!text || !len) {
 		return false;
@@ -3720,24 +3693,13 @@ static bool cmd_matches_exact_or_arg(const char *cmd, const char *prefix) {
 	return !strncmp (cmd, prefix, len) && (!cmd[len] || isspace ((unsigned char)cmd[len]));
 }
 
-static bool cmd_matches_family(const char *cmd, const char *prefix) {
-	if (!cmd || !prefix) {
-		return false;
-	}
-	size_t prefix_len = strlen (prefix);
-	if (strncmp (cmd, prefix, prefix_len)) {
-		return false;
-	}
-	return !cmd[prefix_len] || cmd[prefix_len] == '.' || isspace ((unsigned char)cmd[prefix_len]);
-}
-
+// What the debug namespace covers: reports about the engine's own workings.
+// Configuring the plugin and reading a function's assumptions are neither.
 static bool sleigh_direct_sla_debug_only_command(const char *cmd) {
 	if (!cmd) {
 		return false;
 	}
-	if (!strcmp (cmd, "sla.info")
-		|| !strcmp (cmd, "sla.json")
-		|| !strcmp (cmd, "sla.regs")
+	if (!strcmp (cmd, "sla.json")
 		|| !strcmp (cmd, "sla.opvals")
 		|| !strcmp (cmd, "sla.mem")
 		|| !strcmp (cmd, "sla.vars")
@@ -3752,41 +3714,7 @@ static bool sleigh_direct_sla_debug_only_command(const char *cmd) {
 		|| !strcmp (cmd, "sla.cfg.json")) {
 		return true;
 	}
-	return cmd_matches_exact_or_arg (cmd, "sla.arch")
-		|| cmd_matches_exact_or_arg (cmd, "sla.profilej")
-		|| cmd_matches_exact_or_arg (cmd, "sla.assumptions-")
-		|| cmd_matches_exact_or_arg (cmd, "sla.assumptions")
-		|| cmd_matches_exact_or_arg (cmd, "sla.assumej")
-		|| cmd_matches_exact_or_arg (cmd, "sla.slice")
-		|| cmd_matches_exact_or_arg (cmd, "sla.sym.paths")
-		|| cmd_matches_exact_or_arg (cmd, "sla.sym");
-}
-
-static bool sleigh_direct_sym_snapshot_required_command(const char *cmd) {
-	if (!cmd) {
-		return false;
-	}
-	return cmd_matches_exact_or_arg (cmd, "sym.runj")
-		|| cmd_matches_exact_or_arg (cmd, "sym.replayj")
-		|| cmd_matches_family (cmd, "sym.explore")
-		|| cmd_matches_family (cmd, "sym.solve")
-		|| cmd_matches_family (cmd, "sym.state")
-		|| cmd_matches_exact_or_arg (cmd, "sla.sym.paths")
-		|| cmd_matches_exact_or_arg (cmd, "sla.sym");
-}
-
-static char *sleigh_decompile_execute(RAnal *anal, RAnalFunction *fcn, bool json_projection);
-
-
-static char *sleigh_decompile_execute(RAnal *anal, RAnalFunction *fcn, bool json_projection) {
-	(void)anal;
-	(void)fcn;
-	R_LOG_ERROR ("r2sleigh: direct decompile commands cannot construct source authority; use pd:s");
-	return json_projection
-		? sleigh_engine_v2_error_json ("borrowed_snapshot_required",
-			R2SLEIGH_STATUS_UNSUPPORTED_V2,
-			"decompilation requires the borrowed snapshot provider")
-		: NULL;
+	return cmd_matches_exact_or_arg (cmd, "sla.slice");
 }
 
 /* The deadline one engine call gets, derived from the engine's own budget for a
@@ -3851,10 +3779,9 @@ static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 
 static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 	bool is_sla_ns = r_str_startswith (cmd, "sla");
-	bool is_sym_ns = r_str_startswith (cmd, "sym");
 	bool is_sla_debug_ns = false;
 	char debug_cmd[4096];
-	if (!is_sla_ns && !is_sym_ns) {
+	if (!is_sla_ns) {
 		return NULL;
 	}
 
@@ -3879,36 +3806,6 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		cmd = debug_cmd;
 		is_sla_debug_ns = true;
 	}
-	if (r_str_startswith (cmd, "sym.debug.")) {
-		int n = snprintf (debug_cmd, sizeof (debug_cmd), "sym.%s", cmd + strlen ("sym.debug."));
-		if (n < 0 || (size_t)n >= sizeof (debug_cmd)) {
-			if (cons) {
-				r_cons_println (cons, "r2sleigh: debug command too long");
-			}
-			return strdup ("");
-		}
-		cmd = debug_cmd;
-	}
-	if (!strcmp (cmd, "sla.dec?") || !strcmp (cmd, "sla.dec ?")) {
-		if (cons) {
-			r_cons_println (cons, "sla.dec is unavailable here; use pd:s.");
-		}
-		return strdup ("");
-	}
-	if (!strcmp (cmd, "sla.decj?") || !strcmp (cmd, "sla.decj ?")) {
-		if (cons) {
-			r_cons_println (cons, "sla.decj is unavailable here; use pd:s.");
-		}
-		return strdup ("");
-	}
-
-	if (sleigh_direct_sym_snapshot_required_command (cmd)) {
-		R_LOG_ERROR ("r2sleigh: symbolic execution requires a borrowed function snapshot");
-		if (cons) {
-			r_cons_println (cons, "r2sleigh: symbolic execution requires the borrowed function snapshot provider");
-		}
-		return strdup ("");
-	}
 	if (!is_sla_debug_ns) {
 		if (sleigh_direct_sla_debug_only_command (cmd)) {
 			// Engine inspection lives under the debug namespace. Returning an
@@ -3926,11 +3823,15 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 
 	if (cmd[3] == '?') {
 		if (cons) {
-			r_cons_println (cons, "| a:sla        - Show r2sleigh status");
-			r_cons_println (cons, "| pd:s - decompile with r2sleigh");
-			r_cons_println (cons, "| a:sla.debug.* - engine inspection (ssa, defuse, dom, cfg, taint, regs, mem, vars)");
-			r_cons_println (cons, "| a:sla.dec / a:sla.decj - unavailable outside that provider");
-			r_cons_println (cons, "| a:sym.* - unavailable without the borrowed function snapshot provider");
+			r_cons_println (cons, "| a:sla                 - show r2sleigh status");
+			r_cons_println (cons, "| a:sla.arch [name]     - show or set the lifted architecture");
+			r_cons_println (cons, "| a:sla.assumptions[-]  - show or clear a function's assumptions");
+			r_cons_println (cons, "| a:sla.assumej <json>  - set a function's assumptions");
+			r_cons_println (cons, "| a:sla.profilej        - per-function stage timings");
+			r_cons_println (cons, "| a:sla.debug.*         - engine inspection (json, opvals, mem, vars,");
+			r_cons_println (cons, "|                         ssa[.func[.opt]], defuse[.func], dom, cfg[.json],");
+			r_cons_println (cons, "|                         taint, slice)");
+			r_cons_println (cons, "| pd:s [name|addr]      - decompile with r2sleigh");
 		}
 		return strdup("");
 	}
@@ -4130,47 +4031,6 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "]");
 		}
 
-		(void)sleigh_v2_block_release (&block);
-		return strdup("");
-	}
-
-	if (!strcmp (cmd, "sla.regs")) {
-		R2ILContext *ctx = get_context (anal);
-		if (!ctx) {
-			R_LOG_ERROR ("r2sleigh: no context");
-			return strdup("");
-		}
-
-		ut64 addr = core->addr;
-		ut8 buf[SLEIGH_MIN_BYTES] = {0};
-		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
-			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return strdup("");
-		}
-
-		R2ILBlock *block = NULL;
-		if (sleigh_v2_lift_instruction (ctx, buf, sizeof (buf), addr, &block)
-			!= R2SLEIGH_STATUS_OK_V2 || !block) {
-			R_LOG_ERROR ("r2sleigh: lift failed");
-			return strdup("");
-		}
-
-		char *read_json = NULL;
-		char *write_json = NULL;
-		const R2ILBlock *blocks[] = { block };
-		(void)sleigh_v2_analysis_render (R2SLEIGH_ANALYSIS_BLOCK_REGS_READ_V2,
-			ctx, blocks, 1, 0, NULL, &read_json);
-		(void)sleigh_v2_analysis_render (R2SLEIGH_ANALYSIS_BLOCK_REGS_WRITE_V2,
-			ctx, blocks, 1, 0, NULL, &write_json);
-
-		if (cons) {
-			r_cons_printf (cons, "{\"read\":%s,\"write\":%s}\n",
-				read_json ? read_json : "[]",
-				write_json ? write_json : "[]");
-		}
-
-		free (read_json);
-		free (write_json);
 		(void)sleigh_v2_block_release (&block);
 		return strdup("");
 	}
@@ -4597,20 +4457,6 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		return strdup("");
 	}
 
-	if (cmd_matches_exact_or_arg (cmd, "sla.decj")) {
-		char *json = sleigh_decompile_execute (anal, NULL, true);
-		if (cons && json) {
-			r_cons_printf (cons, "%s\n", json);
-		}
-		free (json);
-		return strdup ("");
-	}
-
-	if (cmd_matches_exact_or_arg (cmd, "sla.dec")) {
-		(void)sleigh_decompile_execute (anal, NULL, false);
-		return strdup("");
-	}
-
 	if (!strcmp (cmd, "sla.cfg") || !strcmp (cmd, "sla.cfg.json")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
@@ -4650,7 +4496,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		return strdup("");
 	}
 
-	R_LOG_ERROR ("Unknown subcommand. See 'a:sla?' or 'a:sym?' for help");
+	R_LOG_ERROR ("Unknown subcommand. See 'a:sla?' for help");
 	return strdup("");
 }
 

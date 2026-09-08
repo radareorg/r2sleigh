@@ -2606,7 +2606,7 @@ rustc_session::declare_lint!(
     /// ### Why is this bad?
     ///
     /// Positive executable-C plugin tests should exercise the same
-    /// `EngineSession::decompile_function` path as `pd:s` / `a:sla.dec`.
+    /// `EngineSession::decompile_function` path as `pd:s`.
     /// Direct prepared-input renderer tests normalize a bypass around engine
     /// request preparation, route diagnostics, and request construction.
     ///
@@ -11086,6 +11086,41 @@ fn r2plugin_legacy_debug_command_redirects_stay_deleted() {
         assert!(
             !c_source.contains(forbidden),
             "plugin must not retain legacy debug command redirect {forbidden:?}"
+        );
+    }
+    // Deleted command families, and the namespace that went with the
+    // symbolic-execution subsystem. A deleted command does not return as a
+    // refusal shim; it stops being a command.
+    for forbidden in [
+        "sla.dec",
+        "sla.regs",
+        "sla.sym",
+        "sym.runj",
+        "sym.replayj",
+        "sym.explore",
+        "sym.solve",
+        "sym.state",
+        "sleigh_direct_sym_snapshot_required_command",
+        "sleigh_decompile_execute",
+    ] {
+        assert!(
+            !c_source.contains(forbidden),
+            "plugin must not bring back deleted command {forbidden:?}"
+        );
+    }
+    // Configuration is not engine inspection, and was unreachable while the
+    // gate said it was.
+    for name in ["sla.arch", "sla.assumptions", "sla.assumej", "sla.profilej", "sla.info"] {
+        let gate = c_source
+            .split("static bool sleigh_direct_sla_debug_only_command")
+            .nth(1)
+            .expect("the debug-namespace gate")
+            .split("\n}\n")
+            .next()
+            .expect("the gate body");
+        assert!(
+            !gate.contains(name),
+            "{name:?} is configuration and must not be gated behind a:sla.debug."
         );
     }
 }

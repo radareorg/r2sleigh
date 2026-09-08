@@ -527,7 +527,7 @@ serialization formats are:
 - **JSON** (`serde_json`) -- for plugin output and debugging
 - **postcard** -- for the sole compact `R2PSTC07` binary storage representation
 
-The plugin command `a:sla.json` outputs the R2ILBlock for the current
+The plugin command `a:sla.debug.json` outputs the R2ILBlock for the current
 instruction as JSON.
 
 Compatibility Guarantees

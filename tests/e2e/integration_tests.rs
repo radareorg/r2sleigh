@@ -12,45 +12,103 @@ use std::time::Duration;
 mod ffi_v2;
 
 #[test]
-fn detached_symbolic_command_families_require_a_borrowed_snapshot() {
+fn deleted_command_families_are_not_left_as_refusal_shims() {
+    // The symbolic-execution namespace named a subsystem this tree no longer
+    // has, and the direct decompile commands were superseded by pd:s. A
+    // deleted command answers as an unclaimed one, not with a refusal.
     for command in [
-        "a:sym.explore 0",
-        "a:sym.explore.replayj",
-        "a:sym.solve.state",
-        "a:sym.state",
-        "a:sym.debug.solve.replayj",
         "a:sla.debug.sym.paths",
+        "a:sla.sym",
+        "a:sla.dec",
+        "a:sla.decj",
+        "a:sla.regs",
+        "a:sla.debug.regs",
+        "a:sla.debug.types",
     ] {
         let result = r2_cmd(vuln_test_binary(), command);
         result.assert_ok();
         assert!(
-            result.contains("borrowed function snapshot provider")
-                && !result.contains("Unknown subcommand"),
-            "{command} must refuse before detached lifting:\n{}\n{}",
+            result.contains("Unknown subcommand")
+                && !result.contains("borrowed function snapshot")
+                && !result.contains("cannot construct source authority"),
+            "{command} must be unknown rather than a refusal shim:\n{}\n{}",
             result.stdout,
             result.stderr
         );
     }
 
-    let collision = r2_cmd(vuln_test_binary(), "a:sym.explorer");
-    collision.assert_ok();
-    assert!(
-        collision.contains("Unknown subcommand")
-            && !collision.contains("borrowed function snapshot provider"),
-        "a prefix collision must not enter the snapshot refusal route"
-    );
+    // The sym prefix belongs to nobody now, so the plugin does not answer for
+    // it at all -- the same silence radare2 gives any unclaimed a: command.
+    for command in ["a:sym.explore 0", "a:sym.state", "a:sym.runj"] {
+        let result = r2_cmd(vuln_test_binary(), command);
+        result.assert_ok();
+        assert!(
+            !result.contains("borrowed function snapshot") && !result.contains("Unknown subcommand"),
+            "{command} must not be answered by a released namespace:\n{}\n{}",
+            result.stdout,
+            result.stderr
+        );
+    }
+}
 
-    let removed_types = r2_cmd(vuln_test_binary(), "a:sla.debug.types");
-    removed_types.assert_ok();
-    assert!(
-        removed_types.contains("Unknown subcommand")
-            && !removed_types.contains("cannot construct source authority"),
-        "the deleted detached type-report command must not remain as a refusal shim"
-    );
+#[test]
+fn configuration_commands_are_not_gated_behind_the_debug_namespace() {
+    // a:sla.debug.* is engine inspection. Reading the architecture, reading a
+    // function's assumptions and the timing report are not, and were each
+    // unreachable while the gate claimed otherwise.
+    for command in [
+        "a:sla",
+        "a:sla.info",
+        "a:sla.arch",
+        "a:sla.assumptions",
+        "a:sla.profilej",
+    ] {
+        let result = r2_cmd(vuln_test_binary(), &format!("aaa; s entry0; {command}"));
+        result.assert_ok();
+        assert!(
+            !result.contains("use a:sla.debug."),
+            "{command} is configuration, not engine inspection:\n{}\n{}",
+            result.stdout,
+            result.stderr
+        );
+    }
 
+    // Inspection still is gated, and says so rather than answering emptily.
+    for command in ["a:sla.ssa", "a:sla.taint", "a:sla.cfg", "a:sla.dom"] {
+        let result = r2_cmd(vuln_test_binary(), command);
+        result.assert_ok();
+        assert!(
+            result.contains("use a:sla.debug."),
+            "{command} is engine inspection and must stay in the debug namespace:\n{}\n{}",
+            result.stdout,
+            result.stderr
+        );
+    }
+}
+
+#[test]
+fn opvals_reports_the_registers_an_instruction_reads_and_writes() {
+    // The fact a:sla.regs carried. opvals answers it through the same helper
+    // the arch plugin fills op->srcs/dsts with, so it is the one that stays.
+    let result = r2_cmd(
+        vuln_test_binary(),
+        "aaa; s entry0; a:sla.debug.opvals",
+    );
+    result.assert_ok();
+    let json: Value = result.parse_json().expect("opvals JSON");
+    assert!(
+        json.get("srcs").and_then(Value::as_array).is_some()
+            && json.get("dsts").and_then(Value::as_array).is_some(),
+        "opvals must report both operand sides:\n{}",
+        result.stdout
+    );
+}
+
+#[test]
+fn profile_command_reports_local_stage_timings() {
     let profile = r2_cmd(
         vuln_test_binary(),
-        "aaa; s entry0; a:sla.debug.ssa.func >/dev/null; a:sla.debug.profilej",
+        "aaa; s entry0; a:sla.debug.ssa.func >/dev/null; a:sla.profilej",
     );
     profile.assert_ok();
     let profile_json: Value = profile.parse_json().expect("profile command JSON");
@@ -65,9 +123,8 @@ fn detached_symbolic_command_families_require_a_borrowed_snapshot() {
                 .get("functions")
                 .and_then(Value::as_array)
                 .is_some_and(|functions| !functions.is_empty())
-            && profile_json.get("engine_cache").is_none()
-            && !profile.contains("borrowed function snapshot provider"),
-        "the harmless profile command must expose only local timing profile data outside the snapshot refusal route"
+            && profile_json.get("engine_cache").is_none(),
+        "the profile command must expose only local timing data"
     );
 }
 

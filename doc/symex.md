@@ -150,10 +150,10 @@ Memory Model
 Plugin Commands
 ---------------
 
-Detached symbolic commands are unavailable. `a:sla.sym`, `a:sla.sym.paths`,
-`a:sym.runj`, the `a:sym.explore*` and `a:sym.solve*` families, and commands
-that build a detached symbolic scope cannot establish source authority from
-live plugin state.
+The `a:sym.*` command namespace is gone with the subsystem it named, and so
+are `a:sla.sym` and `a:sla.sym.paths`. The plugin does not answer for that
+prefix; a detached symbolic scope could never establish source authority from
+live plugin state, so the commands are deleted rather than kept as refusals.
 
 Symbolic execution requires a borrowed ABI-139/snapshot-schema-12 function
 snapshot through accessor-schema 5 from radare2's locked snapshot transaction.

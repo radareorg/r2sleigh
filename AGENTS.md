@@ -572,7 +572,7 @@ audit whether the metric is still measuring the right thing.
 
 Use `tests/r2r` for new regressions involving:
 
-- plugin commands such as `a:sla.*`, `a:sym.*`, `pd:s`, `pdD`
+- plugin commands such as `a:sla.*`, `pd:s`, `pdD`
 - stable JSON/text/ESIL output
 - CFG / SSA / def-use / type payload shape
 - command UX and error text
@@ -680,12 +680,8 @@ Do not claim the seam is fixed without both sides being green.
 Treat this as two tiers:
 
 - public / user-facing
-  - `a:sla`
-  - `a:sla.dec`
+  - `a:sla`, `a:sla.arch`, `a:sla.assumptions[-]`, `a:sla.assumej`, `a:sla.profilej`
   - `pd:s`, `pdD`
-  - `a:sym.explore`
-  - `a:sym.solve`
-  - `a:sym.state`
 - debug / engine inspection
   - low-level IL / SSA / facts / plan / replay / path listing commands
 

@@ -1835,7 +1835,7 @@ class ReversingBenchmarkTests(unittest.TestCase):
                 {},
                 None,
                 runner,
-                {"decompile_sla": "a:sla.dec"},
+                {"decompile_sla": "pd:s"},
                 raw_output_archive=archive,
             )
             archive_summary = archive.summary(True)
@@ -1912,7 +1912,7 @@ class ReversingBenchmarkTests(unittest.TestCase):
                 None,
                 1,
                 runner,
-                {"decompile_sla": "a:sla.dec"},
+                {"decompile_sla": "pd:s"},
                 raw_output_archive=archive,
             )
             archive_summary = archive.summary(True)

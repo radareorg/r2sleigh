@@ -188,7 +188,7 @@ What to Test for Each Feature
 
 New opcode:
   - Unit test in crate
-  - r2r test via a:sla.json when output is deterministic
+  - r2r test via a:sla.debug.json when output is deterministic
   - e2e semantic assertion if structure/churn requires richer parsing
 
 New plugin command:
@@ -197,7 +197,7 @@ New plugin command:
 
 New optimization pass:
   - Unit test in r2ssa with before/after SSA
-  - e2e test via a:sla.ssa.func.opt
+  - e2e test via a:sla.debug.ssa.func.opt
 
 Bug fix:
   - Regression test reproducing the original bug

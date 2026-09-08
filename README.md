@@ -63,10 +63,10 @@ r2sleigh run --arch x86-64 --bytes "31c00000000000000000000000000000" --action l
 r2 -qc 'a:sla; aaa; s main; pd:s' /bin/ls
 
 # Plugin: SSA form
-r2 -qc 'aaa; s main; a:sla.ssa' /bin/ls
+r2 -qc 'aaa; s main; a:sla.debug.ssa' /bin/ls
 
 # Plugin: taint analysis
-r2 -qc 'aaa; s main; a:sla.taint' /bin/ls
+r2 -qc 'aaa; s main; a:sla.debug.taint' /bin/ls
 ```
 
 Supported Architectures

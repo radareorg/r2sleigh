@@ -55,18 +55,16 @@ Function-Level:
 - a:sla.debug.slice [var] -- Backward slice
 - pd:s -- Decompile through r2sleigh's bounded borrowed snapshot
 
-Direct `a:sla.dec` and `a:sla.decj` requests are intentionally unavailable:
-they do not run inside radare2's locked snapshot transaction and therefore
-cannot construct source authority. `pd:s` receives one ABI-139/snapshot-schema-12
-borrowed snapshot through accessor-schema 5, deep-copies it synchronously into
-source-interface-schema 10, and either completes from that immutable source or
-refuses. It never falls back to live blocks, names, or detached test metadata.
+`pd:s` is the only decompile route. It receives one
+ABI-139/snapshot-schema-12 borrowed snapshot through accessor-schema 5,
+deep-copies it synchronously into source-interface-schema 10, and either
+completes from that immutable source or refuses. It never falls back to live
+blocks, names, or detached test metadata. The direct `a:sla.dec` and
+`a:sla.decj` commands, which could not construct source authority and only ever
+refused, are deleted rather than kept as shims.
 
-Detached symbolic commands are unavailable for the same reason. This includes
-`a:sla.sym`, `a:sla.sym.paths`, `a:sym.runj`, the `a:sym.explore*` and
-`a:sym.solve*` families, and commands that construct a symbolic scope from live
-plugin state. Symbolic execution requires the same borrowed ABI-139 snapshot;
-the plugin does not expose a replacement command or API for detached inputs.
+The `a:sym.*` namespace is gone with the symbolic-execution subsystem it named.
+The plugin no longer answers for that prefix at all.
 
 Executable semantic C is authorized only through the generic source-obligation
 ledger and typed output-node ownership. Every live machine effect from the

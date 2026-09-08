@@ -15403,3 +15403,58 @@ The rest of the `/* r2dec <kind>: */` family is untouched: `proof`, `budget`,
 would rewrite every corpus baseline and snapshot cell, and unlike `fallback`
 none of them claims another tool did anything, so they are a separate decision
 rather than part of this one.
+
+## The a:sla.* surface: a broken gate and two dead families
+
+Running the whole command surface rather than reading it turned up one bug and
+two subsystems that had outlived their commands.
+
+**The debug gate answered for everything.**
+`sleigh_direct_sla_debug_only_command` had two returns, and the second was not
+an allowlist -- it was more of the same list. So every bare `a:sla.X` replied
+`use a:sla.debug.X`, including three that are not engine inspection at all:
+`sla.arch` configures the lifted architecture and is documented in BUILDING.md
+in its ungated spelling; `sla.assumptions`, `sla.assumptions-` and
+`sla.assumej` read and set analysis facts on a function; `sla.profilej` is a
+timing report. `a:sla.debug.assumej`'s own usage line read
+`Usage: a:sla.assumej <json-array>`, naming the spelling that failed. And
+`a:sla` worked while `a:sla.info` did not, two spellings of one command with
+one of them gated. The gate now lists engine inspection and nothing else, and
+the five reachable commands are covered by an end-to-end test.
+
+**`a:sym.*` named a subsystem that is gone.** r2sym was deleted from the tree,
+and `a:sym.runj`, `sym.replayj`, the `sym.explore*`, `sym.solve*` and `sym.state*`
+families, plus `a:sla.sym` and `a:sla.sym.paths`, all remained as a refusal
+reading "symbolic execution requires the borrowed function snapshot provider".
+The plugin no longer claims the `sym` prefix, so those commands are now
+unclaimed exactly as `a:zzz` is -- radare2 answers nothing for a namespace no
+plugin owns, and the test pins that rather than the old refusal text.
+
+**`a:sla.dec` and `a:sla.decj` were superseded by `pd:s`.** Both refused
+permanently and asymmetrically: `dec` printed nothing at all, `decj` printed a
+`borrowed_snapshot_required` document. Deleting them took
+`sleigh_decompile_execute` and `sleigh_engine_v2_error_json` with them, which is
+what the C glue used to build a decompile response of its own. The kept fact is
+now the stronger statement: the C glue emits no decompile document at all.
+
+**`a:sla.regs` was one of two spellings of one answer.** It and `sla.opvals`
+both report the registers an instruction reads and writes, through two engine
+entry points. `opvals` goes through `add_typed_reg_values`, the same helper the
+arch plugin fills `op->srcs`/`op->dsts` with, so it exercises production code
+and `regs` did not. `regs` is gone and an end-to-end test keeps its fact on
+`opvals`.
+
+`sleigh_cmd` goes from 804 lines to 722, and the file loses 169 lines net.
+
+One correction to an earlier reading of `sla.profilej`. It is not inert: with
+`a:sla.debug.ssa.func` it records a lift and reports it. What is dead is
+narrower -- `SLEIGH_PROFILE_STAGE_TAINT` and `..._DECOMPILE` are declared and
+summed into the JSON and never recorded by anything, so two columns are always
+zero, and the lift the post-analysis loop performs never appears either. That
+wants a trace before deciding between wiring the stages and deleting the
+profiler, so it is untouched here.
+
+Left standing, deliberately: `sla.vars` and `sla.mem` remain as projections of
+`sla.json`, and `sla.defuse` as a projection of `sla.ssa`. Whether the
+convenience is worth 104 lines is a judgement rather than a defect, and none of
+the three claims anything false.

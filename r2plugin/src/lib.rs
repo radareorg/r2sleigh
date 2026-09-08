@@ -4867,9 +4867,11 @@ mod tests {
             !c_source.contains("empty decompilation output"),
             "C glue must not invent decompile fallback text; r2engine/rust output owns refusal policy"
         );
-        assert!(
-            !c_source.contains("r2sleigh refused"),
-            "C glue must print engine output only, not synthesize fallback semantics"
+        assert_eq!(
+            c_source.matches("r2sleigh refused").count(),
+            1,
+            "the only refusal the C glue writes is the engine complexity limit; \
+             everything else is the engine's own text"
         );
         assert!(
             !rust_decompiler_source.contains("/* r2dec:"),
@@ -4910,7 +4912,7 @@ mod tests {
     }
 
     #[test]
-    fn c_plugin_refuses_decj_without_a_borrowed_snapshot() {
+    fn c_plugin_projects_the_engine_response_without_reassembling_it() {
         let c_source = include_str!("../r_anal_sleigh.c");
         // What this used to pin was a projector that assembled a decompile
         // document in C by parsing diagnostics the engine had already produced
@@ -4946,27 +4948,21 @@ mod tests {
             "kernel warnings must still require one complete diagnostics object"
         );
 
-        let decj_route = c_source
-            .find("cmd_matches_exact_or_arg (cmd, \"sla.decj\")")
-            .expect("public decj command route");
-        let dec_route = c_source
-            .find("cmd_matches_exact_or_arg (cmd, \"sla.dec\")")
-            .expect("legacy dec command route");
+        // The fact the deleted a:sla.dec / a:sla.decj commands carried: a
+        // decompile that cannot construct source authority is not offered at
+        // all, rather than offered and refused.
         assert!(
-            decj_route < dec_route,
-            "the exact decj command must route before the backward-compatible dec command"
+            !c_source.contains("sla.dec")
+                && !c_source.contains("sleigh_decompile_execute")
+                && !c_source.contains("borrowed_snapshot_required"),
+            "the deleted direct decompile commands must not return as refusal shims"
         );
+        // That envelope was built by the error JSON only a:sla.decj asked for.
+        // With the command gone the C glue emits no decompile document at all,
+        // which is the stronger form of the same guarantee.
         assert!(
-            c_source.contains("sla.decj is unavailable here; use pd:s.")
-                && c_source.contains("sleigh_decompile_execute (anal, NULL, true)")
-                && c_source.contains("\"borrowed_snapshot_required\"")
-                && c_source.contains("R2SLEIGH_STATUS_UNSUPPORTED_V2"),
-            "direct decj must return a structured refusal instead of constructing source authority"
-        );
-        assert!(
-            c_source.contains("pj_knull (pj, \"rendered_output\")")
-                && c_source.contains("pj_ks (pj, \"outcome\", \"error\")"),
-            "transport and cancellation failures must not expose partial rendered output"
+            !c_source.contains("pj_ks (pj, \"request_kind\", \"decompile\")"),
+            "the C glue must not build a decompile response document of its own"
         );
     }
 
@@ -5014,12 +5010,12 @@ mod tests {
         ] {
             assert!(
                 !decompile_block.contains(forbidden),
-                "a:sla.dec must not own decompile session policy fragment {forbidden:?}"
+                "the decompile route must not own session policy fragment {forbidden:?}"
             );
         }
         assert!(
             !decompile_block.contains("sleigh_analysis_policy_for_anal"),
-            "a:sla.dec must not assemble decompile policy from plugin-local analysis policy"
+            "the decompile route must not assemble policy from plugin-local analysis policy"
         );
         for forbidden in [
             "policy.type_writeback_mode",
@@ -5029,7 +5025,7 @@ mod tests {
         ] {
             assert!(
                 !decompile_block.contains(forbidden),
-                "a:sla.dec must not own decompile session policy fragment {forbidden:?}"
+                "the decompile route must not own session policy fragment {forbidden:?}"
             );
         }
         for forbidden in [
@@ -5056,7 +5052,7 @@ mod tests {
         ] {
             assert!(
                 !decompile_block.contains(forbidden),
-                "a:sla.dec must not build or pass plugin-owned interprocedural scope {forbidden:?}"
+                "the decompile route must not build or pass plugin-owned interprocedural scope {forbidden:?}"
             );
         }
         for forbidden in [
@@ -5069,13 +5065,13 @@ mod tests {
         ] {
             assert!(
                 !decompile_block.contains(forbidden),
-                "a:sla.dec must not collect or pass raw decompiler metadata side channel {forbidden:?}"
+                "the decompile route must not collect or pass raw decompiler metadata {forbidden:?}"
             );
         }
         assert!(
             decompile_block.contains("sleigh_engine_execute_v2 (")
                 && decompile_block.contains("R2SLEIGH_REQUEST_DECOMPILE_V2"),
-            "a:sla.dec must call the versioned engine boundary with decompile-only typed input"
+            "the decompile route must call the versioned engine boundary with decompile-only typed input"
         );
         for forbidden in [
             "/* r2dec: function target",
@@ -5084,40 +5080,17 @@ mod tests {
         ] {
             assert!(
                 !decompile_block.contains(forbidden),
-                "a:sla.dec must not synthesize plugin-owned decompile refusal text {forbidden:?}"
+                "the decompile route must not synthesize plugin-owned refusal text {forbidden:?}"
             );
         }
     }
 
     #[test]
-    fn c_plugin_decompile_uses_only_the_borrowed_snapshot_provider() {
+    fn c_plugin_decompile_uses_only_the_borrowed_snapshot() {
         let c_source = include_str!("../r_anal_sleigh.c");
-        let direct_start = c_source
-            .find("static char *sleigh_decompile_execute(RAnal *anal")
-            .expect("direct-command refusal helper");
-        let direct_end = c_source[direct_start..]
+        let provider_start = c_source
             .find("static RCodeMeta *sleigh_decompile(")
-            .map(|offset| direct_start + offset)
-            .expect("borrowed-snapshot provider after direct refusal");
-        let direct = &c_source[direct_start..direct_end];
-        assert!(
-            direct.contains("direct decompile commands cannot construct source authority")
-                && direct.contains("borrowed_snapshot_required")
-        );
-        for forbidden in [
-            "get_context (",
-            "sleigh_engine_function_preflight",
-            "lift_function_blocks",
-            "snapshot_collect",
-            "sleigh_engine_execute_v2 (",
-        ] {
-            assert!(
-                !direct.contains(forbidden),
-                "direct decompile refusal must not construct authority via {forbidden:?}"
-            );
-        }
-
-        let provider_start = direct_end;
+            .expect("borrowed-snapshot decompile route");
         let provider_end = c_source[provider_start..]
             .find("static char *sleigh_cmd(")
             .map(|offset| provider_start + offset)
@@ -5145,7 +5118,7 @@ mod tests {
         for forbidden in ["get_context (", "lift_function_blocks", "snapshot_collect"] {
             assert!(
                 !provider.contains(forbidden),
-                "borrowed-snapshot provider must not rebuild source state via {forbidden:?}"
+                "the decompile route must not rebuild source state via {forbidden:?}"
             );
         }
     }
