@@ -839,12 +839,30 @@ fn control_op_is_intra_instruction(block: &GenuineLiftedBlock, op_index: usize) 
     else {
         return false;
     };
-    (op_index + 1..block.block.ops.len()).any(|later| {
+    if (op_index + 1..block.block.ops.len()).any(|later| {
         block
             .block
             .op_metadata(later)
             .and_then(|metadata| metadata.instruction_addr)
             == Some(instruction)
+    }) {
+        return true;
+    }
+    // A repeating string instruction ends with a branch to its own start, so
+    // nothing of it follows and its target is what says it stays inside.
+    let target = match &block.block.ops[op_index] {
+        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => {
+            constant_control_target(target)
+        }
+        _ => None,
+    };
+    let Some(target) = target else {
+        return false;
+    };
+    block.instruction_spans.iter().any(|span| {
+        span.addr == instruction
+            && target >= span.addr
+            && target < span.addr.saturating_add(u64::from(span.size))
     })
 }
 
@@ -902,9 +920,21 @@ fn genuine_block_successors(block: &GenuineLiftedBlock) -> Result<Vec<u64>> {
                 .and_then(|metadata| metadata.instruction_addr)
                 != Some(last_instruction)
         {
-            return Err(LiftError::Parse(
-                "genuine basic block contains instructions after a control terminator".to_string(),
-            ));
+            return Err(LiftError::Parse(format!(
+                "genuine basic block contains instructions after a control terminator:                  op {op_index} {} at {:x?} is not the block's last instruction {last_instruction:#x}",
+                match op {
+                    R2ILOp::Branch { .. } => "branch",
+                    R2ILOp::CBranch { .. } => "cbranch",
+                    R2ILOp::Return { .. } => "return",
+                    R2ILOp::Breakpoint => "breakpoint",
+                    R2ILOp::BranchInd { .. } => "branch-ind",
+                    _ => "other",
+                },
+                block
+                    .block
+                    .op_metadata(op_index)
+                    .and_then(|metadata| metadata.instruction_addr),
+            )));
         }
     }
     match block_terminator(block) {
