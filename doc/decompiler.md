@@ -8,7 +8,7 @@ The r2dec decompiler converts SSA-form functions into readable C code. It
 operates as a pipeline of transformations: expression folding, control flow
 structuring, symbol resolution, and code generation.
 
-The production decompiler is invoked through radare2's `pdd` provider after
+The production decompiler is invoked through the `pd:s` command after
 `a:sla` loads the Sleigh architecture. Programmatic certified rendering accepts
 only an opaque trusted SSA artifact derived from the same source snapshot.
 
@@ -291,7 +291,7 @@ tiers:
 When fallback triggers, the output includes a diagnostic comment:
 
 ```c
-/* r2dec fallback: exceeded safety budget */
+/* r2sleigh refused fcn: exceeded safety budget */
 void function_name() {
     // ... simplified output ...
 }
@@ -334,10 +334,10 @@ Plugin Command
 
 | Command | Output | Description |
 |---------|--------|-------------|
-| `pdd` | C code or an explicit residual/refusal | Decompile the function from a bounded borrowed snapshot |
+| `pd:s` | C code or an explicit residual/refusal | Decompile the function from a bounded borrowed snapshot |
 
 Example:
 
 ```bash
-r2 -qc 'a:sla; aaa; s main; pdd' /bin/ls
+r2 -qc 'a:sla; aaa; s main; pd:s' /bin/ls
 ```

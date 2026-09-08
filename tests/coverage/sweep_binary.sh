@@ -35,7 +35,7 @@ command_text="a:sla; aaa"
 while read -r addr size name; do
     command_text+="; ?e R2SLEIGH_COV_BEGIN__${name}__${size}"
     command_text+="; s ${addr}"
-    command_text+="; pdd"
+    command_text+="; pd:s"
     command_text+="; ?e R2SLEIGH_COV_END__${name}"
 done < "$functions"
 

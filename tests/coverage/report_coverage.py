@@ -18,7 +18,7 @@ from pathlib import Path
 
 BEGIN = re.compile(r"^R2SLEIGH_COV_BEGIN__(?P<name>.+)__(?P<size>\d+)$")
 END = re.compile(r"^R2SLEIGH_COV_END__(?P<name>.+)$")
-FALLBACK = re.compile(r"/\* r2dec fallback: skipped decompilation for \S+ \((?P<cause>.*)\) \*/")
+FALLBACK = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
 
 # Numbers inside a cause are counts of refused obligations or conflicting
 # values. They say how much went wrong, not what, and they move with the

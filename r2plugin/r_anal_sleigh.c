@@ -1124,7 +1124,7 @@ static void sleigh_engine_v2_log_semantic_kernel_warnings(R2SleighByteViewV2 vie
 }
 
 // Emit the independent typed audits only for explicit diagnostic runs.
-// Keeping the sidecar out of ordinary pdd output preserves the user-facing
+// Keeping the sidecar out of ordinary pd:s output preserves the user-facing
 // renderer bytes; the corpus enables it and associates the one JSON record with
 // its surrounding function markers.
 static void sleigh_engine_v2_emit_binding_audit(R2SleighByteViewV2 view) {
@@ -3678,9 +3678,12 @@ int sleigh_op(RAnal *anal, RAnalOp *op, ut64 addr, const ut8 *data, int len, RAn
 	return op->size;
 }
 
+static void sleigh_register_core_plugin(RAnal *anal);
+
 static bool sleigh_init(RAnal *anal) {
 	/* Prime context early so register aliases are available before aa/aaa passes. */
 	(void)get_context (anal);
+	sleigh_register_core_plugin (anal);
 	return true;
 }
 
@@ -3778,7 +3781,7 @@ static char *sleigh_decompile_execute(RAnal *anal, RAnalFunction *fcn, bool json
 static char *sleigh_decompile_execute(RAnal *anal, RAnalFunction *fcn, bool json_projection) {
 	(void)anal;
 	(void)fcn;
-	R_LOG_ERROR ("r2sleigh: direct decompile commands cannot construct source authority; use radare2's borrowed snapshot decompiler provider");
+	R_LOG_ERROR ("r2sleigh: direct decompile commands cannot construct source authority; use pd:s");
 	return json_projection
 		? sleigh_engine_v2_error_json ("borrowed_snapshot_required",
 			R2SLEIGH_STATUS_UNSUPPORTED_V2,
@@ -3808,8 +3811,8 @@ static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 		 * nothing here would leave the function neither rendered nor declined,
 		 * which reads downstream as a function nobody asked about. */
 		char *refusal = r_str_newf (
-			"/* r2dec fallback: skipped decompilation for %s "
-			"(engine refusal: function exceeds the engine complexity limit) */\n",
+			"/* r2sleigh refused %s: "
+			"engine refusal: function exceeds the engine complexity limit */\n",
 			r_str_get (fcn->name));
 		if (!refusal) {
 			return NULL;
@@ -3888,13 +3891,13 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 	}
 	if (!strcmp (cmd, "sla.dec?") || !strcmp (cmd, "sla.dec ?")) {
 		if (cons) {
-			r_cons_println (cons, "sla.dec is unavailable outside radare2's borrowed-snapshot decompiler provider; use pdd.");
+			r_cons_println (cons, "sla.dec is unavailable here; use pd:s.");
 		}
 		return strdup ("");
 	}
 	if (!strcmp (cmd, "sla.decj?") || !strcmp (cmd, "sla.decj ?")) {
 		if (cons) {
-			r_cons_println (cons, "sla.decj is unavailable outside radare2's borrowed-snapshot decompiler provider; use pdd.");
+			r_cons_println (cons, "sla.decj is unavailable here; use pd:s.");
 		}
 		return strdup ("");
 	}
@@ -3924,7 +3927,7 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 	if (cmd[3] == '?') {
 		if (cons) {
 			r_cons_println (cons, "| a:sla        - Show r2sleigh status");
-			r_cons_println (cons, "| pdd - decompile through the borrowed-snapshot provider");
+			r_cons_println (cons, "| pd:s - decompile with r2sleigh");
 			r_cons_println (cons, "| a:sla.debug.* - engine inspection (ssa, defuse, dom, cfg, taint, regs, mem, vars)");
 			r_cons_println (cons, "| a:sla.dec / a:sla.decj - unavailable outside that provider");
 			r_cons_println (cons, "| a:sym.* - unavailable without the borrowed function snapshot provider");
@@ -5245,6 +5248,7 @@ static int sleigh_eligible(RAnal *anal) {
 /* Reapply the cached context profile before variable/DWARF integration. The
  * context is process-global while register state belongs to each RAnal. */
 static bool sleigh_pre_analysis(RAnal *anal) {
+	sleigh_register_core_plugin (anal);
 	R2ILContext *ctx = get_context (anal);
 	if (!ctx || !install_context_reg_profile (anal, ctx)) {
 		R_LOG_DEBUG ("r2sleigh: pre-analysis register profile installation failed");
@@ -5453,6 +5457,102 @@ static bool sleigh_post_analysis(RAnal *anal) {
 	return ok;
 }
 
+// r2sleigh answers `pd:s` and nothing else: a provider chosen by score cannot
+// tell a reader which engine produced the line in front of them.
+static RAnalFunction *sleigh_decompile_target(RCore *core, const char *input) {
+	char *arg = r_str_trim_dup (r_str_get (input));
+	if (!arg) {
+		return NULL;
+	}
+	ut64 addr = core->addr;
+	if (*arg) {
+		RAnalFunction *named = r_anal_get_function_byname (core->anal, arg);
+		if (named) {
+			free (arg);
+			return named;
+		}
+		if (!r_num_is_valid_input (core->num, arg)) {
+			R_LOG_ERROR ("r2sleigh: cannot resolve function '%s'", arg);
+			free (arg);
+			return NULL;
+		}
+		addr = r_num_math (core->num, arg);
+	}
+	free (arg);
+	RAnalFunction *fcn = r_anal_get_function_at (core->anal, addr);
+	if (!fcn) {
+		fcn = r_anal_get_fcn_in (core->anal, addr, R_ANAL_FCN_TYPE_ANY);
+	}
+	if (!fcn) {
+		R_LOG_ERROR ("r2sleigh: no function at 0x%08" PFMT64x, addr);
+	}
+	return fcn;
+}
+
+static bool sleigh_core_call(RCorePluginSession *cps, const char *input) {
+	if (!cps || !cps->core || !input) {
+		return false;
+	}
+	if (!r_str_startswith (input, "pd:s")) {
+		return false;
+	}
+	RCore *core = cps->core;
+	const char *rest = input + strlen ("pd:s");
+	if (*rest == '?') {
+		r_cons_println (core->cons, "Usage: pd:s [name|addr] # decompile with r2sleigh");
+		r_core_return_code (core, 0);
+		return true;
+	}
+	if (*rest && !isspace ((unsigned char)*rest)) {
+		return false;
+	}
+	RAnalFunction *fcn = sleigh_decompile_target (core, rest);
+	if (!fcn) {
+		r_core_return_code (core, 1);
+		return true;
+	}
+	RCodeMeta *meta = sleigh_decompile (core->anal, fcn);
+	if (!meta) {
+		R_LOG_ERROR ("r2sleigh: decompilation failed for '%s'", r_str_get (fcn->name));
+		r_core_return_code (core, 1);
+		return true;
+	}
+	char *out = r_codemeta_print2 (meta, NULL, core->anal);
+	const bool rendered = out != NULL;
+	if (rendered) {
+		r_cons_print (core->cons, out);
+	} else {
+		R_LOG_ERROR ("r2sleigh: cannot render decompiler output");
+	}
+	free (out);
+	r_codemeta_free (meta);
+	r_core_return_code (core, rendered? 0: 1);
+	return true;
+}
+
+static RCorePlugin r_core_plugin_sleigh = {
+	.meta = {
+		.name = "sleigh",
+		.desc = "r2sleigh decompiler command (pd:s)",
+		.license = "LGPL3",
+		.author = "r2sleigh project",
+	},
+	.call = sleigh_core_call,
+};
+
+// Registered from the anal plugin so one shared object holds the state, and
+// again from pre-analysis for a radare2 whose plugin init gets the wrong pointer.
+static void sleigh_register_core_plugin(RAnal *anal) {
+	static R_TH_LOCAL RCmd *registered = NULL;
+	RCore *core = anal? anal->coreb.core: NULL;
+	if (!core || !core->rcmd || registered == core->rcmd) {
+		return;
+	}
+	if (r_core_plugin_add (core->rcmd, &r_core_plugin_sleigh)) {
+		registered = core->rcmd;
+	}
+}
+
 RAnalPlugin r_anal_plugin_sleigh = {
 	.meta = {
 		.name = "sla",
@@ -5469,7 +5569,6 @@ RAnalPlugin r_anal_plugin_sleigh = {
 	.pre_analysis = sleigh_pre_analysis,
 	.analyze_fcn = sleigh_analyze_fcn,
 	.post_analysis = sleigh_post_analysis,
-	.decompile = sleigh_decompile,
 };
 
 #ifndef R2_PLUGIN_INCORE

@@ -352,7 +352,7 @@ The public product should be workflow-oriented, not command-oriented.
 
 The plugin should:
 
-- improve `aa`, `af`, `pdfj`, `pdd`, type views, and existing radare2 analysis
+- improve `aa`, `af`, `pdfj`, `pd:s`, type views, and existing radare2 analysis
   surfaces
 - keep a small public command surface
 - treat engine-inspection commands as debug/maintainer tools
@@ -572,7 +572,7 @@ audit whether the metric is still measuring the right thing.
 
 Use `tests/r2r` for new regressions involving:
 
-- plugin commands such as `a:sla.*`, `a:sym.*`, `pdd`, `pdD`
+- plugin commands such as `a:sla.*`, `a:sym.*`, `pd:s`, `pdD`
 - stable JSON/text/ESIL output
 - CFG / SSA / def-use / type payload shape
 - command UX and error text
@@ -682,7 +682,7 @@ Treat this as two tiers:
 - public / user-facing
   - `a:sla`
   - `a:sla.dec`
-  - `pdd`, `pdD`
+  - `pd:s`, `pdD`
   - `a:sym.explore`
   - `a:sym.solve`
   - `a:sym.state`

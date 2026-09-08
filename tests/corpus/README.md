@@ -18,12 +18,12 @@ tests/corpus/run_matrix.sh --gate measurement
 
 The script always installs the plugin first and requires the install to print
 `Installed to ...`. It then builds all six binaries and source-backed oracle
-executables, captures marked `pdd` dumps, verifies all 54 cells, and writes:
+executables, captures marked `pd:s` dumps, verifies all 54 cells, and writes:
 
 ```text
 tests/corpus/artifacts/
   bin/                 corpus and oracle executables
-  dumps/               full marked pdd sessions
+  dumps/               full marked pd:s sessions
   raw/                 exact extracted renderer output
   compile/<config>/    raw and diagnostic compile envelopes
   results/<config>.json

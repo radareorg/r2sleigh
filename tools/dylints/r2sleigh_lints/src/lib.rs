@@ -2606,7 +2606,7 @@ rustc_session::declare_lint!(
     /// ### Why is this bad?
     ///
     /// Positive executable-C plugin tests should exercise the same
-    /// `EngineSession::decompile_function` path as `pdd` / `a:sla.dec`.
+    /// `EngineSession::decompile_function` path as `pd:s` / `a:sla.dec`.
     /// Direct prepared-input renderer tests normalize a bypass around engine
     /// request preparation, route diagnostics, and request construction.
     ///
@@ -2751,7 +2751,7 @@ rustc_session::declare_lint!(
     /// Use an engine-owned fallback helper or request/response route.
     pub R2PLUGIN_DIRECT_R2DEC_FALLBACK_COMMENT,
     Warn,
-    "r2plugin must not call r2dec fallback-comment renderers directly"
+    "r2plugin must not call the refusal-comment renderers directly"
 );
 
 rustc_session::declare_lint!(
@@ -3096,7 +3096,7 @@ rustc_session::declare_lint!(
     /// engine-owned fallback helper.
     pub R2ENGINE_R2DEC_FALLBACK_COMMENT_OWNERSHIP,
     Warn,
-    "r2engine must own fallback/refusal comments instead of calling r2dec fallback helpers"
+    "r2engine must own refusal comments instead of calling r2dec helpers"
 );
 
 rustc_session::declare_lint!(

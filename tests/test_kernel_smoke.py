@@ -123,7 +123,7 @@ class KernelSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             [call.args[2].rsplit("; ", 1)[-1] for call in calls[1:]],
-            ["pdd", "pdd", "pdD", "a:sla.debug.ssa.func"],
+            ["pd:s", "pd:s", "pdD", "a:sla.debug.ssa.func"],
         )
         self.assertIs(
             report["targets"][0]["commands"]["ssa_function_report"]["ssa_report_valid"],
@@ -298,7 +298,7 @@ class KernelSmokeTests(unittest.TestCase):
 
     def test_strict_fails_decompiler_fallback_text(self):
         responses = self.valid_target_responses()
-        responses[1] = cmd_result("/* r2dec fallback: skipped decompilation */\n")
+        responses[1] = cmd_result("/* r2sleigh refused fcn: skipped decompilation */\n")
         exit_code, report, _, _ = self.run_harness(responses)
 
         self.assertEqual(exit_code, 1)
@@ -308,7 +308,7 @@ class KernelSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             report["targets"][0]["commands"]["decompile_sla"]["fallback_marker"],
-            "r2dec fallback:",
+            "r2sleigh refused",
         )
 
     def test_budget_refusal_is_not_hard_decompiler_fallback(self):

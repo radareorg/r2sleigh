@@ -1520,8 +1520,8 @@ def _matching_brace(text: str, opening: int) -> int | None:
 # and a cell that says which rule refused, which is the whole value of the gate
 # on a corpus where most cells refuse.
 FALLBACK_REASON_RE = re.compile(
-    r"/\* r2dec fallback: skipped decompilation for (?P<function>\S+) "
-    r"\((?P<reason>.*?)\) \*/"
+    r"/\* r2sleigh refused (?P<function>\S+): "
+    r"(?P<reason>.*?) \*/"
 )
 
 

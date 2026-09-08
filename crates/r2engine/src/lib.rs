@@ -4086,10 +4086,7 @@ pub fn cfg_guard_fallback_comment(
 pub fn artifact_guard_fallback_comment(function_name: &str, reason: &str) -> String {
     let function_name = sanitize_fallback_comment_text(function_name);
     let reason = sanitize_fallback_comment_text(reason);
-    format!(
-        "/* r2dec fallback: skipped decompilation for {} ({}) */",
-        function_name, reason
-    )
+    format!("/* r2sleigh refused {}: {} */", function_name, reason)
 }
 
 fn build_engine_analysis_artifact(
@@ -5740,7 +5737,7 @@ mod tests {
                         .map(|route| route.kind),
                     Some(r2types::DecompileRouteKind::FallbackComment)
                 );
-                assert!(response.output.starts_with("/* r2dec fallback:"));
+                assert!(response.output.starts_with("/* r2sleigh refused"));
                 assert!(!response.output.contains("() {"));
             }
         }
@@ -5907,7 +5904,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.contains(reason.as_str()))
         );
-        assert!(response.output.starts_with("/* r2dec fallback:"));
+        assert!(response.output.starts_with("/* r2sleigh refused"));
         assert!(effect_obligation_refusal_reason(EffectObligationAudit::NOT_RUN).is_none());
         assert_eq!(
             response.function_facts.input_quality(),
@@ -5978,7 +5975,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.contains(&reason))
         );
-        assert!(response.output.starts_with("/* r2dec fallback:"));
+        assert!(response.output.starts_with("/* r2sleigh refused"));
         assert!(placement_refusal_reason(PlacementAudit::Applied).is_none());
         assert!(placement_refusal_reason(PlacementAudit::NotRun).is_none());
     }
@@ -6026,7 +6023,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.contains(reason.as_str()))
         );
-        assert!(response.output.starts_with("/* r2dec fallback:"));
+        assert!(response.output.starts_with("/* r2sleigh refused"));
         assert!(!response.output.contains("() {"));
     }
 
@@ -6332,7 +6329,7 @@ mod tests {
             },
         )
         .expect("complex CFG should produce a guard fallback");
-        assert!(cfg_comment.contains("r2dec fallback"));
+        assert!(cfg_comment.contains("r2sleigh refused"));
         assert!(cfg_comment.contains("sym.loopy"));
         assert!(cfg_comment.contains("complex loop graph"));
 
@@ -7287,7 +7284,7 @@ mod tests {
 
     #[test]
     fn request_plan_preserves_refusal_diagnostics() {
-        let comment = "/* r2dec fallback: semantic evidence unavailable */".to_string();
+        let comment = "/* r2sleigh refused: semantic evidence unavailable */".to_string();
         let route = test_decompile_route(
             r2types::DecompileRouteKind::FallbackComment,
             Some(&comment),

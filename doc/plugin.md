@@ -53,11 +53,11 @@ Function-Level:
 - a:sla.debug.cfg.json -- CFG as JSON
 - a:sla.debug.taint -- Taint analysis
 - a:sla.debug.slice [var] -- Backward slice
-- pdd -- Decompile through radare2's bounded borrowed-snapshot provider
+- pd:s -- Decompile through r2sleigh's bounded borrowed snapshot
 
 Direct `a:sla.dec` and `a:sla.decj` requests are intentionally unavailable:
 they do not run inside radare2's locked snapshot transaction and therefore
-cannot construct source authority. `pdd` receives one ABI-139/snapshot-schema-12
+cannot construct source authority. `pd:s` receives one ABI-139/snapshot-schema-12
 borrowed snapshot through accessor-schema 5, deep-copies it synchronously into
 source-interface-schema 10, and either completes from that immutable source or
 refuses. It never falls back to live blocks, names, or detached test metadata.

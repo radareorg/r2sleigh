@@ -2,7 +2,7 @@
 # Run one r2 command against a plugin this tree actually built.
 #
 # Every worktree installs to ~/.local/share/radare2/plugins, so a bare `r2 -c
-# pdd` measures whichever tree installed last. That has now cost this project
+# pd:s` measures whichever tree installed last. That has now cost this project
 # five conclusions -- four before this file existed and one after -- and every
 # one of them looked like a real finding until it was repeated. Writing the
 # hazard down did not stop it, because the failure is silent: nothing about a
@@ -13,8 +13,8 @@
 # together, which is the only window in which the answer is about this tree.
 #
 # usage: tests/corpus/locked_probe.sh <binary> <r2 command> [env=value ...]
-#   tests/corpus/locked_probe.sh /bin/ls 'a:sla; aaa; pdd @@F'
-#   tests/corpus/locked_probe.sh ./h_x64_O2 'a:sla; aaa; s sym._djb2; pdd' R2SLEIGH_TIMING=1
+#   tests/corpus/locked_probe.sh /bin/ls 'a:sla; aaa; pd:s @@F'
+#   tests/corpus/locked_probe.sh ./h_x64_O2 'a:sla; aaa; s sym._djb2; pd:s' R2SLEIGH_TIMING=1
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then

@@ -11,10 +11,10 @@ Like ``glaurung`` and ``kuna`` it is driven as a CLI rather than imported, but
 unlike them the CLI is radare2 itself. One ``r2`` process per binary does the
 whole job::
 
-    r2 -e scr.color=0 -q -c 'a:sla; aaa; <per-function seek and pdd>' <binary>
+    r2 -e scr.color=0 -q -c 'a:sla; aaa; <per-function seek and pd:s>' <binary>
 
 ``a:sla`` swaps radare2's architecture plugin for the Sleigh-backed one, which
-is what makes ``pdd`` render r2sleigh's output rather than the stock r2dec one,
+is what makes ``pd:s`` available; the stock ``pdd`` stays r2dec's,
 so it must run before analysis. Functions are marked in the stream with
 ``R2SLEIGH_DECBENCH_BEGIN__<index>`` / ``..._END__<index>`` sentinels and split
 back out here; one process amortises the ``aaa`` that dominates the wall time.
@@ -75,7 +75,7 @@ _END = "R2SLEIGH_DECBENCH_END__"
 
 # What the plugin prints when it declines a function. The text carries the typed
 # cause, which is worth keeping in metadata even though the function is dropped.
-_REFUSAL = re.compile(r"/\* r2dec fallback: skipped decompilation for \S+ \((?P<cause>.*)\) \*/")
+_REFUSAL = re.compile(r"/\* r2sleigh refused \S+: (?P<cause>.*) \*/")
 
 # What radare2 prints when no decompiler plugin is registered at all. It is not
 # output from a decompiler and must never be scored as one: counted as rendered
@@ -381,7 +381,7 @@ class RawR2SleighDecompiler(Decompiler):
             for index, (_, addr) in enumerate(candidates):
                 script.append(f"?e {_BEGIN}{index}")
                 script.append(f"s {addr}")
-                script.append("pdd")
+                script.append("pd:s")
                 script.append(f"?e {_END}{index}")
             decompile = _run_r2(binary_path, "; ".join(script), timeout=binary_timeout)
 

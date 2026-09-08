@@ -46,7 +46,7 @@ command_text="a:sla; aaa"
 for function in "${functions[@]}" ${callees[@]+"${callees[@]}"}; do
     command_text+="; ?e R2SLEIGH_CORPUS_BEGIN__${function}"
     command_text+="; s sym._${function}"
-    command_text+="; pdd"
+    command_text+="; pd:s"
     command_text+="; ?e R2SLEIGH_CORPUS_END__${function}"
 done
 

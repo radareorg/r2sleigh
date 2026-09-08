@@ -2717,7 +2717,7 @@ fn r2sleigh_engine_proven_facts_trusted_output(
     let crate::ffi_v2::TrustedIngress { root: trusted, .. } = ingress;
     // The same size gate `decompile_function` applies, for the same reason.
     //
-    // This path runs once per function during `aaa`, before any `pdd`, and it
+    // This path runs once per function during `aaa`, before any `pd:s`, and it
     // was the only engine entry point with neither a size guard nor a working
     // deadline. On an optimised binary that made a single large function able
     // to consume the whole sweep, which cost the caller every function after
@@ -4868,7 +4868,7 @@ mod tests {
             "C glue must not invent decompile fallback text; r2engine/rust output owns refusal policy"
         );
         assert!(
-            !c_source.contains("r2dec fallback: empty"),
+            !c_source.contains("r2sleigh refused"),
             "C glue must print engine output only, not synthesize fallback semantics"
         );
         assert!(
@@ -4916,7 +4916,7 @@ mod tests {
         // document in C by parsing diagnostics the engine had already produced
         // as JSON. Nothing ever asked for it: its only caller passed the
         // projection flag as false, because the commands that would have set it
-        // were withdrawn in favour of pdd. It is gone, and so is the reparsing.
+        // were withdrawn in favour of the command route. It is gone, and so is the reparsing.
         assert!(
             !c_source.contains("sleigh_engine_v2_response_json")
                 && !c_source.contains("r_json_parsedup (diagnostics_text)"),
@@ -4957,9 +4957,8 @@ mod tests {
             "the exact decj command must route before the backward-compatible dec command"
         );
         assert!(
-            c_source.contains(
-                "sla.decj is unavailable outside radare2's borrowed-snapshot decompiler provider; use pdd."
-            ) && c_source.contains("sleigh_decompile_execute (anal, NULL, true)")
+            c_source.contains("sla.decj is unavailable here; use pd:s.")
+                && c_source.contains("sleigh_decompile_execute (anal, NULL, true)")
                 && c_source.contains("\"borrowed_snapshot_required\"")
                 && c_source.contains("R2SLEIGH_STATUS_UNSUPPORTED_V2"),
             "direct decj must return a structured refusal instead of constructing source authority"
@@ -8378,7 +8377,7 @@ mod integration_tests {
             response.render_refusal
         );
         assert!(
-            response.output.starts_with("/* r2dec fallback:")
+            response.output.starts_with("/* r2sleigh refused")
                 && response
                     .output
                     .contains("native declaration placement refused: missing_definition")

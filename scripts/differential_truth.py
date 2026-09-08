@@ -130,7 +130,7 @@ def recovered_from_stripped(binary: Path, r2_bin: str) -> dict[int, tuple[Protot
             addr = int(addr_text, 16)
         except ValueError:
             continue
-        body = r2(binary, f"aaa\ns {addr}\npdd", r2_bin, plugin=True)
+        body = r2(binary, f"aaa\ns {addr}\npd:s", r2_bin, plugin=True)
         lines = [line for line in body.splitlines() if line.strip()]
         if not lines:
             continue

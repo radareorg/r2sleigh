@@ -136,7 +136,7 @@ pub(crate) unkeyed_writes: BTreeMap<&'static str, usize>,
 
 - **Six inert fixes in a row.** Each edited a rule governing the *name* when the
   rule on the path governed the *value*, or the reverse. Located only by planting
-  `CExpr::External { name: "ZZMARKERZZ" }` and grepping `pdd`.
+  `CExpr::External { name: "ZZMARKERZZ" }` and grepping `pd:s`.
 - **Three measured regressions from single-table edits.** Span-gate widening
   37 → 19; a guard on the `Block` arm of `structure_region` 37 → 17; excluding
   self-zeroing writes in parameter recovery 37 → 36. Each was correct alone;
@@ -225,7 +225,7 @@ enum ValueDisposition {
 ```
 
 Validation returns a typed refusal in release builds. A malformed artifact must
-not silently render, and must not panic during `pdd`.
+not silently render, and must not panic during `pd:s`.
 
 ### Width belongs to the use
 

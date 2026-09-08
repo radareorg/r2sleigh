@@ -48,7 +48,7 @@ INCOMPLETE_SECTION_STATUSES = {
     BATCH_SECTION_SETUP_FAILED,
 }
 DECOMPILER_FALLBACK_MARKERS = (
-    "r2dec fallback:",
+    "r2sleigh refused",
     "r2dec: decompilation panicked",
     "r2dec: failed to spawn",
     "skipped decompilation",
@@ -196,7 +196,7 @@ LOCAL_DECL_RE = re.compile(
     r"(?:(?:\s+)|(?:\s*\*+\s*))(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:[=;,\[])"
 )
 TARGET_COMMAND_DEFS: dict[str, str] = {
-    "decompile_sla": "pdd",
+    "decompile_sla": "pd:s",
     "decompile_pdd": "pdd",
     "decompile_pdg": "pdg",
     "ssa_function_report": "a:sla.debug.ssa.func",
@@ -6696,8 +6696,8 @@ def fixed_performance_plugin_probe(
             reasons.append(f"plugin probe exited with {probe_result.returncode}")
         if FIXED_PERFORMANCE_PROBE_ERROR_RE.search(probe_result.stderr):
             reasons.append("plugin probe reported an ABI/load error")
-        if "borrowed-snapshot provider" not in help_text:
-            reasons.append("plugin decompiler provider is absent or a no-op")
+        if "pd:s" not in help_text:
+            reasons.append("plugin decompiler command is absent or a no-op")
         if "sla: loaded architecture '" not in status_text:
             reasons.append("plugin status did not load a Sleigh architecture")
         probe_target = {"addr": target.get("addr"), "commands": {}}

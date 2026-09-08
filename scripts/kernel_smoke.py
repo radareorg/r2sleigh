@@ -36,7 +36,7 @@ DEFAULT_TARGETS = (
 JSON_COMMANDS = frozenset({"ssa_function_report"})
 DECOMPILER_COMMANDS = frozenset({"decompile_sla", "decompile_pdd", "decompile_pdD"})
 DECOMPILER_FALLBACK_MARKERS = (
-    "r2dec fallback:",
+    "r2sleigh refused",
     "r2dec: decompilation panicked",
     "r2dec: failed to spawn",
     "skipped decompilation",
@@ -354,7 +354,7 @@ def collect_target(
     addr = target["addr"]
     prefix = f"a:sla >/dev/null; {analysis}; s 0x{addr:x}; af"
     commands = {
-        "decompile_sla": "pdd",
+        "decompile_sla": "pd:s",
         "decompile_pdd": "pdd",
         "decompile_pdD": "pdD",
         "ssa_function_report": "a:sla.debug.ssa.func",

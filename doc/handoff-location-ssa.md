@@ -15345,3 +15345,61 @@ reported refusal rather than the first one is what cost the previous session:
 the object's kind, `member-access-declined` names which of the three checks
 refused a member fact, and the placement audit's unobserved-binding errors now
 name the observation, the binding, the symbol and the expression that failed.
+
+## The decompiler is `pd:s` now, and it is not radare2's decompiler provider
+
+r2sleigh used to answer radare2's `pdd` by filling in `RAnalPlugin.decompile`.
+`pdd` is documented as "decompile function with the best analysis provider",
+and `r_anal_decompiler_provider` picks that provider by `plugin_score` with no
+configuration a user can set. So `pdd` meant r2sleigh or r2dec depending on
+which plugins were loaded and how they scored, and a reader could not tell
+which engine produced a line. A decompiler whose premise is that only what is
+proven is printed cannot make that promise from a command like that, so it owns
+one of its own.
+
+The command is `pd:s`. Two other letters were considered and are taken: `pdz`
+is retdec's, with a `fallbackcmd.pdz` entry in radare2's core, and `pdx` is a
+live core command aliasing `pad`/`pix` that disassembles hexpairs. The whole
+top-level `pd<letter>` space is effectively spoken for, which is why radare2
+added the `pd:` namespace and moved `pdg` to `pd:g`; its own help text says so.
+
+Owning a `pd:` command needs an `RCorePlugin`, and r2sleigh shipped only anal
+and arch plugins. Rather than a second shared object carrying its own copy of
+the capture state, the anal plugin registers the core plugin at runtime with
+`r_core_plugin_add`. That did not work at first, and the reason was radare2's:
+
+```c
+	if (foo->init) {
+		foo->init (anal->user);   // callback is bool (*init)(RAnal *a)
+	}
+```
+
+`anal->user` is set by `r_core_init` to the `RCore`, so every analysis plugin's
+`init` receives an `RCore` through an `RAnal` parameter. No analysis plugin in
+radare2's tree defines `init`, so nothing depended on it. Fixed upstream as its
+own pull request and carried in the fork; the plugin also registers from
+`pre_analysis`, which is what a radare2 without that fix falls back on.
+
+The refusal comment changed with it. The engine printed
+
+```
+/* r2dec fallback: skipped decompilation for fcn_3220 (...) */
+```
+
+and r2dec never ran -- the string was ours. A refusal that names another tool
+as the thing that took over is a mislabelled certificate, so it now reads
+
+```
+/* r2sleigh refused fcn_3220: native rendering refused: ... */
+```
+
+Three parsers read that line -- the corpus verifier, the DecBench census and
+the coverage report -- and all three were changed with it. The census through
+`pd:s` is 614/692, identical to the same census through `pdd`, so the switch
+moved nothing but the name.
+
+The rest of the `/* r2dec <kind>: */` family is untouched: `proof`, `budget`,
+`residual` and `timing` all still carry the crate's own name. Renaming those
+would rewrite every corpus baseline and snapshot cell, and unlike `fallback`
+none of them claims another tool did anything, so they are a separate decision
+rather than part of this one.

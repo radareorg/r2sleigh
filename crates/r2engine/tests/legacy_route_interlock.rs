@@ -33,6 +33,6 @@ fn detached_production_input_refuses_before_source_owned_certified_c() {
             .unwrap_or_default()
             .contains("engine analysis requires an immutable source snapshot")
     );
-    assert!(response.output.contains("r2dec fallback:"));
+    assert!(response.output.contains("r2sleigh refused"));
     assert!(!response.output.contains("legacy_route_interlock(void)"));
 }

@@ -108,7 +108,7 @@ Run a radare2 command on a binary. Returns R2Result.
 Seek to a function then run a command:
 
 ```rust
-let result = r2_at_func(vuln_test_binary(), "main", "pdd");
+let result = r2_at_func(vuln_test_binary(), "main", "pd:s");
 result.assert_ok();
 assert!(result.contains("int"));
 ```
@@ -177,7 +177,7 @@ case N:
 ```rust
 #[test]
 fn test_my_pattern() {
-    let result = r2_at_func(vuln_test_binary(), "test_my_pattern", "pdd");
+    let result = r2_at_func(vuln_test_binary(), "test_my_pattern", "pd:s");
     result.assert_ok();
     assert!(result.contains("expected_output"));
 }
@@ -203,7 +203,7 @@ Bug fix:
   - Regression test reproducing the original bug
 
 Decompiler change:
-  - r2r exact normalized full snapshot via `pdd` only for an exact source-backed fixture
+  - r2r exact normalized full snapshot via `pd:s` only for an exact source-backed fixture
   - e2e only when decompiler behavior needs semantic parsing instead of snapshot diffs
 
 Test Coverage Checklist

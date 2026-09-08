@@ -469,7 +469,7 @@ grep -a -q "$WITNESS" "$lib" || {
     exit 70
 }
 # Present on disk is not the same as loadable. A plugin that fails to dlopen is
-# skipped silently by radare2, `pdd` then reports no decompiler, and every
+# skipped silently by radare2, `pd:s` is then unknown, and every
 # function of every binary comes back empty -- which reads in the results as a
 # decompiler with nothing to say rather than as a plugin that never ran. That is
 # exactly how a whole cell can score near zero without anything looking wrong,

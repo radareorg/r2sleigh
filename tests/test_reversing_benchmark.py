@@ -661,7 +661,7 @@ class ReversingBenchmarkTests(unittest.TestCase):
                     cmd_result(DISCOVERY),
                     cmd_result('{"name":"sym.check_secret","ops":[]}\n'),
                     cmd_result(DISCOVERY),
-                    cmd_result("/* r2dec fallback: skipped decompilation */\n"),
+                    cmd_result("/* r2sleigh refused fcn: skipped decompilation */\n"),
                     cmd_result(""),
                     cmd_result("not json\n"),
                     cmd_result("{}\n"),
@@ -2150,7 +2150,7 @@ class ReversingBenchmarkTests(unittest.TestCase):
                                 "runtime_bucket": "fast",
                                 "decompile_quality": {
                                     "classification": "fallback",
-                                    "fallback_marker": "r2dec fallback:",
+                                    "fallback_marker": "r2sleigh refused",
                                     "artifact_count": 2,
                                 },
                             },
@@ -3640,7 +3640,7 @@ class ReversingBenchmarkTests(unittest.TestCase):
         noop = cmd_result(
             batched_stdout(
                 [
-                    ("plugin_help", 0, "| pdd - borrowed-snapshot provider"),
+                    ("plugin_help", 0, "| pd:s - decompile with r2sleigh"),
                     ("plugin_status", 0, "sla: loaded architecture 'x86'"),
                     ("decompile_sla", 0, ""),
                     ("ssa_function_report", 0, ""),
@@ -3650,7 +3650,7 @@ class ReversingBenchmarkTests(unittest.TestCase):
         healthy = cmd_result(
             batched_stdout(
                 [
-                    ("plugin_help", 0, "| pdd - borrowed-snapshot provider"),
+                    ("plugin_help", 0, "| pd:s - decompile with r2sleigh"),
                     ("plugin_status", 0, "sla: loaded architecture 'x86'"),
                     ("decompile_sla", 0, "int f(void) { return 1; }"),
                     ("ssa_function_report", 0, SSA_FUNCTION_REPORT),

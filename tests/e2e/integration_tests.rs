@@ -152,7 +152,7 @@ mod borrowed_snapshot_provider {
         };
         let result = r2_cmd_timeout(
             binary,
-            "a:sla >/dev/null; aaa; s dbg.new_foo; pdd",
+            "a:sla >/dev/null; aaa; s dbg.new_foo; pd:s",
             Duration::from_secs(120),
         );
         result.assert_ok();
@@ -337,12 +337,12 @@ mod check_secret_phase5 {
         let mut lines = Vec::new();
         for line in output.lines() {
             if line == start {
-                assert!(!active, "duplicate {label} pdd start marker {repeat}");
+                assert!(!active, "duplicate {label} pd:s start marker {repeat}");
                 active = true;
                 continue;
             }
             if line == end {
-                assert!(active, "{label} pdd end marker {repeat} preceded its start");
+                assert!(active, "{label} pd:s end marker {repeat} preceded its start");
                 completed = true;
                 break;
             }
@@ -350,8 +350,8 @@ mod check_secret_phase5 {
                 lines.push(line);
             }
         }
-        assert!(active, "missing {label} pdd start marker {repeat}");
-        assert!(completed, "missing {label} pdd end marker {repeat}");
+        assert!(active, "missing {label} pd:s start marker {repeat}");
+        assert!(completed, "missing {label} pd:s end marker {repeat}");
         lines.join("\n")
     }
 
@@ -360,9 +360,9 @@ mod check_secret_phase5 {
         let mut result = r2_cmd_timeout(
             binary.to_str().expect("UTF-8 fixture path"),
             &format!(
-                "aaa; s 0x100000650; ?e __R2SLEIGH_PDD_{marker}_START_0__; pdd; \
+                "aaa; s 0x100000650; ?e __R2SLEIGH_PDD_{marker}_START_0__; pd:s; \
                  ?e __R2SLEIGH_PDD_{marker}_END_0__; \
-                 ?e __R2SLEIGH_PDD_{marker}_START_1__; pdd; \
+                 ?e __R2SLEIGH_PDD_{marker}_START_1__; pd:s; \
                  ?e __R2SLEIGH_PDD_{marker}_END_1__"
             ),
             Duration::from_secs(120),
@@ -374,7 +374,7 @@ mod check_secret_phase5 {
         assert_eq!(
             normalize_pdd_output(&first),
             normalize_pdd_output(&second),
-            "request-local {label} pdd rebuild must be deterministic"
+            "request-local {label} pd:s rebuild must be deterministic"
         );
         result.stdout = first;
         result
@@ -397,7 +397,7 @@ mod check_secret_phase5 {
         let binary = repo_path("tests/e2e/vuln_test_x86");
         let result = r2_cmd_timeout(
             binary.to_str().expect("UTF-8 struct-array fixture path"),
-            "e bin.dbginfo=true; oo; aaa; s 0x100000e70; pdd",
+            "e bin.dbginfo=true; oo; aaa; s 0x100000e70; pd:s",
             Duration::from_secs(120),
         );
         result.assert_ok();
@@ -695,7 +695,7 @@ int main(void) {{
         );
         let result = r2_cmd_timeout(
             binary.to_str().expect("UTF-8 ARM64 fixture path"),
-            "e bin.dbginfo=true; e bin.relocs.apply=true; oo; aaa; s sym._check_secret; pdd",
+            "e bin.dbginfo=true; e bin.relocs.apply=true; oo; aaa; s sym._check_secret; pd:s",
             Duration::from_secs(120),
         );
         result.assert_ok();
