@@ -559,8 +559,11 @@ static ut32 fcn_context_widest_memref(RVecRArchValue *values, ut32 measured) {
 
 /* The extent a slot's own accesses established, or zero when none did. A type
  * is a spelling of those bytes rather than a count of them. */
-static ut32 fcn_context_slot_measured_extent(RAnal *anal, RAnalFunction *fcn, RAnalVar *var) {
+static ut32 fcn_context_slot_measured_extent(RAnal *anal, RAnalFunction *fcn, RAnalVar *var, bool *dereferenced) {
 	ut32 measured = 0;
+	if (dereferenced) {
+		*dereferenced = false;
+	}
 	if (!anal->iob.read_at) {
 		return 0;
 	}
@@ -582,6 +585,9 @@ static ut32 fcn_context_slot_measured_extent(RAnal *anal, RAnalFunction *fcn, RA
 		// `lea` computes an address and dereferences nothing, so it says
 		// where the slot is and nothing about how wide it is.
 		if (decoded > 0 && op.direction != R_ANAL_OP_DIR_REF) {
+			if (dereferenced) {
+				*dereferenced = true;
+			}
 			// How many bytes this instruction moves through its memory
 			// operand, which is the claim the access makes about the slot.
 			if (op.refptr > 0 && (ut32)op.refptr > measured) {
@@ -704,21 +710,20 @@ static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext
 		type_is_aggregate = count > 1
 			|| kind == R_TYPE_STRUCT || kind == R_TYPE_UNION;
 	}
-	// An aggregate's extent is a statement about the object and a DWARF
-	// declaration is exact, so both may exceed what the accesses touched. A
-	// scalar radare2 inferred may not: the accesses are what the program did.
 	// An aggregate's extent exceeds any single access, so it stands; a scalar's
 	// tightest sound claim is the narrower of its type and its accesses.
 	if (!type_is_aggregate) {
-		const ut32 measured = fcn_context_slot_measured_extent (anal, fcn, var);
+		bool dereferenced = false;
+		const ut32 measured = fcn_context_slot_measured_extent (anal, fcn, var, &dereferenced);
 		if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
-			eprintf ("r2sleigh: slot extent fcn=%s %s type=%s type_size=%u measured=%u\n",
+			eprintf ("r2sleigh: slot extent fcn=%s %s type=%s type_size=%u measured=%u deref=%d\n",
 				r_str_get (fcn->name), r_str_get (slot->name),
-				r_str_get (slot->type), slot->size, measured);
+				r_str_get (slot->type), slot->size, measured, (int)dereferenced);
 		}
 		if (measured > 0 && (!slot->size || measured < slot->size)) {
 			slot->size = measured;
 		}
+		slot->dereferenced = dereferenced;
 	}
 
 	if ((R_STR_ISNOTEMPTY (var->name) && !slot->name)
@@ -2827,6 +2832,53 @@ static void snapshot_stack_resource_report(const RAnalFcnSlot *slot, const char 
 		slot->offset_valid? 1: 0, slot->offset, slot->size);
 }
 
+/* Drop a slot that overlaps another and is only ever an address.
+ *
+ * radare2 mints a variable at each `lea` target, so an interior address of an
+ * array becomes a local at an unaligned offset inside it. Such a slot claims
+ * an extent no access established, and it is the one to lose the claim. */
+static void snapshot_stack_drop_address_only_overlaps(RAnalFcnContext *ctx) {
+	RListIter *left_iter;
+	RAnalFcnSlot *left;
+	RList *doomed = r_list_new ();
+	if (!doomed) {
+		return;
+	}
+	r_list_foreach (ctx->fcn_slots, left_iter, left) {
+		if (!left || !left->offset_valid || !left->size) {
+			continue;
+		}
+		const st64 left_end = left->offset + (st64)left->size;
+		RListIter *right_iter;
+		for (right_iter = left_iter->n; right_iter; right_iter = right_iter->n) {
+			RAnalFcnSlot *right = right_iter->data;
+			if (!right || right->base != left->base
+				|| !right->offset_valid || !right->size) {
+				continue;
+			}
+			const st64 right_end = right->offset + (st64)right->size;
+			if (left->offset >= right_end || right->offset >= left_end) {
+				continue;
+			}
+			// Only when exactly one of the pair was never dereferenced does
+			// the overlap say which slot's extent was never established.
+			if (left->dereferenced && !right->dereferenced) {
+				r_list_push (doomed, right);
+			} else if (right->dereferenced && !left->dereferenced) {
+				r_list_push (doomed, left);
+			}
+		}
+	}
+	RListIter *iter;
+	RAnalFcnSlot *slot;
+	// The list owns its slots and frees what it deletes; a slot that overlaps
+	// two others is listed twice and the second delete finds nothing.
+	r_list_foreach (doomed, iter, slot) {
+		r_list_delete_data (ctx->fcn_slots, slot);
+	}
+	r_list_free (doomed);
+}
+
 static bool snapshot_stack_resources_complete(const RAnalFcnContext *ctx) {
 	RListIter *left_iter;
 	RAnalFcnSlot *left;
@@ -3017,6 +3069,7 @@ static bool function_interface_snapshot_collect(
 	 * variadic and left every call to it without an argument count. */
 	interface->variadic = false;
 	interface->noreturn = fcn->is_noreturn;
+	snapshot_stack_drop_address_only_overlaps (ctx);
 	interface->stack_resources_complete = snapshot_stack_resources_complete (ctx);
 	SnapshotStorageResult return_address_collected =
 		snapshot_return_address_storage_collect (

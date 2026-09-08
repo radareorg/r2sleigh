@@ -123,6 +123,9 @@ typedef struct r_anal_fcn_slot_t {
 	/* Whether the variable's type came from a DWARF record for this slot.
 	 * Only a declared type is exact; radare2's own inference is evidence. */
 	bool dwarf_declared;
+	/* Whether any access read or wrote through this slot. An address-only
+	 * slot says where something is and nothing about how wide it is. */
+	bool dereferenced;
 } RAnalFcnSlot;
 
 typedef struct r_anal_fcn_callee_t {
