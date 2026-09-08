@@ -720,7 +720,9 @@ static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext
 				r_str_get (fcn->name), r_str_get (slot->name),
 				r_str_get (slot->type), slot->size, measured, (int)dereferenced);
 		}
-		if (measured > 0 && (!slot->size || measured < slot->size)) {
+		// A measurement is what the program did, so it settles the extent; a
+		// type narrower than a proven access is a wrong type, not a bound.
+		if (measured > 0) {
 			slot->size = measured;
 		}
 		slot->dereferenced = dereferenced;
@@ -2860,12 +2862,25 @@ static void snapshot_stack_drop_address_only_overlaps(RAnalFcnContext *ctx) {
 			if (left->offset >= right_end || right->offset >= left_end) {
 				continue;
 			}
-			// Only when exactly one of the pair was never dereferenced does
-			// the overlap say which slot's extent was never established.
-			if (left->dereferenced && !right->dereferenced) {
+			// A slot strictly inside another is an interior access of that
+			// object, which radare2 minted as a variable of its own.
+			if (left->offset <= right->offset && right_end <= left_end
+				&& (st64)left->size > (st64)right->size) {
 				r_list_push (doomed, right);
-			} else if (right->dereferenced && !left->dereferenced) {
+				continue;
+			}
+			if (right->offset <= left->offset && left_end <= right_end
+				&& (st64)right->size > (st64)left->size) {
 				r_list_push (doomed, left);
+				continue;
+			}
+			// A slot in an overlapping pair that nothing dereferenced claims
+			// an extent no access established, so it loses the claim.
+			if (!left->dereferenced) {
+				r_list_push (doomed, left);
+			}
+			if (!right->dereferenced) {
+				r_list_push (doomed, right);
 			}
 		}
 	}
