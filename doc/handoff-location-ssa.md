@@ -17006,3 +17006,43 @@ cannot silently widen it and create a new overlap.
 still renders. Corpus gates hold at 54 pass on raw, differential, binding,
 effect, placement and render refusal, with snapshot 42/12 and diagnostic 48/6
 unchanged.
+
+### A1 measured: +21 functions, and the overlap class falls by two thirds
+
+Local census over the six binaries against `a34721c1`:
+
+```
+                     before A1   after A1
+rendered                   567        588
+refused                    125        104
+silent                       0          0
+```
+
+```
+  13  native declaration placement refused: missing_definition
+  12  native rendering refused: observation journal: RenderedValueRequired
+  11  snapshot wire decode failed: RejectedContract { OverlappingStackSlots }
+   8  native rendering refused: missing machine projection: BindingPlanBuild
+   7  native declaration placement refused: unobserved_binding_read
+   6  native rendering refused: unrepresentable operation
+   6  native rendering refused: observation journal: PlannedElidedValueRendered
+   5  engine refusal: function exceeds the engine complexity limit
+   4  native rendering refused: missing machine projection: OpLowering
+   3  native rendering refused: missing program-variable authorization
+   3  the address is a cold partition of another function, not a function
+   3  trusted lift refused: instructions after a control terminator
+```
+
+**`OverlappingStackSlots` falls from 34 to 11**, so measuring the extent removed
+23 of the 34 -- the radare2 typing artefacts -- and left 11. That is the residue
+the invariant predicted: overlaps that survive a correct extent are real, and are
+what per-cell demotion is for. Eleven is a small enough number that the demotion
+can be judged against the individual cases rather than adopted wholesale.
+
+The ranking is now genuinely flat: no cause exceeds 13, and the plan/journal
+family (`missing_definition` 13, `RenderedValueRequired` 12, `BindingPlanBuild`
+8, `unobserved_binding_read` 7, `PlannedElidedValueRendered` 6) is 46 of the 104
+between them -- four and a half times the largest single string. That is the
+shape the derivation predicted: the strings are many and the violation is one,
+which is why the single-owner boundary is the step that matters rather than the
+next instance.
