@@ -16897,3 +16897,63 @@ boundary disagreement between radare2 and the lift and untraced.
 A1 and B1 are wires between things that already exist and are the two largest
 levers on the local corpus; B4 and A2 are the structural changes that make the
 invariants hold rather than merely making the counts go down.
+
+### Correction: B1 is already wired, and the real limit is the depth of the lattice
+
+The derivation above states that the `-fipa-ra` preservation mechanism "is
+connected by nothing" and that `CalleeFacts::preserved_carriers()` has zero
+callers. **That is wrong, and the error was in the check, not the reading.** The
+search was run over `crates/`, and the plugin crate lives at `r2plugin/src/`.
+Over the whole workspace there is exactly one caller, and it is the production
+path:
+
+```rust
+// r2plugin/src/ffi_v2.rs:1238
+callee_preserved_carriers.insert (entry, facts.preserved_carriers().clone());
+...
+let root = trusted_from_source_with_callees (
+    source, execution, &callee_interfaces, &callee_preserved_carriers)?;
+```
+
+So producer, transport and consumer are joined, and `preserved_by_target` is
+populated on every capture. The `CalleePreservedCarriers::new()` sites in
+`crates/r2ssa/src/function.rs` are the other constructors -- tests and the
+untrusted build -- not the path the plugin takes.
+
+**The reason it changes nothing is structural, and more interesting than a
+missing wire.** `preserved_call_carriers` (`semantic.rs:3874`) starts from the
+convention's clobber set and removes every storage any instruction in the body
+defines. A call's own clobbers are `CallDefine`s, so a body that calls something
+whose preservation is unknown loses every carrier that call may touch. The
+comment says exactly this: "the answer composes through exactly the callees whose
+own bodies were read".
+
+The capture is one level deep -- `ffi_v2.rs` says so outright, "the set is one
+level deep, so it has no callee interfaces of its own to be prepared against" --
+so a callee's own callees are always unknown. Therefore:
+
+    preserved(f)  =  ∅   for every f that makes a call,
+                     the convention set minus f's own writes, for a leaf.
+
+**Verified** for the traced case: the callee at 0x8d80 whose preservation would
+have to prove `rsi` for `RSI_35` is `dbg.BZ2_compressBlock`, 16048 bytes with 23
+calls, so its preserved set is empty by construction.
+
+So B1 is not "add a wire". It is: **the preservation lattice is depth-limited to
+one, and the fixpoint it wants is over the whole call graph.** The options are a
+deeper capture, or a summary that is computed once per program and cached the way
+`CalleeFacts` already is, with the capture supplying bodies and the lattice
+iterated to a fixpoint over them. That is a larger piece of work than the
+derivation credited, it has a cost dimension, and it is a question for the user
+rather than something to pick.
+
+The rest of invariant B is unaffected: Result (B2), the single-owner disposition
+(B4) and the EntryValue role for a genuine clobber (B3) do not depend on
+preservation, and B3 in particular is what renders the cases preservation will
+never reach.
+
+**Method note.** This is the third hypothesis in this session overturned by the
+check that should have preceded it, and the second where the check was a search
+whose root was too narrow. A claim that a mechanism has no callers is only as
+good as the tree the search covered; for this workspace that tree is the
+repository root, because `r2plugin/` is a crate outside `crates/`.
