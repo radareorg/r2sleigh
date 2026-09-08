@@ -16549,3 +16549,33 @@ What is left is a question about the SSA itself rather than about capture or the
 CFG, and it needs `a:sla.debug.ssa.func` rather than more disassembly: with the
 definition in 0x3dd2 dominating a read in 0x3edf, why does `BindingId(220)` get
 no reaching value. That is the exact question to open with.
+
+### The SSA is correct, so `missing_definition` is a binding-plan defect
+
+`a:sla.debug.ssa.func` on `dbg.addFlagsFromEnvVar` settles it. The function has
+exactly two SSA values for `r14`:
+
+```
+R14_0   the entry value, mentioned only in the entry block 0x3da0
+R14_1   defined in block 0x3dd2, used in 0x3e68, 0x3e7b, 0x3e9c and 0x3edf
+```
+
+There is no phi and no third value. The read at 0x3edf uses `R14_1`, whose
+definition is in 0x3dd2 and dominates it, exactly as the machine says. SSA
+construction did the right thing.
+
+So the chain is clean the whole way down -- radare2's blocks, the capture, the
+CFG and the SSA all agree -- and the refusal still says
+
+```
+BindingId(220) is read 2 times and never written
+```
+
+A `BindingId` is not an SSA value; it is a binding-plan entity. The plan gave the
+*reads* of `R14_1` a binding and never gave its *definition* the same one. That
+is where the twelve functions in this class should be traced next, in
+`crates/r2dec` binding assignment rather than anywhere below it.
+
+This narrowing is the useful part. The class began the session as an unattributed
+count, and it is now a specific question about one pass: why a binding reaches
+the uses of a value without reaching its definition.
