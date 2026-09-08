@@ -400,15 +400,22 @@ fn split_internal_control_flow_targets(block: &R2ILBlock) -> Vec<R2ILBlock> {
 
     let mut split_points = BTreeSet::new();
     for (op_idx, op) in block.ops.iter().enumerate() {
+        // A repeating string instruction branches to its own start. That flow
+        // never leaves the instruction, so it is no boundary between blocks.
+        let own_instruction = op_instruction_addrs
+            .get(op_idx)
+            .copied()
+            .unwrap_or(block.addr);
         if let Some(target) = op_direct_control_target(op)
             && target > block.addr
             && target < block_end
             && instruction_addrs.contains(&target)
+            && target != own_instruction
         {
             split_points.insert(target);
         }
 
-        if op_terminates_basic_block(op) {
+        if op_terminates_basic_block(op) && op_direct_control_target(op) != Some(own_instruction) {
             let current_addr = op_instruction_addrs
                 .get(op_idx)
                 .copied()

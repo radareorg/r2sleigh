@@ -2764,6 +2764,11 @@ impl SSAFunction {
         // and the edge it disagreed about; discarding it left the reader with
         // "malformed SSA source input" and nothing to look at.
         validate_ssa_function(&function).map_err(|error| {
+            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                let mut addrs = function.blocks.keys().copied().collect::<Vec<_>>();
+                addrs.sort_unstable();
+                eprintln!("ssa block domain ({}): {addrs:x?}", addrs.len());
+            }
             r2il::refusal_evidence!("ssa-integrity", "{error:?}");
             malformed_ssa_input()
         })?;
