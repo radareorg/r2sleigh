@@ -161,11 +161,14 @@ Native analysis depth:
 | `aaa` | balanced signatures, xrefs, and type facts |
 | `aaaa` | aggressive taint, interproc, and type write-back |
 
-r2sleigh does not expose public `anal.*` tuning keys. `a:sla.debug.profilej` is
-a passive local timing accumulator: run a successful command such as
-`a:sla.debug.ssa.func` first, then read the profile. There is no detached
-type-report command; host type state is inspected with radare2's `afcfj` and
-`afvj` commands until a locked snapshot-owned type callback exists.
+r2sleigh does not expose public `anal.*` tuning keys. `a:sla.profilej` is a
+passive local timing accumulator, cleared at the start of each post-analysis
+sweep and read afterwards. It reports four stages, one per thing the plugin
+spends time on: `proof_us` for the artifacts analysis proves, `lift_us` for a
+function lift, `taint_us` for the taint summary (which needs `aaaa`), and
+`decompile_us` for a `pd:s`. There is no detached type-report command; host
+type state is inspected with radare2's `afcfj` and `afvj` commands until a
+locked snapshot-owned type callback exists.
 
 Kernel smoke harness:
 

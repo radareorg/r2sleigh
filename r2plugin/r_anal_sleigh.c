@@ -871,12 +871,11 @@ typedef enum {
 	SLEIGH_MODE_FULL = 2,
 } SleighMode;
 
+// One arm per thing this plugin spends time on. A stage with no site records
+// nothing and reports a zero that reads as "fast" rather than "not measured".
 typedef enum {
 	SLEIGH_PROFILE_STAGE_LIFT,
-	SLEIGH_PROFILE_STAGE_TYPED_CONTEXT,
-	SLEIGH_PROFILE_STAGE_SESSION,
-	SLEIGH_PROFILE_STAGE_MUTATION,
-	SLEIGH_PROFILE_STAGE_XREF,
+	SLEIGH_PROFILE_STAGE_PROOF,
 	SLEIGH_PROFILE_STAGE_TAINT,
 	SLEIGH_PROFILE_STAGE_DECOMPILE,
 } SleighProfileStage;
@@ -885,10 +884,7 @@ typedef struct {
 	ut64 addr;
 	char *name;
 	ut64 lift_us;
-	ut64 typed_context_us;
-	ut64 session_us;
-	ut64 mutation_us;
-	ut64 xref_us;
+	ut64 proof_us;
 	ut64 taint_us;
 	ut64 decompile_us;
 	ut64 total_us;
@@ -3131,17 +3127,8 @@ static void sleigh_profile_add(RAnal *anal, const RAnalFunction *fcn, SleighProf
 	case SLEIGH_PROFILE_STAGE_LIFT:
 		entry->lift_us += elapsed_us;
 		break;
-	case SLEIGH_PROFILE_STAGE_TYPED_CONTEXT:
-		entry->typed_context_us += elapsed_us;
-		break;
-	case SLEIGH_PROFILE_STAGE_SESSION:
-		entry->session_us += elapsed_us;
-		break;
-	case SLEIGH_PROFILE_STAGE_MUTATION:
-		entry->mutation_us += elapsed_us;
-		break;
-	case SLEIGH_PROFILE_STAGE_XREF:
-		entry->xref_us += elapsed_us;
+	case SLEIGH_PROFILE_STAGE_PROOF:
+		entry->proof_us += elapsed_us;
 		break;
 	case SLEIGH_PROFILE_STAGE_TAINT:
 		entry->taint_us += elapsed_us;
@@ -3195,10 +3182,7 @@ static char *sleigh_profile_json(RAnal *anal) {
 			pj_ks (pj, "name", entry->name? entry->name: "");
 			pj_kn (pj, "total_us", entry->total_us);
 			pj_kn (pj, "lift_us", entry->lift_us);
-			pj_kn (pj, "typed_context_us", entry->typed_context_us);
-			pj_kn (pj, "session_us", entry->session_us);
-			pj_kn (pj, "mutation_us", entry->mutation_us);
-			pj_kn (pj, "xref_us", entry->xref_us);
+			pj_kn (pj, "proof_us", entry->proof_us);
 			pj_kn (pj, "taint_us", entry->taint_us);
 			pj_kn (pj, "decompile_us", entry->decompile_us);
 			pj_end (pj);
@@ -3734,6 +3718,7 @@ static ut64 sleigh_engine_call_deadline_us(RAnal *anal) {
 
 static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 	R_RETURN_VAL_IF_FAIL (anal && fcn, NULL);
+	const ut64 decompile_start_us = r_time_now_mono ();
 	if (sleigh_function_exceeds_engine_limits (fcn)) {
 		/* In band, and in the shape every other refusal takes. Returning
 		 * nothing here would leave the function neither rendered nor declined,
@@ -3742,6 +3727,8 @@ static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 			"/* r2sleigh refused %s: "
 			"engine refusal: function exceeds the engine complexity limit */\n",
 			r_str_get (fcn->name));
+		sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_DECOMPILE,
+			r_time_now_mono () - decompile_start_us);
 		if (!refusal) {
 			return NULL;
 		}
@@ -3752,6 +3739,8 @@ static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 	const SleighFunctionCapture *held = sleigh_function_capture (anal, fcn);
 	if (!held || !held->wire) {
 		R_LOG_ERROR ("r2sleigh: cannot capture '%s'", r_str_get (fcn->name));
+		sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_DECOMPILE,
+			r_time_now_mono () - decompile_start_us);
 		return NULL;
 	}
 	/* The buffer comes from the held capture rather than a walk of this
@@ -3768,6 +3757,8 @@ static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 		R2SLEIGH_REQUEST_DECOMPILE_V2,
 		R2SLEIGH_CAP_DECOMPILE_V2 | R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2,
 		&payload);
+	sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_DECOMPILE,
+		r_time_now_mono () - decompile_start_us);
 	if (!result) {
 		R_LOG_ERROR ("r2sleigh: decompilation was refused");
 		return NULL;
@@ -5178,6 +5169,7 @@ static bool sleigh_post_analysis_inner(RAnal *anal) {
 		const bool proof_eligible = post_mode >= SLEIGH_MODE_FULL
 			|| sleigh_function_may_prove (anal, fcn);
 		if (proof_eligible && sleigh_artifact_plan_init (&proof_plan, anal, fcn, "proof")) {
+			const ut64 proof_start_us = r_time_now_mono ();
 			if (collect_proof_artifacts_for_function (&proof_plan, anal, fcn,
 					&proof_xrefs, &proof_dead_blocks)
 					&& sleigh_artifact_plan_submit (&proof_plan)) {
@@ -5185,6 +5177,8 @@ static bool sleigh_post_analysis_inner(RAnal *anal) {
 			} else {
 				proof_refused++;
 			}
+			sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_PROOF,
+				r_time_now_mono () - proof_start_us);
 			sleigh_artifact_plan_fini (&proof_plan);
 		} else if (!proof_eligible) {
 			proof_skipped++;
@@ -5233,9 +5227,12 @@ static bool sleigh_post_analysis_inner(RAnal *anal) {
 			break;
 		}
 		SleighTaintPlanStats stats;
+		const ut64 taint_start_us = r_time_now_mono ();
 		bool collected = collect_taint_artifacts_for_function (
 			&taint_plan, anal, ctx, &blocks, &stats);
 		bool committed = collected && sleigh_artifact_plan_submit (&taint_plan);
+		sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_TAINT,
+			r_time_now_mono () - taint_start_us);
 		if (!collected) {
 			taint_parse_failures++;
 			R_LOG_WARN ("r2sleigh: taint collection failed at 0x%08"PFMT64x,

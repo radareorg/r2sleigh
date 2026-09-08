@@ -15458,3 +15458,53 @@ Left standing, deliberately: `sla.vars` and `sla.mem` remain as projections of
 `sla.json`, and `sla.defuse` as a projection of `sla.ssa`. Whether the
 convenience is worth 104 lines is a judgement rather than a defect, and none of
 the three claims anything false.
+
+## Tracing the profiler: six of seven stages had no producer
+
+`a:sla.profilej` declares seven stages, gives each a field on the entry, sums
+each into `total_us`, and emits each as a JSON key. Grepping for the sites
+finds `sleigh_profile_add` called with exactly one of them, `LIFT`, from two
+places. The other six -- `TYPED_CONTEXT`, `SESSION`, `MUTATION`, `XREF`,
+`TAINT` and `DECOMPILE` -- were never written by anything, so six columns
+reported a zero that reads as "fast" rather than "not measured". Three of those
+names, typed context, session and mutation, do not correspond to anything left
+in the plugin; they are leftovers of the session-policy machinery the lints
+already forbid by name.
+
+The two `LIFT` sites explain the rest. One is inside the `a:sla.debug.ssa.func`
+command, which is why the end-to-end test saw a count of one. The other sits in
+post-analysis, *after* the taint eligibility check:
+
+```c
+		if (!taint_eligible) {
+			...
+			continue;
+		}
+		...
+		sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_LIFT, ...);
+```
+
+`aaa` reports `taint enabled=0`, so every function takes that `continue` and
+the only analysis-path record is unreachable. Meanwhile the work the loop does
+perform -- proofs, 22 of 38 functions on bzip2recover at -O0 -- was not
+measured at all. That is why a full analysis reported `count:0`: not because
+the profiler is broken, but because it was pointed at the one branch that does
+not run.
+
+The stage set is now the four things this plugin spends time on, each with a
+site: `proof_us` around the proof artifacts, `lift_us` where it already was,
+`taint_us` around the taint summary, and `decompile_us` around the whole of
+`sleigh_decompile`, recorded on every exit so a refused function is not
+reported as free. The four names with no producer are gone.
+
+What that buys, measured on bzip2recover at -O0:
+
+```
+aaa    22 functions, e.g. sym.register_tm_clones proof 7645us
+aaaa   55 functions, e.g. dbg.bsClose proof 32289us lift 884us taint 2978us
+pd:s   dbg.main decompile 1281577us
+```
+
+The last of those is the number the coverage work has wanted all along and had
+no way to ask for: what one function costs to decompile, separated from what it
+costs to analyse.

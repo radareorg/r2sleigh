@@ -105,26 +105,67 @@ fn opvals_reports_the_registers_an_instruction_reads_and_writes() {
 }
 
 #[test]
-fn profile_command_reports_local_stage_timings() {
-    let profile = r2_cmd(
-        vuln_test_binary(),
-        "aaa; s entry0; a:sla.debug.ssa.func >/dev/null; a:sla.profilej",
-    );
+fn profile_command_reports_the_stages_that_have_sites() {
+    // Analysis spends its time proving, and that was the one thing the
+    // profiler never measured: its only record sat inside the taint branch,
+    // which is off unless the depth asks for it.
+    let profile = r2_cmd(vuln_test_binary(), "aaa; a:sla.profilej");
     profile.assert_ok();
     let profile_json: Value = profile.parse_json().expect("profile command JSON");
     assert!(
         profile_json.get("enabled") == Some(&Value::Bool(true))
-            && profile_json
-                .get("count")
-                .and_then(Value::as_u64)
-                .is_some_and(|count| count > 0)
             && profile_json.get("max").is_some_and(Value::is_u64)
-            && profile_json
-                .get("functions")
-                .and_then(Value::as_array)
-                .is_some_and(|functions| !functions.is_empty())
             && profile_json.get("engine_cache").is_none(),
         "the profile command must expose only local timing data"
+    );
+    let functions = profile_json
+        .get("functions")
+        .and_then(Value::as_array)
+        .expect("profile function array");
+    assert!(
+        functions
+            .iter()
+            .any(|f| f.get("proof_us").and_then(Value::as_u64).is_some_and(|us| us > 0)),
+        "a plain analysis must report the time it spent proving:\n{}",
+        profile.stdout
+    );
+    // Every stage reported has a site that records it. A key with no producer
+    // reports a zero that reads as "fast" rather than "not measured".
+    for function in functions {
+        let object = function.as_object().expect("profile entry object");
+        for key in ["lift_us", "proof_us", "taint_us", "decompile_us"] {
+            assert!(object.contains_key(key), "profile entry must report {key}");
+        }
+        for gone in ["typed_context_us", "session_us", "mutation_us", "xref_us"] {
+            assert!(
+                !object.contains_key(gone),
+                "{gone} never had a site and must not be reported"
+            );
+        }
+    }
+}
+
+#[test]
+fn profile_command_measures_a_decompile() {
+    let profile = r2_cmd(
+        vuln_test_binary(),
+        "aaa; s main; pd:s >/dev/null; a:sla.profilej",
+    );
+    profile.assert_ok();
+    let profile_json: Value = profile.parse_json().expect("profile command JSON");
+    let functions = profile_json
+        .get("functions")
+        .and_then(Value::as_array)
+        .expect("profile function array");
+    assert!(
+        functions
+            .iter()
+            .any(|f| f
+                .get("decompile_us")
+                .and_then(Value::as_u64)
+                .is_some_and(|us| us > 0)),
+        "pd:s must be measured by the stage named for it:\n{}",
+        profile.stdout
     );
 }
 
