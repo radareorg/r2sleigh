@@ -415,8 +415,7 @@ impl<'a> FoldingContext<'a> {
         let render_fact = self.certified_call_render_fact_for_op(block_addr, op_idx)?;
         if matches!(
             render_fact.disposition,
-            r2types::CallsiteRenderDisposition::Suppressed
-                | r2types::CallsiteRenderDisposition::Residualized
+            r2types::CallsiteRenderDisposition::Residualized
         ) {
             return None;
         }

@@ -1131,8 +1131,7 @@ impl<'a> FoldingContext<'a> {
         let rendered_call = call_fact.filter(|fact| {
             !matches!(
                 fact.disposition,
-                r2types::CallsiteRenderDisposition::Suppressed
-                    | r2types::CallsiteRenderDisposition::Residualized
+                r2types::CallsiteRenderDisposition::Residualized
             )
         });
         // Every carried value owns exactly one return-value obligation. A

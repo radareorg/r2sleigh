@@ -199,14 +199,13 @@ pub struct CallsiteRenderFact {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CallsiteRenderDisposition {
-    SideEffectStatement,
-    AssignedResult,
-    NestedExpression,
+    /// The call is a statement of this function. Whether it assigns its result
+    /// is the binding plan's answer, from the value the statement defines.
+    Statement,
     /// A value-returning callee returns directly to this function's caller.
     TerminalReturn,
     /// A void callee returns directly to this function's caller.
     TerminalVoidReturn,
-    Suppressed,
     Residualized,
 }
 
@@ -2881,7 +2880,7 @@ impl FunctionFacts {
         let prepared_callee_resolution = prepared_callee_resolution_facts(prepared, self);
         let prepared_callsites = prepared_callsite_argument_facts(prepared);
         let prepared_call_results = prepared_call_result_facts(prepared);
-        let prepared_call_render = prepared_call_render_facts(prepared, &prepared_call_results);
+        let prepared_call_render = prepared_call_render_facts(prepared);
         let prepared_control = prepared_control_facts(prepared);
         let prepared_render = FunctionRenderFacts::from_prepared(prepared);
 
@@ -3860,10 +3859,7 @@ fn prepared_call_result_facts(prepared: &r2ssa::SsaArtifact) -> FunctionCallResu
     }
 }
 
-fn prepared_call_render_facts(
-    prepared: &r2ssa::SsaArtifact,
-    call_results: &FunctionCallResultFacts,
-) -> FunctionCallRenderFacts {
+fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionCallRenderFacts {
     let by_callsite = prepared
         .certificates()
         .callsites
@@ -3873,13 +3869,8 @@ fn prepared_call_render_facts(
                 block_addr: cert.block_addr,
                 op_index: cert.op_index,
             };
-            // Whether the call site assigns its result is one question, and
-            // `owner_for_site` answers it. Asking a second, narrower one here
-            // -- does some result have a *stack slot* owner -- made the two
-            // disagree the moment a register-carried result gained an owner:
-            // the disposition said side effect while the owner lookup named a
-            // value, so the call rendered as a bare statement *and* as its
-            // definition's right-hand side, and one site was evaluated twice.
+            // This fact says how control leaves the site, not what the
+            // statement assigns; the plan owns that, from the value it defines.
             let count_refusal = if cert.variadic {
                 cert.variadic_argument_count_refusal.or_else(|| {
                     cert.variadic_argument_count_evidence.is_none().then_some(
@@ -3934,10 +3925,8 @@ fn prepared_call_render_facts(
                     None if function_returns_void => CallsiteRenderDisposition::TerminalVoidReturn,
                     None => CallsiteRenderDisposition::TerminalReturn,
                 }
-            } else if call_results.owner_for_site(callsite).is_some() {
-                CallsiteRenderDisposition::AssignedResult
             } else {
-                CallsiteRenderDisposition::SideEffectStatement
+                CallsiteRenderDisposition::Statement
             };
             (
                 callsite,
@@ -6086,7 +6075,7 @@ mod tests {
                 CallsiteRenderFact {
                     callsite,
                     target: Some(target),
-                    disposition: CallsiteRenderDisposition::AssignedResult,
+                    disposition: CallsiteRenderDisposition::Statement,
                     proof_values: vec![arg],
                     residual_reason: None,
                 },
@@ -6100,7 +6089,7 @@ mod tests {
             .and_then(|render| render.fact_for_site(callsite))
             .expect("call render fact must travel through FunctionFacts");
         assert_eq!(fact.target, Some(target));
-        assert_eq!(fact.disposition, CallsiteRenderDisposition::AssignedResult);
+        assert_eq!(fact.disposition, CallsiteRenderDisposition::Statement);
         assert_eq!(fact.proof_values, vec![arg]);
     }
 

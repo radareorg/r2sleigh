@@ -3299,8 +3299,7 @@ fn prepared_call_render_authorized(call_view: &PreparedCallView) -> bool {
     };
     if matches!(
         render_fact.disposition,
-        r2types::CallsiteRenderDisposition::Suppressed
-            | r2types::CallsiteRenderDisposition::Residualized
+        r2types::CallsiteRenderDisposition::Residualized
     ) {
         return false;
     }
@@ -3804,7 +3803,7 @@ mod tests {
                     op_index: 0,
                 },
                 target: None,
-                disposition: r2types::CallsiteRenderDisposition::SideEffectStatement,
+                disposition: r2types::CallsiteRenderDisposition::Statement,
                 proof_values: vec![ValueId(7)],
                 residual_reason: None,
             }),

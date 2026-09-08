@@ -432,8 +432,7 @@ impl<'a> FoldingContext<'a> {
             || render_fact.target != Some(cert.target)
             || matches!(
                 render_fact.disposition,
-                r2types::CallsiteRenderDisposition::Suppressed
-                    | r2types::CallsiteRenderDisposition::Residualized
+                r2types::CallsiteRenderDisposition::Residualized
             )
         {
             return Err(OpLoweringRefusal::missing_machine_projection());
@@ -651,7 +650,7 @@ mod indexed_argument_tests {
             r2types::CallsiteRenderFact {
                 callsite,
                 target: Some(r2ssa::ValueId(9)),
-                disposition: r2types::CallsiteRenderDisposition::SideEffectStatement,
+                disposition: r2types::CallsiteRenderDisposition::Statement,
                 proof_values: proof_values.iter().copied().map(r2ssa::ValueId).collect(),
                 residual_reason: None,
             },
