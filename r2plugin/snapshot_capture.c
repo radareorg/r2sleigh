@@ -5000,6 +5000,14 @@ static bool call_site_interface_snapshot_collect_one(
 	// the prototype as incomplete because the identity is settled elsewhere
 	// withholds what was recovered here.
 	interface->complete = arguments_complete && result_complete;
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		eprintf ("r2sleigh: callsite iface call=%#" PFMT64x " target=%#" PFMT64x
+			" cc=%s ret_type=%s result_kind=%d args_ok=%d result_ok=%d complete=%d\n",
+			callee->call_addr, callee->addr, r_str_get (calling_convention),
+			r_str_get (callee->signature->ret_type), (int)interface->result_kind,
+			arguments_complete? 1: 0, result_complete? 1: 0,
+			interface->complete? 1: 0);
+	}
 	return true;
 }
 static bool call_site_interfaces_snapshot_collect(

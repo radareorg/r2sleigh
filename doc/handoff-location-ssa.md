@@ -17200,3 +17200,43 @@ the capture builds.
 The probe itself stays, behind `R2SLEIGH_DEBUG_INTERFACE`. It is the instrument
 that turned three plausible explanations into one fact, and the next question is
 the same shape.
+
+### The capture is clean; the loss is the engine's reaching walk
+
+The second probe closes the capture side completely:
+
+```
+callsite iface call=0x3ee2 target=0x3860 cc=amd64 ret_type=Cell *
+                result_kind=2 args_ok=1 result_ok=1 complete=1
+```
+
+`result_kind=2` is `R_ANAL_SNAPSHOT_RETURN_REGISTER`, and every coordinate is
+complete. All four call sites of `snocString` report the same. So the capture
+hands the engine a complete call-site interface naming a register result, and
+nothing about the callee's prototype, its clone suffix, or the type database is
+at fault.
+
+That re-reads the engine-side evidence. `arguments_complete=false` is the
+*engine's own* argument resolution failing -- "argument 1 in Register offset 48
+has no reaching value" -- not a capture gap. And since `interface.result()` is
+`Register`, `results` comes from `call_result_values_after_call`, so
+`results_complete = true` means that call returned `Some`, which may still be
+`Some(vec![])`.
+
+**One candidate remains, and it explains both halves at once.** At 0x3edf the
+argument in `rsi` is loop-carried -- only `rdi` is set at the call -- and the
+reaching walk does not find it. If the same walk cannot find the value the call
+leaves in `rax` either, then `results` is `Some(empty)`, no certificate matches
+the `CallDefine`, and no completeness flag anywhere can help. One defect in the
+reaching analysis would then account for the failed argument *and* the
+uncertified result.
+
+The check is to print what `call_result_values_after_call` returns for
+`(0x3edf, 3)`, in `crates/r2ssa/src/semantic.rs`. If it is empty, the work is in
+the reaching walk around a loop-carried value, which is a different subsystem
+from everything traced so far and is where this class actually lives.
+
+Both probes stay behind `R2SLEIGH_DEBUG_INTERFACE`. Between them they took this
+from "the largest engine-side refusal class" to "one function in
+`crates/r2ssa`", and ruled out the capture, the wire, the CFG, the SSA
+construction, the callee prototype and the completeness gates on the way.
