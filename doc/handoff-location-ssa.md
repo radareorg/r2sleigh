@@ -16519,3 +16519,33 @@ the entry defect fixed this session: a block placed after a `ret` is easy to
 join to the wrong predecessor, and joining 0x3edf to 0x3ed0 would put the
 `pop r14` on its incoming path and make the caller's `r14` -- which has no
 definition in this function -- the value that reaches the read.
+
+### That hypothesis is disproved, and here is what is actually established
+
+The epilogue-fallthrough guess in the previous entry is wrong. Checked against
+the engine's own CFG for `dbg.addFlagsFromEnvVar`:
+
+- the block sets match exactly, 25 blocks in radare2 and 25 in the engine, with
+  no address in one and not the other, so nothing was dropped at capture;
+- block 0x3ed0 ends in `ret` with no successor, so it never joins 0x3edf;
+- 0x3edf's only predecessor is 0x3e7b, exactly as radare2 has it.
+
+So the CFG is right. The write `R14 = 0x180e0` is present in the lift, in block
+0x3dd2, and every path to 0x3e7b passes through 0x3dd2 -- the entry's two early
+exits both jump to 0x3ed0, and the only way onward is through 0x3dd2. The
+definition dominates the read, the edge exists, and the SSA still reports the
+read as unbound.
+
+One thing looked wrong along the way and is not: the CFG dump prints block 0x3dd2
+with `call 0x24f0` on its terminator line and draws no successor arrow, while a
+single-successor block elsewhere (0x3edf, ending `jmp 0x3ea8`) does draw one.
+That reads like a lost fallthrough, but block 0x3dd2's last instruction is a
+`nop` at 0x3dee, not the call, so `snapshot_terminal_flow` classifies it
+`SEQUENTIAL` and the edge is kept. The terminator line is the dump summarising
+the last significant operation, not the block's real terminator, which is worth
+knowing before reading these dumps again.
+
+What is left is a question about the SSA itself rather than about capture or the
+CFG, and it needs `a:sla.debug.ssa.func` rather than more disassembly: with the
+definition in 0x3dd2 dominating a read in 0x3edf, why does `BindingId(220)` get
+no reaching value. That is the exact question to open with.
