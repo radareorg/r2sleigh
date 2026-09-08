@@ -75,6 +75,14 @@ pub(crate) enum BindingRole {
     /// exist, which refused the whole function for saying what the program
     /// actually does.
     EntryValue,
+    /// A convention-clobbered register a call left changed, that no result
+    /// certificate claims and no callee body proves preserved.
+    ///
+    /// The program reads whatever the callee happened to leave there. That is
+    /// indeterminate for the same reason an entry value is, and it is spelled
+    /// apart from one because it becomes indeterminate at a call rather than at
+    /// entry, which is what a reader needs to know to judge the read.
+    CallClobbered,
 }
 
 /// One rendered C object. The name hint is presentation only, never identity.
@@ -89,6 +97,8 @@ pub(crate) struct Binding {
     /// re-derived independently by the sealing oracle, never from a name or a
     /// register spelling.
     caller_supplied: bool,
+    /// Whether some member is a call clobber no result certificate claims.
+    call_clobbered: bool,
 }
 
 impl Binding {
@@ -1399,6 +1409,8 @@ impl BindingPlan {
         let Some(role) = roles.next() else {
             return Some(if binding.caller_supplied {
                 BindingRole::EntryValue
+            } else if binding.call_clobbered {
+                BindingRole::CallClobbered
             } else {
                 BindingRole::Local
             });
@@ -1421,7 +1433,9 @@ impl BindingPlan {
     /// its first read.
     pub(crate) fn binding_is_entry_declared(&self, binding: BindingId) -> Option<bool> {
         let role = self.binding_role(binding)?;
-        if matches!(role, BindingRole::EntryValue) {
+        // Neither can be required to be assigned before its first read: one
+        // holds a value from entry, the other from whatever a call left.
+        if matches!(role, BindingRole::EntryValue | BindingRole::CallClobbered) {
             return Some(true);
         }
         // Storage above the entry stack pointer holds a value on entry for the

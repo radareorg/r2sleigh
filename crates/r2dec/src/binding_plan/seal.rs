@@ -719,9 +719,27 @@ impl BindingPlan {
                             }
                             _ => false,
                         });
+                    // Re-derived here too rather than trusting the plan: a
+                    // call clobber nothing claims is supplied from outside.
+                    let expected_call_clobbered = component.members.iter().any(|value| {
+                        graph.def_inst(*value).is_some_and(|inst| {
+                            graph.inst(inst).is_some_and(|inst| {
+                                matches!(
+                                    inst.payload,
+                                    r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
+                                )
+                            })
+                        }) && !source_owned
+                            .source()
+                            .facts()
+                            .certificates
+                            .call_results
+                            .contains_key(value)
+                    });
                     if actual != &component.members
                         || binding.certificate.sources.as_ref() != expected_sources.as_slice()
                         || binding.caller_supplied != expected_caller_supplied
+                        || binding.call_clobbered != expected_call_clobbered
                     {
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::CertificateMembership {

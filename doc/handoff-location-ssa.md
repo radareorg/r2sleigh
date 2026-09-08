@@ -17288,3 +17288,46 @@ bucket exposes the Clobbered bucket beneath it.
 For future measurement: comparing cause-string counts is not enough to judge a
 change of this kind. The per-function set of refused bindings is the thing to
 diff, and `placement-decision` prints it.
+
+### Step 3: a clobbered post-call register is declared, not refused
+
+`RDX_1` in `dbg.addFlagsFromEnvVar` is a `CallDefine` for a caller-saved
+register that no result certificate claims and no callee body proves preserved.
+The program reads it, so it reads whatever the callee left -- the **Clobbered**
+case of the post-call invariant, and the last of the three.
+
+The plan already modelled the shape. `BindingRole::EntryValue` exists for a
+value the function reads before writing, declared without an assignment being
+demanded, and `binding_is_entry_declared` is what exempts it from
+`placement.rs`'s missing-definition refusal. What it did not cover is this case,
+because `caller_supplied` is derived as "some member has no defining
+instruction" and a `CallDefine` has one.
+
+`Binding` now carries `call_clobbered` beside `caller_supplied`, set when a
+member is defined by a `CallDefine` that the artifact's
+`certificates.call_results` does not claim. `BindingRole::CallClobbered` is
+returned for it -- deliberately a separate variant rather than overloading
+`EntryValue`, because a reader needs to know the value became indeterminate *at
+a call* rather than at entry -- and `binding_is_entry_declared` answers true for
+both, since neither can be required to be assigned before its first read.
+
+The sealing oracle re-derives `call_clobbered` independently and compares, the
+same way it already does for `caller_supplied`. That duplication is the design:
+the seal exists to disagree with the plan.
+
+Measured on the traced function, the refusal moves again:
+
+```
+before step 3:  native declaration placement refused: missing_definition   (RDX_1)
+after  step 3:  native rendering refused: observation journal: RenderedValueRequired
+```
+
+`missing_definition` is gone and the function now stops at the plan/journal
+boundary -- which is step 4's territory, exactly as the plan predicted the
+sequence would run. Three of the three post-call buckets are now accounted for:
+Result by the per-coordinate boundary, Preserved by the capture (bounded by
+breadth, not depth), and Clobbered by this role.
+
+Gates hold at 54 pass on raw, differential, binding, effect, placement and
+render refusal, with snapshot 42/12 and diagnostic 48/6 unchanged; 378 r2dec and
+520 r2ssa unit tests pass.

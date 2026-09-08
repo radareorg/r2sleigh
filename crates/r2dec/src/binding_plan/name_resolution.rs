@@ -246,7 +246,9 @@ impl BindingNameResolution {
                 // An incoming machine value renders as an ordinary object; the
                 // role only says the declaration comes from entry rather than
                 // from a statement.
-                Some(BindingRole::Local | BindingRole::EntryValue) => SymbolRole::Carrier,
+                Some(BindingRole::Local | BindingRole::EntryValue | BindingRole::CallClobbered) => {
+                    SymbolRole::Carrier
+                }
                 None => {
                     return Err(BindingNameResolutionError::ConflictingCertifiedRoles(
                         binding_id,

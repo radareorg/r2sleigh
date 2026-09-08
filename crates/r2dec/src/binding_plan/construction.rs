@@ -145,6 +145,34 @@ pub(super) fn unanimous_value_binding(
 }
 
 /// The binding a stack object takes, sharing one with the values its reloads
+/// Whether a call left this register changed and nothing says what is in it.
+///
+/// The convention says a call may clobber the carrier, and no result
+/// certificate claims the callee returned a value there, so the program reads
+/// whatever the callee happened to leave.
+fn value_is_unclaimed_call_clobber(
+    source_owned: &SourceOwnedFunctionFacts,
+    graph: &r2ssa::SsaGraph,
+    value: ValueId,
+) -> bool {
+    let Some(inst) = graph.def_inst(value) else {
+        return false;
+    };
+    let defined_by_call = graph.inst(inst).is_some_and(|inst| {
+        matches!(
+            inst.payload,
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
+        )
+    });
+    defined_by_call
+        && !source_owned
+            .source()
+            .facts()
+            .certificates
+            .call_results
+            .contains_key(&value)
+}
+
 /// certify as its contents where there is one.
 fn bind_stack_object(
     bindings: &mut Vec<Binding>,
@@ -176,6 +204,7 @@ fn bind_stack_object(
         },
         presentation_name_hint,
         caller_supplied,
+        call_clobbered: false,
     });
     Ok(binding)
 }
@@ -746,6 +775,10 @@ impl BindingPlan {
                 .members
                 .iter()
                 .any(|value| graph.def_inst(*value).is_none());
+            let call_clobbered = component
+                .members
+                .iter()
+                .any(|value| value_is_unclaimed_call_clobber(source_owned, graph, *value));
             bindings.push(Binding {
                 declaration_type: super::rules::declaration_type_for_binding(
                     source_owned,
@@ -765,6 +798,7 @@ impl BindingPlan {
                 },
                 presentation_name_hint: Some(first.var.display_name()),
                 caller_supplied,
+                call_clobbered,
             });
         }
 
@@ -840,6 +874,7 @@ impl BindingPlan {
                         },
                         presentation_name_hint: None,
                         caller_supplied: false,
+                        call_clobbered: false,
                     });
                     binding
                 }
