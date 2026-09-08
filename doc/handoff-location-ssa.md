@@ -17532,3 +17532,25 @@ then **592 rendered / 100 refused / 0 silent** of 692 at `54ac846e`.
 The largest remaining class is `RenderedValueRequired` at sixteen, up from ten
 before step 3 introduced `BindingRole::CallClobbered`. That growth is this
 session's and is the next thing to trace.
+
+### The next thread: a rendered site claims a value it never renders
+
+`RenderedValueRequired` is the largest remaining class at sixteen, up from ten
+before step 3. Most of that growth is revealed rather than caused:
+`dbg.BZ2_hbMakeCodeLengths` for instance used to refuse at the interface for
+overlapping slots and now reaches the journal.
+
+`fcn_1260` in bzip2recover_O2 is the shape to start from. `ValueId(3948)` is a
+`CallDefine` of `RAX` with **no readers at all** -- `uses=0`, `readers=[]` --
+disposed `Bound { binding: BindingId(1501) }`, and it carries observation
+target 18292, which is a plain `Value(ValueId(3948))`. So a rendered
+instruction registered an obligation to render this value and the cell was
+never filled.
+
+That is not the same defect as the call clobber. A clobber has readers that are
+all elided; this value has none, and something still promised to render it. The
+two candidate owners are the plan, for binding a value with no reader instead
+of eliding it, and `discharged_instruction_targets`, for registering a value
+observation the statement does not in fact discharge. Which one is wrong is the
+question, and the probe that prints a value's observation targets under
+`R2DEC_TRACE_REFUSAL` is now in place to answer it.

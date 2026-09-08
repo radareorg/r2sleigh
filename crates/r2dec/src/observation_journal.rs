@@ -3485,6 +3485,15 @@ impl LegacyObservationJournal {
                                 .collect::<String>())
                         );
                     }
+                    for id in &targets {
+                        eprintln!(
+                            "   target {id} = {:?}",
+                            self.targets.get(*id).map(|target| format!("{target:?}")
+                                .chars()
+                                .take(160)
+                                .collect::<String>())
+                        );
+                    }
                     let other_unaccounted = self
                         .values
                         .iter()
