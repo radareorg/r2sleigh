@@ -16957,3 +16957,52 @@ check that should have preceded it, and the second where the check was a search
 whose root was too narrow. A claim that a mechanism has no callers is only as
 good as the tree the search covered; for this workspace that tree is the
 repository root, because `r2plugin/` is a crate outside `crates/`.
+
+### A1 landed: the capture measures a scalar slot's extent from its own accesses
+
+`fcn_context_slot_measured_extent` decodes the instruction at each address in
+`var->accesses` and takes the widest memory reference it makes, skipping any
+op whose direction is `R_ANAL_OP_DIR_REF` because a `lea` computes an address
+and dereferences nothing. A scalar slot's extent then becomes the narrower of
+what its type spells and what its accesses touched; an aggregate's stands,
+because an array or struct legitimately exceeds any single access.
+
+Two things about the implementation are worth recording because both were wrong
+on the first attempt and the instrumentation is what settled them.
+
+**The width is `op.refptr`, not the operand vectors.** `R_ARCH_OP_MASK_VAL` is
+supposed to fill `op.dsts`/`op.srcs` with `RArchValue.memref`, and for x86-64
+`aoj` shows no such fields at all. `refptr` carries it -- 4 for
+`mov dword [rbp - 0x14], edx` -- and is only misleading for `lea`, which the
+direction check already excludes. The operand scan is kept as a refinement for
+architectures that do populate it.
+
+**The `dwarf_declared` exemption had to go, and the instrumentation is why.**
+The first version refused to narrow a slot the debug information declared, on
+the reading that DWARF is exact. Printing the two widths side by side for
+`dbg.adler32` in a debug build shows why that is wrong:
+
+```
+var_10h  Bytef const *  dwarf=1  type_size=8  measured=8
+var_14h  z_size_t       dwarf=1  type_size=8  measured=4     <- the defect
+var_8h   uLong          dwarf=1  type_size=8  measured=8
+```
+
+Every slot in the function reports `dwarf=1`, including `var_14h`, whose name is
+radare2's synthetic `var_XXh` rather than anything DWARF supplied. So the flag
+says the *slot* was declared, not that the *type currently on it* came from
+DWARF -- and this type did not: `af` alone gives `int32_t` and `aaft` replaces
+it with the callee's `z_size_t`. Exempting on that flag exempted exactly the
+case the measurement exists for.
+
+The rule as it now stands is the narrower of the two rather than the measurement
+outright, which is the tightest claim that is sound in the direction that
+matters: the extent exists to prove slots disjoint, so under-claiming can only
+prevent a false overlap, while over-claiming is what caused the defect. It also
+means an instruction that touches eight bytes at a slot radare2 typed four wide
+cannot silently widen it and create a new overlap.
+
+`dbg.adler32` renders with the correct `uint32_t len`, and `uInt64_toAscii`
+still renders. Corpus gates hold at 54 pass on raw, differential, binding,
+effect, placement and render refusal, with snapshot 42/12 and diagnostic 48/6
+unchanged.

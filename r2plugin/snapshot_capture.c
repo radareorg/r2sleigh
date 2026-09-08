@@ -545,6 +545,56 @@ static bool fcn_context_dwarf_formal_ordinal(RAnal *anal, RAnalFunction *fcn,
 	return true;
 }
 
+/* The widest memory reference among an operand list, which is what an access
+ * establishes about the bytes it touched. */
+static ut32 fcn_context_widest_memref(RVecRArchValue *values, ut32 measured) {
+	RArchValue *value;
+	R_VEC_FOREACH (values, value) {
+		if (value && value->memref > 0 && (ut32)value->memref > measured) {
+			measured = (ut32)value->memref;
+		}
+	}
+	return measured;
+}
+
+/* The extent a slot's own accesses established, or zero when none did. A type
+ * is a spelling of those bytes rather than a count of them. */
+static ut32 fcn_context_slot_measured_extent(RAnal *anal, RAnalFunction *fcn, RAnalVar *var) {
+	ut32 measured = 0;
+	if (!anal->iob.read_at) {
+		return 0;
+	}
+	RAnalVarAccess *access;
+	R_VEC_FOREACH ((RVecAnalVarAccess *)&var->accesses, access) {
+		if (!access) {
+			continue;
+		}
+		const ut64 addr = fcn->addr + access->offset;
+		ut8 bytes[32] = {0};
+		if (anal->iob.read_at (anal->iob.io, addr, bytes, (int)sizeof (bytes))
+				!= (int)sizeof (bytes)) {
+			continue;
+		}
+		RAnalOp op;
+		r_anal_op_init (&op);
+		const int decoded = r_anal_op (anal, &op, addr, bytes, (int)sizeof (bytes),
+			R_ARCH_OP_MASK_BASIC | R_ARCH_OP_MASK_VAL);
+		// `lea` computes an address and dereferences nothing, so it says
+		// where the slot is and nothing about how wide it is.
+		if (decoded > 0 && op.direction != R_ANAL_OP_DIR_REF) {
+			// How many bytes this instruction moves through its memory
+			// operand, which is the claim the access makes about the slot.
+			if (op.refptr > 0 && (ut32)op.refptr > measured) {
+				measured = (ut32)op.refptr;
+			}
+			measured = fcn_context_widest_memref (&op.dsts, measured);
+			measured = fcn_context_widest_memref (&op.srcs, measured);
+		}
+		r_anal_op_fini (&op);
+	}
+	return measured;
+}
+
 static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext *ctx, RAnalFunction *fcn, RAnalVar *var, RAnalVar *home_source, int arg_index) {
 	const RAnalFunctionParam *signature_param = NULL;
 
@@ -623,6 +673,7 @@ static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext
 	} else {
 		slot->arg_index = -1;
 	}
+	bool type_is_aggregate = false;
 	if (R_STR_ISNOTEMPTY (slot->type)) {
 		// An array slot is as wide as its element repeated: the type
 		// database sizes only the element's spelling, so a local declared
@@ -645,6 +696,28 @@ static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext
 		if (bits && count && !r_mul_overflow (bits, count, &total_bits)
 			&& !(total_bits % 8) && total_bits / 8 <= UT32_MAX) {
 			slot->size = (ut32)(total_bits / 8);
+		}
+		char *resolved = r_type_resolve_typedef (anal->sdb_types, slot->type);
+		const RTypeKind kind = r_type_kind (anal->sdb_types,
+			resolved? resolved: slot->type);
+		free (resolved);
+		type_is_aggregate = count > 1
+			|| kind == R_TYPE_STRUCT || kind == R_TYPE_UNION;
+	}
+	// An aggregate's extent is a statement about the object and a DWARF
+	// declaration is exact, so both may exceed what the accesses touched. A
+	// scalar radare2 inferred may not: the accesses are what the program did.
+	// An aggregate's extent exceeds any single access, so it stands; a scalar's
+	// tightest sound claim is the narrower of its type and its accesses.
+	if (!type_is_aggregate) {
+		const ut32 measured = fcn_context_slot_measured_extent (anal, fcn, var);
+		if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+			eprintf ("r2sleigh: slot extent fcn=%s %s type=%s type_size=%u measured=%u\n",
+				r_str_get (fcn->name), r_str_get (slot->name),
+				r_str_get (slot->type), slot->size, measured);
+		}
+		if (measured > 0 && (!slot->size || measured < slot->size)) {
+			slot->size = measured;
 		}
 	}
 
