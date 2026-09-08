@@ -15910,3 +15910,47 @@ as a function of its own. Whether that is worth building depends on how common
 the split is across DecBench rather than in one binary here, which is the next
 thing to measure -- the lesson of this session being that a lead measured on six
 binaries has twice now been worth nothing at scale.
+
+### Counting the cold partitions: rare overall, but two thirds of a refusal class
+
+Across every DecBench binary retained on the benchmark host, `.cold` partitions
+appear only at -O2 and only rarely:
+
+```
+O0    20 binaries   cold=0    funcs=7477   0.00%
+O1     7 binaries   cold=0    funcs=4874   0.00%
+O2    18 binaries   cold=29   funcs=6442   0.45%
+```
+
+Read as a rate, that says do not bother. Read against the refusals it says the
+opposite. The benchmark's own census over the nine binaries of the last run:
+
+```
+coverage 606/735 = 0.824
+refusal causes: 129 functions
+   23  missing_definition
+   18  unrepresentable operation
+   14  BindingPlanBuild
+   11  OpLowering(implementation.rs:1359)
+   10  region_does_not_dominate_occurrence
+    8  engine complexity limit
+    8  UnownedBindingSymbol
+    6  deadline exceeded during structuring
+    5  PlannedElidedValueRendered
+    3  RenderedValueRequired
+```
+
+Of the 18 `unrepresentable operation` functions, **12 are cold-partition
+parents** -- `main`, `gz_compress`, `file_compress` and `file_uncompress` across
+three zlib binaries. The remaining six are `gz_open` in five binaries and
+bzip2's `testStream`.
+
+So 0.45% of functions account for 9.3% of all refusals and two thirds of that
+class. Recovering them takes this selection from 606/735 to 618/735, +1.7
+points, from one fix at one root.
+
+The ranking also corrects the local census this session kept steering by.
+`RenderedValueRequired` is 10 locally and **3** here; `unrepresentable
+operation` is 8 locally and 18 here. A six-binary proxy has now been wrong about
+target selection three times, and the benchmark's own census is cheap to read
+from a run that has already happened.
