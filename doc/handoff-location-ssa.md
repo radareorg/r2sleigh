@@ -15652,3 +15652,70 @@ elsewhere in the benchmark rather than in this corpus.
 The eight are also, all of them, structuring refusals reported under the
 linearizer's name. Whatever is done next, `unrepresentable operation` should
 stop being what the census says about them.
+
+### Following it down: the composer drops the continuation of a multi-exit loop
+
+Building the completion described above took four changes, all of which worked
+and none of which rendered a function. They are recorded here because the last
+of them found the actual root, which is architectural rather than a bug at a
+line.
+
+**The capability was built and it works.** On-demand region construction for an
+unclaimed continuation is a small addition: `analyze_unclaimed_continuation`
+reuses `analyze_loop_body` over the set of blocks no region claimed, and the
+structurer calls it when a deferred shared exit's head branches instead of
+walking successors in a line. With it, `minigzip_O2` `main` gets past "shared
+exit block 0x2565 branches where the exits join" to a domain question three
+layers further in.
+
+**What the trace found underneath.** Instrumenting the region tree against the
+function's own block list shows the size of the problem:
+
+```
+REGIONTREE blocks=23 of 33 reason=None unclaimed=[0x2565, 0x2570, ...]   (main, -O2)
+REGIONTREE blocks=22 of 52 reason=None unclaimed=[0x2f62, 0x2f68, ...]   (0x2e80)
+```
+
+`reason=None`: the analyzer does not think it failed. Ten and thirty blocks
+respectively are simply not in any region, and unclaimed blocks are ordinary --
+even a function that renders has them.
+
+The cause is in the loop collapse. A loop's collapsed node is given exactly one
+successor, its canonical fallthrough, and other outside edges are meant to
+survive as `Region::Transfer` nodes. `get_loop_fallthrough` finds that
+continuation through the same three-way classification the loop form uses, so a
+loop no single test controls has none, the collapsed node gets no successor at
+all, and everything after the loop becomes unreachable in the working graph.
+
+Two attempts to close that both failed, and the second says why. Returning the
+one block outside the body when there is one does nothing here, because this
+loop leaves to two:
+
+```
+LOOPCOLLAPSE header=0x2544 all_external=["0x2565", "0x2806"] canonical=None
+```
+
+Handing the composer both is worse rather than better -- one function goes from
+22 claimed blocks to 21 -- because `Region::MultiExit` only *names* the targets
+control can leave through. `Region::blocks()` on it returns the head's blocks
+alone, so a MultiExit claims no continuation either.
+
+**So the root is this.** A loop that leaves through more than one target has no
+place in the region tree for what follows it, and three separate mechanisms --
+deferred shared exits, exit-continuation chains, and transfer lowering -- try to
+place those blocks after the fact, each meeting the next gap. The right
+structure for such a loop is not in question:
+
+```c
+while (1) { ... if (a) goto L1; ... if (b) goto L2; }
+L1: ...
+L2: ...
+```
+
+The continuations are sequenced after the loop and labelled, and each exit is a
+jump to one. What is in question is where that belongs: teaching `MultiExit` to
+own and structure its continuations, or rebuilding the loop collapse so each
+exit target is sequenced rather than named. That is a design decision about the
+composer, not a defect to trace, so it is recorded rather than guessed at.
+
+Everything was reverted; the tree is at 614/692 with the corpus unchanged.
