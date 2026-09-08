@@ -15249,3 +15249,25 @@ line rather than merely accusing it.
 The fix collapses only a spelling with no `*` in it, and only for the three
 names `tp_expand_int` inverts. It is a radare2 correctness fix unrelated to
 Sleigh, so it goes upstream on its own branch.
+
+The measurement, on the same six binaries the earlier census used: 599/692
+rendered before, 602/692 after, and `PlannedElidedValueRendered` falls from 16
+reports to 13. `syncsearch` is one of the three, and the local census
+reproduces the earlier session's baseline number exactly, so the three are
+attributable to these two radare2 commits and nothing else.
+
+Two things the trace turned up and did not fix. The prefix path of
+`tp_built_type` builds `"unsigned int64_t"` when a signedness fact meets a
+variable already typed `int64_t`, which the collapse used to hide by rewriting
+it to `uint32_t`; the honest form keeps the variable's width and changes only
+its sign. And `unsigned char`, `unsigned short` and `unsigned long` still
+collapse to `uint32_t`, so three widths are wrong wherever a bare integer
+carries one of those spellings. Both are radare2's and both want their own
+change; neither is what refused a function here.
+
+`syncsearch` renders now, and its body still reads `len = (uint32_t)RDX_0;`
+against an undeclared `uint64_t RDX_0`. The parameter home for `len` is a
+four-byte slot written by `mov dword [var_24h], edx`, and the incoming 64-bit
+`RDX_0` it is narrowed from has no definition. That is the subregister
+argument-spill class, and it is a correctness defect in a function the census
+now counts as rendered.
