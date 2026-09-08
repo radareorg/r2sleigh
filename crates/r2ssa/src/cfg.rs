@@ -88,11 +88,15 @@ pub enum BlockTerminator {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeclaredSuccessors {
     by_block: BTreeMap<u64, BTreeSet<u64>>,
+    entry: Option<u64>,
 }
 
 impl DeclaredSuccessors {
     pub fn from_source_image(image: &r2source::OwnedFunctionImage) -> Self {
-        let mut declared = Self::default();
+        let mut declared = Self {
+            entry: Some(image.entry_address()),
+            ..Self::default()
+        };
         for block in image.blocks() {
             declared.insert(
                 block.address(),
@@ -107,6 +111,14 @@ impl DeclaredSuccessors {
 
     pub fn insert(&mut self, block: u64, successors: impl IntoIterator<Item = u64>) {
         self.by_block.entry(block).or_default().extend(successors);
+    }
+
+    /// The block the source says control enters at.
+    ///
+    /// It is not always the lowest-addressed one: a function GCC split across a
+    /// hot and a cold range enters in the hot half, which is placed after.
+    pub const fn entry(&self) -> Option<u64> {
+        self.entry
     }
 
     /// Blocks the source declares to have no successor at all.
@@ -526,7 +538,9 @@ impl CFG {
             return None;
         }
 
-        let entry = blocks[0].addr;
+        let entry = declared
+            .and_then(DeclaredSuccessors::entry)
+            .unwrap_or(blocks[0].addr);
         let mut cfg = Self::new(entry);
 
         for block in blocks {
@@ -1030,6 +1044,43 @@ mod tests {
         };
         assert_eq!(cases.len(), 8);
         assert_eq!(*default, Some(0x4020u64));
+    }
+
+    #[test]
+    fn the_source_decides_the_entry_when_it_is_not_the_lowest_block() {
+        // GCC splits a function across a hot and a cold range and places the
+        // cold half first, so the lowest-addressed block is not the entry.
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 1,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0x1001, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x2000,
+                size: 1,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0x2001, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let guessed = CFG::from_blocks(&blocks).expect("cfg");
+        assert_eq!(guessed.entry, 0x1000);
+
+        let declared = DeclaredSuccessors {
+            entry: Some(0x2000),
+            ..DeclaredSuccessors::default()
+        };
+        let sourced =
+            CFG::from_blocks_with_declared_successors(&blocks, Some(&declared)).expect("cfg");
+        assert_eq!(sourced.entry, 0x2000);
     }
 
     #[test]

@@ -758,13 +758,17 @@ static bool sleigh_function_exceeds_engine_limits(RAnalFunction *fcn) {
  * already exactly it. Returns NULL when the walk refused or when the analysis
  * changed underneath it, which is the same fail-closed answer the three
  * callers gave before. */
-static const SleighFunctionCapture *sleigh_function_capture(RAnal *anal, RAnalFunction *fcn) {
+static const SleighFunctionCapture *sleigh_function_capture_with_reason(RAnal *anal, RAnalFunction *fcn, const char **reason) {
+	// Every exit names its cause, so a caller that has to decline in band can
+	// say which one it was rather than only that the capture is absent.
+	const char *cause = "the function could not be captured";
 	if (!anal || !fcn) {
-		return NULL;
+		goto refused;
 	}
 	RCore *core = anal->coreb.core;
 	if (!core) {
-		return NULL;
+		cause = "radare2 offered no core to capture from";
+		goto refused;
 	}
 	/* Ask radare2 how big this is before collecting anything. The engine
 	 * declines a function past its block and operation caps, and until now it
@@ -776,9 +780,9 @@ static const SleighFunctionCapture *sleigh_function_capture(RAnal *anal, RAnalFu
 	 * reason. radare2's own block count and instruction total are a floor for
 	 * what lifting produces, so nothing refused here would have been accepted. */
 	if (sleigh_function_exceeds_engine_limits (fcn)) {
-		R_LOG_ERROR ("r2sleigh: capture refused '%s': the function exceeds the engine complexity limit",
-			r_str_get (fcn->name));
-		return NULL;
+		cause = "the function exceeds the engine complexity limit";
+		R_LOG_ERROR ("r2sleigh: capture refused '%s': %s", r_str_get (fcn->name), cause);
+		goto refused;
 	}
 	const ut64 function_epoch = r_anal_function_dirty_epoch (fcn);
 	const ut64 type_epoch = r_anal_types_dirty_epoch (anal);
@@ -798,8 +802,8 @@ static const SleighFunctionCapture *sleigh_function_capture(RAnal *anal, RAnalFu
 	if (!snapshot) {
 		/* The capture names what it refused; dropping that name left every
 		 * refused function reporting only that it could not be captured. */
-		R_LOG_ERROR ("r2sleigh: capture refused '%s': %s", r_str_get (fcn->name),
-			refusal? refusal: "no reason recorded");
+		cause = refusal? refusal: "no reason recorded";
+		R_LOG_ERROR ("r2sleigh: capture refused '%s': %s", r_str_get (fcn->name), cause);
 	}
 	uint8_t *wire = NULL;
 	size_t wire_len = 0;
@@ -822,15 +826,15 @@ static const SleighFunctionCapture *sleigh_function_capture(RAnal *anal, RAnalFu
 		/* Four conditions end here and the caller sees only that the capture
 		 * is absent; name the one that failed. */
 		if (snapshot_taken) {
-			R_LOG_ERROR ("r2sleigh: capture refused '%s': %s", r_str_get (fcn->name),
-				!wire? "the snapshot could not be serialized"
+			cause = !wire? "the snapshot could not be serialized"
 				: !revision? "the snapshot carries no revision identity"
 				: r_anal_function_dirty_epoch (fcn) != function_epoch
 					? "the function changed during capture"
-					: "the type database changed during capture");
+					: "the type database changed during capture";
+			R_LOG_ERROR ("r2sleigh: capture refused '%s': %s", r_str_get (fcn->name), cause);
 		}
 		free (wire);
-		return NULL;
+		goto refused;
 	}
 	held->valid = true;
 	held->addr = fcn->addr;
@@ -840,6 +844,16 @@ static const SleighFunctionCapture *sleigh_function_capture(RAnal *anal, RAnalFu
 	held->wire = wire;
 	held->wire_len = wire_len;
 	return held;
+
+refused:
+	if (reason) {
+		*reason = cause;
+	}
+	return NULL;
+}
+
+static const SleighFunctionCapture *sleigh_function_capture(RAnal *anal, RAnalFunction *fcn) {
+	return sleigh_function_capture_with_reason (anal, fcn, NULL);
 }
 
 static R2ILContext *sleigh_ctx = NULL;
@@ -3544,32 +3558,36 @@ static ut64 sleigh_engine_call_deadline_us(RAnal *anal) {
 	return r2sleigh_engine_budget_usec_v2 (function_count);
 }
 
+// In band, and in the shape every other refusal takes. Returning nothing leaves
+// the function neither rendered nor declined, which reads as a function nobody asked about.
+static RCodeMeta *sleigh_decline(const RAnalFunction *fcn, const char *reason) {
+	char *refusal = r_str_newf ("/* r2sleigh refused %s: %s */\n",
+		r_str_get (fcn->name), reason);
+	if (!refusal) {
+		return NULL;
+	}
+	RCodeMeta *declined = r_codemeta_new (refusal);
+	free (refusal);
+	return declined;
+}
+
 static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 	R_RETURN_VAL_IF_FAIL (anal && fcn, NULL);
 	const ut64 decompile_start_us = r_time_now_mono ();
 	if (sleigh_function_exceeds_engine_limits (fcn)) {
-		/* In band, and in the shape every other refusal takes. Returning
-		 * nothing here would leave the function neither rendered nor declined,
-		 * which reads downstream as a function nobody asked about. */
-		char *refusal = r_str_newf (
-			"/* r2sleigh refused %s: "
-			"engine refusal: function exceeds the engine complexity limit */\n",
-			r_str_get (fcn->name));
 		sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_DECOMPILE,
 			r_time_now_mono () - decompile_start_us);
-		if (!refusal) {
-			return NULL;
-		}
-		RCodeMeta *declined = r_codemeta_new (refusal);
-		free (refusal);
-		return declined;
+		return sleigh_decline (fcn,
+			"engine refusal: function exceeds the engine complexity limit");
 	}
-	const SleighFunctionCapture *held = sleigh_function_capture (anal, fcn);
+	const char *capture_refusal = "the function could not be captured";
+	const SleighFunctionCapture *held = sleigh_function_capture_with_reason (
+		anal, fcn, &capture_refusal);
 	if (!held || !held->wire) {
 		R_LOG_ERROR ("r2sleigh: cannot capture '%s'", r_str_get (fcn->name));
 		sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_DECOMPILE,
 			r_time_now_mono () - decompile_start_us);
-		return NULL;
+		return sleigh_decline (fcn, capture_refusal);
 	}
 	/* The buffer comes from the held capture rather than a walk of this
 	 * function's own: the proof path has usually taken one already, and
@@ -3589,7 +3607,7 @@ static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 		r_time_now_mono () - decompile_start_us);
 	if (!result) {
 		R_LOG_ERROR ("r2sleigh: decompilation was refused");
-		return NULL;
+		return sleigh_decline (fcn, "the engine returned no rendering and no cause");
 	}
 	RCodeMeta *metadata = r_codemeta_new (result);
 	free (result);

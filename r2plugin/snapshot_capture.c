@@ -1609,13 +1609,159 @@ static bool function_image_data_symbols_collect(RAnal *anal,
 	}
 	return true;
 }
+// GCC's -freorder-blocks-and-partition splits one function across two ranges and
+// names the second `<name>.cold`, which radare2 then lists as its own function.
+static bool function_name_is_cold_partition(const char *cold, const char *hot) {
+	const size_t hot_length = strlen (hot);
+	if (strncmp (cold, hot, hot_length) || cold[hot_length] != '.') {
+		return false;
+	}
+	const char *suffix = cold + hot_length + 1;
+	if (strncmp (suffix, "cold", 4)) {
+		return false;
+	}
+	return !suffix[4] || suffix[4] == '.';
+}
+
+static bool block_list_holds_addr(const RList *blocks, ut64 addr) {
+	RListIter *iter;
+	const RAnalBlock *block;
+	r_list_foreach (blocks, iter, block) {
+		if (block && block->addr == addr) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// The block a cold partition starts at this address, or NULL when no partition
+// of this function owns it.
+static RAnalBlock *cold_partition_block_at(RAnal *anal, const RAnalFunction *fcn, ut64 addr) {
+	RListIter *fcn_iter;
+	RAnalFunction *other;
+	if (!fcn->name) {
+		return NULL;
+	}
+	r_list_foreach (anal->fcns, fcn_iter, other) {
+		if (other == fcn || !other || !other->name || !other->bbs
+			|| !function_name_is_cold_partition (other->name, fcn->name)) {
+			continue;
+		}
+		RListIter *block_iter;
+		RAnalBlock *block;
+		r_list_foreach (other->bbs, block_iter, block) {
+			if (block && block->addr == addr) {
+				return block;
+			}
+		}
+	}
+	return NULL;
+}
+
+// Every target a block can transfer to, so the walk can ask whether each one
+// leaves the function for a cold partition.
+static ut64 block_successor_target(const RAnalBlock *block, size_t index) {
+	if (block->switch_op) {
+		const int cases = block->switch_op->cases
+			? r_list_length (block->switch_op->cases): 0;
+		if (index < (size_t)cases) {
+			const RAnalCaseOp *case_op = r_list_get_n (block->switch_op->cases, (int)index);
+			return case_op? case_op->jump: UT64_MAX;
+		}
+		index -= (size_t)cases;
+	}
+	if (!index) {
+		return block->jump;
+	}
+	if (index == 1) {
+		return block->fail;
+	}
+	return UT64_MAX;
+}
+
+static size_t block_successor_count(const RAnalBlock *block) {
+	const int cases = block->switch_op && block->switch_op->cases
+		? r_list_length (block->switch_op->cases): 0;
+	return (size_t)(cases > 0? cases: 0) + 2;
+}
+
+// The function this one is a cold partition of, when that function branches
+// into it, or NULL when this is a function in its own right.
+static RAnalFunction *cold_partition_owner(RAnal *anal, const RAnalFunction *fcn) {
+	RListIter *fcn_iter;
+	RAnalFunction *hot;
+	if (!fcn->name || !fcn->bbs) {
+		return NULL;
+	}
+	r_list_foreach (anal->fcns, fcn_iter, hot) {
+		if (hot == fcn || !hot || !hot->name || !hot->bbs
+			|| !function_name_is_cold_partition (fcn->name, hot->name)) {
+			continue;
+		}
+		RListIter *block_iter;
+		const RAnalBlock *block;
+		r_list_foreach (hot->bbs, block_iter, block) {
+			const size_t successors = block? block_successor_count (block): 0;
+			size_t index;
+			for (index = 0; index < successors; index++) {
+				const ut64 target = block_successor_target (block, index);
+				if (target != UT64_MAX && block_list_holds_addr (fcn->bbs, target)) {
+					return hot;
+				}
+			}
+		}
+	}
+	return NULL;
+}
+
+// A function's blocks together with the cold-partition blocks it branches to,
+// so that an edge out of the function does not cost the proof its guard.
+static RList *function_image_block_walk(RAnal *anal, const RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits) {
+	RList *blocks = r_list_clone (fcn->bbs, NULL);
+	if (!blocks) {
+		return NULL;
+	}
+	size_t scanned = 0;
+	while (scanned < (size_t)r_list_length (blocks)) {
+		const RAnalBlock *block = r_list_get_n (blocks, (int)scanned++);
+		if (!block) {
+			continue;
+		}
+		const size_t successors = block_successor_count (block);
+		size_t index;
+		for (index = 0; index < successors; index++) {
+			const ut64 target = block_successor_target (block, index);
+			if (target == UT64_MAX || block_list_holds_addr (blocks, target)) {
+				continue;
+			}
+			RAnalBlock *cold = cold_partition_block_at (anal, fcn, target);
+			if (!cold) {
+				continue;
+			}
+			if ((size_t)r_list_length (blocks) >= limits->max_function_blocks
+				|| !r_list_append (blocks, cold)) {
+				r_list_free (blocks);
+				return NULL;
+			}
+		}
+	}
+	return blocks;
+}
 static bool function_image_snapshot_collect(RAnal *anal, const RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits, RAnalFunctionImageSnapshot *image, const char **reason) {
 	const char *refusal = "the function image is not coherent";
+	RList *walk = NULL;
 	R_RETURN_VAL_IF_FAIL (anal && fcn && limits && image, false);
 	if (fcn->anal != anal || !anal->iob.read_at || !fcn->bbs) {
 		IMAGE_REFUSE ("the function does not belong to this analysis or has no blocks");
 	}
-	const int listed_blocks = r_list_length (fcn->bbs);
+	if (cold_partition_owner (anal, fcn)) {
+		IMAGE_REFUSE ("the address is a cold partition of another function, not a function");
+	}
+	walk = function_image_block_walk (anal, fcn, limits);
+	if (!walk) {
+		IMAGE_REFUSE ("the block list could not be walked into its cold partitions");
+	}
+	const int listed_blocks = r_list_length (walk);
 	if (listed_blocks <= 0 || (size_t)listed_blocks > limits->max_function_blocks) {
 		IMAGE_REFUSE ("the block count is zero or past its limit");
 	}
@@ -1635,7 +1781,7 @@ static bool function_image_snapshot_collect(RAnal *anal, const RAnalFunction *fc
 	size_t index = 0;
 	RListIter *iter;
 	RAnalBlock *source;
-	r_list_foreach (fcn->bbs, iter, source) {
+	r_list_foreach (walk, iter, source) {
 		if (!source || index >= count || !source->size
 			|| source->size > (ut64)SIZE_MAX || source->size > (ut64)INT_MAX
 			|| source->size > (ut64)limits->max_block_source_bytes
@@ -1665,6 +1811,8 @@ static bool function_image_snapshot_collect(RAnal *anal, const RAnalFunction *fc
 	if (index != count) {
 		IMAGE_REFUSE ("the block list changed while it was read");
 	}
+	r_list_free (walk);
+	walk = NULL;
 	image->total_source_bytes = total_source_bytes;
 	qsort (image->blocks, count, sizeof (RAnalSnapshotBlock), snapshot_block_compare);
 	ut64 previous_end = 0;
@@ -1738,6 +1886,7 @@ static bool function_image_snapshot_collect(RAnal *anal, const RAnalFunction *fc
 	return true;
 
 fail:
+	r_list_free (walk);
 	function_image_snapshot_fini (image);
 	if (reason) {
 		*reason = refusal;

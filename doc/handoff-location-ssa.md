@@ -16068,3 +16068,107 @@ of its `.cold` sibling **that the function actually branches to**, transitively
 within the sibling, rather than by the sibling's whole block list. A partition
 nothing jumps to contributes nothing, which is the right answer for `main` and
 costs it nothing.
+
+### Capturing the partition, and the entry the CFG was guessing at
+
+Extending the capture to the cold blocks a function branches to exposed a second
+defect immediately underneath it. `CFG::from_blocks_with_declared_successors`
+took the function entry as `blocks[0].addr`. The capture sorts its blocks by
+address so that the overlap check and the target classifier can binary-search
+them, and a cold partition sits *below* the hot half, so unioning the two made
+`sym.file_compress.cold` at 0x2416 the entry of `file_compress` at 0x2b60. The
+SSA validator caught it exactly:
+
+```
+PredecessorOutsideBlockDomain { block_addr: 0x2416, predecessor: 0x2bb3 }
+```
+
+Everything reachable from the wrong entry was one block, and 0x2416's real
+predecessor was no longer in the domain. The guess is older than cold partitions
+and was simply never wrong before: a radare2 function's lowest block had always
+been its entry. The image has carried `entry_address` all along, and the layout
+validator already checks that it names a declared block, so the entry was a fact
+the builder had and did not read. `DeclaredSuccessors` -- the channel that
+already carries what the source says about the shape -- now carries it, and the
+`blocks[0]` guess survives only where nothing declares one, which is the unit
+tests.
+
+With both in place, on minigzip at -O2:
+
+```
+sym.gz_compress    refused (missing canonical loop identity)  ->  renders
+sym.file_compress  refused (guard domain omits P1)            ->  renders
+sym.file_uncompress refused (5 blocks unrendered)             ->  declaration
+                                                                  placement:
+                                                                  unobserved_binding_read
+main, gz_open      unchanged, as the trace predicted
+```
+
+`file_compress` now renders its cold arm as the first branch of the function --
+`fprintf(stderr, "%s: filename too long\n", prog); exit(1);` -- which is
+precisely the code GCC moved out of line.
+
+### A cold partition is not a function, and saying so
+
+Rendering `sym.file_compress.cold` on its own produced a `void` function whose
+body reads `RBX_0` with nothing having written it, because the register is set in
+the hot half. That is the project's oldest hazard -- an uninitialised read made
+invisible by rendering it -- and it was being emitted for every partition in the
+binary. The capture now refuses an address whose name marks it a cold partition
+of a function that actually branches into it. A partition nothing branches to is
+still captured on its own, which is the right answer for radare2's bogus
+`sym.main.cold`.
+
+### The census was counting silent failures as renderings
+
+Auditing that refusal turned up something larger. Of the 692 functions in the
+local six binaries, **53 produced no output at all**: no C, and no refusal
+comment. `sleigh_decompile` returned NULL on a capture failure and on an engine
+call that came back empty, and NULL reaches the caller as nothing to print. The
+reason existed -- `dbg.license` fails with "the snapshot could not be
+serialized" -- but it went only to `R_LOG_ERROR` on stderr.
+
+The comment above the one path that did decline in band already said why this is
+wrong: returning nothing "would leave the function neither rendered nor
+declined, which reads downstream as a function nobody asked about". Both other
+paths now decline the same way, with the capture reporting its cause to the
+caller rather than only to the log.
+
+This also corrects every census number quoted in this document this session. The
+script counted a function as rendered unless its output contained a refusal
+marker, so all 53 silent failures counted as successes. **The local census was
+561/692, not 614/692**, and the sessions that steered by 614 were steering by a
+figure inflated by 53.
+
+With every function answering, the local census over the six binaries reads:
+
+```
+                     before   after
+rendered                561     560
+refused                  78     132
+silent                   53       0
+```
+
+Rendered moves by -1: `gz_compress` and `file_compress` arrive, and the three
+cold partitions that were rendering as functions correctly stop. The cause
+ranking is the point:
+
+```
+  34  the engine returned no rendering and no cause
+  19  the snapshot could not be serialized
+  11  native declaration placement refused: missing_definition
+  10  native rendering refused: observation journal: RenderedValueRequired
+   6  native rendering refused: missing machine projection authorization: BindingPlanBuild
+   5  native rendering refused: unrepresentable operation
+   5  native declaration placement refused: unobserved_binding_read
+   5  native rendering refused: missing machine projection authorization: OpLowering
+```
+
+The two largest classes in the tree were both invisible an hour ago, and
+together they are 53 of 132 refusals. "The engine returned no rendering and no
+cause" is the worse of the two by a distance: it is a refusal that names
+nothing, which is the one thing this decompiler is not allowed to produce. It
+covers whatever `sleigh_engine_execute_v2` returns NULL for, which is at least
+the SSA-integrity failure seen here and the lift parse errors logged during
+post-analysis. Attributing it is the next piece of work, and it is worth more
+than the eight structuring refusals this session started from.
