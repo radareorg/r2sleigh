@@ -16619,3 +16619,37 @@ That is the defect to fix, in `crates/r2dec` binding assignment: whatever builds
 the `writes` list from the SSA is not treating a call's result as a definition.
 The r14 analysis in the two entries above is sound about the machine and about
 the CFG, and it was about the wrong value.
+
+### Where the missing write occurrence comes from
+
+`placement.rs` builds a `FinalBindingWrite` only from a
+`PlacementObservationTarget::Write { inst, projection, block }` observation:
+
+```rust
+PlacementObservationTarget::Write { inst: inst_id, projection, block } => {
+    let value = inst.output.ok_or(...)?;
+    if let Some(binding) = bound_value (names, value)? {
+        ...
+        writes.push (FinalBindingWrite { binding, inst: inst_id, defines: Some (value), ... });
+    }
+}
+```
+
+So a definition that the *observation journal* did not record as a write
+produces no write occurrence, whatever the SSA says. `RAX_21` is defined in the
+SSA at the call to `snocString` and has no such observation, which is why
+`writes_for_binding.is_empty()` and the function is refused.
+
+The likely mechanism, and the thing to check first, is elision: if the call's
+assignment was inlined into its reader, its `SymbolAccess::Write` never reached
+the journal while the binding stayed live for another read. That is the shape
+the standing rules already cover -- a folded obligation's occurrence moves with
+the expression rather than being elided, and the inlining guard counts only
+rendered readers -- so the question is whether a call result is going through
+that path or around it.
+
+The full chain for this class is now: census count -> refusal cause ->
+`BindingId(220)` -> `RAX_21` -> the call at 0x3ee2 -> an SSA definition that
+exists -> a `PlacementObservationTarget::Write` that does not. Next session
+starts by dumping the observation journal for this function and asking which
+statement, if any, carries the call's write.
