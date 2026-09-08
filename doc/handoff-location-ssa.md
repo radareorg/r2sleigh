@@ -15719,3 +15719,57 @@ exit target is sequenced rather than named. That is a design decision about the
 composer, not a defect to trace, so it is recorded rather than guessed at.
 
 Everything was reverted; the tree is at 614/692 with the corpus unchanged.
+
+### Building the multi-exit continuation: the architecture is right, one thing is not
+
+All four parts of the plan were built. The behavioural gates stayed green
+throughout; the census did not move, and the deletion in part 4 made it worse.
+Reverted at the stop condition the plan set. What was learned is specific
+enough to resume from.
+
+**Parts 1-3 work structurally.** `Region::MultiExit` gained a `continuation`
+that `blocks()` and `entry()` include; `find_working_convergence` generalises
+the two-target branch merge to N targets with the same return-path allowance;
+`multi_exit_region` takes each exit's region out of `region_map` -- they are
+already there, because a block two exits reach is deliberately left for whoever
+post-dominates it -- and sequences them with the convergence last; the
+structurer arm renders the head and then each member behind a label, instead of
+setting a safety reason. The loop collapse keeps every external target when
+there is no canonical fallthrough, and `get_loop_fallthrough` returns the
+convergence so an exit to it is a `break`.
+
+The evidence that this is the right shape: both target functions stopped
+failing structurally and started failing on *domain coverage*, which is the
+certificate verifying the placement rather than the composer having nowhere to
+put it.
+
+```
+0x2460  loop-domain mismatch for transfer join at 0x2806
+0x2e80  control-domain coverage mismatch for transfer join at 0x2f30
+```
+
+**The one thing that is not right.** A continuation block is still emitted while
+the loop is active:
+
+```
+JOINDOMAIN 0x2806 source_loops=[] active=[[LoopId(0)], [LoopId(0)]]
+                  alternatives=[[LoopId(0)], [LoopId(0)], [], []]
+```
+
+The transfer's own recorded domain is correct -- the `[]` entries --
+`transfer_target_domains_for` strips the loop and validates it. The `[LoopId(0)]`
+entries are `self.active_domains` at the moment `certify_transfer_domain_join`
+runs for that block, so something emits 0x2806 from inside the loop even though
+the MultiExit continuation owns it and is structured after the head at the outer
+domain. Finding that emission site is the next step, and it is one question, not
+a layer: who calls `certify_transfer_domain_join` for a block the continuation
+claims.
+
+**Part 4 cannot be a deletion yet.** Replacing the inline exit-continuation
+rendering with a jump to the label the continuation now provides costs a
+function: minigzip at -O0 goes from 171 rendered to 170. So that mechanism is
+still covering a case the MultiExit path does not, and it has to keep working
+until the case is known. Deleting it is the last step, not an early one.
+
+Order for the next attempt: find the emission site above, land parts 1-3 with the
+old mechanisms still in place and measure, and only then delete them.
