@@ -16398,3 +16398,48 @@ same shape on the pointer axis: `mov byte [ebp-0xd], al` then
 That last one names a second, deeper defect worth separating: an argument passed
 by address should type the pointee, not the variable. The width guard blocks the
 symptom in that case; it does not state the rule.
+
+### The width guard is not enough, and why: radare2 does not record a measured width
+
+Measured over the 34 overlap functions, guarding the width in `var_retype_impl`
+gives:
+
+```
+rendered           9
+still overlapping  22
+moved to another refusal  3
+```
+
+Nine renders for seven changed upstream expectations, and the 22 that remain are
+the largest bucket -- the one the guard was written for. The reason is in the
+guard's own escape clause. It reads
+
+```c
+if (have && want && have != want && have != (ut64)anal->config->bits)
+```
+
+and that last term exempts a variable whose current width is the pointer width,
+because on a 64-bit target `int64_t` is ambiguous: it is what a real eight-byte
+store produces *and* what `inferred_var_size` returns when the access
+established no width at all. Refusing every retype of an `int64_t` would block
+correct propagation onto genuine eight-byte locals; allowing them all lets the
+common `ParameterHome 8B -> ParameterHome 8B, four apart` case through, which is
+22 of the 34.
+
+So the guard cannot be completed as written, and it has been reverted rather than
+landed at nine. The patch is kept at `$CLAUDE_JOB_DIR/tmp/tp-width-guard.patch`
+for whoever picks this up.
+
+**What the complete fix needs is for radare2 to record whether a variable's width
+was measured.** `RAnalVar` carries `type` and `delta` but no size, and
+`RAnalVarAccess` carries a permission but no width, so by the time type
+propagation runs, "eight bytes because a `mov qword` said so" and "eight bytes
+because nothing said anything" are the same fact. Recording the access width on
+the variable -- `extract_arg` already has `access_size` in hand at every call to
+`r_anal_function_set_var` -- makes the rule statable without an escape clause: a
+retype may change a measured variable's spelling but not its extent.
+
+That is a field on a public struct and therefore an ABI question, which is why it
+is written down here rather than pushed. It is the largest single lever left on
+the local corpus: 22 functions, and `OverlappingStackSlots` is 27% of all
+refusals.
