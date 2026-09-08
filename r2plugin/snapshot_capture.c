@@ -1272,10 +1272,50 @@ static bool snapshot_switch_cases_target(const RAnalSwitchOp *switch_op, ut64 ad
 		} \
 		return false; \
 	} while (0)
+/* Whether this block ends in a call radare2 says never comes back.
+ *
+ * `aanr` propagates noreturn after the caller's graph is built and does not
+ * revisit it, so the stale edge fabricates a second entry into a loop. */
+static bool snapshot_block_ends_in_noreturn_call(const RAnalBlock *source) {
+	RAnal *anal = source->anal;
+	if (!anal || !anal->iob.read_at || source->ninstr < 1 || source->size < 1) {
+		return false;
+	}
+	ut64 last = source->addr;
+	if (source->ninstr > 1 && source->op_pos && source->op_pos_size >= source->ninstr - 1) {
+		last = source->addr + source->op_pos[source->ninstr - 2];
+	}
+	if (last < source->addr || last >= source->addr + source->size) {
+		return false;
+	}
+	ut8 bytes[32] = {0};
+	if (anal->iob.read_at (anal->iob.io, last, bytes, (int)sizeof (bytes))
+			!= (int)sizeof (bytes)) {
+		return false;
+	}
+	RAnalOp op;
+	r_anal_op_init (&op);
+	const int decoded = r_anal_op (anal, &op, last, bytes, (int)sizeof (bytes),
+		R_ARCH_OP_MASK_BASIC);
+	const bool is_call = decoded > 0
+		&& (op.type & R_ANAL_OP_TYPE_MASK) == R_ANAL_OP_TYPE_CALL
+		&& op.jump != UT64_MAX;
+	const bool never_returns = is_call && r_anal_noreturn_at (anal, op.jump);
+	r_anal_op_fini (&op);
+	return never_returns;
+}
+
 static bool snapshot_block_successors_collect(const RAnalBlock *source, RAnalSnapshotBlock *block, size_t *total_successors, const RAnalFunctionSnapshotLimits *limits, const char **reason) {
 	size_t count = 0;
 	ut64 default_addr = UT64_MAX;
 	bool jump_is_distinct = false;
+	// Control does not come back, so whatever edge the graph still carries
+	// out of this block is not one the program can take.
+	if (snapshot_block_ends_in_noreturn_call (source)) {
+		block->switch_addr = UT64_MAX;
+		block->num_successors = 0;
+		return true;
+	}
 	if (source->switch_op) {
 		const RAnalSwitchOp *switch_op = source->switch_op;
 		const int listed_cases = switch_op->cases? r_list_length (switch_op->cases): 0;
