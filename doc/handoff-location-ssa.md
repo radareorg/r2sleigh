@@ -17645,3 +17645,24 @@ the check at all. The next step is at the caller of
 arguments of a call site it is invoked for, and why argument 0 of this one is
 not one of them.
 
+### Lead three: a read authorized by the wrong occurrence
+
+`unobserved_binding_read` is seventeen DecBench cells and seven local ones, and
+`fcn_88a0` in bzip2_O2 shows the shape. The `binding-symbol-observed` evidence
+reads:
+
+    Read binding=BindingId(204) name="stack_m312" members=[]
+    authorizing_elsewhere=["1152:StackAccess { access: ..., binding: BindingId(204),
+                            symbol: ..., is_write: false }"]
+    active=["Other", "Other", "StackAccess { ... }"]
+
+So the binding *is* authorized, by observation 1152, and the occurrence being
+checked carries three observations of which the matching one is not the one the
+check accepted. `members=[]` says no SSA value is bound to it: this is a pure
+stack object.
+
+The question is which of the active observations the checker should be matching
+against, and why an expression carrying a `StackAccess` for this binding does
+not satisfy a read of it. That is the third lead, alongside the out-parameter
+escape and the `rep` prefix.
+
