@@ -15954,3 +15954,61 @@ The ranking also corrects the local census this session kept steering by.
 operation` is 8 locally and 18 here. A six-binary proxy has now been wrong about
 target selection three times, and the benchmark's own census is cheap to read
 from a run that has already happened.
+
+### The cold-partition attribution does not survive a trace
+
+The previous entry claimed that 12 of the 18 `unrepresentable operation`
+refusals are GCC `.cold` partition parents, and read that as one root worth one
+fix. Those 12 were identified by name -- a `<name>.cold` symbol exists in the
+same binary -- and not by following any of them down. Traced, the claim mostly
+fails.
+
+minigzip at -O2 carries all four local cold partitions and five of the local
+refusals in this class. Their reasons, from `R2DEC_TRACE_REFUSAL=1`:
+
+```
+0x2460 main             canonical loop fact LoopId(0) does not exactly match rendered
+                        loop at 0x2544: condition PredicateId(12) vs PredicateId(2)
+0x2970 gz_compress      missing canonical loop identity for header 0x29f9
+0x2b60 file_compress    rendered guard domain for block 0x2c73 omits canonical guard
+                        Branch { predicate: PredicateId(1), truth: false }
+0x2cb0 file_uncompress  structuring covered 7 of 12 source blocks, leaving 0x2d91
+                        and 4 others unrendered
+0x2e80 gz_open          canonical loop fact LoopId(0) does not exactly match rendered
+                        loop at 0x2f14: condition PredicateId(6) vs PredicateId(3)
+```
+
+Five functions, five reasons, and not one of them says a block was missing.
+Checking which of them actually branch into a cold partition:
+
+```
+gz_compress     0x29d1 -> 0x2400   sym.gz_compress.cold
+file_compress   0x2bb3 -> 0x2416   sym.file_compress.cold
+file_uncompress 0x2d91 -> 0x2428   sym.file_uncompress.cold
+main            no edge into 0x243a
+gz_open         no cold partition at all
+```
+
+`main` is in the class by name only. `sym.main.cold` at 0x243a is 364 bytes,
+which runs to 0x25a6 and so overlaps `main` itself at 0x2460 -- radare2 built it
+by walking out of the cold stub and falling into the hot function, and `main`
+never jumps to it. Its refusal is a loop-condition disagreement that has nothing
+to do with partitioning. `gz_open` refuses for the same reason with no cold
+partition anywhere near it.
+
+Of the three that do branch into their partition, only `file_uncompress` names
+the branching block in its refusal -- 0x2d91 is exactly the block whose jump
+leaves the function. `gz_compress` and `file_compress` fail on a loop identity
+and a guard domain respectively, both of which are the reasons that also refuse
+`main` and `gz_open`, neither of which is partitioned.
+
+The correlation is real and the cause is not. GCC partitions the functions that
+have cold error paths, which are the large branchy ones, which are also the
+functions that break structuring. One of five, at most, is a capture defect.
+Cold capture is therefore not the lever the count made it look like, and it is
+not being built.
+
+What the trace does say is that three of five refusals in this class are loop
+identity -- the canonical loop fact and the rendered loop disagreeing about
+which predicate controls the loop -- and one is the guard domain. That is where
+the next work goes.
