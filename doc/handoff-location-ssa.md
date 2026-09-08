@@ -17447,3 +17447,62 @@ before the previous section's fix was measured.
 
 `census.sh` now writes the installed plugin's mtime into `.build` in each output
 directory, so a census that measured a stale install says so.
+
+### Step 4's sweep was one function, and the fact it read is now smaller
+
+`certified_assigned_call_result_owner_expr_for_source` was the only place in
+`r2dec` that distinguished `AssignedResult` from `SideEffectStatement`. Once it
+asks the plan about the value it assigns, nothing distinguishes the two
+variants, so they collapse to one `Statement` and
+`prepared_call_render_facts` no longer takes `FunctionCallResultFacts` at all.
+`Suppressed` and `NestedExpression` had no producer anywhere and are deleted.
+
+Measured effect on the local census: none. 588 rendered / 104 refused / 0
+silent before and after, with the per-function outcome set identical and one
+function's refusal reason moving from `ExactUseRequiresRenderedOccurrence` to
+`RenderedValueRequired`. The change stands on the code being wrong as written:
+`definition_for_site`'s own doc comment says the owner "is not the value whose
+definition the call statement renders", and the gate was reading the owner.
+
+### Overlapping stack slots, traced to two separate causes
+
+Eleven functions across the corpus refused `OverlappingStackSlots`. Every pair
+had the same shape -- an eight-byte claim overlapping a neighbour one to six
+bytes later -- and none of them was a union.
+
+**The first cause is aggregation.** `dbg.BZ2_bzDecompress` refused although its
+own frame has one stack variable. The overlap was in `dbg.BZ2_decompress`,
+which it calls, and `decode_snapshot_inner` propagated a nested callee's
+failure to the root with `?`. A callee whose facts a contract refuses now drops
+out of the set with the reason recorded, and the root knows less about that
+callee rather than failing to decode. Malformed framing still propagates, and
+the depth bound gets its own `CalleeSetTooDeep` rather than posing as a
+statement about a function's facts.
+
+**The second cause is a fabricated variable.** radare2 mints a local at every
+`lea` target, so `var_b1h` and `var_b2h` appear as `int64_t` at rsp+193 and
+rsp+194 in `dbg.BZ2_decompress`, both created only by `lea` on the byte array
+at rsp+0xb2. This is the class of PR 26692 upstream. The extent measurement
+already ignores `lea`, so it measures nothing for such a slot and the declared
+type stands in as an extent no access established.
+
+The first attempt made that a general rule -- a non-aggregate slot nothing
+dereferenced claims no extent -- and the corpus disproved it. `bzerr`,
+`nUnused` and `unusedTmpV` in `dbg.testStream` are real DWARF locals whose
+address is passed to `BZ2_bzReadClose` and which the function never
+dereferences; zeroing them cost two functions that had been rendering. The rule
+that survives uses the evidence only where it discriminates: where two slots
+overlap and exactly one was never dereferenced, that one is dropped. A slot
+overlapping nothing keeps its extent, and a pair that both dereference is a
+real overlap this leaves alone.
+
+On bzip2_O2 the two changes take overlap refusals from eight to two with no
+function lost. Two functions that had been refusing at the interface now refuse
+further in, on a `DuplicateDefinition` of a lifter temporary
+(`tmp:regpiece:f9a0:a:1:s0` in `dbg.fallbackSort`) and on
+`ambiguous_observation_execution_order` in `dbg.compressStream`. Both were
+masked by the interface refusal and are the next things to trace.
+
+The residue is the pair where neither slot was dereferenced, which the evidence
+does not separate. Whether one of those is real is an open question rather than
+a decided one.
