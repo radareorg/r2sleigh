@@ -17661,8 +17661,14 @@ checked carries three observations of which the matching one is not the one the
 check accepted. `members=[]` says no SSA value is bound to it: this is a pure
 stack object.
 
-The question is which of the active observations the checker should be matching
-against, and why an expression carrying a `StackAccess` for this binding does
-not satisfy a read of it. That is the third lead, alongside the out-parameter
-escape and the `rep` prefix.
+The active `StackAccess` carries `is_write: true`. It is the store at
+`InstId(351)`, whose address is `IntAdd(ValueId(338), ValueId(393))` -- an
+indexed write, `stack_m312[i] = x`. The read that authorizes the binding
+elsewhere is a `Load` at `InstId(558)`, in a different block entirely.
 
+So nothing was folded and no occurrence went missing. What happens is that the
+base name appearing in `stack_m312[i] = x` is classified as a *read* of the
+symbol, and the only observation at that occurrence is the write. The base of an
+indexed assignment is the assignment's target, not a read of it; the index is
+the read, and it belongs to a different binding. That is the defect, and it has
+one right answer rather than being a fork.
