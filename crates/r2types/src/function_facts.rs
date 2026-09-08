@@ -3909,7 +3909,7 @@ fn prepared_call_render_facts(
                     .boundaries
                     .calls
                     .get(&cert.call_site)
-                    .filter(|boundary| boundary.complete && boundary.at == cert.at)
+                    .filter(|boundary| boundary.results_complete && boundary.at == cert.at)
                     .and_then(|boundary| boundary.result_kind)
                 {
                     Some(_) if function_returns_void => {
@@ -5594,6 +5594,8 @@ mod tests {
             variadic_argument_count_refusal: None,
             results: Vec::new(),
             complete: true,
+            arguments_complete: true,
+            results_complete: true,
         };
 
         assert!(exact_tail_return_certificate_matches(
@@ -5604,6 +5606,7 @@ mod tests {
         ));
 
         boundary.complete = false;
+        boundary.results_complete = false;
         assert!(!exact_tail_return_certificate_matches(
             &call_site,
             &certificate,

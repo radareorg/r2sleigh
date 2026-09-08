@@ -27,6 +27,9 @@ typedef ut32 RAnalSnapshotTypeId;
 #define SNAPSHOT_MAX_CODE_POINTER_TABLES 16
 #define SNAPSHOT_MAX_CODE_POINTER_TABLE_ENTRIES 256
 #define SNAPSHOT_MAX_CALLEE_SNAPSHOTS 4
+// How far a capture follows calls. A second level lets a callee prove what it
+// preserves, and costs a lift per body; raise it only against a measured gain.
+#define SNAPSHOT_CALLEE_DEPTH 1
 #define DB anal->sdb_cc
 #define R_ANAL_FUNCTION_SNAPSHOT_LIMITS_VERSION 4
 

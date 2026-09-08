@@ -2148,6 +2148,21 @@ pub fn encode_snapshot_set(
     snapshot: &OwnedFunctionSnapshot,
     callees: &[OwnedFunctionSnapshot],
 ) -> Result<Vec<u8>, SnapshotWireError> {
+    let callees = callees
+        .iter()
+        .map(|snapshot| CapturedCallee {
+            snapshot: snapshot.clone(),
+            callees: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    encode_snapshot_parts(snapshot, &callees, snapshot.source_revision_identity())
+}
+
+/// Encode one snapshot together with the whole bounded tree beneath it.
+pub fn encode_snapshot_tree(
+    snapshot: &OwnedFunctionSnapshot,
+    callees: &[CapturedCallee],
+) -> Result<Vec<u8>, SnapshotWireError> {
     encode_snapshot_parts(snapshot, callees, snapshot.source_revision_identity())
 }
 
@@ -2170,13 +2185,21 @@ pub fn encode_snapshot_set(
 /// misses rather than one that is wrong.
 pub fn encode_snapshot_cache_key(
     snapshot: &OwnedFunctionSnapshot,
+    callees: &[OwnedFunctionSnapshot],
 ) -> Result<Vec<u8>, SnapshotWireError> {
-    encode_snapshot_parts(snapshot, &[], snapshot.source_content_identity())
+    let callees = callees
+        .iter()
+        .map(|snapshot| CapturedCallee {
+            snapshot: snapshot.clone(),
+            callees: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    encode_snapshot_parts(snapshot, &callees, snapshot.source_content_identity())
 }
 
 fn encode_snapshot_parts(
     snapshot: &OwnedFunctionSnapshot,
-    callees: &[OwnedFunctionSnapshot],
+    callees: &[CapturedCallee],
     revision_identity: &[u8],
 ) -> Result<Vec<u8>, SnapshotWireError> {
     let mut writer = SnapshotWireWriter::new();
@@ -2206,7 +2229,11 @@ fn encode_snapshot_parts(
     let count = u32::try_from(callees.len()).map_err(|_| SnapshotWireError::ValueTooWide)?;
     writer.u32(count);
     for callee in callees {
-        let nested = encode_snapshot(callee)?;
+        let nested = encode_snapshot_parts(
+            &callee.snapshot,
+            &callee.callees,
+            callee.snapshot.source_revision_identity(),
+        )?;
         writer.bytes(&nested)?;
     }
     writer.finish()
@@ -2242,24 +2269,39 @@ impl From<SnapshotWireError> for SnapshotDecodeError {
 /// The parts go through `from_captured_parts`, the same private mint the
 /// accessor walk uses, so a buffer cannot assemble source authority the
 /// in-crate constructor would refuse.
+/// How many levels of callee a capture may carry below its root.
+///
+/// One level proves nothing about register preservation for a callee that
+/// itself calls anything, because its own clobbers erase the answer.
+pub const SNAPSHOT_CALLEE_DEPTH: usize = 2;
+
+/// One captured callee body together with the bodies it calls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedCallee {
+    pub snapshot: OwnedFunctionSnapshot,
+    pub callees: Vec<CapturedCallee>,
+}
+
 /// Decode one snapshot and the snapshots of the functions it calls.
 ///
 /// The callees ride inside the same buffer, each as a whole snapshot with its
-/// own string table, so they decode by this same reader and carry no callees of
-/// their own.
+/// own string table, so they decode by this same reader. The set is bounded to
+/// `SNAPSHOT_CALLEE_DEPTH` levels, and a buffer claiming more is refused rather
+/// than followed.
 pub fn decode_snapshot_set(
     buffer: &[u8],
-) -> Result<(OwnedFunctionSnapshot, Vec<OwnedFunctionSnapshot>), SnapshotDecodeError> {
-    decode_snapshot_inner(buffer)
+) -> Result<(OwnedFunctionSnapshot, Vec<CapturedCallee>), SnapshotDecodeError> {
+    decode_snapshot_inner(buffer, SNAPSHOT_CALLEE_DEPTH)
 }
 
 pub fn decode_snapshot(buffer: &[u8]) -> Result<OwnedFunctionSnapshot, SnapshotDecodeError> {
-    decode_snapshot_inner(buffer).map(|(snapshot, _)| snapshot)
+    decode_snapshot_inner(buffer, SNAPSHOT_CALLEE_DEPTH).map(|(snapshot, _)| snapshot)
 }
 
 fn decode_snapshot_inner(
     buffer: &[u8],
-) -> Result<(OwnedFunctionSnapshot, Vec<OwnedFunctionSnapshot>), SnapshotDecodeError> {
+    depth: usize,
+) -> Result<(OwnedFunctionSnapshot, Vec<CapturedCallee>), SnapshotDecodeError> {
     let mut reader = SnapshotWireReader::new(buffer)?;
     let machine = read_machine_profile(&mut reader)?;
     let function = read_function_identity(&mut reader)?;
@@ -2289,20 +2331,23 @@ fn decode_snapshot_inner(
     let diagnostics = read_diagnostic_identity(&mut reader)?;
     let callee_count = reader.u32()? as usize;
     let mut callees = Vec::with_capacity(callee_count.min(64));
+    if callee_count > 0 && depth == 0 {
+        // A bounded set keeps a capture's cost a property of what was asked
+        // for; an unbounded one lets the buffer decide how far to recurse.
+        return Err(SnapshotDecodeError::Wire(
+            SnapshotWireError::RejectedContract {
+                contract: "callee snapshot set depth",
+                reason: format!("the set is deeper than {SNAPSHOT_CALLEE_DEPTH} levels"),
+            },
+        ));
+    }
     for _ in 0..callee_count {
         let nested = reader.bytes()?;
-        let (callee, nested_callees) = decode_snapshot_inner(nested)?;
-        // One level. A callee that carried callees of its own would make the
-        // set's shape depend on the program rather than on what was asked for.
-        if !nested_callees.is_empty() {
-            return Err(SnapshotDecodeError::Wire(
-                SnapshotWireError::RejectedContract {
-                    contract: "callee snapshot set depth",
-                    reason: "a callee carried callees of its own".to_string(),
-                },
-            ));
-        }
-        callees.push(callee);
+        let (snapshot, callees_of_callee) = decode_snapshot_inner(nested, depth - 1)?;
+        callees.push(CapturedCallee {
+            snapshot,
+            callees: callees_of_callee,
+        });
     }
     reader.finish()?;
     let snapshot = OwnedFunctionSnapshot::from_captured_parts(
@@ -2404,6 +2449,55 @@ mod tests {
     }
 
     #[test]
+    fn a_capture_carries_two_levels_and_refuses_a_third() {
+        // A callee that calls something preserves nothing unless that body was
+        // read too, which is what the second level is for.
+        let root = sample_snapshot(None);
+        let callee = sample_snapshot(None);
+        let grandchild = sample_snapshot(None);
+
+        let two_deep = vec![CapturedCallee {
+            snapshot: callee.clone(),
+            callees: vec![CapturedCallee {
+                snapshot: grandchild.clone(),
+                callees: Vec::new(),
+            }],
+        }];
+        let buffer = encode_snapshot_tree(&root, &two_deep).expect("encode two levels");
+        let (decoded_root, decoded) = decode_snapshot_set(&buffer).expect("decode two levels");
+        assert_eq!(decoded_root.function().address(), root.function().address());
+        let [decoded_callee] = decoded.as_slice() else {
+            panic!("one callee");
+        };
+        assert_eq!(decoded_callee.callees.len(), 1);
+        assert_eq!(
+            decoded_callee.callees[0].snapshot.function().address(),
+            grandchild.function().address()
+        );
+
+        let three_deep = vec![CapturedCallee {
+            snapshot: callee,
+            callees: vec![CapturedCallee {
+                snapshot: grandchild.clone(),
+                callees: vec![CapturedCallee {
+                    snapshot: grandchild,
+                    callees: Vec::new(),
+                }],
+            }],
+        }];
+        let buffer = encode_snapshot_tree(&root, &three_deep).expect("encode three levels");
+        assert!(matches!(
+            decode_snapshot_set(&buffer),
+            Err(SnapshotDecodeError::Wire(
+                SnapshotWireError::RejectedContract {
+                    contract: "callee snapshot set depth",
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[test]
     fn a_callee_snapshot_rides_inside_its_caller_and_decodes_alone() {
         let root = sample_snapshot(None);
         let callee = sample_snapshot(None);
@@ -2412,9 +2506,10 @@ mod tests {
         assert_eq!(decoded_root.function().address(), root.function().address());
         assert_eq!(decoded_callees.len(), 1);
         assert_eq!(
-            decoded_callees[0].function().address(),
+            decoded_callees[0].snapshot.function().address(),
             callee.function().address()
         );
+        assert!(decoded_callees[0].callees.is_empty());
         // The plain decoder still reads the same buffer and simply drops them.
         assert!(decode_snapshot(&buffer).is_ok());
     }
@@ -3798,7 +3893,7 @@ mod tests {
         // same callee under two callers two different keys, which is the one
         // case a callee cache exists to serve.
         let body = sample_snapshot(None).with_source_content_identity(Box::from(&b"own-body"[..]));
-        let key = encode_snapshot_cache_key(&body).expect("encode a cache key");
+        let key = encode_snapshot_cache_key(&body, &[]).expect("encode a cache key");
         let decoded = decode_snapshot(&key).expect("decode the cache key");
         assert_eq!(decoded.source_revision_identity(), b"own-body");
         assert_eq!(decoded.source_content_identity(), b"own-body");
@@ -3842,6 +3937,9 @@ mod tests {
         let [decoded_callee] = decoded_callees.as_slice() else {
             panic!("one callee");
         };
-        assert_eq!(decoded_callee.source_content_identity(), &b"callee-own"[..]);
+        assert_eq!(
+            decoded_callee.snapshot.source_content_identity(),
+            &b"callee-own"[..]
+        );
     }
 }

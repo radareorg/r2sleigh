@@ -689,6 +689,11 @@ pub struct SourceCallBoundaryFact {
     /// result value the caller observes. An exact discarded result is complete
     /// because there is no caller-side value to identify.
     pub complete: bool,
+    /// The same, per coordinate. A caller may resolve what a callee returns
+    /// without resolving what it was passed, and the conjunction above threw
+    /// away a proven result because an argument beside it was unproven.
+    pub arguments_complete: bool,
+    pub results_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3949,6 +3954,8 @@ fn collect_source_boundary_facts(
             // Calls carry implicit machine state. Only an exact source-owned
             // callsite interface may change this state to complete.
             complete: false,
+            arguments_complete: false,
+            results_complete: false,
         };
         if let Some((machine_context, interface)) = machine_context.and_then(|context| {
             call_site
@@ -4092,6 +4099,8 @@ fn collect_source_boundary_facts(
                 if let Some(results) = results {
                     boundary.results = results;
                 }
+                boundary.arguments_complete = arguments_complete;
+                boundary.results_complete = results_complete;
                 boundary.complete = arguments_complete && results_complete;
             }
         }
@@ -4133,6 +4142,8 @@ fn collect_source_boundary_facts(
             // the callee returns stays unproven; the renderer's disposition
             // decides what a transfer through this boundary looks like.
             boundary.complete = true;
+            boundary.arguments_complete = true;
+            boundary.results_complete = true;
         }
         facts.calls.insert(call_site.id, boundary);
     }
@@ -8764,7 +8775,7 @@ fn process_call_result_flow_block(
                 let Some(boundary) = boundaries
                     .calls
                     .get(&call_site_id)
-                    .filter(|boundary| boundary.complete)
+                    .filter(|boundary| boundary.results_complete)
                 else {
                     continue;
                 };

@@ -17046,3 +17046,72 @@ between them -- four and a half times the largest single string. That is the
 shape the derivation predicted: the strings are many and the violation is one,
 which is why the single-owner boundary is the step that matters rather than the
 next instance.
+
+### Steps 1 and 2, and what measuring them actually said
+
+**The traced `missing_definition` cases are not a preservation problem.** Step 1
+was built on the reading that the Preserved bucket needed a deeper capture. The
+evidence gathered afterwards says otherwise. For `dbg.snocString` at 0x3ee2:
+
+```
+call-boundary-incomplete: callsite (0x3edf, 3) declares 2 arguments:
+    arguments_complete=false  results_complete=true
+```
+
+The **result resolves**. The **arguments do not**. And
+`boundary.complete = arguments_complete && results_complete` discards the proven
+result along with the unproven arguments, so `collect_call_result_certificates`
+-- which filters on `complete` -- certifies nothing, the `CallDefine` gets no
+owner, the render fact says `SideEffectStatement`, and the read refuses.
+
+radare2 has the prototype for that callee (`Cell * snocString (Char *, Cell *)`),
+so this was never about a missing return either. It is the third structural
+violation the `derive-core-designs-mathematically-before-planning` memory names,
+verbatim: **boundary facts aggregated all-or-nothing instead of per coordinate.**
+
+`SourceCallBoundaryFact` now carries `arguments_complete` and `results_complete`
+beside `complete`, and the two consumers that gate the call *result* --
+`collect_call_result_certificates` and the render-fact `result_kind` lookup --
+read the result coordinate rather than the conjunction. `recover_interface` is
+deliberately left on the conjunction: it infers a callee's signature from call
+sites, its own comment records care about reading a tail transfer as proof of a
+return, and it has not been traced.
+
+**Measured, it moves nothing.** bzip2 at -O2, before and after, is identical:
+
+```
+total=114 rendered=81 refused=33   silent=0
+   8  missing machine projection authorization
+   8  snapshot wire decode failed: OverlappingStackSlots
+   8  native declaration placement refused: missing_definition
+```
+
+So the completeness gate was not this instance's blocker either. The next
+candidate, unverified: `boundary.results` may be `Some(vec![])` -- complete but
+carrying no reaching SSA value for the result -- in which case the certificate
+never matches the `CallDefine`'s value whatever the gate says. The doc comment on
+`results` says exactly that shape exists ("a complete non-void boundary may carry
+no entries here when the caller discards the result"), and the check is to print
+`boundary.results` for that call site.
+
+It lands anyway, under the standing exception: the aggregation is wrong as
+written -- it throws away a proven coordinate because a different one is
+unproven -- and that is a defect independent of whether any function currently
+benefits, exactly like the transfer-join fix banked earlier in this document.
+
+**Depth 2 costs and, so far, buys nothing.** The capture now follows calls two
+levels, the wire contract carries and bounds the tree, the decoder refuses a
+third level, and a round-trip test covers both. Gates stayed at 54 pass. But a
+census of minigzip at -O2 ran for over eight minutes at 99.7% CPU on that one
+binary, against a whole six-binary census in about forty before, and the
+`missing_definition` count did not move on the binaries that did complete.
+
+The reason is breadth, not depth: `preserved(f)` is empty unless *every* call `f`
+makes is to a captured body, and `SNAPSHOT_MAX_CALLEE_SNAPSHOTS` is 4. A callee
+with 23 calls -- `BZ2_compressBlock`, the one whose preservation would answer
+`RSI_35` -- can never qualify. Depth without breadth cannot close the bucket.
+
+`SNAPSHOT_CALLEE_DEPTH` is therefore set to **1** in the capture while the
+decoder still accepts 2. That reverses the user's decision on the strength of a
+cost measurement they have not seen, so it is flagged rather than settled: the
+capability is in the tree and the constant is one line.

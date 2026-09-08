@@ -1972,6 +1972,24 @@ fn trusted_callee_signatures(
 /// fixpoint iterates over, the C signature its own typed body proves, and the
 /// data objects its image observed. Holding the body instead, so that a later
 /// caller could redo those four derivations from it, is what made a session
+/// The register a body proves it returns in, or None when it proves none.
+///
+/// Every returning block must name a definition reaching the return register:
+/// one that does not leaves the block unresolved, which is what a genuinely
+/// void function looks like.
+fn body_proven_return(shared: &r2ssa::SsaArtifact) -> Option<r2ssa::CanonicalStorageId> {
+    let live_out = shared.live_out();
+    if live_out.is_empty() || live_out.unresolved_blocks().next().is_some() {
+        return None;
+    }
+    shared
+        .machine_context()
+        .abi_model()
+        .return_registers()
+        .first()
+        .map(|slot| slot.storage())
+}
+
 /// retain a prepared function per function in the program.
 #[derive(Debug, Clone)]
 pub struct CalleeFacts {
@@ -1992,6 +2010,13 @@ impl CalleeFacts {
         let shared = callee.shared_artifact();
         let address = shared.function().entry;
         let interface = shared.machine_context().function_interface()?.clone();
+        // radare2 defaults a function with no recovered prototype to void, and
+        // a body that fills the return register on every return path says
+        // otherwise; the body is the stronger claim about what it does.
+        let interface = match body_proven_return(&shared) {
+            Some(storage) => interface.with_body_proven_return(storage).ok()?,
+            None => interface,
+        };
         let preserved_carriers = shared.facts().boundaries.preserved_call_carriers.clone();
         let summary =
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)

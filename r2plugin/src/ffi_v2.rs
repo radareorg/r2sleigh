@@ -1195,7 +1195,7 @@ unsafe fn capture_trusted_ssa_from_buffer(
     // what the interprocedural solve checks before it uses any of them.
     let ptr_bits = source.machine().bits();
     for callee in callees {
-        let entry = callee.function().address();
+        let entry = callee.snapshot.function().address();
         // A callee body is prepared from its own snapshot and nothing else --
         // the set is one level deep, so it has no callee interfaces of its own
         // to be prepared against. Re-serializing it therefore reproduces the
@@ -1209,7 +1209,16 @@ unsafe fn capture_trusted_ssa_from_buffer(
         // callee inherits its caller's capture tag and a plain encoding would
         // therefore differ for every caller of the same body. That function
         // states exactly what it substitutes and why.
-        let key = r2source::snapshot_wire::encode_snapshot_cache_key(&callee).ok();
+        // A callee's own contribution now depends on the bodies it calls, so
+        // the key covers them too or a depth-1 answer would be served for it.
+        let nested_bodies = callee
+            .callees
+            .iter()
+            .map(|nested| nested.snapshot.clone())
+            .collect::<Vec<_>>();
+        let key =
+            r2source::snapshot_wire::encode_snapshot_cache_key(&callee.snapshot, &nested_bodies)
+                .ok();
         let cached = key
             .as_deref()
             .and_then(|key| r2engine::cached_callee_facts(entry, key));
@@ -1222,7 +1231,32 @@ unsafe fn capture_trusted_ssa_from_buffer(
                 facts
             }
             None => {
-                let Ok(artifact) = trusted_from_source(callee, execution) else {
+                // What this callee preserves is erased by the clobbers of
+                // anything it calls, so its own callees are read first.
+                let mut nested_interfaces = std::collections::BTreeMap::new();
+                let mut nested_preserved = r2ssa::CalleePreservedCarriers::new();
+                for nested in &callee.callees {
+                    let nested_entry = nested.snapshot.function().address();
+                    let Ok(nested_artifact) =
+                        trusted_from_source(nested.snapshot.clone(), execution)
+                    else {
+                        continue;
+                    };
+                    let Some(nested_facts) =
+                        r2engine::CalleeFacts::derive(&nested_artifact, ptr_bits)
+                    else {
+                        continue;
+                    };
+                    nested_interfaces.insert(nested_entry, nested_facts.interface().clone());
+                    nested_preserved
+                        .insert(nested_entry, nested_facts.preserved_carriers().clone());
+                }
+                let Ok(artifact) = trusted_from_source_with_callees(
+                    callee.snapshot,
+                    execution,
+                    &nested_interfaces,
+                    &nested_preserved,
+                ) else {
                     continue;
                 };
                 let Some(facts) = r2engine::CalleeFacts::derive(&artifact, ptr_bits) else {

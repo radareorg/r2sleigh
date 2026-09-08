@@ -780,6 +780,8 @@ mod tests {
                 arguments,
                 results: Vec::new(),
                 complete: true,
+                arguments_complete: true,
+                results_complete: true,
             },
         );
         boundaries

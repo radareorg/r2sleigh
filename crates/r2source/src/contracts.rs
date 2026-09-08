@@ -1699,6 +1699,32 @@ impl SourceFunctionInterface {
         self.return_kind
     }
 
+    /// The same interface with a return register the callee's body proved.
+    ///
+    /// Only a `Void` is replaced: an absent prototype defaults to void, and a
+    /// body that fills the return register on every return path outranks that
+    /// default. A stated return is never overridden.
+    pub fn with_body_proven_return(
+        mut self,
+        storage: CanonicalStorageId,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        if !matches!(self.return_kind, SourceFunctionReturn::Void) {
+            return Ok(self);
+        }
+        if !valid_register_storage(storage) {
+            return Err(SourceFunctionInterfaceError::InvalidRegisterStorage);
+        }
+        if self.parameters.iter().any(|parameter| {
+            parameter
+                .location
+                .overlaps(SourceParameterLocation::Register(storage))
+        }) {
+            return Err(SourceFunctionInterfaceError::OverlappingRegisterStorages);
+        }
+        self.return_kind = SourceFunctionReturn::Register { storage };
+        Ok(self)
+    }
+
     pub fn return_address_storage_is_valid(&self, storage: CanonicalStorageId) -> bool {
         valid_register_storage(storage)
             && !self

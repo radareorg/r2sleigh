@@ -263,7 +263,7 @@ static bool function_snapshot_machine_tuple_collect(RAnalFunctionSnapshot *snaps
 static bool function_snapshot_machine_tuple_is_current(const RAnalFunctionSnapshot *snapshot, const RAnal *anal);
 static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAnal *anal, RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits, const char **reason);
 static void r_anal_function_snapshot_limits_default(RAnalFunctionSnapshotLimits *limits);
-static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits);
+static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits, unsigned depth, ut64 root_addr);
 static RAnalFunctionSnapshot *r_anal_function_snapshot_collect_with_limits(RAnal *anal, RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits, const char **reason);
 static RAnalFunctionSnapshot *r_anal_function_snapshot_collect_bounded(RAnal *anal, RAnalFunction *fcn, const char **reason);
 static RList *r_anal_types_snapshot_with_limits(RAnal *anal, const RAnalFunctionSnapshotLimits *limits);
@@ -5545,8 +5545,8 @@ static void r_anal_function_snapshot_limits_default(RAnalFunctionSnapshotLimits 
 		.max_total_owned_bytes = 512 * 1024 * 1024,
 	};
 }
-static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits) {
-	if (!snapshot->context.callees) {
+static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctionSnapshot *snapshot, const RAnalFunctionSnapshotLimits *limits, unsigned depth, ut64 root_addr) {
+	if (!snapshot->context.callees || !depth) {
 		return;
 	}
 	RAnalFunctionSnapshot **collected = R_NEWS0 (RAnalFunctionSnapshot *, SNAPSHOT_MAX_CALLEE_SNAPSHOTS);
@@ -5563,7 +5563,9 @@ static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctio
 		// A callee that is the caller is the same body, and one already taken
 		// is the same body too: a set with a repeat describes nothing extra and
 		// costs a consumer a disjointness check it cannot satisfy.
-		if (!callee || callee->addr == UT64_MAX || callee->addr == snapshot->function_addr) {
+		if (!callee || callee->addr == UT64_MAX
+			|| callee->addr == snapshot->function_addr
+			|| callee->addr == root_addr) {
 			continue;
 		}
 		size_t seen;
@@ -5583,17 +5585,10 @@ static void function_snapshot_collect_callees_unlocked(RAnal *anal, RAnalFunctio
 		if (!callee_snapshot) {
 			continue;
 		}
-		// One level. A callee's own callees are its business, and collecting
-		// them would make the cost of a capture depend on the shape of the
-		// program rather than on the function asked for.
-		size_t nested;
-		for (nested = 0; nested < callee_snapshot->num_callee_snapshots; nested++) {
-			r_anal_function_snapshot_free (callee_snapshot->callee_snapshots[nested]);
-		}
-		free (callee_snapshot->callee_snapshots);
-		callee_snapshot->callee_snapshots = NULL;
-		callee_snapshot->num_callee_snapshots = 0;
-		callee_snapshot->capabilities &= ~R_ANAL_FUNCTION_SNAPSHOT_CAP_CALLEE_SNAPSHOTS;
+		// A callee preserves nothing it calls something unknown for, so a
+		// body one level down is what makes the level above prove anything.
+		function_snapshot_collect_callees_unlocked (anal, callee_snapshot,
+			limits, depth - 1, root_addr);
 		// The identity a set carries is the identity of the capture, not of one
 		// function in it. A consumer reasoning across a call has to be able to
 		// tell that these bodies were read together, and a per-function hash
@@ -5618,7 +5613,8 @@ static RAnalFunctionSnapshot *r_anal_function_snapshot_collect_with_limits(RAnal
 	RAnalFunctionSnapshot *snapshot = function_snapshot_collect_with_limits_unlocked (
 		anal, fcn, limits, reason);
 	if (snapshot) {
-		function_snapshot_collect_callees_unlocked (anal, snapshot, limits);
+		function_snapshot_collect_callees_unlocked (anal, snapshot, limits,
+			SNAPSHOT_CALLEE_DEPTH, snapshot->function_addr);
 	}
 	r_th_lock_leave (anal->lock);
 	return snapshot;

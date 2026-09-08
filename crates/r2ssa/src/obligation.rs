@@ -2409,6 +2409,8 @@ mod tests {
                 variadic_argument_count_refusal: None,
                 results: Vec::new(),
                 complete: true,
+                arguments_complete: true,
+                results_complete: true,
             },
         );
         let inventory = SemanticObligationInventory::collect(
