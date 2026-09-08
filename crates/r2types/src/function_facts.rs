@@ -2500,15 +2500,23 @@ impl FunctionFacts {
         };
         let mut member_facts = Vec::new();
         for memory in self.render.memory_accesses() {
-            // Offset zero is the object itself, which the slot's own name
-            // already spells.
+            // Offset zero is a member too when the access is narrower than the
+            // object: the slot's name would stand for the whole aggregate.
             let Some(offset_bits) = memory
                 .object_offset
-                .filter(|offset| *offset > 0 && memory.width > 0)
+                .filter(|offset| *offset >= 0 && memory.width > 0)
                 .and_then(|offset| u64::try_from(offset).ok())
                 .and_then(|bytes| bytes.checked_mul(8))
             else {
                 continue;
+            };
+            let declined = |why: &str| {
+                r2il::refusal_evidence!(
+                    "member-access-declined",
+                    "object={:?} offset_bits={offset_bits} width={}: {why}",
+                    memory.object,
+                    memory.width
+                );
             };
             let Some(slot) = prepared
                 .certificates()
@@ -2516,12 +2524,14 @@ impl FunctionFacts {
                 .get(&memory.object)
                 .and_then(|certificate| certificate.source_slot.as_ref())
             else {
+                declined("the object has no certified source slot");
                 continue;
             };
             let Some(aggregate) = slot
                 .logical_type()
                 .and_then(|type_id| aggregate_layout_for_type(graph, type_id))
             else {
+                declined("the slot's declared type has no aggregate layout");
                 continue;
             };
             let width_bits = u64::from(memory.width).saturating_mul(8);
@@ -2530,6 +2540,7 @@ impl FunctionFacts {
             let Some(member) = aggregate.members().iter().find(|member| {
                 member.offset_bits() == offset_bits && member.size_bits() == width_bits
             }) else {
+                declined("no member covers exactly that offset and width");
                 continue;
             };
             member_facts.push(MemberAccessRenderFact {

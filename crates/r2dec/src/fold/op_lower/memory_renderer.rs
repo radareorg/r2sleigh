@@ -727,6 +727,12 @@ impl<'a> FoldingContext<'a> {
         if let Some(expr) = self.certified_subscript_expr_for_fact(fact, &elem_ty) {
             return Some(PendingMemoryAccessExpr::Replacement(expr));
         }
+        // A member of a declared slot is asked first: at offset zero the slot's
+        // own name would stand for the whole aggregate, not for the member the
+        // machine touched.
+        if let Some(expr) = self.certified_slot_member_expr_for_memory_fact(fact) {
+            return Some(PendingMemoryAccessExpr::Planned(expr));
+        }
         if let Some(expr) = self.certified_stack_owner_expr_for_memory_fact(fact) {
             return Some(PendingMemoryAccessExpr::Planned(expr));
         }
@@ -769,6 +775,38 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// A declared member of a slot the plan gave a name.
+    ///
+    /// The slot's name spells the object, so the member needs no address;
+    /// asking for one demands the frame address the plan elided precisely
+    /// because the slot has a name, and the access then renders as a gap.
+    fn certified_slot_member_expr_for_memory_fact(
+        &self,
+        fact: &r2types::MemoryAccessRenderFact,
+    ) -> Option<CExpr> {
+        let offset = fact.object_offset.filter(|offset| *offset >= 0)?;
+        if fact.width == 0 {
+            return None;
+        }
+        if self
+            .prepared_ssa()
+            .is_some_and(|prepared| prepared.objects().address_is_indexed(fact.address))
+        {
+            return None;
+        }
+        let member = self.certified_member_fact_for_memory(fact)?;
+        if i64::try_from(member.field_offset).ok()? != offset {
+            return None;
+        }
+        let field_name = member.field_name.clone();
+        self.inputs.render_facts()?.stack_slot_offset(fact.object)?;
+        let owner = self.certified_stack_var_expr_for_object(fact.object)?;
+        Some(CExpr::Member {
+            base: Box::new(owner),
+            member: field_name,
+        })
+    }
+
     /// The slot's name, for an access that sits at the slot's own offset.
     ///
     /// An access at an offset the machine computes is inside the slot and
@@ -782,9 +820,12 @@ impl<'a> FoldingContext<'a> {
         let declined = |why: &str| {
             r2il::refusal_evidence!(
                 "stack-owner-declined",
-                "value={:?} object={:?} width={} object_offset={:?}: {why}",
+                "value={:?} object={:?} kind={:?} width={} object_offset={:?}: {why}",
                 fact.address,
                 fact.object,
+                self.prepared_ssa()
+                    .and_then(|prepared| prepared.objects().object(fact.object))
+                    .map(|object| object.kind.clone()),
                 fact.width,
                 fact.object_offset
             );

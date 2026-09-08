@@ -195,9 +195,19 @@ pub(crate) fn collect_final_placement_occurrences(
                 });
             }
             let RenderObservationNode::Expr(expr) = node else {
+                r2il::refusal_evidence!(
+                    "certified-value-read-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} value={value:?}: \
+                     the observation marks a statement rather than an expression"
+                );
                 return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
             };
             if !expr_reads_symbol(expr, symbol) {
+                r2il::refusal_evidence!(
+                    "certified-value-read-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} value={value:?}: \
+                     the marked expression {expr:?} does not read the symbol"
+                );
                 return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
             }
         }
@@ -217,9 +227,19 @@ pub(crate) fn collect_final_placement_occurrences(
                 });
             }
             let RenderObservationNode::Expr(expr) = node else {
+                r2il::refusal_evidence!(
+                    "array-index-read-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} access={access:?}: \
+                     the observation marks a statement rather than an expression"
+                );
                 return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
             };
             if !expr_reads_symbol(expr, symbol) {
+                r2il::refusal_evidence!(
+                    "array-index-read-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} access={access:?}: \
+                     the marked expression {expr:?} does not read the symbol"
+                );
                 return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
             }
         }
@@ -240,6 +260,12 @@ pub(crate) fn collect_final_placement_occurrences(
                 });
             }
             let RenderObservationNode::Expr(expr) = node else {
+                r2il::refusal_evidence!(
+                    "stack-access-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} \
+                     access={access:?} object={object:?} is_write={is_write}: \
+                     the observation marks a statement rather than an expression"
+                );
                 return Err(if is_write {
                     PlacementAnalysisError::UnobservedBindingWrite { binding }
                 } else {
@@ -247,6 +273,12 @@ pub(crate) fn collect_final_placement_occurrences(
                 });
             };
             if !expr_reads_symbol(expr, symbol) {
+                r2il::refusal_evidence!(
+                    "stack-access-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} \
+                     access={access:?} object={object:?} is_write={is_write}: \
+                     the marked expression {expr:?} does not read the symbol"
+                );
                 return Err(if is_write {
                     PlacementAnalysisError::UnobservedBindingWrite { binding }
                 } else {
@@ -267,12 +299,23 @@ pub(crate) fn collect_final_placement_occurrences(
                 return Err(PlacementAnalysisError::InvalidCertifiedValueRead { value, at: call });
             }
             let RenderObservationNode::Expr(expr) = node else {
+                r2il::refusal_evidence!(
+                    "frame-address-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} call={call:?}: \
+                     the observation marks a statement rather than an expression"
+                );
                 return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
             };
             let is_array = names.plan().binding(binding).is_some_and(|binding| {
                 matches!(binding.declaration_type(), crate::ast::CType::Array(_, _))
             });
             if !frame_object_address_expr_matches(expr, symbol, is_array) {
+                r2il::refusal_evidence!(
+                    "frame-address-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} call={call:?} \
+                     is_array={is_array}: the marked expression {expr:?} is not that \
+                     object's address"
+                );
                 return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
             }
         }
@@ -1095,6 +1138,11 @@ fn direct_stack_assignment_observations(
             CExpr::Subscript { base, index } => {
                 collect(base, targets, reads, writes) && collect(index, targets, reads, writes)
             }
+            // A member selects inside whatever the base names, so the base is
+            // the only part of the destination that is evaluated.
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                collect(base, targets, reads, writes)
+            }
             CExpr::Var(_) => true,
             _ => false,
         }
@@ -1781,7 +1829,12 @@ fn audit_expr(
                     | BinaryOp::ShlAssign
                     | BinaryOp::ShrAssign
             );
-            if assignment && matches!(left.unobserved(), CExpr::Var(_) | CExpr::Subscript { .. }) {
+            if assignment
+                && matches!(
+                    left.unobserved(),
+                    CExpr::Var(_) | CExpr::Subscript { .. } | CExpr::Member { .. }
+                )
+            {
                 if *op != BinaryOp::Assign {
                     audit_expr(
                         left,
@@ -1895,7 +1948,12 @@ fn audit_expr(
                 by_symbol,
             )?;
         }
-        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+        CExpr::Member { base, .. } => {
+            // `s.f` names a place inside `s`, so a write to it writes `s`.
+            // `p->f` is different: `p` is read whichever side it sits on.
+            audit_expr(base, access, active, source, names, targets, by_symbol)?;
+        }
+        CExpr::PtrMember { base, .. } => {
             audit_expr(
                 base,
                 SymbolAccess::Read,

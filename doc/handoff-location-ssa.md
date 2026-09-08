@@ -15297,3 +15297,51 @@ each of them the same correction on an eight-byte slot.
 The three radare2 commits together take the census from 599/692 to 610/692 and
 the refusals from 93 to 82. `PlannedElidedValueRendered` falls from 16 reports
 to 6 and is no longer the largest class; `RenderedValueRequired` at 11 is.
+
+## A declared member of a frame slot had no route that did not need an address
+
+`RenderedValueRequired` became the largest class once the radare2 typing fixes
+landed, and the first one traced -- bzip2's `applySavedTimeInfoToOutputFile` --
+was not about the value the refusal named. The value was a `Copy` planned
+`Inline` whose single reader is the value operand of a store; the store never
+rendered, so the operand was never observed, and the seal reported the inlined
+value as unaccounted.
+
+The store is `uTimBuf.modtime = ...`, into a `struct utimbuf` held in a frame
+slot. Four routes answer for a memory access, in order: a semantic array, a
+proved subscript, the slot's own name, and last the address dereferenced. The
+member of a declared slot is rendered inside the *fourth*, by decomposing the
+rendered address into base plus offset -- so it can only be reached when the
+address renders. The plan elides that frame address precisely because the slot
+has a name, and the access then had no route at all.
+
+Three changes, each at the place the answer is missing rather than near the
+symptom.
+
+A member of a declared frame slot is now its own route, built from the slot's
+name and the member fact, needing no address. It is asked *before* the slot's
+own name, because at offset zero the name would stand for the whole aggregate
+rather than for the member the machine touched -- which is why the producer now
+emits facts at offset zero too. A member fact requires an exact offset and
+width match, so a whole-object access still finds no member and still renders
+as the slot's name.
+
+Placement had two gaps that only a member destination reaches. Its
+direct-assignment recogniser knew `Var` and `Subscript` and not `Member`, so
+`uTimBuf.modtime = x` was an ambiguous group rather than a store with an
+ordered destination. And `audit_expr` treated a member destination as a *read*
+of the object, so the write marker on the assignment did not authorise it.
+`s.f = v` writes a place inside `s` and reads nothing; `p->f = v` reads `p`,
+which is why only the `.` form propagates the access kind to its base.
+
+The function now renders `uTimBuf.actime = ...` and `uTimBuf.modtime = ...`,
+which is what bzip2's source says. Census 610/692 to 614/692, refusals 82 to
+78; `PlannedElidedValueRendered` falls to 5 as a side effect, since the member
+route answers accesses that used to demand an elided address.
+
+Four silent declines were given evidence on the way, because following the
+reported refusal rather than the first one is what cost the previous session:
+`stack-owner-declined` names which of the four guards refused a slot's name and
+the object's kind, `member-access-declined` names which of the three checks
+refused a member fact, and the placement audit's unobserved-binding errors now
+name the observation, the binding, the symbol and the expression that failed.
