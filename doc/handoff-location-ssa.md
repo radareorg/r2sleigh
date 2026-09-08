@@ -17167,3 +17167,36 @@ The chain for this one function is now complete end to end: read of `RAX_21`
 -> no owner -> `SideEffectStatement` -> call-site result `Void` ->
 `signature=false` -> a callee signature radare2 can print and the capture cannot
 retrieve.
+
+### The probe: the capture does resolve the signature
+
+```
+r2sleigh: callee signature 0x3860 fcn=dbg.snocString signature=1 ret=Cell *
+```
+
+So all three candidates in the entry above are wrong. The `.part.0` suffix does
+not defeat the lookup, `load_types = false` does not starve it, and
+`r_anal_get_fcn_in` returns the right function. `fcn_context_resolve_callee_signature`
+hands back a signature whose return type is `Cell *`.
+
+The loss is therefore **between the callee list and the call site**. Two distinct
+fields are involved and they must not be confused again:
+
+- the *physical* result carrier, `interface->result_kind` /
+  `interface->result_storage`, set in `call_site_interfaces_snapshot_collect`
+  from `callee->signature->ret_type` via `r_anal_cc_ret`; and
+- the *logical* `cert.callee_signature`, which is what the
+  `callee-declaration` evidence prints as `signature=` and which comes from a
+  type-writeback analysis of the captured callee body, not from this signature
+  at all.
+
+The `signature=false` in that evidence line is the second of those. It explains
+the `void` in the rendered declaration but says nothing directly about whether
+the result was certified. Which of the two actually fails for 0x3edf is the next
+probe, and it is one `eprintf` in the same function that answered this one:
+print `result_kind`, `result_storage` and `complete` for each call-site interface
+the capture builds.
+
+The probe itself stays, behind `R2SLEIGH_DEBUG_INTERFACE`. It is the instrument
+that turned three plausible explanations into one fact, and the next question is
+the same shape.

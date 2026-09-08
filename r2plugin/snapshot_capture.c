@@ -806,7 +806,15 @@ static RAnalFunctionSignature *fcn_context_resolve_callee_signature(RAnal *anal,
 	RAnalFunction *callee_fcn;
 	R_RETURN_VAL_IF_FAIL (anal, NULL);
 	callee_fcn = r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
-	return callee_fcn? r_anal_function_get_signature_current (callee_fcn): NULL;
+	RAnalFunctionSignature *signature = callee_fcn
+		? r_anal_function_get_signature_current (callee_fcn): NULL;
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		eprintf ("r2sleigh: callee signature %#" PFMT64x " fcn=%s signature=%d ret=%s\n",
+			addr, callee_fcn? r_str_get (callee_fcn->name): "(none)",
+			signature? 1: 0,
+			signature? r_str_get (signature->ret_type): "(none)");
+	}
+	return signature;
 }
 static bool fcn_context_has_callee(RList *callees, ut64 call_addr, ut64 addr) {
 	RListIter *iter;
