@@ -17506,3 +17506,29 @@ masked by the interface refusal and are the next things to trace.
 The residue is the pair where neither slot was dereferenced, which the evidence
 does not separate. Whether one of those is real is an open question rather than
 a decided one.
+
+### Invariant I_A is closed on the local corpus
+
+`OverlappingStackSlots` is zero across all six binaries, from eleven. The
+residue the previous entry called an open question was not one: both remaining
+shapes were radare2 fabrications the evidence does separate.
+
+`dbg.BZ2_hbMakeCodeLengths` carries `var_474h` and `var_478h`, both `int64_t`
+four bytes apart and both address-only. The rule that dropped a slot only when
+exactly one of a pair was undereferenced had been restricted that way to protect
+`bzerr`, and `bzerr` is protected by overlapping nothing. `dbg.inflate_table`
+carries `var_60h` measuring sixteen bytes through an SSE access while typed
+`int64_t`, with `var_62h` inside it; a slot strictly inside another is an
+interior access minted as a variable.
+
+A measurement now settles a scalar's extent rather than only narrowing it,
+since a type narrower than a proven access is a wrong type and claiming fewer
+bytes than the program moved leaves room for the fabricated neighbour.
+
+Local census across the session: 588 rendered / 104 refused / 0 silent at
+`6f976880`, then 590 / 102 after the callee-drop and the first overlap rule,
+then **592 rendered / 100 refused / 0 silent** of 692 at `54ac846e`.
+
+The largest remaining class is `RenderedValueRequired` at sixteen, up from ten
+before step 3 introduced `BindingRole::CallClobbered`. That growth is this
+session's and is the next thing to trace.
