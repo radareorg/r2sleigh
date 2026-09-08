@@ -23,6 +23,8 @@ fn deleted_command_families_are_not_left_as_refusal_shims() {
         "a:sla.decj",
         "a:sla.regs",
         "a:sla.debug.regs",
+        "a:sla.debug.vars",
+        "a:sla.debug.defuse",
         "a:sla.debug.types",
     ] {
         let result = r2_cmd(vuln_test_binary(), command);
@@ -101,6 +103,44 @@ fn opvals_reports_the_registers_an_instruction_reads_and_writes() {
             && json.get("dsts").and_then(Value::as_array).is_some(),
         "opvals must report both operand sides:\n{}",
         result.stdout
+    );
+}
+
+#[test]
+fn the_facts_the_deleted_instruction_views_carried_are_still_reported() {
+    // a:sla.debug.vars listed the varnodes of one instruction's lift, which is
+    // what a:sla.debug.json reports the lift of; a:sla.debug.defuse partitioned
+    // one instruction's SSA values into inputs, outputs and live, and every
+    // name in that partition is a dst or a source of the operations the SSA
+    // commands report.
+    let pcode = r2_cmd(vuln_test_binary(), "aaa; s entry0; a:sla.debug.json");
+    pcode.assert_ok();
+    let pcode_json: Value = pcode.parse_json().expect("pcode JSON");
+    assert!(
+        pcode_json.as_array().is_some_and(|ops| !ops.is_empty()),
+        "the raw lift the varnode dump projected must still be reportable:\n{}",
+        pcode.stdout
+    );
+
+    let ssa = r2_cmd(vuln_test_binary(), "aaa; s entry0; a:sla.debug.ssa.func");
+    ssa.assert_ok();
+    let ssa_json: Value = ssa.parse_json().expect("function SSA JSON");
+    let operations: Vec<&Value> = ssa_json
+        .get("blocks")
+        .and_then(Value::as_array)
+        .expect("function SSA blocks")
+        .iter()
+        .filter_map(|block| block.get("ops").and_then(Value::as_array))
+        .flatten()
+        .collect();
+    assert!(
+        !operations.is_empty()
+            && operations
+                .iter()
+                .all(|op| op.get("sources").is_some() || op.get("dst").is_some()),
+        "the def-use relation the per-instruction view partitioned must still be \
+         reported by the SSA commands:\n{}",
+        ssa.stdout
     );
 }
 

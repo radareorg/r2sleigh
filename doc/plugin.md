@@ -20,7 +20,7 @@ Reads anal.arch and anal.bits from radare2:
 - riscv + 32 bits -> riscv32
 - mips -> mips
 
-Maintainer override: `a:sla.debug.arch x86-64`
+Maintainer override: `a:sla.arch x86-64`
 
 Plugin Callbacks
 ----------------
@@ -33,16 +33,18 @@ sleigh_post_analysis: Native post-analysis enrichment during aa/aaa/aaaa.
 Command Reference
 -----------------
 
+Configuration and status:
+- a:sla, a:sla.info -- Status and loaded architecture
+- a:sla.arch [name] -- Get/set architecture
+- a:sla.assumptions[-] [fn] -- Show or clear a function's assumptions
+- a:sla.assumej <json> -- Set a function's assumptions
+- a:sla.profilej -- Per-function stage timings
+
 Instruction-Level:
-- a:sla -- Status and help
-- a:sla.debug.info -- Architecture info
-- a:sla.debug.arch [name] -- Get/set architecture
 - a:sla.debug.json -- R2IL ops as JSON
-- a:sla.debug.regs -- Registers read/written
+- a:sla.debug.opvals -- Registers read/written
 - a:sla.debug.mem -- Memory accesses
-- a:sla.debug.vars -- All varnodes
 - a:sla.debug.ssa -- SSA for instruction
-- a:sla.debug.defuse -- Def-use analysis
 
 Function-Level:
 - a:sla.debug.ssa.func -- Function SSA with phi nodes

@@ -15508,3 +15508,34 @@ pd:s   dbg.main decompile 1281577us
 The last of those is the number the coverage work has wanted all along and had
 no way to ask for: what one function costs to decompile, separated from what it
 costs to analyse.
+
+## The two derived instruction views are gone
+
+`a:sla.debug.vars` dumped every varnode of one instruction's lift, and
+`a:sla.debug.defuse` partitioned that instruction's SSA values into inputs,
+outputs and live. Both are views over data another command already reports, and
+checking that before deleting them is what makes the deletion honest. On
+`enter 0x4864, 0x8b` the SSA command reports operations whose `dst` and
+`sources` are `RBP_0`, `RSP_0`, `RSP_1`, `tmp:44980_1` and so on, and every name
+in `defuse`'s three lists is one of those: `inputs` are used and never defined
+by these ops, `outputs` are defined and not consumed within them, `live` are
+both. The varnode dump is the same relation to `a:sla.debug.json`, which
+reports the lift the varnodes come from.
+
+Neither had a caller in any test or script. `a:sla.debug.defuse.func`, the
+function-wide def-use, is a different command and stays; so does
+`a:sla.debug.mem`, because memory-SSA is where the current work is and a
+filtered view of it earns its lines.
+
+`sleigh_cmd` finishes this cleanup at 654 lines, from 804. Across the four
+tiers the command surface loses `a:sym.*` and `a:sla.sym*` with the subsystem
+they named, `a:sla.dec` and `a:sla.decj` to `pd:s`, `a:sla.regs` to
+`a:sla.debug.opvals`, and now `a:sla.debug.vars` and `a:sla.debug.defuse` to
+the commands they projected -- and it gains back the five configuration
+commands the gate had made unreachable.
+
+`doc/plugin.md`'s command reference had drifted with all of it: it still listed
+`a:sla.debug.info`, `a:sla.debug.arch` and `a:sla.debug.regs`, two of which are
+no longer gated and one of which no longer exists. It now has a configuration
+section naming the five reachable commands and an instruction section naming
+the four that remain.

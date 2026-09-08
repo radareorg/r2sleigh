@@ -11102,6 +11102,8 @@ fn r2plugin_legacy_debug_command_redirects_stay_deleted() {
         "sym.state",
         "sleigh_direct_sym_snapshot_required_command",
         "sleigh_decompile_execute",
+        "sla.vars",
+        "sla.defuse\"",
     ] {
         assert!(
             !c_source.contains(forbidden),

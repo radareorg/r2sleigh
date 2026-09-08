@@ -318,7 +318,6 @@ Plugin Commands
 | `a:sla.debug.ssa` | JSON | SSA form for current instruction |
 | `a:sla.debug.ssa.func` | JSON | Function SSA with phi nodes |
 | `a:sla.debug.ssa.func.opt` | JSON | Optimized function SSA |
-| `a:sla.debug.defuse` | JSON | Def-use analysis for current instruction |
 | `a:sla.debug.defuse.func` | JSON | Function-wide def-use analysis |
 | `a:sla.debug.dom` | JSON | Dominator tree |
 | `a:sla.debug.cfg` | text | ASCII CFG |

@@ -3686,9 +3686,7 @@ static bool sleigh_direct_sla_debug_only_command(const char *cmd) {
 	if (!strcmp (cmd, "sla.json")
 		|| !strcmp (cmd, "sla.opvals")
 		|| !strcmp (cmd, "sla.mem")
-		|| !strcmp (cmd, "sla.vars")
 		|| !strcmp (cmd, "sla.ssa")
-		|| !strcmp (cmd, "sla.defuse")
 		|| !strcmp (cmd, "sla.ssa.func")
 		|| !strcmp (cmd, "sla.ssa.func.opt")
 		|| !strcmp (cmd, "sla.defuse.func")
@@ -3819,8 +3817,8 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 			r_cons_println (cons, "| a:sla.assumptions[-]  - show or clear a function's assumptions");
 			r_cons_println (cons, "| a:sla.assumej <json>  - set a function's assumptions");
 			r_cons_println (cons, "| a:sla.profilej        - per-function stage timings");
-			r_cons_println (cons, "| a:sla.debug.*         - engine inspection (json, opvals, mem, vars,");
-			r_cons_println (cons, "|                         ssa[.func[.opt]], defuse[.func], dom, cfg[.json],");
+			r_cons_println (cons, "| a:sla.debug.*         - engine inspection (json, opvals, mem,");
+			r_cons_println (cons, "|                         ssa[.func[.opt]], defuse.func, dom, cfg[.json],");
 			r_cons_println (cons, "|                         taint, slice)");
 			r_cons_println (cons, "| pd:s [name|addr]      - decompile with r2sleigh");
 		}
@@ -4113,40 +4111,6 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		return strdup("");
 	}
 
-	if (!strcmp (cmd, "sla.vars")) {
-		R2ILContext *ctx = get_context (anal);
-		if (!ctx) {
-			R_LOG_ERROR ("r2sleigh: no context");
-			return strdup("");
-		}
-
-		ut64 addr = core->addr;
-		ut8 buf[SLEIGH_MIN_BYTES] = {0};
-		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
-			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return strdup("");
-		}
-
-		R2ILBlock *block = NULL;
-		if (sleigh_v2_lift_instruction (ctx, buf, sizeof (buf), addr, &block)
-			!= R2SLEIGH_STATUS_OK_V2 || !block) {
-			R_LOG_ERROR ("r2sleigh: lift failed");
-			return strdup("");
-		}
-
-		char *vars_json = NULL;
-		const R2ILBlock *blocks[] = { block };
-		(void)sleigh_v2_analysis_render (R2SLEIGH_ANALYSIS_BLOCK_VARNODES_V2,
-			ctx, blocks, 1, 0, NULL, &vars_json);
-		if (cons && vars_json) {
-			r_cons_printf (cons, "%s\n", vars_json);
-		}
-
-		free (vars_json);
-		(void)sleigh_v2_block_release (&block);
-		return strdup("");
-	}
-
 	if (!strcmp (cmd, "sla.ssa")) {
 		R2ILContext *ctx = get_context (anal);
 		if (!ctx) {
@@ -4177,40 +4141,6 @@ static char *sleigh_cmd(RAnal *anal, const char *cmd) {
 		}
 
 		free (ssa_json);
-		(void)sleigh_v2_block_release (&block);
-		return strdup("");
-	}
-
-	if (!strcmp (cmd, "sla.defuse")) {
-		R2ILContext *ctx = get_context (anal);
-		if (!ctx) {
-			R_LOG_ERROR ("r2sleigh: no context");
-			return strdup("");
-		}
-
-		ut64 addr = core->addr;
-		ut8 buf[SLEIGH_MIN_BYTES] = {0};
-		if (!anal->iob.read_at (anal->iob.io, addr, buf, sizeof (buf))) {
-			R_LOG_ERROR ("r2sleigh: failed to read bytes at 0x%"PFMT64x, addr);
-			return strdup("");
-		}
-
-		R2ILBlock *block = NULL;
-		if (sleigh_v2_lift_instruction (ctx, buf, sizeof (buf), addr, &block)
-			!= R2SLEIGH_STATUS_OK_V2 || !block) {
-			R_LOG_ERROR ("r2sleigh: lift failed");
-			return strdup("");
-		}
-
-		char *defuse_json = NULL;
-		const R2ILBlock *blocks[] = { block };
-		(void)sleigh_v2_analysis_render (R2SLEIGH_ANALYSIS_BLOCK_DEFUSE_V2,
-			ctx, blocks, 1, 0, NULL, &defuse_json);
-		if (cons && defuse_json) {
-			r_cons_printf (cons, "%s\n", defuse_json);
-		}
-
-		free (defuse_json);
 		(void)sleigh_v2_block_release (&block);
 		return strdup("");
 	}
