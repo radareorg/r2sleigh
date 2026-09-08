@@ -15271,3 +15271,29 @@ four-byte slot written by `mov dword [var_24h], edx`, and the incoming 64-bit
 `RDX_0` it is narrowed from has no definition. That is the subregister
 argument-spill class, and it is a correctness defect in a function the census
 now counts as rendered.
+
+The two neighbouring defects named above turned out to be worth more than the
+first one. Naming which guard declines a slot owner -- `stack-owner-declined`,
+now emitted by each of the four early returns in
+`certified_stack_owner_expr_for_memory_fact` -- showed that most of the
+`PlannedElidedValueRendered` refusals are not the memory renderer's at all: the
+guards pass and the delegate fails, with `ParameterHomeWidthMismatch` again.
+
+bzip2's `BZ2_bzReadClose` is the clean case. It homes `int *bzerror` with
+`mov qword [rbp-0x18], rdi`, `aa` types the slot `int64_t` correctly, and
+`aaft` turns it into `uint32_t`. Not through the pointer collapse this time,
+through the signedness path: a `cmp` and an unsigned branch tell the pass the
+variable is unsigned and nothing about its width, and `tp_built_type` applied
+that by writing the word in front of the type it already had, producing
+`unsigned int64_t`, which is not a type. The collapse below then read its
+`unsigned` prefix and rewrote the whole thing to `uint32_t`, and an eight-byte
+slot came out four bytes wide.
+
+A sized alias already carries its width, so the fact now picks the same-width
+alias with the other sign. Anything that is not a sized alias keeps the old
+composition exactly, which is what holds the change to five moved expectations,
+each of them the same correction on an eight-byte slot.
+
+The three radare2 commits together take the census from 599/692 to 610/692 and
+the refusals from 93 to 82. `PlannedElidedValueRendered` falls from 16 reports
+to 6 and is no longer the largest class; `RenderedValueRequired` at 11 is.

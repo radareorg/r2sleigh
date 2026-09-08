@@ -779,22 +779,40 @@ impl<'a> FoldingContext<'a> {
         &self,
         fact: &r2types::MemoryAccessRenderFact,
     ) -> Option<CExpr> {
+        let declined = |why: &str| {
+            r2il::refusal_evidence!(
+                "stack-owner-declined",
+                "value={:?} object={:?} width={} object_offset={:?}: {why}",
+                fact.address,
+                fact.object,
+                fact.width,
+                fact.object_offset
+            );
+            None::<CExpr>
+        };
         if fact.width == 0 {
-            return None;
+            return declined("the access has no width");
         }
         if self
             .prepared_ssa()
             .is_some_and(|prepared| prepared.objects().address_is_indexed(fact.address))
         {
-            return None;
+            return declined("the address is indexed");
         }
         // An access at a constant offset inside the slot is inside it and not
         // at it, exactly as an indexed one is. The name alone would say a
         // four-byte read of `statBuf.st_mode` was the whole `struct stat`.
         if fact.object_offset.is_some_and(|offset| offset != 0) {
-            return None;
+            return declined("the access sits at an offset inside the slot");
         }
-        self.inputs.render_facts()?.stack_slot_offset(fact.object)?;
+        if self
+            .inputs
+            .render_facts()
+            .and_then(|facts| facts.stack_slot_offset(fact.object))
+            .is_none()
+        {
+            return declined("the object has no declared stack slot");
+        }
         self.certified_stack_var_expr_for_object(fact.object)
     }
 }
