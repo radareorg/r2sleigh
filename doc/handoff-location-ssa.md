@@ -16653,3 +16653,247 @@ The full chain for this class is now: census count -> refusal cause ->
 exists -> a `PlacementObservationTarget::Write` that does not. Next session
 starts by dumping the observation journal for this function and asking which
 statement, if any, carries the call's write.
+
+## The remaining refusals, derived as invariants rather than counted as strings
+
+The user asked for the remaining refusals to be treated mathematically and end to
+end: the class each belongs to, the invariant that class violates, what closes it
+by construction, and what residue is left once it holds. This entry is that
+derivation. Every claim below is marked as either **verified** by a trace or a
+read of the code this session, or **to check**, with the check named. Nothing
+here is a guess written as a finding.
+
+### The shape of the problem
+
+A function is refused when some layer cannot certify a claim the rendering makes.
+Write the refusals as a sum over invariants:
+
+    R  =  Σ_k  { f : invariant I_k fails on f }
+
+and each I_k as a statement about one fact with one owner. The census counts
+cause *strings*, and a string is not an invariant: several strings can be one
+violated invariant, and one string can hide two. The ranking is the input to
+this reasoning, not its output. Two things make the counts lower bounds rather
+than totals: a function reports only its *first* refusal (fixing the wire
+writer this session exposed sixteen overlaps behind it), and the benchmark
+census excluded functions that produced nothing at all.
+
+**Verified:** the DecBench run at `decbench-20260908T103747-86682` discovered
+1082 functions, skipped 277 by list, and *observed* 735. The 70 eligible
+functions it never observed are the silent-failure class fixed today. Its
+reported coverage of 606/735 = 0.824 therefore excludes them; the honest
+denominator is 805 and the honest figure is at most 606/805 = 0.753. The
+benchmark ranking must be re-taken with in-band refusals before it is used for
+anything.
+
+### Invariant A — a stack slot's extent is what the program established
+
+**Class:** `OverlappingStackSlots`, 34 of 125 locally, 27% and the largest
+single string.
+
+**Statement.** Let the frame be an address space and each slot a pair
+(offset, extent). The extent the program established is
+
+    ext(s)  =  ⊔ { width(a) : a is an access at s's offset }
+
+the join of the widths of the accesses that touched it. A type is a *spelling*
+of those bytes and may refine ext(s) -- say what they mean -- but may not widen
+it; the only thing allowed to widen an extent past its accesses is a DWARF
+declaration of an aggregate, because that is an exact statement about the
+object rather than an inference from its use. The invariant is
+
+    I_A :  ∀ slot s, claimed_extent(s) = ext(s), unless a DWARF aggregate declares more.
+
+**Where it fails (verified).** The capture reads a slot's extent off its *type*
+(`snapshot_capture.c`, the `r_anal_type_bitsize` path in `fcn_context_collect_slot`).
+radare2's type on a stack variable is not always a measurement: `inferred_var_size`
+returns the pointer width when the access established none, and `aaft` adopts a
+callee's parameter type without regard to the store that filled the slot. Grouping
+the 34 by the shape of the evidence line:
+
+    22   a slot claiming 8 bytes with the next slot 4 bytes later
+     4   a slot claiming 8 bytes with the next slot 1 byte later
+     3   6 bytes later
+     5   other
+
+Two of those shapes were traced to their instruction this session: the interior
+`lea` (fixed upstream, radareorg/radare2#26692) and the callee retype
+(`adler32`: `mov dword [rbp-0x14], edx` stored four bytes; `aaft` made the slot
+`z_size_t`). The width guard written for the second recovers 9 of 34 and cannot
+be completed, because on a 64-bit target `int64_t` is both a measured eight and
+the no-measurement default, and radare2 records neither a size on `RAnalVar` nor
+a width on `RAnalVarAccess`. The question of adding one is with trufae on 26692.
+
+**What closes it by construction.** Measure ext(s) where the extent is claimed,
+which is the capture, from the accesses themselves. **Verified:** the slot
+builder receives the `RAnalVar` (`fcn_context_collect_slot (anal, ctx, fcn, var,
+…)`), `var->accesses` is a public field carrying each access address, and the
+file already decodes instructions with `r_anal_op` (lines 822 and 1106). One
+decode per access gives its width. This is capture policy against radare2's
+public API, needs nothing upstream, and does not wait on the `RAnalVar`
+question. The type then refines the spelling; a DWARF aggregate may widen; the
+contract's `size_bytes == 0` already means "extent not established" and
+`owns_entry_relative_range` already treats it as claiming nothing.
+
+**The residue, and what to do with it.** After measurement, an overlap that
+remains is real: a union, a slot reused for two variables with disjoint lives,
+or a radare2 variable that is wrong in a way measurement did not catch. Today the
+contract refuses the whole function for it (`contracts.rs:1446`). **Verified:**
+the engine's own memory model does not need that. Frame objects are keyed by
+(base, offset) with no size (`ensure_stack_object`), and may-alias between two
+SP-rooted frame objects is answered by range (`modular_memory_ranges_may_overlap`,
+`semantic.rs:3035`). So overlapping slots are already sound as *memory*; what
+they cannot be is two *program variables*, which is the promotion the pinned
+rule `a-proven-local-is-a-variable-not-memory` grants only to a proven
+non-escaping local. The end state is therefore per cell: an overlapping pair is
+denied promotion and renders through the memory path, and the function is not
+lost. That is exactly the shape the pinned rule `marked-partial-rendering-
+replaces-whole-function-refusal` already decided. Whether to change the contract
+before or after measurement lands is a sequencing question put to the user
+below.
+
+### Invariant B — a post-call register state is exactly one of three things
+
+**Class:** `missing_definition`, 12 locally and 23 on the benchmark, the largest
+engine-side string on both.
+
+**Statement.** For a call c and a convention-clobbered register r, the value the
+program may read from r after c is
+
+    ρ(c, r)  ∈  { Result(c, r),  Preserved(c, r),  Clobbered(c, r) }
+
+-- the callee returned in r; the callee provably never wrote r, so the caller's
+own value is still there; or neither is known. The SSA models all three as one
+operation, `CallDefine`, which is correct for dataflow and insufficient for
+rendering: a `Result` renders as `x = f(...)`, a `Preserved` renders as nothing
+(the read names the pre-call value), and a `Clobbered` that is read renders as an
+indeterminate the program really does read. The invariant is
+
+    I_B :  every CallDefine with a reader is resolved to exactly one of the three,
+           and the rendering of a value is a function of that resolution.
+
+**Where it fails (verified).** Five of the twelve were followed to their SSA
+definition and every one is a `CallDefine`: `RAX_18`, `RAX_21` (results of
+`snocString` in `addFlagsFromEnvVar`), `RSI_35` (after a call to 0x8d80 in
+0x5b30), `RDI_33`, `RDI_20` (in 0x4210). Six more carry the same names
+(`R9_24`, `RSI_38/41/44/62/68`) and are **to check** by the same dump; three
+(`tmp_70500_4`, `tmp_70500_8`, `var_18h`) are not `CallDefine` destinations and
+are **unclassified**.
+
+Two owners answer "does this call produce a value the program uses", and they
+disagree:
+
+- the binding plan binds a `CallDefine` when it has readers (`construction.rs:745`
+  marks `caller_supplied` only for values with *no* defining instruction, and a
+  `CallDefine` has one), so `RAX_21` is Bound;
+- the render fact says `SideEffectStatement` unless `call_results.owner_for_site`
+  names an owner (`function_facts.rs:3937`), and a `CallDefine` becomes a
+  certified result only when the call boundary is `complete` and its `results`
+  name that value (`semantic.rs:8764`). `snocString` at 0x3ee2 has
+  `callee_interface=false`, so no result, so no owner, so no assignment.
+
+The renderer then emits `snocString(...);` with no left-hand side, the journal
+records no write, and `placement.rs:3631` refuses on
+`writes_for_binding.is_empty()`. The comment at `function_facts.rs:3880` records
+that this exact pair of owners disagreed once before in the other direction.
+
+**The mechanism for `Preserved` exists and is not connected (verified).** The
+argument-register cases are GCC's `-fipa-ra`: a caller keeps a value in `rsi`
+across a call to a local callee it has seen never write `rsi`, then reads it. The
+tree already states this rule in three places and wires none of them together:
+
+- producer: `preserved_call_carriers` (`semantic.rs:3874`) computes for every
+  analysed body the convention-clobbered registers it leaves untouched at every
+  exit, exported as `SemanticFacts.preserved_call_carriers` (`:834`, set at
+  `:4141`);
+- transport: `CalleeFacts.preserved_carriers` in `r2engine` (`lib.rs:1985`, filled
+  at `:1995` from exactly that field);
+- consumer: `rename.rs:417` consults `boundary.preserved_by_target.get(&target)`
+  before emitting a `CallDefine`, so a preserved carrier gets no clobber and the
+  read reaches the pre-call value, precisely as the doc comment at
+  `function.rs:1945` describes.
+
+Every production constructor passes `CalleePreservedCarriers::new()`
+(`function.rs` 563, 592, 674, 728, 1476, 2474) and `CalleeFacts::preserved_carriers()`
+has **zero callers** in the workspace. The root build at `r2engine/lib.rs:4001`
+has `callee_facts` in scope and hands the SSA an empty map.
+
+**What closes it by construction.**
+
+1. *Preserved.* Build `preserved_by_target` from `callee_facts` at the root build
+   and pass it. One wire. **To check:** that 0x8d80's body is captured for root
+   0x5b30 and preserves `rsi`; if so `RSI_35` never exists and its three reads
+   name the pre-call value.
+2. *Result.* When the boundary carries no declared result but the callee's body
+   is read and defines the return register on every return path and the caller
+   reads it, that is a body-proven result. The pinned rule
+   `body-proven-callee-signature-wins` already says the body outranks the
+   interface for arity; this is the same rule for the return. **Verified** that
+   `snocString`'s body is analysed in the same run and defines `RAX`
+   (`reaching-abi-value: (0x3860, 4) defines Register offset 56`); **to check**
+   that it does so on every return path.
+3. *Clobbered with readers.* The program reads an indeterminate value. The plan
+   already has the honest role for this -- `BindingRole::EntryValue`, whose doc
+   comment says "the object exists from function entry holding an indeterminate
+   value, exactly as the machine does; treating it as a local and demanding an
+   assignment before its first read asks for a definition that cannot exist" --
+   and it applies it only to values with no defining instruction. Extending it
+   to a `CallDefine` that resolves to neither of the first two buckets renders
+   the read as what it is, visibly, and the project's oldest rule (an
+   uninitialised read is never made invisible) is kept because the declaration
+   says so.
+
+With all three, every `CallDefine` with a reader lands in exactly one bucket, and
+the class is closed rather than reduced.
+
+**The structural fix underneath it.** The disagreement exists because the render
+disposition of a call is computed from a table (`call_results`) that is
+independent of the plan's disposition of the call's values. That is one fact
+with two owners -- the third structural violation named in the
+`derive-core-designs-mathematically-before-planning` memory, verbatim. The
+single-owner form is: the disposition of a call site is a function of the plan's
+dispositions of its `CallDefine` values (any Bound ⇒ `AssignedResult`, else
+`SideEffectStatement`), and the boundary certificate supplies only the *type*.
+Then the two cannot disagree. How far to take that -- this one table, or the
+whole plan/journal boundary -- is the scope question put to the user below.
+
+### The rest of the plan/journal family
+
+`RenderedValueRequired` (11), `BindingPlanBuild` (8), `unobserved_binding_read`
+(7), `PlannedElidedValueRendered` (5), `InvalidUse` (2): 33 locally, and on the
+benchmark `BindingPlanBuild` 14 and `UnownedBindingSymbol` 8 besides. **Verified**
+that these are all refusals raised at the same boundary -- the journal sealing
+the rendered tree against the plan (`observation_journal.rs`, whose own doc
+comment on `RenderedValueRequirementCause` says "they all mean that the native
+tree cannot account for one planned value") -- and **not traced**: none of them
+was followed to a value this session. They are listed here so the next session
+does not mistake B's closure for the family's. The method that closed B is the
+one to apply: evidence line → binding name from `placement-decision` →
+defining op in the SSA dump → the owner that disagrees.
+
+### What is not in these two invariants
+
+`unrepresentable operation` (6 locally) is structuring, derived earlier in this
+document as the continuation rule. `engine complexity limit` (5) and the
+benchmark's `deadline exceeded` (6) are cost, which the pinned rule
+`a-deadline-must-not-decide-coverage` says is the defect. `OpLowering(implementation.rs:1359)`
+(5 locally, 11 on the benchmark) is untraced. Three
+`trusted lift refused: instructions after a control terminator` are a block
+boundary disagreement between radare2 and the lift and untraced.
+
+### Order, and what it buys
+
+    A1  measure slot extents in the capture           removes the 22 width-widening
+                                                      overlaps and the 4 interior-lea
+                                                      ones without waiting upstream
+    B1  wire preserved_by_target at the root build    argument-register CallDefines
+    B2  body-proven result when the interface is      result-register CallDefines
+        absent
+    B3  EntryValue role for a Clobbered CallDefine     the honest residue of B
+    B4  call disposition derived from the plan        the two owners become one
+    A2  overlap denies promotion per cell instead     the honest residue of A
+        of refusing the function
+
+A1 and B1 are wires between things that already exist and are the two largest
+levers on the local corpus; B4 and A2 are the structural changes that make the
+invariants hold rather than merely making the counts go down.
