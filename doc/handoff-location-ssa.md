@@ -15128,3 +15128,34 @@ So the pieces land together or not at all: the producer, and the guard that stop
 the owner path claiming an access that is inside the slot rather than at it. On
 its own the guard changes nothing today, because the functions it would protect
 refuse earlier on the folded geometry constant.
+
+
+### The member producer landed
+
+The blocker above is closed. The memory-SSA annotation that answers for an
+access already states where in the object it lands, and it is keyed by the
+access, so `object_offset` now travels on the access through the certificate to
+the render fact. Both sides ask the same question of the same key, and the
+mismatch between the object model's address value and the render fact's simply
+stops mattering.
+
+With that, the third producer reads the declared slot's node in the interface
+type graph and takes the member whose offset *and* size are exactly the access's.
+The owner-path guard landed in the same commit, and the commit message says why
+they must never be separated.
+
+**It buys no coverage yet, and moves five functions to truer causes.**
+`RenderedValueRequired` falls from sixteen to eleven and `missing_definition`
+rises from twelve to sixteen, mostly onto the flag class -- the gap cell and the
+rendered use counting one machine use twice. `notAStandardFile` now stops on
+`ZF_5` instead of on a frame displacement, which is the same wall the other
+aggregate functions hit.
+
+So the flag class is now in front of more functions than when it was first
+diagnosed, and it is the next thing to do. What is known about it: one machine
+use, one observation target, two placement reads, because `placement_target`
+maps a gapped use of a bound value and a rendered use of it to the same
+`PlacementObservationTarget::Use`. The seal calls that a `ConflictingUse`, but
+placement consumes the targets first, so it surfaces as a placement refusal
+instead. Fixing it means the gap not claiming a cell the rendering answers for,
+not deduplicating at placement.
