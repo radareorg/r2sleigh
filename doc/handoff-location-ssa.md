@@ -16012,3 +16012,59 @@ What the trace does say is that three of five refusals in this class are loop
 identity -- the canonical loop fact and the rendered loop disagreeing about
 which predicate controls the loop -- and one is the guard domain. That is where
 the next work goes.
+
+### Following the guard down: the cold edge is the cause after all
+
+The previous entry compared refusal strings and concluded the cold partitions
+were a coincidence. That was as unearned as the claim it replaced. Following one
+refusal to the value it names says the opposite for three of the four.
+
+`file_compress` at 0x2b60 refuses because the rendered guard domain for block
+0x2c73 is `[P0=false, P2=true]` where the canonical domain is
+`[P0=false, P1=false, P2=true]`. The engine's own CFG shows why the canonical
+domain is right:
+
+```
+0x2b60  jcc t:0x2c43 f:0x2bb3      P0
+0x2bb3  jcc t:0x2416 f:0x2bfd      P1     <- 0x2416 is sym.file_compress.cold
+0x2bfd  jcc t:0x2c73 f:0x2c10      P2
+0x2c10  jcc t:0x2c6e f:0x2c33
+0x2c33  ret
+0x2c43  call 0x23b0                       terminal, the callee does not return
+0x2c6e  call 0x22b0                       terminal
+0x2c73  call 0x23b0                       terminal
+```
+
+0x2c43 and 0x2c6e end in calls that do not return, so 0x2c73 has exactly one
+predecessor, 0x2bfd, and exactly one path from the entry. Its domain is that
+path's three guards. The rendering keeps P0 and P2 and loses **P1 -- the branch
+whose taken edge leaves the function for the cold partition.** A branch the
+renderer cannot write, because its target is not in the function and so has no
+label, is a branch that contributes no guard, and every block after it is
+rendered in a domain weaker than the one the proof requires.
+
+`gz_compress` at 0x2970 is the same defect wearing the loop's clothes. Its loop
+is 0x29c0 -> 0x29d1 -> 0x29f9 -> 0x29c0, entered at 0x29d1, so 0x29d1 is the
+header -- and 0x29d1's exit is `jcc t:0x2400 f:0x29f9` into
+`sym.gz_compress.cold`. The header cannot be the rendered loop test because one
+of its arms leaves the function, the renderer settles on 0x29f9 instead, and the
+canonical loop identity for 0x29f9 does not exist. `file_uncompress` names 0x2d91
+among its unrendered blocks, which is precisely the block holding its jump to
+0x2428.
+
+So the rule is not "the cold blocks are missing from the body". It is that **an
+edge leaving the function is unrenderable, and unrenderable edges silently cost
+the proof its guards.** Capturing the partition removes the external edge, and
+the guard comes back with it.
+
+`main` remains outside this. It has no edge into 0x243a, and `sym.main.cold`
+there is 364 bytes -- past `main`'s own entry at 0x2460 -- so radare2 built it by
+falling out of the stub into the hot function. Unioning that by name would hand
+the capture 29 blocks overlapping the ones it already has, and the coherence
+check would refuse a function that today at least reaches structuring.
+
+That settles the shape of the fix. The capture extends a function by the blocks
+of its `.cold` sibling **that the function actually branches to**, transitively
+within the sibling, rather than by the sibling's whole block list. A partition
+nothing jumps to contributes nothing, which is the right answer for `main` and
+costs it nothing.
