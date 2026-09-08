@@ -16579,3 +16579,43 @@ is where the twelve functions in this class should be traced next, in
 This narrowing is the useful part. The class began the session as an unattributed
 count, and it is now a specific question about one pass: why a binding reaches
 the uses of a value without reaching its definition.
+
+### The undefined binding is a call's return value, and the SSA defines it
+
+Correction to the two entries above. The evidence prints
+
+```
+BindingId(220) is read 2 times and never written ... reads [(..., 16095), (..., 16095)]
+```
+
+and 16095 is 0x3edf, the **block** address, not an instruction address -- which
+is why both reads show the same number and why the trace above read them as two
+reads of `r14` at one instruction. The observation journal names the binding
+directly:
+
+```
+placement-decision: binding=BindingId(220) name=RAX_21 reason=MissingDefinition
+```
+
+`RAX_21`, not `r14`. Block 0x3edf is
+
+```
+0x3edf  mov  rdi, r14
+0x3ee2  call snocString
+0x3ee7  mov  rbp, rax        <- RAX_21
+0x3eea  jmp  0x3ea8
+```
+
+so the value is the return of `snocString`. The SSA dump has `RAX_21` mentioned
+twice in block 0x3edf and **defining** it there, so the definition exists in the
+SSA exactly where the call is.
+
+The binding plan nevertheless records two reads of BindingId(220) and no write.
+So a call's return value produces an SSA definition and no binding-plan write
+occurrence, and `placement.rs:3631` refuses because
+`writes_for_binding.is_empty()`.
+
+That is the defect to fix, in `crates/r2dec` binding assignment: whatever builds
+the `writes` list from the SSA is not treating a call's result as a definition.
+The r14 analysis in the two entries above is sound about the machine and about
+the CFG, and it was about the wrong value.
