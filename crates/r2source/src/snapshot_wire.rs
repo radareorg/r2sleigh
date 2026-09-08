@@ -50,6 +50,8 @@ pub enum SnapshotWireError {
     ValueTooWide,
     /// A tag names a case this schema does not define; `record` says which record it came from.
     UnknownDiscriminant { record: &'static str, tag: u64 },
+    /// The buffer nests callee snapshots deeper than the reader will descend.
+    CalleeSetTooDeep,
     /// The bytes decoded but the contract refused them; `contract` names the constructor that said no and `reason` says what it objected to.
     RejectedContract {
         contract: &'static str,
@@ -2142,6 +2144,18 @@ pub fn encode_snapshot(snapshot: &OwnedFunctionSnapshot) -> Result<Vec<u8>, Snap
 
 /// Encode one snapshot together with the snapshots of what it calls.
 ///
+/// Whether a nested decode failure is a fact about that callee's own facts.
+///
+/// A contract its facts fail, or validation of the parts they mint, says the
+/// root knows less about that callee. Anything else is about the bytes.
+const fn callee_failure_is_about_the_callee(error: &SnapshotDecodeError) -> bool {
+    matches!(
+        error,
+        SnapshotDecodeError::Wire(SnapshotWireError::RejectedContract { .. })
+            | SnapshotDecodeError::Validation(_)
+    )
+}
+
 /// Each callee is a whole buffer of its own, so it decodes by the same reader
 /// and nothing about it depends on where it sits in this one.
 pub fn encode_snapshot_set(
@@ -2335,19 +2349,26 @@ fn decode_snapshot_inner(
         // A bounded set keeps a capture's cost a property of what was asked
         // for; an unbounded one lets the buffer decide how far to recurse.
         return Err(SnapshotDecodeError::Wire(
-            SnapshotWireError::RejectedContract {
-                contract: "callee snapshot set depth",
-                reason: format!("the set is deeper than {SNAPSHOT_CALLEE_DEPTH} levels"),
-            },
+            SnapshotWireError::CalleeSetTooDeep,
         ));
     }
     for _ in 0..callee_count {
         let nested = reader.bytes()?;
-        let (snapshot, callees_of_callee) = decode_snapshot_inner(nested, depth - 1)?;
-        callees.push(CapturedCallee {
-            snapshot,
-            callees: callees_of_callee,
-        });
+        // A contract the callee's own facts fail is a fact about that callee,
+        // so the root knows less about it rather than failing to decode.
+        match decode_snapshot_inner(nested, depth - 1) {
+            Ok((snapshot, callees_of_callee)) => callees.push(CapturedCallee {
+                snapshot,
+                callees: callees_of_callee,
+            }),
+            Err(error) if callee_failure_is_about_the_callee(&error) => r2il::refusal_evidence!(
+                "callee-snapshot-refused",
+                "dropping a callee snapshot from the set: {error}"
+            ),
+            // Malformed framing or an unbounded set says the buffer itself is
+            // not what it claims, and nothing in it can be trusted.
+            Err(error) => return Err(error),
+        }
     }
     reader.finish()?;
     let snapshot = OwnedFunctionSnapshot::from_captured_parts(
@@ -2449,6 +2470,29 @@ mod tests {
     }
 
     #[test]
+    fn a_callees_own_refusal_costs_the_root_that_callee_and_not_itself() {
+        // The overlapping stack slots of one callee refused every caller that
+        // captured it, which is a fact about the callee aggregated as if it
+        // were a fact about the buffer.
+        assert!(callee_failure_is_about_the_callee(
+            &SnapshotDecodeError::Wire(SnapshotWireError::RejectedContract {
+                contract: "SourceFunctionInterface::new",
+                reason: "OverlappingStackSlots".to_string(),
+            })
+        ));
+        for bytes_are_wrong in [
+            SnapshotWireError::CalleeSetTooDeep,
+            SnapshotWireError::PayloadTruncated,
+            SnapshotWireError::BadMagic(0),
+            SnapshotWireError::TrailingPayload(1),
+        ] {
+            assert!(!callee_failure_is_about_the_callee(
+                &SnapshotDecodeError::Wire(bytes_are_wrong)
+            ));
+        }
+    }
+
+    #[test]
     fn a_capture_carries_two_levels_and_refuses_a_third() {
         // A callee that calls something preserves nothing unless that body was
         // read too, which is what the second level is for.
@@ -2489,10 +2533,7 @@ mod tests {
         assert!(matches!(
             decode_snapshot_set(&buffer),
             Err(SnapshotDecodeError::Wire(
-                SnapshotWireError::RejectedContract {
-                    contract: "callee snapshot set depth",
-                    ..
-                }
+                SnapshotWireError::CalleeSetTooDeep
             ))
         ));
     }
