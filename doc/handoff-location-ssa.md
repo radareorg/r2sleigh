@@ -17628,3 +17628,20 @@ find which link in this particular chain they miss.
 
 **Lead two: `rep` string instructions**, recorded in the previous entry. Both
 leads are worth roughly twenty DecBench cells each.
+
+### The out-parameter trace, one step further
+
+`certified_frame_object_call_argument` now names an uncertified call site rather
+than returning silently, and that is not what happens here: the call to
+`BZ2_bzWriteClose64.part.0` at 0x87d0 is certified. Nor does the frame-address
+spelling decline -- `call-argument-frame-address` never fires. Across the whole
+function, `EscapedStackAddress` appears zero times, and none of the seventy-one
+`call-argument-frame-object` failures has a defining op mentioning `RSP` or
+`IntAdd`; every one is a `Copy` of a register or temporary.
+
+So the argument carrying `lea rdi, [var_4h]` is not among the values that reach
+the check at all. The next step is at the caller of
+`certified_stack_address_argument_expr` in `fold/op_lower/calls.rs`: which
+arguments of a call site it is invoked for, and why argument 0 of this one is
+not one of them.
+

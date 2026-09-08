@@ -307,7 +307,15 @@ pub(crate) fn certified_frame_object_call_argument(
     argument_index: usize,
     value: ValueId,
 ) -> Option<r2ssa::ObjectId> {
-    let certificate = certified_call_site(source, at)?;
+    let Some(certificate) = certified_call_site(source, at) else {
+        // Without a call certificate no argument of this site can name a frame
+        // object, and an out-parameter's escape becomes invisible.
+        r2il::refusal_evidence!(
+            "call-argument-frame-object",
+            "call {at:?} argument {argument_index} value {value:?}: the site has no call certificate"
+        );
+        return None;
+    };
     let listed = certificate.argument_values.get(argument_index).copied() == Some(value);
     let certified = certificate
         .argument_certificates
@@ -328,11 +336,19 @@ pub(crate) fn certified_frame_object_call_argument(
     if !(listed && certified && !indexed && frame) {
         r2il::refusal_evidence!(
             "call-argument-frame-object",
-            "call {at:?} argument {argument_index} value {value:?}: listed={listed} certified={certified} indexed={indexed} object={object:?} kind={kind:?} stack_root={:?}",
+            "call {at:?} argument {argument_index} value {value:?}: listed={listed} certified={certified} indexed={indexed} object={object:?} kind={kind:?} stack_root={:?} def={:?}",
             source.graph().value(value).and_then(|value| source
                 .function()
                 .decompile_prep_facts()
-                .and_then(|facts| facts.stack_address_roots.get(&value.var)))
+                .and_then(|facts| facts.stack_address_roots.get(&value.var))),
+            source
+                .graph()
+                .def_inst(value)
+                .and_then(|inst| source.graph().inst(inst))
+                .map(|inst| format!("{:?}", inst.payload)
+                    .chars()
+                    .take(220)
+                    .collect::<String>())
         );
         return None;
     }
