@@ -1213,7 +1213,13 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         self.completed_loop_exit = None;
         self.region_exit_domains = None;
         let inherited_domains = self.active_domains.clone();
-        if let Some(domains) = self.transfer_target_domains.remove(&region.entry()) {
+        // A transfer's entry is its target, which it jumps to rather than
+        // places. Certifying the join here asks the target's domain to match
+        // the one the jump is written in, which for an exit is inside the loop
+        // it leaves; the join belongs where the target is placed.
+        if !matches!(region, Region::Transfer { .. })
+            && let Some(domains) = self.transfer_target_domains.remove(&region.entry())
+        {
             self.certify_transfer_domain_join(region.entry(), domains);
         }
         let stmt = self.structure_region_in_active_domains(region)?;
