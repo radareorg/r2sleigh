@@ -1097,17 +1097,31 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// Whether this call assigns its result, decided by the value it assigns.
+    ///
+    /// The render fact answers from a second table keyed on owners, and the
+    /// two disagreed whenever a value had a binding but no recorded owner.
     fn certified_assigned_call_result_owner_expr_for_source(
         &self,
         source_call: (u64, usize),
     ) -> Option<CExpr> {
-        let callsite = r2types::CallsiteKey {
-            block_addr: source_call.0,
-            op_index: source_call.1,
-        };
-        let render_fact = self.inputs.call_render_facts()?.fact_for_site(callsite)?;
-        (render_fact.disposition == r2types::CallsiteRenderDisposition::AssignedResult)
-            .then(|| self.certified_call_result_owner_expr_for_source(source_call))?
+        let value = self
+            .certified_call_result_definition_for_source(source_call)?
+            .value;
+        let names = self.inputs.binding_names?;
+        match names.disposition_for_value(value) {
+            Some(crate::binding_plan::ValueDisposition::Bound { .. }) => {
+                self.certified_call_result_owner_expr_for_source(source_call)
+            }
+            // Nothing reads the result, so the call is its own statement.
+            Some(crate::binding_plan::ValueDisposition::Elided { .. }) => None,
+            // No object to assign and no proof the result is dead. Rendering a
+            // bare statement here would drop that, or evaluate the call twice.
+            _ => {
+                self.retain_first_lowering_refusal(OpLoweringRefusal::missing_program_variable());
+                None
+            }
+        }
     }
 
     /// The name a call result carries, for a definition that is a slice of it.

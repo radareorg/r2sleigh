@@ -17374,3 +17374,76 @@ Nothing regressed -- the gates hold and the function refused before and refuses
 now -- but the earlier claim that all three buckets are "accounted for" should be
 read as: Result is rendered, Preserved is bounded by breadth, Clobbered is
 classified and awaits step 4's decision about who owes it a cell.
+
+### The fork the previous entry left open, answered by the trace
+
+Neither reading was right. The trace names the third possibility, which is the
+one the code was already built for.
+
+`R2DEC_TRACE_REFUSAL` on `fcn_3da0` reports both uses of `ValueId(43)` as inputs
+to one instruction, `InstId(605)`, whose output `ValueId(632)` is already
+`Elided { reason: UnobservedMerge }`. So every reader of the clobber is a phi
+nobody observes. The binding is real, and it owes neither a declaration nor an
+exemption: the value has no rendered occurrence because nothing survives to read
+it, which is a fact about the graph rather than a decision about the seal.
+
+The journal already contained exactly this rule. A value with **no defining
+instruction** whose every read is elided is accounted
+`CallerSuppliedEntryValue`, on the stated grounds that no statement in this
+function assigns it and none can be expected to. The test it used for "supplied
+from outside" was `graph.def_inst(value).is_none()`, and a call clobber fails
+that test while satisfying the property: it is supplied by the callee, and the
+`CallDefine` recording the clobber is not a statement this function renders.
+
+That is the two-owner violation in its smallest form. The plan already computes
+which values are unclaimed call clobbers, to set `Binding::call_clobbered`; the
+journal re-derived a narrower version of the same question from the graph. The
+plan now keeps the set and answers for it (`value_is_call_clobber`), and the
+seal re-derives it per value as it already re-derived the per-binding flag. The
+elision carries its own reason, `UnclaimedCallClobber`, because saying
+`caller-supplied-entry-value` of a callee's leftover would be false.
+
+Committed as `6f976880`. `fcn_3da0` now refuses further down, on an unaccounted
+use of a flag-width `IntAnd`, which is a separate gap.
+
+### The emission gate asked the wrong table, and the doc comment already said so
+
+`certified_assigned_call_result_owner_expr_for_source` decided whether a call
+renders as `x = f(...)` or `f(...);` by reading `CallsiteRenderDisposition`,
+which `prepared_call_render_facts` derives from `call_results.owner_for_site`.
+It then took the value to assign from `call_results.definition_for_site`. Two
+different queries over the same table, and `definition_for_site`'s own doc
+comment states the difference: a result "may acquire a stable stack owner after
+copies, a store and a reload. That owner is useful for later reads, but it is
+not the value whose definition the call statement renders."
+
+So where a value had a binding but no recorded owner, the gate said side effect,
+the call rendered as a bare statement, and the binding's only definition was
+never written -- which is what `missing_definition` was reporting. The gate now
+asks the plan about the value it is actually going to assign. A disposition of
+`Elided` renders the call as its own statement, because nothing reads the
+result; anything else keeps the refusal in band rather than dropping it, since a
+bare statement for an inlined result would evaluate the call twice.
+
+Only one site in `r2dec` consumed the `AssignedResult` / `SideEffectStatement`
+split, so the sweep step 4 anticipated across `op_lower` turned out to be one
+function. The other dispositions -- `Suppressed`, `Residualized`, the two
+terminal returns -- have their own consumers and are untouched.
+
+### A census must name the build it measured
+
+Censuses 6 through 13 were taken against one installed plugin. Their contents
+differ, so they are not duplicates, but the totals coincide at
+563 rendered / 78 refused / 51 silent and reading that as "steps 1 to 3 moved
+nothing" would have been wrong twice over: the counts are a projection, and the
+build under them never changed. `census-11` and `census-13` are byte-identical.
+
+Re-measured against `6f976880` after an actual `make install`, the local census
+is **588 rendered / 104 refused / 0 silent** of 692. The silent column is zero,
+which is what the in-band decline work bought; the 51 silent in the older runs
+were that work not yet installed rather than a live defect. `missing_definition`
+falls 11 to 6; `RenderedValueRequired` rises 10 to 13, which is step 3's residue
+before the previous section's fix was measured.
+
+`census.sh` now writes the installed plugin's mtime into `.build` in each output
+directory, so a census that measured a stale install says so.
