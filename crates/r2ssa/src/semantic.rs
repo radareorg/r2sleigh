@@ -4089,6 +4089,18 @@ fn collect_source_boundary_facts(
                     false
                 };
                 let results_complete = results.is_some();
+                if let Some(found) = results.as_ref()
+                    && found.is_empty()
+                    && !matches!(interface.result(), SourceCallResult::Void)
+                {
+                    // A register result the walk found no value for is not the
+                    // same as a void one, and only this says which happened.
+                    r2il::refusal_evidence!(
+                        "call-result-empty",
+                        "callsite ({block_addr:#x}, {op_index}) declares {:?} and no value reaches it",
+                        interface.result()
+                    );
+                }
                 if !arguments_complete || !results_complete {
                     r2il::refusal_evidence!(
                         "call-boundary-incomplete",

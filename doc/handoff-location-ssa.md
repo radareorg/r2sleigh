@@ -17240,3 +17240,51 @@ Both probes stay behind `R2SLEIGH_DEBUG_INTERFACE`. Between them they took this
 from "the largest engine-side refusal class" to "one function in
 `crates/r2ssa`", and ruled out the capture, the wire, the CFG, the SSA
 construction, the callee prototype and the completeness gates on the way.
+
+### Correction: the per-coordinate split does work, and the count hid it
+
+The entry above records the per-coordinate boundary as measured neutral, on the
+strength of a census that showed `missing_definition` at 8 on bzip2 -O2 before
+and after. **The count was the same and the cause was not.**
+
+`dbg.addFlagsFromEnvVar` refused on three bindings before:
+
+```
+name=RAX_18  reason=MissingDefinition
+name=RAX_21  reason=MissingDefinition
+name=RDX_1   reason=MissingDefinition
+```
+
+and after the split it refuses on one:
+
+```
+name=RDX_1   reason=MissingDefinition
+```
+
+Both `RAX_18` and `RAX_21` -- the results of the two `snocString` calls, the
+values this whole trace began from -- are now certified and owned. The function
+still refuses, so it still counts as one `missing_definition`, and a census that
+counts functions per cause string cannot see the difference. That is the same
+lesson as the silent-failure class earlier in this document: **the count is a
+projection, and a change can move every function forward one obligation without
+moving any number.**
+
+The two probes are why this was visible at all. `call-result-empty` fires for 74
+call sites in this capture but **not** for 0x3edf or 0x3e9c, which is the
+positive evidence that the result now finds its value.
+
+`RDX_1` is the next obligation and it is a different bucket:
+
+```
+{"op": "CallDefine", "dst": "RDX_1", ...}   in block 0x3da0
+```
+
+RDX is caller-saved and no declared result names it, so this is a register the
+program reads holding whatever a callee left -- the genuinely **Clobbered** case
+of the post-call invariant, which is exactly what step 3's indeterminate local
+exists to render. The sequence the plan predicted is holding: fixing the Result
+bucket exposes the Clobbered bucket beneath it.
+
+For future measurement: comparing cause-string counts is not enough to judge a
+change of this kind. The per-function set of refused bindings is the thing to
+diff, and `placement-decision` prints it.
