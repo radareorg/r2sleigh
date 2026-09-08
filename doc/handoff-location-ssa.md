@@ -16172,3 +16172,60 @@ covers whatever `sleigh_engine_execute_v2` returns NULL for, which is at least
 the SSA-integrity failure seen here and the lift parse errors logged during
 post-analysis. Attributing it is the next piece of work, and it is worth more
 than the eight structuring refusals this session started from.
+
+### Attributing the engine's silence, and what it revealed
+
+Declining in band gave the census a cause for every function, but two of the
+causes were placeholders: "the engine returned no rendering and no cause" (34)
+and, on the capture side, "the snapshot could not be serialized" (19). The
+engine was in fact naming both -- `sleigh_engine_v2_log_error` reads
+`api->session_error` and logs the text -- and the plugin was throwing it away
+before returning NULL. `sleigh_engine_execute_v2` now hands that text back, and
+the four paths that fail before a session exists name themselves too.
+
+With the placeholders resolved, the local census reads:
+
+```
+total=692 rendered=560 refused=132 silent=0
+
+  31  snapshot buffer rejected: snapshot wire decode failed:
+      RejectedContract { contract: "SourceFunctionInterface::new",
+                         reason: "OverlappingStackSlots" }
+  19  the snapshot could not be serialized
+  11  native declaration placement refused: missing_definition
+  10  native rendering refused: observation journal: RenderedValueRequired
+   6  native rendering refused: missing machine projection authorization: BindingPlanBuild
+   5  native rendering refused: unrepresentable operation
+   5  native declaration placement refused: unobserved_binding_read
+   5  native rendering refused: missing machine projection authorization: OpLowering
+   5  engine refusal: function exceeds the engine complexity limit
+   5  native rendering refused: observation journal: PlannedElidedValueRendered
+   3  the address is a cold partition of another function, not a function
+   3  trusted lift refused: Parse error: genuine basic block contains instructions
+      after a control terminator
+```
+
+**`OverlappingStackSlots` is the largest cause in the tree by a factor of
+three**, at 31 of 132, and the 19 serialization failures are very likely the
+same contract refusing on the write side rather than the read side -- worth
+confirming before treating them as separate. Together that is 50 of 132, 38% of
+every refusal, and none of it was visible before this session because all of it
+was landing on the silent path.
+
+This is the next piece of work, and it displaces the structuring refusals this
+session opened with. There is already a radare2 branch named
+`pr/overlapping-stack-vars`, which is worth reading before starting.
+
+### Upstream commit messages take bullet bodies
+
+trufae, on 26687: "for the same reason we dont want huge comments, i also prefer
+short commit messages, lately claude has started to use some weird yapping and
+it makes commit messages hard to read by users. also the body of the commit
+messages must be empty or just a bullet points list like its been done in the
+rest of the git history."
+
+This applies to every commit that goes to radareorg/radare2. The three commits
+on `pr/tp-pointer-collapse` were rewritten to that shape. The long derivation
+still has a home -- the pull request body, where a reviewer can argue with it --
+but not the commit. Note the parallel with the project's own rule that a comment
+is one or two lines: the same reasoning, applied one layer out.

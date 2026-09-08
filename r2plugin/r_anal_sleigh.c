@@ -961,10 +961,13 @@ static bool sleigh_post_analysis_budget_allows(SleighPostAnalysisBudget *budget,
 	return false;
 }
 
-static void sleigh_engine_v2_log_error(
+// The engine's own account of what it refused, kept for the caller. Logging it
+// and returning nothing left every such function with no cause to print.
+static void sleigh_engine_v2_log_error_into(
 	const R2SleighApiV2 *api,
 	const R2SleighSessionV2 *session,
-	uint32_t status
+	uint32_t status,
+	char **error_out
 ) {
 	R2SleighByteViewV2 error = {0};
 	if (api && session && api->session_error
@@ -973,12 +976,16 @@ static void sleigh_engine_v2_log_error(
 		int len = error.len > INT_MAX? INT_MAX: (int)error.len;
 		R_LOG_ERROR ("r2sleigh: V2 engine request failed (%u): %.*s",
 			status, len, (const char *)error.data);
+		if (error_out && !*error_out) {
+			*error_out = r_str_newf ("%.*s", len, (const char *)error.data);
+		}
 		return;
 	}
 	R_LOG_ERROR ("r2sleigh: V2 engine request failed (%u)", status);
+	if (error_out && !*error_out) {
+		*error_out = r_str_newf ("the engine failed with status %u", status);
+	}
 }
-
-
 
 static bool sleigh_engine_v2_phase_status_is_valid(uint32_t status) {
 	switch (status) {
@@ -1211,7 +1218,7 @@ static uint32_t sleigh_engine_v2_retry_pending(const R2SleighApiV2 *api) {
 
 // Returns a malloc-owned NUL-terminated projection. Every borrowed response
 // view is consumed before response_free releases the opaque Rust owner.
-static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capability, const R2SleighEngineRequestPayloadV2 *payload) {
+static char *sleigh_engine_execute_v2_with_error(uint32_t kind, uint64_t required_capability, const R2SleighEngineRequestPayloadV2 *payload, char **error_out) {
 	required_capability |= R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2
 		| R2SLEIGH_CAP_RESPONSE_INFO_V2
 		| R2SLEIGH_CAP_EXECUTION_CONTROL_V2;
@@ -1231,15 +1238,24 @@ static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capabilit
 		|| !api->response_bytes || !api->response_info
 		|| !api->response_free || !api->session_error) {
 		R_LOG_ERROR ("r2sleigh: incompatible V2 engine API table");
+		if (error_out && !*error_out) {
+			*error_out = strdup ("the engine API table is incompatible");
+		}
 		return NULL;
 	}
 	uint32_t status = sleigh_engine_v2_retry_pending (api);
 	if (status != R2SLEIGH_STATUS_OK_V2) {
+		if (error_out && !*error_out) {
+			*error_out = r_str_newf ("a previous engine response is still pending (%u)", status);
+		}
 		return NULL;
 	}
 	if (!payload || payload->abi_version != R2SLEIGH_ABI_V2
 		|| payload->struct_size != sizeof (*payload)) {
 		R_LOG_ERROR ("r2sleigh: invalid native V2 request graph");
+		if (error_out && !*error_out) {
+			*error_out = strdup ("the request payload does not match the engine ABI");
+		}
 		return NULL;
 	}
 
@@ -1252,6 +1268,9 @@ static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capabilit
 	status = api->session_create (&config, &session);
 	if (status != R2SLEIGH_STATUS_OK_V2 || !session) {
 		R_LOG_ERROR ("r2sleigh: failed to create V2 engine session (%u)", status);
+		if (error_out && !*error_out) {
+			*error_out = r_str_newf ("the engine session could not be created (%u)", status);
+		}
 		uint32_t free_status = sleigh_engine_v2_release_or_preserve (api, NULL, &session);
 		if (free_status != R2SLEIGH_STATUS_OK_V2) {
 			return NULL;
@@ -1269,7 +1288,7 @@ static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capabilit
 	R2SleighResponseV2 *response = NULL;
 	status = api->execute (session, &request, &response);
 	if (status != R2SLEIGH_STATUS_OK_V2 || !response) {
-		sleigh_engine_v2_log_error (api, session, status);
+		sleigh_engine_v2_log_error_into (api, session, status, error_out);
 		uint32_t free_status = sleigh_engine_v2_release_or_preserve (api, &response, &session);
 		(void)free_status;
 		return NULL;
@@ -1285,7 +1304,7 @@ static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capabilit
 		|| (info.outcome != R2SLEIGH_OUTCOME_COMPLETED_V2
 			&& info.outcome != R2SLEIGH_OUTCOME_REFUSED_V2)
 		|| !info.diagnostics_json.data || !info.diagnostics_json.len) {
-		sleigh_engine_v2_log_error (api, session, status);
+		sleigh_engine_v2_log_error_into (api, session, status, error_out);
 		uint32_t free_status = sleigh_engine_v2_release_or_preserve (api, &response, &session);
 		if (free_status != R2SLEIGH_STATUS_OK_V2) {
 			return NULL;
@@ -1297,6 +1316,9 @@ static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capabilit
 		if (info.phase_timings[phase_index].phase != phase_index
 			|| !sleigh_engine_v2_phase_status_is_valid (info.phase_timings[phase_index].status)) {
 			R_LOG_ERROR ("r2sleigh: invalid V2 engine phase metadata");
+			if (error_out && !*error_out) {
+				*error_out = strdup ("the engine returned invalid phase metadata");
+			}
 			uint32_t free_status = sleigh_engine_v2_release_or_preserve (api, &response, &session);
 			if (free_status != R2SLEIGH_STATUS_OK_V2) {
 				return NULL;
@@ -1309,6 +1331,9 @@ static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capabilit
 		|| info.phase_timings[R2SLEIGH_PHASE_FFI_CONVERSION_V2].elapsed_us
 			!= info.ffi_conversion_elapsed_us) {
 		R_LOG_ERROR ("r2sleigh: invalid V2 FFI conversion metadata");
+		if (error_out && !*error_out) {
+			*error_out = strdup ("the engine returned invalid FFI conversion metadata");
+		}
 		uint32_t free_status = sleigh_engine_v2_release_or_preserve (api, &response, &session);
 		if (free_status != R2SLEIGH_STATUS_OK_V2) {
 			return NULL;
@@ -1323,7 +1348,7 @@ static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capabilit
 		&& (!bytes.len || bytes.data)) {
 		result = sleigh_byte_view_v2_copy (bytes);
 	} else {
-		sleigh_engine_v2_log_error (api, session, status);
+		sleigh_engine_v2_log_error_into (api, session, status, error_out);
 	}
 	sleigh_engine_v2_log_semantic_kernel_warnings (info.diagnostics_json);
 	sleigh_engine_v2_emit_binding_audit (info.diagnostics_json);
@@ -1332,6 +1357,13 @@ static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capabilit
 		free (result);
 		return NULL;
 	}
+	return result;
+}
+
+static char *sleigh_engine_execute_v2(uint32_t kind, uint64_t required_capability, const R2SleighEngineRequestPayloadV2 *payload) {
+	char *error = NULL;
+	char *result = sleigh_engine_execute_v2_with_error (kind, required_capability, payload, &error);
+	free (error);
 	return result;
 }
 
@@ -3599,16 +3631,21 @@ static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 		.snapshot_buffer = held->wire,
 		.snapshot_buffer_len = held->wire_len,
 	};
-	char *result = sleigh_engine_execute_v2 (
+	char *engine_refusal = NULL;
+	char *result = sleigh_engine_execute_v2_with_error (
 		R2SLEIGH_REQUEST_DECOMPILE_V2,
 		R2SLEIGH_CAP_DECOMPILE_V2 | R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2,
-		&payload);
+		&payload, &engine_refusal);
 	sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_DECOMPILE,
 		r_time_now_mono () - decompile_start_us);
 	if (!result) {
 		R_LOG_ERROR ("r2sleigh: decompilation was refused");
-		return sleigh_decline (fcn, "the engine returned no rendering and no cause");
+		RCodeMeta *declined = sleigh_decline (fcn, engine_refusal
+			? engine_refusal: "the engine returned no rendering and no cause");
+		free (engine_refusal);
+		return declined;
 	}
+	free (engine_refusal);
 	RCodeMeta *metadata = r_codemeta_new (result);
 	free (result);
 	return metadata;
