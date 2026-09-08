@@ -16443,3 +16443,39 @@ That is a field on a public struct and therefore an ABI question, which is why i
 is written down here rather than pushed. It is the largest single lever left on
 the local corpus: 22 functions, and `OverlappingStackSlots` is 27% of all
 refusals.
+
+### What `missing_definition` is, for whoever picks it up next
+
+Twelve functions, the largest engine-side cause once overlap is set aside. The
+evidence line names the value precisely:
+
+```
+placement-missing-definition at crates/r2dec/src/placement.rs:3631:
+  BindingId(21) is read 2 times and never written;
+  externally_declared=false entry_declared=false
+  reads [(Use(InstId(52), 0), ValueId(45), 0x15776),
+         (Use(InstId(68), 0), ValueId(45), 0x15810)]
+```
+
+This is the uninitialised-read detector doing its job, and the project's history
+is explicit that it must not be answered by declaring the name -- a pass that did
+exactly that removed 170 markers without resolving one and was reverted. So the
+question is never "how do we declare BindingId(21)" but "why does the value it
+carries have no reaching definition".
+
+The evidence gives what a trace needs: the binding, the value, and the byte
+addresses of every read. The read sites in the sample above are far from the
+entry of the function being rendered, which suggests the definition sits in a
+block the capture did not take -- the same family as this session's cold
+partitions, and worth checking against the function's block list first.
+
+A second, smaller cause hides in the same functions and should not be confused
+with it:
+
+```
+switch-selector-walk at crates/r2ssa/src/function.rs:3983:
+  const:14374_0 has no definition and reads as a constant
+```
+
+That one is about a switch selector resolving to a constant, and it is a
+different question.
