@@ -857,14 +857,6 @@ void r2sleigh_set_arch_override(const char *arch) {
 	sleigh_arch_override = strdup (arch);
 }
 
-static bool collect_data_refs_from_typed(
-	RAnal *anal,
-	RAnalFunction *fcn,
-	const R2SleighDataRef *items,
-	size_t count,
-	RVecAnalRef *refs,
-	R_OUT size_t *discovered);
-
 typedef enum {
 	SLEIGH_MODE_FAST = 0,
 	SLEIGH_MODE_BALANCED = 1,
@@ -4464,77 +4456,6 @@ static bool sleigh_analyze_fcn_inner(RAnal *anal, RAnalFunction *fcn) {
 	block_array_free (&blocks);
 	sleigh_artifact_plan_fini (&plan);
 	return committed;
-}
-
-static RAnalRefType data_ref_type_from_json(RAnal *anal, ut64 to_addr, const char *type_name) {
-	if (type_name && *type_name) {
-		switch (type_name[0]) {
-		case 'c':
-		case 'C':
-			return R_ANAL_REF_TYPE_CALL;
-		case 'j':
-		case 'J':
-			return R_ANAL_REF_TYPE_JUMP;
-		case 's':
-		case 'S':
-			return R_ANAL_REF_TYPE_STRN;
-		default:
-			break;
-		}
-	}
-	return r_anal_get_fcn_in (anal, to_addr, 0)? R_ANAL_REF_TYPE_CODE: R_ANAL_REF_TYPE_DATA;
-}
-
-static RAnalRefType data_ref_type_from_kind(RAnal *anal, ut64 to_addr, char kind) {
-	char type_name[2] = { kind, 0 };
-	return data_ref_type_from_json (anal, to_addr, kind? type_name: NULL);
-}
-
-static bool data_ref_targets_ram(const R2SleighDataRef *item) {
-	return item
-		&& item->space_kind == R2SLEIGH_DATA_REF_SPACE_RAM
-		&& item->custom_space == 0;
-}
-
-static bool collect_data_refs_from_typed(
-	RAnal *anal,
-	RAnalFunction *fcn,
-	const R2SleighDataRef *items,
-	size_t count,
-	RVecAnalRef *refs,
-	R_OUT size_t *discovered
-) {
-	if (!discovered) {
-		return false;
-	}
-	*discovered = 0;
-	size_t i;
-	if (!anal || !items || count == 0) {
-		return false;
-	}
-	for (i = 0; i < count; i++) {
-		if (!data_ref_targets_ram (&items[i])) {
-			continue;
-		}
-		ut64 from_addr = (ut64)items[i].from;
-		ut64 to_addr = (ut64)items[i].to;
-		if (fcn && to_addr >= fcn->addr && to_addr < fcn->addr + r_anal_function_linear_size (fcn)) {
-			continue;
-		}
-		if (refs) {
-			RAnalRef *ref = RVecAnalRef_emplace_back (refs);
-			if (!ref) {
-				return false;
-			}
-			*ref = (RAnalRef) {
-				.at = from_addr,
-				.addr = to_addr,
-				.type = data_ref_type_from_kind (anal, to_addr, items[i].ref_kind),
-			};
-		}
-		(*discovered)++;
-	}
-	return true;
 }
 
 /* Called during reference analysis (aar) */

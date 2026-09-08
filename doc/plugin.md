@@ -25,9 +25,12 @@ Maintainer override: `a:sla.arch x86-64`
 Plugin Callbacks
 ----------------
 
+sleigh_init / sleigh_fini: Plugin lifetime; init also registers the pd:s command.
+sleigh_eligible: Whether this plugin answers for the current architecture.
 sleigh_op: Lifts instructions during aaa. Generates ESIL.
+sleigh_cmd: The a:sla command namespace.
+sleigh_pre_analysis: Installs the register profile before the analysis passes.
 sleigh_analyze_fcn: Per-function SSA analysis after af (also auto-applies DATA xrefs).
-sleigh_get_data_refs: Def-use xrefs callback used by radare2 during aar when supported.
 sleigh_post_analysis: Native post-analysis enrichment during aa/aaa/aaaa.
 
 Command Reference

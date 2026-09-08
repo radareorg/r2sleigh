@@ -11104,6 +11104,10 @@ fn r2plugin_legacy_debug_command_redirects_stay_deleted() {
         "sleigh_decompile_execute",
         "sla.vars",
         "sla.defuse\"",
+        // The body of a data-refs callback radare2 has no slot for.
+        "collect_data_refs_from_typed",
+        "data_ref_type_from_json",
+        "sleigh_get_data_refs",
     ] {
         assert!(
             !c_source.contains(forbidden),

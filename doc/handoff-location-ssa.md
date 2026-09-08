@@ -15539,3 +15539,27 @@ commands the gate had made unreachable.
 no longer gated and one of which no longer exists. It now has a configuration
 section naming the five reachable commands and an instruction section naming
 the four that remain.
+
+## The orphaned data-refs collector, and the callback list that outlived it
+
+`collect_data_refs_from_typed` warned as unused on every build. Tracing it
+before deleting turned up more than one dead function. Its only caller would
+have been `sleigh_get_data_refs`, which does not exist in the plugin source at
+all -- the name survives only in `doc/plugin.md` and in this document's own
+profiling tables from when it did exist, at 14.9 milliseconds over 38 calls.
+And radare2's `RAnalPlugin` has no data-refs callback slot to wire one to, so
+this is not a capability waiting to be reconnected; it is the body of a
+callback whose hook was removed.
+
+The chain was four functions deep and entirely private to it:
+`collect_data_refs_from_typed`, `data_ref_targets_ram`,
+`data_ref_type_from_kind` and `data_ref_type_from_json`, each called only by
+the one above. `R2SleighDataRef` itself stays: it is the engine ABI, carries
+static assertions on its layout, and `api->data_ref_size` is checked against it
+at load.
+
+`doc/plugin.md`'s callback list had drifted the same way the command reference
+had. It named `sleigh_get_data_refs`, which is gone, and omitted `sleigh_init`,
+`sleigh_fini`, `sleigh_eligible`, `sleigh_cmd` and `sleigh_pre_analysis`, which
+are all registered. It now lists what the plugin registers, and the lint that
+holds deleted commands out of the C source holds these names too.
