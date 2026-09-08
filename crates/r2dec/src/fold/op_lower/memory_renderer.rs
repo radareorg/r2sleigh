@@ -788,6 +788,12 @@ impl<'a> FoldingContext<'a> {
         {
             return None;
         }
+        // An access at a constant offset inside the slot is inside it and not
+        // at it, exactly as an indexed one is. The name alone would say a
+        // four-byte read of `statBuf.st_mode` was the whole `struct stat`.
+        if fact.object_offset.is_some_and(|offset| offset != 0) {
+            return None;
+        }
         self.inputs.render_facts()?.stack_slot_offset(fact.object)?;
         self.certified_stack_var_expr_for_object(fact.object)
     }

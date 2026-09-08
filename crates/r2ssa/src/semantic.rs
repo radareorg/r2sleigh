@@ -1249,6 +1249,10 @@ pub struct StructuredMemoryAccessFact {
     pub width: u32,
     /// True only when exactly one memory-SSA fact annotates this raw subeffect.
     pub provenance_complete: bool,
+    /// Where in the object this access lands, when the memory fact states it
+    /// exactly. A member of a declared aggregate is the aggregate at an
+    /// offset, and this is that offset.
+    pub object_offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1321,6 +1325,8 @@ pub struct MemoryAccessCertificate {
     pub value: Option<ValueId>,
     pub is_write: bool,
     pub width: u32,
+    /// Where in the object the access lands, when the memory fact states it.
+    pub object_offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7261,6 +7267,7 @@ fn collect_prepared_function_certificates(
                     value: fact.value,
                     is_write: fact.is_write,
                     width: fact.width,
+                    object_offset: fact.object_offset,
                 },
             )
         })
@@ -10261,6 +10268,16 @@ fn insert_raw_memory_subeffect(
         .map(|location| location.object)
         .or_else(|| objects.escaped_unknown_object(space))
         .unwrap_or(ObjectId(0));
+    // The one annotation that answered for this access also says where in the
+    // object it lands, and it is keyed by the access rather than by an address
+    // value, so both sides of the render can ask the same question.
+    let object_offset = (matching.len() == 1)
+        .then(|| {
+            matching
+                .first()
+                .and_then(|location| location.address.exact_offset())
+        })
+        .flatten();
     insert_structured_memory_access(
         access_facts,
         inst,
@@ -10274,6 +10291,7 @@ fn insert_raw_memory_subeffect(
         is_write,
         width,
         provenance_complete,
+        object_offset,
     );
 }
 
@@ -10291,6 +10309,7 @@ fn insert_structured_memory_access(
     is_write: bool,
     width: u32,
     provenance_complete: bool,
+    object_offset: Option<i64>,
 ) {
     let id = StructuredAccessId {
         inst,
@@ -10310,6 +10329,7 @@ fn insert_structured_memory_access(
             is_write,
             width,
             provenance_complete,
+            object_offset,
         },
     );
 }

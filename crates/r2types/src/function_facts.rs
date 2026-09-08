@@ -1162,6 +1162,8 @@ pub struct MemoryAccessRenderFact {
     pub value: Option<r2ssa::ValueId>,
     pub is_write: bool,
     pub width: u32,
+    /// Where in the object the access lands, when the memory fact states it.
+    pub object_offset: Option<i64>,
     /// True when one certified expression root contains multiple paths to this
     /// read and would duplicate the effect if rendered inline.
     pub materialize_result: bool,
@@ -1833,6 +1835,7 @@ impl SourceOwnedFunctionFacts {
         report.normalize_field_certificates_from_external_layout();
         if let Some(param_slots) = param_slots.as_ref() {
             report.populate_member_access_render_facts_from_field_certificates(source, param_slots);
+            report.populate_member_access_render_facts_from_declared_slots(source);
         }
         report.populate_certified_loop_carrier_types();
         if let Some(param_slots) = param_slots.as_ref() {
@@ -2011,6 +2014,23 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
         }
     }
     Some(resolver)
+}
+
+/// The aggregate a type node names, when it names one.
+fn aggregate_layout_for_type(
+    graph: &r2ssa::SourceTypeGraph,
+    type_id: u32,
+) -> Option<&r2ssa::SourceAggregateLayout> {
+    let ty = graph.types().get(usize::try_from(type_id).ok()?)?;
+    let aggregate_id = match ty.kind() {
+        r2ssa::SourceTypeKind::Struct { aggregate_id }
+        | r2ssa::SourceTypeKind::Union { aggregate_id } => aggregate_id,
+        _ => return None,
+    };
+    graph
+        .aggregates()
+        .get(usize::try_from(aggregate_id).ok()?)
+        .filter(|aggregate| aggregate.id() == aggregate_id && aggregate.type_id() == type_id)
 }
 
 impl FunctionFacts {
@@ -2458,6 +2478,81 @@ impl FunctionFacts {
             cert.field_name = field.name.clone();
             if cert.field_type.is_none() {
                 cert.field_type = field.ty.clone();
+            }
+        }
+    }
+
+    /// A member of an aggregate the source declared in a frame slot.
+    ///
+    /// The pointer form -- `s->field` through a parameter -- has a producer
+    /// already. A struct held in a slot had none, so an access inside one
+    /// rendered as address arithmetic carrying the frame displacement, and the
+    /// geometry constant in it then had no rendered occurrence.
+    fn populate_member_access_render_facts_from_declared_slots(
+        &mut self,
+        prepared: &r2ssa::SsaArtifact,
+    ) {
+        let Some(interface) = prepared.machine_context().function_interface() else {
+            return;
+        };
+        let Some(graph) = interface.type_graph() else {
+            return;
+        };
+        let mut member_facts = Vec::new();
+        for memory in self.render.memory_accesses() {
+            // Offset zero is the object itself, which the slot's own name
+            // already spells.
+            let Some(offset_bits) = memory
+                .object_offset
+                .filter(|offset| *offset > 0 && memory.width > 0)
+                .and_then(|offset| u64::try_from(offset).ok())
+                .and_then(|bytes| bytes.checked_mul(8))
+            else {
+                continue;
+            };
+            let Some(slot) = prepared
+                .certificates()
+                .stack_slots
+                .get(&memory.object)
+                .and_then(|certificate| certificate.source_slot.as_ref())
+            else {
+                continue;
+            };
+            let Some(aggregate) = slot
+                .logical_type()
+                .and_then(|type_id| aggregate_layout_for_type(graph, type_id))
+            else {
+                continue;
+            };
+            let width_bits = u64::from(memory.width).saturating_mul(8);
+            // The member has to be the whole of what the access reads, or its
+            // name would stand for more or less than the machine touched.
+            let Some(member) = aggregate.members().iter().find(|member| {
+                member.offset_bits() == offset_bits && member.size_bits() == width_bits
+            }) else {
+                continue;
+            };
+            member_facts.push(MemberAccessRenderFact {
+                access: memory.access,
+                block_addr: memory.block_addr,
+                op_index: memory.op_index,
+                object: memory.object,
+                is_write: memory.is_write,
+                field_offset: offset_bits / 8,
+                field_name: member.name().to_string(),
+                field_type: crate::writeback::source_type_like(
+                    graph,
+                    member.type_id(),
+                    &mut BTreeSet::new(),
+                ),
+                access_width: memory.width,
+            });
+        }
+        for fact in member_facts {
+            let key = (fact.block_addr, fact.op_index, fact.is_write);
+            let facts = self.render.member_accesses_by_op.entry(key).or_default();
+            if !facts.contains(&fact) {
+                facts.push(fact);
             }
         }
     }
@@ -4337,6 +4432,7 @@ fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRenderFacts {
                         value: cert.value,
                         is_write: cert.is_write,
                         width: cert.width,
+                        object_offset: cert.object_offset,
                         materialize_result: false,
                         control_domain,
                     },
@@ -7669,6 +7765,7 @@ mod tests {
                             value: Some(value),
                             is_write: true,
                             width: 8,
+                            object_offset: None,
                             materialize_result: false,
                             control_domain: test_control_domain(),
                         },
@@ -7854,6 +7951,7 @@ mod tests {
                         value: Some(value),
                         is_write: false,
                         width: 4,
+                        object_offset: None,
                         materialize_result: false,
                         control_domain: test_control_domain(),
                     },
@@ -7972,6 +8070,7 @@ mod tests {
                         value: Some(r2ssa::ValueId(51)),
                         is_write: false,
                         width: 4,
+                        object_offset: None,
                         materialize_result: false,
                         control_domain: test_control_domain(),
                     },
