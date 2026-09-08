@@ -1060,12 +1060,17 @@ fn inlinable_core(
         if !literal_only && frame_address_replacement.is_none() && reader_count != 1 {
             rejected(&format!(
                 "{reader_count} readers ({} of them certified boundary reads), of which {} sit in a \
-                 certificate-elided instruction; root {root_kind}",
+                 certificate-elided instruction; root {root_kind}; sites [{}]",
                 boundary_readers.len(),
                 use_sites
                     .iter()
                     .filter(|site| elided_reads.contains(&site.inst))
                     .count(),
+                use_sites
+                    .iter()
+                    .map(|site| format!("i{}#{}", site.inst.0, site.input_idx))
+                    .collect::<Vec<_>>()
+                    .join(" "),
             ));
             continue;
         }

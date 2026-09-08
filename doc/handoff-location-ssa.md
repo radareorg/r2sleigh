@@ -15191,3 +15191,61 @@ expression rather than being elided -- so the definition has to be rendered
 where the value is bound, or the fold has to decline when the value has a second
 reader. Which of those it is, is the next decision, and it is a design question
 rather than a trace.
+
+## The flag class was a symptom; the cause was radare2 typing a pointer home uint32_t
+
+Naming the two use sites in the multi-reader rejection settles the question the
+previous section left open, and settles it against the reframing above. For
+`ZF_9` in zlib's `syncsearch` the sites are `i191#1` and `i222#1`, and the SSA
+dump says what they are:
+
+```
+InstId(186) out=ValueId(241) Op(IntEqual { dst: ZF_9, ... })
+InstId(191) in=[ValueId(246), ValueId(241)] Op(CBranch { cond: ZF_9 })
+InstId(222) out=ValueId(274) Phi { predecessors: [BlockId(7), BlockId(9), BlockId(10)] }
+SSAVALUE ValueId(274) ZF_11 def=Some(InstId(222)) uses=[]
+```
+
+The second reader is a phi on the flag register whose result nothing reads. It
+would have been worth removing on its own -- a phi with no uses is not a reader
+and the inlining guard counts only rendered readers -- but it is not why the
+function refuses.
+
+The whole-function refusal is `PlannedElidedValueRendered`, and the evidence
+chain runs the other way entirely:
+
+```
+stack object ObjectId(3) has no program variable: ParameterHomeWidthMismatch {
+    parameter_index: 1, slot_width_bits: 32, parameter_width_bits: 64 }
+memory-address-unplanned: ValueId(222) object=ObjectId(3) error=PlannedElidedValueRendered
+gap opened at 0xdd67:5 for machine-projection over 19 ops, claiming 84 cells
+placement-missing-definition: BindingId(36) name=ZF_9 is read 1 times and never written
+```
+
+The gap swallows the nineteen instructions that define those values while their
+reads sit outside it, so every binding in that range reports a missing
+definition. `ZF_9` is one of six, and the last one printed. Reading the bottom
+of that list as the defect is what produced the reframing above; the top of it
+is the cause.
+
+`ParameterHomeWidthMismatch` here is radare2's, and it is one line of it.
+`syncsearch` homes its pointer parameters with `mov qword [rbp-0x18], rdi`, and
+`aa` types the slot `int64_t` correctly. `aaft` then derives `unsigned int *`
+for it, which is also correct, and `tp_built_type` in `libr/anal/p/tp/types.c`
+canonicalises that spelling by matching a prefix of the whole string:
+
+```c
+} else if (r_str_startswith (tmp1, "unsigned")) {
+        r_strbuf_set (&sb, "uint32_t");
+```
+
+`unsigned int *` starts with `unsigned`, so the pointer becomes a four-byte
+integer and the slot's width stops agreeing with the store that created it.
+The same line eats `unsigned char`, `unsigned long` and, through the `int`
+branch below it, `int64_t`. Setting the two types back by hand with `afvt`
+renders `syncsearch` immediately, which is the measurement that identifies the
+line rather than merely accusing it.
+
+The fix collapses only a spelling with no `*` in it, and only for the three
+names `tp_expand_int` inverts. It is a radare2 correctness fix unrelated to
+Sleigh, so it goes upstream on its own branch.
