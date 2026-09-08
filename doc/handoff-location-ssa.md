@@ -15612,3 +15612,43 @@ missing form is an endless loop whose exits are certified breaks, and it is a
 capability rather than a bug at a line. It is the fix for at least three of the
 eight here, and the shape is ordinary at -O2, so it is likely worth more than
 that across the benchmark.
+
+### The endless-loop form is written and measured inert; here is what completes it
+
+The loop form described above was built and it works: `Region::EndlessLoop`,
+classified in `make_loop_region` when `unique_loop_latch_condition_block`
+returns nothing, structured by a `structure_endless_loop` that renders
+`while (1)` and takes `condition: None` into the render proof; and on the
+canonical side `loop_condition` returning the header's exit test, else the one
+exit test if there is exactly one, else `None`, so the two sides agree about a
+loop no predicate controls. r2ssa's 519 tests pass with that change.
+
+It renders nothing new. Census 614/692 before and after, every corpus gate
+byte-identical, no function moved in either direction. What it does is move the
+refusal one layer down, and the layer below is not one thing:
+
+```
+minigzip_O2 0x2460  shared exit block 0x2565 branches where the exits join
+minigzip_O2 0x2e80  shared exit block 0x2f68 is also reached by control this did not lower
+```
+
+Both come from `append_deferred_shared_exits`, which is itself the fallback for
+an exit whose target *no region claimed*. It writes such a block once after the
+body by walking a linear chain of successors, so a head with two successors has
+nowhere to put its branch. Making that work is not a guard: it needs a region
+built on demand for a subgraph the region analyzer left unclaimed, which is a
+larger capability than the loop form it would be serving.
+
+So the stack is reverted, per the rule that a partial fix changing no rendered
+behaviour does not stay in the tree. Re-apply it alongside on-demand region
+construction for unclaimed exit continuations, and check the eight together:
+only two of them reach the shared-exit layer at all. The other six are on
+unrelated shapes -- three exit-edge and forwarder cases, one block-coverage
+case, one guard-domain case, and one `missing canonical loop identity for
+header 0x29f9` that the condition fix does not touch -- so the loop form is
+worth roughly two functions here even once it is complete, and its value is
+elsewhere in the benchmark rather than in this corpus.
+
+The eight are also, all of them, structuring refusals reported under the
+linearizer's name. Whatever is done next, `unrepresentable operation` should
+stop being what the census says about them.
