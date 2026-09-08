@@ -17115,3 +17115,55 @@ with 23 calls -- `BZ2_compressBlock`, the one whose preservation would answer
 decoder still accepts 2. That reverses the user's decision on the strength of a
 cost measurement they have not seen, so it is flagged rather than settled: the
 capability is in the tree and the constant is one line.
+
+### Following `RAX_21` to the end: the callee's signature never reaches the capture
+
+Neither the completeness gate nor the callee's body was this instance's blocker.
+Two evidence lines settle it:
+
+```
+call-argument: callsite (0x3edf, 3) argument 1 in Register offset 48 has no reaching value
+callee-declaration: name=dbg_snocString signature=false ... ret_type: Void
+```
+
+The first explains `arguments_complete=false`: at 0x3edf only `rdi` is set, and
+`rsi` -- `snocString`'s second parameter -- is carried in from an earlier
+iteration, which the reaching walk does not find. The second is the one that
+matters for `RAX_21`: **`signature=false`**, so the call site's interface result
+is `Void`, so `results = Some(vec![])`, so there is no result value to certify
+whatever any completeness flag says. The rendering then declares
+`dbg_snocString` returning `void` and the read of its result has no definition.
+
+radare2 itself has the prototype. `afcf @ 0x3860` prints
+`Cell * sym.snocString.part.0 (Char *name, Cell *root)`, and the type database
+holds it under the *unsuffixed* key with an explicit address link:
+
+```
+fcnlink.00003860=snocString
+func.snocString=name,root
+func.snocString.arg.0=Char *,name
+func.snocString.arg.1=Cell *,root
+```
+
+The function is named `sym.snocString.part.0` -- a GCC `.part.0` clone, the same
+family of suffix as the `.cold` partitions earlier in this document -- and
+`function_signature_type_name` handles that: it tries the address link first,
+then the name, then the basename after the last dot. So the lookup is not
+defeated by the suffix.
+
+What the capture calls is `r_anal_function_get_signature_current`, which is
+`function_get_signature (function, false)` -- **`load_types = false`**, so it
+skips `r_anal_types_ensure_loaded`. That is the leading candidate: the capture
+asks for a signature without ensuring the type database is loaded, and gets
+nothing where an interactive `afcf` gets the prototype. The second candidate is
+`r_anal_get_fcn_in (anal, 0x3860, R_ANAL_FCN_TYPE_ANY)` returning a different
+function than the one holding the link.
+
+Both are one probe apart: print `fcn_context_resolve_callee_signature`'s result
+and the type name it resolved for 0x3860 during a capture. That is where the
+next session starts, and it is a capture-side defect this project owns.
+
+The chain for this one function is now complete end to end: read of `RAX_21`
+-> no owner -> `SideEffectStatement` -> call-site result `Void` ->
+`signature=false` -> a callee signature radare2 can print and the capture cannot
+retrieve.
