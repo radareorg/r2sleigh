@@ -901,6 +901,8 @@ pub(crate) struct LegacyObservationJournal {
     /// gapped obligation into a duplicate rendering.
     gapped_effects: BTreeSet<SemanticObligationId>,
     targets: Vec<ObservationTarget>,
+    /// Where each target was allocated, under `R2DEC_TRACE_REFUSAL` only.
+    target_origins: Vec<&'static std::panic::Location<'static>>,
 }
 
 /// Transaction boundary for render markers allocated by one tentative AST
@@ -2084,6 +2086,7 @@ impl LegacyObservationJournal {
             coalesced_copy_writes,
             coalesced_copy_outputs,
             materialized_removed_phis,
+            target_origins: Vec::new(),
             placement_elided_writes: BTreeSet::new(),
             placement_elided_observations: BTreeSet::new(),
             placement_elided_effects: BTreeSet::new(),
@@ -2367,24 +2370,60 @@ impl LegacyObservationJournal {
                 crate::binding_plan::certified_boundary_read_values(source.source(), inst.id)
             })
             .collect::<BTreeSet<_>>();
-        let dead_inline_values = graph
-            .values
-            .iter()
-            .filter(|value| {
-                matches!(
-                    self.plan.disposition(value.id),
-                    Some(ValueDisposition::Inline { .. })
-                )
-            })
-            .filter(|value| !certified_boundary_values.contains(&value.id))
-            .filter(|value| {
-                graph
-                    .use_sites(value.id)
-                    .iter()
-                    .all(|site| elided_uses.contains_key(site))
-            })
-            .map(|value| value.id)
-            .collect::<Vec<_>>();
+        // Deadness propagates. A dead inline value's defining instruction
+        // renders nothing, so its own operand reads have no occurrence either.
+        let mut dead_inline_values = Vec::new();
+        let mut seen = BTreeSet::new();
+        loop {
+            let found = graph
+                .values
+                .iter()
+                .filter(|value| !seen.contains(&value.id))
+                .filter(|value| {
+                    matches!(
+                        self.plan.disposition(value.id),
+                        Some(ValueDisposition::Inline { .. })
+                    )
+                })
+                .filter(|value| !certified_boundary_values.contains(&value.id))
+                .filter(|value| {
+                    graph
+                        .use_sites(value.id)
+                        .iter()
+                        .all(|site| elided_uses.contains_key(site))
+                })
+                .map(|value| value.id)
+                .collect::<Vec<_>>();
+            if found.is_empty() {
+                break;
+            }
+            for value in found {
+                seen.insert(value);
+                dead_inline_values.push(value);
+                // Only a definition whose sole output is this value renders
+                // nothing once it is dead; anything else still owes its cells.
+                let Some(definition) = graph.def_inst(value) else {
+                    continue;
+                };
+                let Some(instruction) = graph.inst(definition) else {
+                    continue;
+                };
+                if instruction.output != Some(value) {
+                    continue;
+                }
+                for input_idx in 0..instruction.inputs.len() {
+                    elided_uses
+                        .entry(UseSite {
+                            inst: definition,
+                            input_idx,
+                        })
+                        .or_insert(r2ssa::ledger::ElisionReason::DeadUnusedTemporary);
+                }
+                elided_writes
+                    .entry(definition)
+                    .or_insert(r2ssa::ledger::ElisionReason::DeadUnusedTemporary);
+            }
+        }
         for value in dead_inline_values {
             let slot = self.value_slot_mut(value)?;
             record_same(
@@ -2453,6 +2492,7 @@ impl LegacyObservationJournal {
         ))
     }
 
+    #[track_caller]
     fn allocate_many(
         &mut self,
         targets: Vec<ObservationTarget>,
@@ -2469,6 +2509,14 @@ impl LegacyObservationJournal {
         let ids = (0..count)
             .map(|offset| RenderObservationId(first + offset))
             .collect();
+        if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+            let origin = std::panic::Location::caller();
+            self.target_origins
+                .resize(self.targets.len() + targets.len(), origin);
+            for slot in &mut self.target_origins[self.targets.len()..] {
+                *slot = origin;
+            }
+        }
         self.targets.extend(targets);
         Ok(ids)
     }
@@ -2599,6 +2647,7 @@ impl LegacyObservationJournal {
     /// value cell is therefore part of this same contract, deduplicated with
     /// the root, produced values, and exact child markers already carried by
     /// the expression.
+    #[track_caller]
     pub(crate) fn observe_rendered_replacement_expr(
         &mut self,
         contract: crate::fold::op_lower::RenderedReplacementContract,
@@ -3485,9 +3534,58 @@ impl LegacyObservationJournal {
                                 .collect::<String>())
                         );
                     }
+                    if let Some(fact) = self.source.facts().certificates.call_results.get(&value) {
+                        let site = fact.call_site;
+                        for peer in self
+                            .source
+                            .facts()
+                            .certificates
+                            .call_results
+                            .values()
+                            .filter(|peer| peer.call_site == site)
+                        {
+                            eprintln!(
+                                "   call result at {site:?}: {:?} at {:?} width {} relation {:?} carrier {:?} owner {:?}",
+                                peer.value,
+                                peer.at,
+                                peer.width,
+                                peer.relation,
+                                peer.carrier,
+                                peer.owner
+                            );
+                        }
+                    }
+                    for (id, target) in self.targets.iter().enumerate() {
+                        if matches!(target, ObservationTarget::Value(_)) {
+                            eprintln!(
+                                "   any {id} {target:?} from {:?}",
+                                self.target_origins.get(id).map(ToString::to_string)
+                            );
+                        }
+                    }
+                    for site in graph.use_sites(value) {
+                        eprintln!(
+                            "   reader {:?} write={:?} output_obs={:?}",
+                            site.inst,
+                            self.writes.get(site.inst.0 as usize),
+                            graph
+                                .inst(site.inst)
+                                .and_then(|inst| inst.output)
+                                .and_then(|out| self.values.get(out.0 as usize)),
+                        );
+                    }
+                    if let Some(definition) = graph.def_inst(value) {
+                        eprintln!(
+                            "   def {definition:?} write={:?} placement_elided_write={} block={:?}",
+                            self.writes.get(definition.0 as usize),
+                            self.placement_elided_writes.contains(&definition),
+                            graph.inst(definition).map(|inst| inst.block),
+                        );
+                    }
                     for id in &targets {
                         eprintln!(
-                            "   target {id} = {:?}",
+                            "   target {id} from {:?} = {:?}",
+                            self.target_origins.get(*id).map(ToString::to_string),
                             self.targets.get(*id).map(|target| format!("{target:?}")
                                 .chars()
                                 .take(160)

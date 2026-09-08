@@ -62,6 +62,7 @@ impl<'a> FoldingContext<'a> {
     /// its definition when one exists. Canonical memory rewrites replace
     /// exactly the instructions recorded by the authority-bound access term.
     /// Callers cannot pass any of those instruction lists.
+    #[track_caller]
     pub(super) fn finish_replacement_expr(&self, pending: PendingReplacementExpr) -> CExpr {
         let PendingReplacementExpr {
             expr,

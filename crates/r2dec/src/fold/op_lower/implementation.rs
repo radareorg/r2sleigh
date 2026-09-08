@@ -1153,9 +1153,18 @@ impl<'a> FoldingContext<'a> {
     }
 
     /// Whether the call statement at this site renders the assignment itself.
+    ///
+    /// Asked by building the owner expression and discarding it, which
+    /// registered a value observation no rendered statement then filled.
     pub(super) fn call_site_assigns_its_own_result(&self, site: (u64, usize)) -> bool {
-        self.materializable_call_result_expr_for_call_expr(site, &CExpr::IntLit(0))
-            .is_some()
+        self.certified_call_result_definition_for_source(site)
+            .zip(self.inputs.binding_names)
+            .is_some_and(|(definition, names)| {
+                matches!(
+                    names.disposition_for_value(definition.value),
+                    Some(crate::binding_plan::ValueDisposition::Bound { .. })
+                )
+            })
     }
 
     /// The value a call site's certified result carries.
