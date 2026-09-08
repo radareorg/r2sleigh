@@ -15867,3 +15867,46 @@ loop form, a continuation, a transfer-join fix, a domain fix, and finally a CFG
 that disagrees with the SSA predicates about how many successors a block has.
 It was chosen because the census listed it first, not because it was
 representative, and a pathological function will always supply one more layer.
+
+## The guard that could not be pushed: GCC's cold partitions are separate functions
+
+Following the guard-domain refusal down reached a root that is one fact rather
+than another layer. Block `0x2579` of minigzip's `main` at -O2 is a conditional,
+and radare2 records both of its edges:
+
+```
+{'addr': '0x2579', 'jump': '0x27bd', 'fail': '0x259d'}
+```
+
+`0x27bd` is not a block of `main`. It belongs to `sym.main.cold`, the partition
+GCC splits error paths into at -O2 under `-freorder-blocks-and-partition`. So
+the plugin's CFG correctly drops the edge -- it leaves the function -- while the
+predicate facts still record the branch, and the canonical control domain of the
+fall-through block carries a guard the structurer can never push, because there
+is no second arm inside the function to render.
+
+That is not a defect in the structurer. `main` and `main.cold` are one function
+that radare2 models as two.
+
+It also accounts for half the class this whole thread was pulled from. The
+corpus has four cold partitions, all in minigzip at -O2, and **all four of their
+hot parents are refused**, each with `unrepresentable operation`:
+
+```
+sym.gz_compress.cold     gz_compress     0x2970   refused
+sym.file_compress.cold   file_compress   0x2b60   refused
+sym.file_uncompress.cold file_uncompress 0x2cb0   refused
+sym.main.cold            main            0x2460   refused
+```
+
+Four of the eight `unrepresentable operation` functions are cold splits. The
+composer work was never going to reach them.
+
+The fix belongs in the plugin rather than the fork, by the standing rule that
+capture policy runs against radare2's public API: `function_image_snapshot_collect`
+walks `fcn->bbs` directly, and a function with a `<name>.cold` sibling should be
+captured as the union of both block lists, with the cold partition not offered
+as a function of its own. Whether that is worth building depends on how common
+the split is across DecBench rather than in one binary here, which is the next
+thing to measure -- the lesson of this session being that a lead measured on six
+binaries has twice now been worth nothing at scale.
