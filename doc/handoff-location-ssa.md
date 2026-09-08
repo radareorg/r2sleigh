@@ -15094,13 +15094,24 @@ slot, `slot.logical_type()` its node in the interface type graph,
 `offset_bits` and `size_bits` are exactly the access's offset and width -- so the
 name stands for precisely what the machine touched.
 
-**It is inert, for one reason:** `prepared.objects().interior_offset(memory.address)`
-returns `None` for every memory access, in every function, while
-`DeclaredStackSlots::containing` is observed mapping that same coordinate to its
-container during object-model construction. The displacement is recorded against
-the address value the model resolved; the value a `MemoryAccessRenderFact`
-carries is evidently not that one. Reconciling those two is the whole of what is
-left, and it is one probe: print both values for one access.
+**It is inert, and the reason is now exact.** Printing both sides shows
+`interior_offsets` is populated -- `notAStandardFile` records exactly one entry,
+`ValueId(87)` -- and that **`ValueId(87)` appears among no render access at all**.
+The render facts for that function carry addresses `ValueId(4)`, `(7)`, `(10)`,
+`(14)` and so on; the value the object model recorded the displacement against is
+not one of them.
+
+So the displacement is keyed by the address value the object model resolved,
+and a `MemoryAccessRenderFact` carries a different one. This is the same
+normalized-versus-prepared distinction that produced the header-load bug earlier
+in this project's history, where an ordinal counted a block's phis and a
+`memory_accesses_by_op` key did not.
+
+Closing it means keying the displacement by something both sides hold. The
+access already has an identity -- `StructuredAccessId`, which the render fact
+carries as `memory.access` -- so recording the interior offset against the
+*access* rather than against an address value would make the lookup exact from
+either side. That is the change, and it is in `r2ssa`, not in the producer.
 
 **A latent wrong rendering is waiting behind it, and this is the warning.**
 `certified_stack_owner_expr_for_memory_fact` is consulted *before* the member
