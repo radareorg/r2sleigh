@@ -16329,3 +16329,72 @@ the remaining 34 are other shapes and have not been looked at. That is the next
 trace, and the method that worked here is worth repeating: read the
 `stack-slot-overlap` evidence line, which names both slots with their offsets,
 sizes and roles, and find the instruction that created the wrong one.
+
+### The remaining overlaps are one defect: a retype that changes the width
+
+Tracing all 34 `OverlappingStackSlots` functions and grouping them by the shape
+of the two slots the evidence names:
+
+```
+ 12  ParameterHome 8B  ->  ParameterHome 8B   4 bytes apart
+  8  Local         8B  ->  Local         8B   4 bytes apart
+  4  Local         8B  ->  Local         8B   1 byte  apart
+  3  Local         8B  ->  Local         8B   6 bytes apart
+  2  ParameterHome 8B  ->  ParameterHome 4B   4 bytes apart
+  2  Local         8B  ->  Local         4B   4 bytes apart
+  ... 3 more singletons
+```
+
+Twenty-two of the thirty-four are a slot claiming eight bytes with the next slot
+four bytes later: a four-byte variable wearing an eight-byte type.
+
+`dbg.adler32` in minigzip at -O0 is the whole defect in four instructions:
+
+```
+0x00012f1f  mov qword [rbp-0x8],  rdi   ; adler, 8 bytes
+0x00012f23  mov qword [rbp-0x10], rsi   ; buf,   8 bytes
+0x00012f27  mov dword [rbp-0x14], edx   ; len,   4 bytes
+0x00012f2a  mov edx,  dword [rbp-0x14]  ; read back as 4, passed to adler32_z
+```
+
+`adler32(uLong adler, const Bytef *buf, uInt len)` -- `uInt` is four bytes, and
+the store says so. But `adler32_z` takes `z_size_t len`, and radare2's type
+propagation adopts the callee's parameter type for the caller's slot:
+
+```
+af   only:  var int32_t   var_14h @ rbp-0x14
+after aaft: var z_size_t  var_14h @ rbp-0x14
+```
+
+Eight bytes at rbp-0x14 runs into `buf` at rbp-0x10. The value really is widened
+-- but in the register at the call, not in the slot. `var_retype_impl` treats any
+`int`-spelled type as "default" and replaces it wholesale, so a fact about what
+the value *becomes* overwrites what the storage *is*.
+
+Guarding the width in `var_retype_impl` -- a retype changes the spelling, not the
+extent, unless the current width is the pointer-width default that carries no
+information -- gives `var uInt var_14h @ rbp-0x14` and `dbg.adler32` renders with
+the correct `uint32_t len`.
+
+**It also changes six `db/cmd/types` expectations and one in `db/formats`, and
+each of them encodes the same widening.** `db/cmd/types` "General type
+propgation" on `bins/elf/hello_world`:
+
+```
+call strlen                  ; size_t in rax
+mov dword [rbp-0x20], eax    ; four bytes stored
+mov dword [rbp-0x1c], eax    ; four bytes stored
+mov eax,  dword [rbp-0x1c]   ; four read back
+mov rdi,  rax                ; zero-extended into malloc's size_t
+```
+
+The expectation is `var size_t size @ rbp-0x1c`, with `src` (a `char *`, eight
+bytes) at rbp-0x18 -- so the expectation itself describes two variables
+overlapping. The source is `int size = strlen (...)`. The crackme7 case is the
+same shape on the pointer axis: `mov byte [ebp-0xd], al` then
+`lea eax, [ebp-0xd]`, and the address being passed as a `char *` retyped the
+*variable* to `char *`, four bytes at an offset holding one.
+
+That last one names a second, deeper defect worth separating: an argument passed
+by address should type the pointee, not the variable. The width guard blocks the
+symptom in that case; it does not state the rule.
