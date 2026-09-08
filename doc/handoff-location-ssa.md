@@ -17331,3 +17331,46 @@ breadth, not depth), and Clobbered by this role.
 Gates hold at 54 pass on raw, differential, binding, effect, placement and
 render refusal, with snapshot 42/12 and diagnostic 48/6 unchanged; 378 r2dec and
 520 r2ssa unit tests pass.
+
+### What step 3 exposes, and why it is step 4 rather than a step 3 defect
+
+The obligation `dbg.addFlagsFromEnvVar` now stops on is a direct consequence of
+step 3, and the trace names it exactly:
+
+```
+unaccounted value ValueId(43) disposition Bound { BindingId(19) }
+    def = CallDefine RDI_2   uses=2   storage=(Register, 56, 8)
+    readers = [Phi { ... }]
+other unaccounted: ValueId(44) CallDefine RSI_1, ValueId(46) CallDefine RCX_1
+```
+
+All three are `CallDefine` values that step 3 made `CallClobbered`, so the plan
+now **binds** them instead of refusing the function. The journal's seal then
+demands a rendered occurrence for every bound value and finds none, because a
+`CallDefine` is not an operation the renderer emits a statement for, and these
+values' only readers are phis that were coalesced away.
+
+So the refusal moved from `placement` to the `journal` because **the plan and
+the renderer disagree about whether a bound value must appear** -- which is the
+two-owner violation step 4 exists to remove, now demonstrated on a value rather
+than argued from a comment. Two readings are available and they differ in what
+they claim:
+
+- the binding is real and owes a **declaration**, the way an entry-declared
+  local does, and that declaration is the cell the seal is looking for; or
+- the binding is real and owes nothing, because nothing in the rendered text
+  names it, and the seal's demand is the thing that is wrong.
+
+The first is almost certainly right -- a register the program reads after a call
+should appear in the output as a declared object, or the reader cannot see what
+was read -- and it is what `BindingRole::CallClobbered` was given a distinct
+spelling for. But which owner decides is the question step 4 answers, and
+answering it here by making the seal quieter would be the same shortcut the
+project's history warns about: it would make an unrendered read invisible again.
+
+**Step 3 is therefore correct but not sufficient on its own**, and the honest
+statement is that the Clobbered bucket is *identified* rather than *rendered*.
+Nothing regressed -- the gates hold and the function refused before and refuses
+now -- but the earlier claim that all three buckets are "accounted for" should be
+read as: Result is rendered, Preserved is bounded by breadth, Clobbered is
+classified and awaits step 4's decision about who owes it a cell.
