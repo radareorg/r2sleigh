@@ -16479,3 +16479,43 @@ switch-selector-walk at crates/r2ssa/src/function.rs:3983:
 
 That one is about a switch selector resolving to a constant, and it is a
 different question.
+
+### One `missing_definition` narrowed to a register, a block and an edge
+
+`dbg.addFlagsFromEnvVar` in bzip2 at -O2. The evidence names
+`BindingId(220)`, `ValueId(582)`, read twice, both reads at **0x3edf**. The
+first guess -- that the definition sits in a block the capture did not take --
+is wrong here: 0x3edf is a block of the function, listed as
+`0x00003edf 0x00003eec 13 j 0x00003ea8`.
+
+Every mention of `r14`, which is what 0x3edf reads:
+
+```
+0x3da2  push r14
+0x3dd7  lea  r14, obj.tmpName          <- the only write
+0x3e6e  mov  byte [r14 + rax], dl
+0x3e7b  mov  byte [r14 + rax], 0       <- this block jumps to 0x3edf
+0x3e9c  mov  rdi, r14                  <- read, and this one is fine
+0x3eda  pop  r14                       <- epilogue, restores the caller's r14
+0x3ede  ret
+0x3edf  mov  rdi, r14                  <- the read with no definition
+```
+
+Read on the machine, `r14` at 0x3edf holds `obj.tmpName` from 0x3dd7: the only
+predecessor of 0x3edf is 0x3e7b, and the `pop r14` at 0x3eda belongs to the
+epilogue block 0x3ed0-0x3ede, which ends in `ret` and therefore reaches 0x3edf
+on no path at all. GCC has placed a loop-continuation block *after* the return.
+
+So the definition exists and the edge to the read exists, and the SSA still has
+the read unbound. The two reads are `InstId(523) input 0` and
+`InstId(529) input 1` at the same address, which is one instruction lifted into
+two operations, so the next step is the SSA dump for this function
+(`a:sla.debug.ssa.func`) rather than more disassembly: find whether the block at
+0x3edf received a phi for `r14`, and if not, whether the CFG gave the epilogue
+block a fallthrough it should not have.
+
+That last possibility is worth checking first, because it is the same shape as
+the entry defect fixed this session: a block placed after a `ret` is easy to
+join to the wrong predecessor, and joining 0x3edf to 0x3ed0 would put the
+`pop r14` on its incoming path and make the caller's `r14` -- which has no
+definition in this function -- the value that reaches the read.
