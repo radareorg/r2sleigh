@@ -721,8 +721,10 @@ impl BindingPlan {
                         });
                     // Re-derived here too rather than trusting the plan: a
                     // call clobber nothing claims is supplied from outside.
-                    let expected_call_clobbered = component.members.iter().any(|value| {
-                        graph.def_inst(*value).is_some_and(|inst| {
+                    let mut expected_call_clobbered = false;
+                    let mut clobber_set_agrees = true;
+                    for value in component.members.iter() {
+                        let expected = graph.def_inst(*value).is_some_and(|inst| {
                             graph.inst(inst).is_some_and(|inst| {
                                 matches!(
                                     inst.payload,
@@ -734,12 +736,15 @@ impl BindingPlan {
                             .facts()
                             .certificates
                             .call_results
-                            .contains_key(value)
-                    });
+                            .contains_key(value);
+                        expected_call_clobbered |= expected;
+                        clobber_set_agrees &= self.value_is_call_clobber(*value) == expected;
+                    }
                     if actual != &component.members
                         || binding.certificate.sources.as_ref() != expected_sources.as_slice()
                         || binding.caller_supplied != expected_caller_supplied
                         || binding.call_clobbered != expected_call_clobbered
+                        || !clobber_set_agrees
                     {
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::CertificateMembership {

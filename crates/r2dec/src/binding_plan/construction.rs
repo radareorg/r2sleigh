@@ -748,6 +748,7 @@ impl BindingPlan {
 
         let mut bindings = Vec::with_capacity(components.len());
 
+        let mut call_clobbers = BTreeSet::new();
         for component in components {
             let width_bits = match binding_width(source, &machine_projection, &component)? {
                 BindingWidth::Exact(width_bits) => width_bits,
@@ -775,10 +776,13 @@ impl BindingPlan {
                 .members
                 .iter()
                 .any(|value| graph.def_inst(*value).is_none());
-            let call_clobbered = component
-                .members
-                .iter()
-                .any(|value| value_is_unclaimed_call_clobber(source_owned, graph, *value));
+            let mut call_clobbered = false;
+            for value in &component.members {
+                if value_is_unclaimed_call_clobber(source_owned, graph, *value) {
+                    call_clobbers.insert(*value);
+                    call_clobbered = true;
+                }
+            }
             bindings.push(Binding {
                 declaration_type: super::rules::declaration_type_for_binding(
                     source_owned,
@@ -1207,6 +1211,7 @@ impl BindingPlan {
             dispositions: dispositions.into_boxed_slice(),
             parameters: parameters.into_boxed_slice(),
             stack_objects,
+            call_clobbers,
             typed: std::cell::OnceCell::new(),
         };
         plan.validate_seal(source_owned)?;

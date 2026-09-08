@@ -158,6 +158,12 @@ pub enum ElisionReason {
     /// which is what a register the caller happened to leave behind looks like
     /// once the merges that carried it are found to be unobserved.
     CallerSuppliedEntryValue,
+    /// The register content an unknown callee left behind, that nothing reads.
+    ///
+    /// The convention lets the call clobber the carrier and no result
+    /// certificate claims it, so no statement here assigns it; where every read
+    /// of it is itself elided there is no occurrence to render.
+    UnclaimedCallClobber,
     /// A removed merge input already names the merge result, so its edge copy
     /// would be the identity assignment `x = x`.
     RedundantPhiEdge,
@@ -193,6 +199,7 @@ impl std::fmt::Display for ElisionReason {
             Self::UnobservedValue => "unobserved-value",
             Self::UnusedStructuralValue => "unused-structural-value",
             Self::CallerSuppliedEntryValue => "caller-supplied-entry-value",
+            Self::UnclaimedCallClobber => "unclaimed-call-clobber",
             Self::RedundantPhiEdge => "redundant-phi-edge",
             Self::MaterializedPhiEdges => "materialized-phi-edges",
             Self::DeadUnclassified => "dead-unclassified",
