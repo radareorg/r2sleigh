@@ -16290,3 +16290,42 @@ Literal text now takes `WALK_BLOCK_BYTES_MAX`, the producer's existing ceiling
 for a single item of data rather than for a name. `license` and `usage` render.
 This is the bounds rule in miniature: 512 was derived for identifiers and
 correct there, and reusing it for data made it a magic number.
+
+### Where the local census stands, and what is next
+
+With the interior-`lea` fix installed and literal text bounded as data:
+
+```
+                     start of session   after
+rendered                        561      567
+refused                          78      125
+silent                           53        0
+```
+
+```
+  34  snapshot wire decode failed: RejectedContract { SourceFunctionInterface::new,
+                                                      OverlappingStackSlots }
+  12  native declaration placement refused: missing_definition
+  11  native rendering refused: observation journal: RenderedValueRequired
+   8  native rendering refused: missing machine projection authorization: BindingPlanBuild
+   7  native declaration placement refused: unobserved_binding_read
+   6  native rendering refused: unrepresentable operation
+   5  native rendering refused: missing machine projection authorization: OpLowering
+   5  engine refusal: function exceeds the engine complexity limit
+   5  native rendering refused: observation journal: PlannedElidedValueRendered
+   3  the address is a cold partition of another function, not a function
+   3  trusted lift refused: genuine basic block contains instructions after a control terminator
+```
+
+The serialization class is gone, from 19 to 0. `OverlappingStackSlots` reads
+*higher* than the 31 it was, which is the two changes interacting rather than a
+regression: sixteen of the nineteen functions that used to die at the wire writer
+now get past it and meet the overlap contract instead, while seven functions
+came through end to end.
+
+So overlap is now 34 of 125, 27% of every refusal and more than twice the next
+cause. The interior-`lea` shape it was traced from is fixed upstream in 26692;
+the remaining 34 are other shapes and have not been looked at. That is the next
+trace, and the method that worked here is worth repeating: read the
+`stack-slot-overlap` evidence line, which names both slots with their offsets,
+sizes and roles, and find the instruction that created the wrong one.
