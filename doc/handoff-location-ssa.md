@@ -17554,3 +17554,34 @@ of eliding it, and `discharged_instruction_targets`, for registering a value
 observation the statement does not in fact discharge. Which one is wrong is the
 question, and the probe that prints a value's observation targets under
 `R2DEC_TRACE_REFUSAL` is now in place to answer it.
+
+### `rep` string instructions are an instruction-local loop nothing models
+
+Three commits took `dbg.inflateCopy`, `dbg.fill_window` and `dbg.deflateCopy`
+from a lift parse error to a genuine blocker, and the blocker is a missing
+capability rather than a defect.
+
+`normalize_instruction_local_control` converts a *forward* instruction-local
+branch into a value select. A `rep` prefix is a *backward* one -- the branch
+targets its own instruction's start -- and the `target_index <= branch_index`
+arm turns it into `R2ILOp::Unimplemented`, which the obligation inventory seeds
+as `VolatileOrUnknownEffect` and the effect ledger refuses.
+
+Two designs are available and they are not equivalent.
+
+The first expands the instruction-local loop into real basic blocks. That
+contradicts the invariant the previous commit established, that a block
+boundary never falls inside one machine instruction, and it renders the copy as
+a hand-written loop.
+
+The second gives the instruction its own structured effect. `rep movsq` is a
+counted copy and its operands are exactly `rdi`, `rsi` and `rcx`; the machine's
+own statement is that this is a block move, and rendering it as one is both
+more faithful and better output than a lifted loop. The string instructions are
+a closed set -- `movs`, `stos`, `cmps`, `scas`, `lods` with `rep`, `repe` and
+`repne`.
+
+The second is almost certainly right, and what it needs is a structured
+multi-cell memory effect the engine does not have today: the existing
+vocabulary is one `ObservableMemoryRead`/`Write` per access with a known
+address. That is the thing to design before writing any of it.
