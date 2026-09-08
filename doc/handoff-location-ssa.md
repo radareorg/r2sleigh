@@ -15805,3 +15805,65 @@ were dead, not misfiled. Reachability was the wrong question to ask first.
 The one useful thing to come out of the review is a radare2 bug worth its own
 pull request: `aep*` is never emitted by `r_core_project_save_script`, so ESIL
 pins do not survive a project.
+
+## DecBench answers the composer question: revert
+
+The landing decision was put to the benchmark rather than the local census, and
+the answer is unambiguous. Two runs over the same selection -- zlib and bzip2 at
+-O2, 9 binaries, 859 functions, angr's reference cached -- differing only in the
+composer stack, since the radare2 typing fixes are committed in the fork and
+present in both:
+
+```
+                        rendered    regressions   byte_match(rendered)
+without the stack       606/859         10              0.389
+with the stack          606/859         16              0.388
+```
+
+Coverage is **identical**. The stack recovers no function at this scale, adds
+six quality regressions, and costs a hundredth of a point of byte_match. On the
+local corpus it is -1. Attributed exactly, the six it adds are:
+
+```
+zlib .../O2::scan_tree      byte_match 0.076 -> 0.061   (five binaries)
+bzip2/bzip2recover/O2::bsPutUChar  byte_match 0.169 -> 0.000
+```
+
+The ten regressions present in both halves belong to the radare2 typing commits,
+not to this work.
+
+So the stack comes out. It is saved as a diff rather than a branch, because what
+is worth keeping from it is the knowledge, not the code: five separately correct
+fixes that each moved a refusal to a strictly finer proof obligation and none of
+which moved a number. The model -- a region's continuation is the region rooted
+at the convergence of its exits -- is still the right one; what the measurement
+says is that it is not what is holding coverage back, and that the three
+mechanisms it would replace are not costing anything measurable either.
+
+One piece of it is a defect in its own right and should be raised separately:
+`structure_region` certifies a transfer-target join keyed on `region.entry()`,
+and a `Region::Transfer`'s entry is its *target*, so the join is checked where
+the jump is written rather than where the target is placed. For an exit that
+means checking it inside the loop it leaves. Measured alone it changes nothing
+(614/692, 378 tests green), which is why it did not land here.
+
+### What the benchmark says to do instead
+
+```
+coverage    r2sleigh 606/859 (70.5%)   angr 799/859 (93.0%)
+byte_match  r2sleigh 0.388             angr 0.288
+type_match  r2sleigh 0.235             angr 0.180
+ged         r2sleigh 13.04             angr 17.25   (lower is better)
+```
+
+Where r2sleigh renders it beats angr on every metric. The entire gap is
+coverage, and it is 22.5 points wide. That is the number to work against, and it
+says the eight `unrepresentable operation` functions -- the thread this whole
+composer effort was pulled from -- were never where the coverage was.
+
+A method error is worth recording with it. The driver for five rounds of work
+was minigzip's `main` at -O2: 33 blocks, 10 of them unclaimed, needing in turn a
+loop form, a continuation, a transfer-join fix, a domain fix, and finally a CFG
+that disagrees with the SSA predicates about how many successors a block has.
+It was chosen because the census listed it first, not because it was
+representative, and a pathological function will always supply one more layer.
