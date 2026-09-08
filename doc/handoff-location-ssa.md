@@ -15563,3 +15563,52 @@ had. It named `sleigh_get_data_refs`, which is gone, and omitted `sleigh_init`,
 `sleigh_fini`, `sleigh_eligible`, `sleigh_cmd` and `sleigh_pre_analysis`, which
 are all registered. It now lists what the plugin registers, and the lint that
 holds deleted commands out of the C source holds these names too.
+
+## "Unrepresentable operation" is a structuring refusal wearing the wrong name
+
+Eight functions are refused with `native rendering refused: unrepresentable
+operation`, which reads as a P-code op with no C spelling. None of them is that.
+The evidence says so in one line:
+
+```
+refusal evidence structuring-gave-up: reason=unlowered Exit edge 0x3026 -> 0x303e
+  in loop 0x2e3f: exit continuation block 0x303f is reached by 2 edges
+  then linearization refused: Lowering(UnrepresentableOperation(lib.rs:2843))
+```
+
+Structuring gives up, the residual path tries to render the body linearly
+instead, and the linearizer refuses. What the census reports is the *second*
+refusal; the fact worth chasing went with the first. The eight split 4/4 between
+the linearizer's two honest refusals -- a `Switch` terminator cannot be
+linearized, and a transfer to a target outside the function has no label to jump
+to -- and both of those are correct, so the residual path is not the defect.
+
+The structuring reasons behind them are six shapes, and three are one:
+
+```
+canonical loop fact LoopId(0) does not exactly match rendered loop at 0x2544
+missing canonical loop identity for header 0x29f9
+```
+
+Naming which of the five compared fields differs turns that into a single
+finding. `body`, `latches` and `exits` all agree; only `condition` and
+`condition_value` differ, and for the same reason both times:
+
+```
+condition Some(PredicateId(12)) vs Some(PredicateId(2))
+```
+
+The loop at `0x2544` in minigzip's `main` at -O2 has both of its header's
+successors inside the loop, and its exits at `0x253b` and `0x2556`. The header's
+test never leaves. `structure_pre_test_loop` takes the loop condition from the
+header block's branch unconditionally, so it was about to render `while (P2)`
+around a test that is an ordinary internal branch -- wrong output, caught by the
+exactness check. The refusal is the certificate working.
+
+The structurer has two loop forms, `Region::WhileLoop` and
+`Region::DoWhileLoop`, and the region analyzer must pick one. This loop is
+neither: in C it is `for (;;) { ... if (x) break; ... if (y) break; ... }`. The
+missing form is an endless loop whose exits are certified breaks, and it is a
+capability rather than a bug at a line. It is the fix for at least three of the
+eight here, and the shape is ordinary at -O2, so it is likely worth more than
+that across the benchmark.

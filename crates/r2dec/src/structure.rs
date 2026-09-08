@@ -765,15 +765,44 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             )
         })?;
         let rendered = self.loop_render_proof(header, condition, condition_value, body);
-        if loop_fact.condition != rendered.loop_condition
-            || loop_fact.condition_value != rendered.loop_condition_value
-            || loop_fact.body != rendered.loop_body_blocks
-            || loop_fact.latches != rendered.loop_latches
-            || loop_fact.exits != rendered.loop_exits
-        {
+        // Five fields have to agree, and saying only that they did not left the
+        // reader to guess which; the differing one is the fact worth chasing.
+        let mut differs = Vec::new();
+        if loop_fact.condition != rendered.loop_condition {
+            differs.push(format!(
+                "condition {:?} vs {:?}",
+                loop_fact.condition, rendered.loop_condition
+            ));
+        }
+        if loop_fact.condition_value != rendered.loop_condition_value {
+            differs.push(format!(
+                "condition_value {:?} vs {:?}",
+                loop_fact.condition_value, rendered.loop_condition_value
+            ));
+        }
+        if loop_fact.body != rendered.loop_body_blocks {
+            differs.push(format!(
+                "body {:x?} vs {:x?}",
+                loop_fact.body, rendered.loop_body_blocks
+            ));
+        }
+        if loop_fact.latches != rendered.loop_latches {
+            differs.push(format!(
+                "latches {:x?} vs {:x?}",
+                loop_fact.latches, rendered.loop_latches
+            ));
+        }
+        if loop_fact.exits != rendered.loop_exits {
+            differs.push(format!(
+                "exits {:x?} vs {:x?}",
+                loop_fact.exits, rendered.loop_exits
+            ));
+        }
+        if !differs.is_empty() {
             return Err(format!(
-                "canonical loop fact {:?} does not exactly match rendered loop at 0x{header:x}",
-                loop_id
+                "canonical loop fact {:?} does not exactly match rendered loop at 0x{header:x}: {}",
+                loop_id,
+                differs.join("; ")
             ));
         }
         Ok(loop_id)
