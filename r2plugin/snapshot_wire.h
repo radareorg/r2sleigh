@@ -65,5 +65,7 @@ bool r2sleigh_wire_write_snapshot_prefix(R2SleighWireWriter *writer, const void 
 /* Serialize one whole borrowed snapshot. The buffer this produces is what
  * r2sleigh_snapshot_wire_decode_v2 parses, so the two must agree exactly. */
 bool r2sleigh_wire_write_snapshot(R2SleighWireWriter *writer, const void *snapshot);
+// Which check the last write refused at, as "function:line", or NULL.
+const char *r2sleigh_wire_last_refusal(void);
 
 #endif

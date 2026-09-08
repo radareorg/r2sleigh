@@ -826,7 +826,13 @@ static const SleighFunctionCapture *sleigh_function_capture_with_reason(RAnal *a
 		/* Four conditions end here and the caller sees only that the capture
 		 * is absent; name the one that failed. */
 		if (snapshot_taken) {
-			cause = !wire? "the snapshot could not be serialized"
+			static R_TH_LOCAL char wire_detail[192];
+			const char *where = r2sleigh_wire_last_refusal ();
+			if (!wire && where) {
+				snprintf (wire_detail, sizeof (wire_detail),
+					"the snapshot could not be serialized at %s", where);
+			}
+			cause = !wire? (where? wire_detail: "the snapshot could not be serialized")
 				: !revision? "the snapshot carries no revision identity"
 				: r_anal_function_dirty_epoch (fcn) != function_epoch
 					? "the function changed during capture"

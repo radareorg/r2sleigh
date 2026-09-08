@@ -16229,3 +16229,64 @@ on `pr/tp-pointer-collapse` were rewritten to that shape. The long derivation
 still has a home -- the pull request body, where a reviewer can argue with it --
 but not the commit. Note the parallel with the project's own rule that a comment
 is one or two lines: the same reasoning, applied one layer out.
+
+### The two capture-side causes, traced
+
+**`OverlappingStackSlots`, 31 of 132.** bzip2's `uInt64_toAscii` at -O2 refuses
+because two stack slots claim the same byte:
+
+```
+slot at StackPointer-96 (8 bytes, ParameterHome)  overlaps
+slot at StackPointer-89 (8 bytes, Local)
+```
+
+Seven bytes apart, both claiming eight. The second slot is `var_fh`, and
+radare2 created it from one instruction:
+
+```
+0x3785  mov qword [rsp+8], rsi     ; the 8-byte value, spilled
+0x378f  lea r8,  [rsp+8]           ; its address
+0x3797  lea r12, [rsp+0xf]         ; the address of its last byte
+0x37b0  movzx eax, byte [rcx]      ; walked backwards from r12 down to r8
+```
+
+`uInt64_toAscii.isra.0` is a GCC IPA-SRA clone that takes the `UInt64` by value,
+spills its eight bytes to `rsp+8`, and indexes them in reverse. `rsp+0xf` is the
+last byte *of that slot*, not a slot of its own. radare2 made it a variable
+because `extract_arg` calls `inferred_var_size`, which returns the pointer width
+when the access establishes no width -- and a `lea` establishes none.
+
+The first attempt keyed on `access_size < 1` and never fired: x86 `lea` reports
+`refptr: 8`. The signal that is actually right is `op->direction`, which is
+`R_ANAL_OP_DIR_REF` for a `lea` and READ/WRITE for a real access. With
+`get_stack_var` folding an address taken strictly inside an existing variable's
+extent into that variable, `var_fh` disappears and the function renders.
+
+**Seven radare2 tests regress on that rule** (3993 OK/0 XX before, 3986 OK/7 XX
+after), so it is not landing as written. The likely cause is that the container's
+extent is often itself the same guess: a variable whose only access was also
+unsized carries `int64_t` from the default, and absorbing a later `lea` into it
+is then absorbing one guess into another. The narrowing to try is to fold only
+into a container whose extent is established -- an aggregate, or a variable with
+a sized access.
+
+**`the snapshot could not be serialized`, 19 of 132, is one line.** With the
+writer recording where it refused, all nineteen report `walk_image:218`:
+
+```c
+static const char *walk_bounded(const char *string) {
+	const char *text = r_str_get (string);
+	return strlen (text) < WALK_NAME_MAX? text: NULL;   // 512
+}
+```
+
+`WALK_NAME_MAX` is documented as the longest *identifier* the snapshot will
+carry, because "a truncated register or type name would decode into a different
+entity". It was also being applied to string literals, which are program data.
+bzip2's `license` and `usage` embed multi-line text well past 512 bytes, so the
+whole snapshot was refused over the length of a string the program contains.
+
+Literal text now takes `WALK_BLOCK_BYTES_MAX`, the producer's existing ceiling
+for a single item of data rather than for a name. `license` and `usage` render.
+This is the bounds rule in miniature: 512 was derived for identifiers and
+correct there, and reusing it for data made it a magic number.
