@@ -15077,3 +15077,43 @@ doing so. So the question is narrow and well posed for whoever picks it up:
 **what gate keeps a load whose address resolves into a declared aggregate from
 reaching `certified_memory_access_expr`?** That is one probe on the `Load` arm of
 the op lowering, and it stands in front of fourteen functions.
+
+### The member producer for a declared frame aggregate: written, and what blocks it
+
+Following the narrowed question above -- what keeps a load into a declared
+aggregate from rendering as a member -- the answer is that **nothing produces the
+fact**. `member_accesses_by_op` has exactly two producers, both keyed on
+`field_access_certificates`, and those come from `struct_name_from_pointer_type`
+on a *parameter*. `s->field` through a pointer parameter has a producer; a
+struct held in a frame slot has none.
+
+A third producer was written. Everything it needs is reachable:
+`prepared.certificates().stack_slots[object].source_slot` gives the declared
+slot, `slot.logical_type()` its node in the interface type graph,
+`graph.aggregates()` the layout, and a member is accepted only when its
+`offset_bits` and `size_bits` are exactly the access's offset and width -- so the
+name stands for precisely what the machine touched.
+
+**It is inert, for one reason:** `prepared.objects().interior_offset(memory.address)`
+returns `None` for every memory access, in every function, while
+`DeclaredStackSlots::containing` is observed mapping that same coordinate to its
+container during object-model construction. The displacement is recorded against
+the address value the model resolved; the value a `MemoryAccessRenderFact`
+carries is evidently not that one. Reconciling those two is the whole of what is
+left, and it is one probe: print both values for one access.
+
+**A latent wrong rendering is waiting behind it, and this is the warning.**
+`certified_stack_owner_expr_for_memory_fact` is consulted *before* the member
+path and refuses only an *indexed* address, so an access at a constant offset
+inside a declared slot renders as the slot's bare name. With the producer in
+place and that guard absent, `notAStandardFile` rendered
+`tmp_11f00_2 = statBuf;` -- a four-byte read of `statBuf.st_mode` spelled as the
+whole `struct stat` -- and three functions on `bzip2-O0` "recovered" that way.
+Adding the interior-offset guard to that path takes the count straight back to
+29, which is the correct answer: they were never rendering, they were rendering
+wrongly.
+
+So the pieces land together or not at all: the producer, and the guard that stops
+the owner path claiming an access that is inside the slot rather than at it. On
+its own the guard changes nothing today, because the functions it would protect
+refuse earlier on the folded geometry constant.
