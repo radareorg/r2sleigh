@@ -15159,3 +15159,35 @@ maps a gapped use of a bound value and a rendered use of it to the same
 placement consumes the targets first, so it surfaces as a placement refusal
 instead. Fixing it means the gap not claiming a cell the rendering answers for,
 not deduplicating at placement.
+
+### The flag class is a two-reader value whose definition vanished
+
+The gap-cell double count is real and is **not** the cause. Releasing a gap's
+claim on a use cell the rendering answers for -- recording the claimed cells at
+`gap_stmt`, releasing one when `observe_normalized_input_uses_expr` records the
+same site, and honouring the release in both `placement_target` and the seal --
+takes `ZF_9`'s placement reads from two to one, which is the right number for
+one machine use. It changes no refusal, no cause and no function on any of the
+six binaries, so it is not in the tree; it belongs with whatever makes it
+load-bearing.
+
+The cause is upstream of placement entirely. `R2SLEIGH_TRACE_INLINE=ZF_9` says:
+
+```
+INLINE ZF_9 ValueId(241) stays bound: 2 readers (0 of them certified boundary
+reads), of which 0 sit in a certificate-elided instruction; root Compare
+```
+
+So the *inlining core* counts two readers too, from `graph.use_sites` -- its own
+count, independent of the journal's. Two live SSA uses is a value that earns a
+name, and the plan binds it correctly. What then goes wrong is on the write
+side: the branch folds the comparison into the `if`, the defining statement
+disappears with it, and a bound value is left with no rendered definition.
+
+That reframes the class. It is not "a flag is wrongly bound"; it is **a bound
+value whose definition was folded into one of its readers**. The rule this
+project already settled says a folded obligation's occurrence *moves* with the
+expression rather than being elided -- so the definition has to be rendered
+where the value is bound, or the fold has to decline when the value has a second
+reader. Which of those it is, is the next decision, and it is a design question
+rather than a trace.
