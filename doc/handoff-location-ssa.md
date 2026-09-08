@@ -17585,3 +17585,46 @@ The second is almost certainly right, and what it needs is a structured
 multi-cell memory effect the engine does not have today: the existing
 vocabulary is one `ObservableMemoryRead`/`Write` per access with a known
 address. That is the thing to design before writing any of it.
+
+### Where DecBench stands, and the two leads that are traced but not fixed
+
+Checkpoint against angr 9.3.3 on bzip2 and zlib, 1820 functions:
+
+    coverage    r2sleigh 1499 (82.4%)   angr 1715 (94.2%)
+    byte_match  0.245 rendered | 0.202 all      angr 0.368 | 0.347
+    type_match  0.443 rendered | 0.314 all      angr 0.377 | 0.315
+    ged         10.881 rendered | 0.022 all     angr 11.840 | 0.030
+
+Coverage was 1314/1803 (72.9%) at the session baseline. On the functions we do
+render we are already better than angr on `type_match` (0.443 against 0.377) and
+on `ged` (10.881 against 11.840, lower is better); the all-function columns lose
+because a refusal scores zero. `type_match` all-function is 0.314 against 0.315,
+so roughly a dozen more rendered functions take that metric past angr.
+
+`byte_match` is the one coverage alone does not win: 0.245 per rendered function
+against angr's 0.368. That is a quality gap in the emitted text and needs its
+own work once the refusals are down.
+
+The DecBench-wide refusal ranking, from the run's own census: 53
+`RenderedValueRequired`, 21 `missing_definition`, 17 `unobserved_binding_read`,
+17 `BindingPlanBuild`, 16 `OpLowering(implementation.rs:137x)`, 15 engine
+complexity limit, 15 the lift parse error, 13 structuring deadline, 13
+`PlannedElidedValueRendered`, 12 unrepresentable operation. The `BindingPlanBuild`
+and lift-parse classes are the ones this session closed, so that ranking is
+already stale in our favour.
+
+**Lead one: an out-parameter's address has no object.** `dbg.BZ2_bzclose`
+refuses `missing_definition` on `stack_m48`, whose only occurrence is a read.
+The program never assigns it here: `lea rdi, [var_4h]` passes its address to
+`BZ2_bzWriteClose`, which writes through the pointer. Placement already has the
+rule for this -- `escaped_frame_object_address_uses_its_declaration_as_definition`
+treats an escaped frame-object address as its own definition -- and it does not
+fire because `certified_frame_object_call_argument` finds `object=None` for the
+argument value. The new `stack_root` field on that evidence says why: the value
+has no entry in `DecompilePrepFacts::stack_address_roots`, so the object model
+never resolved it to a frame object. The rules that populate that map cover
+`Copy`, `Cast`, `Trunc`, `Subpiece`, `IntAdd` and `IntSub`; the next step is to
+find which link in this particular chain they miss.
+
+**Lead two: `rep` string instructions**, recorded in the previous entry. Both
+leads are worth roughly twenty DecBench cells each.

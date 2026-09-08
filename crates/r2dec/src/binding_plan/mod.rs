@@ -328,7 +328,11 @@ pub(crate) fn certified_frame_object_call_argument(
     if !(listed && certified && !indexed && frame) {
         r2il::refusal_evidence!(
             "call-argument-frame-object",
-            "call {at:?} argument {argument_index} value {value:?}: listed={listed} certified={certified} indexed={indexed} object={object:?} kind={kind:?}"
+            "call {at:?} argument {argument_index} value {value:?}: listed={listed} certified={certified} indexed={indexed} object={object:?} kind={kind:?} stack_root={:?}",
+            source.graph().value(value).and_then(|value| source
+                .function()
+                .decompile_prep_facts()
+                .and_then(|facts| facts.stack_address_roots.get(&value.var)))
         );
         return None;
     }
