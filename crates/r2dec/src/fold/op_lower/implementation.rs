@@ -1187,12 +1187,10 @@ impl<'a> FoldingContext<'a> {
         if written != Some(carrier) {
             r2il::refusal_evidence!(
                 "call-result-split",
-                "{:x?} defines {carrier:?} carried at {:?} and writes {written:?} carried at \
-                 {:?}; the slice {value:?} can be spelled by neither",
-                source_call,
-                cert.carrier,
-                self.certified_call_result_definition_for_source(source_call)
-                    .map(|definition| definition.carrier.clone())
+                "{:x?} has two identity results on one storage, {carrier:?} and \
+                 {written:?}; the slice {value:?} reads the first and the statement \
+                 assigns the second",
+                source_call
             );
         }
         r2il::refusal_evidence!(

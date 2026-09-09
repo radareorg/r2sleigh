@@ -19194,12 +19194,31 @@ storage, and the `CallDefine` arm in `semantic.rs` marks `Identity` only for the
 `CallDefine` whose output is that value. One identity result per site, by
 construction.
 
-So two identity facts for one `CallsiteKey` cannot come from one boundary walk.
-They come from how `call_result_facts_by_value` is assembled -- it is keyed by
-`ValueId` and filled by iterating `call_result_facts.by_value`, so two values
-that resolve to the same `(block_addr, op_index)` both land in it. That is where
-to look: what puts two values with one call-site key and one storage into
-`by_value`.
+So two identity facts for one `CallsiteKey` cannot come from one boundary walk,
+and they are not a key collision either -- both carry `CallSiteId(3)`.
+
+They come from the **flow pass**. `insert_call_result_certificate` is called
+from a walk that tracks a call's result forward through the copies and stores it
+reaches, minting a certificate for each value it flows into, all under the same
+`call_site`. So a call site legitimately has several identity results: the one
+the call defines, and one for every value that result reaches while it is still
+the same carrier.
+
+That makes "find the identity result at this call site" under-determined by
+construction, and the two consumers resolve it differently, which is the whole
+defect. `definition_for_site` already asks the right question -- identity,
+register carrier, earliest instruction, unique there -- which is "the value the
+call itself defined". The scan in `derived_call_result_carrier_expr` asks for
+whichever sorts first.
+
+Joining them onto `definition_for_site` is the fix, and the one thing left in
+its way is the cell rule: the slice's read then names the value the call
+statement assigns, and `observe_certified_read_expr` claims
+`ObservationTarget::Value(value)` for a *read*, which collides with the
+definition's own claim. Whether a certified read should claim the value's cell
+at all -- as opposed to only its own `CertifiedValueRead` cell -- is the
+question to settle, and it is a question about the cell model rather than about
+calls.
 
 The reproduction is one line:
 
