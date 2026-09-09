@@ -211,6 +211,8 @@ pub(crate) struct ControlFlowStructurer<'a, 'o> {
     transfer_target_domains: BTreeMap<u64, Vec<RenderedBlockDomain>>,
     /// Shared tails the analysis placed once, written after the body.
     hoisted_joins: BTreeMap<u64, Region>,
+    /// How deep the region walk is, so its trace reads as a tree.
+    walk_depth: usize,
     /// Counted loops whose exact initializer and update have been moved into
     /// the header before region emission begins.
     certified_for_regions: BTreeMap<u64, CertifiedForRegion>,
@@ -496,6 +498,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             proven_dead_blocks: std::cell::OnceCell::new(),
             transfer_target_domains: BTreeMap::new(),
             hoisted_joins: BTreeMap::new(),
+            walk_depth: 0,
             certified_for_regions: BTreeMap::new(),
             certified_for_header_sites: BTreeSet::new(),
         }
@@ -535,6 +538,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             proven_dead_blocks: std::cell::OnceCell::new(),
             transfer_target_domains: BTreeMap::new(),
             hoisted_joins: BTreeMap::new(),
+            walk_depth: 0,
             certified_for_regions: BTreeMap::new(),
             certified_for_header_sites: BTreeSet::new(),
         })
@@ -1324,10 +1328,13 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
         r2il::refusal_evidence!(
             "region-walk",
-            "{} at {:#x}",
+            "{:indent$}{} at {:#x}",
+            "",
             region_kind_name(region),
-            region.entry()
+            region.entry(),
+            indent = self.walk_depth * 2
         );
+        self.walk_depth += 1;
         self.completed_loop_exit = None;
         self.region_exit_domains = None;
         let inherited_domains = self.active_domains.clone();
@@ -1350,6 +1357,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         ) {
             self.region_exit_domains = None;
         }
+        self.walk_depth = self.walk_depth.saturating_sub(1);
         self.active_domains = inherited_domains;
         if Self::trailing_loop_condition_block(region).is_none() {
             self.completed_loop_exit = None;
@@ -3599,11 +3607,24 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             Ok(RenderedBlockOccurrence { alternatives })
         })();
         match result {
-            Ok(occurrence) => self
-                .rendered_block_domains
-                .entry(block_addr)
-                .or_default()
-                .push(occurrence),
+            Ok(occurrence) => {
+                r2il::refusal_evidence!(
+                    "block-domain",
+                    "{block_addr:#x} rendered under {:?}",
+                    self.fold_ctx
+                        .control_facts()
+                        .map(|facts| occurrence
+                            .alternatives
+                            .iter()
+                            .map(|domain| Self::describe_guards(facts, &domain.guards))
+                            .collect::<Vec<_>>())
+                        .unwrap_or_default()
+                );
+                self.rendered_block_domains
+                    .entry(block_addr)
+                    .or_default()
+                    .push(occurrence)
+            }
             Err(reason) => self.safety_reason = Some(reason),
         }
     }
