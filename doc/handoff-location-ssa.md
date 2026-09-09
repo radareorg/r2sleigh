@@ -18243,3 +18243,9 @@ merge, so not every use is a memory address and nothing answers for its value
 cell. The phi use is already accounted `Elided(UnobservedMerge)`; what is
 missing is that an elided use should not disqualify the address from being
 named by its accesses.
+
+An unobserved merge edge does not disqualify it. `fcn_3957`'s address value is
+read by a load and by a phi edge the plan elides as an unobserved merge, and
+that edge spells nothing, so it cannot be the occurrence that answers for the
+value either. `use_spells_nothing_but_an_address` states both cases in one
+place, and the count goes to **736 rendered / 118 refused**.

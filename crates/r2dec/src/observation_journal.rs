@@ -3171,6 +3171,22 @@ impl LegacyObservationJournal {
         Ok(marked)
     }
 
+    /// Whether a read of a value spells nothing except an object's address.
+    ///
+    /// A memory-address operand renders as the object's name, and a read on an
+    /// unobserved merge edge renders nothing at all; neither can be the
+    /// occurrence that answers for the value.
+    fn use_spells_nothing_but_an_address(&self, site: UseSite) -> bool {
+        matches!(
+            self.plan.use_disposition(site),
+            Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
+        ) || self
+            .source
+            .unobserved_merges()
+            .unobserved_uses()
+            .contains(&site)
+    }
+
     /// The definitions an inlined address computation is made of.
     ///
     /// Rendering the access spells the object rather than the address, so every
@@ -3207,13 +3223,13 @@ impl LegacyObservationJournal {
             pending.extend(inst.inputs.iter().copied());
             // Only a value nothing else can render. A producer read somewhere
             // that spells it is answered there, and answering again here
-            // reports one effect discharged twice.
-            if !graph.use_sites(value).iter().all(|site| {
-                matches!(
-                    self.plan.use_disposition(*site),
-                    Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
-                )
-            }) {
+            // reports one effect discharged twice; a read on an unobserved
+            // merge edge spells nothing and does not disqualify it.
+            if !graph
+                .use_sites(value)
+                .iter()
+                .all(|site| self.use_spells_nothing_but_an_address(*site))
+            {
                 continue;
             }
             discharged.push(definition);
@@ -4702,12 +4718,9 @@ impl LegacyObservationJournal {
             }
             let uses = graph.use_sites(graph_value.id);
             if uses.is_empty()
-                || !uses.iter().all(|site| {
-                    matches!(
-                        self.plan.use_disposition(*site),
-                        Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
-                    )
-                })
+                || !uses
+                    .iter()
+                    .all(|site| self.use_spells_nothing_but_an_address(*site))
             {
                 continue;
             }
