@@ -19034,3 +19034,36 @@ writes the block and drops the branch behind it, and that is the same
 "already-placed entry written as a truncated block" face of the copying defect
 the tails fixed on the other side. It should emit a jump to a tail placed once,
 exactly as `working_join_path` does.
+
+## `RenderedValueRequired` is one defect in the binding plan, traced
+
+The largest single refusal family on DecBench -- 27 of 174, and 19 locally --
+reports `observation journal: RenderedValueRequired`. It is not a family of
+independent failures. Traced on `bzip2_O2 0x5130`:
+
+    ValueId(204) bound to BindingId(90) renders as Var(SymbolId index 113)
+    which does not read symbol SymbolId index 90
+
+The read is a *derived call result reading its identity carrier*.
+`derived_call_result_carrier_expr` returns the carrier's value paired with the
+expression **the call site owns its result through**, and says why in its own
+comment: taking `symbol_for_value` instead "gave a name the statement does not
+necessarily assign". So the expression names the owner's symbol while the
+journal, re-deriving from `symbol_for_value(carrier)`, demands the carrier's.
+
+Two owners for one question -- which symbol this read names -- and the code
+already knows they disagree.
+
+Letting the caller pass the symbol its expression names was tried. The journal
+then accepts and **placement refuses instead**, with
+`invalid_certified_value_read`, because `certified_value_read_matches` requires
+`names.symbol_for_binding(binding) == Some(symbol)`. That is the third table
+answering the same question, and moving the refusal from one to the next is the
+pattern this project has already been burned by. Reverted.
+
+The cause is upstream of all three: **the carrier is bound to a binding nothing
+assigns**, because the call site assigns through the owner expression. That is
+also what `UnownedBindingSymbol` (14 more declines) reports from the other end.
+The fix is in the binding plan -- the carrier and the result the call site
+writes should be one binding -- not in the journal or the placement audit, and
+it closes 41 of the 174 declines at once.

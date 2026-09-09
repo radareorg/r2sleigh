@@ -3012,6 +3012,13 @@ impl LegacyObservationJournal {
             ));
         };
         if !crate::placement::expr_reads_symbol(&expr, symbol) {
+            // Which spelling was written instead: the read is certified and the
+            // binding is known, so the disagreement is about the expression.
+            r2il::refusal_evidence!(
+                "certified-read",
+                "{value:?} bound to {binding:?} renders as {expr:?} which does not read \
+                 symbol {symbol:?}"
+            );
             return Err(LegacyObservationJournalError::rendered_value_required(
                 value,
                 RenderedValueRequirementCause::CertifiedReadExpressionMissingSymbol,
@@ -3076,6 +3083,13 @@ impl LegacyObservationJournal {
             });
         }
         if !crate::placement::expr_reads_symbol(&expr, symbol) {
+            // Which spelling was written instead: the read is certified and the
+            // binding is known, so the disagreement is about the expression.
+            r2il::refusal_evidence!(
+                "certified-read",
+                "{value:?} bound to {binding:?} at an address access renders as {expr:?} \
+                 which does not read symbol {symbol:?}"
+            );
             return Err(LegacyObservationJournalError::rendered_value_required(
                 value,
                 RenderedValueRequirementCause::CertifiedReadExpressionMissingSymbol,
