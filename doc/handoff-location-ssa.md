@@ -17789,3 +17789,43 @@ gave -296 against the object's -312, so a guess would have been wrong.
 Until it is settled, the translation that succeeds on a register with no
 frame-pointer role is the thing to distrust first.
 
+### The coordinate question, answered: radare2 does not parse a CFA frame base
+
+`dwarfdump --debug-info` on bzip2_O2 gives every function
+`DW_AT_frame_base (DW_OP_call_frame_cfa)`, and radare2's
+`parse_dwarf_location` in `libr/anal/dwarf_process.c` says so itself:
+
+    case DW_OP_fbreg: {
+        /* TODO sometimes CFA is referenced, but we don't parse that yet
+           just an offset involving framebase of a function*/
+
+A `DW_OP_fbreg` location is resolved by recursively parsing the frame base, and
+`DW_OP_call_frame_cfa` is not a `reg`/`breg` operation, so that recursion
+returns NULL and the variable's location is dropped.
+
+So the `bp`-based slots are not DWARF locations at all. They are radare2's own
+recovery, which classifies a variable by the register the code addresses it
+through, and in these functions `rbp` is a general register holding a pointer
+into a buffer rather than a frame pointer. The name and type come from DWARF;
+the location does not. That is why no function in the binary sets up a frame
+pointer and 93 slots still claim one.
+
+This is a radare2 gap, and a wide one: GCC emits `DW_OP_call_frame_cfa` as the
+frame base for essentially every function built without a frame pointer, which
+is the default at `-O2`. No DWARF local location is imported for any such
+binary.
+
+Closing it means implementing the CFA case. The honest version reads the CFA
+rule from `.eh_frame` at the variable's PC; the common case on x86-64 SysV is
+that at function entry the CFA is the stack pointer plus the return address
+size, so an `fbreg` offset is stack-pointer-relative with that adjustment. The
+adjustment must come from the CFI rather than be assumed, because a function
+that adjusts the stack changes the relation at every point after the prologue,
+and radare2's `SPV` deltas are relative to `fcn->stack` at the access rather
+than to entry.
+
+That is the next piece of work and it is upstream. It is also the largest single
+recovery gap this session found: it decides whether a local has its declared
+name and type at all, which is what `type_match` measures and what makes an
+array render as `yy[i]` instead of `((uint8_t*)ptr)[i]`.
+
