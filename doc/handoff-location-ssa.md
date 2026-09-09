@@ -17903,14 +17903,19 @@ whose buffers are vector-filled.
 
 **It stays.** Reverting would restore a benchmark count by re-hiding correct
 type recovery, which is the trade this project's rules exist to refuse. The
-fix is not a revert but an admissibility rule: an array declaration does not
-describe an object some access uses more widely than its element type, because
-the array spelling cannot render that access. That is the same principle
+fix is not a revert but an admissibility rule: a declared aggregate does not
+describe an object when an access to it spans members, because the aggregate
+spelling cannot render that access. That is the same principle
 `admit_declaration_type` already applies to width -- a type whose width is not
 the storage's is not a description of it -- extended from the object's extent
-to its element. It needs the access widths, which
-`accessed_object_width` computes in `r2ssa` and which `declaration_type_for_binding`
-would need reaching.
+to its interior.
+
+An attempt at the array-shaped version of this rule was written and reverted:
+it keyed on `StackArrayLayoutDisposition` and moved nothing, because the object
+here is a struct and takes the `Struct | Union` branch of
+`declaration_type_for_binding`, which returns the declaration on extent alone.
+The guard belongs there, and what it needs is the member layout, which the type
+graph carries.
 
 Local census at the same point: 603 rendered / 89 refused / 0 silent of 692,
 from 588 at the start of the session, with thirteen array declarations where
