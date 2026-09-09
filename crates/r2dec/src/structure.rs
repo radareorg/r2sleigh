@@ -233,7 +233,7 @@ struct RenderedLoopExit {
     domains: Vec<RenderedBlockDomain>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct RenderedBlockDomain {
     guards: Vec<ControlGuard>,
     loops: Vec<LoopId>,
@@ -3241,13 +3241,10 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             domain.loops.sort_unstable();
             domain.loops.dedup();
         }
-        let mut unique = Vec::new();
-        for domain in domains.drain(..) {
-            if !unique.contains(&domain) {
-                unique.push(domain);
-            }
-        }
-        *domains = unique;
+        // Ordered rather than scanned: a nested branch carries a disjunction of
+        // path domains, and a linear membership test made the dedup quadratic.
+        let unique = domains.drain(..).collect::<BTreeSet<_>>();
+        domains.extend(unique);
     }
 
     /// Emit side-effecting statements for a block without labels or loop markers.
