@@ -68,6 +68,10 @@ pub struct CallBoundaryConfig {
     /// the value the caller held going in is the value it holds coming out,
     /// which is exactly what a compiler that has seen the callee relies on.
     pub preserved_by_target: BTreeMap<u64, BTreeSet<CanonicalStorageId>>,
+    /// The carriers a call reads without naming them in an operand.
+    pub argument_regs: Vec<CallBoundaryDef>,
+    /// The carriers a return reads without naming them in an operand.
+    pub return_regs: Vec<CallBoundaryDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -19316,3 +19316,79 @@ ABI model and are not available where phis are placed. The narrower question
 the same trace raised is worth its own fix either way: a parameter's declared
 width should be the width the callee actually reads, not the width of the ABI
 slot it arrives in.
+
+## The next lever is a stack slot the width consensus refuses to name
+
+With the gap closure and the call-clobber phis landed, DecBench's refusals
+regrouped rather than shrank: `implementation.rs:1435` fell from eleven to five,
+and two causes appeared that were not in the list before -- ten at
+`lowering.rs:204` and nine at `memory_renderer.rs:116` -- alongside
+`missing program-variable authorization` rising from three to eight. All four
+are the same trace, and they are now the largest single thing between us and
+angr's coverage.
+
+`zlib_example`'s `fcn_bc90` shows it end to end. A load at `0xbc90:66` asks for
+its address expression and gets nothing:
+
+    memory-access-expression: (0xbc90, 66) access {inst 66, ordinal 0} at
+      ValueId(79) has no planned expression
+    planned-elided-value-rendered: ValueId(79) was elided as DeadStackBase
+      and memory_renderer.rs:677 asked for it by name
+    stack object ObjectId(6) has no program variable:
+      MissingSourceIdentity { object: ObjectId(6) }
+    stack-object-identity: object=ObjectId(6) at StackPointer-128
+      source_slot=false callee_allocation=false size=None
+
+The plan elided the frame address precisely because a named slot needs none,
+and the slot has no name, so neither spelling exists. The name is missing
+because all three inputs to `stack_object_identity` are absent: radare2 reported
+no stack variable at `SP-128`, no callee-allocation certificate covers it, and
+`accessed_object_width` returned `None`. The last one is the layer to fix, and
+the evidence now says exactly why it gave up:
+
+    stack-object-width: object=ObjectId(6) widths disagree: 4 and 2; accesses=
+      [(ValueId(79), 4, Some(0), true), (ValueId(405), 4, Some(0), false),
+       (ValueId(2226), 2, Some(0), false), (ValueId(2251), 8, Some(0), true)]
+
+Every access is at offset zero, and the widths are 4, 4, 2 and 8. The consensus
+rule reads that as "the object is read as more than one thing, which is not a
+geometry this can state" and refuses.
+
+Two readings are possible and they are not equally right. One storage read at
+several widths is a carrier with slices, which is exactly how this project
+already treats a register: a narrow read is a `MachineUseSlice` of the carrier
+and renders as a cast. Two variables sharing a slot at different times is the
+other, and rendering them as one object would give an `int` and a pointer one
+declaration.
+
+Which it is here is not a judgement call: the memory SSA already answers it.
+`build_memory_ssa` gives every store a `MemoryDefFact` version and every load a
+`MemoryUseFact` naming the version it reads, so the object's accesses partition
+into store-and-the-loads-it-reaches groups. Inside one group the store's width
+is the variable's width and each load must be a slice at a contained offset --
+that is the carrier reading, and it renders. Two groups whose widths differ are
+two variables in one slot -- that is the reuse reading, and each becomes its own
+program object. Nothing has to be guessed.
+
+One correctness hole is hidden behind the present refusal and has to be closed
+with it. `certified_stack_owner_expr_for_memory_fact` returns the slot's name
+for any access at `object_offset == 0` without comparing the access's width to
+the object's, so a two-byte read of an eight-byte local would render as the
+whole local. Today the width consensus refuses before that can happen; widening
+the geometry removes the shield.
+
+That decides the shape of the fix. A slot whose accesses are all one width
+stays a scalar and renders by name, as now. A slot read at several widths is a
+storage location rather than a scalar, so its declaration is a byte array of the
+maximum extent its accesses reach, and each access renders as
+`*(T *)&slot[offset]` -- which is what a partial store into a wider slot needs
+in any case, because `x = v` cannot say "the low two bytes of x". The address is
+already spellable: `frame_object_address_expr` exists and an object accessed
+this way is not one the model can call a scalar local anyway. The rendering side
+therefore needs one new spelling and a width check on the owner path; the
+geometry side needs the maximum extent and the containment proof.
+
+Two guards keep this from claiming more than it has. The extent stands only when
+every access lies inside it, and the whole fallback runs only where all three of
+today's inputs are absent -- no source slot, no callee allocation, no single
+width -- so it can never displace a better recovery, only replace a refusal.

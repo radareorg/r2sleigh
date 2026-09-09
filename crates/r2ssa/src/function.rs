@@ -1970,7 +1970,87 @@ fn decompile_call_boundary_config(
         defined_regs,
         stack_pointer_restored_by_callee,
         preserved_by_target,
+        argument_regs: call_argument_register_defs(arch),
+        return_regs: return_read_register_defs(arch),
     })
+}
+
+/// The registers a call reads without naming them in an operand: the
+/// convention's argument carriers.
+fn call_argument_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
+    let named = |names: &[(&str, u32)]| {
+        names
+            .iter()
+            .map(|(name, size)| CallBoundaryDef {
+                name: (*name).to_string(),
+                size: *size,
+            })
+            .collect()
+    };
+    match arch.name.to_ascii_lowercase().as_str() {
+        "x86-64" | "x86_64" | "x64" | "amd64" => named(&[
+            ("rdi", 8),
+            ("edi", 4),
+            ("rsi", 8),
+            ("esi", 4),
+            ("rdx", 8),
+            ("edx", 4),
+            ("rcx", 8),
+            ("ecx", 4),
+            ("r8", 8),
+            ("r8d", 4),
+            ("r9", 8),
+            ("r9d", 4),
+            ("rax", 8),
+            ("eax", 4),
+        ]),
+        "x86" | "x86-32" | "i386" | "i686" => named(&[("eax", 4)]),
+        "arm" if arch.addr_size == 4 => named(&[("r0", 4), ("r1", 4), ("r2", 4), ("r3", 4)]),
+        "aarch64" | "arm64" => named(&[
+            ("x0", 8),
+            ("w0", 4),
+            ("x1", 8),
+            ("w1", 4),
+            ("x2", 8),
+            ("w2", 4),
+            ("x3", 8),
+            ("w3", 4),
+            ("x4", 8),
+            ("w4", 4),
+            ("x5", 8),
+            ("w5", 4),
+            ("x6", 8),
+            ("w6", 4),
+            ("x7", 8),
+            ("w7", 4),
+            ("x8", 8),
+            ("w8", 4),
+        ]),
+        _ => Vec::new(),
+    }
+}
+
+/// The registers a return reads without naming them in an operand: the
+/// convention's result carriers, plus the stack and frame it hands back.
+fn return_read_register_defs(arch: &ArchSpec) -> Vec<CallBoundaryDef> {
+    let named = |names: &[(&str, u32)]| {
+        names
+            .iter()
+            .map(|(name, size)| CallBoundaryDef {
+                name: (*name).to_string(),
+                size: *size,
+            })
+            .collect()
+    };
+    match arch.name.to_ascii_lowercase().as_str() {
+        "x86-64" | "x86_64" | "x64" | "amd64" => {
+            named(&[("rax", 8), ("eax", 4), ("rdx", 8), ("edx", 4)])
+        }
+        "x86" | "x86-32" | "i386" | "i686" => named(&[("eax", 4), ("edx", 4)]),
+        "arm" if arch.addr_size == 4 => named(&[("r0", 4), ("r1", 4)]),
+        "aarch64" | "arm64" => named(&[("x0", 8), ("w0", 4), ("x1", 8), ("w1", 4)]),
+        _ => Vec::new(),
+    }
 }
 
 /// The registers a call may leave changed under this architecture's
@@ -2676,6 +2756,18 @@ impl SSAFunction {
         // Collect variable definitions and sizes
         let (mut defs, mut storage_by_identity) =
             collect_defs_from_cfg_with_names_storage_and_control(&cfg, reg_names_ref, control)?;
+
+        // Place phi nodes
+        let mut phi_placement = PhiPlacement::compute_with_storage_and_control(
+            &cfg,
+            &domtree,
+            &defs,
+            &storage_by_identity,
+            control,
+        )?;
+        // A call defines its convention's registers, and renaming writes those
+        // definitions after placement has run, so the merges they need are
+        // added here -- pruned, because an unread merge only invents a live-in.
         if let Some(call_boundaries) = call_boundaries {
             crate::phi::add_call_boundary_def_sites(
                 &cfg,
@@ -2684,16 +2776,16 @@ impl SSAFunction {
                 &mut defs,
                 &mut storage_by_identity,
             );
+            let complete = PhiPlacement::compute_with_storage_and_control(
+                &cfg,
+                &domtree,
+                &defs,
+                &storage_by_identity,
+                control,
+            )?;
+            let live_in = crate::phi::live_in_by_block(&cfg, call_boundaries, reg_names_ref, &defs);
+            phi_placement.merge_live_additions(complete, &live_in);
         }
-
-        // Place phi nodes
-        let phi_placement = PhiPlacement::compute_with_storage_and_control(
-            &cfg,
-            &domtree,
-            &defs,
-            &storage_by_identity,
-            control,
-        )?;
 
         // Rename variables
         let renamed = rename_function_with_names_and_call_boundaries_and_control(

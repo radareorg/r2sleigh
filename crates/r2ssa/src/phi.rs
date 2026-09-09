@@ -127,6 +127,36 @@ impl PhiPlacement {
         Ok(placement)
     }
 
+    /// Take from `complete` the merges this placement lacks, where the
+    /// identity is live at the block that would carry them.
+    pub fn merge_live_additions(
+        &mut self,
+        complete: Self,
+        live_in: &HashMap<u64, BTreeSet<RenameIdentity>>,
+    ) {
+        for (block, phis) in complete.phis {
+            let existing = self.phis.entry(block).or_default();
+            let held = existing
+                .iter()
+                .map(|phi| phi.identity.clone())
+                .collect::<BTreeSet<_>>();
+            let live = live_in.get(&block);
+            for phi in phis {
+                if held.contains(&phi.identity)
+                    || !live.is_some_and(|live| live.contains(&phi.identity))
+                {
+                    continue;
+                }
+                existing.push(phi);
+            }
+            existing.sort_unstable_by(|lhs, rhs| {
+                lhs.identity
+                    .cmp(&rhs.identity)
+                    .then(lhs.predecessors.cmp(&rhs.predecessors))
+            });
+        }
+    }
+
     /// Get phi nodes for a specific block.
     pub fn get_phis(&self, block: u64) -> &[PhiInfo] {
         self.phis.get(&block).map(|v| v.as_slice()).unwrap_or(&[])
@@ -259,6 +289,73 @@ pub fn add_call_boundary_def_sites(
             }
         }
     }
+}
+
+/// Where each identity is live, so a phi is placed only where a read can see
+/// it.
+///
+/// A call reads its arguments and a return its value through the convention
+/// rather than through an operand, so both are added to the reads a block
+/// makes; without them the carrier a return hands back looks dead everywhere.
+pub fn live_in_by_block(
+    cfg: &CFG,
+    call_boundaries: &crate::rename::CallBoundaryConfig,
+    reg_names: Option<&RegisterNameMap>,
+    defs: &DefinitionSitesByIdentity,
+) -> HashMap<u64, BTreeSet<RenameIdentity>> {
+    let resolve = |regs: &[crate::rename::CallBoundaryDef]| {
+        regs.iter()
+            .flat_map(|reg| call_boundary_identities(defs, reg, reg_names))
+            .filter(|identity| defs.contains_key(identity))
+            .collect::<BTreeSet<_>>()
+    };
+    let clobbered = resolve(&call_boundaries.defined_regs);
+    let arguments = resolve(&call_boundaries.argument_regs);
+    let returned = resolve(&call_boundaries.return_regs);
+
+    let mut live_in: HashMap<u64, BTreeSet<RenameIdentity>> = HashMap::new();
+    let addrs = cfg.block_addrs().collect::<Vec<_>>();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for addr in addrs.iter().rev() {
+            let Some(block) = cfg.get_block(*addr) else {
+                continue;
+            };
+            let mut live = cfg
+                .successors(*addr)
+                .into_iter()
+                .filter_map(|succ| live_in.get(&succ))
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for op in block.ops.iter().rev() {
+                match op {
+                    r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. } => {
+                        for identity in &clobbered {
+                            live.remove(identity);
+                        }
+                        live.extend(arguments.iter().cloned());
+                    }
+                    r2il::R2ILOp::Return { .. } => live.extend(returned.iter().cloned()),
+                    _ => {}
+                }
+                if let Some(varnode) = get_op_output_varnode(op) {
+                    live.remove(&RenameIdentity::from_varnode(varnode, reg_names));
+                }
+                for varnode in op.inputs() {
+                    if !matches!(varnode.space, r2il::SpaceId::Const) {
+                        live.insert(RenameIdentity::from_varnode(varnode, reg_names));
+                    }
+                }
+            }
+            if live_in.get(addr) != Some(&live) {
+                live_in.insert(*addr, live);
+                changed = true;
+            }
+        }
+    }
+    live_in
 }
 
 fn get_op_output_varnode(op: &r2il::R2ILOp) -> Option<&r2il::Varnode> {
