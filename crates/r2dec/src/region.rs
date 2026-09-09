@@ -2335,7 +2335,19 @@ impl WorkingGraph {
         let mut edge_labels: HashMap<(usize, usize), CFGEdge> = HashMap::new();
         let mut block_to_node = HashMap::new();
 
+        // Close over the successors as well as the block list: the recursive
+        // builder navigates by edges, and a graph missing one would disagree.
         let mut blocks = func.block_addrs().to_vec();
+        let mut frontier = blocks.clone();
+        let mut seen = blocks.iter().copied().collect::<BTreeSet<_>>();
+        while let Some(block) = frontier.pop() {
+            for succ in func.successors(block) {
+                if seen.insert(succ) {
+                    blocks.push(succ);
+                    frontier.push(succ);
+                }
+            }
+        }
         blocks.sort_unstable();
         for (idx, block) in blocks.iter().enumerate() {
             nodes.insert(
