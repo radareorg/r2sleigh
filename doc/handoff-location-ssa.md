@@ -18862,3 +18862,51 @@ That is the same defect as the builder split above, seen from the other side:
 two builders compose parts of one function and only one of them knows about the
 tails. Joining them fixes both. Until then the pre-condition to add is that a
 hoisted target's block is not already placed inside a collapsed node's region.
+
+## What the 174 DecBench declines actually are
+
+Measured on the zlib+bzip2 O2 sweep, 631 of 860 rendered, 174 declined, 55
+never attempted. The declines rank as:
+
+     27  observation journal: RenderedValueRequired
+     14  observation journal: UnownedBindingSymbol
+     12  machine projection: BindingPlanBuild
+     11  declaration placement: missing_definition
+     11  machine projection: OpLowering(implementation.rs)
+     10  declaration placement: region_does_not_dominate_occurrence
+     10  unrepresentable operation
+      9  the address is a cold partition of another function
+      8  engine complexity limit
+      6  engine request deadline during structuring
+      5  observation journal: InvalidUse
+      5  observation journal: PlannedElidedValueRendered
+      4  declaration placement: unobserved_binding_read
+      3  missing program-variable authorization
+      3  observation journal: ExactWriteRequiresRenderedOccurrence
+     ~36  effect-obligation and long tail
+
+About **82 of these name a cell** -- a value, a use, a write, an occurrence --
+and are exactly what the gap machinery can anchor. Routing them turns 631 into
+roughly 713. The rest name no cell and are defects to trace one at a time.
+
+### The size limits cannot be derived where they are asked
+
+Lifting `ENGINE_DECOMPILE_MAX_BLOCKS` and `MAX_OPS` and `DecompilerConfig::
+max_blocks` was measured: the nine functions the local corpus declines for size
+then cost 1.3 to 3.8 seconds each and refuse for *other* reasons --
+unrepresentable operation, the structuring deadline, malformed SSA. So the size
+check is hiding nine ordinary refusals rather than costing nine renders.
+
+Blocks do not predict cost. `zlib_example sym_crc32_z` is 33 blocks and was the
+fourth most expensive function measured; `bzip2_O2 dbg_main` is 175 blocks and
+costs 148 ms. Cost tracks instructions, at 214 us each at the median and 4.8 ms
+at the worst.
+
+The honest bound is "work the engine could not finish inside the program's own
+budget", and `post_analysis_budget_usec` already states that budget as
+`function_count * 100 ms`. But `r2sleigh_engine_complexity_limit_exceeded_v2`
+is handed only a block count and an op count, so the budget the bound should be
+measured against is not in scope where the bound is applied. Deriving it means
+passing the budget across the FFI -- one integer of fork surface, and the only
+way the constant stops being a guess. That is the next step for this thread, and
+it is worth less than the gap routing above: fourteen functions against eighty.
