@@ -3954,8 +3954,8 @@ static bool snapshot_type_spec_rejected(const char *spec) {
 	if (snapshot_type_spec_is_function_pointer (spec)) {
 		return strstr (spec, "atomic") != NULL;
 	}
-	return R_STR_ISEMPTY (spec) || strchr (spec, '[') || strchr (spec, ']')
-		|| strchr (spec, '(') || strchr (spec, ')')
+	// A bracketed spec is an array, which `snapshot_type_add_array` parses.
+	return R_STR_ISEMPTY (spec) || strchr (spec, '(') || strchr (spec, ')')
 		|| strstr (spec, "atomic");
 }
 /* The one node of an opaque kind: an object the graph does not describe, or
@@ -4682,6 +4682,97 @@ static void snapshot_type_root_report(const char *stage, const char *type, const
 		r_str_get (spec), (int)result);
 }
 
+/* Split `T[N]` into its element spelling and count, or refuse.
+ *
+ * Only a single bracketed suffix with a positive decimal count is an array
+ * this graph can place; anything else keeps its brackets and is refused. */
+static bool snapshot_type_array_split(const char *spec, char **element, ut64 *count) {
+	const char *open = strchr (spec, '[');
+	if (!open || open == spec) {
+		return false;
+	}
+	const char *cursor = open + 1;
+	ut64 value = 0;
+	if (!(*cursor >= '0' && *cursor <= '9')) {
+		return false;
+	}
+	while (*cursor >= '0' && *cursor <= '9') {
+		if (value > (UT64_MAX - (ut64)(*cursor - '0')) / 10) {
+			return false;
+		}
+		value = value * 10 + (ut64)(*cursor - '0');
+		cursor++;
+	}
+	if (*cursor != ']' || cursor[1] != '\0' || !value) {
+		return false;
+	}
+	char *head = r_str_ndup (spec, (size_t)(open - spec));
+	if (!head) {
+		return false;
+	}
+	r_str_trim (head);
+	if (R_STR_ISEMPTY (head)) {
+		free (head);
+		return false;
+	}
+	*element = head;
+	*count = value;
+	return true;
+}
+
+static SnapshotTypeGraphResult snapshot_type_add_array(
+	SnapshotTypeGraphBuilder *builder, const char *spec,
+	RAnalSnapshotTypeId *result_id) {
+	char *element_spec = NULL;
+	ut64 count = 0;
+	if (!snapshot_type_array_split (spec, &element_spec, &count)) {
+		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
+	}
+	RAnalSnapshotTypeId element_id = R_ANAL_SNAPSHOT_TYPE_ID_INVALID;
+	SnapshotTypeGraphResult result = snapshot_type_add_root (
+		builder, element_spec, &element_id);
+	free (element_spec);
+	if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+		return result;
+	}
+	if (element_id >= builder->graph->num_types) {
+		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
+	}
+	const RAnalSnapshotType *element = &builder->graph->types[element_id];
+	if (!element->size_bits || !element->align_bits) {
+		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
+	}
+	ut64 size_bits;
+	if (r_mul_overflow (element->size_bits, count, &size_bits)) {
+		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
+	}
+	size_t i;
+	for (i = 0; i < builder->graph->num_types; i++) {
+		const RAnalSnapshotType *existing = &builder->graph->types[i];
+		if (existing->kind == R_ANAL_SNAPSHOT_TYPE_ARRAY
+			&& existing->target_type_id == element_id
+			&& existing->array_count == count) {
+			*result_id = existing->id;
+			return SNAPSHOT_TYPE_GRAPH_VALID;
+		}
+	}
+	if (builder->graph->num_types >= builder->type_capacity
+		|| builder->graph->num_types >= UT32_MAX) {
+		return SNAPSHOT_TYPE_GRAPH_UNSUPPORTED;
+	}
+	RAnalSnapshotType *array = &builder->graph->types[builder->graph->num_types];
+	array->id = (RAnalSnapshotTypeId)builder->graph->num_types;
+	array->kind = R_ANAL_SNAPSHOT_TYPE_ARRAY;
+	array->size_bits = size_bits;
+	array->align_bits = element->align_bits;
+	array->target_type_id = element_id;
+	array->aggregate_id = UT32_MAX;
+	array->array_count = count;
+	builder->graph->num_types++;
+	*result_id = array->id;
+	return SNAPSHOT_TYPE_GRAPH_VALID;
+}
+
 static SnapshotTypeGraphResult snapshot_type_add_root(
 	SnapshotTypeGraphBuilder *builder, const char *type,
 	RAnalSnapshotTypeId *result_id) {
@@ -4694,6 +4785,14 @@ static SnapshotTypeGraphResult snapshot_type_add_root(
 	result = snapshot_type_unalias (builder, type, &spec);
 	if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
 		snapshot_type_root_report ("unalias", type, NULL, result);
+		return result;
+	}
+	if (strchr (spec, '[')) {
+		result = snapshot_type_add_array (builder, spec, result_id);
+		if (result != SNAPSHOT_TYPE_GRAPH_VALID) {
+			snapshot_type_root_report ("array", type, spec, result);
+		}
+		free (spec);
 		return result;
 	}
 	const bool pointer = strchr (spec, '*') != NULL;
@@ -4924,6 +5023,11 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 			}
 			slot->logical_type_id = rooted == SNAPSHOT_TYPE_GRAPH_VALID
 				? slot_type_id: R_ANAL_SNAPSHOT_TYPE_ID_INVALID;
+			if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+				eprintf ("r2sleigh: slot type fcn=%s %s type=%s rooted=%d id=%u\n",
+					r_str_get (snapshot->function_name), r_str_get (slot->name),
+					r_str_get (slot->type), (int)rooted, slot->logical_type_id);
+			}
 		}
 	}
 	free (aggregate_sources);

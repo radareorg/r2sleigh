@@ -196,6 +196,8 @@ typedef enum {
 	R_ANAL_SNAPSHOT_TYPE_CODE,
 	/* An aggregate whose members all begin at its start. */
 	R_ANAL_SNAPSHOT_TYPE_UNION,
+	/* A run of `array_count` elements of `target_type_id`. */
+	R_ANAL_SNAPSHOT_TYPE_ARRAY,
 } RAnalSnapshotTypeKind;
 
 typedef enum {
@@ -325,6 +327,8 @@ typedef struct r_anal_snapshot_type_t {
 	ut64 align_bits;
 	RAnalSnapshotTypeId target_type_id;
 	ut32 aggregate_id;
+	/* How many elements an array holds. Zero for every other kind. */
+	ut64 array_count;
 } RAnalSnapshotType;
 
 typedef struct r_anal_snapshot_aggregate_member_t {

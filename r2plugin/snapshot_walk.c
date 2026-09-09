@@ -508,6 +508,7 @@ bool r2sleigh_wire_write_snapshot_prefix(R2SleighWireWriter *writer, const void 
 #define WALK_TYPE_VOID 4
 #define WALK_TYPE_CODE 5
 #define WALK_TYPE_UNION 6
+#define WALK_TYPE_ARRAY 7
 #define WALK_ROLE_UNCLASSIFIED 0
 #define WALK_ROLE_LOCAL 1
 #define WALK_ROLE_PARAMETER_HOME 2
@@ -773,6 +774,11 @@ static bool walk_type_graph(R2SleighWireWriter *writer, const RAnalFunctionSnaps
 		case R_ANAL_SNAPSHOT_TYPE_UNION:
 			r2sleigh_wire_u8 (writer, WALK_TYPE_UNION);
 			r2sleigh_wire_u32 (writer, type->aggregate_id);
+			break;
+		case R_ANAL_SNAPSHOT_TYPE_ARRAY:
+			r2sleigh_wire_u8 (writer, WALK_TYPE_ARRAY);
+			r2sleigh_wire_u32 (writer, type->target_type_id);
+			r2sleigh_wire_u64 (writer, type->array_count);
 			break;
 		default:
 			/* Signedness and indirection are not recoverable elsewhere. */

@@ -742,6 +742,14 @@ fn write_type_graph(writer: &mut MachineContextIdentityWriter, graph: Option<&So
                 writer.u8(7);
                 writer.u32(aggregate_id);
             }
+            SourceTypeKind::Array {
+                element_type_id,
+                count,
+            } => {
+                writer.u8(8);
+                writer.u32(element_type_id);
+                writer.u64(count);
+            }
         }
         writer.u64(source_type.size_bits());
         writer.u64(source_type.align_bits());

@@ -1497,6 +1497,7 @@ const TYPE_STRUCT: u8 = 3;
 const TYPE_VOID: u8 = 4;
 const TYPE_CODE: u8 = 5;
 const TYPE_UNION: u8 = 6;
+const TYPE_ARRAY: u8 = 7;
 
 pub fn write_type(writer: &mut SnapshotWireWriter, source_type: &SourceType) {
     writer.u32(source_type.id());
@@ -1516,6 +1517,14 @@ pub fn write_type(writer: &mut SnapshotWireWriter, source_type: &SourceType) {
         SourceTypeKind::Union { aggregate_id } => {
             writer.u8(TYPE_UNION);
             writer.u32(aggregate_id);
+        }
+        SourceTypeKind::Array {
+            element_type_id,
+            count,
+        } => {
+            writer.u8(TYPE_ARRAY);
+            writer.u32(element_type_id);
+            writer.u64(count);
         }
     }
     writer.u64(source_type.size_bits());
@@ -1537,6 +1546,10 @@ pub fn read_type(reader: &mut SnapshotWireReader<'_>) -> Result<SourceType, Snap
         TYPE_CODE => SourceTypeKind::Code,
         TYPE_UNION => SourceTypeKind::Union {
             aggregate_id: reader.u32()?,
+        },
+        TYPE_ARRAY => SourceTypeKind::Array {
+            element_type_id: reader.u32()?,
+            count: reader.u64()?,
         },
         // Signedness and indirection are not recoverable from anything else in
         // the record, so an unknown kind is refused.

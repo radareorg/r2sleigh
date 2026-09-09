@@ -1838,6 +1838,7 @@ fn source_member_type_spelling(
         // against, and an opaque kind is never a member at all.
         r2ssa::SourceTypeKind::Struct { .. }
         | r2ssa::SourceTypeKind::Union { .. }
+        | r2ssa::SourceTypeKind::Array { .. }
         | r2ssa::SourceTypeKind::Void
         | r2ssa::SourceTypeKind::Code => return None,
     };

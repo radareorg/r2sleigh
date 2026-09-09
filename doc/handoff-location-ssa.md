@@ -17717,3 +17717,39 @@ A second, smaller thing this trace turned up: `yy` is captured with
 at entry-relative -312. The eight bytes are the pushed frame pointer. Whether
 the engine or the capture owns that conversion should be settled while the
 array work is done, since both bear on matching an object to its declared slot.
+
+### The array type is carried now, and the next defect is underneath it
+
+`SourceTypeKind::Array { element_type_id, count }` exists end to end: the
+capture parses `T[N]`, resolves `T` and emits an array node; the wire carries
+it as tag 7; the graph validates that the extent is the element's size times
+the count and that the element is reachable; `r2types` maps it to
+`CTypeLike::Array`, which placement and rendering already understand.
+`dbg.generateMTFValues` roots `yy : UChar[256]` as type 17 where it used to be
+refused.
+
+It moves nothing yet, because a second defect sits between the declared slot
+and the object. `collect_declared_stack_slots` restates a frame-pointer slot in
+entry-relative coordinates by asking `unique_stack_root_for_storage` where the
+base register sits relative to entry, and for `generateMTFValues` that answers
+`None`. The prologue says why:
+
+    push r14 / mov rsi, rdi / xor edx, edx / push r13 / push r12
+    push rbp / push rbx / sub rsp, 0x110
+
+`rbp` is pushed as a callee-saved register and never set from `rsp`. There is
+no frame pointer, so the register has no entry-relative position, and every
+slot radare2 reports as `bp`-relative -- `yy` at -304 among them -- fails to
+translate and is lost. Eight slots fail this way in that one function.
+
+What radare2 calls a `bp` base for a DWARF-declared local is the DWARF frame
+base, which on x86-64 is normally the CFA rather than the machine `rbp`. The
+engine reads it as the machine register. Settling which coordinate
+`RAnalVar`'s `BPV` delta is in -- from radare2's own source, not from a guess
+-- is what unblocks this, and with it every frame-base-declared local: its
+name, its type, and for an array its subscript rendering.
+
+This is the same missing fact as lead one. `DecompilePrepFacts::stack_address_roots`
+had no entry for the out-parameter's address either. One coordinate system,
+three symptoms.
+

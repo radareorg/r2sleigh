@@ -175,6 +175,12 @@ pub enum SourceTypeKind {
     Union {
         aggregate_id: u32,
     },
+    /// A run of `count` elements of one type. The count is stated, never
+    /// inferred: an array whose bound the source does not give is not this.
+    Array {
+        element_type_id: u32,
+        count: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -461,6 +467,28 @@ impl SourceTypeGraph {
                         return Err(SourceTypeGraphError::InvalidType);
                     }
                 }
+                SourceTypeKind::Array {
+                    element_type_id,
+                    count,
+                } => {
+                    // The extent is the element's, `count` times, so a zero
+                    // count or a size that is not that product is not an array.
+                    let element = usize::try_from(element_type_id)
+                        .ok()
+                        .and_then(|id| types.get(id));
+                    let Some(element) = element else {
+                        return Err(SourceTypeGraphError::InvalidType);
+                    };
+                    if count == 0
+                        || element
+                            .size_bits
+                            .checked_mul(count)
+                            .is_none_or(|extent| extent != source_type.size_bits)
+                        || source_type.align_bits != element.align_bits
+                    {
+                        return Err(SourceTypeGraphError::InvalidType);
+                    }
+                }
                 SourceTypeKind::Void | SourceTypeKind::Code => {}
             }
         }
@@ -672,6 +700,13 @@ impl SourceTypeGraph {
                         if reachable.insert(member.type_id) {
                             worklist.push(member.type_id);
                         }
+                    }
+                }
+                SourceTypeKind::Array {
+                    element_type_id, ..
+                } => {
+                    if reachable.insert(element_type_id) {
+                        worklist.push(element_type_id);
                     }
                 }
                 SourceTypeKind::SignedInteger
