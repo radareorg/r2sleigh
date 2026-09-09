@@ -18773,3 +18773,39 @@ either the certificate names the chain, or the render proof reports the leaving
 predicate while emitting the disjunction and the equivalence is proved rather
 than asserted. Until that is settled the loop family stays as it is: these
 functions render, without structure, and say why.
+
+## A loop-free function never reaches the iterative builder, or the hoisting
+
+`analyze_iterative` returns early when a function has no loops:
+
+    let all_loops = self.collect_ordered_loops();
+    if all_loops.is_empty() {
+        return Some(self.analyze_region_recursive(self.func.entry));
+    }
+
+So every acyclic function is structured by the recursive builder, and none of
+the placed-once tail work reaches it -- `structure-placement` reports "tails at
+[]" for all of them. That is most of what is left: of the 206 functions that
+render without structure, the largest class (62) is "rendered control-domain
+occurrences do not exactly cover block N", and the instances traced are acyclic.
+
+The remaining shape in that class is the one the tails were built for.
+`minigzip_O2 0x37a0` places `0x37f3` twice: once as a full `if-else` region
+under `0x37cf=true`, and once as a bare `Region::Block` under `0x37cf=false`,
+because `analyze_region_recursive_inner` returns `Region::Block(entry)` for an
+entry it has already processed. The second placement writes the block and drops
+the branch behind it, so the blocks it guards go unwritten and coverage refuses.
+Neither `0x3870` nor `0x37ee` dominates `0x37f3`; their common dominator
+`0x37cf` does, which is where the region belongs.
+
+Deleting the early return was tried. Two unit tests fail --
+`a_switch_arm_keeps_every_case_value_that_reaches_it` and
+`a_restored_stack_pointer_renders` -- so the iterative builder is not yet at
+parity for acyclic input. In the switch case the working graph sees the
+dispatch block with **zero** successors where the recursive builder reads the
+switch terminator directly, so the two builders disagree about the CFG itself
+and that disagreement has to be understood before the paths are joined. The
+change was reverted rather than carried half-done.
+
+Joining them is the largest remaining structural win: it would put the whole
+acyclic corpus behind one builder, the one that places a shared tail once.
