@@ -7142,16 +7142,39 @@ fn collect_declared_stack_slots(
                         }
                     }
                     None => {
-                        // A declared slot that cannot be restated is a slot
-                        // no object will ever match; the reason is the base
-                        // register's entry-relative position, or its absence.
-                        r2il::refusal_evidence!(
-                            "stack-slot-translation",
-                            "slot {:?} at frame offset {} has no unique entry-relative base: root={:?}",
-                            slot.base_storage(),
-                            slot.offset(),
-                            base_root
-                        );
+                        // A frame base the body never establishes as a register
+                        // still has a position: DWARF states these locals
+                        // against the call frame address, and radare2 restates
+                        // that as the frame pointer a standard prologue would
+                        // have made, which sits one return address below entry.
+                        match interface
+                            .return_address_storage()
+                            .map(|storage| i64::from(storage.size))
+                            .and_then(|ra_size| slot.offset().checked_sub(ra_size))
+                            .zip(interface.stack_pointer_storage())
+                        {
+                            Some((entry_offset, stack_pointer)) => {
+                                let translated = (StackAddressBase::StackPointer, entry_offset);
+                                let restated = slot.restated(
+                                    StackAddressBase::StackPointer,
+                                    stack_pointer,
+                                    entry_offset,
+                                );
+                                declared_stack_slot_keys.insert(translated, key);
+                                if exact_stack_slots.insert(translated, restated).is_some() {
+                                    ambiguous_stack_slots.insert(translated);
+                                }
+                            }
+                            None => {
+                                r2il::refusal_evidence!(
+                                    "stack-slot-translation",
+                                    "slot {:?} at frame offset {} has no unique entry-relative base and no return address size: root={:?}",
+                                    slot.base_storage(),
+                                    slot.offset(),
+                                    base_root
+                                );
+                            }
+                        }
                     }
                 }
             }
