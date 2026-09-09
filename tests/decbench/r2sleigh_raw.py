@@ -97,6 +97,7 @@ _R2_FLAGS = ("-e", "scr.color=0", "-e", "bin.relocs.apply=true", "-q")
 # `dbg.readError` matches nothing, so the prefix comes off. Everything left
 # unprefixed keeps whatever radare2 called it.
 _FLAG_PREFIXES = ("dbg.", "sym.", "fcn.", "loc.", "flirt.")
+_ADDRESS_NAME = re.compile(r"0*([0-9a-f]+)")
 
 
 def _retitle(code: str, flag: str, source_name: str) -> str:
@@ -118,13 +119,23 @@ def _retitle(code: str, flag: str, source_name: str) -> str:
 def _source_name(flag: str) -> str:
     """The name the source would use for a radare2 function flag."""
     name = flag
+    analysis_named = False
     changed = True
     while changed:
         changed = False
         for prefix in _FLAG_PREFIXES:
             if name.startswith(prefix):
+                analysis_named = analysis_named or prefix == "fcn."
                 name = name[len(prefix) :]
                 changed = True
+    # A function neither DWARF nor the symbol table names is `fcn.00402850`
+    # here and `sub_402850` in the benchmark, so the address is the only thing
+    # the two spellings share. Without this every such function was filtered
+    # out before the engine was asked and counted as a decompiler that said
+    # nothing, rather than one that was never given the work.
+    address = _ADDRESS_NAME.fullmatch(name) if analysis_named else None
+    if address:
+        return f"sub_{address.group(1)}"
     return name or flag
 
 
@@ -353,9 +364,16 @@ class RawR2SleighDecompiler(Decompiler):
             # reports no functions at all, which reads as a decompiler with
             # nothing to say rather than a filter that removed the work.
             requested = {_source_name(name) for (name, _) in functions}
+            # The benchmark also hands the addresses it wants, and an address
+            # is the only thing a `sub_402850` and a radare2 flag can share, so
+            # a candidate sitting on a requested target is kept whatever it is
+            # called. Matching on the name alone dropped every function neither
+            # DWARF nor the symbol table named.
+            requested_addrs = common.addr_targets_of(function_names or set())
             candidates = [
                 (name, addr) for (name, addr) in candidates
                 if _source_name(name) in requested
+                or to_file_addr(addr) in requested_addrs
             ]
             stages.append(("after requested-name filter", len(candidates)))
         # The benchmark hands a stripped binary and names its own targets by
