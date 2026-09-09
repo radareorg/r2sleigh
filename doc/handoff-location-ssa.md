@@ -19239,3 +19239,37 @@ every binary rather than on this one.
 
 It closes `RenderedValueRequired` (27) and `UnownedBindingSymbol` (14) together,
 which is 41 of the 174 declines.
+
+## A gap's closure has to follow the convention, not only the SSA edges
+
+`missing_definition` was the largest single refusal cause in both censuses --
+fourteen of a hundred and ten locally, nineteen of a hundred and sixty-eight on
+DecBench. Traced on `zlib_example`'s `fcn_1300`, it came out of the marked-gap
+machinery rather than out of placement.
+
+The gap opened at `0x13d8:85` and closed over twenty-two operations. The last
+two were a load into `tmp:11f80_4` and a copy of it into `RSI`. `RSI_24` has no
+SSA use at all: the call two operations later names it through the site's
+`CallArgument` obligations, which are convention facts and not operands. The
+forward walk in `gap_closure_from_seed` followed `graph.use_sites` only, so it
+stopped at the copy, the call rendered, and its argument spelled
+`tmp_11f80_4` -- a binding whose only assignment was inside the gap. Placement
+then refused the whole function for a binding read and never written, which is
+exactly the undefined read the closure exists to prevent.
+
+Two readers travel on the convention rather than on an operand: a call's
+arguments and a return's value. The closure now follows a callsite
+certificate's `argument_values` and `stack_argument_values`, and a return
+boundary's `values` and `register_compositions`. A return reached that way makes
+the gap impossible rather than larger, so the control-transfer check that
+already guarded the *seed* now applies to the whole closure.
+
+The second half of the same defect was in `placement_target`. A gapped read of
+a bound value was mapped to a placement read so that a gap covering a read could
+not silently delete the store outside it that the marker only called unproven.
+That holds for a value defined outside the gap and inverts for one the gap owns:
+the marker spells no symbol, and nothing anywhere assigns the object. The
+journal now records the values a gap claims and declines the read for those.
+
+Local census 744 -> 747 rendered, 110 -> 107 refused, three functions gained and
+none lost. DecBench 637 -> 641 of 860, with the gap column at nine.

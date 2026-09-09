@@ -6763,9 +6763,24 @@ fn accessed_object_width(structured: &StructuredDataflowFacts, object: ObjectId)
             None => width = Some(access.width),
             Some(existing) if existing == access.width => {}
             Some(existing) => {
+                // Which accesses disagree, at what offsets, is what says
+                // whether this is one object read two ways or two objects.
+                let filed: Vec<(ValueId, u32, Option<i64>, bool)> = structured
+                    .memory_accesses
+                    .values()
+                    .filter(|access| access.object == object)
+                    .map(|access| {
+                        (
+                            access.address,
+                            access.width,
+                            access.object_offset,
+                            access.is_write,
+                        )
+                    })
+                    .collect();
                 r2il::refusal_evidence!(
                     "stack-object-width",
-                    "object={object:?} widths disagree: {existing} and {}",
+                    "object={object:?} widths disagree: {existing} and {}; accesses={filed:?}",
                     access.width
                 );
                 return None;

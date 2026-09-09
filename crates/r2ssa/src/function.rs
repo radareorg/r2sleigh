@@ -3272,14 +3272,14 @@ impl SSAFunction {
                         // parts. `fmov w11, s0` is exactly that -- the low half
                         // and a zeroed upper half -- and the merge went on
                         // carrying the register's previous contents.
+                        // The pieces are written into the predecessor, so the
+                        // name has to carry the merge they serve, not that block.
                         let mut materialized = Vec::new();
                         if let Some(composed) = piece_family_tiles(
                             state,
                             requested,
                             source,
-                            *pred_addr,
-                            phi_index,
-                            source_index,
+                            &format!("phi:{block_addr:x}:{phi_index:x}:{source_index:x}"),
                             &mut materialized,
                         ) && composed != *source
                         {
@@ -4814,9 +4814,7 @@ fn materialize_register_alias_sources(
                 state,
                 requested,
                 source,
-                block_addr,
-                op_index,
-                source_index,
+                &format!("{block_addr:x}:{op_index:x}:{source_index:x}"),
                 &mut materialized,
             ) {
                 replacements.insert(source.clone(), pieced);
@@ -4859,19 +4857,13 @@ fn piece_family_tiles(
     state: &FamilyRootState,
     requested: RegisterFamilySlot,
     source: &SSAVar,
-    block_addr: u64,
-    op_index: usize,
-    source_index: usize,
+    site: &str,
     materialized: &mut Vec<SSAOp>,
 ) -> Option<SSAVar> {
     let tiles = family_root_tiles_for_range(state, requested)?;
     let mut part = 0usize;
     let name = |part: &mut usize| {
-        let named = SSAVar::new(
-            format!("tmp:regpiece:{block_addr:x}:{op_index:x}:{source_index:x}:{part:x}"),
-            1,
-            source.size,
-        );
+        let named = SSAVar::new(format!("tmp:regpiece:{site}:{part:x}"), 1, source.size);
         *part += 1;
         named
     };
@@ -4882,11 +4874,7 @@ fn piece_family_tiles(
         let piece = if root.offset == 0 && root.value.size == width {
             root.value
         } else {
-            let extracted = SSAVar::new(
-                format!("tmp:regpiece:{block_addr:x}:{op_index:x}:{source_index:x}:s{part:x}"),
-                1,
-                width,
-            );
+            let extracted = SSAVar::new(format!("tmp:regpiece:{site}:s{part:x}"), 1, width);
             part += 1;
             materialized.push(SSAOp::Subpiece {
                 dst: extracted.clone(),
