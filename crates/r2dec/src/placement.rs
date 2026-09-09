@@ -1066,6 +1066,21 @@ fn observation_is_write(
     )
 }
 
+/// Whether any observation in this expression is one placement orders.
+fn expression_has_placement_observation(
+    expr: &CExpr,
+    targets: &[Option<PlacementObservationTarget>],
+) -> bool {
+    let mut observed = false;
+    visit_expr_observations(expr, &mut |id| {
+        observed |= !matches!(
+            observation_target(targets, id),
+            None | Some(PlacementObservationTarget::Other)
+        );
+    });
+    observed
+}
+
 fn expression_has_placement_write(
     expr: &CExpr,
     targets: &[Option<PlacementObservationTarget>],
@@ -1144,7 +1159,10 @@ fn direct_stack_assignment_observations(
                 collect(base, targets, reads, writes)
             }
             CExpr::Var(_) => true,
-            _ => false,
+            // Anything carrying no observation contributes nothing to order:
+            // a constant subscript index is part of the destination, not a
+            // second occurrence competing with the store for a position.
+            other => !expression_has_placement_observation(other, targets),
         }
     }
 
@@ -1253,6 +1271,26 @@ fn collect_expr_observation_scopes(
             } else if expression_has_placement_write(left, targets)
                 || expression_has_placement_write(right, targets)
             {
+                // Which side carries the write, and what the destination is.
+                // An assignment whose destination this cannot order is the
+                // common way a statement becomes ambiguous.
+                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                    eprintln!(
+                        "ambiguous assignment: left_writes={} right_writes={} left={:?}",
+                        expression_has_placement_write(left, targets),
+                        expression_has_placement_write(right, targets),
+                        {
+                            let mut core = left.as_ref();
+                            while let CExpr::Observed { expr, .. }
+                            | CExpr::Paren(expr)
+                            | CExpr::Cast { expr, .. } = core
+                            {
+                                core = expr;
+                            }
+                            format!("{core:?}").chars().take(200).collect::<String>()
+                        }
+                    );
+                }
                 record_ambiguous_expr_group(
                     [left.as_ref(), right.as_ref()],
                     current,

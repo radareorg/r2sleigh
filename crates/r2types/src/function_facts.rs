@@ -897,6 +897,12 @@ pub fn admit_declaration_type(ty: CTypeLike, width_bits: u32, ptr_bits: u32) -> 
                 .and_then(|parsed| parsed.bits(ptr_bits))
                 == Some(width_bits)
         }
+        // A sized array describes the storage when its own extent is that
+        // storage: the element width times the count, which is exactly what
+        // `declaration_type_width_bits` computes for it.
+        CTypeLike::Array(_, Some(_)) => {
+            declaration_type_width_bits(&ty, ptr_bits) == Some(width_bits)
+        }
         _ => false,
     };
     if admissible {
