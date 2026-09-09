@@ -18965,8 +18965,9 @@ payloads map straight through; a binding maps through the values it carries to
 their defining instructions.
 
 It fires -- four plans on `zlib_example`, three on `minigzip_O2`, one on
-`bzip2_O0`, all `missing_definition` -- and converts **nothing** locally: 744 of
-854 either way. The trace says why, and it is worth reading before the next
+`bzip2_O0`, all `missing_definition` -- and converts **nothing**: 744 of 854
+locally either way, and 638 of 860 on DecBench either way, to the function. It
+was written, measured twice, and reverted. The trace says why, and it is worth reading before the next
 attempt. On `zlib_example 0xcd30` the order is:
 
     the proof named InstId(440) as unowned_binding_symbol; planning a gap
@@ -18985,7 +18986,22 @@ and 142 cells become 60 and 269) and the census **loses two functions**, because
 a gap that large stops opening. Reverted.
 
 What the trace actually points at: a gap that removes a bound value's write
-leaves the binding's other readers with no definition, and the honest answer is
-either that those readers are inside the gap (they are not, and forcing them in
-costs more than it fixes) or that placement should treat a gapped definition as
-a definition. The second is the untried one.
+leaves the binding's other readers with no definition. Treating a gapped
+definition *as* a definition would silence placement and emit C that reads an
+unassigned variable, which is the mistake this project already made once and
+reverted -- declaring the names the detector complained about. So placement is
+right to refuse.
+
+The remaining move is therefore neither of those: **do not plan a gap whose
+bound value has readers the closure cannot claim.** The function then refuses
+with the journal cause it actually has instead of a placement symptom the gap
+created, and nothing is lost -- those functions refuse either way today. That is
+a reporting fix rather than a coverage one, and it is what this thread ends
+pointing at.
+
+The 25 DecBench declines this was aimed at are therefore not reachable by
+routing. Of them, `region_does_not_dominate_occurrence` (10) carries only a
+region index and a block address and names no cell at all; `missing_definition`
+(11) and `unobserved_binding_read` (4) are each a binding whose definition
+something else removed. They are defects to trace, which is what the standing
+decision says to do with the unanchored half.
