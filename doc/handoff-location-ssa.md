@@ -19183,11 +19183,27 @@ moves the refusal to the next checker rather than removing it:
   because the slice then renders from the binding nothing assigns.
 
 Every checker is right, which is the signal that the defect is upstream of all
-of them. **A call site must certify one identity result per storage.** Two
-`CallDefine`s of one register at one site is either a lifting artefact the
-boundary should collapse before certifying, or two values the plan must give one
-binding; deciding which is the next step, and it is in `semantic.rs` around the
-`CallDefine` arm that assigns `CallResultValueRelation`, not in the renderer.
+of them. **A call site must certify one identity result per storage.**
+
+The boundary is not where the duplicate comes from, which narrows it further.
+`call_result_values_after_call` walks the `CallDefine`s following a call, keeps
+the ones whose canonical storage and width are the convention's result slot, and
+returns `Some` **only when exactly one candidate remains** -- anything else is
+`None`, an incomplete boundary. So `boundary.results` holds at most one value per
+storage, and the `CallDefine` arm in `semantic.rs` marks `Identity` only for the
+`CallDefine` whose output is that value. One identity result per site, by
+construction.
+
+So two identity facts for one `CallsiteKey` cannot come from one boundary walk.
+They come from how `call_result_facts_by_value` is assembled -- it is keyed by
+`ValueId` and filled by iterating `call_result_facts.by_value`, so two values
+that resolve to the same `(block_addr, op_index)` both land in it. That is where
+to look: what puts two values with one call-site key and one storage into
+`by_value`.
+
+The reproduction is one line:
+
+    R2DEC_TRACE_REFUSAL=1 r2 -qq -A -c 'pd:s @ 0x5130' bzip2_O2 | grep call-result-split
 
 It is worth doing carefully rather than quickly: it closes `RenderedValueRequired`
 (27) and `UnownedBindingSymbol` (14) together, 41 of the 174 declines, and the
