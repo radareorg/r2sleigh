@@ -18798,14 +18798,25 @@ the branch behind it, so the blocks it guards go unwritten and coverage refuses.
 Neither `0x3870` nor `0x37ee` dominates `0x37f3`; their common dominator
 `0x37cf` does, which is where the region belongs.
 
-Deleting the early return was tried. Two unit tests fail --
-`a_switch_arm_keeps_every_case_value_that_reaches_it` and
-`a_restored_stack_pointer_renders` -- so the iterative builder is not yet at
-parity for acyclic input. In the switch case the working graph sees the
-dispatch block with **zero** successors where the recursive builder reads the
-switch terminator directly, so the two builders disagree about the CFG itself
-and that disagreement has to be understood before the paths are joined. The
-change was reverted rather than carried half-done.
+Deleting the early return was tried. The switch half is settled and landed:
+`WorkingGraph::from_function` seeded from `block_addrs()` while the recursive
+builder navigates by `successors()`, so the graph was one isolated node whenever
+those differ. It closes over the successors now and both builders see the same
+edges.
+
+What remains is `a_restored_stack_pointer_renders`. With the two paths joined,
+`0x1010` becomes the conditional's continuation through `sequence_merge` rather
+than the branch's own merge, `sequence_owned_merge` defers it, and the branch's
+`ControlPredicate` and `ControlTransfer` obligations at `0x1000` go unaccounted:
+"source effect closure refused native C (3 refused, 2 unaccounted)". The
+recursive builder already carries the rule that answers this -- a merge that is
+one block stays with the branch that converges on it -- and applying the same
+rule to the iterative merge site breaks two other tests
+(`iterative_composition_duplicates_partial_joins_on_disjoint_paths` and
+`guarded_latch_loop_without_condition_certificates_is_residual`), so the rule is
+not simply transplantable and the two sites disagree about something further
+down. That is the next thing to trace. The unification was reverted rather than
+carried half-done.
 
 Joining them is the largest remaining structural win: it would put the whole
 acyclic corpus behind one builder, the one that places a shared tail once.
