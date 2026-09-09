@@ -517,6 +517,51 @@ pub(super) fn certified_return_control_stack_objects(
         .collect()
 }
 
+/// Close a control-only value set over the copies that carry those values.
+///
+/// A value every one of whose uses is a copy producing something already in the
+/// set is itself in it. Re-scanning every value once per pass was quadratic in
+/// the value count; a value can only become eligible when one of the copies it
+/// feeds enters the set, so only those are re-examined.
+fn close_over_control_copies(graph: &r2ssa::SsaGraph, values: &mut BTreeSet<ValueId>) {
+    let mut work = values.iter().copied().collect::<Vec<_>>();
+    while let Some(output) = work.pop() {
+        let Some(def) = graph.def_of.get(output.0 as usize).copied().flatten() else {
+            continue;
+        };
+        let Some(carrier) = graph.inst(def) else {
+            continue;
+        };
+        if !matches!(
+            carrier.payload,
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. })
+        ) {
+            continue;
+        }
+        for input in carrier.inputs.iter().copied() {
+            if values.contains(&input) {
+                continue;
+            }
+            let uses = graph.use_sites(input);
+            if uses.is_empty() {
+                continue;
+            }
+            let reaches_only_control = uses.iter().all(|site| {
+                graph.inst(site.inst).is_some_and(|inst| {
+                    matches!(
+                        inst.payload,
+                        r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. })
+                    ) && inst.output.is_some_and(|output| values.contains(&output))
+                })
+            });
+            if reaches_only_control {
+                values.insert(input);
+                work.push(input);
+            }
+        }
+    }
+}
+
 pub(super) fn certified_return_control_values(source: &r2ssa::SsaArtifact) -> BTreeSet<ValueId> {
     let graph = source.graph();
     let sites = certified_return_transfer_sites(source);
@@ -548,33 +593,7 @@ pub(super) fn certified_return_control_values(source: &r2ssa::SsaArtifact) -> BT
     //
     // A value every one of whose uses is a copy producing something already
     // control-only is itself control-only: it reaches nothing but the return.
-    loop {
-        let mut added = false;
-        for value in &graph.values {
-            if values.contains(&value.id) {
-                continue;
-            }
-            let uses = graph.use_sites(value.id);
-            if uses.is_empty() {
-                continue;
-            }
-            let reaches_only_control = uses.iter().all(|site| {
-                graph.inst(site.inst).is_some_and(|inst| {
-                    matches!(
-                        inst.payload,
-                        r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. })
-                    ) && inst.output.is_some_and(|output| values.contains(&output))
-                })
-            });
-            if reaches_only_control {
-                values.insert(value.id);
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
+    close_over_control_copies(graph, &mut values);
     values
 }
 
@@ -699,33 +718,7 @@ pub(super) fn certified_direct_call_target_values(
     // the target into a temporary first leaves the call's own operand
     // certified and the copy one step upstream not, and that copy then lowered
     // to an assignment of an object the plan had already elided.
-    loop {
-        let mut added = false;
-        for value in &graph.values {
-            if values.contains(&value.id) {
-                continue;
-            }
-            let uses = graph.use_sites(value.id);
-            if uses.is_empty() {
-                continue;
-            }
-            let reaches_only_target = uses.iter().all(|site| {
-                graph.inst(site.inst).is_some_and(|inst| {
-                    matches!(
-                        inst.payload,
-                        r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. })
-                    ) && inst.output.is_some_and(|output| values.contains(&output))
-                })
-            });
-            if reaches_only_target {
-                values.insert(value.id);
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
+    close_over_control_copies(graph, &mut values);
     values
 }
 
