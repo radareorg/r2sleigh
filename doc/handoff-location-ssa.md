@@ -17753,3 +17753,39 @@ This is the same missing fact as lead one. `DecompilePrepFacts::stack_address_ro
 had no entry for the out-parameter's address either. One coordinate system,
 three symptoms.
 
+### Quantified: no function in bzip2_O2 has a frame pointer, and 93 slots claim one
+
+Counted over the whole binary with the new slot dump: 93 declared stack slots
+carry `base=0`, the frame pointer, and 305 carry `base=1`, the stack pointer.
+Fifty-four of the 93 fail `stack-slot-translation` with `root=None`.
+
+Twenty-one distinct functions own those 93 slots, and **not one of them contains
+`mov rbp, rsp`**. `fcn->bp_off` in radare2 is set only when `op_is_set_bp` fires,
+so it stays zero for all of them; what radare2 reports as a `bp` base for these
+locals is the DWARF frame base, which on x86-64 is normally
+`DW_OP_call_frame_cfa`, not the machine register.
+
+Two consequences, and the second is the more serious.
+
+Fifty-four slots are lost outright: no name, no type, no array spelling. That is
+the visible cost.
+
+The other thirty-nine *did* translate, against a `unique_stack_root_for_storage`
+answer for a register that is not a frame pointer at all. `rbp` in these
+functions is pushed and restored like any other callee-saved register, so a
+unique entry-relative position for it is a coincidence of the body rather than a
+frame-pointer relation. Those thirty-nine declared slots are therefore placed at
+coordinates nothing verified, which is worse than refusing them.
+
+Settling this needs radare2's own answer to one question: which frame is an
+`R_ANAL_VAR_KIND_BPV` delta measured from when the function never sets the frame
+pointer. `fcn_context_stack_offset` adds `fcn->bp_off` and calls the result
+frame-pointer-relative; if the delta is really CFA-relative the base is wrong
+for every one of these slots and the capture should say `StackPointer` with the
+CFA displacement folded in. The arithmetic should be read out of radare2's DWARF
+import rather than inferred from one example -- an attempt to infer it from `yy`
+gave -296 against the object's -312, so a guess would have been wrong.
+
+Until it is settled, the translation that succeeds on a register with no
+frame-pointer role is the thing to distrust first.
+
