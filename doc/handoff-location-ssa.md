@@ -18249,3 +18249,86 @@ read by a load and by a phi edge the plan elides as an unobserved merge, and
 that edge spells nothing, so it cannot be the occurrence that answers for the
 value either. `use_spells_nothing_but_an_address` states both cases in one
 place, and the count goes to **736 rendered / 118 refused**.
+
+## A third of what we render has no structure, and the cost is the same defect
+
+Profiling `deflate` phase by phase overturned two hypotheses and found something
+neither of them was about.
+
+The engine's timing comment puts ~95% of a render in one `rendering` bucket.
+`crates/r2dec/src/stage_timing.rs` already splits that bucket, and it says the
+binding plan is **3%** — so the four `rewrite_inlining_partition` calls and eight
+canonicalisations per render, real as they are, are not the cost. Sub-marks
+inside the structurer then ruled out the second guess as well: the control
+coverage BDD, whose budget is exponential in predicate count, costs **2us**.
+
+For `dbg_deflate`, 8,758 ms:
+
+    structure_walk        4,879 ms   the region emission walk
+    structure_region_seal 3,024 ms   what runs after it
+    placement               319 ms
+    binding_plan            290 ms
+    prepare                 112 ms
+    codegen                 101 ms
+    structure_analyze         4 ms
+    structure_coverage        0 ms
+
+The second number is the finding. `deflate` structures for 4.9 seconds, fails
+`validate_rendered_block_domain_coverage`, sets a safety reason, and
+`primary_native_body` **throws the structured body away and re-renders the
+function linearly** -- another 3.0 seconds. The work is done twice and the
+reader gets gotos:
+
+    r2dec residual: canonical loop fact LoopId(5) does not exactly match
+    rendered loop at 0x7e94: condition Some(PredicateId(73)) vs
+    Some(PredicateId(94)); body rendered without structure
+
+This is not rare. Over the seven local binaries, **232 of 736 rendered
+functions -- 32% -- are rendered without structure**: 61 of 169 in minigzip_O2,
+63 of 162 in zlib_example, 15 of 114 in bzip2_O2. They are counted as successes
+by every coverage measure we have, because they render. What they lose is
+exactly what `ged` and `vj_ged` measure.
+
+Ranked by the reason recorded:
+
+    101  structuring covered N of M source blocks, leaving 0x... unrendered
+     52  canonical loop fact does not match rendered loop: condition A vs B
+     50  rendered control-domain occurrences do not exactly cover block
+      5  rendered guard domain omits canonical guards
+      4  unlowered Exit edge in loop: exit continuation reached by N edges
+
+The 52 and the 50 name their own cause and are traceable from the string. The
+**101 are the silent class**: every deliberate drop in the region walk sets a
+safety reason first, so a function that reaches the coverage check with blocks
+missing lost them without any rule saying so. The coverage check is a backstop
+reporting a symptom, and it is the only thing that notices.
+
+`bzip2_O2 0x8640` (`BZ2_bzread`) is the smallest instance -- five blocks, two
+lost. The region analysis is correct and covers all five:
+
+    seq 0x8640
+      if 0x8640
+        bb 0x8661
+      if-else 0x8686
+        bb 0x869b        <- __stack_chk_fail, noreturn
+        bb 0x8696        <- add rsp, 0x18 ; ret
+
+Both arms of the second branch go unrendered. Instrumenting
+`certified_branch_condition_from_block` to name which of its four gates
+declines, and the `unresolved branch condition` path to name the branch it
+drops, produced **no output at all** for `0x8686` -- so that node is never
+emitted, and the arms are not lost by any of the paths that would say so. That
+is where the next trace starts.
+
+The instrumentation lands with this note: sub-stage marks through the
+structurer (`structure_analyze`, `structure_prepare`, `structure_walk`,
+`structure_joins`, `structure_coverage`, `structure_cleanup`,
+`structure_seal_body`, `structure_region_seal`), the four named gates in
+`certified_branch_condition_from_block`, and the dropped-arm evidence. Gates
+unchanged: 378 + 520 unit tests, 54 pass on each of the six.
+
+Two consequences for priorities. Coverage is not the only multiplier -- a third
+of the rendered population is losing tree structure, which is what the remaining
+`ged` gap is made of. And the engine's cost is not the binding plan or the BDD:
+it is one structuring walk that is thrown away, so fixing the structure defects
+removes the second render as well.

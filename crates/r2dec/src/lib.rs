@@ -3637,11 +3637,14 @@ impl Decompiler {
                 refusal,
             ));
         }
+        crate::stage_timing::mark("structure_region_seal");
         let (body_stmt, structured_regions) = routed_body.into_marked_body();
+        crate::stage_timing::mark("structure_marked_body");
 
         // Build the C function
         // Convert body to statements
         let body = self.stmt_to_vec(body_stmt);
+        crate::stage_timing::mark("structure_flatten");
         let mut c_function = CFunction {
             symbols: std::rc::Rc::clone(&symbol_table),
             name: crate::ast::c_identifier(&func_name),

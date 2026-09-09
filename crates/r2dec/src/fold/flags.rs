@@ -22,12 +22,25 @@ impl<'a> FoldingContext<'a> {
         &self,
         block: &FunctionSSABlock,
     ) -> Option<(CExpr, r2ssa::PredicateId, r2ssa::ValueId)> {
-        let (branch_idx, cond) = Self::unique_terminal_branch_condition(block)?;
-        let predicate = self.control_facts()?.branch_for_block(block.addr)?;
+        let declined = |gate: &str| {
+            r2il::refusal_evidence!("branch-condition", "block {:#x}: {gate}", block.addr);
+            None::<(CExpr, r2ssa::PredicateId, r2ssa::ValueId)>
+        };
+        let Some((branch_idx, cond)) = Self::unique_terminal_branch_condition(block) else {
+            return declined("no single conditional branch ends the block");
+        };
+        let Some(predicate) = self
+            .control_facts()
+            .and_then(|facts| facts.branch_for_block(block.addr))
+        else {
+            return declined("no control fact names a branch predicate here");
+        };
         if self.prepared_value_id_for_var(cond) != Some(predicate.condition) {
-            return None;
+            return declined("the branch operand is not the value the predicate names");
         }
-        let expr = self.exact_branch_input_expr(block.addr, branch_idx)?;
+        let Some(expr) = self.exact_branch_input_expr(block.addr, branch_idx) else {
+            return declined("the predicate has no planned expression at this branch");
+        };
         Some((expr, predicate.id, predicate.condition))
     }
 

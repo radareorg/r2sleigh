@@ -490,6 +490,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         control.poll()?;
         let region_analyzer = RegionAnalyzer::new_with_control(func, control.raw())
             .map_err(|reason| DecompileExecutionStop::new(control.phase(), reason))?;
+        crate::stage_timing::mark("structure_regions");
         Ok(Self {
             func,
             fold_ctx,
@@ -1120,8 +1121,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             .map_err(ControlFlowStructureError::from);
         }
         // Post-process: flatten, simplify loops, remove redundant control flow.
-        seal_structured_body(Self::cleanup(symbols, stmt), source_authority)
-            .map_err(ControlFlowStructureError::from)
+        let cleaned = Self::cleanup(symbols, stmt);
+        crate::stage_timing::mark("structure_cleanup");
+        let sealed = seal_structured_body(cleaned, source_authority)
+            .map_err(ControlFlowStructureError::from);
+        crate::stage_timing::mark("structure_seal_body");
+        sealed
     }
 
     fn structure_preserving_render_proof_identity_marked(
@@ -1176,9 +1181,11 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 blocks: self.func.block_addrs().to_vec(),
             }
         };
+        crate::stage_timing::mark("structure_analyze");
         self.structured_region_blocks = region.blocks().into_iter().collect();
         self.prepare_certified_for_regions(&region)?;
         self.shared_joins = self.collect_shared_joins()?;
+        crate::stage_timing::mark("structure_prepare");
         // The jumps into a shared join need its label, and the jump back out
         // needs its successor's. Both have to exist before anything is written,
         // because a block already written can no longer be given one.
@@ -1186,9 +1193,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             self.ensure_label(join);
         }
         let stmt = self.structure_region(&region)?;
+        crate::stage_timing::mark("structure_walk");
         let stmt = self.append_shared_joins(stmt)?;
         let stmt = self.append_deferred_shared_exits(stmt)?;
+        crate::stage_timing::mark("structure_joins");
         self.validate_rendered_block_domain_coverage();
+        crate::stage_timing::mark("structure_coverage");
         if self.safety_reason.is_some() {
             return Ok(CStmt::Empty);
         }
@@ -1523,6 +1533,14 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 let (cond, predicate, condition_value) =
                     self.get_branch_condition_with_predicate(*cond_block);
                 let Some(mut cond) = cond else {
+                    // Both arms go unrendered here, which the coverage check
+                    // then reports as the whole function, so say which branch.
+                    r2il::refusal_evidence!(
+                        "unresolved-branch-condition",
+                        "block {cond_block:#x} predicate={predicate:?} condition={condition_value:?}:                          dropping then={:#x} else={:?}",
+                        then_region.entry(),
+                        else_region.as_ref().map(|region| region.entry())
+                    );
                     let mut prefix = self.structure_block_prefix_stmts(*cond_block)?;
                     prefix.push(CStmt::comment(format!(
                         "r2dec residual: unresolved branch condition at 0x{cond_block:x}"
