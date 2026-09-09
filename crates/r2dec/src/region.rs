@@ -717,12 +717,21 @@ impl<'a> RegionAnalyzer<'a> {
             None
         };
 
+        // A merge an arm already placed is not this branch's to write, and a
+        // merge this branch does not dominate is reached without it as well.
+        let owned_merge = merge
+            .filter(|merge| !self.processed.contains(merge))
+            .filter(|merge| self.dominators.dominates(cond, *merge));
+        r2il::refusal_evidence!(
+            "branch-merge",
+            "{cond:#x} merge {merge:x?} owned {owned_merge:x?}"
+        );
         let branch = match (then_region, else_region) {
             (Some(then_r), Some(else_r)) => Region::IfThenElse {
                 cond_block: cond,
                 then_region: then_r,
                 else_region: Some(else_r),
-                merge_block: merge,
+                merge_block: owned_merge,
             },
             (Some(then_r), None) => Region::IfThenElse {
                 cond_block: cond,
@@ -748,7 +757,7 @@ impl<'a> RegionAnalyzer<'a> {
         // The sequence is the shape `sequence_owned_merge` already coordinates:
         // it defers the merge, the branch skips it, and the continuation is
         // written here in full.
-        let Some(merge) = merge.filter(|merge| !self.processed.contains(merge)) else {
+        let Some(merge) = owned_merge else {
             return branch;
         };
         match self.analyze_region_recursive(merge) {
@@ -1537,6 +1546,14 @@ impl<'a> RegionAnalyzer<'a> {
                         },
                         _ => base,
                     };
+                    r2il::refusal_evidence!(
+                        "branch-merge",
+                        "{cond_block:#x} merge {:x?} dominated={:?}",
+                        merge.and_then(|node| graph.node_entry(node)),
+                        merge
+                            .and_then(|node| graph.node_entry(node))
+                            .map(|merge_block| self.dominators.dominates(cond_block, merge_block))
+                    );
                     if let Some(merge_node) = merge
                         && graph.node_entry(merge_node).is_some_and(|merge_block| {
                             self.dominators.dominates(cond_block, merge_block)
