@@ -18740,3 +18740,36 @@ certified breaks -- rather than reported under a test that does not govern it.
 `deflate`'s `LoopId(5)` is the hard end of the same problem: three latches and
 three exits, canonical condition at `0x7ec2` inside the body, renderer's pick at
 `0x813b` which is a latch.
+
+### What the rotation actually needs: a short-circuit condition chain
+
+Anchoring the do-while's test at the loop's exit predicate was tried and is
+unsound, and the reason is the design constraint. At `minigzip_O2 0xe944` the
+loop is
+
+    e944: if (c1) goto e930 else goto e949
+    e949: if (c2) goto e930 else goto e953   // e953 leaves the loop
+    e930: ...; goto e944
+
+so the loop continues iff `c1 || c2`. Emitting `do { ... } while (c2)` puts the
+test where control does not always reach it -- the path `e944 -> e930` skips
+`e949` -- and the domain check says so: "rendered guard domain [] for block
+0xe949 omits canonical guards [Branch { PredicateId(0), false }]". The change
+was reverted.
+
+The shape the machine actually has is a **short-circuit condition chain**: a run
+of blocks starting at the header, each branching either to the common
+continuation or to the next block in the chain, the last one branching out of
+the loop. Every block after the first is reached only through the chain. That is
+`while (c1 || c2) { body }`, and recovering it is what "the renderer rotates"
+means for this family.
+
+Two things have to be decided together before writing it, and they are one
+question: what a loop certificate says about a condition spread over several
+blocks. `LoopCertificate::condition` is a single `PredicateId`, and
+`loop_condition` picks the predicate whose edge leaves -- `e949`'s here. The
+rendered test would be `c1 || c2`, whose value is not that predicate's value. So
+either the certificate names the chain, or the render proof reports the leaving
+predicate while emitting the disjunction and the equivalence is proved rather
+than asserted. Until that is settled the loop family stays as it is: these
+functions render, without structure, and say why.
