@@ -18820,3 +18820,34 @@ carried half-done.
 
 Joining them is the largest remaining structural win: it would put the whole
 acyclic corpus behind one builder, the one that places a shared tail once.
+
+## Where the session leaves the census, including what it cost
+
+Measured over the seven local binaries, against the state this session started
+from:
+
+    rendered      736 -> 739     refused 118 -> 115     silent 0 -> 0
+    unstructured  204 -> 206
+    dbg_deflate   8,875 ms -> 5,089 ms   (structure_walk 4,836 -> 1,258)
+
+Coverage is up by three with none lost. The unstructured column is worth being
+precise about, because the net of +2 hides a much larger churn: **53 functions
+render without structure that used to render with it, and 51 the other way.**
+The +2 arrives as two separate movements. Placing shared tails once cost 17
+(204 -> 221 at the same coverage), and a branch no longer naming a merge it does
+not dominate recovered 16 (222 -> 206).
+
+The 17 have one cause and it is traced. `bzip2_O0 0x6f9b` is the shape: the tail
+at `0x70d4` is rendered under `70ba=true` and under `70ba=false && 70c6=false`,
+and the path `70ba=false && 70c6=true` reaches it with no jump rendered, so
+`certify_transfer_domain_join` refuses -- correctly. A tail may only be placed
+once when **every** predecessor jumps to it, and the composition does not
+guarantee that: the merge-continuation site is guarded against taking a hoisted
+node, but a loop body composed by the recursive builder during `collapse_loop`
+can place a block that the later post-collapse pass then hoists, and that path
+falls into the tail instead of jumping.
+
+That is the same defect as the builder split above, seen from the other side:
+two builders compose parts of one function and only one of them knows about the
+tails. Joining them fixes both. Until then the pre-condition to add is that a
+hoisted target's block is not already placed inside a collapsed node's region.
