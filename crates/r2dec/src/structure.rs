@@ -3428,8 +3428,50 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
         // Ordered rather than scanned: a nested branch carries a disjunction of
         // path domains, and a linear membership test made the dedup quadratic.
-        let unique = domains.drain(..).collect::<BTreeSet<_>>();
+        let mut unique = domains.drain(..).collect::<BTreeSet<_>>();
+        Self::absorb_complementary_domains(&mut unique);
         domains.extend(unique);
+    }
+
+    /// `(D and g) or (D and not g)` is `D`, so collapse every such pair.
+    ///
+    /// A branch carries both arms out of it, which doubles the disjunction at
+    /// every nesting level. This is an identity, not a bound: no path is lost.
+    fn absorb_complementary_domains(domains: &mut BTreeSet<RenderedBlockDomain>) {
+        loop {
+            let mut consumed = BTreeSet::new();
+            let mut absorbed = BTreeSet::new();
+            for domain in domains.iter() {
+                if consumed.contains(domain) {
+                    continue;
+                }
+                for (index, guard) in domain.guards.iter().enumerate() {
+                    let ControlGuard::Branch { predicate, truth } = guard else {
+                        continue;
+                    };
+                    let mut twin = domain.clone();
+                    twin.guards[index] = ControlGuard::Branch {
+                        predicate: *predicate,
+                        truth: !*truth,
+                    };
+                    twin.guards.sort();
+                    if !domains.contains(&twin) || consumed.contains(&twin) {
+                        continue;
+                    }
+                    let mut rest = domain.clone();
+                    rest.guards.remove(index);
+                    consumed.insert(domain.clone());
+                    consumed.insert(twin);
+                    absorbed.insert(rest);
+                    break;
+                }
+            }
+            if absorbed.is_empty() {
+                return;
+            }
+            domains.retain(|domain| !consumed.contains(domain));
+            domains.extend(absorbed);
+        }
     }
 
     /// Emit side-effecting statements for a block without labels or loop markers.
