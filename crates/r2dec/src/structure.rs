@@ -1266,8 +1266,13 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // What the tree placed, what it jumped to, and what it left behind.
         r2il::refusal_evidence!(
             "structure-placement",
-            "tails at {:x?}, shared joins at {:x?}, blocks no region placed {:x?}",
+            "tails at {:x?}, jumped to {:x?}, shared joins at {:x?}, blocks no region placed {:x?}",
             self.hoisted_joins.keys().collect::<Vec<_>>(),
+            {
+                let mut jumped = std::collections::BTreeSet::new();
+                RegionAnalyzer::collect_goto_targets(&region, &mut jumped);
+                jumped
+            },
             self.shared_joins.iter().collect::<Vec<_>>(),
             self.func
                 .block_addrs()
@@ -2829,14 +2834,26 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     /// Write each hoisted tail once, behind its label, after the body.
     /// The whole region is written: that structure is what would be repeated.
     fn append_hoisted_joins(&mut self, stmt: CStmt) -> ControlFlowStructureResult<CStmt> {
-        if self.hoisted_joins.is_empty() {
+        // A walk that already refused stopped writing, so the jumps into these
+        // tails were never reached and the first reason is the one to keep.
+        if self.hoisted_joins.is_empty() || self.safety_reason.is_some() {
             return Ok(stmt);
         }
         let joins = std::mem::take(&mut self.hoisted_joins);
+        // A tail that jumps to another has to be written first, or the one it
+        // jumps to is placed before any arrival into it was recorded.
+        let Some(order) = Self::hoisted_join_order(&joins) else {
+            self.safety_reason =
+                Some("the tails placed once jump to each other in a cycle".to_string());
+            return Ok(CStmt::Empty);
+        };
         let mut stmts = Vec::new();
         Self::append_stmt_body_flat(&mut stmts, stmt);
         let outer_domains = self.active_domains.clone();
-        for (target, tail) in joins {
+        for target in order {
+            let Some(tail) = joins.get(&target).cloned() else {
+                continue;
+            };
             // The tail runs for whatever jumped to it, not for the domain the
             // body happened to end in. `structure_region` certifies the join.
             let arriving = self.transfer_target_domains.get(&target).cloned();
@@ -2860,6 +2877,33 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             1 => stmts.remove(0),
             _ => CStmt::Block(stmts),
         })
+    }
+
+    /// The order to write the tails in: a tail that jumps to another first.
+    fn hoisted_join_order(joins: &BTreeMap<u64, Region>) -> Option<Vec<u64>> {
+        let mut waits_for: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+        for (target, tail) in joins {
+            let mut jumps = BTreeSet::new();
+            RegionAnalyzer::collect_goto_targets(tail, &mut jumps);
+            for jump in jumps {
+                if jump != *target && joins.contains_key(&jump) {
+                    waits_for.entry(jump).or_default().insert(*target);
+                }
+            }
+        }
+        let mut order = Vec::with_capacity(joins.len());
+        let mut written = BTreeSet::new();
+        while order.len() < joins.len() {
+            let next = joins.keys().copied().find(|target| {
+                !written.contains(target)
+                    && waits_for
+                        .get(target)
+                        .is_none_or(|before| before.iter().all(|other| written.contains(other)))
+            })?;
+            written.insert(next);
+            order.push(next);
+        }
+        Some(order)
     }
 
     /// Write the shared joins after the body, each behind its label.

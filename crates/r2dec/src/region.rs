@@ -534,12 +534,37 @@ impl<'a> RegionAnalyzer<'a> {
         self.hoisted_joins.clear();
 
         if let Some(region) = self.analyze_iterative() {
+            self.retain_referenced_tails(&region);
             return region;
         }
+        self.hoisted_joins.clear();
         Region::Irreducible {
             entry: self.func.entry,
             blocks: self.func.block_addrs().to_vec(),
         }
+    }
+
+    /// Drop the tails the finished tree never jumps to.
+    ///
+    /// A tail is recorded where a path asks for one, and that path's region is
+    /// sometimes discarded by whatever composes it next.
+    fn retain_referenced_tails(&mut self, region: &Region) {
+        let mut wanted = BTreeSet::new();
+        Self::collect_goto_targets(region, &mut wanted);
+        let mut frontier = wanted.iter().copied().collect::<Vec<_>>();
+        while let Some(target) = frontier.pop() {
+            let mut nested = BTreeSet::new();
+            if let Some(tail) = self.hoisted_joins.get(&target) {
+                Self::collect_goto_targets(tail, &mut nested);
+            }
+            for next in nested {
+                if wanted.insert(next) {
+                    frontier.push(next);
+                }
+            }
+        }
+        self.hoisted_joins
+            .retain(|target, _| wanted.contains(target));
     }
 
     /// Name the joins whose every incoming edge can write its merge.
@@ -1916,9 +1941,11 @@ impl<'a> RegionAnalyzer<'a> {
         let tail = self.owned_tail(region_map.get(&node)?, target)?;
         let inside = tail.blocks().into_iter().collect::<BTreeSet<_>>();
         let mut spelled = BTreeSet::new();
-        Self::collect_goto_targets(&tail, &mut spelled);
+        Self::collect_left_targets(&tail, &mut spelled);
         // A jump the trim introduced still owes the merge its edge carries.
-        if !spelled
+        let mut jumped = BTreeSet::new();
+        Self::collect_goto_targets(&tail, &mut jumped);
+        if !jumped
             .iter()
             .all(|target| self.hoistable_joins.contains(target))
         {
@@ -1959,15 +1986,30 @@ impl<'a> RegionAnalyzer<'a> {
         }
     }
 
-    /// Every block a region already spells a jump to.
+    /// Every block a region leaves through, jump or transfer.
+    pub(crate) fn collect_left_targets(region: &Region, out: &mut BTreeSet<u64>) {
+        Self::collect_targets(region, true, out);
+    }
+
+    /// Every block a placed-once tail spells a jump to.
     pub(crate) fn collect_goto_targets(region: &Region, out: &mut BTreeSet<u64>) {
+        Self::collect_targets(region, false, out);
+    }
+
+    fn collect_targets(region: &Region, transfers: bool, out: &mut BTreeSet<u64>) {
+        let collect =
+            |child: &Region, out: &mut BTreeSet<u64>| Self::collect_targets(child, transfers, out);
         match region {
-            Region::Goto { target, .. } | Region::Transfer { target, .. } => {
+            Region::Goto { target, .. } => {
                 out.insert(*target);
             }
+            Region::Transfer { target, .. } if transfers => {
+                out.insert(*target);
+            }
+            Region::Transfer { .. } => {}
             Region::Sequence(regions) => {
                 for child in regions {
-                    Self::collect_goto_targets(child, out);
+                    collect(child, out);
                 }
             }
             Region::IfThenElse {
@@ -1975,24 +2017,26 @@ impl<'a> RegionAnalyzer<'a> {
                 else_region,
                 ..
             } => {
-                Self::collect_goto_targets(then_region, out);
+                collect(then_region, out);
                 if let Some(else_region) = else_region {
-                    Self::collect_goto_targets(else_region, out);
+                    collect(else_region, out);
                 }
             }
             Region::WhileLoop { body, .. } | Region::DoWhileLoop { body, .. } => {
-                Self::collect_goto_targets(body, out);
+                collect(body, out);
             }
             Region::MultiExit { head, exits } => {
-                Self::collect_goto_targets(head, out);
-                out.extend(exits.iter().copied());
+                collect(head, out);
+                if transfers {
+                    out.extend(exits.iter().copied());
+                }
             }
             Region::Switch { cases, default, .. } => {
                 for (_, case) in cases {
-                    Self::collect_goto_targets(case, out);
+                    collect(case, out);
                 }
                 if let Some(default) = default {
-                    Self::collect_goto_targets(default, out);
+                    collect(default, out);
                 }
             }
             Region::Block(_) | Region::Irreducible { .. } => {}
