@@ -17829,3 +17829,34 @@ recovery gap this session found: it decides whether a local has its declared
 name and type at all, which is what `type_match` measures and what makes an
 array render as `yy[i]` instead of `((uint8_t*)ptr)[i]`.
 
+### The array chain, end to end, and where it now stops
+
+Six commits took a declared array from "the type graph refuses any spec with a
+bracket" to rendered C. In order, each was a separate defect:
+
+1. the snapshot type graph had no array kind and rejected the spelling;
+2. `collect_declared_stack_slots` dropped a frame-base slot whose base register
+   the body never establishes, which is every function GCC builds without a
+   frame pointer;
+3. `direct_stack_assignment_observations` called a destination unorderable
+   because its subscript index was a literal;
+4. `admit_declaration_type` refused a sized array as a description of its own
+   storage;
+5. placement demanded an assignment of a whole array before an element read;
+6. and the accumulated effect is that `dbg.fallbackSort` and its neighbours in
+   bzip2_O0 now declare `int32_t stackLo[100]`, `int32_t ftab[257]`,
+   `int32_t ftabCopy[256]` and `uint8_t buf[32]` under the names bzip2's own
+   source gives them.
+
+bzip2_O0 goes from 23 refused to 20. bzip2_O2 and minigzip_O2 do not move yet.
+
+`dbg.generateMTFValues` is the O2 case and it now refuses `ConflictingUse` at
+`InstId(586) input 1`: the stack-geometry certificate elides that operand as
+`DeadStackBase` while the renderer emits it exactly. The instruction is
+`IntAdd { dst: tmp:4e00_2 }` whose output is the address of the `Load` at
+`InstId(587)`, so the access is `yy[index]` with a computed index. Either the
+renderer failed to spell it through the object and fell back to address
+arithmetic, or the certificate is eliding an operand the spelling still needs.
+Which of the two operands is the base and which the index decides it, and that
+is the next probe.
+
