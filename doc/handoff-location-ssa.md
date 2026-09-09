@@ -19121,7 +19121,34 @@ two declarations.
 
 Where the same site's carrier and definition are one value -- `ValueId(171)` for
 both, `BindingId(78)` for both, two lines above in the same function -- nothing
-refuses. So the fix is the coalescing rule in `binding_plan/construction.rs`
-that already holds for most call sites and does not hold for this one, and
-finding why it does not is the next step. It closes `RenderedValueRequired` (27)
-and `UnownedBindingSymbol` (14) together, which is 41 of the 174 declines.
+refuses.
+
+### Two rules for "the identity result of this call"
+
+The last hop names it exactly, and it is not a coalescing question. Two
+functions answer "which value is this call site's identity result" and they use
+different rules:
+
+* `derived_call_result_carrier_expr` scans `call_result_facts_by_value`, a map
+  keyed by `ValueId`, and takes the **first identity result** it finds -- the
+  lowest value id, `ValueId(204)`.
+* `CallResultFacts::definition_for_site` takes the identity, register-carried
+  result with the **earliest `at`**, and requires it to be unique at that
+  instruction -- `ValueId(261)`.
+
+A site with one identity result cannot tell them apart, which is why most sites
+are fine. A site with two gets one value read and a different one assigned, and
+the value nothing assigns is the binding `UnownedBindingSymbol` complains about
+from the other end.
+
+Two identity results exist because a call emits a `CallDefine` per storage the
+callee's interface names, and the boundary certified more than one of them. So
+the question to settle first is upstream of the renderer: what a call site with
+two certified identity results means, and which of them the program assigns.
+Making the carrier lookup use `definition_for_site` -- one rule, one owner -- is
+the shape of the fix, but it needs that answer, because on its own it moves the
+refusal to `ConflictingValue`: the call already answers for the value it
+assigns, and a read of it is a second answer for the same cell.
+
+It closes `RenderedValueRequired` (27) and `UnownedBindingSymbol` (14) together,
+which is 41 of the 174 declines.
