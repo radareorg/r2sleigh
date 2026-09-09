@@ -19392,3 +19392,35 @@ Two guards keep this from claiming more than it has. The extent stands only when
 every access lies inside it, and the whole fallback runs only where all three of
 today's inputs are absent -- no source slot, no callee allocation, no single
 width -- so it can never displace a better recovery, only replace a refusal.
+
+## Correcting the pruning measurement, and why the extent change was reverted
+
+The commit "Prune the merges a call's definitions add to what can read them"
+claims the local census went from 747 to 756 of 854 with nine functions gained.
+**That number is wrong and the correct one is zero.** The comparison was taken
+by a script that waited for seven census files to *exist* rather than to be
+finished, so the last binary's output was read while `radare2` was still writing
+it and nine of its refusals had not been printed yet. Re-counted against the
+same two build stamps, the refusal sets are identical function for function:
+107 either way, 747 rendered.
+
+What the pruning does change is real and was measured another way. The snapshot
+gate moved exactly one cell, and it moved *back*: `murmur3_32` at `x64_O0`
+recovers its `uint32_t` third parameter in place of `uint64_t RDX_0`, and loses
+the `uint64_t RCX_6 = tmp_11f80_9;` copy that a dead `RCX` merge had forced. So
+the commit stands on that and on the smaller SSA, not on coverage.
+
+Whenever a census is compared, wait for the run to finish rather than for its
+files to appear. Two shapes of that mistake have now cost a conclusion each: a
+`pgrep`-based wait that matches its own command line and never fires, and a
+file-count wait that fires too early.
+
+The extent geometry from the section above was written and then reverted. It
+did what it was meant to -- `fcn_bc90` stopped refusing at
+`memory_renderer.rs:116` and got as far as placement -- and it moved no function
+into the rendered column, because the next thing it meets is a different defect
+(`binding-symbol-observed` names `BindingId(89)`, spelled `ECX_29` and declared
+64-bit, read where no observation authorises it). An inert change does not stay
+in the tree, so it comes back with the rendering side that completes it: the
+slice spelling for an access narrower than its slot, and the width check on the
+owner path.
