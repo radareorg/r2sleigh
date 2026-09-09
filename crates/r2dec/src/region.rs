@@ -95,6 +95,33 @@ pub enum Region {
     },
 }
 
+/// How many nodes a region holds, for the copy trace.
+fn count_region_nodes(region: &Region) -> usize {
+    1 + match region {
+        Region::Sequence(regions) => regions.iter().map(count_region_nodes).sum::<usize>(),
+        Region::IfThenElse {
+            then_region,
+            else_region,
+            ..
+        } => {
+            count_region_nodes(then_region)
+                + else_region.as_ref().map_or(0, |r| count_region_nodes(r))
+        }
+        Region::WhileLoop { body, .. } | Region::DoWhileLoop { body, .. } => {
+            count_region_nodes(body)
+        }
+        Region::MultiExit { head, .. } => count_region_nodes(head),
+        Region::Switch { cases, default, .. } => {
+            cases
+                .iter()
+                .map(|(_, r)| count_region_nodes(r))
+                .sum::<usize>()
+                + default.as_ref().map_or(0, |r| count_region_nodes(r))
+        }
+        Region::Block(_) | Region::Transfer { .. } | Region::Irreducible { .. } => 0,
+    }
+}
+
 impl Region {
     /// Get the entry block of this region.
     pub fn entry(&self) -> u64 {
@@ -1368,6 +1395,13 @@ impl<'a> RegionAnalyzer<'a> {
                         base
                     } else if self.working_join_requires_path_copy(next, graph, &reachable) {
                         if let Some(next_region) = region_map.get(&next).cloned() {
+                            r2il::refusal_evidence!(
+                                "region-path-copy",
+                                "copying the region at {:#x} into the path through {:#x}: {} nodes",
+                                next_region.entry(),
+                                base.entry(),
+                                count_region_nodes(&next_region)
+                            );
                             Self::sequence_merge(base, next_region)
                         } else {
                             base

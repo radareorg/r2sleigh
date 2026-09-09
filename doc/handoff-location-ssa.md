@@ -18563,3 +18563,55 @@ it is real loop inversion, not a mis-pick to correct. `deflate`'s `LoopId(5)` is
 the shape to design against -- header `0x7e94`, canonical condition at `0x7ec2`
 inside the body, renderer's choice `0x813b` which is a latch, three latches and
 three exits all agreeing.
+
+## The cost is exponential path copying, and every thread in this session ends there
+
+The "fifty-four times its CFG" reading above was right about the number and
+wrong about the cause, and two more measurements were needed to say why.
+
+`structure_with_regions` is entered **once** per render -- so the 10,841 walk
+visits are not repeated structuring. And the tree holds only **105 distinct
+`(kind, address)` pairs**. One pass therefore builds a tree with ten thousand
+nodes over a hundred distinct ones: the same subtree appears about a hundred
+times.
+
+It is deliberate, and `analyze_post_collapse_iterative` says so
+(`crates/r2dec/src/region.rs`):
+
+    } else if self.working_join_requires_path_copy(next, graph, &reachable) {
+        if let Some(next_region) = region_map.get(&next).cloned() {
+
+with the comment "A proper merge is emitted once by the condition it
+post-dominates. A partial join must instead be copied into each disjoint path
+that reaches it." On `dbg_deflate` that fires **23 times and copies 1,901
+nodes**, and the copies compound: a region copied late already contains the
+copies made earlier, which is how 1,901 becomes 10,841. Copying a shared tail
+into every path that reaches it is O(2^d) in the depth of partial joins.
+
+**This is the whole performance story, and it is not a caching or capping
+problem.** The engine is not superlinear in general -- `build_tree` is 65 nodes
+for 61 blocks. One construction is exponential, one function hits it hard, and
+that function is 8.9 of the 12.2 seconds the binary costs. The wall-clock
+deadline and both complexity constants exist to survive this construction; at a
+linear tree size `deflate` needs none of them, which is why none of them have
+been touched.
+
+**And it is the same defect as the correctness one.** The three sites recorded
+earlier -- a merge written as a block, an already-placed entry written as a
+truncated block, a shared join written as a block -- are all the structurer
+refusing to place a shared tail once. Path copying is the fourth face of it:
+where the others truncate, this one duplicates. The reverted `Region::Goto`
+experiment established the missing ingredient, because `certify_transfer_domain_join`
+rejected a jump to a target placed inside one arm: the tail has to be *hoisted*
+to a point that dominates its predecessors, not merely jumped to.
+
+So one change closes all of it:
+
+    place a shared tail once, at a point dominating every predecessor,
+    behind a label the other paths jump to
+
+That replaces exponential copying with linear placement, removes the 103
+control-domain failures whose cause is a truncated duplicate, removes the reason
+the deadline and the two complexity constants exist, and removes the second
+render every unstructured function currently pays for. It is the piece of work
+this session ends pointing at, with each of its four faces measured.

@@ -1137,6 +1137,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     pub(crate) fn structure_with_regions(
         &mut self,
     ) -> ControlFlowStructureResult<SealedStructuredBody> {
+        r2il::refusal_evidence!("structuring-run", "entering structure_with_regions");
         let symbols = &self.fold_ctx.symbols;
         let source_authority = self
             .fold_ctx
