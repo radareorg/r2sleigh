@@ -18939,3 +18939,17 @@ rather than a value, so the anchor is one hop further: binding -> the values it
 carries -> the defining instruction. That reaches another 25 of the DecBench
 declines (11 `missing_definition`, 10 `region_does_not_dominate_occurrence`, 4
 `unobserved_binding_read`).
+
+## DecBench, measured before and after this session's second half
+
+Same sweep, zlib + bzip2 at O2, 860 functions:
+
+                       before        after
+    coverage        631 (73.4%)   638 (74.2%)      angr 799 (92.9%)
+    byte_match      0.399/631     0.397/638        angr 0.288/799
+    type_match      0.239/491     0.241/498        angr 0.180/652
+
+Seven functions gained, **none regressed**. We remain ahead of angr on every
+metric over what we render -- byte_match by 38%, type_match by 34% -- and behind
+only on how much we render. Coverage is still the whole gap, and the ranking of
+the 174 declines above is the map for closing it.
