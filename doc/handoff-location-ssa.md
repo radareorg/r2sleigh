@@ -17962,3 +17962,65 @@ operation wider than any single C statement -- and it is what to build.
 Until it exists the nine stay refused, and the frame-base restatement stays,
 because the alternative is re-hiding 54 declared slots per binary to recover a
 benchmark count.
+
+### The byte_match front: what it costs, and why the obvious lever does not move
+
+Counted over the 65,198 rendered body lines of the local corpus:
+
+    42,830  machine temporaries    tmp_11f80_1, tmp_3f680_1
+    20,772  register names         RAX_2, RDX_3, EAX_1
+     6,782  pointer casts          ((uint8_t*)RSI_1)
+     5,895  condition codes        OF_2, SF_2, ZF_5
+       209  lifter helpers         r2sleigh_int_sborrow_32(...)
+       103  machine stack objects  stack_m312
+
+Roughly one machine name per rendered line, which is what `byte_match` scores
+against real C.
+
+`dbg.hasSuffix` in bzip2_O0 is the whole problem in six source lines. bzip2
+writes
+
+    Int32 ns = strlen(s);
+    Int32 nx = strlen(suffix);
+    if (ns < nx) return False;
+
+and we render thirty lines, of which the first four are one source line:
+
+    uint64_t tmp_11f80_1 = (uint64_t)s;
+    uint64_t RAX_2 = sym_imp_strlen(tmp_11f80_1);
+    int32_t EAX_1 = (int32_t)RAX_2;
+    ns = EAX_1;
+
+The DWARF names `ns` and `nx` are recovered; what is missing is folding.
+
+`R2SLEIGH_TRACE_INLINE` names each rejection. For that sequence:
+`tmp:11f80_1` is refused as `MemoryRead` (an `-O0` parameter home load),
+`EAX_1` as `Source`, and the flags `OF_2` and `SF_2` because each has two
+readers. The flag case is the sharper one: `flag.signed_ge_from_borrow` in
+`r2rewrite` matches exactly the `OF == SF` shape and would rewrite it to
+`ns >= nx`, removing the subtraction and both flags -- but it only fires when
+the comparison term can see the flag definitions, and a bound flag is a name.
+
+**Two attempts, both reverted.**
+
+Admitting `MachineExprKind::Source` into `expression_renders_inline` -- which
+the canonical side already admits as `TermKind::Leaf` -- made `hasSuffix` refuse
+`InvalidPlannedInline`: the disposition's term and the canonicaliser's no longer
+agree, because the eligibility set is an input to the canonical fixpoint.
+
+Exempting condition codes from the single-reader rule **panicked** the engine at
+the execute boundary.
+
+Both confirm the note already in `rewrite_inlining_partition`: widening
+eligibility needs the two-pass structure, because excluding or admitting a value
+changes the member set that `merge_would_interfere` reads and so changes which
+components form. The partition is computed *from* the eligibility answer, and
+the canonical terms are computed from the partition. Widening it one predicate
+at a time cannot work, and neither attempt was a small bug.
+
+So the byte_match work is a piece of design: a staged eligibility fixpoint that
+admits a class, recomputes the partition and the canonical terms, and checks the
+two still agree -- the shape `rewrite_inlining_partition` already uses for
+singleton literals, generalised. The flag class is the one to stage first: it is
+5,895 names, it has a rewrite rule waiting for it, and `machine_noise` already
+counts a rendered flag as a defect.
