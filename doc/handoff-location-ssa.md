@@ -19158,13 +19158,41 @@ by instruction; the slice reads the other. Making the carrier lookup use
 `ConflictingValue`, because the call already answers for the value it assigns
 and a read of it is a second answer for the same cell.
 
-That last part is the shape of the fix, and it has a precedent in this codebase.
-The effect ledger already carries three duplicate-tolerance rules --
-`duplicates_are_exclusive`, `duplicates_are_a_repeated_literal`,
-`duplicates_are_a_named_object_address` -- each saying when two answers for one
-cell are the same answer. "A read of the value this statement writes" is a
-fourth of exactly that kind. With it, the carrier lookup can use
-`definition_for_site` and the two rules become one.
+### One call, one register, two values
+
+The `call-result-split` evidence settles what the two identity results are, and
+it is not a two-register return:
+
+    (531a, 9) defines ValueId(204) carried at Register { offset: 0, size: 8 }
+    and writes ValueId(261) carried at Register { offset: 0, size: 8 }
+
+**The same storage, defined twice at one call site**, given two bindings. The
+renderer assigns `BindingId(113)` and certifies the slice's read against
+`BindingId(90)`, which no statement ever assigns -- so whatever the checkers do,
+one declaration is unfillable. That is what `RenderedValueRequired` and
+`UnownedBindingSymbol` are both reporting, from the two ends.
+
+Three ways to absorb it downstream were each written and measured, and each
+moves the refusal to the next checker rather than removing it:
+
+* pair the read with the written value -> `ConflictingValue`, because the call
+  already answers for that value as a write;
+* let the read carry the symbol its expression names -> `invalid_certified_value_read`
+  in the placement audit, which requires the recorded symbol to be the binding's;
+* refuse to certify a read the statement cannot spell -> `read_before_assignment`,
+  because the slice then renders from the binding nothing assigns.
+
+Every checker is right, which is the signal that the defect is upstream of all
+of them. **A call site must certify one identity result per storage.** Two
+`CallDefine`s of one register at one site is either a lifting artefact the
+boundary should collapse before certifying, or two values the plan must give one
+binding; deciding which is the next step, and it is in `semantic.rs` around the
+`CallDefine` arm that assigns `CallResultValueRelation`, not in the renderer.
+
+It is worth doing carefully rather than quickly: it closes `RenderedValueRequired`
+(27) and `UnownedBindingSymbol` (14) together, 41 of the 174 declines, and the
+rule -- one certified result per storage per call -- is the kind that holds on
+every binary rather than on this one.
 
 It closes `RenderedValueRequired` (27) and `UnownedBindingSymbol` (14) together,
 which is 41 of the 174 declines.

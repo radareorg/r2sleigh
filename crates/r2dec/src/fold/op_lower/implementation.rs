@@ -1180,10 +1180,26 @@ impl<'a> FoldingContext<'a> {
         let written = self
             .certified_call_result_definition_for_source(source_call)
             .map(|definition| definition.value);
+        // The read this returns is of the carrier, spelled by the expression the
+        // statement assigns. When those are two values the claim is unspellable:
+        // it names one variable and reads another, and the value nothing assigns
+        // is left owning a declaration no statement fills.
+        if written != Some(carrier) {
+            r2il::refusal_evidence!(
+                "call-result-split",
+                "{:x?} defines {carrier:?} carried at {:?} and writes {written:?} carried at \
+                 {:?}; the slice {value:?} can be spelled by neither",
+                source_call,
+                cert.carrier,
+                self.certified_call_result_definition_for_source(source_call)
+                    .map(|definition| definition.carrier.clone())
+            );
+        }
         r2il::refusal_evidence!(
             "call-result-carrier",
-            "slice {value:?} reads carrier {carrier:?} bound {:?}; the site writes {written:?} \
-             bound {:?}",
+            "slice {value:?} carrier {:?} reads {carrier:?} bound {:?}; the site writes \
+             {written:?} bound {:?}",
+            cert.carrier,
             self.inputs
                 .binding_names
                 .and_then(|names| names.disposition_for_value(carrier)),
