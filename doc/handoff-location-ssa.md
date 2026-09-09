@@ -19211,14 +19211,22 @@ register carrier, earliest instruction, unique there -- which is "the value the
 call itself defined". The scan in `derived_call_result_carrier_expr` asks for
 whichever sorts first.
 
-Joining them onto `definition_for_site` is the fix, and the one thing left in
-its way is the cell rule: the slice's read then names the value the call
-statement assigns, and `observe_certified_read_expr` claims
-`ObservationTarget::Value(value)` for a *read*, which collides with the
-definition's own claim. Whether a certified read should claim the value's cell
-at all -- as opposed to only its own `CertifiedValueRead` cell -- is the
-question to settle, and it is a question about the cell model rather than about
-calls.
+Both are joined onto `definition_for_site` now, and the cell rule that stood in
+the way was not a fork -- this codebase already states it, in the gap closure:
+"A value the caller supplied has no defining statement to answer for it; its
+cell is answered wherever it is read." So a certified read claims
+`ObservationTarget::Value` only when nothing defines the value; where a
+definition answers the cell, a read of it is not a second answer.
+
+Both are correct as written and both are measured **neutral**: 744 of 854
+rendered either way, no function moved, gates 54 pass each. They land on that
+basis rather than on a number.
+
+What the family fails on now is one value later. `bzip2_O2 0x5130` refuses with
+`ConflictingValue(ValueId(208))` instead of `RenderedValueRequired(204)`, and
+the gap loop is reached and plans against it -- so the next hop is what puts two
+answers on 208's cell, with 204's story now closed. The reproduction is the same
+one line.
 
 The reproduction is one line:
 

@@ -3025,24 +3025,33 @@ impl LegacyObservationJournal {
                 self.plan.disposition(value),
             ));
         }
-        let mut ids = self
-            .allocate_many(vec![
-                ObservationTarget::Value(value),
-                ObservationTarget::CertifiedValueRead {
-                    value,
-                    source,
-                    binding: *binding,
-                    symbol,
-                },
-            ])?
-            .into_iter();
-        let value_id = ids
-            .next()
-            .ok_or(LegacyObservationJournalError::TooManyObservations)?;
+        // A value its own statement defines is answered by that definition, and
+        // a read of it is not a second answer. Only a value nothing defines --
+        // one the caller supplied -- has its cell answered where it is read.
+        let defined = self.source.graph().def_inst(value).is_some();
+        let mut targets = Vec::with_capacity(2);
+        if !defined {
+            targets.push(ObservationTarget::Value(value));
+        }
+        targets.push(ObservationTarget::CertifiedValueRead {
+            value,
+            source,
+            binding: *binding,
+            symbol,
+        });
+        let mut ids = self.allocate_many(targets)?.into_iter();
+        let value_id = if defined { None } else { ids.next() };
+        if !defined && value_id.is_none() {
+            return Err(LegacyObservationJournalError::TooManyObservations);
+        }
         let read_id = ids
             .next()
             .ok_or(LegacyObservationJournalError::TooManyObservations)?;
-        Ok(CExpr::observed(read_id, CExpr::observed(value_id, expr)))
+        let marked = match value_id {
+            Some(value_id) => CExpr::observed(value_id, expr),
+            None => expr,
+        };
+        Ok(CExpr::observed(read_id, marked))
     }
 
     /// Mark the exact value a certified stack-array subscript uses as its

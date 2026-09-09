@@ -1163,23 +1163,15 @@ impl<'a> FoldingContext<'a> {
         // is the value the site defines. Pairing the owner expression with the
         // identity carrier instead named one value and read another, which the
         // journal then refused for a symbol the expression never mentions.
-        // The identity result this slice is a lane *of*, by the storage both
-        // name. Taking the first identity result at the site picked a different
-        // register whenever a call returns in two of them, and the slice was
-        // then read against a carrier it is not part of.
-        let carrier = view
-            .call_result_facts_by_value
-            .values()
-            .find(|other| {
-                other.callsite == cert.callsite
-                    && other.relation.is_identity()
-                    && other.carrier == cert.carrier
-            })?
-            .value;
+        // The value the call itself defined. A result flows, and every value it
+        // reaches is certified under the same call site, so "an identity result
+        // here" names several; the one the statement assigns is the one
+        // `definition_for_site` asks for, and it is the one this slice reads.
         let source_call = (cert.callsite.block_addr, cert.callsite.op_index);
-        let written = self
-            .certified_call_result_definition_for_source(source_call)
-            .map(|definition| definition.value);
+        let carrier = self
+            .certified_call_result_definition_for_source(source_call)?
+            .value;
+        let written = Some(carrier);
         // The read this returns is of the carrier, spelled by the expression the
         // statement assigns. When those are two values the claim is unspellable:
         // it names one variable and reads another, and the value nothing assigns
