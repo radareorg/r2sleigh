@@ -18693,11 +18693,18 @@ under two minutes where they previously did not complete at all. **This is a
 pre-existing defect, not something the hoisting introduced**: the same trace at
 `HEAD` reaches 108,855 alternatives on the same function.
 
-The exponent itself is untouched. The right representation is the one the
-coverage proof already uses internally -- a BDD over the same predicate
-variables, which is canonical and compact where a DNF is not. Two things wait on
-it: the exponent, and the certify fix above, which is correct but cannot be
-carried in a DNF.
+The exponent is gone too, and not by a bound. `(D and g) or (D and not g)` is
+`D`, and applying that identity to a fixpoint in `normalize_rendered_domains`
+collapses exactly the doubling a branch introduces. The worst function on
+minigzip_O0 falls from **932,023 alternatives to 1,084**, and the binary that
+did not finish now renders its 185 functions in 31.9 s. The identity drops
+nothing: a disjunction that survives it is a real one, a partial join with
+several arrivals.
+
+A BDD is still the better representation -- it is canonical where a minimised
+DNF is only smaller -- and the certify fix above still waits on it, because the
+domain a certified join proves is a disjunction that absorption cannot always
+shorten. But the exponent is no longer the reason to build one.
 
 `sample` and `atos` now work on the engine. `[profile.probe]` in the workspace
 manifest is a release build with symbols and line tables kept, because
