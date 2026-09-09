@@ -178,9 +178,44 @@ pub(crate) struct FoldingContext<'a> {
     /// A planned gap is opened when the fold reaches its anchor, not when the
     /// refusal is met: that is the whole point of planning it, since by the
     /// time the refusal was met a reader had already claimed its cells.
-    pub(crate) gap_anchors: std::cell::RefCell<
-        std::collections::BTreeMap<InstId, crate::fold::op_lower::OpLoweringRefusal>,
-    >,
+    pub(crate) gap_anchors: std::cell::RefCell<std::collections::BTreeMap<InstId, GapReason>>,
+}
+
+/// Why a gap was planned, in the terms the marker prints.
+///
+/// A lowering refusal carries its own kind and site. A proof failure found
+/// after rendering names a cell rather than a lowering site, so it says what
+/// failed and where the cell was named instead.
+#[derive(Clone)]
+pub(crate) struct GapReason {
+    pub(crate) kind: String,
+    pub(crate) origin: String,
+    /// The lowering refusal to report if the gap cannot be opened after all.
+    pub(crate) lowering: Option<crate::fold::op_lower::OpLoweringRefusal>,
+}
+
+impl GapReason {
+    pub(crate) fn from_lowering(refusal: crate::fold::op_lower::OpLoweringRefusal) -> Self {
+        Self {
+            kind: refusal.kind().to_string(),
+            origin: refusal.origin_site(),
+            lowering: Some(refusal),
+        }
+    }
+
+    /// A cell a later proof could not account for.
+    pub(crate) fn from_proof(kind: &str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            origin: "render proof".to_string(),
+            lowering: None,
+        }
+    }
+
+    pub(crate) fn refusal(&self) -> crate::fold::op_lower::OpLoweringRefusal {
+        self.lowering
+            .unwrap_or_else(crate::fold::op_lower::OpLoweringRefusal::missing_machine_projection)
+    }
 }
 
 impl FoldArchConfig {
@@ -274,9 +309,6 @@ impl<'a> FoldingContext<'a> {
     /// point, and nothing else is owned: a value defined outside keeps its own
     /// occurrence and only its use here is gapped.
     pub(crate) fn gap_closure(&self, block_addr: u64, op_idx: usize) -> Option<GapClosure> {
-        let prepared = self.inputs.prepared_ssa?;
-        let names = self.inputs.binding_names?;
-        let graph = prepared.graph();
         let Some(seed) = self.source_inst_for_normalized_op(block_addr, op_idx) else {
             r2il::refusal_evidence!(
                 "gap",
@@ -285,6 +317,18 @@ impl<'a> FoldingContext<'a> {
             );
             return None;
         };
+        self.gap_closure_from_seed(seed)
+    }
+
+    /// The gap a seed instruction opens, and everything that reads it.
+    pub(crate) fn gap_closure_from_seed(&self, seed: InstId) -> Option<GapClosure> {
+        let prepared = self.inputs.prepared_ssa?;
+        let names = self.inputs.binding_names?;
+        let graph = prepared.graph();
+        let block_addr = graph
+            .inst(seed)
+            .and_then(|inst| graph.block(inst.block))
+            .map(|block| block.addr)?;
 
         // A gap stands in for computation and for effects, never for where
         // the program goes next. A return whose value cannot be proven has no
@@ -302,7 +346,7 @@ impl<'a> FoldingContext<'a> {
         {
             r2il::refusal_evidence!(
                 "gap",
-                "the operation at {block_addr:#x}:{op_idx} is a control transfer, which a \
+                "the operation at {block_addr:#x} is a control transfer, which a \
                  marker cannot stand in for"
             );
             return None;
@@ -433,7 +477,9 @@ impl<'a> FoldingContext<'a> {
         if self.gap_anchors.borrow().contains_key(&anchor) {
             return false;
         }
-        self.gap_anchors.borrow_mut().insert(anchor, refusal);
+        self.gap_anchors
+            .borrow_mut()
+            .insert(anchor, GapReason::from_lowering(refusal));
         self.gapped_sites.borrow_mut().extend(closure.sites);
         r2il::refusal_evidence!(
             "gap",
@@ -444,14 +490,34 @@ impl<'a> FoldingContext<'a> {
         true
     }
 
+    /// Plan a gap at an instruction a later proof failure named.
+    ///
+    /// The lowering path plans from where it is; a seal or placement refusal
+    /// names a cell instead, and the instruction behind that cell is the same
+    /// anchor arrived at from the other end.
+    pub(crate) fn plan_gap_at_anchor(&self, anchor: InstId, kind: &str) -> bool {
+        if self.gap_anchors.borrow().contains_key(&anchor) {
+            return false;
+        }
+        let Some(closure) = self.gap_closure_from_seed(anchor) else {
+            return false;
+        };
+        self.gap_anchors
+            .borrow_mut()
+            .insert(anchor, GapReason::from_proof(kind));
+        self.gapped_sites.borrow_mut().extend(closure.sites);
+        r2il::refusal_evidence!(
+            "gap",
+            "planning a gap at {anchor:?} over {} ops before the next render attempt",
+            closure.ops
+        );
+        true
+    }
+
     /// The gap a previous attempt planned at this operation, if any.
-    pub(crate) fn planned_gap_at(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-    ) -> Option<crate::fold::op_lower::OpLoweringRefusal> {
+    pub(crate) fn planned_gap_at(&self, block_addr: u64, op_idx: usize) -> Option<GapReason> {
         let anchor = self.source_inst_for_normalized_op(block_addr, op_idx)?;
-        self.gap_anchors.borrow().get(&anchor).copied()
+        self.gap_anchors.borrow().get(&anchor).cloned()
     }
 
     /// Whether a marked gap accounts for the definition of this value, which
@@ -477,7 +543,7 @@ impl<'a> FoldingContext<'a> {
         &self,
         block_addr: u64,
         op_idx: usize,
-        refusal: crate::analysis::lower::OpLoweringRefusal,
+        reason: &GapReason,
     ) -> Option<(crate::ast::CStmt, BTreeSet<InstId>)> {
         let Some(journal) = self.inputs.observation_journal else {
             r2il::refusal_evidence!(
@@ -499,8 +565,8 @@ impl<'a> FoldingContext<'a> {
             op_idx: u32::try_from(op_idx).ok()?,
         };
         let marker = crate::ast::GapMarker {
-            kind: refusal.kind().to_string(),
-            origin: refusal.origin_site(),
+            kind: reason.kind.clone(),
+            origin: reason.origin.clone(),
             block_addr,
             op_idx,
             ops: closure.ops,
@@ -516,7 +582,7 @@ impl<'a> FoldingContext<'a> {
                 r2il::refusal_evidence!(
                     "gap",
                     "opened at {block_addr:#x}:{op_idx} for {} over {} ops, claiming {} cells",
-                    refusal.kind(),
+                    reason.kind,
                     closure.ops,
                     closure.cells.len()
                 );

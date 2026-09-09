@@ -1313,9 +1313,9 @@ impl<'a> FoldingContext<'a> {
             // A gap a previous attempt planned is opened here, at its anchor,
             // before any of the operations it covers can render and claim a
             // cell it has to account for.
-            if let Some(refusal) = self.planned_gap_at(block.addr, op_idx) {
-                let Some((stmt, owned)) = self.open_gap(block.addr, op_idx, refusal) else {
-                    return Err(refusal);
+            if let Some(reason) = self.planned_gap_at(block.addr, op_idx) {
+                let Some((stmt, owned)) = self.open_gap(block.addr, op_idx, &reason) else {
+                    return Err(reason.refusal());
                 };
                 self.gapped_sites.borrow_mut().extend(owned);
                 stmts.push(FoldedOpStmt {
@@ -1532,7 +1532,8 @@ impl<'a> FoldingContext<'a> {
                 // journal can account for every cell the gap covers; when it
                 // cannot, the refusal stands as it did before.
                 Err(refusal) => {
-                    let Some((stmt, owned)) = self.open_gap(block.addr, op_idx, refusal) else {
+                    let reason = crate::fold::context::GapReason::from_lowering(refusal);
+                    let Some((stmt, owned)) = self.open_gap(block.addr, op_idx, &reason) else {
                         return Err(refusal);
                     };
                     self.gapped_sites.borrow_mut().extend(owned);

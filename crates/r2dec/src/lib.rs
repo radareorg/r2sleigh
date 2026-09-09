@@ -1639,6 +1639,44 @@ pub enum BindingShadowAuditFailure {
     },
 }
 
+/// The instruction a native render failure names, when it names a cell.
+///
+/// A failure that reaches a value, a use or a write reaches the instruction
+/// that defines or performs it, and that is what a marked gap anchors to.
+fn gap_anchor_for_native_failure(
+    failure: &BindingShadowAuditFailure,
+    prepared: &r2ssa::SsaArtifact,
+) -> Option<r2ssa::InstId> {
+    use BindingObservationJournalFailure as Journal;
+    let journal = match failure {
+        BindingShadowAuditFailure::JournalConstruction(journal)
+        | BindingShadowAuditFailure::JournalRecording(journal)
+        | BindingShadowAuditFailure::JournalSeal(journal) => journal,
+        _ => return None,
+    };
+    let graph = prepared.graph();
+    match journal {
+        Journal::RenderedValueRequired { value }
+        | Journal::PlannedElidedValueRendered { value }
+        | Journal::PlannedRefusedValueRendered { value }
+        | Journal::MissingPlannedValue { value }
+        | Journal::ConflictingValue { value }
+        | Journal::InvalidPlannedInline { value, .. }
+        | Journal::UnownedBindingSymbol { value, .. } => graph.def_inst(*value),
+        Journal::InvalidCertifiedValueRead { at, .. } => Some(*at),
+        Journal::InvalidUse { site }
+        | Journal::RefusedRenderedUse { site }
+        | Journal::ExactUseRequiresRenderedOccurrence { site }
+        | Journal::ConflictingUse { site } => Some(site.inst),
+        Journal::InvalidWrite { inst }
+        | Journal::OutputlessWrite { inst }
+        | Journal::RefusedRenderedWrite { inst }
+        | Journal::ExactWriteRequiresRenderedOccurrence { inst }
+        | Journal::ConflictingWrite { inst } => Some(*inst),
+        _ => None,
+    }
+}
+
 /// Non-consuming binding audit exposed to corpus and integration tooling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingShadowAuditOutcome {
@@ -2818,8 +2856,33 @@ impl Decompiler {
                 ),
             ));
         }
-        let decompiler = Self::new(self.config.clone()).with_context(input.context_projection());
-        decompiler.build_function_internal_with_control(input, work)
+        // A proof failure that names a cell is planned as a gap and the whole
+        // rendering is run again with that cell marked, exactly as a lowering
+        // refusal is. The plan only grows and is a subset of the graph, so the
+        // attempts are bounded by it.
+        let mut seed_gaps = std::collections::BTreeMap::new();
+        let gap_attempt_bound = input.prepared_ssa().graph().insts.len().saturating_add(1);
+        loop {
+            let decompiler =
+                Self::new(self.config.clone()).with_context(input.context_projection());
+            let product =
+                decompiler.build_function_internal_with_control(input, work, &seed_gaps)?;
+            if seed_gaps.len() < gap_attempt_bound
+                && let BindingShadowAuditOutcome::Failed(failure) =
+                    product.binding_shadow(input.source_owned_facts())
+                && let Some(anchor) = gap_anchor_for_native_failure(&failure, input.prepared_ssa())
+                && !seed_gaps.contains_key(&anchor)
+            {
+                let kind = DecompileRenderRefusal::from(failure).kind().to_string();
+                r2il::refusal_evidence!(
+                    "gap",
+                    "the proof named {anchor:?} as {kind}; planning a gap and rendering again"
+                );
+                seed_gaps.insert(anchor, kind);
+                continue;
+            }
+            return Ok(product);
+        }
     }
 
     fn linearize_function_body(
@@ -3063,6 +3126,7 @@ impl Decompiler {
         &self,
         input: &'a DecompilerInput,
         work: DecompileWorkControl<'a>,
+        seed_gaps: &std::collections::BTreeMap<r2ssa::InstId, String>,
     ) -> Result<InternalBuildProduct, DecompileExecutionStop> {
         crate::stage_timing::begin();
         // The names this rendering declares, from the first pass that mints one.
@@ -3533,6 +3597,12 @@ impl Decompiler {
         // One rendered function has one table, and this is the one the passes
         // before now declared into.
         fold_ctx.symbols = std::rc::Rc::clone(&symbol_table);
+        // Cells a previous attempt's proof could not account for. Planning them
+        // before the fold runs is the whole point: by the time the proof failed,
+        // a statement reading the unproven value had already rendered.
+        for (anchor, kind) in seed_gaps {
+            fold_ctx.plan_gap_at_anchor(*anchor, kind);
+        }
         let fold_blocks: Vec<_> = func.blocks().cloned().collect();
         let structuring_work = work.with_phase(DecompileWorkPhase::Structuring);
         if let Err(error) = fold_ctx.analyze_blocks_with_control(&fold_blocks, structuring_work) {
@@ -6324,7 +6394,7 @@ mod tests {
         let execution = r2ssa::SsaExecutionControl::default();
         let work = DecompileWorkControl::new(&execution, DecompileWorkPhase::Normalization);
         let built = internal_decompiler
-            .build_function_internal_with_control(&input, work)
+            .build_function_internal_with_control(&input, work, &Default::default())
             .expect("native production build");
 
         let internal_output =
