@@ -6424,6 +6424,8 @@ struct StackGeometryContext<'a> {
     frame_round_trips: &'a BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
     return_controls: &'a BTreeMap<InstId, MachineReturnControlCertificate>,
     unobserved: &'a crate::deadphi::DeadPhis,
+    machine_context: Option<&'a SourceMachineContext>,
+    declared_slots: &'a DeclaredStackSlots,
 }
 
 fn collect_stack_geometry_certificate(
@@ -6438,6 +6440,8 @@ fn collect_stack_geometry_certificate(
         frame_round_trips,
         return_controls,
         unobserved,
+        machine_context,
+        declared_slots,
     } = answered;
     let Some(prep) = function.decompile_prep_facts() else {
         return StackGeometryCertificate::default();
@@ -6477,6 +6481,39 @@ fn collect_stack_geometry_certificate(
         false
     };
 
+    // A declared array does not collapse into a bare name. `base + const`
+    // renders as `name[const]`, so the constant survives as the subscript
+    // index and the address computation is not geometry that vanishes.
+    let declared_arrays = machine_context
+        .and_then(SourceMachineContext::function_interface)
+        .and_then(crate::SourceFunctionInterface::type_graph)
+        .map(|types: &crate::SourceTypeGraph| {
+            declared_slots
+                .by_key
+                .values()
+                .filter(|slot| {
+                    slot.logical_type()
+                        .and_then(|id| usize::try_from(id).ok())
+                        .and_then(|id| types.types().get(id))
+                        .is_some_and(|ty| matches!(ty.kind(), SourceTypeKind::Array { .. }))
+                })
+                .map(|slot| (slot.base(), slot.offset()))
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let addresses_declared_array = |value: ValueId| {
+        !declared_arrays.is_empty()
+            && objects
+                .object_for_value(value, SpaceId::Ram)
+                .and_then(|object| objects.object(object))
+                .is_some_and(|object| match object.kind {
+                    ObjectKind::StackSlot { base, offset, .. }
+                    | ObjectKind::FrameObject { base, offset, .. } => {
+                        declared_arrays.contains(&(base, offset))
+                    }
+                    _ => false,
+                })
+    };
     let mut geometry_outputs = BTreeMap::<InstId, ValueId>::new();
     let mut geometry_inputs = BTreeSet::<ValueId>::new();
     for inst in &graph.insts {
@@ -6500,6 +6537,7 @@ fn collect_stack_geometry_certificate(
                 inst.inputs.len() == 2
                     && ((stack_root(inst.inputs[0]).is_some() && is_constant(inst.inputs[1]))
                         || (is_constant(inst.inputs[0]) && stack_root(inst.inputs[1]).is_some()))
+                    && !addresses_declared_array(output)
             }
             InstPayload::Op(SSAOp::IntSub { .. }) => {
                 inst.inputs.len() == 2
@@ -7363,6 +7401,8 @@ fn collect_prepared_function_certificates(
             frame_round_trips: &stack_frame_round_trips,
             return_controls: &machine_return_controls,
             unobserved,
+            machine_context,
+            declared_slots,
         },
     );
     let stack_slots = objects
