@@ -19096,3 +19096,32 @@ never meet. It is inert here only because the skip list removes those functions
 first, and the name filter it would have fed does not run when the benchmark
 passes no name list. If the skip list is ever narrowed on the benchmark's own
 terms, this is the other half of that change.
+
+### And the two values it is about, named
+
+Two more attempts localised it further, and both failed in a way that says where
+the fix is not. Pairing the certified read with the value the call *writes*
+instead of the identity carrier moves the refusal to `ConflictingValue`, because
+the call statement already answers for that value as a write. Letting the read
+carry the symbol its expression names moves it to `invalid_certified_value_read`
+in the placement audit, which requires the recorded symbol to be the binding's
+own. Three tables, one question, and the answer is in none of them.
+
+The `call-result-carrier` evidence now names both values in one line. On
+`bzip2_O2 0x5130`:
+
+    slice ValueId(262) reads carrier ValueId(204) bound BindingId(90);
+    the site writes ValueId(261) bound BindingId(113)
+
+One call, one machine result, **two values with two separate bindings**. The
+expression spells binding 113 because that is what the statement assigns; the
+read is certified against binding 90 because that is the identity carrier. Every
+downstream checker is right and they disagree because the plan gave one result
+two declarations.
+
+Where the same site's carrier and definition are one value -- `ValueId(171)` for
+both, `BindingId(78)` for both, two lines above in the same function -- nothing
+refuses. So the fix is the coalescing rule in `binding_plan/construction.rs`
+that already holds for most call sites and does not hold for this one, and
+finding why it does not is the next step. It closes `RenderedValueRequired` (27)
+and `UnownedBindingSymbol` (14) together, which is 41 of the 174 declines.

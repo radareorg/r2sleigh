@@ -1159,19 +1159,36 @@ impl<'a> FoldingContext<'a> {
         if cert.relation.is_identity() {
             return None;
         }
+        // Whatever the call statement wrote is what this slice reads, and that
+        // is the value the site defines. Pairing the owner expression with the
+        // identity carrier instead named one value and read another, which the
+        // journal then refused for a symbol the expression never mentions.
         let carrier = view
             .call_result_facts_by_value
             .values()
             .find(|other| other.callsite == cert.callsite && other.relation.is_identity())?
             .value;
+        let source_call = (cert.callsite.block_addr, cert.callsite.op_index);
+        let written = self
+            .certified_call_result_definition_for_source(source_call)
+            .map(|definition| definition.value);
+        r2il::refusal_evidence!(
+            "call-result-carrier",
+            "slice {value:?} reads carrier {carrier:?} bound {:?}; the site writes {written:?} \
+             bound {:?}",
+            self.inputs
+                .binding_names
+                .and_then(|names| names.disposition_for_value(carrier)),
+            written.and_then(|written| self
+                .inputs
+                .binding_names
+                .and_then(|names| names.disposition_for_value(written)))
+        );
         // Whatever the call statement wrote is what this slice reads. Taking
         // `symbol_for_value` instead gave a name the statement does not
         // necessarily assign -- the site owns its result through the owner
         // expression -- so the lane mentioned a variable nothing declared.
-        let owner = self.certified_call_result_owner_expr_for_source((
-            cert.callsite.block_addr,
-            cert.callsite.op_index,
-        ))?;
+        let owner = self.certified_call_result_owner_expr_for_source(source_call)?;
         Some((carrier, owner))
     }
 
