@@ -3641,8 +3641,34 @@ impl LegacyObservationJournal {
                                     .then_some(id)
                             })
                             .collect::<Vec<_>>();
+                        // Which object this use addresses, and how the plan
+                        // typed it. An address use that nothing rendered is
+                        // almost always an access the object's declaration has
+                        // no spelling for.
+                        let addressed = graph
+                            .inst(InstId(inst as u32))
+                            .and_then(|inst| inst.inputs.get(input_idx).copied())
+                            .and_then(|value| {
+                                self.source
+                                    .objects()
+                                    .object_for_value(value, r2il::SpaceId::Ram)
+                            });
                         eprintln!(
-                            "unaccounted use inst={inst} input={input_idx} payload={:?} targets={targets:?}",
+                            "unaccounted use inst={inst} input={input_idx} object={addressed:?} kind={:?} accesses={:?} payload={:?} targets={targets:?}",
+                            addressed
+                                .and_then(|object| self.source.objects().object(object))
+                                .map(|object| format!("{:?}", object.kind)
+                                    .chars()
+                                    .take(70)
+                                    .collect::<String>()),
+                            addressed.map(|object| self
+                                .source
+                                .certificates()
+                                .memory_accesses
+                                .values()
+                                .filter(|access| access.object == object)
+                                .map(|access| (access.width, access.object_offset, access.is_write))
+                                .collect::<Vec<_>>()),
                             graph.inst(InstId(inst as u32)).map(|inst| format!(
                                 "{:?}",
                                 inst.payload

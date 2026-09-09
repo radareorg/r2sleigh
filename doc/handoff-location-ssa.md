@@ -17920,3 +17920,45 @@ graph carries.
 Local census at the same point: 603 rendered / 89 refused / 0 silent of 692,
 from 588 at the start of the session, with thirteen array declarations where
 there were none.
+
+### What actually completes the regression fix: decomposing a wide constant store
+
+Three attempts at the nine-function regression, each measured and each reverted.
+
+**Attempt one**, an array element-width rule keyed on `StackArrayLayoutDisposition`:
+moved nothing. The object is a struct, not an array, and takes the
+`Struct | Union` branch of `declaration_type_for_binding`.
+
+**Attempt two**, declining a struct declaration when an access spans members:
+the guard fires -- evidence `aggregate-declaration-declined object=ObjectId(3)
+type=Struct("z_stream")` -- and the function still refuses. Declining the
+*type* leaves the object bound to the declared slot, and the sixteen-byte store
+at offset 64 is unspellable through a 112-byte bit vector too.
+
+**Attempt three**, suppressing `StackSlotCertificate::source_slot` for such a
+slot: moves the refusal from `ExactUseRequiresRenderedOccurrence` to
+`RenderedValueRequired` and no further. The name and type are gone but the
+addresses still merge into one object, because `DeclaredStackSlots::containing`
+still holds the slot, and that map is built before any access is classified --
+the widths it would need to consult do not exist yet.
+
+The facts, now proven rather than guessed. Object 3 is
+`StackSlot { base: StackPointer, offset: -168 }`, which is `c_stream` declared
+at frame base -160 and restated. Its accesses are
+
+    (width 8, offset 0, write) (width 8, offset 24, write)
+    (width 16, offset 64, write) (width 8, offset 80, write)
+
+and in `z_stream` the members at 64 and 72 are `zalloc` and `zfree`. So one
+sixteen-byte store covers two members.
+
+What renders it is not a guard but a capability: **decompose a wide store of a
+known constant into per-member assignments**. GCC zeroes `xmm0` and emits
+`movups [rsp+64], xmm0`, whose honest C is `c_stream.zalloc = 0;
+c_stream.zfree = 0;`. The value is a constant, the members are known, and the
+decomposition is exact. That is the same family as the `rep` prefix -- a machine
+operation wider than any single C statement -- and it is what to build.
+
+Until it exists the nine stay refused, and the frame-base restatement stays,
+because the alternative is re-hiding 54 declared slots per binary to recover a
+benchmark count.
