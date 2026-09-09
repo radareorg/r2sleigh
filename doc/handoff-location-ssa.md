@@ -18910,3 +18910,23 @@ measured against is not in scope where the bound is applied. Deriving it means
 passing the budget across the FFI -- one integer of fork surface, and the only
 way the constant stops being a guess. That is the next step for this thread, and
 it is worth less than the gap routing above: fourteen functions against eighty.
+
+## The gap loop now takes proof failures, and what it costs
+
+`gap_anchor_for_native_failure` maps an observation-journal seal failure to the
+instruction behind the cell it names, and the render is run again with that cell
+marked. Four functions locally, 744 of 854 rendered against 740.
+
+The cost is a whole re-render per gap, because the seal reports one unaccounted
+cell at a time: `zlib_example` needs 34 attempts on one function and the binary
+goes from 40.8 s to 48.5 s. `first_unaccounted_render_observation` scans
+`values`, `uses` and `writes` and returns the first `None`; a sibling that
+returns all of them, carried out through the failure, would turn k renders into
+one. That is the next thing to do here and it is pure arithmetic -- the same
+gaps, found in one pass.
+
+Placement refusals are not yet routed. `PlacementRefusal` names a `BindingId`
+rather than a value, so the anchor is one hop further: binding -> the values it
+carries -> the defining instruction. That reaches another 25 of the DecBench
+declines (11 `missing_definition`, 10 `region_does_not_dominate_occurrence`, 4
+`unobserved_binding_read`).
