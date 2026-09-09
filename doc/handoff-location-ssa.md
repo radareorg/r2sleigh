@@ -19142,13 +19142,29 @@ the value nothing assigns is the binding `UnownedBindingSymbol` complains about
 from the other end.
 
 Two identity results exist because a call emits a `CallDefine` per storage the
-callee's interface names, and the boundary certified more than one of them. So
-the question to settle first is upstream of the renderer: what a call site with
-two certified identity results means, and which of them the program assigns.
-Making the carrier lookup use `definition_for_site` -- one rule, one owner -- is
-the shape of the fix, but it needs that answer, because on its own it moves the
-refusal to `ConflictingValue`: the call already answers for the value it
-assigns, and a read of it is a second answer for the same cell.
+callee's interface names, and the boundary certified more than one of them.
+
+The obvious reading -- a System V two-register return, `RAX:RDX` -- is wrong,
+and measuring it says so. Matching the slice to the identity result whose
+`carrier` storage it shares picks **the same value**, `ValueId(204)`, so the two
+identity results are on *one* storage at two different instructions. That change
+is kept anyway, because taking "the first identity result at the site" is wrong
+as written for a call that does return in two registers, and it is measured
+neutral here: 744 of 854 rendered either way, six gates 54 pass each.
+
+So the site defines one register twice. `definition_for_site` picks the earlier
+by instruction; the slice reads the other. Making the carrier lookup use
+`definition_for_site` -- one rule, one owner -- moves the refusal to
+`ConflictingValue`, because the call already answers for the value it assigns
+and a read of it is a second answer for the same cell.
+
+That last part is the shape of the fix, and it has a precedent in this codebase.
+The effect ledger already carries three duplicate-tolerance rules --
+`duplicates_are_exclusive`, `duplicates_are_a_repeated_literal`,
+`duplicates_are_a_named_object_address` -- each saying when two answers for one
+cell are the same answer. "A read of the value this statement writes" is a
+fourth of exactly that kind. With it, the carrier lookup can use
+`definition_for_site` and the two rules become one.
 
 It closes `RenderedValueRequired` (27) and `UnownedBindingSymbol` (14) together,
 which is 41 of the 174 declines.

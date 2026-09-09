@@ -1163,10 +1163,18 @@ impl<'a> FoldingContext<'a> {
         // is the value the site defines. Pairing the owner expression with the
         // identity carrier instead named one value and read another, which the
         // journal then refused for a symbol the expression never mentions.
+        // The identity result this slice is a lane *of*, by the storage both
+        // name. Taking the first identity result at the site picked a different
+        // register whenever a call returns in two of them, and the slice was
+        // then read against a carrier it is not part of.
         let carrier = view
             .call_result_facts_by_value
             .values()
-            .find(|other| other.callsite == cert.callsite && other.relation.is_identity())?
+            .find(|other| {
+                other.callsite == cert.callsite
+                    && other.relation.is_identity()
+                    && other.carrier == cert.carrier
+            })?
             .value;
         let source_call = (cert.callsite.block_addr, cert.callsite.op_index);
         let written = self
