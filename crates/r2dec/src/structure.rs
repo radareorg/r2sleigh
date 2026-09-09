@@ -447,6 +447,22 @@ struct SwitchRegionView<'r> {
     prefix_regions: &'r [Region],
 }
 
+/// What a region is, for the walk trace. The variant name alone, so a trace
+/// line stays one line whatever the region contains.
+fn region_kind_name(region: &Region) -> &'static str {
+    match region {
+        Region::Block(_) => "block",
+        Region::Sequence(_) => "sequence",
+        Region::IfThenElse { .. } => "if-else",
+        Region::WhileLoop { .. } => "while",
+        Region::DoWhileLoop { .. } => "do-while",
+        Region::MultiExit { .. } => "multi-exit",
+        Region::Transfer { .. } => "transfer",
+        Region::Switch { .. } => "switch",
+        Region::Irreducible { .. } => "irreducible",
+    }
+}
+
 impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     /// Create a new structurer using a pre-analyzed folding context.
     #[cfg(test)]
@@ -1218,8 +1234,20 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     /// Structure a region into C statements.
     fn structure_region(&mut self, region: &Region) -> ControlFlowStructureResult<CStmt> {
         if !self.poll() {
+            r2il::refusal_evidence!(
+                "region-walk",
+                "stopped before {} at {:#x}",
+                region_kind_name(region),
+                region.entry()
+            );
             return Ok(CStmt::Empty);
         }
+        r2il::refusal_evidence!(
+            "region-walk",
+            "{} at {:#x}",
+            region_kind_name(region),
+            region.entry()
+        );
         self.completed_loop_exit = None;
         self.region_exit_domains = None;
         let inherited_domains = self.active_domains.clone();
@@ -1599,6 +1627,11 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     Self::stmt_guarantees_termination(&then_stmt)
                         && Self::stmt_guarantees_termination(else_stmt)
                 });
+                r2il::refusal_evidence!(
+                    "if-merge",
+                    "cond={cond_block:#x} merge={merge_block:?} owned_by_ancestor={merge_owned_by_ancestor}                      terminates={branches_terminate} arm_exits={}",
+                    arm_exits.len()
+                );
                 let if_stmt = self.observe_control_ownership(
                     *cond_block,
                     CStmt::if_stmt(cond, then_stmt, else_stmt),

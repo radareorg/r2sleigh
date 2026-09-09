@@ -18332,3 +18332,55 @@ of the rendered population is losing tree structure, which is what the remaining
 `ged` gap is made of. And the engine's cost is not the binding plan or the BDD:
 it is one structuring walk that is thrown away, so fixing the structure defects
 removes the second render as well.
+
+## A merge point is a region, not a block
+
+The head of the silent 101 was one line. `analyze_conditional`
+(`crates/r2dec/src/region.rs:619`) records a conditional's merge point as an
+*address* and never analyses it:
+
+    Region::IfThenElse { cond_block, then_region, else_region, merge_block: merge }
+
+and the emission then writes it with `self.structure_block(*merge_addr)`
+(`structure.rs`) -- one basic block. So a merge that is itself a branch, a loop,
+or anything but a straight-line tail loses everything after it, the rendered
+block coverage check reports "structuring covered N of M source blocks", and the
+whole function falls back to no structure at all.
+
+`bzip2_O2 0x8640` (`BZ2_bzread`) is five blocks and the walk trace proved it:
+
+    if-else at 0x8640
+    block at 0x8661
+
+Two nodes. `0x8686`, the merge, was written as a block and its own branch to
+`0x869b`/`0x8696` was never seen. The earlier reading that r2's `pdct` showed a
+correct tree was wrong -- `pdct` is radare2's own pseudo-decompiler and does not
+exist in this tree.
+
+The shape the emission already wants is a sequence.
+`Self::sequence_owned_merge` (`structure.rs:2854`) matches exactly
+`Sequence[IfThenElse{merge_block: Some(m)}, <region entered at m>]`: the sequence
+defers the merge, the branch sees `merge_owned_by_ancestor` and skips it, and
+the sequence writes the merge's full region next. Nothing produced that shape.
+`analyze_conditional` now does.
+
+**A merge that is one block keeps the old path.** Routing a leaf merge through
+the sequence lost the branch's own `ControlPredicate` and `ControlTransfer`
+obligations -- `a_restored_stack_pointer_renders` went from "0 unaccounted" to
+"3 refused, 2 unaccounted" with a complete and correct region walk. Both forms
+are correct for a leaf and the branch's own path is the proven one, so the
+sequence is used only where it is needed. **That anomaly is not understood and
+is not hidden**: a leaf merge written by a sequence sibling rather than by its
+branch drops two control obligations, and something in the observation of
+control ownership is positional rather than structural. It is the next thing to
+trace here, and it may well be the same defect behind some of the remaining
+`rendered control-domain occurrences do not exactly cover block` cases.
+
+Measured over the seven local binaries: **232 unstructured to 204**, twenty-eight
+functions recovering real control structure, coverage unchanged at 736 rendered
+/ 118 refused, six gates at 54 pass, unit tests 378 + 520. Each recovered
+function also stops paying for the discarded structuring walk.
+
+The instrumentation that found it stays: the region-walk trace names every node
+the structurer enters, and `if-merge` names which merge path a branch took. Both
+are behind `R2DEC_TRACE_REFUSAL`, whose check is a cached `OnceLock`.

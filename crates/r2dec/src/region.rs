@@ -635,7 +635,7 @@ impl<'a> RegionAnalyzer<'a> {
             None
         };
 
-        match (then_region, else_region) {
+        let branch = match (then_region, else_region) {
             (Some(then_r), Some(else_r)) => Region::IfThenElse {
                 cond_block: cond,
                 then_region: then_r,
@@ -658,6 +658,23 @@ impl<'a> RegionAnalyzer<'a> {
                 }
             }
             (None, None) => Region::Block(cond),
+        };
+        // Where the arms converge, and everything from there on, is part of
+        // this region. Naming only the merge's address left the emission one
+        // block to write, so a merge that is itself a branch or a loop lost
+        // everything after it and the whole function fell back to no structure.
+        // The sequence is the shape `sequence_owned_merge` already coordinates:
+        // it defers the merge, the branch skips it, and the continuation is
+        // written here in full.
+        let Some(merge) = merge.filter(|merge| !self.processed.contains(merge)) else {
+            return branch;
+        };
+        match self.analyze_region_recursive(merge) {
+            // A merge that is one block is already written by the branch that
+            // converges on it, and routing it through the sequence instead
+            // loses that branch's own control obligations.
+            Region::Block(_) => branch,
+            continuation => Region::Sequence(vec![branch, continuation]),
         }
     }
 
