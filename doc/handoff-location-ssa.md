@@ -18833,9 +18833,11 @@ acyclic corpus behind one builder, the one that places a shared tail once.
 Measured over the seven local binaries, against the state this session started
 from:
 
-    rendered      736 -> 739     refused 118 -> 115     silent 0 -> 0
-    unstructured  204 -> 206
-    dbg_deflate   8,875 ms -> 5,089 ms   (structure_walk 4,836 -> 1,258)
+    rendered      736 -> 740     refused 118 -> 114     silent 0 -> 0
+    unstructured  204 -> 207
+    dbg_deflate   8,875 ms -> 5,048 ms   (structure_walk 4,836 -> 1,245)
+    minigzip_O0   did not finish -> 31.9 s for 185 functions
+    worst domain  932,023 alternatives -> 1,084
 
 Coverage is up by three with none lost. The unstructured column is worth being
 precise about, because the net of +2 hides a much larger churn: **53 functions
@@ -18844,7 +18846,9 @@ The +2 arrives as two separate movements. Placing shared tails once cost 17
 (204 -> 221 at the same coverage), and a branch no longer naming a merge it does
 not dominate recovered 16 (222 -> 206).
 
-The 17 have one cause and it is traced. `bzip2_O0 0x6f9b` is the shape: the tail
+The 17 had one cause and it is fixed: a tail jumped to a block only it wrote,
+so the jump went nowhere and the path that should have arrived never did. The
+trace below is what named it. `bzip2_O0 0x6f9b` is the shape: the tail
 at `0x70d4` is rendered under `70ba=true` and under `70ba=false && 70c6=false`,
 and the path `70ba=false && 70c6=true` reaches it with no jump rendered, so
 `certify_transfer_domain_join` refuses -- correctly. A tail may only be placed
