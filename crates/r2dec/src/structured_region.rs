@@ -1079,6 +1079,7 @@ fn strip_region_markers(stmt: &mut CStmt) {
 pub(crate) fn kind_of(region: &Region) -> StructuredRegionKind {
     match region {
         Region::Block(_) => StructuredRegionKind::Block,
+        Region::Goto { .. } => StructuredRegionKind::Transfer,
         Region::Sequence(_) => StructuredRegionKind::Sequence,
         Region::IfThenElse { .. } => StructuredRegionKind::IfThenElse,
         Region::WhileLoop { .. } => StructuredRegionKind::WhileLoop,
@@ -1093,7 +1094,10 @@ pub(crate) fn kind_of(region: &Region) -> StructuredRegionKind {
 #[cfg(test)]
 fn direct_children(region: &Region) -> Vec<&Region> {
     match region {
-        Region::Block(_) | Region::Transfer { .. } | Region::Irreducible { .. } => Vec::new(),
+        Region::Block(_)
+        | Region::Goto { .. }
+        | Region::Transfer { .. }
+        | Region::Irreducible { .. } => Vec::new(),
         Region::Sequence(regions) => regions.iter().collect(),
         Region::IfThenElse {
             then_region,

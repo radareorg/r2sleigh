@@ -209,6 +209,8 @@ pub(crate) struct ControlFlowStructurer<'a, 'o> {
     /// Exact side-entry domains that reach a labeled block through a certified
     /// noncanonical loop exit.
     transfer_target_domains: BTreeMap<u64, Vec<RenderedBlockDomain>>,
+    /// Shared tails the analysis placed once, written after the body.
+    hoisted_joins: BTreeMap<u64, Region>,
     /// Counted loops whose exact initializer and update have been moved into
     /// the header before region emission begins.
     certified_for_regions: BTreeMap<u64, CertifiedForRegion>,
@@ -452,6 +454,7 @@ struct SwitchRegionView<'r> {
 fn region_kind_name(region: &Region) -> &'static str {
     match region {
         Region::Block(_) => "block",
+        Region::Goto { .. } => "goto",
         Region::Sequence(_) => "sequence",
         Region::IfThenElse { .. } => "if-else",
         Region::WhileLoop { .. } => "while",
@@ -492,6 +495,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             structured_region_blocks: BTreeSet::new(),
             proven_dead_blocks: std::cell::OnceCell::new(),
             transfer_target_domains: BTreeMap::new(),
+            hoisted_joins: BTreeMap::new(),
             certified_for_regions: BTreeMap::new(),
             certified_for_header_sites: BTreeSet::new(),
         }
@@ -530,6 +534,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             structured_region_blocks: BTreeSet::new(),
             proven_dead_blocks: std::cell::OnceCell::new(),
             transfer_target_domains: BTreeMap::new(),
+            hoisted_joins: BTreeMap::new(),
             certified_for_regions: BTreeMap::new(),
             certified_for_header_sites: BTreeSet::new(),
         })
@@ -968,6 +973,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
 
     fn collect_pre_test_loop_regions(region: &Region, loops: &mut Vec<(u64, BTreeSet<u64>)>) {
         match region {
+            Region::Goto { .. } => {}
             Region::Sequence(regions) => {
                 for child in regions {
                     Self::collect_pre_test_loop_regions(child, loops);
@@ -1192,8 +1198,15 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         self.emitted_labels.clear();
         self.structured_region_blocks.clear();
         self.transfer_target_domains.clear();
+        self.hoisted_joins.clear();
         if self.region_analyzer.is_none() {
             self.region_analyzer = Some(RegionAnalyzer::new(self.func));
+        }
+        // Which joins may be placed once: a join whose edges cannot each write
+        // the merge they carry is still copied into every path.
+        let hoistable = self.hoistable_joins();
+        if let Some(analyzer) = self.region_analyzer.as_mut() {
+            analyzer.set_hoistable_joins(hoistable);
         }
         let region = if let Some(analyzer) = self.region_analyzer.as_mut() {
             let region = if let Some(control) = self.control {
@@ -1225,9 +1238,43 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             }
         };
         crate::stage_timing::mark("structure_analyze");
+        // Tails placed once. Their labels have to exist before anything is
+        // written: a block already written cannot be given one afterwards.
+        let hoisted = self
+            .region_analyzer
+            .as_ref()
+            .map(|analyzer| analyzer.hoisted_joins().clone())
+            .unwrap_or_default();
         self.structured_region_blocks = region.blocks().into_iter().collect();
+        for (target, tail) in &hoisted {
+            self.ensure_label(*target);
+            // A tail jumps back into blocks the body writes, and a block the
+            // walk already wrote cannot be given a label afterwards.
+            let mut escapes = std::collections::BTreeSet::new();
+            RegionAnalyzer::collect_goto_targets(tail, &mut escapes);
+            for escape in escapes {
+                self.ensure_label(escape);
+            }
+            self.structured_region_blocks.extend(tail.blocks());
+        }
+        self.hoisted_joins = hoisted;
         self.prepare_certified_for_regions(&region)?;
+        for tail in self.hoisted_joins.clone().values() {
+            self.prepare_certified_for_regions(tail)?;
+        }
         self.shared_joins = self.collect_shared_joins()?;
+        // What the tree placed, what it jumped to, and what it left behind.
+        r2il::refusal_evidence!(
+            "structure-placement",
+            "tails at {:x?}, shared joins at {:x?}, blocks no region placed {:x?}",
+            self.hoisted_joins.keys().collect::<Vec<_>>(),
+            self.shared_joins.iter().collect::<Vec<_>>(),
+            self.func
+                .block_addrs()
+                .iter()
+                .filter(|addr| !self.structured_region_blocks.contains(addr))
+                .collect::<Vec<_>>()
+        );
         crate::stage_timing::mark("structure_prepare");
         // The jumps into a shared join need its label, and the jump back out
         // needs its successor's. Both have to exist before anything is written,
@@ -1237,6 +1284,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         }
         let stmt = self.structure_region(&region)?;
         crate::stage_timing::mark("structure_walk");
+        let stmt = self.append_hoisted_joins(stmt)?;
         let stmt = self.append_shared_joins(stmt)?;
         let stmt = self.append_deferred_shared_exits(stmt)?;
         crate::stage_timing::mark("structure_joins");
@@ -1282,7 +1330,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // places. Certifying the join here asks the target's domain to match
         // the one the jump is written in, which for an exit is inside the loop
         // it leaves; the join belongs where the target is placed.
-        if !matches!(region, Region::Transfer { .. })
+        if !matches!(region, Region::Transfer { .. } | Region::Goto { .. })
             && let Some(domains) = self.transfer_target_domains.remove(&region.entry())
         {
             self.certify_transfer_domain_join(region.entry(), domains);
@@ -1428,8 +1476,8 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         match self.rendered_branch_occurrences_cover_source(block_addr, &[occurrence]) {
             Ok(true) => {
                 self.active_domains = vec![RenderedBlockDomain {
-                    guards: source.guards,
-                    loops: source.loops,
+                    guards: source.guards.clone(),
+                    loops: source.loops.clone(),
                 }];
             }
             Ok(false) => {
@@ -1527,6 +1575,30 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     ) -> ControlFlowStructureResult<CStmt> {
         Ok(match region {
             Region::Block(addr) => self.structure_block(*addr)?,
+            // The tail is written once after the body, so this edge owes only
+            // the merge writes it carries, the jump, and the domain it ran in.
+            Region::Goto { source, target } => {
+                let Some(mut stmts) = self.shared_exit_merge_writes(*target, *source)? else {
+                    r2il::refusal_evidence!(
+                        "region-goto",
+                        "the edge {source:#x} to {target:#x} cannot write the merge it carries"
+                    );
+                    return Err(OpLoweringRefusal::missing_program_variable().into());
+                };
+                self.transfer_target_domains
+                    .entry(*target)
+                    .or_default()
+                    .extend(self.active_domains.iter().cloned());
+                stmts.push(CStmt::Goto(self.ensure_label(*target)));
+                // Control leaves here, so nothing falls out of this path into
+                // whatever the enclosing region writes next.
+                self.region_exit_domains = Some(Vec::new());
+                if stmts.len() == 1 {
+                    stmts.remove(0)
+                } else {
+                    CStmt::Block(stmts)
+                }
+            }
             Region::Sequence(regions) => {
                 let mut stmts = Vec::with_capacity(regions.len());
                 let outer_domains = self.active_domains.clone();
@@ -2688,6 +2760,30 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     /// many branches reach but some path steps around is not that, so the tree
     /// has nowhere to put it and it goes unwritten. It is still part of the
     /// function, and every edge reaching it agrees where it runs, so it can be
+    /// Blocks every incoming edge can write the merge it carries for.
+    fn hoistable_joins(&self) -> std::collections::HashSet<u64> {
+        let mut hoistable = std::collections::HashSet::new();
+        for addr in self.func.block_addrs() {
+            let predecessors = self.func.predecessors(*addr);
+            if predecessors.is_empty() {
+                continue;
+            }
+            if predecessors
+                .iter()
+                .all(|pred| matches!(self.shared_exit_merge_writes(*addr, *pred), Ok(Some(_))))
+            {
+                hoistable.insert(*addr);
+            }
+        }
+        hoistable
+    }
+
+    /// The blocks several branches converge on that no region claimed.
+    ///
+    /// A region tree says if/else with a merge every path runs through. A block
+    /// many branches reach but some path steps around is not that, so the tree
+    /// has nowhere to put it and it goes unwritten. It is still part of the
+    /// function, and every edge reaching it agrees where it runs, so it can be
     /// written once behind a label like any other shared arrival.
     fn collect_shared_joins(&self) -> ControlFlowStructureResult<BTreeSet<u64>> {
         let mut joins = BTreeSet::new();
@@ -2728,6 +2824,42 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             joins.insert(addr);
         }
         Ok(joins)
+    }
+
+    /// Write each hoisted tail once, behind its label, after the body.
+    /// The whole region is written: that structure is what would be repeated.
+    fn append_hoisted_joins(&mut self, stmt: CStmt) -> ControlFlowStructureResult<CStmt> {
+        if self.hoisted_joins.is_empty() {
+            return Ok(stmt);
+        }
+        let joins = std::mem::take(&mut self.hoisted_joins);
+        let mut stmts = Vec::new();
+        Self::append_stmt_body_flat(&mut stmts, stmt);
+        let outer_domains = self.active_domains.clone();
+        for (target, tail) in joins {
+            // The tail runs for whatever jumped to it, not for the domain the
+            // body happened to end in. `structure_region` certifies the join.
+            let arriving = self.transfer_target_domains.get(&target).cloned();
+            let Some(mut arriving) = arriving.filter(|domains| !domains.is_empty()) else {
+                self.safety_reason = Some(format!(
+                    "no rendered arrival for the tail placed at 0x{target:x}"
+                ));
+                return Ok(CStmt::Empty);
+            };
+            Self::normalize_rendered_domains(&mut arriving);
+            self.active_domains = arriving;
+            if let Some(label) = self.take_block_label(target) {
+                stmts.push(CStmt::Label(label));
+            }
+            let tail_stmt = self.structure_region(&tail)?;
+            Self::append_stmt_body_flat(&mut stmts, tail_stmt);
+            self.active_domains = outer_domains.clone();
+        }
+        Ok(match stmts.len() {
+            0 => CStmt::Empty,
+            1 => stmts.remove(0),
+            _ => CStmt::Block(stmts),
+        })
     }
 
     /// Write the shared joins after the body, each behind its label.
@@ -2902,6 +3034,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
     fn region_owns_block_emission(region: &Region, addr: u64) -> bool {
         match region {
             Region::Block(block) => *block == addr,
+            Region::Goto { .. } => false,
             Region::Sequence(regions) => regions
                 .iter()
                 .any(|region| Self::region_owns_block_emission(region, addr)),
@@ -3860,6 +3993,19 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 occurrence_formula = bdd.or(occurrence_formula, alternative_formula)?;
             }
             if bdd.and(rendered_formula, occurrence_formula)? != BDD_FALSE {
+                // Two renderings of one block that can both run on one path.
+                r2il::refusal_evidence!(
+                    "control-coverage",
+                    "{block_addr:#x} has overlapping occurrences {:?}",
+                    occurrences
+                        .iter()
+                        .map(|occurrence| occurrence
+                            .alternatives
+                            .iter()
+                            .map(|alternative| Self::describe_guards(facts, &alternative.guards))
+                            .collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                );
                 return Ok(false);
             }
             rendered_formula = bdd.or(rendered_formula, occurrence_formula)?;

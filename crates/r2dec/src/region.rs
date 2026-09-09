@@ -86,6 +86,13 @@ pub enum Region {
         /// The merge block after the switch (if any).
         merge_block: Option<u64>,
     },
+    /// Control reaching a shared tail that is placed once elsewhere.
+    Goto {
+        /// Block the edge leaves.
+        source: u64,
+        /// Block the edge arrives at.
+        target: u64,
+    },
     /// An irreducible region (contains gotos).
     Irreducible {
         /// Entry block.
@@ -118,7 +125,10 @@ fn count_region_nodes(region: &Region) -> usize {
                 .sum::<usize>()
                 + default.as_ref().map_or(0, |r| count_region_nodes(r))
         }
-        Region::Block(_) | Region::Transfer { .. } | Region::Irreducible { .. } => 0,
+        Region::Block(_)
+        | Region::Goto { .. }
+        | Region::Transfer { .. }
+        | Region::Irreducible { .. } => 0,
     }
 }
 
@@ -133,6 +143,7 @@ impl Region {
             Self::DoWhileLoop { body, .. } => body.entry(),
             Self::MultiExit { head, .. } => head.entry(),
             Self::Transfer { target, .. } => *target,
+            Self::Goto { target, .. } => *target,
             Self::Switch { switch_block, .. } => *switch_block,
             Self::Irreducible { entry, .. } => *entry,
         }
@@ -142,6 +153,8 @@ impl Region {
     pub fn blocks(&self) -> Vec<u64> {
         match self {
             Self::Block(addr) => vec![*addr],
+            // A jump places nothing; the hoisted tail owns its blocks.
+            Self::Goto { .. } => Vec::new(),
             Self::Sequence(regions) => regions.iter().flat_map(|r| r.blocks()).collect(),
             Self::IfThenElse {
                 cond_block,
@@ -223,6 +236,10 @@ pub struct RegionAnalyzer<'a> {
     recursion_depth_limit: usize,
     /// Iterative collapse guard.
     max_collapse_iterations: usize,
+    /// Joins the caller proved every incoming edge can write its merge for.
+    hoistable_joins: HashSet<u64>,
+    /// Shared tails placed once, keyed by the block each is entered at.
+    hoisted_joins: BTreeMap<u64, Region>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +319,8 @@ impl<'a> RegionAnalyzer<'a> {
             processed: HashSet::new(),
             analysis_reason: None,
             recursion_depth: 0,
+            hoistable_joins: HashSet::new(),
+            hoisted_joins: BTreeMap::new(),
             recursion_depth_limit: (num_blocks.saturating_mul(8)).max(256),
             max_collapse_iterations: num_blocks.saturating_mul(10).max(256),
         };
@@ -512,6 +531,7 @@ impl<'a> RegionAnalyzer<'a> {
         self.processed.clear();
         self.analysis_reason = None;
         self.recursion_depth = 0;
+        self.hoisted_joins.clear();
 
         if let Some(region) = self.analyze_iterative() {
             return region;
@@ -520,6 +540,16 @@ impl<'a> RegionAnalyzer<'a> {
             entry: self.func.entry,
             blocks: self.func.block_addrs().to_vec(),
         }
+    }
+
+    /// Name the joins whose every incoming edge can write its merge.
+    pub fn set_hoistable_joins(&mut self, joins: HashSet<u64>) {
+        self.hoistable_joins = joins;
+    }
+
+    /// Shared tails this analysis placed once, in the order they are written.
+    pub fn hoisted_joins(&self) -> &BTreeMap<u64, Region> {
+        &self.hoisted_joins
     }
 
     /// Analyze with a distinct cooperative-stop result.
@@ -1394,17 +1424,9 @@ impl<'a> RegionAnalyzer<'a> {
                         // fallthrough chain into several guarded occurrences.
                         base
                     } else if self.working_join_requires_path_copy(next, graph, &reachable) {
-                        if let Some(next_region) = region_map.get(&next).cloned() {
-                            r2il::refusal_evidence!(
-                                "region-path-copy",
-                                "copying the region at {:#x} into the path through {:#x}: {} nodes",
-                                next_region.entry(),
-                                base.entry(),
-                                count_region_nodes(&next_region)
-                            );
-                            Self::sequence_merge(base, next_region)
-                        } else {
-                            base
+                        match self.working_join_path(next, node, graph, &mut region_map) {
+                            Some(region) => Self::sequence_merge(base, region),
+                            None => base,
                         }
                     } else {
                         // A proper merge is emitted once by the condition it
@@ -1429,14 +1451,21 @@ impl<'a> RegionAnalyzer<'a> {
                         .find(|node| graph.node_is_latch_transfer(*node))
                         .or_else(|| self.find_working_merge_point(true_succ, false_succ, graph));
                     let then_region = if Some(true_succ) != merge {
-                        self.take_working_path_region(true_succ, graph, &reachable, &mut region_map)
-                            .map(Box::new)
+                        self.take_working_path_region(
+                            true_succ,
+                            node,
+                            graph,
+                            &reachable,
+                            &mut region_map,
+                        )
+                        .map(Box::new)
                     } else {
                         None
                     };
                     let else_region = if Some(false_succ) != merge {
                         self.take_working_path_region(
                             false_succ,
+                            node,
                             graph,
                             &reachable,
                             &mut region_map,
@@ -1486,6 +1515,9 @@ impl<'a> RegionAnalyzer<'a> {
                     if let Some(merge_node) = merge
                         && graph.node_entry(merge_node).is_some_and(|merge_block| {
                             self.dominators.dominates(cond_block, merge_block)
+                                // A tail placed once is written after the body,
+                                // and both arms already jump to it.
+                                && !self.hoisted_joins.contains_key(&merge_block)
                         })
                         && let Some(continuation) = region_map.remove(&merge_node)
                     {
@@ -1823,17 +1855,286 @@ impl<'a> RegionAnalyzer<'a> {
     }
 
     fn take_working_path_region(
-        &self,
+        &mut self,
         node: usize,
+        from: usize,
         graph: &WorkingGraph,
         reachable: &HashSet<usize>,
         region_map: &mut HashMap<usize, Region>,
     ) -> Option<Region> {
         if self.working_join_requires_path_copy(node, graph, reachable) {
-            region_map.get(&node).cloned()
+            self.working_join_path(node, from, graph, region_map)
         } else {
             region_map.remove(&node)
         }
+    }
+
+    /// A jump to a join placed once, or this path's own copy of it.
+    /// Copying a partial join into every path is exponential in their depth.
+    fn working_join_path(
+        &mut self,
+        node: usize,
+        from: usize,
+        graph: &WorkingGraph,
+        region_map: &mut HashMap<usize, Region>,
+    ) -> Option<Region> {
+        if let Some((target, tail)) = self.hoistable_tail(node, graph, region_map)
+            && let Some(source) = self.working_edge_source(from, target, graph)
+        {
+            r2il::refusal_evidence!(
+                "region-hoisted-join",
+                "placing the tail at {target:#x} once: {} nodes",
+                count_region_nodes(&tail)
+            );
+            self.hoisted_joins.insert(target, tail);
+            return Some(Region::Goto { source, target });
+        }
+        region_map.get(&node).cloned()
+    }
+
+    /// The join a node enters and the tail to place once behind its label.
+    /// Nothing follows the tail, so every way out of it has to be a jump.
+    fn hoistable_tail(
+        &self,
+        node: usize,
+        graph: &WorkingGraph,
+        region_map: &HashMap<usize, Region>,
+    ) -> Option<(u64, Region)> {
+        let target = graph
+            .node_entry(node)
+            .or_else(|| region_map.get(&node).map(Region::entry))
+            .filter(|target| self.hoistable_joins.contains(target))?;
+        // Every path into the join has to be able to name the edge it takes,
+        // or the ones that cannot would copy what the others jump to.
+        let arrives = graph.preds.get(&node).into_iter().flatten();
+        if !arrives
+            .into_iter()
+            .all(|pred| self.working_edge_source(*pred, target, graph).is_some())
+        {
+            return None;
+        }
+        let tail = self.owned_tail(region_map.get(&node)?, target)?;
+        let inside = tail.blocks().into_iter().collect::<BTreeSet<_>>();
+        let mut spelled = BTreeSet::new();
+        Self::collect_goto_targets(&tail, &mut spelled);
+        // A jump the trim introduced still owes the merge its edge carries.
+        if !spelled
+            .iter()
+            .all(|target| self.hoistable_joins.contains(target))
+        {
+            return None;
+        }
+        let mut escapes = inside
+            .iter()
+            .flat_map(|block| self.func.successors(*block))
+            .filter(|succ| !inside.contains(succ) && !spelled.contains(succ))
+            .collect::<Vec<_>>();
+        escapes.sort_unstable();
+        escapes.dedup();
+        if !escapes
+            .iter()
+            .all(|target| self.hoistable_joins.contains(target))
+        {
+            return None;
+        }
+        match escapes.as_slice() {
+            [] => Some((target, tail)),
+            [escape] => match self
+                .exit_sources(std::slice::from_ref(&tail), *escape)
+                .as_slice()
+            {
+                [source] => Some((
+                    target,
+                    Region::Sequence(vec![
+                        tail,
+                        Region::Goto {
+                            source: *source,
+                            target: *escape,
+                        },
+                    ]),
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Every block a region already spells a jump to.
+    pub(crate) fn collect_goto_targets(region: &Region, out: &mut BTreeSet<u64>) {
+        match region {
+            Region::Goto { target, .. } | Region::Transfer { target, .. } => {
+                out.insert(*target);
+            }
+            Region::Sequence(regions) => {
+                for child in regions {
+                    Self::collect_goto_targets(child, out);
+                }
+            }
+            Region::IfThenElse {
+                then_region,
+                else_region,
+                ..
+            } => {
+                Self::collect_goto_targets(then_region, out);
+                if let Some(else_region) = else_region {
+                    Self::collect_goto_targets(else_region, out);
+                }
+            }
+            Region::WhileLoop { body, .. } | Region::DoWhileLoop { body, .. } => {
+                Self::collect_goto_targets(body, out);
+            }
+            Region::MultiExit { head, exits } => {
+                Self::collect_goto_targets(head, out);
+                out.extend(exits.iter().copied());
+            }
+            Region::Switch { cases, default, .. } => {
+                for (_, case) in cases {
+                    Self::collect_goto_targets(case, out);
+                }
+                if let Some(default) = default {
+                    Self::collect_goto_targets(default, out);
+                }
+            }
+            Region::Block(_) | Region::Irreducible { .. } => {}
+        }
+    }
+
+    fn block_is_owned(&self, owner: u64, block: u64) -> bool {
+        self.dominators.dominates(owner, block)
+    }
+
+    fn region_is_owned(&self, owner: u64, region: &Region) -> bool {
+        region
+            .blocks()
+            .iter()
+            .all(|block| self.block_is_owned(owner, *block))
+    }
+
+    /// The blocks in these regions that the edge to `target` can leave.
+    fn exit_sources(&self, regions: &[Region], target: u64) -> Vec<u64> {
+        let mut sources = regions
+            .iter()
+            .flat_map(Region::blocks)
+            .filter(|block| self.func.successors(*block).contains(&target))
+            .collect::<Vec<_>>();
+        sources.sort_unstable();
+        sources.dedup();
+        sources
+    }
+
+    /// The tail rewritten so every block it writes is one the join owns.
+    /// A path leaving that set jumps to where the rest of the tree wrote it.
+    fn owned_tail(&self, region: &Region, owner: u64) -> Option<Region> {
+        if self.region_is_owned(owner, region) {
+            return Some(region.clone());
+        }
+        match region {
+            Region::Sequence(regions) => {
+                let mut kept: Vec<Region> = Vec::new();
+                for child in regions {
+                    if self.region_is_owned(owner, child) {
+                        kept.push(child.clone());
+                        continue;
+                    }
+                    match self.owned_tail(child, owner) {
+                        Some(trimmed) => kept.push(trimmed),
+                        None => {
+                            let target = child.entry();
+                            match self.exit_sources(&kept, target).as_slice() {
+                                [source] => kept.push(Region::Goto {
+                                    source: *source,
+                                    target,
+                                }),
+                                _ => return None,
+                            }
+                        }
+                    }
+                    break;
+                }
+                (!kept.is_empty()).then_some(Region::Sequence(kept))
+            }
+            Region::IfThenElse {
+                cond_block,
+                then_region,
+                else_region,
+                merge_block,
+            } => {
+                if !self.block_is_owned(owner, *cond_block) {
+                    return None;
+                }
+                let merge_is_owned =
+                    merge_block.is_some_and(|merge| self.block_is_owned(owner, merge));
+                let escape = merge_block.filter(|_| !merge_is_owned);
+                let then_arm = self.owned_arm(then_region, *cond_block, owner, escape)?;
+                let else_arm = match else_region {
+                    Some(arm) => Some(Box::new(self.owned_arm(arm, *cond_block, owner, escape)?)),
+                    None => escape.map(|target| {
+                        Box::new(Region::Goto {
+                            source: *cond_block,
+                            target,
+                        })
+                    }),
+                };
+                Some(Region::IfThenElse {
+                    cond_block: *cond_block,
+                    then_region: Box::new(then_arm),
+                    else_region: else_arm,
+                    merge_block: merge_block.filter(|_| merge_is_owned),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// One arm of a branch the join owns, ending in a jump where it leaves.
+    fn owned_arm(
+        &self,
+        arm: &Region,
+        cond_block: u64,
+        owner: u64,
+        escape: Option<u64>,
+    ) -> Option<Region> {
+        let body = if self.region_is_owned(owner, arm) {
+            arm.clone()
+        } else if self.block_is_owned(owner, arm.entry()) {
+            self.owned_tail(arm, owner)?
+        } else {
+            return Some(Region::Goto {
+                source: cond_block,
+                target: arm.entry(),
+            });
+        };
+        let Some(target) = escape else {
+            return Some(body);
+        };
+        match self
+            .exit_sources(std::slice::from_ref(&body), target)
+            .as_slice()
+        {
+            // The arm never reaches the merge, so it owes it no jump.
+            [] => Some(body),
+            [source] => Some(Region::Sequence(vec![
+                body.clone(),
+                Region::Goto {
+                    source: *source,
+                    target,
+                },
+            ])),
+            _ => None,
+        }
+    }
+
+    /// The block inside `from` that the edge to `target` leaves.
+    /// A node reaching the target from several blocks gets no single jump.
+    fn working_edge_source(&self, from: usize, target: u64, graph: &WorkingGraph) -> Option<u64> {
+        let blocks = graph.node_blocks(from);
+        let mut sources = self
+            .func
+            .predecessors(target)
+            .into_iter()
+            .filter(|pred| blocks.contains(pred));
+        let source = sources.next()?;
+        sources.next().is_none().then_some(source)
     }
 
     /// Where a switch's arms converge.
@@ -2946,6 +3247,7 @@ mod tests {
     fn explicit_block_occurrences(region: &Region, expected: u64) -> usize {
         match region {
             Region::Block(addr) => usize::from(*addr == expected),
+            Region::Goto { .. } => 0,
             Region::Sequence(regions) => regions
                 .iter()
                 .map(|region| explicit_block_occurrences(region, expected))
@@ -3338,6 +3640,7 @@ mod tests {
 
     fn region_contains_dowhile_cond(region: &Region, expected: u64) -> bool {
         match region {
+            Region::Goto { .. } => false,
             Region::DoWhileLoop { body, cond_block } => {
                 *cond_block == expected || region_contains_dowhile_cond(body, expected)
             }
@@ -3370,6 +3673,7 @@ mod tests {
 
     fn region_contains_loop_entry(region: &Region, expected: u64) -> bool {
         match region {
+            Region::Goto { .. } => false,
             Region::DoWhileLoop { body, .. } => {
                 body.entry() == expected || region_contains_loop_entry(body, expected)
             }
@@ -3404,6 +3708,7 @@ mod tests {
 
     fn region_contains_cond_block(region: &Region, expected: u64) -> bool {
         match region {
+            Region::Goto { .. } => false,
             Region::IfThenElse {
                 cond_block,
                 then_region,
@@ -3437,6 +3742,7 @@ mod tests {
 
     fn region_contains_multi_exit(region: &Region, expected_entry: u64) -> bool {
         match region {
+            Region::Goto { .. } => false,
             Region::MultiExit { head, .. } => {
                 head.entry() == expected_entry || region_contains_multi_exit(head, expected_entry)
             }
@@ -3475,6 +3781,7 @@ mod tests {
         expected_kind: RegionTransferKind,
     ) -> bool {
         match region {
+            Region::Goto { .. } => false,
             Region::Transfer {
                 source,
                 target,
@@ -3532,6 +3839,7 @@ mod tests {
 
     fn region_contains_irreducible_entry(region: &Region, expected: u64) -> bool {
         match region {
+            Region::Goto { .. } => false,
             Region::Irreducible { entry, .. } => *entry == expected,
             Region::WhileLoop { body, .. } | Region::DoWhileLoop { body, .. } => {
                 region_contains_irreducible_entry(body, expected)

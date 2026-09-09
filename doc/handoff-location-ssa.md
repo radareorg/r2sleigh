@@ -18615,3 +18615,95 @@ control-domain failures whose cause is a truncated duplicate, removes the reason
 the deadline and the two complexity constants exist, and removes the second
 render every unstructured function currently pays for. It is the piece of work
 this session ends pointing at, with each of its four faces measured.
+
+## The shared tail is placed once, and the exponential copying is gone
+
+The change the previous section pointed at is implemented. A partial join whose
+every incoming edge can write the merge it carries is no longer copied into each
+disjoint path: it is placed once after the body behind a label, and every path
+jumps to it. `Region::Goto { source, target }` is the edge, and the analyzer
+hands the structurer a `hoisted_joins` map of the tails it placed.
+
+Four things had to be true before it worked, and each of them was a separate
+trace this session. They are recorded because each looked like the whole answer
+at the time.
+
+**Every consumer of a copied region has to become a jump, not just one.** The
+first version rewrote only the single-successor copy site and left
+`take_working_path_region` -- the one that clones a conditional's arm -- copying
+as before. The join was then written twice, once inline and once in the tail,
+and `occurrence_regions_have_proven_order` refused four functions on
+`unprovable_execution_order` because one block had occurrences in two regions
+that were neither nested nor exclusive. Both sites now go through one helper.
+
+**A jump's own region must not certify the join.** `structure_region` certifies
+a transfer target's domain at the top of the walk, and it excluded
+`Region::Transfer` for the reason the comment there gives -- a transfer's entry
+is its target. `Region::Goto` has the same property and was not excluded, so the
+arrival domains were consumed at the jump instead of at the placement.
+
+**A certified join runs in the domain that was proved, not the canonical one --
+and that fix is blocked, not landed.** `certify_transfer_domain_join` proves the
+union of arrivals covers exactly what reaches the block and then sets
+`active_domains` to the block's *canonical* control domain. For a partial join
+those differ: the canonical domain is the common prefix of the guards, which
+admits paths that step around the join, so the line claims a wider domain than
+the proof supports. Keeping the proved alternatives instead was tried, was
+correct, and multiplied the rendered-domain disjunction until one function took
+minutes in `normalize_rendered_domains` alone. It is out of the tree until the
+representation below can carry a disjunction compactly. The trimmed tail does
+not need it: `owned_tail` makes the tail's own coverage exact, so all six
+functions render with the canonical collapse in place.
+
+**A tail placed once has to own what it writes.** The composed region at a join
+is its whole downward closure, which routinely includes blocks the rest of the
+tree also places -- a later merge reached from outside the join. Writing that
+region after the body wrote those blocks twice. `owned_tail` now trims the
+region to the blocks the join dominates and turns each departure into a jump,
+and `hoistable_tail` closes the result: any successor of a tail block that is
+neither inside the tail nor already jumped to becomes an explicit jump, or the
+tail is not hoisted at all. Without the closure step `murmur3_32` fell off the
+end of its own function in three corpus cells.
+
+Measured on `dbg_deflate` (minigzip_O2), which is the function the whole
+performance story is about:
+
+    structure_walk   4,836 ms  ->  77 ms
+    total            8,875 ms  ->  4,524 ms
+
+The walk is no longer the cost. `structure_region_seal` at 3.0 s is now two
+thirds of the render and is the next thing to name; a `structure_route` mark has
+been added to split it.
+
+## The rendered control domain is a DNF, and it is exponential
+
+Chasing the hoisting work named the next cost precisely, and it is not the
+structurer's tree -- it is how a rendered domain is written down.
+`RenderedBlockDomain` is a conjunction of guards and `active_domains` is a list
+of them, so a rendered domain is a disjunctive normal form. At a branch whose
+merge an ancestor owns, `structure_branch_region` unions both arms' domains and
+carries them out, so every such nesting level doubles the list. On minigzip_O0
+the `if-merge` trace reaches **932,023 alternatives** for one function.
+
+`normalize_rendered_domains` then deduplicated that list with a linear
+membership scan, which is quadratic: 10^11 comparisons on that function, inside
+one call, with no `poll()` to reach. The function did not finish. That part is
+fixed -- the dedup is ordered now -- and minigzip_O0's 185 functions complete in
+under two minutes where they previously did not complete at all. **This is a
+pre-existing defect, not something the hoisting introduced**: the same trace at
+`HEAD` reaches 108,855 alternatives on the same function.
+
+The exponent itself is untouched. The right representation is the one the
+coverage proof already uses internally -- a BDD over the same predicate
+variables, which is canonical and compact where a DNF is not. Two things wait on
+it: the exponent, and the certify fix above, which is correct but cannot be
+carried in a DNF.
+
+`sample` and `atos` now work on the engine. `[profile.probe]` in the workspace
+manifest is a release build with symbols and line tables kept, because
+`[profile.release]` sets `strip = true` and a stripped `cdylib` gives a profiler
+nothing but hex. Build it with `cargo build --profile probe -p r2sleigh-plugin`,
+copy the dylib over the installed one, `codesign -f -s -` it, and run
+`dsymutil` on it once so `atos -o <dSYM>/Contents/Resources/DWARF/<dylib> -l
+<load address> <addr>` prints `structure.rs:1720`. That is how the arm-exit
+union was named rather than guessed at.

@@ -3626,6 +3626,7 @@ impl Decompiler {
             }
         };
         structuring_work.poll()?;
+        crate::stage_timing::mark("structure_route");
         if let Some(structured_body) = routed_body.structured_body()
             && let Err(refusal) = validate_sealed_region_occurrence_coverage(structured_body)
         {
