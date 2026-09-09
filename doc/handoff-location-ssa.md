@@ -18100,3 +18100,69 @@ tree and rendering `minigzip_O0 0x3957` showed the same refusal, so the earlier
 census had been taken against a plugin that no longer matches the tree. A
 census is only a baseline for the exact build stamped in its `.build` file, and
 a stale one manufactures regressions that do not exist.
+
+## byte_match is ahead of angr; coverage is the whole gap
+
+The DecBench checkpoint after the member-run decomposition, zlib and bzip2 at
+O2, 860 functions:
+
+    coverage    r2sleigh 631/860 (73.4%)   angr 799/860 (92.9%)
+    byte_match  rendered 0.397 | all 0.291   angr 0.288 | 0.267
+    type_match  rendered 0.239 | all 0.137   angr 0.180 | 0.136
+    ged         rendered 14.195 over 41      angr 17.247 over 77
+
+This inverts the reading the byte_match work was started from. When that
+priority was set, byte_match was 0.245 rendered against angr's 0.368. It is now
+0.397 against 0.288, and `type_match` and `ged` are ahead on the rendered
+population as well. Every remaining metric gap is the all-function column, and
+the all-function column is coverage: 229 functions refuse, and each scores zero.
+
+So the ordering changes on the evidence. Refusals are the work; rendering
+quality is already better than the reference wherever we render at all.
+
+## Two inlining widenings, both traced, both reverted
+
+Neither moved a number, so neither is in the tree. What each one cost to find is
+worth keeping, because both are on the path to the staged eligibility fixpoint.
+
+**Multi-reader recomputation of lifter scratch.** The single-reader rule was
+generalised: the motion test -- reader in the same block, after the definition,
+no location the expression reads written in between -- was made per-reader
+rather than asked once, and pass two admitted values in a Sleigh `Unique` slot
+that are alone in their binding component. The census did not move at all: same
+730 rendered, same 1,829 distinct machine temporaries. Tracing one case said
+why. `tmp:3f680_1` in `hasSuffix` has three readers and `Unique` storage, and
+is *not* alone in its component: it is a copy, so it coalesces with its source.
+The values this admits are mostly already coalesced, and the ones that are not
+fail the motion test.
+
+It also produced one real finding before it was reverted. Spelling a value at
+two readers renders its definition twice, and if that definition owns a semantic
+obligation the ledger sees the effect discharged twice: `hasSuffix` refused with
+`1 conflicts (live-value-producer at 0x406d:op:67)`. Any multi-reader admission
+has to exclude a definition that owns an obligation, which is a rule derived
+from the ledger rather than a bound chosen for comfort.
+
+**Inlining a private object's load.** This is the larger class -- `tmp:11f80_1`
+and `tmp:6a80_3` in `hasSuffix` are refused as `MemoryRead`, and at -O0 the
+parameter-home load is everywhere. The project has already decided that a proven
+non-escaping stack local's loads are program-variable accesses rather than
+memory effects, so `expression_renders_inline` and `term_renders_inline` were
+widened to admit `MemoryRead`/`Load` when the object is in
+`private_stack_objects` (which the artifact now had to retain and expose), and
+the motion test gained "no instruction between the definition and the reader
+writes that object".
+
+It refused `InvalidPlannedInline`, and the cause is exact rather than a puzzle:
+`materialize_term` in `op_lower/lowering.rs` ends with
+
+    Kind::Opaque(_) | Kind::Variable(_) | Kind::Load { .. }
+    | Kind::Subscript { .. } | Kind::ObjectAddress(_) => return Err(invalid()),
+
+The comment above `term_renders_inline` says to keep its list identical to
+`materialize_term`, and this is what happens when they diverge. Admitting a
+private load to inlining therefore requires `materialize_term` to spell one --
+the object's name, or its member or element -- which is machinery
+`memory_renderer.rs` has for the statement path and the term path does not.
+That is the actual next step for this class, and it is a rendering change rather
+than a policy change.
