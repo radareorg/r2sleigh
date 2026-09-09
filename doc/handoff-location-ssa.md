@@ -18919,11 +18919,20 @@ marked. Four functions locally, 744 of 854 rendered against 740.
 
 The cost is a whole re-render per gap, because the seal reports one unaccounted
 cell at a time: `zlib_example` needs 34 attempts on one function and the binary
-goes from 40.8 s to 48.5 s. `first_unaccounted_render_observation` scans
-`values`, `uses` and `writes` and returns the first `None`; a sibling that
-returns all of them, carried out through the failure, would turn k renders into
-one. That is the next thing to do here and it is pure arithmetic -- the same
-gaps, found in one pass.
+goes from 40.8 s to 48.5 s.
+
+Planning them all in one pass was tried and is **wrong**, not merely slower. A
+sibling of `first_unaccounted_render_observation` that returns every unaccounted
+cell was carried out through the refusal and planned in one go. `bzip2_O2` fell
+from 22.0 s to 7.9 s, but `zlib_example` rose to 76.4 s and the census lost the
+three functions the loop had gained, with **no gap markers at all** in the
+output. Gapping every cell the seal names at once poisons so much through
+`gap_closure` that the gaps can no longer open, and the function refuses again.
+
+The incremental loop is not a slow way to reach the same answer -- it is what
+finds the *minimal* set of gaps, one cell at a time, each one re-proved against
+a render that already accounts for the last. The k renders are the search. The
+experiment was reverted.
 
 Placement refusals are not yet routed. `PlacementRefusal` names a `BindingId`
 rather than a value, so the anchor is one hop further: binding -> the values it
