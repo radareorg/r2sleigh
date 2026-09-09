@@ -3130,18 +3130,62 @@ impl LegacyObservationJournal {
                 input_idx: 0,
             }));
         }
-        let id = self
-            .allocate_many(vec![ObservationTarget::StackAccess {
-                access,
-                object: fact.object,
-                binding,
-                symbol,
-                is_write,
-            }])?
-            .into_iter()
-            .next()
-            .ok_or(LegacyObservationJournalError::TooManyObservations)?;
-        Ok(CExpr::observed(id, expr))
+        // The address the machine computed has no separate spelling here: the
+        // rendered lvalue names the object it addressed, so the statements that
+        // computed the address vanished into it and it answers for their cells.
+        let discharged = self.inlined_address_producers(fact.address);
+        let mut targets = vec![ObservationTarget::StackAccess {
+            access,
+            object: fact.object,
+            binding,
+            symbol,
+            is_write,
+        }];
+        targets.extend(self.discharged_instruction_targets(None, &discharged, Some(&expr))?);
+        let mut marked = expr;
+        for id in self.allocate_many(targets)? {
+            marked = CExpr::observed(id, marked);
+        }
+        Ok(marked)
+    }
+
+    /// The definitions an inlined address computation is made of.
+    ///
+    /// Rendering the access spells the object rather than the address, so every
+    /// inlined producer behind that address is discharged there. A producer the
+    /// plan bound is not: its own statement still renders it.
+    fn inlined_address_producers(&self, address: ValueId) -> Vec<InstId> {
+        let graph = self.source.graph();
+        let mut discharged = Vec::new();
+        let mut pending = vec![address];
+        let mut seen = BTreeSet::new();
+        while let Some(value) = pending.pop() {
+            if !seen.insert(value) {
+                continue;
+            }
+            if !matches!(
+                self.plan.disposition(value),
+                Some(ValueDisposition::Inline { .. })
+            ) {
+                continue;
+            }
+            if self
+                .values
+                .get(value.0 as usize)
+                .is_none_or(Option::is_some)
+            {
+                continue;
+            }
+            let Some(definition) = graph.def_inst(value) else {
+                continue;
+            };
+            let Some(inst) = graph.inst(definition) else {
+                continue;
+            };
+            discharged.push(definition);
+            pending.extend(inst.inputs.iter().copied());
+        }
+        discharged
     }
 
     /// Account the merge a normalization removed by materializing its edges.

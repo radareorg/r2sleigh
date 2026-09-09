@@ -18166,3 +18166,38 @@ the object's name, or its member or element -- which is machinery
 `memory_renderer.rs` has for the statement path and the term path does not.
 That is the actual next step for this class, and it is a rendering change rather
 than a policy change.
+
+## A rendered stack access answers for the address that vanished into it
+
+`RenderedValueRequired` was the largest local refusal class at twenty-five.
+Naming the unaccounted value in each of minigzip_O0's five cases showed four
+shapes, and three of them were one defect.
+
+`fcn_48e6` is the smallest. `tmp:4700_55 = IntAdd(RBP_1, -8)` is a frame
+address with exactly one use, the address operand of a store, and the plan
+inlines it. The store renders as `stack_x = ...`: the object's name, with no
+address expression anywhere in it. So the use cell is answered -- the
+memory-address marker accounts for the operand -- and the *value* cell has no
+target at all, because nothing rendered the address.
+
+The rendered lvalue is where those statements went. `observe_stack_access_expr`
+now discharges the whole inlined address computation there, through the same
+`discharged_instruction_targets` the rewriter's replacement contract uses, so
+the access answers for each producer's write, value and operand cells. Walking
+the chain rather than the one value matters: `fcn_4b2b`'s unaccounted value was
+a *constant* operand of the address computation, two links down.
+
+Measured serially over the seven local binaries the count is unchanged at 730
+rendered / 124 refused, and `RenderedValueRequired` falls from twenty-five to
+nineteen: the six functions now reach the effect ledger and refuse there on an
+unaccounted `live-value-producer`, which is the next layer rather than this one.
+The cells were unowned before and are owned by the right site now, so it lands
+on its own.
+
+**A parallel census is not a census.** Running one r2 per binary is three times
+faster and changed the answer: `deflate` in minigzip_O2 refused "engine request
+deadline exceeded during structuring phase" under seven concurrent processes and
+rendered on its own. That cost a wrong reading of this change as -1 function.
+`census.sh` is serial again with the reason written into it, and `tally.sh` now
+refuses to compare two censuses whose `.build` stamps differ, which is the
+other way this session manufactured a regression that did not exist.
