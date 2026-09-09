@@ -749,6 +749,10 @@ pub(crate) struct EffectOccurrences {
     /// The obligation belongs to a value the plan spells as a literal at every
     /// reader, so a count above one is one execution spelled several times.
     repeated_literal: bool,
+    /// The obligation belongs to an address computation every reader spells by
+    /// naming the object it addressed, which performs nothing, so a count above
+    /// one is how many accesses named it rather than how many ran.
+    named_object_address: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -796,6 +800,12 @@ impl SurvivingEffectObservations {
         self.occurrences
             .get(&id)
             .is_some_and(|occurrences| occurrences.repeated_literal)
+    }
+
+    pub(crate) fn duplicates_are_a_named_object_address(&self, id: SemanticObligationId) -> bool {
+        self.occurrences
+            .get(&id)
+            .is_some_and(|occurrences| occurrences.named_object_address)
     }
 
     pub(crate) fn is_coalesced_carrier_use(&self, site: UseSite) -> bool {
@@ -3108,7 +3118,9 @@ impl LegacyObservationJournal {
             .ok_or(LegacyObservationJournalError::InvalidUse(UseSite {
                 inst: access.inst,
                 input_idx: 0,
-            }))?;
+            }))?
+            .clone();
+        let fact = &fact;
         let Some(disposition) = self.plan.stack_object_disposition(fact.object) else {
             return Ok(expr);
         };
@@ -3142,6 +3154,16 @@ impl LegacyObservationJournal {
             is_write,
         }];
         targets.extend(self.discharged_instruction_targets(None, &discharged, Some(&expr))?);
+        // The statements went here, and so did the obligations they owed: a
+        // frame address computation carries a live-value producer, and its
+        // occurrence is this access.
+        for inst in &discharged {
+            for obligation in self.source.obligations().obligations_for_inst(*inst) {
+                if self.effect_occurrences.contains_key(&obligation.id) {
+                    targets.push(ObservationTarget::Effect(obligation.id));
+                }
+            }
+        }
         let mut marked = expr;
         for id in self.allocate_many(targets)? {
             marked = CExpr::observed(id, marked);
@@ -3182,8 +3204,19 @@ impl LegacyObservationJournal {
             let Some(inst) = graph.inst(definition) else {
                 continue;
             };
-            discharged.push(definition);
             pending.extend(inst.inputs.iter().copied());
+            // Only a value nothing else can render. A producer read somewhere
+            // that spells it is answered there, and answering again here
+            // reports one effect discharged twice.
+            if !graph.use_sites(value).iter().all(|site| {
+                matches!(
+                    self.plan.use_disposition(*site),
+                    Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
+                )
+            }) {
+                continue;
+            }
+            discharged.push(definition);
         }
         discharged
     }
@@ -4169,6 +4202,7 @@ impl LegacyObservationJournal {
                             exclusive: false,
                             // Nor a plan to ask which values are literals.
                             repeated_literal: false,
+                            named_object_address: false,
                         },
                     )
                 })
@@ -4650,6 +4684,43 @@ impl LegacyObservationJournal {
         ids
     }
 
+    /// The obligations of every address computation the accesses that read it
+    /// spell by naming their object.
+    ///
+    /// The machine computes the address once and each rendered access performs
+    /// nothing to obtain it, exactly as a repeated literal does, so several
+    /// occurrences are one execution.
+    fn named_object_address_effects(&self) -> BTreeSet<SemanticObligationId> {
+        let graph = self.source.graph();
+        let mut ids = BTreeSet::new();
+        for graph_value in &graph.values {
+            if !matches!(
+                self.plan.disposition(graph_value.id),
+                Some(ValueDisposition::Inline { .. })
+            ) {
+                continue;
+            }
+            let uses = graph.use_sites(graph_value.id);
+            if uses.is_empty()
+                || !uses.iter().all(|site| {
+                    matches!(
+                        self.plan.use_disposition(*site),
+                        Some(r2ssa::MachineUseDisposition::MemoryAddress(_))
+                    )
+                })
+            {
+                continue;
+            }
+            let Some(definition) = graph.def_inst(graph_value.id) else {
+                continue;
+            };
+            if let Some(disposition) = self.source.obligations().instruction_for_inst(definition) {
+                ids.extend(disposition.obligations.iter().copied());
+            }
+        }
+        ids
+    }
+
     fn into_sealed_observations(
         mut self,
         source: &SourceOwnedFunctionFacts,
@@ -4657,6 +4728,7 @@ impl LegacyObservationJournal {
         let coverage = self.final_coverage();
         let exclusive = std::mem::take(&mut self.exclusive_duplicate_effects);
         let repeated_literals = self.repeated_literal_effects();
+        let named_object_addresses = self.named_object_address_effects();
         let effects = SurvivingEffectObservations {
             occurrences: std::mem::take(&mut self.effect_occurrences)
                 .into_iter()
@@ -4667,6 +4739,7 @@ impl LegacyObservationJournal {
                             count,
                             exclusive: exclusive.contains(&id),
                             repeated_literal: repeated_literals.contains(&id),
+                            named_object_address: named_object_addresses.contains(&id),
                         },
                     )
                 })

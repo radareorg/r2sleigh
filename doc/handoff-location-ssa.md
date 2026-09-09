@@ -18201,3 +18201,45 @@ rendered on its own. That cost a wrong reading of this change as -1 function.
 `census.sh` is serial again with the reason written into it, and `tally.sh` now
 refuses to compare two censuses whose `.build` stamps differ, which is the
 other way this session manufactured a regression that did not exist.
+
+## An address every access names by its object is one execution
+
+Discharging the elided address computation's cells at the rendered access left
+its *obligation* unowned: a frame address computation carries a live-value
+producer, and the statement that owed it had vanished into the access. Marking
+the obligation there too closed the three traced functions and broke seven
+others with `conflicts (live-value-producer ...)`, because one address feeds
+several accesses and each of them then answered for the same effect.
+
+Two wrong answers before the right one. A `BTreeSet` of already-claimed
+producers on the journal made the count right and the cells wrong: the plan is
+built more than once per render, so the second pass found everything claimed and
+marked nothing. Choosing a deterministic owner instead -- the lowest-numbered
+access that elides the producer -- kept the cells but did not remove the
+conflicts, because the duplication is not between two accesses of one producer.
+
+The right answer was already in the ledger, twice. `duplicates_are_exclusive`
+admits several occurrences that the structured form put on paths excluding one
+another, and `duplicates_are_a_repeated_literal` admits several occurrences of a
+value spelled as a literal at each reader, on the ground that spelling a
+constant performs nothing. An address every reader spells by *naming the object
+it addressed* is the same fact: the machine computes it once, and no rendered
+access performs the computation, so a count above one is how many accesses named
+it rather than how many ran. `duplicates_are_a_named_object_address` says so,
+and the deterministic-owner rule went with it -- there is nothing to choose
+between accesses when they may all answer.
+
+The condition is exact rather than convenient: the value's disposition is
+`Inline` and *every* graph use of it is a `MemoryAddress`. A producer read
+anywhere that spells it is answered there.
+
+Measured serially over the seven local binaries: **730 rendered / 124 refused to
+735 / 119**, five gained and none lost -- `gzputc`, `gzvprintf`, and three in
+bzip2 -O0. Six corpus gates stay at 54 pass each; unit tests stay at 378 and 520.
+
+`fcn_3957` is the case this does not close, and it is worth naming. Its address
+value has two uses, a load and a phi edge the plan elides as an unobserved
+merge, so not every use is a memory address and nothing answers for its value
+cell. The phi use is already accounted `Elided(UnobservedMerge)`; what is
+missing is that an elided use should not disqualify the address from being
+named by its accesses.

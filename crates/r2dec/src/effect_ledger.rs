@@ -378,6 +378,11 @@ pub(crate) fn build_obligation_ledger(
             // would be three evaluations.
             _ if effects.duplicates_are_a_repeated_literal(id) => rendered_site(id)
                 .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
+            // And an address computation every access spells by naming its
+            // object. The machine computes it once and no rendered access
+            // performs it, so the count is how many accesses named it.
+            _ if effects.duplicates_are_a_named_object_address(id) => rendered_site(id)
+                .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx }),
             _ => {
                 if let Some(outcome) = rendered_site(id)
                     .map(|(block_addr, op_idx)| Outcome::Rendered { block_addr, op_idx })
