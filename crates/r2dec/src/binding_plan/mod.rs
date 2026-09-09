@@ -1468,6 +1468,20 @@ impl BindingPlan {
         if matches!(role, BindingRole::EntryValue | BindingRole::CallClobbered) {
             return Some(true);
         }
+        // An aggregate's declaration is its definition. C requires no
+        // assignment of a whole array before an element of it is read, and no
+        // single element write ever assigns the object, so demanding one
+        // refuses every buffer a function fills and then reads.
+        if matches!(role, BindingRole::StackObject { .. })
+            && self.binding(binding).is_some_and(|binding| {
+                matches!(
+                    binding.declaration_type(),
+                    r2types::CTypeLike::Array(_, Some(_))
+                )
+            })
+        {
+            return Some(true);
+        }
         // Storage above the entry stack pointer holds a value on entry for the
         // same reason a version-0 register does: this function never wrote it.
         Some(
