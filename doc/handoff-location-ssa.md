@@ -19067,3 +19067,32 @@ also what `UnownedBindingSymbol` (14 more declines) reports from the other end.
 The fix is in the binding plan -- the carrier and the result the call site
 writes should be one binding -- not in the journal or the placement audit, and
 it closes 41 of the 174 declines at once.
+
+## The functions that render nothing at all are dropped before we are asked
+
+Eighty-six of the functions the DecBench population lists produced no row from
+r2sleigh at all -- neither a score nor a decline. The adapter records its own
+candidate stages, and they say where they go:
+
+    bzip2:        discovered 114 -> after skip-list 73 -> after narrowing 73
+    bzip2recover: discovered  32 -> after skip-list 12 -> after narrowing 12
+
+Rendered plus declined is exactly the post-skip-list count, so **everything that
+survives the skip list is asked about**. The forty-one bzip2 functions that
+vanish are removed by DecBench's own `common.should_skip_function`, before the
+engine sees them. By name they are thirty-eight `sub_<address>` functions,
+seventeen GCC clones (`.part.0`, `.isra.0`, `.constprop.0`) and thirty-one
+others.
+
+Making the adapter ask about them anyway would raise the coverage number
+without deciding anything about a single function, and would be exactly the
+"100% on this binary" move: the skip list is the benchmark's statement about
+what counts as a function, and arguing with it is not decompilation.
+
+One correspondence in that area is real and was fixed and then reverted, because
+it changes nothing measurable: radare2 calls a function it named itself
+`fcn.00402850` and the benchmark calls it `sub_402850`, so the row keys can
+never meet. It is inert here only because the skip list removes those functions
+first, and the name filter it would have fed does not run when the benchmark
+passes no name list. If the skip list is ever narrowed on the benchmark's own
+terms, this is the other half of that change.
