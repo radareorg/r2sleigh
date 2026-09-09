@@ -339,10 +339,19 @@ class RawR2SleighDecompiler(Decompiler):
         # discarded the work. Five zlib binaries reported zero functions each
         # this way.
         stages: list[tuple[str, int]] = [("discovered", len(discovered))]
+        # A function sitting on one of the driver's DWARF `low_pc` targets is a
+        # verified source function and `should_skip_function` keeps it whatever
+        # section it landed in -- the rule its own docstring says applies
+        # everywhere. Calling it without that set made this backend drop
+        # functions the others keep, and they were then counted as a decompiler
+        # that said nothing rather than one that was never asked.
+        addr_targets = common.addr_targets_of(function_names)
         candidates = [
             (name, addr)
             for (name, addr) in discovered
-            if not common.should_skip_function(name, to_file_addr(addr), text_range)
+            if not common.should_skip_function(
+                name, to_file_addr(addr), text_range, addr_targets
+            )
         ]
         stages.append(("after skip-list", len(candidates)))
         if functions is not None:
