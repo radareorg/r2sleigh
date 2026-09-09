@@ -18384,3 +18384,45 @@ function also stops paying for the discarded structuring walk.
 The instrumentation that found it stays: the region-walk trace names every node
 the structurer enters, and `if-merge` names which merge path a branch took. Both
 are behind `R2DEC_TRACE_REFUSAL`, whose check is a cached `OnceLock`.
+
+## One statement covers all three: a block address that heads a region is not a block
+
+After the merge fix the ranking moved rather than shrank -- the silent class fell
+from 101 to 13 and "rendered control-domain occurrences do not exactly cover
+block" rose from 50 to 103. Eighty-eight functions stopped failing silently and
+started failing by name, which is progress in diagnosis before it is progress in
+output. Tracing the smallest of them found the same defect twice more.
+
+`minigzip_O2 0x3560` has seven blocks and two joins. The walk writes
+`block at 0x3590` twice and `block at 0x357a` once, and `0x357a` has two
+successors -- so the occurrence written as a bare block drops its branch, one of
+the two paths to `0x3585` is never rendered, and the coverage proof correctly
+reports that the rendered domain does not cover the source domain.
+
+Three sites, one mistake:
+
+1. **A merge point.** `analyze_conditional` recorded the address;
+   the emission wrote `structure_block`. Fixed above: 232 unstructured to 204.
+2. **An already-analysed entry.** `analyze_region_recursive_inner` returns
+   `Region::Block(entry)` when `processed` contains it, and `structure_block`
+   has no guard against re-rendering, so the duplicate writes the block's
+   statements and none of its successors. This is the 103.
+3. **A shared join.** `append_shared_joins` writes `folded_block_stmts(block)`
+   -- one block, never the join's region. Which is exactly why
+   `collect_shared_joins` must refuse any join with successors
+   (`structure.rs:2686`), and why (2) has no escape hatch to fall back on.
+
+The statement that fixes all three: **a block address that heads a region must
+be written as that region, not as that block.**
+
+Two things constrain the fix for (2) and (3). Duplicating a tail is already
+legitimate here -- the effect ledger's `duplicates_are_exclusive` rule exists
+for "a shared tail emitted once per path that reaches it rather than jumped to"
+-- so re-analysing a processed entry is sound in principle. But unrestricted
+duplication is exponential: a chain of twenty diamonds is a million tails, which
+is what the global `processed` set is really protecting against. So the answer
+is not to duplicate more; it is to make the *join* a first-class region written
+once behind a label, which then lets `collect_shared_joins` drop its
+no-successors restriction and gives (2) somewhere to go.
+
+That is the next piece of work, and it is one change rather than three.
