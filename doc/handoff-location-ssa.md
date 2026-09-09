@@ -17873,3 +17873,45 @@ settles it at certificate time is the declared slot's type, which
 
 The evidence for a conflicting use now names both operands with their canonical
 storage, so base and index are distinguishable without a second run.
+
+### The DecBench regression, traced: a vector store into a declared array
+
+The third checkpoint reads 1490/1820 (81.9%) against the second's 1499 (82.4%).
+Diffing the two runs' own censuses rather than the stale baseline: **nine newly
+refused, none newly rendered**, and they are three functions across three zlib
+variants -- `test_deflate`, `test_inflate`, `test_sync` in `example`,
+`example64` and `examplesh` -- all `ExactUseRequiresRenderedOccurrence`.
+
+Reproduced locally by building zlib 1.2.13's `test/example.c` on the benchmark
+host (this machine is arm64; the corpus is x86-64 ELF) and copying the binary
+back. Bisected by neutralising one change at a time: the cause is the
+frame-base restatement. With it removed, `test_deflate` and `test_inflate`
+render again.
+
+The restatement is not wrong. What it does is make 54 declared slots per binary
+match their objects, and one of those objects is zlib's `compr` buffer. The
+unaccounted use is input 0 of `InstId(72)`, `Store { addr: tmp:4e00_3, val:
+tmp:6c00_1 }` where the value is **sixteen bytes** -- an SSE fill of the buffer.
+A declared `uint8_t compr[N]` cannot spell a sixteen-byte assignment, so the
+access has no rendering, and before the slot matched it went through the raw
+memory path instead.
+
+So the trade today is: the restatement buys named, typed, correctly sized
+arrays -- `stackLo[100]`, `ftab[257]`, `ftabCopy[256]`, `buf[32]` under bzip2's
+own names, five functions gained locally -- and costs nine DecBench functions
+whose buffers are vector-filled.
+
+**It stays.** Reverting would restore a benchmark count by re-hiding correct
+type recovery, which is the trade this project's rules exist to refuse. The
+fix is not a revert but an admissibility rule: an array declaration does not
+describe an object some access uses more widely than its element type, because
+the array spelling cannot render that access. That is the same principle
+`admit_declaration_type` already applies to width -- a type whose width is not
+the storage's is not a description of it -- extended from the object's extent
+to its element. It needs the access widths, which
+`accessed_object_width` computes in `r2ssa` and which `declaration_type_for_binding`
+would need reaching.
+
+Local census at the same point: 603 rendered / 89 refused / 0 silent of 692,
+from 588 at the start of the session, with thirteen array declarations where
+there were none.
