@@ -18474,3 +18474,47 @@ both needed there, and both worked. What failed was placing the target inside an
 arm, which (3) is precisely what fixes.
 
 Reverted, tree back to 736 rendered / 118 refused and 204 unstructured.
+
+## "The" loop condition is not well defined for a loop with several exits
+
+The second cause, 52 functions, is a strict five-field equality in
+`exact_rendered_loop_id` between the canonical loop fact and the rendered loop.
+In every case the differing fields are `condition` and `condition_value` alone;
+`body`, `latches` and `exits` agree exactly.
+
+The rendered comment could not show this. `sanitize_comment_debug_ids`
+deliberately rewrites `ValueId(N)` to `value` and `ObjectId(N)` to `object`,
+because SSA numbers mean nothing to someone reading the C -- which is right, and
+which also meant the two sides printed identically as `Some(value)`. The
+comparison now reaches stderr unredacted through `rendered-loop-mismatch`.
+
+`dbg_deflate`'s own loop, the one that costs 8.9 seconds:
+
+    LoopId(5) at 0x7e94
+      canonical latches=[7e0f, 8070, 813b]  exits=[79e1, 7a58, 816d]
+      rendered  latches=[7e0f, 8070, 813b]  exits=[79e1, 7a58, 816d]
+      condition Some(PredicateId(73)) vs Some(PredicateId(94))
+      canonical condition sits at 0x7ec2, rendered condition at 0x813b
+
+Three latches and three exits. The canonical condition is an exit test inside
+the body; the rendered condition is a *latch*, because the structurer wrote the
+loop bottom-tested. The header 0x7e94 is neither. Both are defensible names for
+"the" condition and nothing makes one of them the answer.
+
+It generalises: over minigzip_O2, of 306 mismatch events **292 are loops with
+more than one exit** (284 with three, plus 2/4/7-exit cases) and only 14 are
+single-exit. So this is not a rotation bug in the common case -- it is a check
+demanding that two independently chosen values agree on a field the loop does
+not determine.
+
+That makes it a design question rather than a defect to trace, and it is the
+question to settle before touching it:
+
+- If a loop's exits are the invariant, a certificate for a multi-exit loop
+  should carry no single condition, and the equality should not ask for one.
+- If the certificate's condition is meant to be authoritative, the renderer owes
+  a rotation that makes that test the loop test and the others in-body exits --
+  better C, and much more work.
+
+The 14 single-exit mismatches are a different thing and are the ones worth
+tracing as a defect.

@@ -816,6 +816,32 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             ));
         }
         if !differs.is_empty() {
+            // The rendered comment redacts SSA identities, so the unredacted
+            // comparison only reaches a reader here.
+            r2il::refusal_evidence!(
+                "rendered-loop-mismatch",
+                "{loop_id:?} at {header:#x}: {} | canonical latches={:x?} exits={:x?}                  rendered latches={:x?} exits={:x?}",
+                differs.join("; "),
+                loop_fact.latches,
+                loop_fact.exits,
+                rendered.loop_latches,
+                rendered.loop_exits
+            );
+            let block_of = |want: Option<PredicateId>| {
+                want.and_then(|want| {
+                    facts
+                        .branch_predicates
+                        .iter()
+                        .find(|(_, predicate)| predicate.id == want)
+                        .map(|(addr, _)| *addr)
+                })
+            };
+            r2il::refusal_evidence!(
+                "rendered-loop-mismatch",
+                "{loop_id:?} canonical condition sits at {:x?}, rendered condition at {:x?}, header {header:#x}",
+                block_of(loop_fact.condition),
+                block_of(rendered.loop_condition)
+            );
             return Err(format!(
                 "canonical loop fact {:?} does not exactly match rendered loop at 0x{header:x}: {}",
                 loop_id,
