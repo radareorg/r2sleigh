@@ -169,6 +169,98 @@ pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + 
     Ok((defs, storage_by_identity))
 }
 
+/// The rename identities one call-boundary register names.
+///
+/// Renaming resolves these itself and, doing so per call site, could see an
+/// identity a previous site had just created. Resolving once against the
+/// definitions the body already has removes that order dependency.
+pub fn call_boundary_identities(
+    defs: &DefinitionSitesByIdentity,
+    reg: &crate::rename::CallBoundaryDef,
+    reg_names: Option<&RegisterNameMap>,
+) -> BTreeSet<RenameIdentity> {
+    let needle = reg.name.to_ascii_lowercase();
+    let mut identities = defs
+        .keys()
+        .filter(|candidate| {
+            candidate.size == reg.size && candidate.name.to_ascii_lowercase() == needle
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if identities.is_empty()
+        && let Some(reg_names) = reg_names
+    {
+        for ((offset, size), candidate) in reg_names {
+            if *size == reg.size && candidate.eq_ignore_ascii_case(&reg.name) {
+                identities.insert(RenameIdentity::new(
+                    candidate,
+                    CanonicalStorageId {
+                        space: crate::CanonicalStorageSpace::Register,
+                        offset: *offset,
+                        size: *size,
+                    },
+                ));
+            }
+        }
+    }
+    if identities.is_empty() {
+        identities.insert(RenameIdentity::synthetic(&reg.name, reg.size));
+    }
+    identities
+}
+
+/// Record the definitions renaming will add at every call.
+///
+/// A call clobbers its convention's registers, and renaming writes a
+/// `CallDefine` for each. Phi placement ran before those existed, so a
+/// register two paths defined -- one by a call and one by an instruction --
+/// reached a join with no phi, and the return that read it had no value.
+pub fn add_call_boundary_def_sites(
+    cfg: &CFG,
+    call_boundaries: &crate::rename::CallBoundaryConfig,
+    reg_names: Option<&RegisterNameMap>,
+    defs: &mut DefinitionSitesByIdentity,
+    storage_by_identity: &mut CanonicalStorageByIdentity,
+) {
+    // Only a carrier the body itself mentions. A register that appears
+    // nowhere but in the clobber list is read by no statement, so no phi for
+    // it can be observed and placing one only invents a live-in value.
+    let resolved = call_boundaries
+        .defined_regs
+        .iter()
+        .map(|reg| {
+            let identities = call_boundary_identities(defs, reg, reg_names);
+            identities
+                .into_iter()
+                .filter(|identity| defs.contains_key(identity))
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    for addr in cfg.block_addrs() {
+        let Some(block) = cfg.get_block(addr) else {
+            continue;
+        };
+        for op in &block.ops {
+            // Only a direct call names a callee whose body may have been read;
+            // anything else defines the whole list.
+            let preserved = match op {
+                r2il::R2ILOp::Call { target } if target.is_ram() => {
+                    call_boundaries.preserved_by_target.get(&target.offset)
+                }
+                r2il::R2ILOp::CallInd { .. } => None,
+                _ => continue,
+            };
+            for identity in resolved.iter().flatten() {
+                if preserved.is_some_and(|preserved| preserved.contains(&identity.storage)) {
+                    continue;
+                }
+                defs.entry(identity.clone()).or_default().insert(block.addr);
+                storage_by_identity.insert(identity.clone(), identity.storage);
+            }
+        }
+    }
+}
+
 fn get_op_output_varnode(op: &r2il::R2ILOp) -> Option<&r2il::Varnode> {
     use r2il::R2ILOp::*;
 

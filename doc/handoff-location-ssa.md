@@ -19273,3 +19273,46 @@ journal now records the values a gap claims and declines the read for those.
 
 Local census 744 -> 747 rendered, 110 -> 107 refused, three functions gained and
 none lost. DecBench 637 -> 641 of 860, with the gap column at nine.
+
+## Phi placement never saw the definitions a call makes
+
+`OpLowering(implementation.rs:1435)` -- an incomplete return boundary -- was
+eleven DecBench functions. On `zlib_example`'s `fcn_2840` the evidence reads:
+
+    0x286a has no phi for Register{offset 0, size 8} and its predecessors
+    disagree: [Value(ValueId(47)), Value(ValueId(101))]
+
+Block `0x2840` writes `RAX` with an `IntZExt`; block `0x2878` writes it with the
+`CallDefine` that follows its call; they join at `0x286a`, which ends in the
+return. There is no `RAX` phi there, although `RDX`, `RSI`, `RDI`, `RBP`, `R13`
+and `RSP` all have one.
+
+The reason is an ordering: `PhiPlacement::compute_with_storage_and_control` runs
+over the raw R2IL CFG, and `CallDefine` is not an R2IL operation. Renaming
+synthesises the clobbers afterwards in `append_call_boundary_defs`, so a
+register two paths define -- one by an instruction and one by a call -- reaches
+a join with no phi, and the return that reads it has no value. This is not
+specific to returns; any reader of such a register is equally unserved.
+
+`add_call_boundary_def_sites` now records those definitions before placement,
+resolving the identity each `CallBoundaryDef` names once against the body's own
+definitions instead of per call site, which also removes an order dependency:
+renaming could previously see an identity a *previous* call site had just
+created.
+
+It records a definition only for a carrier the body otherwise mentions. That is
+a liveness fact rather than a compromise -- a register appearing nowhere but in
+the clobber list is read by no statement, so no phi placed for it can be
+observed -- and without it the extra phis materialise version-0 live-ins for
+registers the function never touches. Measured: `murmur3_32`'s third parameter
+turned from `uint32_t EDX_0` into `uint64_t RDX_0`, which is the wrong width for
+a `uint32_t seed`, because the argument walk found a genuine but dead `RDX_0`.
+
+**What is left.** A register defined *only* by call clobbers on two paths --
+`return c ? g() : h();` -- still gets no phi, because it is in no R2IL
+operation. Closing that needs convention-aware liveness at SSA-build time: the
+return registers and the argument registers, which live in the semantic layer's
+ABI model and are not available where phis are placed. The narrower question
+the same trace raised is worth its own fix either way: a parameter's declared
+width should be the width the callee actually reads, not the width of the ABI
+slot it arrives in.

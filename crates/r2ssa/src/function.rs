@@ -2674,8 +2674,17 @@ impl SSAFunction {
         let reg_names_ref = reg_names.as_deref();
 
         // Collect variable definitions and sizes
-        let (defs, storage_by_identity) =
+        let (mut defs, mut storage_by_identity) =
             collect_defs_from_cfg_with_names_storage_and_control(&cfg, reg_names_ref, control)?;
+        if let Some(call_boundaries) = call_boundaries {
+            crate::phi::add_call_boundary_def_sites(
+                &cfg,
+                call_boundaries,
+                reg_names_ref,
+                &mut defs,
+                &mut storage_by_identity,
+            );
+        }
 
         // Place phi nodes
         let phi_placement = PhiPlacement::compute_with_storage_and_control(
