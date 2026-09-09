@@ -4252,7 +4252,23 @@ impl LegacyObservationJournal {
                         if record_same(slot, observation).is_err() {
                             if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
                                 eprintln!(
-                                    "conflicting use {site:?}: recorded {slot:?}, rendered {observation:?}, payload={:?}",
+                                    "conflicting use {site:?}: recorded {slot:?}, rendered {observation:?} operands={:?} payload={:?}",
+                                    // Which operand this is, by storage: a
+                                    // stack base and a computed index are the
+                                    // two halves of one address and only the
+                                    // base is stack geometry.
+                                    self.source.graph().inst(site.inst).map(|inst| inst
+                                        .inputs
+                                        .iter()
+                                        .map(|value| (
+                                            *value,
+                                            self.source
+                                                .graph()
+                                                .value(*value)
+                                                .and_then(|value| value.canonical_storage)
+                                                .map(|storage| (storage.space, storage.offset))
+                                        ))
+                                        .collect::<Vec<_>>()),
                                     self.source.graph().inst(site.inst).map(|inst| format!(
                                         "{:?}",
                                         inst.payload

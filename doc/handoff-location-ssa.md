@@ -17854,9 +17854,22 @@ bzip2_O0 goes from 23 refused to 20. bzip2_O2 and minigzip_O2 do not move yet.
 `InstId(586) input 1`: the stack-geometry certificate elides that operand as
 `DeadStackBase` while the renderer emits it exactly. The instruction is
 `IntAdd { dst: tmp:4e00_2 }` whose output is the address of the `Load` at
-`InstId(587)`, so the access is `yy[index]` with a computed index. Either the
-renderer failed to spell it through the object and fell back to address
-arithmetic, or the certificate is eliding an operand the spelling still needs.
-Which of the two operands is the base and which the index decides it, and that
-is the next probe.
+`InstId(587)`, so the access is `yy[index]` with a computed index. It is the second.
 
+`collect_stack_geometry_certificate` admits an `IntAdd` as geometry when one
+operand carries a stack root and the other is a constant, and then elides
+*every* input of that instruction. The assumption is that `base + const`
+collapses entirely into the object's name, which held while a stack object
+rendered as a scalar. With the object declared an array it collapses into
+`yy[const]` instead, and the constant survives as the rendered subscript index
+-- so the renderer emits a use the certificate said had vanished.
+
+The parallel already exists one line away: a geometry use whose machine
+disposition is `MemoryAddress` is left alone because "the rendered
+memory-address marker accounts for the surviving operand". A constant that
+becomes a subscript index is the same kind of survivor, and the fact that
+settles it at certificate time is the declared slot's type, which
+`DeclaredStackSlots` already holds.
+
+The evidence for a conflicting use now names both operands with their canonical
+storage, so base and index are distinguishable without a second run.
