@@ -18518,3 +18518,48 @@ question to settle before touching it:
 
 The 14 single-exit mismatches are a different thing and are the ones worth
 tracing as a defect.
+
+## The cost is one function whose region tree is fifty-four times its CFG
+
+The walk trace counts what the structurer visits, and it settles where the 4.9
+seconds go. `dbg_deflate` has 200 basic blocks and the walk enters **10,841
+region nodes**:
+
+    3,613 if-else   3,579 block   1,717 sequence   1,104 transfer   828 do-while
+
+At roughly 450us a node that is the whole `structure_walk` span. Six thousand of
+those are *internal* nodes, so they are not the cheap already-processed leaves --
+the tree genuinely has fifty-four nodes per block.
+
+It is not systematic. Measured against CFG size on the same binary:
+
+    dbg_deflate       200 blocks   10,841 nodes    54x
+    dbg_build_tree     61 blocks       65 nodes     1x
+    dbg_deflate_slow   50 blocks       11 nodes     (walk stops early)
+    dbg_longest_match  32 blocks        6 nodes     (walk stops early)
+
+So the engine is not superlinear in general; one function's region analysis
+explodes, and that one function is 8.9 seconds of the 12.2 the whole binary
+costs. 828 do-while nodes for a function with about ten loops is roughly eighty
+copies of each loop's subtree, which points at `analyze_loop` rather than at the
+conditional path this session already changed. The blow-up predates that change:
+`structure_walk` measured 4,879 ms before it and 4,880 ms after.
+
+This is the thing to fix before any deadline or complexity constant is touched.
+Both of those exist to survive this, and with the tree at its proper size
+`deflate` is a sub-second function that needs neither.
+
+## The loop-condition question is settled: the certificate is authoritative
+
+Asked, and answered: for a loop with several exits the certificate's condition
+is the authority and the renderer owes a rotation that makes that test the loop
+test, with the others as in-body exits. Better C and a better `ged` than
+relaxing the check would have given.
+
+One measurement shapes the work. Over minigzip_O2's 26 mismatching loops, the
+canonical condition is **never** the header and **never** the block the renderer
+chose -- it is a third block every time. So there is no cheap version of this:
+it is real loop inversion, not a mis-pick to correct. `deflate`'s `LoopId(5)` is
+the shape to design against -- header `0x7e94`, canonical condition at `0x7ec2`
+inside the body, renderer's choice `0x813b` which is a latch, three latches and
+three exits all agreeing.
