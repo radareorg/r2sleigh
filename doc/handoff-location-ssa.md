@@ -19005,3 +19005,32 @@ region index and a block address and names no cell at all; `missing_definition`
 (11) and `unobserved_binding_read` (4) are each a binding whose definition
 something else removed. They are defects to trace, which is what the standing
 decision says to do with the unanchored half.
+
+## Joining the two region builders is a net loss, measured
+
+The premise recorded above -- that acyclic functions never reach the iterative
+builder, so joining the two would give them the placed-once tails and recover
+much of the 85 -- is **wrong**, and the measurement says so plainly. With
+`analyze_iterative`'s early return deleted and the single-block-merge rule
+carried across (a merge that is one block stays with the branch that converges
+on it, which is what `a_restored_stack_pointer_renders` needs and which the
+recursive builder already does):
+
+    rendered      744 -> 746        refused 110 -> 108
+    unstructured  210 -> 260
+
+Two functions gained, and **fifty lost their structure**. The iterative builder
+is worse at acyclic input than the recursive one in ways the tails do not make
+up for. Two unit tests also encode the old shapes -- one asserts a
+post-dominating merge appears as a Sequence continuation rather than a branch's
+merge annotation, the other that a fixture with no control facts refuses as a
+typed lowering refusal rather than a safety reason. Reverted.
+
+The thread is not dead, it is redirected: the tails belong in the **recursive**
+builder, where the acyclic functions already are. The defect to attack there is
+the one traced at `minigzip_O2 0x37a0` -- `analyze_region_recursive_inner`
+returns `Region::Block(entry)` for an entry it has already processed, which
+writes the block and drops the branch behind it, and that is the same
+"already-placed entry written as a truncated block" face of the copying defect
+the tails fixed on the other side. It should emit a jump to a tail placed once,
+exactly as `working_join_path` does.
