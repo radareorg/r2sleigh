@@ -1946,6 +1946,7 @@ impl<'a> RegionAnalyzer<'a> {
             .node_entry(node)
             .or_else(|| region_map.get(&node).map(Region::entry))
             .filter(|target| self.hoistable_joins.contains(target))?;
+        let target_block = target;
         // Every path into the join has to be able to name the edge it takes,
         // or the ones that cannot would copy what the others jump to.
         let arrives = graph.preds.get(&node).into_iter().flatten();
@@ -1975,10 +1976,11 @@ impl<'a> RegionAnalyzer<'a> {
             .collect::<Vec<_>>();
         escapes.sort_unstable();
         escapes.dedup();
-        if !escapes
-            .iter()
-            .all(|target| self.hoistable_joins.contains(target))
-        {
+        // A jump has to reach a block the rest of the tree writes, and one the
+        // join dominates is written nowhere but inside the tail it left.
+        if !escapes.iter().all(|target| {
+            self.hoistable_joins.contains(target) && !self.block_is_owned(target_block, *target)
+        }) {
             return None;
         }
         match escapes.as_slice() {
@@ -2101,6 +2103,11 @@ impl<'a> RegionAnalyzer<'a> {
                         Some(trimmed) => kept.push(trimmed),
                         None => {
                             let target = child.entry();
+                            // Only a block the join does not own is written
+                            // elsewhere; jumping to one it owns jumps nowhere.
+                            if self.block_is_owned(owner, target) {
+                                return None;
+                            }
                             match self.exit_sources(&kept, target).as_slice() {
                                 [source] => kept.push(Region::Goto {
                                     source: *source,

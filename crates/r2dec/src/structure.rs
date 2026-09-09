@@ -2866,10 +2866,14 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             // body happened to end in. `structure_region` certifies the join.
             let arriving = self.transfer_target_domains.get(&target).cloned();
             let Some(mut arriving) = arriving.filter(|domains| !domains.is_empty()) else {
-                self.safety_reason = Some(format!(
-                    "no rendered arrival for the tail placed at 0x{target:x}"
-                ));
-                return Ok(CStmt::Empty);
+                // Nothing jumped here, so nothing runs here. The block-coverage
+                // check reports the blocks that leaves out, which is the honest
+                // account; a refusal named after this mechanism is not.
+                r2il::refusal_evidence!(
+                    "region-hoisted-join",
+                    "dropping the tail at {target:#x}: no rendered arrival"
+                );
+                continue;
             };
             Self::normalize_rendered_domains(&mut arriving);
             self.active_domains = arriving;
