@@ -18707,3 +18707,36 @@ copy the dylib over the installed one, `codesign -f -s -` it, and run
 `dsymutil` on it once so `atos -o <dSYM>/Contents/Resources/DWARF/<dylib> -l
 <load address> <addr>` prints `structure.rs:1720`. That is how the arm-exit
 union was named rather than guessed at.
+
+## The loop-identity mismatch is about which predicate is "the" condition
+
+Forty rendered-loop mismatches were traced across minigzip_O2 and bzip2_O2, and
+every one of them has the same shape: `body`, `latches` and `exits` agree
+exactly between the canonical loop fact and the render proof, and only
+`condition` and `condition_value` differ. It is not that the renderer recovered
+a different loop; it is that the two disagree about which predicate decides
+whether the loop continues.
+
+`loop_condition` (`crates/r2ssa/src/semantic.rs`) picks the predicate inside the
+body with one target in the body and one in the exit set, preferring the header
+and otherwise the lowest block address. The renderer reports whatever predicate
+the shape it emitted tests.
+
+The case to design against is `minigzip_O2` at `0xe944`, because it is the
+simplest and it settles the direction. The loop has one latch (`0xe930`), one
+exit (`0xe953`), and exactly one exit predicate: the branch at `0xe949`, whose
+false edge leaves. The header at `0xe944` branches to `0xe930` and `0xe949`,
+**both inside the loop**, so the header's predicate does not decide anything
+about leaving. The canonical fact names `0xe949`; the render proof names the
+header's predicate. The certificate is right and the renderer is wrong here,
+which is the direction the standing decision already takes -- the certificate is
+authoritative and the renderer rotates.
+
+So the work is: a loop shape may only report a predicate as its condition when
+that predicate is an exit predicate of the loop. Where the shape the renderer
+picked tests something else, the loop has to be rotated -- emitted with the
+canonical exit test as its condition, or as an infinite loop whose exits are
+certified breaks -- rather than reported under a test that does not govern it.
+`deflate`'s `LoopId(5)` is the hard end of the same problem: three latches and
+three exits, canonical condition at `0x7ec2` inside the body, renderer's pick at
+`0x813b` which is a latch.
