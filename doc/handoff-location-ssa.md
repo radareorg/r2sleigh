@@ -18426,3 +18426,51 @@ once behind a label, which then lets `collect_shared_joins` drop its
 no-successors restriction and gives (2) somewhere to go.
 
 That is the next piece of work, and it is one change rather than three.
+
+## A jump is not enough: the target has to be hoisted, and the measurement says so
+
+The obvious reading of "a block address that heads a region is not a block" was
+that an already-placed target should be reached by a jump. That was built and
+measured: `Region::Goto { source, target }`, produced by an `analyze_edge`
+helper wherever a conditional follows an edge to a target already in
+`processed`; labels for every jump target assigned before anything is written,
+because a block already written cannot be given one afterwards; the edge's merge
+writes emitted before the jump, as `structure_block` already does for a shared
+join; and the arriving domain recorded in `transfer_target_domains` so the
+target's coverage proof would see the path.
+
+It is worse, and the ranking says exactly why. Unstructured went **204 to 263**
+and coverage **736 to 726**, with a new dominant cause:
+
+    91  rendered control-domain occurrences do not exactly cover block N
+    67  control-domain coverage mismatch for transfer join at N   <- new
+    52  canonical loop fact does not match rendered loop
+
+`certify_transfer_domain_join` refuses because the claim is false. The target of
+these edges is placed *inside one arm of a branch*, so it is rendered under that
+arm's guard; a path arriving from a different arm carries a different guard, and
+no amount of recording the arriving domain makes the single placement cover
+both. The jump is legal C and the domains are genuinely irreconcilable.
+
+That is the argument for hoisting, and it is the thing `shared_joins` already
+does: a join is written **after the body**, at a point that dominates every
+predecessor, behind a label every predecessor jumps to. Under that placement the
+arriving domains are the disjunction the proof expects.
+
+So the remaining work for the 103 is one change with three parts, in this order:
+
+1. `append_shared_joins` writes the join's **region**, not
+   `folded_block_stmts(block)`. This is the case-(3) defect, and it is what
+   forces the restriction below.
+2. `collect_shared_joins` drops `if !self.func.successors(addr).is_empty()`
+   (`structure.rs:2686`), which exists only because of (1).
+3. A block the analyzer would otherwise place twice is *removed from the region
+   tree* and becomes a shared join, so every path to it is a labelled jump and
+   its single placement dominates them all.
+
+The reverted branch is worth keeping in mind for (3): the edge-aware
+`analyze_edge` and the pre-pass that labels every jump target before writing are
+both needed there, and both worked. What failed was placing the target inside an
+arm, which (3) is precisely what fixes.
+
+Reverted, tree back to 736 rendered / 118 refused and 204 unstructured.
