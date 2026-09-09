@@ -140,6 +140,32 @@ pub(crate) enum PlacementObservationTarget {
     Other,
 }
 
+/// The instruction an observation names, where it names one.
+pub(crate) fn placement_target_inst(target: &PlacementObservationTarget) -> Option<InstId> {
+    match target {
+        PlacementObservationTarget::Use { site, .. } => Some(site.inst),
+        PlacementObservationTarget::CertifiedValueRead { source, .. } => Some(source.inst()),
+        PlacementObservationTarget::CertifiedArrayIndexRead { access, .. }
+        | PlacementObservationTarget::StackAccess { access, .. } => Some(access.inst),
+        PlacementObservationTarget::Write { inst, .. } => Some(*inst),
+        PlacementObservationTarget::EscapedStackAddress { call, .. } => Some(*call),
+        PlacementObservationTarget::Other => None,
+    }
+}
+
+/// The binding an observation names, where it names one.
+pub(crate) fn placement_target_binding(target: &PlacementObservationTarget) -> Option<BindingId> {
+    match target {
+        PlacementObservationTarget::CertifiedValueRead { binding, .. }
+        | PlacementObservationTarget::CertifiedArrayIndexRead { binding, .. }
+        | PlacementObservationTarget::StackAccess { binding, .. }
+        | PlacementObservationTarget::EscapedStackAddress { binding, .. } => Some(*binding),
+        PlacementObservationTarget::Use { .. }
+        | PlacementObservationTarget::Write { .. }
+        | PlacementObservationTarget::Other => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FinalPlacementOccurrences {
     reads: Box<[FinalBindingRead]>,

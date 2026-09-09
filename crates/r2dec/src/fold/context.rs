@@ -352,6 +352,41 @@ impl<'a> FoldingContext<'a> {
             return None;
         }
 
+        // A call takes its arguments and a return its value through the
+        // convention, so neither reader is an SSA use the walk below sees.
+        let mut implicit_readers: std::collections::BTreeMap<ValueId, BTreeSet<InstId>> =
+            std::collections::BTreeMap::new();
+        for certificate in prepared.certificates().callsites.values() {
+            for value in certificate.argument_values.iter().copied().chain(
+                certificate
+                    .stack_argument_values
+                    .iter()
+                    .map(|argument| argument.value),
+            ) {
+                implicit_readers
+                    .entry(value)
+                    .or_default()
+                    .insert(certificate.at);
+            }
+        }
+        for boundary in prepared.facts().boundaries.returns.values() {
+            for value in boundary.values.iter().map(|fact| fact.value).chain(
+                boundary
+                    .register_compositions
+                    .iter()
+                    .flat_map(|composition| {
+                        composition
+                            .ordered_definitions()
+                            .map(|definition| definition.value)
+                    }),
+            ) {
+                implicit_readers
+                    .entry(value)
+                    .or_default()
+                    .insert(boundary.at);
+            }
+        }
+
         let mut owned: BTreeSet<InstId> = BTreeSet::new();
         owned.insert(seed);
         let mut worklist = vec![seed];
@@ -369,9 +404,15 @@ impl<'a> FoldingContext<'a> {
                     )
                 )
             {
-                for site in graph.use_sites(output) {
-                    if owned.insert(site.inst) {
-                        worklist.push(site.inst);
+                let implicit = implicit_readers.get(&output).into_iter().flatten().copied();
+                for reader in graph
+                    .use_sites(output)
+                    .iter()
+                    .map(|site| site.inst)
+                    .chain(implicit)
+                {
+                    if owned.insert(reader) {
+                        worklist.push(reader);
                     }
                 }
             }
@@ -432,6 +473,26 @@ impl<'a> FoldingContext<'a> {
                     cells.push(crate::observation_journal::GapCell::Value(input));
                 }
             }
+        }
+        // A marker stands in for computation and effects, never for where
+        // control goes next, so a gap that reached one has no honest form.
+        if let Some(transfer) = owned.iter().copied().find(|inst| {
+            matches!(
+                graph.inst(*inst).map(|inst| &inst.payload),
+                Some(r2ssa::graph::InstPayload::Op(
+                    r2ssa::SSAOp::Return { .. }
+                        | r2ssa::SSAOp::Branch { .. }
+                        | r2ssa::SSAOp::CBranch { .. }
+                        | r2ssa::SSAOp::BranchInd { .. }
+                ))
+            )
+        }) {
+            r2il::refusal_evidence!(
+                "gap",
+                "the closure from {block_addr:#x} reaches {transfer:?}, a control transfer a \
+                 marker cannot stand in for"
+            );
+            return None;
         }
         for (id, obligation) in prepared.obligations().obligations() {
             if obligation

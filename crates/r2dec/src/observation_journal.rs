@@ -910,6 +910,9 @@ pub(crate) struct LegacyObservationJournal {
     /// occurrence, so a shared tail cloned onto two paths cannot turn one
     /// gapped obligation into a duplicate rendering.
     gapped_effects: BTreeSet<SemanticObligationId>,
+    /// Values a marked gap accounts for, so a read the gap also covers is
+    /// known to name an object no statement outside the gap assigns.
+    gapped_values: BTreeSet<ValueId>,
     targets: Vec<ObservationTarget>,
     /// Where each target was allocated, under `R2DEC_TRACE_REFUSAL` only.
     target_origins: Vec<&'static std::panic::Location<'static>>,
@@ -1302,10 +1305,28 @@ impl MarkedNativeDraft {
                     })
                     .map(|value| (value, source.source().graph().def_inst(value)))
                     .collect::<Vec<_>>();
+                // What the definitions observed, which tells a never-rendered
+                // statement apart from one rendered and then removed.
+                let defining_insts = members
+                    .iter()
+                    .filter_map(|(_, inst)| *inst)
+                    .collect::<BTreeSet<_>>();
+                let observations = (0..self.journal.placement_target_count())
+                    .filter_map(|index| {
+                        let id = RenderObservationId::from_dense_index(index);
+                        let target = self.journal.placement_target(id)?;
+                        let names_definition = crate::placement::placement_target_inst(&target)
+                            .is_some_and(|inst| defining_insts.contains(&inst));
+                        let names_binding =
+                            crate::placement::placement_target_binding(&target) == Some(binding);
+                        (names_definition || names_binding).then_some((index, target))
+                    })
+                    .collect::<Vec<_>>();
                 r2il::refusal_evidence!(
                     "placement-decision",
                     "binding={binding:?} name={name} reason={reason:?} \
-                     reads={reads:?} writes={writes:?} members={members:?}"
+                     reads={reads:?} writes={writes:?} members={members:?} \
+                     definition_observations={observations:?}"
                 );
             }
         }
@@ -1710,9 +1731,8 @@ impl LegacyObservationJournal {
                     symbol: *symbol,
                 },
             ),
-            // A gapped read of a bound value is still a read: placement must
-            // keep the definition it names, or the gap would silently delete
-            // a store the marker only said was unproven.
+            // A gapped read of a value defined outside the gap is still a
+            // read; one of a value the gap owns names nothing the output has.
             ObservationTarget::Gapped {
                 cell: GapCell::Use { site, block },
                 ..
@@ -1721,6 +1741,7 @@ impl LegacyObservationJournal {
                     .graph()
                     .inst(site.inst)
                     .and_then(|inst| inst.inputs.get(site.input_idx))
+                    .filter(|value| !self.gapped_values.contains(value))
                     .and_then(|value| self.plan.disposition(*value))
                     .and_then(|disposition| {
                         matches!(disposition, ValueDisposition::Bound { .. }).then_some(
@@ -1864,6 +1885,11 @@ impl LegacyObservationJournal {
                             binding: *value_binding,
                         })
                 {
+                    r2il::refusal_evidence!(
+                        "reload-elision",
+                        "{site:?} loads {output:?} from {object:?}, both bound to \
+                         {value_binding:?}; the statement is the store's"
+                    );
                     coalesced_carrier_copy_sites.insert(site);
                     coalesced_copy_outputs.insert(output);
                     coalesced_copy_writes.insert(inst);
@@ -2111,6 +2137,7 @@ impl LegacyObservationJournal {
             effect_occurrence_regions: BTreeMap::new(),
             exclusive_duplicate_effects: BTreeSet::new(),
             gapped_effects: BTreeSet::new(),
+            gapped_values: BTreeSet::new(),
             targets: Vec::new(),
         };
         journal.record_upstream_nonrendered_dispositions(source, origins)?;
@@ -4017,6 +4044,9 @@ impl LegacyObservationJournal {
                         ));
                     }
                 }
+            }
+            if let GapCell::Value(value) = *cell {
+                self.gapped_values.insert(value);
             }
             claimed.push(*cell);
         }
