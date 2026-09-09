@@ -1400,6 +1400,47 @@ impl<'a> FoldingContext<'a> {
             .collect::<BTreeSet<_>>()
     }
 
+    /// The write obligation one member of a decomposed wide store carries.
+    pub(crate) fn exact_effect_obligations_for_member_access(
+        &self,
+        source_inst: InstId,
+        access: r2ssa::StructuredAccessId,
+        address: ValueId,
+    ) -> BTreeSet<SemanticObligationId> {
+        use r2ssa::{SemanticObligationComponent, SemanticObligationKind};
+
+        let Some(prepared) = self.inputs.prepared_ssa else {
+            return BTreeSet::new();
+        };
+        let Some((block_addr, op_idx)) = prepared.inst_op_site(source_inst) else {
+            return BTreeSet::new();
+        };
+        let Some(fact) = self
+            .inputs
+            .render_facts()
+            .and_then(|facts| facts.memory_access_for_access(block_addr, op_idx, true, access))
+            .filter(|fact| {
+                fact.access.inst == source_inst
+                    && fact.address == address
+                    && fact.value.is_none()
+                    && fact.is_write
+            })
+        else {
+            return BTreeSet::new();
+        };
+        prepared
+            .obligations()
+            .obligations_for_inst(source_inst)
+            .filter(|obligation| {
+                obligation.id.kind == SemanticObligationKind::ObservableMemoryWrite
+                    && obligation.id.component
+                        == SemanticObligationComponent::MemoryAccess(fact.access.ordinal)
+                    && obligation.inputs == [address]
+            })
+            .map(|obligation| obligation.id)
+            .collect::<BTreeSet<_>>()
+    }
+
     pub(crate) fn exact_effect_obligations_for_normalized_memory(
         &self,
         kind: EffectOccurrenceKind,

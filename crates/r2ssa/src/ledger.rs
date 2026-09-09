@@ -171,6 +171,12 @@ pub enum ElisionReason {
     /// edge, so the state the merge carried is carried by those copies and the
     /// merge itself needs no standalone C operation.
     MaterializedPhiEdges,
+    /// A wide constant store's value operand, written out member by member.
+    ///
+    /// C cannot spell a value wider than its widest scalar, so the store is
+    /// rendered as one assignment per member and each carries its own slice of
+    /// the constant. The operand itself therefore has no occurrence.
+    DecomposedWideConstantStore,
     /// Proven dead, with no rule yet naming which kind of dead it is.
     DeadUnclassified,
 }
@@ -202,6 +208,7 @@ impl std::fmt::Display for ElisionReason {
             Self::UnclaimedCallClobber => "unclaimed-call-clobber",
             Self::RedundantPhiEdge => "redundant-phi-edge",
             Self::MaterializedPhiEdges => "materialized-phi-edges",
+            Self::DecomposedWideConstantStore => "decomposed-wide-constant-store",
             Self::DeadUnclassified => "dead-unclassified",
         })
     }

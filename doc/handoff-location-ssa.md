@@ -18024,3 +18024,79 @@ two still agree -- the shape `rewrite_inlining_partition` already uses for
 singleton literals, generalised. The flag class is the one to stage first: it is
 5,895 names, it has a rewrite rule waiting for it, and `machine_noise` already
 counts a rendered flag as a defect.
+
+## A wide constant store is several member assignments
+
+`dbg.test_deflate` in zlib refused `ExactUseRequiresRenderedOccurrence` on the
+address operand of one instruction. GCC zeroes `xmm0` and writes it whole:
+
+    movups [rsp+0x40], xmm0
+
+`c_stream` is a declared `z_stream` at frame base -160, restated to -168, and
+offsets 64 and 72 are `zalloc` and `zfree`. So one machine store of sixteen
+bytes covers exactly two declared members, and the C that means the same thing
+is two assignments.
+
+Nothing in the pipeline could say that. `populate_member_access_render_facts`
+declined with "no member covers exactly that offset and width", so the store had
+no member expression; `certified_stack_owner_expr_for_memory_fact` declined
+because the access is *inside* the slot rather than at it; and the frame address
+the last route wanted had been elided precisely because the slot has a name. The
+access rendered as a gap and the address use went unaccounted.
+
+Four layers had to agree before this could render, and each of the first three
+attempts failed at the next one down. They are worth recording because each
+failure named the layer's actual contract.
+
+**The value cannot be spelled, and that is not a defect.**
+`MachineBitVector::MAX_LITERAL_BITS` is 64, so a 128-bit constant imports as
+`TermKind::Opaque` and `term_renders_inline` refuses it -- correctly, since C
+has no such literal. Trying to make the store's value operand render was the
+wrong question. The operand has no occurrence and the members carry the
+constant, which is what `ElisionReason::DecomposedWideConstantStore` now says.
+
+**One rendered statement per member needs one access per member.** With a single
+`StructuredAccessId` the placement audit refused `unobserved_binding_write`: the
+first assignment carried the store's only observation and the second wrote
+`c_stream` with nothing authorising it. `StructuredAccessId` already carries an
+ordinal and `insert_raw_memory_subeffect` already emits several sub-effects for
+one instruction, so the honest model is that the store *is* k accesses --
+`collect_structured_memory_access_facts` now emits one per member, each with the
+parent's proven provenance, the member's own width, and `value: None`.
+
+**Two more owners had to be told.** `memory_access_authorities_match` asserted
+that a store's fact is its whole value at its full width, which a member access
+is not; it now takes the run and checks the member instead. And
+`memory_access_for_op` requires a unique fact per op site, so the effect ledger
+found no obligation to discharge and reported two unaccounted memory writes; the
+per-member obligations are looked up by access identity through the new
+`memory_access_for_access`.
+
+The proof itself is small: `constant_bits_through_copies` follows copies to a
+constant-space varnode, whose value is its storage offset, which is how a value
+too wide for `constant_bits()` is still proved constant. `member_run_slices`
+requires the bytes to tile the members exactly -- start at a member, each abuts
+the next, the last ends with the access -- and refuses two members sharing an
+offset, which is what keeps a union out.
+
+`test_deflate` now renders `c_stream.zalloc = 0U; c_stream.zfree = 0U;`, which
+is what zlib's own source says. Measured over the seven local binaries the
+change is **728 rendered / 126 refused to 730 / 124** -- `test_deflate` and
+`test_inflate` in zlib, and nothing else moved in either direction. The six
+corpus gates stay at 54 pass each; unit tests stay at 378 and 520. The k assignments are emitted as a `CStmt::Block`,
+so they render inside braces; that is the same escape hatch the tail-call
+lowering uses and it is cosmetic, but flattening them into sibling statements
+would read better and is left open.
+
+One restriction is deliberate and checked rather than assumed: only a store
+whose value is *proven* constant decomposes. A wide non-constant store would
+need each member to render a slice of a value C cannot name, which is a
+different problem and is not attempted here.
+
+A note on the baseline, because it cost an hour. The census taken earlier in
+this session showed three minigzip functions rendering that refuse now, and the
+obvious reading was that this change broke them. Building the *unmodified*
+tree and rendering `minigzip_O0 0x3957` showed the same refusal, so the earlier
+census had been taken against a plugin that no longer matches the tree. A
+census is only a baseline for the exact build stamped in its `.build` file, and
+a stale one manufactures regressions that do not exist.

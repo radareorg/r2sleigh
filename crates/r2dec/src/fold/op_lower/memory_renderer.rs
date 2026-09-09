@@ -857,3 +857,51 @@ impl<'a> FoldingContext<'a> {
         self.certified_stack_var_expr_for_object(fact.object)
     }
 }
+
+/// One store whose bytes cover a run of declared members exactly.
+///
+/// Each member is its own structured access, so each assignment carries its
+/// own observation and the object's write is accounted once per member.
+pub(super) struct CertifiedMemberRunStore {
+    pub(super) first: CertifiedMemoryAccessExpr,
+    pub(super) first_slice: u64,
+    pub(super) rest: Vec<(r2ssa::StructuredAccessId, CExpr, u64)>,
+}
+
+impl<'a> FoldingContext<'a> {
+    /// A store of a proven constant across a run of declared members.
+    pub(super) fn render_certified_member_run_store(
+        &self,
+        addr: &SSAVar,
+        val: &SSAVar,
+    ) -> Option<CertifiedMemberRunStore> {
+        let (block_addr, op_idx) = self.current_source_op_site()?;
+        let address = self.prepared_value_id_for_var(addr)?;
+        let value = self.prepared_value_id_for_var(val)?;
+        let prepared = self.prepared_ssa()?;
+        let inst = prepared.graph().inst_id_for_op_site(block_addr, op_idx)?;
+        let certificate = prepared.structured().member_run_stores.get(&inst)?;
+        if certificate.address != address || certificate.value != value {
+            return None;
+        }
+        let owner = self.certified_stack_var_expr_for_object(certificate.object)?;
+        let member_expr = |member: &r2ssa::MemberRunStoreMember| CExpr::Member {
+            base: Box::new(owner.clone()),
+            member: member.name.clone(),
+        };
+        let mut members = certificate.members.iter();
+        let head = members.next()?;
+        Some(CertifiedMemberRunStore {
+            first: CertifiedMemoryAccessExpr {
+                access: head.access,
+                address: certificate.address,
+                is_write: true,
+                expr: member_expr(head),
+            },
+            first_slice: head.bits,
+            rest: members
+                .map(|member| (member.access, member_expr(member), member.bits))
+                .collect(),
+        })
+    }
+}

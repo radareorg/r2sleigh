@@ -451,6 +451,31 @@ impl FunctionRenderFacts {
         self.string_literals_by_value.get(&value)
     }
 
+    /// The memory fact for one exact structured access at an op site.
+    ///
+    /// A decomposed wide store has several accesses at one site, so the access
+    /// identity rather than uniqueness is what selects the fact.
+    pub fn memory_access_for_access(
+        &self,
+        block_addr: u64,
+        op_index: usize,
+        is_write: bool,
+        access: r2ssa::StructuredAccessId,
+    ) -> Option<&MemoryAccessRenderFact> {
+        let mut matching = self
+            .memory_effects_by_op
+            .get(&(block_addr, op_index, is_write))?
+            .iter()
+            .filter_map(|id| {
+                self.certified_effects
+                    .get(id)
+                    .and_then(CertifiedEffect::memory_fact)
+            })
+            .filter(|fact| fact.access == access && fact.width > 0);
+        let first = matching.next()?;
+        matching.next().is_none().then_some(first)
+    }
+
     pub fn memory_access_for_op(
         &self,
         block_addr: u64,

@@ -113,6 +113,7 @@ mod calls;
 pub(crate) mod convert;
 mod lowering;
 mod memory_renderer;
+use memory_renderer::CertifiedMemberRunStore;
 mod projection;
 mod subscript_renderer;
 mod typing;

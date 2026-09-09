@@ -912,6 +912,29 @@ impl<'a> FoldingContext<'a> {
 
     /// An assignment whose right-hand side has what the operation's root
     /// produces, as the typed boundaries state it.
+    /// One assignment per member a wide constant store covers.
+    ///
+    /// The address use is observed once, on the first member; the stored
+    /// value's own use is elided, because C cannot spell a value this wide.
+    fn lower_member_run_store(
+        &self,
+        frame: &LowerFrame,
+        run: CertifiedMemberRunStore,
+    ) -> Option<CStmt> {
+        let CertifiedMemberRunStore {
+            first,
+            first_slice,
+            rest,
+        } = run;
+        let lhs = self.observed_memory_input(frame, 0, first);
+        let mut stmts = vec![CStmt::Expr(CExpr::assign(lhs, CExpr::UIntLit(first_slice)))];
+        for (access, lvalue, slice) in rest {
+            let lhs = self.observe_member_access_expr(access, lvalue);
+            stmts.push(CStmt::Expr(CExpr::assign(lhs, CExpr::UIntLit(slice))));
+        }
+        Some(CStmt::Block(stmts))
+    }
+
     fn assign_stmt(&self, lhs: CExpr, rhs: CExpr) -> Option<CStmt> {
         self.assign_typed(lhs, rhs, None)
     }
@@ -1635,6 +1658,9 @@ impl<'a> FoldingContext<'a> {
                         self.current_block_addr.get().unwrap_or_default(),
                         self.current_op_idx.get().unwrap_or_default()
                     ))));
+                }
+                if let Some(run) = self.render_certified_member_run_store(addr, val) {
+                    return Ok(self.lower_member_run_store(frame, run));
                 }
                 let elem_ty = self
                     .type_hint_for_var(val)

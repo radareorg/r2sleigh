@@ -251,6 +251,28 @@ impl<'a> FoldingContext<'a> {
         // certified access, not from the finalized C shape. A stack-object
         // assignment is still the same source Store even though its AST no
         // longer contains a pointer dereference.
+        // A decomposed wide store is one write per member, and each member's
+        // access carries its own obligation.
+        if let SSAOp::Store { .. } = op
+            && let Some(run) = self
+                .prepared_ssa()
+                .and_then(|prepared| prepared.graph().inst_id_for_op_site(block_addr, op_idx))
+                .and_then(|inst| {
+                    self.prepared_ssa()?
+                        .structured()
+                        .member_run_stores
+                        .get(&inst)
+                })
+        {
+            for member in &run.members {
+                obligations.extend(self.exact_effect_obligations_for_member_access(
+                    run.inst,
+                    member.access,
+                    run.address,
+                ));
+            }
+            return obligations;
+        }
         let memory = match op {
             SSAOp::Load { .. } => self
                 .certified_memory_access_for_current_op(false)
@@ -1213,6 +1235,30 @@ impl<'a> FoldingContext<'a> {
         journal
             .borrow_mut()
             .observe_stack_access_expr(access, is_write, expr)
+    }
+
+    /// One member's own write in a decomposed wide store.
+    pub(super) fn observe_member_access_expr(
+        &self,
+        access: r2ssa::StructuredAccessId,
+        expr: CExpr,
+    ) -> CExpr {
+        let Some(journal) = self.inputs.observation_journal else {
+            return expr;
+        };
+        let fallback = expr.clone();
+        match journal
+            .borrow_mut()
+            .observe_stack_access_expr(access, true, expr)
+        {
+            Ok(marked) => marked,
+            Err(error) => {
+                let refusal = Self::observation_lowering_refusal(&error);
+                self.retain_first_observation_error(error);
+                self.retain_first_lowering_refusal(refusal);
+                fallback
+            }
+        }
     }
 
     pub(crate) fn planned_input_expr_at(

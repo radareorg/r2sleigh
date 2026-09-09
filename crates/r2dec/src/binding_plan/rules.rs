@@ -1082,8 +1082,11 @@ fn inlinable_core(
                 term_renders_inline(&canonical.arena().term(value.canonical).kind)
             });
         if !renderable {
+            let term = canonical
+                .value(value.id)
+                .map(|value| canonical.arena().term(value.canonical).kind);
             rejected(&format!(
-                "expression kind does not render inline: {root_kind}"
+                "expression kind does not render inline: {root_kind} term={term:?}"
             ));
             continue;
         }
@@ -1475,6 +1478,13 @@ pub(crate) fn certificate_elided_cells(
                 insert_elided_write(&mut writes, *inst, ElisionReason::ReturnControl)?;
             }
         }
+    }
+    for certificate in source.structured().member_run_stores.values() {
+        insert_elided_use(
+            &mut uses,
+            certificate.value_use,
+            ElisionReason::DecomposedWideConstantStore,
+        )?;
     }
     for site in &certificates.stack_geometry.uses {
         // A stack-root value has no standalone C occurrence, but an exact

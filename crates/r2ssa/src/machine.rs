@@ -28,9 +28,14 @@ fn memory_access_authorities_match(
     prepared_op: &SSAOp,
     context_space: r2il::SpaceId,
     fact: &StructuredMemoryAccessFact,
+    member_run: Option<&crate::MemberRunStoreCertificate>,
 ) -> bool {
+    // A decomposed wide store is one access per member, so the ordinal picks
+    // the member rather than being the store's only access.
+    let member =
+        member_run.and_then(|run| run.members.iter().find(|member| member.access == fact.id));
     if graph.op_site_for_inst(fact.id.inst) != Some((fact.block_addr, fact.op_index))
-        || fact.id.ordinal != 0
+        || (fact.id.ordinal != 0 && member.is_none())
         || fact.space != context_space
         || graph
             .inst(fact.id.inst)
@@ -53,10 +58,23 @@ fn memory_access_authorities_match(
                 && fact.width == dst.size
         }
         SSAOp::Store { addr, val, .. } => {
-            fact.is_write
-                && graph.value_id_for_var(addr) == Some(fact.address)
-                && fact.value == graph.value_id_for_var(val)
-                && fact.width == val.size
+            let addressed = fact.is_write && graph.value_id_for_var(addr) == Some(fact.address);
+            match member {
+                Some(member) => {
+                    addressed
+                        && fact.value.is_none()
+                        && fact.width == member.width
+                        && fact.object_offset == i64::try_from(member.offset).ok()
+                        && member_run.is_some_and(|run| {
+                            run.address == fact.address
+                                && Some(run.value) == graph.value_id_for_var(val)
+                                && run.object == fact.object
+                        })
+                }
+                None => {
+                    addressed && fact.value == graph.value_id_for_var(val) && fact.width == val.size
+                }
+            }
         }
         _ => false,
     }
@@ -242,6 +260,11 @@ impl MachineValueUse {
             prepared_op,
             source_space,
             fact,
+            artifact
+                .facts()
+                .structured
+                .member_run_stores
+                .get(&access.inst),
         ) {
             return Err(MachineBuildError::EntityMismatch(access.inst));
         }
@@ -3061,6 +3084,11 @@ impl MachineFunction {
             prepared_op,
             source_space,
             fact,
+            artifact
+                .facts()
+                .structured
+                .member_run_stores
+                .get(&fact.id.inst),
         ) || *object != fact.object
             || *space != MachineAddressSpace::from(source_space)
             || *endianness != source_space_model.endianness()
@@ -3252,6 +3280,11 @@ impl MachineBuilder {
                         prepared_op,
                         source_space,
                         access,
+                        artifact
+                            .facts()
+                            .structured
+                            .member_run_stores
+                            .get(&access.id.inst),
                     )
                 })
             })
@@ -3628,6 +3661,11 @@ impl MachineBuilder {
                                 prepared_op,
                                 source_space,
                                 access,
+                                artifact
+                                    .facts()
+                                    .structured
+                                    .member_run_stores
+                                    .get(&access.id.inst),
                             )
                         })
                     })
@@ -6030,6 +6068,7 @@ mod tests {
             &op,
             SpaceId::Ram,
             &fact,
+            None,
         ));
 
         let mut mismatched_op = op.clone();
@@ -6044,6 +6083,7 @@ mod tests {
             &op,
             SpaceId::Ram,
             &fact,
+            None,
         ));
         assert!(!memory_access_authorities_match(
             artifact.graph(),
@@ -6052,6 +6092,7 @@ mod tests {
             &mismatched_op,
             SpaceId::Ram,
             &fact,
+            None,
         ));
         assert!(!memory_access_authorities_match(
             artifact.graph(),
@@ -6060,6 +6101,7 @@ mod tests {
             &op,
             SpaceId::Custom(7),
             &fact,
+            None,
         ));
 
         let mut mismatched_fact = fact.clone();
@@ -6071,6 +6113,7 @@ mod tests {
             &op,
             SpaceId::Ram,
             &mismatched_fact,
+            None,
         ));
 
         let mut mismatched_objects = artifact.objects().clone();
@@ -6088,6 +6131,7 @@ mod tests {
             &op,
             SpaceId::Ram,
             &fact,
+            None,
         ));
     }
 

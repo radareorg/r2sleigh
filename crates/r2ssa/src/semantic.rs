@@ -1334,6 +1334,34 @@ pub struct MemoryAccessCertificate {
     pub object_offset: Option<i64>,
 }
 
+/// One store of a proven constant whose bytes tile a run of declared members.
+///
+/// C has no spelling for a value wider than its widest scalar, so the store is
+/// written as one assignment per member, each taking its slice of the constant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRunStoreCertificate {
+    pub inst: InstId,
+    pub block_addr: u64,
+    pub op_index: usize,
+    pub object: ObjectId,
+    pub address: ValueId,
+    pub value: ValueId,
+    /// Where the stored value is read, so the ledger can say it is not rendered.
+    pub value_use: UseSite,
+    pub members: Vec<MemberRunStoreMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRunStoreMember {
+    /// The structured access this member's own assignment is, and is observed at.
+    pub access: StructuredAccessId,
+    pub name: String,
+    /// Byte offset in the object, which is where the member's name resolves.
+    pub offset: u64,
+    pub width: u32,
+    pub bits: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackSlotCertificate {
     pub object: ObjectId,
@@ -1704,6 +1732,8 @@ pub struct StructuredDataflowFacts {
     /// Cyclic CFG blocks not represented by a structured loop fact.
     pub unstructured_cycle_blocks: BTreeSet<u64>,
     pub memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    /// Wide constant stores written out one declared member at a time.
+    pub member_run_stores: BTreeMap<InstId, MemberRunStoreCertificate>,
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,
 }
 
@@ -1855,6 +1885,7 @@ impl PreparedFunctionFacts {
                 live_out: &live_out,
                 storage_spans,
                 machine_context,
+                declared_slots: &declared_slots,
             },
         );
         phase("structured", structured.memory_accesses.len());
@@ -3267,6 +3298,7 @@ struct StructuredCollectionInputs<'a> {
     live_out: &'a crate::liveout::FunctionLiveOut,
     storage_spans: &'a StorageSpans,
     machine_context: Option<&'a SourceMachineContext>,
+    declared_slots: &'a DeclaredStackSlots,
 }
 
 /// Mask for a width, saturating at the widest value this can state.
@@ -3466,13 +3498,20 @@ fn collect_structured_dataflow_facts(
         inputs.storage_spans,
         inputs.machine_context,
     );
-    let memory_accesses =
-        collect_structured_memory_access_facts(function, graph, inputs.objects, inputs.memory);
+    let (memory_accesses, member_run_stores) = collect_structured_memory_access_facts(
+        function,
+        graph,
+        inputs.objects,
+        inputs.memory,
+        inputs.machine_context,
+        inputs.declared_slots,
+    );
     StructuredDataflowFacts {
         unstructured_cycle_blocks: collect_unstructured_cycle_blocks(graph, &loops),
         inductions: collect_induction_facts(graph, &loops),
         loops,
         memory_accesses,
+        member_run_stores,
         recursive_calls: collect_structured_recursive_call_facts(
             function,
             graph,
@@ -7670,6 +7709,103 @@ fn collect_prepared_function_certificates(
     }
 }
 
+/// The aggregate a source type identifies, when it is one.
+fn source_aggregate_layout(
+    graph: &crate::SourceTypeGraph,
+    type_id: u32,
+) -> Option<&crate::SourceAggregateLayout> {
+    let ty = graph.types().get(usize::try_from(type_id).ok()?)?;
+    let aggregate_id = match ty.kind() {
+        crate::SourceTypeKind::Struct { aggregate_id }
+        | crate::SourceTypeKind::Union { aggregate_id } => aggregate_id,
+        _ => return None,
+    };
+    graph
+        .aggregates()
+        .get(usize::try_from(aggregate_id).ok()?)
+        .filter(|aggregate| aggregate.id() == aggregate_id && aggregate.type_id() == type_id)
+}
+
+/// The bits a value carries when it is constant, followed through copies.
+///
+/// A constant-space varnode states its value as its storage offset, which is
+/// how a value too wide for the bit accessor is still proved constant.
+fn constant_bits_through_copies(graph: &SsaGraph, value: ValueId) -> Option<u64> {
+    let mut current = value;
+    for _ in 0..8 {
+        let carrier = graph.value(current)?;
+        if let Some(bits) = carrier.var.constant_bits() {
+            return Some(bits);
+        }
+        if let Some(storage) = carrier
+            .canonical_storage
+            .filter(|storage| storage.space == crate::CanonicalStorageSpace::Constant)
+        {
+            return Some(storage.offset);
+        }
+        let inst = graph.inst(graph.def_inst(current)?)?;
+        if !matches!(inst.payload, InstPayload::Op(SSAOp::Copy { .. })) {
+            return None;
+        }
+        current = *inst.inputs.first()?;
+    }
+    None
+}
+
+/// The members an access of `width_bits` at `offset_bits` covers exactly.
+fn member_run_slices(
+    aggregate: &crate::SourceAggregateLayout,
+    inst: InstId,
+    offset_bits: u64,
+    width_bits: u64,
+    constant: u64,
+) -> Option<Vec<MemberRunStoreMember>> {
+    let end_bits = offset_bits.checked_add(width_bits)?;
+    let mut members = Vec::new();
+    let mut cursor = offset_bits;
+    while cursor < end_bits {
+        let mut at_cursor = aggregate
+            .members()
+            .iter()
+            .filter(|member| member.offset_bits() == cursor && member.size_bits() > 0);
+        let member = at_cursor.next()?;
+        // Members sharing an offset name the same bytes twice, and nothing
+        // here can say which of them the machine meant.
+        at_cursor.next().is_none().then_some(())?;
+        let next = cursor.checked_add(member.size_bits())?;
+        if next > end_bits || member.size_bits() % 8 != 0 || member.size_bits() > 64 {
+            return None;
+        }
+        let shift = u32::try_from(cursor.checked_sub(offset_bits)?).ok()?;
+        let width = u32::try_from(member.size_bits() / 8).ok()?;
+        members.push(MemberRunStoreMember {
+            access: StructuredAccessId {
+                inst,
+                ordinal: u32::try_from(members.len()).ok()?,
+            },
+            name: member.name().to_string(),
+            offset: cursor / 8,
+            width,
+            bits: constant_slice(constant, shift, member.size_bits()),
+        });
+        cursor = next;
+    }
+    (members.len() > 1).then_some(members)
+}
+
+/// The `bits` of `constant` that start `shift` bits into it.
+fn constant_slice(constant: u64, shift: u32, bits: u64) -> u64 {
+    if shift >= 64 {
+        return 0;
+    }
+    let shifted = constant >> shift;
+    if bits >= 64 {
+        shifted
+    } else {
+        shifted & ((1_u64 << bits) - 1)
+    }
+}
+
 fn collect_renderable_expression_values(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -10173,8 +10309,14 @@ fn collect_structured_memory_access_facts(
     graph: &SsaGraph,
     objects: &ObjectModel,
     memory: &MemorySSAFacts,
-) -> BTreeMap<StructuredAccessId, StructuredMemoryAccessFact> {
+    machine_context: Option<&SourceMachineContext>,
+    declared_slots: &DeclaredStackSlots,
+) -> (
+    BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    BTreeMap<InstId, MemberRunStoreCertificate>,
+) {
     let mut access_facts = BTreeMap::new();
+    let mut member_run_stores = BTreeMap::new();
     for block in function.blocks() {
         for (op_index, op) in block.ops.iter().enumerate() {
             let Some(inst) = graph.inst_id_for_op_site(block.addr, op_index) else {
@@ -10211,20 +10353,63 @@ fn collect_structured_memory_access_facts(
                     addr, val, space, ..
                 } => {
                     if let Some(address) = graph.value_id_for_var(addr) {
-                        insert_raw_memory_subeffect(
-                            &mut access_facts,
-                            memory,
-                            objects,
-                            inst,
-                            &mut ordinal,
-                            block.addr,
-                            op_index,
-                            address,
-                            *space,
-                            graph.value_id_for_var(val),
-                            true,
-                            val.size,
-                        );
+                        let value = graph.value_id_for_var(val);
+                        // A store of a constant across several declared members
+                        // is those members' assignments, and each one is an
+                        // access of its own for everything downstream.
+                        let run = matches!(op, SSAOp::Store { .. })
+                            .then(|| {
+                                member_run_store(
+                                    graph,
+                                    objects,
+                                    memory,
+                                    machine_context,
+                                    declared_slots,
+                                    inst,
+                                    block.addr,
+                                    op_index,
+                                    address,
+                                    value?,
+                                    *space,
+                                    val.size,
+                                )
+                            })
+                            .flatten();
+                        match run {
+                            Some(run) => {
+                                for member in &run.members {
+                                    insert_raw_member_subeffect(
+                                        &mut access_facts,
+                                        memory,
+                                        objects,
+                                        inst,
+                                        &mut ordinal,
+                                        block.addr,
+                                        op_index,
+                                        address,
+                                        *space,
+                                        run.object,
+                                        member,
+                                        val.size,
+                                    );
+                                }
+                                member_run_stores.insert(inst, run);
+                            }
+                            None => insert_raw_memory_subeffect(
+                                &mut access_facts,
+                                memory,
+                                objects,
+                                inst,
+                                &mut ordinal,
+                                block.addr,
+                                op_index,
+                                address,
+                                *space,
+                                value,
+                                true,
+                                val.size,
+                            ),
+                        }
                     }
                 }
                 SSAOp::StoreConditional {
@@ -10303,24 +10488,93 @@ fn collect_structured_memory_access_facts(
             }
         }
     }
-    access_facts
+    (access_facts, member_run_stores)
 }
 
+/// The declared members a wide constant store writes, one assignment each.
+///
+/// C has no scalar as wide as the store, and the layout says which members its
+/// bytes are, so each member takes its own slice of the proven constant.
 #[allow(clippy::too_many_arguments)]
-fn insert_raw_memory_subeffect(
-    access_facts: &mut BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
-    memory: &MemorySSAFacts,
+fn member_run_store(
+    graph: &SsaGraph,
     objects: &ObjectModel,
+    memory: &MemorySSAFacts,
+    machine_context: Option<&SourceMachineContext>,
+    declared_slots: &DeclaredStackSlots,
     inst: InstId,
-    ordinal: &mut u32,
     block_addr: u64,
     op_index: usize,
     address: ValueId,
+    value: ValueId,
     space: SpaceId,
-    value: Option<ValueId>,
+    width: u32,
+) -> Option<MemberRunStoreCertificate> {
+    if space != SpaceId::Ram || width == 0 {
+        return None;
+    }
+    let type_graph = machine_context
+        .and_then(SourceMachineContext::function_interface)
+        .and_then(|interface| interface.type_graph())?;
+    let provenance = raw_memory_subeffect_provenance(memory, objects, inst, space, true, width);
+    if !provenance.complete {
+        return None;
+    }
+    let offset_bits = u64::try_from(provenance.object_offset.filter(|offset| *offset >= 0)?)
+        .ok()?
+        .checked_mul(8)?;
+    let (base, slot_offset) = match objects.object(provenance.object)?.kind {
+        ObjectKind::StackSlot { base, offset, .. }
+        | ObjectKind::FrameObject { base, offset, .. } => (base, offset),
+        _ => return None,
+    };
+    let aggregate = declared_slots
+        .by_key
+        .get(&(base, slot_offset))
+        .and_then(SourceStackSlotSpec::logical_type)
+        .and_then(|type_id| source_aggregate_layout(type_graph, type_id))?;
+    let constant = constant_bits_through_copies(graph, value)?;
+    let members = member_run_slices(
+        aggregate,
+        inst,
+        offset_bits,
+        u64::from(width).saturating_mul(8),
+        constant,
+    )?;
+    // The lifted store reads its address then its value, and the ledger needs
+    // the exact operand it is about to call unrendered.
+    let input_idx = graph
+        .inst(inst)?
+        .inputs
+        .iter()
+        .position(|input| *input == value)?;
+    Some(MemberRunStoreCertificate {
+        inst,
+        block_addr,
+        op_index,
+        object: provenance.object,
+        address,
+        value,
+        value_use: UseSite { inst, input_idx },
+        members,
+    })
+}
+
+/// What the memory annotations say one raw sub-effect touches.
+struct RawMemoryProvenance {
+    object: ObjectId,
+    object_offset: Option<i64>,
+    complete: bool,
+}
+
+fn raw_memory_subeffect_provenance(
+    memory: &MemorySSAFacts,
+    objects: &ObjectModel,
+    inst: InstId,
+    space: SpaceId,
     is_write: bool,
     width: u32,
-) {
+) -> RawMemoryProvenance {
     let annotations = if is_write {
         memory
             .defs_by_inst
@@ -10364,6 +10618,64 @@ fn insert_raw_memory_subeffect(
                 .and_then(|location| location.address.exact_offset())
         })
         .flatten();
+    RawMemoryProvenance {
+        object,
+        object_offset,
+        complete: provenance_complete,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_raw_memory_subeffect(
+    access_facts: &mut BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    memory: &MemorySSAFacts,
+    objects: &ObjectModel,
+    inst: InstId,
+    ordinal: &mut u32,
+    block_addr: u64,
+    op_index: usize,
+    address: ValueId,
+    space: SpaceId,
+    value: Option<ValueId>,
+    is_write: bool,
+    width: u32,
+) {
+    let provenance = raw_memory_subeffect_provenance(memory, objects, inst, space, is_write, width);
+    insert_structured_memory_access(
+        access_facts,
+        inst,
+        ordinal,
+        block_addr,
+        op_index,
+        space,
+        provenance.object,
+        address,
+        value,
+        is_write,
+        width,
+        provenance.complete,
+        provenance.object_offset,
+    );
+}
+
+/// One member's own write, carrying the whole store's proven provenance.
+#[allow(clippy::too_many_arguments)]
+fn insert_raw_member_subeffect(
+    access_facts: &mut BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    memory: &MemorySSAFacts,
+    objects: &ObjectModel,
+    inst: InstId,
+    ordinal: &mut u32,
+    block_addr: u64,
+    op_index: usize,
+    address: ValueId,
+    space: SpaceId,
+    object: ObjectId,
+    member: &MemberRunStoreMember,
+    store_width: u32,
+) {
+    let provenance =
+        raw_memory_subeffect_provenance(memory, objects, inst, space, true, store_width);
     insert_structured_memory_access(
         access_facts,
         inst,
@@ -10373,11 +10685,11 @@ fn insert_raw_memory_subeffect(
         space,
         object,
         address,
-        value,
-        is_write,
-        width,
-        provenance_complete,
-        object_offset,
+        None,
+        true,
+        member.width,
+        provenance.complete,
+        i64::try_from(member.offset).ok(),
     );
 }
 
