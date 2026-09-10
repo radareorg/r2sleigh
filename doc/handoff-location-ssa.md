@@ -19464,3 +19464,55 @@ One flake worth naming: the `diagnostic` column reported `fnv1a64` at `x64_O0`
 as wrong on one run and as passing on the next with all 54 snapshots matching
 both times, so it is not a function of the rendered text. It is not one of the
 gated columns; treat a single move in it as noise and re-run before believing it.
+
+## Every refusing import thunk is a variadic pass-through, and that is a question
+
+The eleven `native effect obligations refused: 1 refused (volatile-or-unknown
+at <entry>:op:0), 2 unaccounted (call ...)` refusals in the local census are
+all PLT thunks, and all of them are thunks for a variadic import: `sprintf`,
+`snprintf`, `fprintf`, `__fprintf_chk`. Every non-variadic thunk in the same
+binaries renders -- `exit` is `exit(status); return;` with four obligations and
+none refused, and `fwrite` and `stat` render the same way. The tail-slot
+machinery (`R_ANAL_CALL_TRANSFER_TAIL_SLOT`, `tail_call_identities`,
+`CallSiteTransfer::TailCall`) is complete for the non-variadic case.
+
+The variadic one bottoms out in a language fact rather than a defect. The
+thunk's single operation is a `BranchInd` through the GOT slot; its call
+boundary is incomplete because `variadic_callsite_argument_count` needs the
+format literal and finds, correctly, that "format argument 1 is the entry
+carrier, not a value this function defines" -- the thunk forwards its own
+caller's `rsi` untouched. The count is unknowable inside the thunk, and C has no
+syntax for forwarding a variadic tail. The obligation therefore seals as
+`VolatileOrUnknownEffect`, and because the only operation is a control transfer
+the marked-gap machinery cannot stand in for it either.
+
+So this needs a decision about how to spell an unforwardable variadic tail,
+which the user has to make. The candidates as I see them: render the fixed
+arguments and mark the tail in the call expression itself (`sprintf(s, fmt
+/* r2dec: variadic tail forwarded */)`), which is honest but is not the C the
+program means; render the thunk as its own prototype with a body that is only a
+marker, which claims nothing; or keep refusing, which is what happens now and
+costs eleven functions locally and none on DecBench, whose population has no
+thunks. The user's earlier answer on thunks -- "trace issue back to its source
+and fix the issue" -- does not settle this one, because the trace reaches the
+language and stops.
+
+## "Unrepresentable operation" is the structurer giving up on a loop, then a switch
+
+Eight local refusals and ten on DecBench say `unrepresentable operation`. None
+is an operation. `lib.rs:2906` is the linearizer's guard: once the structurer
+has given up, the unstructured fallback refuses any function that contains a
+`switch` terminator, because a switch spelled as a comment is not a transfer.
+So the family is "the structurer gave up *and* the function has a switch", and
+the give-up reasons across all eight are the two threads already on the list:
+
+    4  unlowered Exit edge A -> B in loop H          (multi-exit forwarder)
+    3  canonical loop fact does not exactly match     (loop-condition chain)
+       rendered loop at H: condition P6 vs P3
+    1  control-domain coverage mismatch for transfer join
+
+The multi-exit one is the decision recorded in the memory about regions that
+leave through several targets getting a continuation; the condition one is the
+user's "Certificate names the chain" answer. Neither is new. What this trace
+adds is the size: those two threads together are the whole
+`unrepresentable operation` column, and on DecBench that column is ten.
