@@ -1444,7 +1444,14 @@ impl<'a> RegionAnalyzer<'a> {
                 0 => base,
                 1 => {
                     let next = succs[0];
-                    if graph.preds_len_within(next, &reachable) == 1 {
+                    // A block only this node reaches within the arm may still
+                    // be a join of the enclosing branch; dominance is global.
+                    let owns_next = graph.preds_len_within(next, &reachable) == 1
+                        && graph
+                            .node_entry(node)
+                            .zip(graph.node_entry(next))
+                            .is_some_and(|(from, to)| self.dominators.dominates(from, to));
+                    if owns_next {
                         if let Some(next_region) = region_map.remove(&next) {
                             Self::sequence_merge(base, next_region)
                         } else {
@@ -1787,6 +1794,25 @@ impl<'a> RegionAnalyzer<'a> {
                 })
             })
             .collect();
+        // Which nodes each arm could reach, and which of the shared ones each
+        // arm must pass through, is what says why a join was or was not found.
+        r2il::refusal_evidence!(
+            "branch-merge-search",
+            "arms {:x?}/{:x?} reach {}/{} nodes, share {:x?}, post-dominated {:x?}",
+            graph.node_entry(true_target),
+            graph.node_entry(false_target),
+            true_reachable.len(),
+            false_reachable.len(),
+            true_reachable
+                .iter()
+                .filter(|id| false_reachable.contains(id))
+                .filter_map(|id| graph.node_entry(*id))
+                .collect::<Vec<_>>(),
+            common
+                .iter()
+                .filter_map(|id| graph.node_entry(*id))
+                .collect::<Vec<_>>()
+        );
         // Post-dominance asks that every path through the arm arrive, and a
         // path that returns never arrives anywhere. Where that is the only
         // reason the strict test failed, an arm still converges: every node it
