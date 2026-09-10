@@ -1692,37 +1692,47 @@ impl PhiEdgeLiveness {
             .copied()
             .map(|addr| (addr, HashSet::new()))
             .collect::<HashMap<_, _>>();
-        let mut live_out = live_in.clone();
-        let mut changed = true;
-        while changed {
+        // Backward liveness on a worklist: a block is recomputed only when a
+        // successor's live-in grew, which reaches the same fixed point as a
+        // sweep per round without re-walking every block each time.
+        let empty = HashSet::new();
+        let mut worklist: std::collections::VecDeque<u64> =
+            func.block_addrs().iter().rev().copied().collect();
+        let mut queued: HashSet<u64> = worklist.iter().copied().collect();
+        while let Some(addr) = worklist.pop_front() {
             control.poll()?;
-            changed = false;
-            for &addr in func.block_addrs().iter().rev() {
+            queued.remove(&addr);
+            let mut next_in = uses_by_block.get(&addr).cloned().unwrap_or_default();
+            let defs = defs_by_block.get(&addr).unwrap_or(&empty);
+            for successor in func.successors(addr) {
                 control.poll()?;
-                let mut next_out = HashSet::new();
-                for successor in func.successors(addr) {
-                    control.poll()?;
-                    next_out.extend(edge_live_in(
-                        live_in.get(&successor),
-                        phi_defs.get(&successor),
-                        edge_phi_uses.get(&(addr, successor)),
-                    ));
+                let successor_phi_defs = phi_defs.get(&successor);
+                if let Some(successor_live_in) = live_in.get(&successor) {
+                    next_in.extend(
+                        successor_live_in
+                            .iter()
+                            .filter(|value| {
+                                successor_phi_defs.is_none_or(|phis| !phis.contains(*value))
+                                    && !defs.contains(*value)
+                            })
+                            .cloned(),
+                    );
                 }
-                let mut next_in = uses_by_block.get(&addr).cloned().unwrap_or_default();
-                let defs = defs_by_block.get(&addr).cloned().unwrap_or_default();
-                next_in.extend(
-                    next_out
-                        .iter()
-                        .filter(|value| !defs.contains(*value))
-                        .cloned(),
-                );
-                if live_out.get(&addr) != Some(&next_out) {
-                    live_out.insert(addr, next_out);
-                    changed = true;
+                if let Some(phi_uses) = edge_phi_uses.get(&(addr, successor)) {
+                    next_in.extend(
+                        phi_uses
+                            .iter()
+                            .filter(|value| !defs.contains(*value))
+                            .cloned(),
+                    );
                 }
-                if live_in.get(&addr) != Some(&next_in) {
-                    live_in.insert(addr, next_in);
-                    changed = true;
+            }
+            if live_in.get(&addr) != Some(&next_in) {
+                live_in.insert(addr, next_in);
+                for predecessor in func.predecessors(addr) {
+                    if queued.insert(predecessor) {
+                        worklist.push_back(predecessor);
+                    }
                 }
             }
         }
@@ -1734,33 +1744,22 @@ impl PhiEdgeLiveness {
         })
     }
 
-    fn live_on_edge(&self, pred: u64, successor: u64) -> HashSet<r2ssa::SSAVar> {
-        edge_live_in(
-            self.live_in.get(&successor),
-            self.phi_defs.get(&successor),
-            self.edge_phi_uses.get(&(pred, successor)),
-        )
+    /// Whether `value` is live on the edge, without building the edge's set.
+    fn live_on_edge_contains(&self, pred: u64, successor: u64, value: &r2ssa::SSAVar) -> bool {
+        let through_successor = self
+            .live_in
+            .get(&successor)
+            .is_some_and(|live| live.contains(value))
+            && self
+                .phi_defs
+                .get(&successor)
+                .is_none_or(|defs| !defs.contains(value));
+        through_successor
+            || self
+                .edge_phi_uses
+                .get(&(pred, successor))
+                .is_some_and(|uses| uses.contains(value))
     }
-}
-
-fn edge_live_in(
-    successor_live_in: Option<&HashSet<r2ssa::SSAVar>>,
-    successor_phi_defs: Option<&HashSet<r2ssa::SSAVar>>,
-    edge_phi_uses: Option<&HashSet<r2ssa::SSAVar>>,
-) -> HashSet<r2ssa::SSAVar> {
-    let mut live = HashSet::new();
-    if let Some(successor_live_in) = successor_live_in {
-        live.extend(
-            successor_live_in
-                .iter()
-                .filter(|value| successor_phi_defs.is_none_or(|defs| !defs.contains(*value)))
-                .cloned(),
-        );
-    }
-    if let Some(edge_phi_uses) = edge_phi_uses {
-        live.extend(edge_phi_uses.iter().cloned());
-    }
-    live
 }
 
 /// Whether a merge's copy can sit at the end of a two-way predecessor.
@@ -1792,7 +1791,7 @@ fn can_materialize_on_branch_edge(
         && successors
             .into_iter()
             .filter(|successor| *successor != target)
-            .all(|successor| !liveness.live_on_edge(pred, successor).contains(dst))
+            .all(|successor| !liveness.live_on_edge_contains(pred, successor, dst))
 }
 
 fn remove_phi_edge_operation(
