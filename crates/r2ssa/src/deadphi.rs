@@ -67,28 +67,113 @@ struct Closure {
     parents: std::collections::BTreeMap<ValueId, ValueId>,
 }
 
+/// The bytes of a value an observation reaches, as one bit per byte.
+///
+/// A value wider than the mask is taken whole; nothing this decides is about
+/// vectors, and taking every byte is the conservative side.
+fn byte_mask(size_bytes: u32) -> u64 {
+    if size_bytes >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (8 * size_bytes)) - 1
+    }
+}
+
+/// Which bytes of a constant could pass through an `and` with it.
+fn nonzero_byte_mask(bits: u64, size_bytes: u32) -> u64 {
+    let mut mask = 0u64;
+    for byte in 0..size_bytes.min(8) {
+        if (bits >> (8 * byte)) & 0xff != 0 {
+            mask |= 1 << byte;
+        }
+    }
+    mask
+}
+
+/// What an observation of `observed` bytes of a value asks of each input.
+///
+/// A slice, a concatenation, a widening, a copy, a merge and a mask with a
+/// constant each read only some bytes of what feeds them; everything else is
+/// taken to read all of its operands. A byte no observation reaches is not
+/// observed, which is what stops a byte the program overwrote from admitting
+/// the caller's register as a parameter.
+fn observed_input_bytes(
+    graph: &SsaGraph,
+    inst: &crate::graph::GraphInst,
+    observed: u64,
+) -> Vec<(ValueId, u64)> {
+    use crate::graph::InstPayload;
+    let size_of = |value: ValueId| graph.value(value).map_or(8, |value| value.var.size);
+    let constant = |value: ValueId| {
+        graph
+            .value(value)
+            .and_then(|value| value.var.constant_bits())
+    };
+    let whole = |value: ValueId| (value, byte_mask(size_of(value)));
+    let inputs = &inst.inputs;
+    match &inst.payload {
+        InstPayload::Phi { .. } => inputs.iter().map(|input| (*input, observed)).collect(),
+        InstPayload::Op(op) => match op {
+            crate::SSAOp::Copy { .. } if inputs.len() == 1 => vec![(inputs[0], observed)],
+            crate::SSAOp::Subpiece { offset, .. } if inputs.len() == 1 => {
+                vec![(inputs[0], observed.checked_shl(8 * offset).unwrap_or(0))]
+            }
+            crate::SSAOp::Piece { .. } if inputs.len() == 2 => {
+                let lo_bytes = size_of(inputs[1]);
+                let lo = observed & byte_mask(lo_bytes);
+                let hi = observed.checked_shr(8 * lo_bytes).unwrap_or(0);
+                vec![(inputs[0], hi), (inputs[1], lo)]
+            }
+            crate::SSAOp::IntZExt { .. } if inputs.len() == 1 => {
+                vec![(inputs[0], observed & byte_mask(size_of(inputs[0])))]
+            }
+            crate::SSAOp::IntAnd { .. } if inputs.len() == 2 => {
+                let mask_of = |value: ValueId| {
+                    constant(value).map(|bits| nonzero_byte_mask(bits, size_of(value)))
+                };
+                match (mask_of(inputs[0]), mask_of(inputs[1])) {
+                    (None, Some(mask)) => vec![(inputs[0], observed & mask)],
+                    (Some(mask), None) => vec![(inputs[1], observed & mask)],
+                    _ => inputs.iter().map(|input| (*input, observed)).collect(),
+                }
+            }
+            _ => inputs.iter().map(|input| whole(*input)).collect(),
+        },
+    }
+}
+
 fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
-    let mut observed = BTreeSet::new();
+    let mut bytes: std::collections::BTreeMap<ValueId, u64> = std::collections::BTreeMap::new();
     let mut parents = std::collections::BTreeMap::new();
     let mut pending = VecDeque::new();
     for value in roots {
-        if observed.insert(value) {
+        let mask = byte_mask(graph.value(value).map_or(8, |value| value.var.size));
+        if mask != 0 && bytes.insert(value, mask).is_none() {
             pending.push_back(value);
         }
     }
     while let Some(value) = pending.pop_front() {
+        let observed = bytes.get(&value).copied().unwrap_or(0);
         let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
-        for input in &inst.inputs {
-            if observed.insert(*input) {
-                parents.insert(*input, value);
-                pending.push_back(*input);
+        for (input, mask) in observed_input_bytes(graph, inst, observed) {
+            if mask == 0 {
+                continue;
+            }
+            let entry = bytes.entry(input).or_insert(0);
+            let before = *entry;
+            *entry |= mask;
+            if before == 0 {
+                parents.insert(input, value);
+            }
+            if *entry != before {
+                pending.push_back(input);
             }
         }
     }
     Closure {
-        values: observed,
+        values: bytes.keys().copied().collect(),
         parents,
     }
 }

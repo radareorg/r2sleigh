@@ -19561,3 +19561,19 @@ and three unit tests that construct a dead merge to exercise the dead-phi
 certificate lose their fixture. Reverted; the targeted pruning stands. The
 unmodelled read those nine share has not been named; `fcn_11750` in
 `zlib_example` and `fcn_e6a0` in `minigzip_O2` are where to start.
+
+## The observation closure now counts bytes, and `inflateSync` has one parameter
+
+`ProvenProgramObservations` carries one bit per byte through `Subpiece`,
+`Piece`, `IntZExt`, `Copy`, a merge, and an `and` with a constant; every other
+operation reads its operands whole. A value is observed when any byte of it is.
+On `inflateSync` the `test sil, sil` predicate reaches one byte of the merged
+`RSI`, that byte comes from the `SIL` store on the low tile of the `Piece`, and
+the seven bytes of the caller's `RSI` on the high tile are reached by nothing.
+The recovery admits one parameter; `fcn_2140` receives one argument, opens no
+gap on a clobbered `RSI`, and renders with 225 obligations and none refused.
+
+Local census 105 -> 104, `fcn_2140` gained and nothing lost; gates 54 pass on
+every column and all 54 snapshots match. `DeadPhis::find` uses the same
+closure through its value set, so a merge some byte of which is observed stays
+live exactly as before.
