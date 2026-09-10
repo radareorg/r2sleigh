@@ -19651,3 +19651,11 @@ One more thing stood between the spelling and the journal: `expr_reads_symbol`
 had no arm for `CExpr::AddrOf`, so `&slot` did not count as mentioning `slot`.
 It does now. With the spelling alone, gates 54 pass and all 54 snapshots match;
 the census and the `AddrOf` completion are being measured as this is written.
+
+## DecBench after the three gap commits: 644
+
+The run after "A gap does not claim what an earlier gap already owns" (with the
+edge-copy and deferred-marker commits before it) reads 644 of 860, against 640
+for the byte-closure run. The per-function diff is recorded with the run; the
+three `deflate` copies that the deadline had taken are back and the rest is
+what the gap commits gained locally. Refusals on DecBench: 161 of 805 observed.
