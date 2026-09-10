@@ -19614,3 +19614,40 @@ function: every seed is a consequence of a cause the loop cannot name. The
 next step there is not another gap rule; it is to print the first attempt's
 refusal with its witness chain, as the interface recovery now does, and trace
 that.
+
+## `lowering.rs:204` is a narrow or indexed access into a named slot
+
+Ten DecBench refusals and three local ones say
+`OpLowering(lowering.rs:204)`, which is only the arm that maps an
+unclassified journal error to `missing_machine_projection`. The error behind
+it on `minigzip_O2`'s `fcn_b760` is `InvalidUse` from
+`observe_stack_access_expr`, and that function now says which of its four
+checks refused:
+
+    StructuredAccessId { inst: InstId(532) } is_write=false: the expression
+      Deref(Cast { ty: Pointer(u16), expr: Var(tmp_4a00) }) does not read
+      the slot's symbol
+
+Three two-byte loads at offset zero of the slot at `SP-136`, each through a
+computed address (`stack-owner-declined ... the address is indexed`). The owner
+path declines, rightly: the name alone would read the first element for every
+element. The member path has no aggregate layout and the subscript path has no
+proven array fact, so the access fell to the address value, which the plan
+had bound as `tmp_4a00`, and rendered `*(uint16_t *)tmp_4a00`. The journal
+refused that because the access is filed under a named slot and must mention
+it -- otherwise placement cannot see the slot is read and could drop its
+stores as dead.
+
+The spelling that satisfies both is `*(T *)((uint8_t *)&slot + i)`: it starts
+from the slot's own address, so it reads the symbol, and `i` is the index the
+object model recorded for the address, which `index_operand_for_indexed_address`
+defines as the non-rooted operand of the `IntAdd` -- the byte displacement, not
+an element index. `certified_slot_slice_expr_for_memory_fact` renders exactly
+that, with `interior_offset` and a constant `object_offset` for the non-indexed
+narrow case, and the owner path now declines an access that is not the slot's
+own width, closing the hole the extent design named.
+
+One more thing stood between the spelling and the journal: `expr_reads_symbol`
+had no arm for `CExpr::AddrOf`, so `&slot` did not count as mentioning `slot`.
+It does now. With the spelling alone, gates 54 pass and all 54 snapshots match;
+the census and the `AddrOf` completion are being measured as this is written.
