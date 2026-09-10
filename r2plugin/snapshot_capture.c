@@ -5998,11 +5998,21 @@ static RList *types_baselist_with_limits(RAnal *anal, const RAnalFunctionSnapsho
 	return types;
 }
 
+// One remembered hash per process: the key is the analysis and its type epoch,
+// so a hit is exact and a miss only costs the walk below.
+typedef struct {
+	const RAnal *anal;
+	ut64 epoch;
+	ut64 hash;
+} TypeContextHashCache;
+
+static TypeContextHashCache type_context_hash_cache;
+
 static ut64 types_context_hash_from_snapshot(RAnal *anal, const RList *types, ut64 type_dirty_epoch) {
+	const TypeContextHashCache cached = type_context_hash_cache;
 	if (type_dirty_epoch == r_anal_types_dirty_epoch (anal)
-		&& anal->type_context_hash_cache
-		&& anal->type_context_hash_epoch == type_dirty_epoch) {
-		return anal->type_context_hash_cache;
+		&& cached.anal == anal && cached.hash && cached.epoch == type_dirty_epoch) {
+		return cached.hash;
 	}
 	ut64 hash = 0xcbf29ce484222325ULL;
 	hash = type_context_hash_mix (hash, type_dirty_epoch);
@@ -6062,8 +6072,7 @@ static ut64 types_context_hash_from_snapshot(RAnal *anal, const RList *types, ut
 		hash = 1;
 	}
 	if (type_dirty_epoch == r_anal_types_dirty_epoch (anal)) {
-		anal->type_context_hash_cache = hash;
-		anal->type_context_hash_epoch = type_dirty_epoch;
+		type_context_hash_cache = (TypeContextHashCache) { anal, type_dirty_epoch, hash };
 	}
 	return hash;
 }
