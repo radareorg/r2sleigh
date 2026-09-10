@@ -19782,3 +19782,43 @@ match. DecBench for the run before this (48b6d4d4) read 651 of 860, against
 untraced. radare2 itself mislabels the stack parameters at -O2 (its DWARF pass
 files `stream_size` at `version`'s slot); the plugin no longer depends on the
 name, but the mislabel is a radare2 defect worth its own trace and upstream PR.
+
+## DecBench 663 after the stack parameters, and what the run says next
+
+The run on cc8a4327 reads 663 of 860 (651 proven, 12 gapped), against 651 for
+the run before. Its regression list is measured against a fixed older baseline
+(598 rendered), not the previous run, so the `deflatePrime` and `*.cold` lines
+are cumulative, not new. Refusals on the observed 805, ranked: BindingPlanBuild
+12, unrepresentable operation 10, cold partitions 9, complexity limit 8,
+RenderedValueRequired 8, UnownedBindingSymbol 8, structuring deadline 7 (plus 2
+before conversion), `calls.rs:165` 6, then fives. Seventeen functions are lost
+to cost alone -- the deadline and the complexity limit -- which is the largest
+cluster and the one the plan's Phase A already names.
+
+## A narrow formal, its carrier, and why the last fix was reverted
+
+`deflatePrime`'s `value` (an `int` in `rdx`) vanished from the header and came
+back as `uint64_t RDX_0`. The call-clobber phi placement gave the function an
+`RDX` phi, so `RDX_0` existed at alias normalization, and the entry read of
+`edx` became `Subpiece(RDX_0)`; the parameter entity binds the lane `EDX_0`,
+which now has no use. Mapping the carrier's entry value to the slot in the
+r2types resolver restored the name and cost 71 functions in the census
+(`ParameterHomeWidthMismatch` at -O0: the entity's width became the carrier's).
+Reverted. Guarding normalization instead (an entry root is no definition)
+restored `int32_t value` and broke two tests that state the opposite principle,
+that register uses are relative to the canonical carrier. Both are patches on
+one modelling choice: an incoming register has two identities at version zero,
+and four layers reconcile them. The proposed rewrite -- one entry value per
+incoming register, lanes as projections, formals binding the carrier with the
+declared type governing declaration and projection, a full-carrier read of a
+narrow formal rendering as a widening cast -- is with the user as a decision.
+
+## The variadic thunk has a spelling after all
+
+The eleven local `volatile-or-unknown` refusals are PLT thunks for variadic
+imports, recorded above as bottoming out in "C has no syntax for forwarding a
+variadic tail". GNU C does: `__builtin_va_arg_pack()` forwards the caller's
+variadic arguments from an always-inline function, and the fortified headers
+use it for exactly this. A thunk for `sprintf` is therefore
+`return sprintf(s, fmt, __builtin_va_arg_pack());` with the fixed arguments
+from the callee's prototype and no count needed. Not built yet.
