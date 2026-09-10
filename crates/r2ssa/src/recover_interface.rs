@@ -9,12 +9,15 @@
 //! the parameters, and the convention's result slot yields the return. Nothing
 //! here claims a type or a name, both of which compilation genuinely erases.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use r2il::SpaceId;
 use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SourceAbiParameterSpec, SourceCallArgumentSpec,
     SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface, SourceCarrierKind,
     SourceCarrierProjection, SourceConventionSlots, SourceFunctionInterface, SourceFunctionReturn,
-    SourceLogicalValue, SourceMachineRoles, SourceParameterLocation, SourceType, SourceTypeGraph,
-    SourceTypeKind,
+    SourceLogicalValue, SourceMachineRoles, SourceParameterLocation, SourceStackSlotSpec,
+    SourceType, SourceTypeGraph, SourceTypeKind, StackAddressBase,
 };
 
 use crate::function::SSAFunction;
@@ -72,11 +75,49 @@ impl RecoveredResult {
     }
 }
 
+/// One argument slot in the caller's frame the function reads before anything
+/// in it writes there, and how much of it the read covered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveredStackParameter {
+    offset: i64,
+    slot_bytes: u32,
+    observed_bytes: u32,
+}
+
+impl RecoveredStackParameter {
+    /// The slot's offset from the stack pointer at entry.
+    pub const fn offset(self) -> i64 {
+        self.offset
+    }
+
+    /// The convention's slot width.
+    pub const fn slot_bytes(self) -> u32 {
+        self.slot_bytes
+    }
+
+    /// The widest read of the slot, rounded to a machine width, never wider
+    /// than the slot.
+    pub const fn observed_bytes(self) -> u32 {
+        self.observed_bytes
+    }
+}
+
+/// Where every exit of the function takes its return address from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveredReturnMechanism {
+    /// A register, or the callee's own save of one.
+    Link,
+    /// The slot at the entry stack pointer, which the call left there.
+    Stacked { slot_bytes: u32 },
+}
+
 /// What the machine code proves about a function's interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveredInterface {
     parameters: Box<[RecoveredParameter]>,
+    stack_parameters: Box<[RecoveredStackParameter]>,
     result: Option<RecoveredResult>,
+    return_mechanism: Option<RecoveredReturnMechanism>,
 }
 
 impl RecoveredInterface {
@@ -86,10 +127,186 @@ impl RecoveredInterface {
         &self.parameters
     }
 
+    /// Argument-area slots in convention order after the register slots,
+    /// contiguous from the first one, each read by the function.
+    pub const fn stack_parameters(&self) -> &[RecoveredStackParameter] {
+        &self.stack_parameters
+    }
+
     /// The result slot and observed logical width, when every return defines it.
     pub const fn result(&self) -> Option<RecoveredResult> {
         self.result
     }
+
+    /// How the function returns, when every exit agrees.
+    pub const fn return_mechanism(&self) -> Option<RecoveredReturnMechanism> {
+        self.return_mechanism
+    }
+}
+
+/// Where the function's exits take the return address from, when they agree.
+///
+/// A return whose control value is reloaded from the slot at the entry stack
+/// pointer proves the call pushed it there; one that reads a register, or a
+/// save of one in the function's own frame, proves a link register. A return
+/// with no certified control chain proves nothing, and neither does a body
+/// with no return.
+fn recovered_return_mechanism(
+    facts: &crate::semantic::PreparedFunctionFacts,
+) -> Option<RecoveredReturnMechanism> {
+    let mut mechanism = None;
+    for (at, boundary) in &facts.boundaries.returns {
+        let Some(return_address) = boundary.return_address else {
+            r2il::refusal_evidence!(
+                "interface-recovery",
+                "return {at:?} has no return-address fact, so no return mechanism"
+            );
+            return None;
+        };
+        let Some(certificate) = facts.certificates.machine_return_controls.get(at) else {
+            r2il::refusal_evidence!(
+                "interface-recovery",
+                "return {at:?} has no certified control chain, so no return mechanism"
+            );
+            return None;
+        };
+        r2il::refusal_evidence!(
+            "interface-recovery",
+            "return {at:?} takes {:?} from {:?}",
+            return_address.storage,
+            certificate
+                .reload_object
+                .and_then(|object| facts.objects.object(object))
+                .map(|object| object.kind.clone())
+        );
+        let found = match certificate
+            .reload_object
+            .and_then(|object| facts.objects.object(object))
+            .map(|object| &object.kind)
+        {
+            None => RecoveredReturnMechanism::Link,
+            Some(crate::semantic::ObjectKind::StackSlot {
+                base: StackAddressBase::StackPointer,
+                offset,
+                ..
+            }) if *offset < 0 => RecoveredReturnMechanism::Link,
+            Some(crate::semantic::ObjectKind::StackSlot {
+                base: StackAddressBase::StackPointer,
+                offset: 0,
+                ..
+            }) => RecoveredReturnMechanism::Stacked {
+                slot_bytes: return_address.storage.size,
+            },
+            Some(_) => return None,
+        };
+        if mechanism.is_some_and(|known| known != found) {
+            return None;
+        }
+        mechanism = Some(found);
+    }
+    mechanism
+}
+
+/// The argument-area slots the function reads and never writes, from the
+/// first slot above the return address up to the first one it does not read.
+///
+/// A read is evidence only when its value reaches a program observation, the
+/// same authority the register slots rest on. A slot some store in the body
+/// writes is the function's own variable from then on, so its reads say
+/// nothing about the caller. A read that crosses a slot boundary describes
+/// something wider than one slot and ends the prefix there.
+fn recovered_stack_parameters(
+    facts: &crate::semantic::PreparedFunctionFacts,
+    observations: &crate::deadphi::ProvenProgramObservations,
+    first_offset: i64,
+    slot_bytes: u32,
+) -> Vec<RecoveredStackParameter> {
+    if slot_bytes == 0 {
+        return Vec::new();
+    }
+    let written = facts
+        .structured
+        .memory_accesses
+        .values()
+        .filter(|access| access.is_write)
+        .map(|access| access.object)
+        .collect::<BTreeSet<_>>();
+    // The return address is the caller's too, and the return reads it.
+    let control = facts
+        .certificates
+        .machine_return_controls
+        .values()
+        .flat_map(|certificate| certificate.insts.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut observed: BTreeMap<u64, Option<u32>> = BTreeMap::new();
+    for access in facts.structured.memory_accesses.values() {
+        if access.is_write
+            || !access.provenance_complete
+            || access.space != SpaceId::Ram
+            || written.contains(&access.object)
+            || control.contains(&access.id.inst)
+        {
+            continue;
+        }
+        let Some(value) = access.value.filter(|value| observations.contains(*value)) else {
+            continue;
+        };
+        let Some(crate::semantic::ObjectKind::StackSlot {
+            base: StackAddressBase::StackPointer,
+            offset,
+            ..
+        }) = facts
+            .objects
+            .object(access.object)
+            .map(|object| &object.kind)
+        else {
+            continue;
+        };
+        let Some(relative) = offset
+            .checked_add(access.object_offset.unwrap_or(0))
+            .and_then(|address| address.checked_sub(first_offset))
+            .and_then(|relative| u64::try_from(relative).ok())
+        else {
+            continue;
+        };
+        let slot = relative / u64::from(slot_bytes);
+        let inside = u32::try_from(relative % u64::from(slot_bytes)).unwrap_or(u32::MAX);
+        let end = inside.saturating_add(access.width);
+        r2il::refusal_evidence!(
+            "interface-recovery",
+            "stack slot {slot} at entry offset {}: {value:?} reads {} bytes at +{inside}",
+            first_offset.saturating_add(
+                i64::try_from(slot)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(i64::from(slot_bytes))
+            ),
+            access.width
+        );
+        let entry = observed.entry(slot).or_insert(Some(0));
+        match entry {
+            Some(bytes) if end <= slot_bytes => *bytes = (*bytes).max(end),
+            _ => *entry = None,
+        }
+    }
+    let mut parameters = Vec::new();
+    for slot in 0u64.. {
+        let Some(Some(bytes)) = observed.get(&slot) else {
+            break;
+        };
+        let Some(offset) = i64::try_from(slot)
+            .ok()
+            .and_then(|slot| slot.checked_mul(i64::from(slot_bytes)))
+            .and_then(|displacement| first_offset.checked_add(displacement))
+        else {
+            break;
+        };
+        parameters.push(RecoveredStackParameter {
+            offset,
+            slot_bytes,
+            observed_bytes: bytes.next_power_of_two().min(slot_bytes),
+        });
+    }
+    parameters
 }
 
 /// True when this variable is a value the caller supplied.
@@ -457,9 +674,34 @@ fn recover_interface_inner(
             observed,
         });
     }
+    let return_mechanism = recovered_return_mechanism(&facts);
+    // The convention fills every register slot before the argument area, so
+    // a stack slot is a parameter only once each register slot is proven.
+    let stack_parameters = if parameters.len() == slots.argument_slots().len() {
+        let slot_bytes = slots.argument_slots().first().map_or(0, |slot| slot.size);
+        match return_mechanism {
+            Some(RecoveredReturnMechanism::Link) => {
+                recovered_stack_parameters(&facts, &observations, 0, slot_bytes)
+            }
+            Some(RecoveredReturnMechanism::Stacked { slot_bytes: spent }) => {
+                recovered_stack_parameters(&facts, &observations, i64::from(spent), slot_bytes)
+            }
+            None => {
+                r2il::refusal_evidence!(
+                    "interface-recovery",
+                    "the exits do not agree on a return mechanism, so the argument area is not read"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
     Some(RecoveredInterface {
         parameters: parameters.into_boxed_slice(),
+        stack_parameters: stack_parameters.into_boxed_slice(),
         result,
+        return_mechanism,
     })
 }
 
@@ -568,20 +810,31 @@ fn mint_recovered_interface_inner(
     // constructor enforces that literally: a graph carrying a type no logical
     // value names is rejected outright.
     let mut widths: Vec<u32> = Vec::new();
-    let mut width_of = |storage: CanonicalStorageId| -> Option<u32> {
-        let bits = storage_bits(storage)?;
+    fn note_bits(widths: &mut Vec<u32>, bits: u32) {
         if !widths.contains(&bits) {
             widths.push(bits);
         }
+    }
+    fn width_of(widths: &mut Vec<u32>, storage: CanonicalStorageId) -> Option<u32> {
+        let bits = storage_bits(storage)?;
+        note_bits(widths, bits);
         Some(bits)
-    };
+    }
     // The logical value is typed by what the function read, not by the size of
     // the register the convention put it in.
-    let parameter_widths = recovered
+    let mut parameter_widths = recovered
         .parameters()
         .iter()
-        .map(|parameter| width_of(parameter.observed()))
+        .map(|parameter| width_of(&mut widths, parameter.observed()))
         .collect::<Option<Vec<_>>>()?;
+    for parameter in recovered.stack_parameters() {
+        let bits = parameter.observed_bytes().checked_mul(8)?;
+        if !matches!(bits, 8 | 16 | 32 | 64) {
+            return None;
+        }
+        note_bits(&mut widths, bits);
+        parameter_widths.push(bits);
+    }
     // The slot's width decides whether the read covers the whole carrier or
     // only its low half, and nothing else. It names no logical value, so it
     // must not put a type in the graph: an `int` parameter arriving in a
@@ -596,9 +849,15 @@ fn mint_recovered_interface_inner(
         .parameters()
         .iter()
         .map(|parameter| storage_bits(parameter.slot()))
+        .chain(
+            recovered
+                .stack_parameters()
+                .iter()
+                .map(|parameter| parameter.slot_bytes().checked_mul(8)),
+        )
         .collect::<Option<Vec<_>>>()?;
     let result_width = match recovered.result() {
-        Some(result) => Some(width_of(result.observed())?),
+        Some(result) => Some(width_of(&mut widths, result.observed())?),
         None => None,
     };
     widths.sort_unstable();
@@ -639,6 +898,7 @@ fn mint_recovered_interface_inner(
         ))
     };
 
+    let register_count = recovered.parameters().len();
     let parameters = recovered
         .parameters()
         .iter()
@@ -647,6 +907,37 @@ fn mint_recovered_interface_inner(
             Some(SourceAbiParameterSpec::new(
                 u32::try_from(index).ok()?,
                 parameter.slot(),
+            ))
+        })
+        .chain(
+            recovered
+                .stack_parameters()
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    Some(SourceAbiParameterSpec::with_location(
+                        u32::try_from(register_count.checked_add(index)?).ok()?,
+                        SourceParameterLocation::Stack {
+                            offset: parameter.offset(),
+                            size_bytes: parameter.slot_bytes(),
+                        },
+                    ))
+                }),
+        )
+        .collect::<Option<Vec<_>>>()?;
+    // A stack parameter is its own slot, declared at the width it was read,
+    // as a source would declare `int` in an eight-byte slot.
+    let stack_slots = recovered
+        .stack_parameters()
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            Some(SourceStackSlotSpec::new_parameter(
+                StackAddressBase::StackPointer,
+                stack_pointer_storage,
+                parameter.offset(),
+                parameter.observed_bytes(),
+                u32::try_from(register_count.checked_add(index)?).ok()?,
             ))
         })
         .collect::<Option<Vec<_>>>()?;
@@ -665,14 +956,14 @@ fn mint_recovered_interface_inner(
         _ => (SourceFunctionReturn::Void, None),
     };
 
-    // Exact: the stack slot roles are complete because there are none to
-    // classify, which certification requires before it will trust the model.
-    SourceFunctionInterface::new_exact_with_logical_types(
+    // Exact: every stack slot here is a parameter's own, so the roles are
+    // complete, which certification requires before it will trust the model.
+    let interface = SourceFunctionInterface::new_exact_with_logical_types(
         revision_identity.to_vec(),
         calling_convention,
         parameters,
         return_kind,
-        [],
+        stack_slots,
         parameter_logical_values,
         return_logical_value,
         Some(type_graph),
@@ -684,7 +975,27 @@ fn mint_recovered_interface_inner(
     .with_return_address_storage(return_address_storage)
     .ok()?
     .with_stack_pointer_storage(stack_pointer_storage)
-    .ok()
+    .ok()?;
+    // A stacked return names the slot the call spent, which is what places
+    // the argument area at a call site; a stack parameter without it would
+    // be looked for at the wrong offset, so the interface is not minted.
+    let Some(RecoveredReturnMechanism::Stacked { slot_bytes }) = recovered.return_mechanism()
+    else {
+        return Some(interface);
+    };
+    match interface
+        .clone()
+        .with_exact_stacked_return(0, slot_bytes, slot_bytes, slot_bytes)
+    {
+        Ok(interface) => Some(interface),
+        Err(error) => {
+            r2il::refusal_evidence!(
+                "interface-minting",
+                "the stacked return the body proves is rejected: {error:?}"
+            );
+            recovered.stack_parameters().is_empty().then_some(interface)
+        }
+    }
 }
 
 /// Mint a call-site interface from an interface recovered for the callee.

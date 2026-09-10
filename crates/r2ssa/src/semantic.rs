@@ -1526,6 +1526,9 @@ pub struct MachineReturnControlCertificate {
     /// function ran, and the certificate that accounts for the reload accounts
     /// for the save with it.
     pub stack_object: Option<ObjectId>,
+    /// The slot the return address was reloaded from, claimed or not: the
+    /// entry slot a call pushed it into, or the callee's own save of a link.
+    pub reload_object: Option<ObjectId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6274,6 +6277,7 @@ fn collect_machine_return_control_certificates(
         let mut current = return_address.value;
         let mut complete = true;
         let mut claimed_stack_object = None;
+        let mut reload_object = None;
         // The prologue saves the return address once however many returns the
         // function has, so every return's certificate describes that one save.
         // These instructions are therefore exempt from the rule that no two
@@ -6345,6 +6349,7 @@ fn collect_machine_return_control_certificates(
                         complete = false;
                         break;
                     }
+                    reload_object = Some(access.object);
                     // The slot this reload came from holds the return address
                     // and nothing else. Its one write is the prologue's save,
                     // and the value it saves is the return address the function
@@ -6441,6 +6446,7 @@ fn collect_machine_return_control_certificates(
             uses,
             absorbed_insts: absorbed,
             stack_object: claimed_stack_object,
+            reload_object,
         };
         for inst in certificate
             .insts
@@ -7275,6 +7281,49 @@ fn collect_declared_stack_slots(
     for key in ambiguous_stack_slots {
         exact_stack_slots.remove(&key);
         declared_stack_slot_keys.remove(&key);
+    }
+    // A parameter the convention passes on the stack declares its own slot:
+    // the interface places it at an entry offset, whatever the source named.
+    if let Some(interface) = machine_context.and_then(SourceMachineContext::function_interface)
+        && let Some(stack_pointer) = interface.stack_pointer_storage()
+    {
+        for (position, parameter) in interface.parameters().iter().enumerate() {
+            let Some((offset, slot_bytes)) = parameter.location().stack() else {
+                continue;
+            };
+            // The slot is declared at the parameter's own width, not the
+            // convention's: `int` in an eight-byte slot is a four-byte slot.
+            let size_bytes = interface
+                .parameter_logical_values()
+                .get(position)
+                .and_then(|logical| u32::try_from(logical.carrier().size_bits() / 8).ok())
+                .filter(|bytes| *bytes > 0)
+                .unwrap_or(slot_bytes);
+            let key = (StackAddressBase::StackPointer, offset);
+            let slot = SourceStackSlotSpec::new_parameter(
+                StackAddressBase::StackPointer,
+                stack_pointer,
+                offset,
+                size_bytes,
+                parameter.index(),
+            );
+            match exact_stack_slots.get(&key) {
+                Some(declared) if declared.role() == slot.role() => {}
+                Some(declared) => {
+                    r2il::refusal_evidence!(
+                        "stack-slot-parameter",
+                        "parameter {} at entry offset {offset} is declared as {:?}; the parameter owns it",
+                        parameter.index(),
+                        declared.role()
+                    );
+                    exact_stack_slots.insert(key, slot);
+                }
+                None => {
+                    exact_stack_slots.insert(key, slot);
+                    declared_stack_slot_keys.insert(key, key);
+                }
+            }
+        }
     }
     DeclaredStackSlots {
         by_key: exact_stack_slots,

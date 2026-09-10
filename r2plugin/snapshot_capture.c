@@ -2702,24 +2702,21 @@ static void snapshot_link_stack_parameter_slots(RAnalFcnContext *ctx, const RAna
 	RListIter *iter;
 	RAnalFcnSlot *slot;
 	r_list_foreach (ctx->fcn_slots, iter, slot) {
-		/* Only a variable DWARF declared: radare2's own stack analysis also
-		 * names positive-offset accesses `arg_XXh`, and at -O2 it invents a
-		 * second, wider `stream_size` at another frame offset, which the
-		 * name would otherwise link to the same parameter twice. */
 		if (!slot || slot->role != R_ANAL_FCN_SLOT_ARG || slot->arg_index >= 0
-			|| R_STR_ISEMPTY (slot->name) || !slot->dwarf_declared) {
+			|| !slot->offset_valid) {
 			continue;
 		}
+		/* The convention places each stack parameter at one entry offset,
+		 * so the slot at that offset is its storage whatever radare2 named
+		 * it: at -O2 its DWARF pass files `stream_size` where `version` is. */
 		int found = -1;
 		size_t i;
 		for (i = 0; i < interface->num_parameters; i++) {
 			const RAnalSnapshotParameter *parameter = &interface->parameters[i];
-			if (!parameter->on_stack || R_STR_ISEMPTY (parameter->name)
-				|| strcmp (parameter->name, slot->name)) {
+			if (!parameter->on_stack || parameter->stack_offset != slot->offset) {
 				continue;
 			}
 			if (found >= 0) {
-				/* Two parameters of one name link nothing. */
 				found = -1;
 				break;
 			}
@@ -3024,8 +3021,12 @@ static bool snapshot_stack_slot_roles_complete(
 				if (earlier == slot) {
 					break;
 				}
+				/* The same coordinate under two names is one slot declared
+				 * twice, not a second home. */
 				if (earlier && earlier->role == R_ANAL_FCN_SLOT_ARG
-					&& earlier->arg_index == slot->arg_index) {
+					&& earlier->arg_index == slot->arg_index
+					&& !(earlier->offset_valid && slot->offset_valid
+						&& earlier->offset == slot->offset)) {
 					snapshot_stack_slot_role_report (slot, "a second slot for one stack parameter");
 					return false;
 				}
@@ -4957,9 +4958,15 @@ static SnapshotTypeGraphResult function_type_graph_snapshot_collect(
 		RAnalSnapshotParameter *snapshot_parameter = &interface->parameters[index];
 		result = snapshot_type_add_root (
 			&builder, parameter->type, &snapshot_parameter->logical_type_id);
+		/* A stack parameter's carrier is its argument slot. */
+		const RAnalSnapshotRegisterStorage stack_carrier = {
+			.size = snapshot_parameter->stack_size,
+		};
+		const RAnalSnapshotRegisterStorage *carrier = snapshot_parameter->on_stack
+			? &stack_carrier: &snapshot_parameter->storage;
 		if (result != SNAPSHOT_TYPE_GRAPH_VALID
 			|| !snapshot_type_carrier_project (graph,
-				snapshot_parameter->logical_type_id, &snapshot_parameter->storage,
+				snapshot_parameter->logical_type_id, carrier,
 				&snapshot_parameter->carrier)) {
 			snapshot_type_graph_report (result == SNAPSHOT_TYPE_GRAPH_VALID
 				? "parameter type does not project onto its carrier"
