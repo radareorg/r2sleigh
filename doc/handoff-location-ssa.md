@@ -19659,3 +19659,48 @@ edge-copy and deferred-marker commits before it) reads 644 of 860, against 640
 for the byte-closure run. The per-function diff is recorded with the run; the
 three `deflate` copies that the deadline had taken are back and the rest is
 what the gap commits gained locally. Refusals on DecBench: 161 of 805 observed.
+
+## An access through a computed pointer into a named slot, end to end
+
+`minigzip_O2`'s `fcn_b760` was the trace for `lowering.rs:204`, and it turned
+out to be five defects stacked, each visible only once the one above it was
+fixed. In order:
+
+1. `expr_reads_symbol` had no arm for `CExpr::AddrOf`, so `&slot` did not
+   count as mentioning `slot`. It does now.
+2. The journal's `observe_stack_access_expr` demanded the slot's symbol in an
+   access rendered through the pointer the plan bound for a computed address
+   (`*(uint16_t *)tmp_4a00`). The slot is mentioned where the pointer was
+   computed from it, and the access still reads the slot; the check now accepts
+   the pointer's symbol when the address is indexed and bound, in the journal
+   and in placement's collection alike.
+3. Placement's `target_authorizes_binding` then had to authorise reading that
+   pointer under the access's `StackAccess` target, and -- separately -- to let
+   an access's own expression name its slot on either side: a store through a
+   subscript spells `&slot` as the base it writes, which the audit classifies
+   as a read. That arm had also been passing a literal `false` for the access
+   direction, so a write target could never authorise its own slot.
+4. The subscript renderer spelled a `TermKind::ObjectAddress` as the object's
+   *name*, which for a scalar slot is its contents: `((int16_t *)stack_m104)[i]`.
+   It now takes the object's address, decaying only an array.
+5. A slot read only through computed offsets and never written in the function
+   -- a buffer a callee filled through an escaped address -- refused as
+   `missing_definition`. Every read of it is `IndexedStackAccess`, whose own
+   documentation already says the declaration defines it; the refusal now
+   applies only where some read is not indexed.
+
+The first four together: local census 101 -> 100, `minigzip_O2`'s `fcn_2cb0`
+gained and nothing lost, gates 54 pass on every column and all 54 snapshots
+match. The fifth is being measured as this is written; `fcn_b760` itself goes
+on to a `ConflictingUse`, the next layer.
+
+Two other things landed on the way. The slice spelling for a narrow or offset
+access into a named slot (`*(T *)((uint8_t *)&slot + off)`) was written,
+measured at 101 -> 149, and reverted: its owner-path width check declined
+every `-O0` local whose declared type is wider than the access, and its
+re-read of the index value double-observed it. The idea is right and the
+measurement says the width comparison must use the slot's certified width,
+not the declaration type's, and the index must reuse the address value's
+expression. And `unauthorized-symbol-statement` now prints the bare shape of
+the statement an unauthorised symbol sits in, which is what found item 4 in
+one probe.
