@@ -19577,3 +19577,14 @@ Local census 105 -> 104, `fcn_2140` gained and nothing lost; gates 54 pass on
 every column and all 54 snapshots match. `DeadPhis::find` uses the same
 closure through its value set, so a merge some byte of which is observed stays
 live exactly as before.
+
+## DecBench after the byte closure: `deflate` again, three times
+
+The run after "Observe bytes, not values" reads 640 of 860 against 643 before
+it. The per-function diff is three lost and none gained, and all three are
+`deflate` -- `zlib/example64`, `zlib/minigzip`, `zlib/minigzip64` -- the one
+function that renders or refuses on the wall-clock budget. Nothing else moved
+in either direction, and `missing_definition`, which led the cause list at 16
+three runs ago, is no longer in the top seven. Read the number as flat with a
+sharper refusal profile, and treat `deflate` deltas as the deadline until the
+work bound replaces it.
