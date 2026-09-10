@@ -1338,6 +1338,9 @@ impl<'a> FoldingContext<'a> {
         self.current_op_idx.set(None);
         self.folded_blocks.borrow_mut().insert(block.addr);
         let mut stmts = Vec::new();
+        // A marker waits for the last operation its gap owns in this block, so
+        // a value the gap reads from outside is assigned before the marker.
+        let mut pending_gaps: Vec<(usize, FoldedOpStmt)> = Vec::new();
 
         for (op_idx, op) in block.ops.iter().enumerate() {
             self.current_op_idx.set(Some(op_idx));
@@ -1349,21 +1352,32 @@ impl<'a> FoldingContext<'a> {
                     return Err(reason.refusal());
                 };
                 self.gapped_sites.borrow_mut().extend(owned);
-                stmts.push(FoldedOpStmt {
+                let last = (op_idx..block.ops.len())
+                    .filter(|index| self.normalized_op_is_gapped(block.addr, *index))
+                    .max()
+                    .unwrap_or(op_idx);
+                let marker = FoldedOpStmt {
                     site: self
                         .normalized_site(block.addr, op_idx)
                         .ok_or_else(OpLoweringRefusal::missing_machine_projection)?,
                     stmt,
-                });
+                };
+                if last == op_idx {
+                    stmts.push(marker);
+                } else {
+                    pending_gaps.push((last, marker));
+                }
+                continue;
+            }
+            if let Some(position) = pending_gaps.iter().position(|(last, _)| *last == op_idx) {
+                let (_, marker) = pending_gaps.remove(position);
+                stmts.push(marker);
                 continue;
             }
             // An operation a marked gap already covers has no statement of its
             // own: the gap answered for its cells, and rendering it here would
             // put a second answer on them.
-            if self
-                .source_inst_for_normalized_op(block.addr, op_idx)
-                .is_some_and(|inst| self.gapped_sites.borrow().contains(&inst))
-            {
+            if self.normalized_op_is_gapped(block.addr, op_idx) {
                 continue;
             }
             if self.is_inlined_single_use_call_result(block, op_idx, op) {
@@ -1598,6 +1612,9 @@ impl<'a> FoldingContext<'a> {
         self.current_block_addr.set(None);
         self.current_block_id.set(None);
         self.current_op_idx.set(None);
+        for (_, marker) in pending_gaps {
+            stmts.push(marker);
+        }
         Ok(stmts)
     }
 

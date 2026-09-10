@@ -603,6 +603,31 @@ impl<'a> FoldingContext<'a> {
         self.gap_anchors.borrow().get(&anchor).cloned()
     }
 
+    /// Whether a marked gap accounts for the operation at this normalized site.
+    ///
+    /// A copy normalization made for a merge has no source instruction of its
+    /// own; it belongs to the merge, and is gapped exactly when the merge is.
+    pub(crate) fn normalized_op_is_gapped(&self, block_addr: u64, op_idx: usize) -> bool {
+        let Some(site) = self.normalized_site(block_addr, op_idx) else {
+            return false;
+        };
+        let inst = match self
+            .inputs
+            .normalization_origins
+            .and_then(|origins| origins.origin(site))
+        {
+            Some(crate::normalize::NormalizedOpOrigin::Original(inst)) => Some(*inst),
+            Some(crate::normalize::NormalizedOpOrigin::PhiEdgeCopy(origin)) => {
+                Some(origin.definition.inst)
+            }
+            Some(crate::normalize::NormalizedOpOrigin::RelocatedInitializer(origin)) => {
+                Some(origin.definition.inst)
+            }
+            None => self.source_inst_for_normalized_site(site),
+        };
+        inst.is_some_and(|inst| self.gapped_sites.borrow().contains(&inst))
+    }
+
     /// Whether a marked gap accounts for the definition of this value, which
     /// means no statement in the output assigns it.
     pub(crate) fn value_is_gapped(&self, value: ValueId) -> bool {
@@ -664,10 +689,11 @@ impl<'a> FoldingContext<'a> {
                 // second reader nothing else reports.
                 r2il::refusal_evidence!(
                     "gap",
-                    "opened at {block_addr:#x}:{op_idx} for {} over {} ops, claiming {} cells",
+                    "opened at {block_addr:#x}:{op_idx} for {} over {} ops, claiming {} cells: {:?}",
                     reason.kind,
                     closure.ops,
-                    closure.cells.len()
+                    closure.cells.len(),
+                    closure.sites
                 );
                 Some((stmt, closure.sites))
             }

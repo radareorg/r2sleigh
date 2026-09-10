@@ -1288,7 +1288,7 @@ impl MarkedNativeDraft {
                     .writes()
                     .iter()
                     .filter(|write| write.binding == binding)
-                    .map(|write| (write.block, write.inst))
+                    .map(|write| (write.block, write.statement, write.inst))
                     .collect::<Vec<_>>();
                 // A binding with no rendered write is the common refusal, and
                 // the question is always what the plan did with the values it
