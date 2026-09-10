@@ -19704,3 +19704,81 @@ not the declaration type's, and the index must reuse the address value's
 expression. And `unauthorized-symbol-statement` now prints the bare shape of
 the statement an unauthorised symbol sits in, which is what found item 4 in
 one probe.
+
+## Stack geometry a subscript folds stays the certificate's
+
+`minigzip_O2`'s `fcn_b760` (inflate_table) refused `ConflictingUse` on the
+stack-base operand of `t = RSP + 0x62`, the address of `count[1]`. Two owners
+answered for that add: the stack geometry certificate elides it (its only
+readers are the load's address operand and dead phis over the reused unique),
+and the rewriter folds it into `Subscript { ObjectAddress(count), 1 }`, whose
+canonical-access replacement discharges the add and marked every operand read
+Exact. The discharge was the wrong answer: `((uint16_t *)&count)[1]` reads no
+stack pointer. A discharged instruction whose output the plan elides as
+`DeadStackBase` now contributes no cells, and the replacement's root value
+target is dropped when the address value is such geometry, the same way the
+owner path's bare slot name never claimed the address. Census 100 -> 99,
+nothing lost; gates 54, snapshots 54. `replacement-discharges` evidence names
+every replacement's discharged instructions and expression.
+
+The rewriter branch tried first for this function -- unfolding a bound
+pointer's definition inside `affine_of` so a load through `p` became
+`slot[i]` -- was reverted, and the patch is parked at
+`$CLAUDE_JOB_DIR/tmp/rewriter-unfold.patch`. It introduces a read of `i` at
+the load that the machine makes elsewhere, and the discharge set has no way to
+say so; a read through a bound pointer is rendered through the pointer, which
+the tree already does.
+
+## Stack-passed parameters, from the interface and from the body
+
+`memory_renderer.rs:116` ("access has no planned expression") was the largest
+remaining local class, 12 functions. Every one was a read of an argument-area
+slot: the seventh integer parameter on amd64. Three defects stacked:
+
+1. **The plugin linked a stack parameter to its slot by DWARF name.** radare2
+   at -O2 files `stream_size` where `version` is, so the name link failed, the
+   `arg_XXh` slot kept role ARG with no parameter, `stack_slot_roles_complete`
+   went false, the ABI model was incoherent, and every return boundary of the
+   function was incomplete. The link is now by entry offset: the convention
+   places each stack parameter at one coordinate, and the slot there is its
+   storage whatever the source named it. Two slots at one coordinate are one
+   slot declared twice, not a second home. The plugin also projected a stack
+   parameter's type onto an empty register storage, so any function with a
+   stack parameter lost its whole DWARF type graph; the carrier is now the
+   argument slot, so `int` in an eight-byte slot is `LowBits` of 32.
+2. **r2ssa declared no slot for a parameter location.** A `Stack { offset }`
+   parameter location is itself a declaration: `collect_declared_stack_slots`
+   now mints a `Parameter`-role slot at that coordinate, at the parameter's
+   logical width, when the source declared none there (and takes the
+   coordinate over a differently-classified declaration, with evidence
+   `stack-slot-parameter`).
+3. **Interface recovery walked register slots only.** `recover_interface`
+   now recovers the return mechanism from the body (every return's control
+   reload from the entry slot at +0 proves a stacked return; a link register or
+   its save in the callee's frame proves a link; `reload_object` on the
+   return-control certificate records which) and, once every register slot is
+   proven, reads the argument area: a load of an entry-stack-pointer slot above
+   the return address, never stored in the function and reaching a program
+   observation, is a parameter, taken as a prefix from the first slot. The
+   minted interface declares each as a `Parameter`-role slot at the width read
+   and carries the stacked return, which is what places the same slot at a
+   call site (`mint_recovered_call_site_interface` subtracts the spent slot).
+
+`zlib_example`'s `sym_deflateInit2_` now renders with eight parameters
+(`uint64_t arg_50h, uint32_t arg_58h`), `minigzip_O2`'s `dbg_deflateInit2_`
+with `version` and `stream_size` typed from DWARF, and bzip2's
+`BZ2_bzWriteClose64_part_0` with `nbytes_out_hi32`.
+
+Not done: 32-bit stack-only conventions still recover nothing, because
+`recover_interface_inner` returns before looking at the stack when the
+convention names no register slots. A struct passed by value in two slots is
+read as two integer parameters; nothing without a declaration can tell.
+
+Measured together: local census 99 -> 93 of 854, six gained
+(`bzip2_O0` 0x9df3, 0x19303, 0x1bc6d; `bzip2_O2` 0x6410, 0x11d10;
+`minigzip_O2` 0x8590), none lost; gates 54 on every column, 54 snapshots
+match. DecBench for the run before this (48b6d4d4) read 651 of 860, against
+644; it flagged `deflatePrime` type_match 0.333 -> 0.167 on all five copies,
+untraced. radare2 itself mislabels the stack parameters at -O2 (its DWARF pass
+files `stream_size` at `version`'s slot); the plugin no longer depends on the
+name, but the mislabel is a radare2 defect worth its own trace and upstream PR.
