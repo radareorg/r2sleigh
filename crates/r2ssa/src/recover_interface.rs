@@ -130,6 +130,36 @@ fn observed_entry_read_storages(
             && graph.def_inst(value.id).is_none()
             && let Some(storage) = is_entry_read(func, &value.var)
         {
+            // Which observation this parameter rests on is the whole question
+            // when the count is wrong, and it is knowable only here.
+            let (root, chain) = observations.witness(value.id);
+            let steps = chain
+                .iter()
+                .map(|step| {
+                    let op = graph
+                        .def_inst(*step)
+                        .and_then(|inst| graph.inst(inst))
+                        .map(|inst| match &inst.payload {
+                            crate::graph::InstPayload::Phi { .. } => "phi".to_string(),
+                            crate::graph::InstPayload::Op(op) => {
+                                let text = format!("{op:?}");
+                                text.split([' ', '(', '{'])
+                                    .next()
+                                    .unwrap_or("op")
+                                    .to_string()
+                            }
+                        })
+                        .unwrap_or_else(|| "entry".to_string());
+                    format!("{step:?}:{op}")
+                })
+                .collect::<Vec<_>>();
+            r2il::refusal_evidence!(
+                "interface-recovery",
+                "entry read {storage:?} ({:?}) is observed from {}: {}",
+                value.id,
+                root.unwrap_or("?"),
+                steps.join(" <- ")
+            );
             note(storage);
         }
     }

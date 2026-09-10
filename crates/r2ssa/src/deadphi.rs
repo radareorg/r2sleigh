@@ -55,13 +55,21 @@ pub struct DeadPhis {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProvenProgramObservations {
     values: BTreeSet<ValueId>,
+    /// The value through which each observed value was reached, so a claim
+    /// that something is observed can name the observation it rests on.
+    parents: std::collections::BTreeMap<ValueId, ValueId>,
+    /// Why each root is one: the obligation that reads it, or the return.
+    roots: std::collections::BTreeMap<ValueId, String>,
 }
 
-fn dependency_closure(
-    graph: &SsaGraph,
-    roots: impl IntoIterator<Item = ValueId>,
-) -> BTreeSet<ValueId> {
+struct Closure {
+    values: BTreeSet<ValueId>,
+    parents: std::collections::BTreeMap<ValueId, ValueId>,
+}
+
+fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
     let mut observed = BTreeSet::new();
+    let mut parents = std::collections::BTreeMap::new();
     let mut pending = VecDeque::new();
     for value in roots {
         if observed.insert(value) {
@@ -74,11 +82,15 @@ fn dependency_closure(
         };
         for input in &inst.inputs {
             if observed.insert(*input) {
+                parents.insert(*input, value);
                 pending.push_back(*input);
             }
         }
     }
-    observed
+    Closure {
+        values: observed,
+        parents,
+    }
 }
 
 impl ProvenProgramObservations {
@@ -91,21 +103,42 @@ impl ProvenProgramObservations {
         if !facts.obligations.is_complete() {
             return None;
         }
-        let roots = live_out.iter().chain(
-            facts
-                .obligations
-                .obligations()
-                .values()
-                .filter(|obligation| obligation.id.kind.is_positive_observation_root())
-                .flat_map(|obligation| obligation.inputs.iter().copied()),
-        );
+        let mut roots = std::collections::BTreeMap::new();
+        for value in live_out.iter() {
+            roots.entry(value).or_insert_with(|| "return".to_string());
+        }
+        for obligation in facts.obligations.obligations().values() {
+            if !obligation.id.kind.is_positive_observation_root() {
+                continue;
+            }
+            for input in obligation.inputs.iter().copied() {
+                roots
+                    .entry(input)
+                    .or_insert_with(|| format!("{:?}", obligation.id));
+            }
+        }
+        let closure = dependency_closure(graph, roots.keys().copied());
         Some(Self {
-            values: dependency_closure(graph, roots),
+            values: closure.values,
+            parents: closure.parents,
+            roots,
         })
     }
 
     pub fn contains(&self, value: ValueId) -> bool {
         self.values.contains(&value)
+    }
+
+    /// The chain of values from the root that observes `value` down to it.
+    pub fn witness(&self, value: ValueId) -> (Option<&str>, Vec<ValueId>) {
+        let mut chain = vec![value];
+        let mut current = value;
+        while let Some(parent) = self.parents.get(&current) {
+            chain.push(*parent);
+            current = *parent;
+        }
+        chain.reverse();
+        (self.roots.get(&current).map(String::as_str), chain)
     }
 }
 
@@ -156,7 +189,7 @@ impl DeadPhis {
         }
         // Whatever an observation depends on is observed, transitively. The walk
         // is over the graph's own instruction inputs, so it visits each edge once.
-        let observed = dependency_closure(graph, roots);
+        let observed = dependency_closure(graph, roots).values;
 
         let unobserved_values = graph
             .values
