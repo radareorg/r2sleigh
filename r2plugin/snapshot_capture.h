@@ -88,6 +88,20 @@ typedef struct r_anal_cc_return_mechanism_t {
 } RAnalCCReturnMechanism;
 
 typedef enum {
+	R_ANAL_FCN_CALLEE_UNKNOWN = 0,
+	R_ANAL_FCN_CALLEE_INTERNAL = 1,
+	R_ANAL_FCN_CALLEE_IMPORTED = 2,
+} RAnalFcnCalleeLinkage;
+
+/* How control reaches a callee: a call comes back, a tail jump names its
+ * target, a tail slot names the relocated slot the target was loaded from. */
+typedef enum {
+	R_ANAL_CALL_TRANSFER_CALL = 0,
+	R_ANAL_CALL_TRANSFER_TAIL_JUMP = 1,
+	R_ANAL_CALL_TRANSFER_TAIL_SLOT = 2,
+} RAnalCallTransfer;
+
+typedef enum {
 	R_ANAL_CC_STACK_GROWTH_NONE = 0,
 	R_ANAL_CC_STACK_GROWTH_LOWER,
 	R_ANAL_CC_STACK_GROWTH_HIGHER,
@@ -101,6 +115,19 @@ typedef struct r_anal_cc_stack_allocation_contract_t {
 	RAnalCCStackGrowth growth;
 	ut32 red_zone_bytes;
 } RAnalCCStackAllocationContract;
+
+typedef enum {
+	R_ANAL_FCN_BASE_BP = 0,
+	R_ANAL_FCN_BASE_SP,
+	R_ANAL_FCN_BASE_NAMED
+} RAnalFcnSlotBase;
+
+typedef enum {
+	R_ANAL_FCN_SLOT_LOCAL = 0,
+	R_ANAL_FCN_SLOT_ARG,
+	R_ANAL_FCN_SLOT_HOME,
+	R_ANAL_FCN_SLOT_UNKNOWN
+} RAnalFcnSlotRole;
 
 typedef struct r_anal_fcn_slot_t {
 	char *name;
