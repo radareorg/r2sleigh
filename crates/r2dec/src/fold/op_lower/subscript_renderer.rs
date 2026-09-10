@@ -230,7 +230,11 @@ impl<'a> FoldingContext<'a> {
                 }
             }
             TermKind::Literal(bits) => literal_expr(bits.bits()),
-            TermKind::ObjectAddress(object) => self.certified_stack_var_expr_for_object(object)?,
+            // The term is the object's address: an array's name decays to it,
+            // anything else has to be taken with `&`.
+            TermKind::ObjectAddress(object) => {
+                self.certified_stack_address_expr_for_object(object)?.0
+            }
             TermKind::Arithmetic { op, left, right } => at_width(CExpr::binary(
                 match op {
                     r2ssa::MachineArithmeticOp::Add => BinaryOp::Add,

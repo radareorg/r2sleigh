@@ -3157,6 +3157,18 @@ impl LegacyObservationJournal {
         is_write: bool,
         expr: CExpr,
     ) -> Result<CExpr, LegacyObservationJournalError> {
+        // Four checks share one error, and which of them refused is the
+        // whole trace when it does.
+        let invalid = |why: &str| {
+            r2il::refusal_evidence!(
+                "stack-access-observe",
+                "{access:?} is_write={is_write}: {why}"
+            );
+            LegacyObservationJournalError::InvalidUse(UseSite {
+                inst: access.inst,
+                input_idx: 0,
+            })
+        };
         let fact = self
             .source
             .structured()
@@ -3165,32 +3177,32 @@ impl LegacyObservationJournal {
             .filter(|fact| {
                 fact.id == access && fact.is_write == is_write && fact.provenance_complete
             })
-            .ok_or(LegacyObservationJournalError::InvalidUse(UseSite {
-                inst: access.inst,
-                input_idx: 0,
-            }))?
+            .ok_or_else(|| invalid("no complete access fact of this direction"))?
             .clone();
         let fact = &fact;
         let Some(disposition) = self.plan.stack_object_disposition(fact.object) else {
             return Ok(expr);
         };
         let StackObjectDisposition::Bound { binding } = disposition else {
-            return Err(LegacyObservationJournalError::InvalidUse(UseSite {
-                inst: access.inst,
-                input_idx: 0,
-            }));
+            return Err(invalid(&format!(
+                "object {:?} is not bound: {disposition:?}",
+                fact.object
+            )));
         };
-        let symbol = self.names.symbol_for_binding(binding).ok_or(
-            LegacyObservationJournalError::InvalidUse(UseSite {
-                inst: access.inst,
-                input_idx: 0,
-            }),
-        )?;
-        if !crate::placement::expr_reads_symbol(&expr, symbol) {
-            return Err(LegacyObservationJournalError::InvalidUse(UseSite {
-                inst: access.inst,
-                input_idx: 0,
-            }));
+        let symbol = self
+            .names
+            .symbol_for_binding(binding)
+            .ok_or_else(|| invalid("the binding has no symbol"))?;
+        if !crate::placement::stack_access_expr_mentions_slot(
+            &self.source,
+            &self.names,
+            access,
+            &expr,
+            symbol,
+        ) {
+            return Err(invalid(&format!(
+                "the expression {expr:?} does not read {symbol:?}"
+            )));
         }
         // The address the machine computed has no separate spelling here: the
         // rendered lvalue names the object it addressed, so the statements that

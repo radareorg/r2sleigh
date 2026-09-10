@@ -298,7 +298,7 @@ pub(crate) fn collect_final_placement_occurrences(
                     PlacementAnalysisError::UnobservedBindingRead { binding }
                 });
             };
-            if !expr_reads_symbol(expr, symbol) {
+            if !stack_access_expr_mentions_slot(source, names, access, expr, symbol) {
                 r2il::refusal_evidence!(
                     "stack-access-unobserved",
                     "observation={id:?} binding={binding:?} symbol={symbol:?} \
@@ -1667,7 +1667,26 @@ fn audit_statement(
                 names,
                 targets,
                 by_symbol,
-            )?;
+            )
+            .map_err(|error| {
+                // The refusal names a symbol; the statement it sits in is
+                // what says which rendering path spelled it.
+                fn bare(expr: &CExpr) -> &CExpr {
+                    let mut expr = expr;
+                    while let CExpr::Observed { expr: inner, .. } = expr {
+                        expr = inner;
+                    }
+                    expr
+                }
+                let shape = match bare(expr) {
+                    CExpr::Binary { op, left, right } => {
+                        format!("{op:?}: {:?} <- {:?}", bare(left), bare(right))
+                    }
+                    other => format!("{other:?}"),
+                };
+                r2il::refusal_evidence!("unauthorized-symbol-statement", "{error:?} in {shape}");
+                error
+            })?;
         }
         CStmt::Decl { name, init, .. } => {
             audit_program_symbol(
@@ -2269,8 +2288,18 @@ fn target_authorizes_binding(
             },
             SymbolAccess::Read,
         ) => {
-            !is_write
-                && stack_binding == binding
+            // An access through a computed address into the slot spells the
+            // pointer the plan bound for that address, and reads it here.
+            let reads_pointer = source
+                .structured()
+                .memory_accesses
+                .get(&access)
+                .filter(|fact| source.objects().address_is_indexed(fact.address))
+                .and_then(|fact| names.disposition_for_value(fact.address))
+                .is_some_and(|disposition| {
+                    matches!(disposition, ValueDisposition::Bound { binding: pointer } if *pointer == binding)
+                });
+            if reads_pointer
                 && stack_access_matches(
                     source,
                     names,
@@ -2278,7 +2307,22 @@ fn target_authorizes_binding(
                     object,
                     stack_binding,
                     symbol,
-                    false,
+                    is_write,
+                )
+            {
+                return true;
+            }
+            // The access's own expression may name its slot on either side:
+            // a store through a subscript spells `&slot` as the base it writes.
+            stack_binding == binding
+                && stack_access_matches(
+                    source,
+                    names,
+                    access,
+                    object,
+                    stack_binding,
+                    symbol,
+                    is_write,
                 )
         }
         (
@@ -2457,12 +2501,44 @@ fn stack_access_matches(
 /// This follows C read semantics closely enough to reject a forged marker on
 /// `symbol = literal`, `&symbol`, or `sizeof(symbol)`, while retaining exact
 /// casts and slice projections produced from the planned value expression.
+/// Whether a rendered stack access mentions the slot it is filed under.
+///
+/// An access through a computed address into a named slot renders through the
+/// pointer the plan bound for that address, and the slot is mentioned where
+/// the pointer was computed from it. The access still reads the slot, which
+/// is what placement records; the symbol it spells is the pointer's.
+pub(crate) fn stack_access_expr_mentions_slot(
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    access: r2ssa::StructuredAccessId,
+    expr: &CExpr,
+    symbol: crate::symbol::SymbolId,
+) -> bool {
+    if expr_reads_symbol(expr, symbol) {
+        return true;
+    }
+    let Some(fact) = source.structured().memory_accesses.get(&access) else {
+        return false;
+    };
+    if !source.objects().address_is_indexed(fact.address) {
+        return false;
+    }
+    let Some(ValueDisposition::Bound { binding }) = names.disposition_for_value(fact.address)
+    else {
+        return false;
+    };
+    names
+        .symbol_for_binding(*binding)
+        .is_some_and(|pointer| expr_reads_symbol(expr, pointer))
+}
+
 pub(crate) fn expr_reads_symbol(expr: &CExpr, symbol: crate::symbol::SymbolId) -> bool {
     match expr.unobserved() {
         CExpr::Var(actual) => *actual == symbol,
         CExpr::Unary { operand, .. }
         | CExpr::Cast { expr: operand, .. }
         | CExpr::Deref(operand)
+        | CExpr::AddrOf(operand)
         | CExpr::Paren(operand) => expr_reads_symbol(operand, symbol),
         CExpr::Binary { op, left, right } => {
             expr_reads_symbol(right, symbol)
@@ -2497,8 +2573,7 @@ pub(crate) fn expr_reads_symbol(expr: &CExpr, symbol: crate::symbol::SymbolId) -
         | CExpr::External { .. }
         | CExpr::DataObject { .. }
         | CExpr::Sizeof(_)
-        | CExpr::SizeofType(_)
-        | CExpr::AddrOf(_) => false,
+        | CExpr::SizeofType(_) => false,
     }
 }
 
@@ -3696,7 +3771,18 @@ fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
             decisions[binding_index] = Some(PlacementDecision::ExternallyDeclared);
             continue;
         }
-        if writes_for_binding.is_empty() && !entry_declared.contains(&binding) {
+        // Storage read at offsets the machine computes is defined by its own
+        // declaration, as an array is; no element write has to precede it.
+        let only_indexed_reads = binding_occurrences.iter().all(|occurrence| {
+            matches!(
+                occurrence.kind,
+                OccurrenceKind::Read(PlacementRead::IndexedStackAccess(_))
+            )
+        });
+        if writes_for_binding.is_empty()
+            && !entry_declared.contains(&binding)
+            && !only_indexed_reads
+        {
             r2il::refusal_evidence!(
                 "placement-missing-definition",
                 "{:?} is read {} times and never written; externally_declared={} entry_declared={} (entry set {:?}); reads {:?}",
