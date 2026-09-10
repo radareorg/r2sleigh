@@ -387,6 +387,23 @@ impl<'a> FoldingContext<'a> {
             }
         }
 
+        // A call and the `CallDefine`s certified at its site are one statement:
+        // the call supplies the effect and each define owns a result lane.
+        let mut statement_mates: std::collections::BTreeMap<InstId, Vec<InstId>> =
+            std::collections::BTreeMap::new();
+        for result in prepared.certificates().call_results.values() {
+            let Some(call) = prepared
+                .certificates()
+                .callsites
+                .get(&result.call_site)
+                .map(|site| site.at)
+            else {
+                continue;
+            };
+            statement_mates.entry(call).or_default().push(result.at);
+            statement_mates.entry(result.at).or_default().push(call);
+        }
+
         let mut owned: BTreeSet<InstId> = BTreeSet::new();
         owned.insert(seed);
         let mut worklist = vec![seed];
@@ -394,6 +411,11 @@ impl<'a> FoldingContext<'a> {
             let Some(instruction) = graph.inst(inst) else {
                 continue;
             };
+            for mate in statement_mates.get(&inst).into_iter().flatten().copied() {
+                if owned.insert(mate) {
+                    worklist.push(mate);
+                }
+            }
             // Forward: a statement that reads an unproven value is unproven.
             if let Some(output) = instruction.output
                 && matches!(
