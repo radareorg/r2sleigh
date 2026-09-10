@@ -1458,6 +1458,18 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let mut alternatives = self.active_domains.clone();
         alternatives.extend(incoming);
         Self::normalize_rendered_domains(&mut alternatives);
+        r2il::refusal_evidence!(
+            "transfer-join",
+            "0x{block_addr:x}: alternatives {:?}; source {:?}",
+            alternatives
+                .iter()
+                .map(|domain| (&domain.loops, &domain.guards))
+                .collect::<Vec<_>>(),
+            self.fold_ctx
+                .control_facts()
+                .and_then(|facts| facts.control_domain_for_block(block_addr))
+                .map(|domain| (&domain.loops, &domain.guards))
+        );
         let Some(source) = self
             .fold_ctx
             .control_facts()
@@ -3416,6 +3428,11 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 true
             }
             Err(reason) => {
+                r2il::refusal_evidence!(
+                    "transfer-domain",
+                    "0x{target:x} out of loop 0x{loop_header:x}: {reason}; active {:?}",
+                    self.active_domains
+                );
                 self.safety_reason = Some(reason);
                 false
             }
