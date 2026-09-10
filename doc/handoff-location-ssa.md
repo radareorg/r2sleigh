@@ -20113,3 +20113,44 @@ tail duplication proposes trees the certificate rejects for
 `terminal-fallthrough` after a `noreturn` call, which the gate declines
 correctly and which costs the rewrite rather than the function; `gzputc`'s
 `int c` is the narrow formal of the ADR.
+
+## The fork branch carries only the integration, and the PR is two PRs
+
+`anal/subregister-argument-spills` is now upstream master (84e28a449e) plus
+the integration alone. Removed from it, in three commits ending at
+`eee9bc9df6`: the xrefs invalidation variant that overlapped PR 26682, the
+`afva` rewrite in `aaa`, motion in `anal.c`, the deleted upstream
+`test_dwarf_integration`, and everything the function snapshot left behind
+when it moved into the plugin (`function_snapshot.h`, orphan comments and
+blank runs in `function.c`, a hash salt, an unused type-link setter, snapshot
+helpers in the unit tests, and an include of the deleted header that broke
+`test_anal_function`). The enums the snapshot alone reads
+(`RAnalFcnCalleeLinkage`, `RAnalCallTransfer`, `RAnalFcnSlotBase`,
+`RAnalFcnSlotRole`) and the type-context hash memo moved into the plugin
+(`9bc0d1fe`, `9d7c5289`); the memo is one remembered entry keyed by the
+analysis and its type epoch, where two `RAnal` fields used to hold it.
+
+The branch is split into two pull requests from upstream master, each built
+and tested on its own in a worktree under `$CLAUDE_JOB_DIR/tmp` against its own
+libraries (`DYLD_LIBRARY_PATH` at a symlink dir of the build's dylibs,
+`R2R_RADARE2` at the build's binary, unit tests linked with
+`LDFLAGS=-L<that dir>`; a build-tree binary reports the source version, so the
+versioned share dir has to exist for type signatures):
+
+- 26701, `pr/anal-decompiler-provider`: the decompile callback and provider
+  selection, `r_anal_decompile`, `pdd`, the function and type dirty epochs,
+  the read-only signature queries, `r_anal_cc_location_uses` exported,
+  `stackalloc`/`redzone`/`retmech` in the cc tables, `RBinBind.get_reloc_at`
+  and `get_sym`, post-analysis depth, and the small fixes beside them.
+- 26702, `pr/drop-unused-plugin-surface`: removal of `RAnalFcnContext` and its
+  records, the `get_data_refs` hook with its `aar` merge step and setting, and
+  `r_anal_types_baselist`.
+
+26646 is closed pointing at both. The integration branch equals their sum
+modulo blank-line context. Install state: the fork is built and installed
+from `eee9bc9df6`; the main checkout's `config-user.mk` still says 6.2.2 while
+the source is 6.2.3, so a reconfigure will move the share dir.
+
+Still open on the fork side: after 26682 merges, confirm no xrefs variant
+remains; after 26701 or 26702 merge, drop the corresponding commits from the
+integration branch on the next rebase.
