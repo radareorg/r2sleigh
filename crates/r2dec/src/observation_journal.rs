@@ -2691,7 +2691,13 @@ impl LegacyObservationJournal {
     ) -> Result<CExpr, LegacyObservationJournalError> {
         let (expr, value, replaced, obligations, frame_address) = contract.into_parts();
         self.value_slot(value)?;
-        let mut targets = vec![ObservationTarget::Value(value)];
+        // A stack address the geometry certificate elided has no occurrence;
+        // the spelling that stands in its place names the cell, not the value.
+        let mut targets = if self.stack_geometry_elides(value) {
+            Vec::new()
+        } else {
+            vec![ObservationTarget::Value(value)]
+        };
         targets.extend(self.discharged_instruction_targets(Some(value), &replaced, Some(&expr))?);
 
         if let Some(frame_address) = frame_address {
@@ -2895,6 +2901,14 @@ impl LegacyObservationJournal {
                 .graph()
                 .inst(definition)
                 .ok_or(LegacyObservationJournalError::InvalidWrite(definition))?;
+            // Stack geometry the rewriter folded into an object's address is
+            // still the certificate's: none of its cells is an occurrence.
+            if inst
+                .output
+                .is_some_and(|output| self.stack_geometry_elides(output))
+            {
+                continue;
+            }
             // The write the vanished statement performed. Its result is part
             // of the expression now standing in the reader's place.
             if let Some(output) = inst.output {
@@ -4189,6 +4203,17 @@ impl LegacyObservationJournal {
 
     pub(crate) fn is_coalesced_carrier_copy(&self, site: NormalizedOpSite) -> bool {
         self.coalesced_carrier_copy_sites.contains(&site)
+    }
+
+    /// Whether the plan elides `value` as dead stack geometry.
+    fn stack_geometry_elides(&self, value: ValueId) -> bool {
+        matches!(
+            self.plan.disposition(value),
+            Some(ValueDisposition::Elided {
+                reason: r2ssa::ledger::ElisionReason::DeadStackBase,
+                ..
+            })
+        )
     }
 
     fn rendered_use_observation(

@@ -167,6 +167,10 @@ impl<'a> FoldingContext<'a> {
                 )
             })
             .collect::<BTreeSet<_>>();
+        r2il::refusal_evidence!(
+            "replacement-discharges",
+            "{value:?} from {source:?} discharges {replaced:?} as {expr:?}"
+        );
         let fallback = expr.clone();
         let contract =
             RenderedReplacementContract::new(expr, value, replaced, obligations, frame_address);
