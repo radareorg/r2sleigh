@@ -276,7 +276,6 @@ pub enum ObligationInventoryFailureKind {
     MissingCanonicalPhiStorage,
     DuplicateCanonicalInstruction,
     DuplicateObligationSeed,
-    UnstructuredControlCycle,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -371,20 +370,6 @@ impl SemanticObligationInventory {
         let mut unsupported = BTreeSet::<InstId>::new();
         let mut duplicate_seeds =
             BTreeSet::<(InstId, SemanticObligationKind, SemanticObligationComponent)>::new();
-        for block_addr in &structured.unstructured_cycle_blocks {
-            if let Some(block) = graph
-                .block_id_for_addr(*block_addr)
-                .and_then(|block| graph.block(block))
-            {
-                for inst in &block.insts {
-                    construction_failures.push(ObligationInventoryFailure {
-                        inst: *inst,
-                        block_addr: Some(*block_addr),
-                        kind: ObligationInventoryFailureKind::UnstructuredControlCycle,
-                    });
-                }
-            }
-        }
 
         for inst in &graph.insts {
             match &inst.payload {
@@ -904,7 +889,6 @@ impl SemanticObligationInventory {
             .count();
         if self.schema_version != SEMANTIC_OBLIGATION_SCHEMA_VERSION
             || !self.construction_failures.is_empty()
-            || !self.unstructured_cycle_blocks.is_empty()
             || self.instructions.len() != self.source_instruction_count + zero_op_span_count
             || self.by_inst.len() != self.source_instruction_count
         {
@@ -2542,25 +2526,19 @@ mod tests {
         }));
     }
 
+    /// A cycle no natural loop owns has no loop certificate, and that is all:
+    /// its instructions owe the same obligations as any other, and the
+    /// structurer writes the cycle with `goto`s.
     #[test]
-    fn irreducible_cycle_refuses_complete_inventory() {
+    fn irreducible_cycle_keeps_a_complete_inventory() {
         let artifact =
             SsaArtifact::raw(&irreducible_cycle_fixture(), None).expect("irreducible artifact");
         assert!(!artifact.structured().unstructured_cycle_blocks.is_empty());
-        assert!(!artifact.obligations().is_complete());
-        assert!(
-            artifact
-                .obligations()
-                .construction_failures
-                .iter()
-                .any(|failure| {
-                    failure.kind == ObligationInventoryFailureKind::UnstructuredControlCycle
-                })
-        );
+        assert!(artifact.obligations().is_complete());
     }
 
     #[test]
-    fn empty_irreducible_cycle_still_refuses_complete_inventory() {
+    fn empty_irreducible_cycle_has_a_complete_empty_inventory() {
         let artifact =
             SsaArtifact::raw(&irreducible_cycle_fixture(), None).expect("irreducible artifact");
         let mut graph = artifact.graph().clone();
@@ -2582,10 +2560,7 @@ mod tests {
         );
         assert_eq!(inventory.source_instruction_count(), 0);
         assert!(!inventory.unstructured_cycle_blocks().is_empty());
-        assert!(!inventory.is_complete());
-        let report = inventory.audit_coverage(inventory.obligations.keys().copied());
-        assert!(!report.source_complete());
-        assert!(!report.is_closed());
+        assert!(inventory.is_complete());
     }
 
     #[test]
