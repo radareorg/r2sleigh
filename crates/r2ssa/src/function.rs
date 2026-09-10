@@ -3913,38 +3913,39 @@ impl SSAFunction {
         let mut out_states: HashMap<u64, FamilyRootState> = HashMap::new();
         let entry_state = self.entry_register_family_state(family_info);
 
-        loop {
+        // A block is recomputed only when a predecessor's exit state moved;
+        // the meet is monotone, so this reaches the same fixed point as a
+        // sweep over every block per round, without re-walking the rest.
+        let mut worklist: std::collections::VecDeque<u64> =
+            self.block_order.iter().copied().collect();
+        let mut queued: HashSet<u64> = worklist.iter().copied().collect();
+        while let Some(addr) = worklist.pop_front() {
             control.poll()?;
-            let mut changed = false;
-
-            for &addr in &self.block_order {
-                control.poll()?;
-                let preds = self.predecessors(addr);
-                let next_in = if addr == self.entry {
-                    let mut state = entry_state.clone();
-                    for predecessor in &preds {
-                        if let Some(predecessor) = out_states.get(predecessor) {
-                            state.retain(|slot, root| predecessor.get(slot) == Some(root));
-                        }
+            queued.remove(&addr);
+            let preds = self.predecessors(addr);
+            let next_in = if addr == self.entry {
+                let mut state = entry_state.clone();
+                for predecessor in &preds {
+                    if let Some(predecessor) = out_states.get(predecessor) {
+                        state.retain(|slot, root| predecessor.get(slot) == Some(root));
                     }
-                    state
-                } else {
-                    meet_family_states(&preds, &out_states)
-                };
-                let next_out = self.transfer_family_state_for_block(addr, &next_in, family_info);
-
-                if in_states.get(&addr) != Some(&next_in) {
-                    in_states.insert(addr, next_in.clone());
-                    changed = true;
                 }
-                if out_states.get(&addr) != Some(&next_out) {
-                    out_states.insert(addr, next_out);
-                    changed = true;
-                }
+                state
+            } else {
+                meet_family_states(&preds, &out_states)
+            };
+            if in_states.get(&addr) == Some(&next_in) && out_states.contains_key(&addr) {
+                continue;
             }
-
-            if !changed {
-                break;
+            let next_out = self.transfer_family_state_for_block(addr, &next_in, family_info);
+            in_states.insert(addr, next_in);
+            if out_states.get(&addr) != Some(&next_out) {
+                out_states.insert(addr, next_out);
+                for successor in self.successors(addr) {
+                    if queued.insert(successor) {
+                        worklist.push_back(successor);
+                    }
+                }
             }
         }
 
