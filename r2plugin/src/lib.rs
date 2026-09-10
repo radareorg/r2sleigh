@@ -8324,39 +8324,21 @@ mod integration_tests {
             });
         assert_eq!(len_home.name, "arg1");
         // The SIMD worker contains machine operations whose exact C projection
-        // is unavailable. Those are marked as gaps now, so the rendering gets
-        // as far as declaration placement, which refuses for its own reason:
-        // a binding nothing writes. Either way the saved frame-pointer object
-        // must not be reached through a fabricated local, which is what the
-        // output assertions below check.
+        // is unavailable. Those are marked as gaps and the rest renders; the
+        // saved frame-pointer object must not be reached through a fabricated
+        // local, which is what the output assertions check.
         assert!(
-            matches!(
-                response.placement_audit,
-                r2engine::PlacementAudit::Refused(
-                    r2engine::PlacementAuditRefusal::MissingDefinition { .. }
-                )
-            ),
-            "placement refuses the binding nothing writes: {:?}",
-            response.placement_audit
+            matches!(response.placement_audit, r2engine::PlacementAudit::Applied),
+            "placement applies around the gapped worker: {:?}\n{}",
+            response.placement_audit,
+            response.output
         );
+        assert_eq!(response.render_refusal, None, "{}", response.output);
         assert!(
-            matches!(
-                response.render_refusal,
-                Some(r2engine::DecompileRenderRefusal::DeclarationPlacement(
-                    r2engine::PlacementAuditRefusal::MissingDefinition { .. }
-                ))
-            ),
-            "the refusal names the layer that made it: {:?}",
-            response.render_refusal
-        );
-        assert!(
-            response.output.starts_with("/* r2sleigh refused")
-                && response
-                    .output
-                    .contains("native declaration placement refused: missing_definition")
+            response.output.contains("r2dec gap:")
                 && !response.output.contains("for (int32_t var_14h = 0;")
                 && !response.output.contains("return var_10h;"),
-            "certified facts must remain inspectable while the unprojected machine operation leaves only a fallback comment; output={} render_facts={:?}",
+            "certified facts must remain inspectable while the unprojected machine operation leaves a gap; output={} render_facts={:?}",
             response.output,
             response.function_facts.render_facts()
         );

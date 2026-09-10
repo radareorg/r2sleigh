@@ -575,6 +575,20 @@ impl ArchSpec {
         self.memory_endianness = endianness;
     }
 
+    /// Whether the register file lays a register's bytes out most significant
+    /// first: the register space's declared order, else the processor's.
+    pub fn register_bytes_are_big_endian(&self) -> bool {
+        let declared = self
+            .spaces
+            .iter()
+            .find(|space| space.id == crate::SpaceId::Register)
+            .and_then(|space| space.endianness);
+        matches!(
+            declared.unwrap_or(self.instruction_endianness),
+            Endianness::Big
+        )
+    }
+
     /// Add a register definition.
     pub fn add_register(&mut self, reg: RegisterDef) {
         self.registers.push(reg);

@@ -594,6 +594,7 @@ mod tests {
             value_by_var,
             op_inst_by_site,
             op_site_by_inst,
+            formal_projections: BTreeMap::new(),
         }
     }
 

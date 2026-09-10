@@ -5,13 +5,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use std::sync::Arc;
+
 use crate::cfg::CFG;
 use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::domtree::DomTree;
+use crate::function::{RegisterFamilyInfo, RegisterFamilySlot};
 use crate::naming::RegisterNameMap;
 use crate::op::SSAOp;
-use crate::phi::{DefinitionSitesByIdentity, PhiPlacement, RenameIdentity};
-use crate::var::{CanonicalStorageId, SSAVar};
+use crate::phi::{DefinitionSitesByIdentity, PhiPlacement, RenameIdentity, register_root_slot};
+use crate::var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RenameProjection {
@@ -40,6 +43,30 @@ pub struct RenameContext {
     /// name/width projection is otherwise identical.
     disambiguators: HashMap<RenameIdentity, u32>,
     next_disambiguator: HashMap<RenameProjection, u32>,
+    /// The register geometry: a lane renames as a projection of its family's
+    /// root (doc/adr-register-identity.md). `None` keeps exact-varnode identities.
+    families: Option<Arc<RegisterFamilyInfo>>,
+    lanes: LaneState,
+}
+
+/// The lane temporaries of the instruction being renamed, and the operations
+/// they add around the one the lift wrote.
+#[derive(Debug, Default)]
+struct LaneState {
+    /// (root offset, lane offset, lane width, the temporary holding it).
+    temps: Vec<(u64, u64, u32, SSAVar)>,
+    /// `Subpiece` reads to place before the operation.
+    prefix: Vec<SSAOp>,
+    /// `Insert` writes to place after it.
+    suffix: Vec<SSAOp>,
+    /// Storage for the root values those operations read and write.
+    storage: Vec<(SSAVar, CanonicalStorageId)>,
+    /// The block and operation index, for the temporaries' names.
+    site: (u64, usize),
+    serial: u32,
+    /// The lane this operation writes is widened into its root later in the
+    /// same instruction, so the temporary alone defines it.
+    defer_lane_write: bool,
 }
 
 /// Decompiler-safe call boundary policy.
@@ -83,11 +110,136 @@ pub struct CallBoundaryDef {
 impl RenameContext {
     /// Create a new rename context.
     pub fn new() -> Self {
+        Self::with_families(None)
+    }
+
+    pub fn with_families(families: Option<Arc<RegisterFamilyInfo>>) -> Self {
         Self {
             stacks: HashMap::new(),
             counters: HashMap::new(),
             disambiguators: HashMap::new(),
             next_disambiguator: HashMap::new(),
+            families,
+            lanes: LaneState::default(),
+        }
+    }
+
+    fn root_storage(root: RegisterFamilySlot) -> CanonicalStorageId {
+        CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: root.offset,
+            size: root.width,
+        }
+    }
+
+    fn lane_lsb_byte(&self, root: RegisterFamilySlot, varnode: &r2il::Varnode) -> u64 {
+        self.families
+            .as_ref()
+            .expect("a lane is found only through its families")
+            .lane_lsb_byte(root, varnode.offset, varnode.size)
+    }
+
+    fn fresh_lane_temp(&mut self, size: u32) -> SSAVar {
+        let (block, op_idx) = self.lanes.site;
+        let serial = self.lanes.serial;
+        self.lanes.serial += 1;
+        SSAVar::new(format!("tmp:lane:{block:x}:{op_idx:x}:{serial:x}"), 1, size)
+    }
+
+    /// Start renaming the operation at `site`; a new instruction forgets the
+    /// lane temporaries of the last one.
+    fn begin_op(&mut self, site: (u64, usize), new_instruction: bool, defer_lane_write: bool) {
+        self.lanes.site = site;
+        self.lanes.defer_lane_write = defer_lane_write;
+        if new_instruction {
+            self.lanes.temps.clear();
+        }
+    }
+
+    /// A read of a lane is a `Subpiece` of its root's current value, shared by
+    /// every read of that lane in the instruction.
+    fn read_lane(
+        &mut self,
+        varnode: &r2il::Varnode,
+        root: RegisterFamilySlot,
+        reg_names: Option<&RegisterNameMap>,
+    ) -> SSAVar {
+        if let Some((_, _, _, temp)) =
+            self.lanes
+                .temps
+                .iter()
+                .find(|(root_offset, offset, width, _)| {
+                    *root_offset == root.offset
+                        && *offset == varnode.offset
+                        && *width == varnode.size
+                })
+        {
+            return temp.clone();
+        }
+        let identity = RenameIdentity::for_root_slot(root, reg_names);
+        let root_value = self.read_var(&identity);
+        let temp = self.fresh_lane_temp(varnode.size);
+        let offset = self.lane_lsb_byte(root, varnode);
+        self.lanes.prefix.push(SSAOp::Subpiece {
+            dst: temp.clone(),
+            src: root_value.clone(),
+            offset: u32::try_from(offset).expect("lane inside its root"),
+        });
+        self.lanes
+            .storage
+            .push((root_value, Self::root_storage(root)));
+        self.lanes
+            .temps
+            .push((root.offset, varnode.offset, varnode.size, temp.clone()));
+        temp
+    }
+
+    /// A write of a lane defines a temporary and, unless the lift widens that
+    /// lane into the root later in the instruction, inserts it into the root.
+    fn write_lane(
+        &mut self,
+        varnode: &r2il::Varnode,
+        root: RegisterFamilySlot,
+        defined_vars: &mut Vec<RenameIdentity>,
+        reg_names: Option<&RegisterNameMap>,
+    ) -> SSAVar {
+        let temp = self.fresh_lane_temp(varnode.size);
+        let written_end = varnode.offset + u64::from(varnode.size);
+        self.lanes.temps.retain(|(root_offset, offset, width, _)| {
+            *root_offset != root.offset
+                || *offset >= written_end
+                || offset + u64::from(*width) <= varnode.offset
+        });
+        self.lanes
+            .temps
+            .push((root.offset, varnode.offset, varnode.size, temp.clone()));
+        if self.lanes.defer_lane_write {
+            return temp;
+        }
+        let identity = RenameIdentity::for_root_slot(root, reg_names);
+        let before = self.read_var(&identity);
+        let after = self.write_var(&identity);
+        defined_vars.push(identity);
+        let position =
+            u32::try_from(self.lane_lsb_byte(root, varnode) * 8).expect("lane inside its root");
+        self.lanes.suffix.push(SSAOp::Insert {
+            dst: after.clone(),
+            src: before.clone(),
+            value: temp.clone(),
+            position: SSAVar::constant(u64::from(position), 4),
+        });
+        let storage = Self::root_storage(root);
+        self.lanes.storage.push((before, storage));
+        self.lanes.storage.push((after, storage));
+        temp
+    }
+
+    /// A write of a whole root ends what its lanes' temporaries stood for.
+    fn forget_lanes_of(&mut self, varnode: &r2il::Varnode) {
+        if matches!(varnode.space, r2il::SpaceId::Register) {
+            self.lanes
+                .temps
+                .retain(|(root_offset, ..)| *root_offset != varnode.offset);
         }
     }
 
@@ -216,11 +368,12 @@ pub fn rename_function_with_names_and_call_boundaries_and_control<C: SsaWorkCont
     phi_placement: &PhiPlacement,
     definitions: &DefinitionSitesByIdentity,
     reg_names: Option<&RegisterNameMap>,
+    families: Option<Arc<RegisterFamilyInfo>>,
     call_boundaries: Option<&CallBoundaryConfig>,
     control: &C,
 ) -> Result<RenamedFunction, SsaExecutionStopReason> {
     control.poll()?;
-    let mut ctx = RenameContext::new();
+    let mut ctx = RenameContext::with_families(families);
     let mut result = RenamedFunction::new();
 
     // Initialize all variables
@@ -392,24 +545,41 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
             // the machine moved is exactly what the callee brings back.
             let mut instruction_addr: Option<u64> = None;
             let mut carrier_entering_instruction: Option<SSAVar> = None;
+            let mut lane_instruction: Option<Option<u64>> = None;
             for (op_idx, op) in block.ops.iter().enumerate() {
                 control.poll()?;
-                if let Some(identity) = stack_pointer_identity {
-                    let op_addr = block.op_instruction_addr(op_idx);
-                    if op_addr.is_some() && op_addr != instruction_addr {
-                        instruction_addr = op_addr;
-                        carrier_entering_instruction = Some(ctx.read_var(identity));
-                    }
+                let op_addr = block.op_instruction_addr(op_idx);
+                if let Some(identity) = stack_pointer_identity
+                    && op_addr.is_some()
+                    && op_addr != instruction_addr
+                {
+                    instruction_addr = op_addr;
+                    carrier_entering_instruction = Some(ctx.read_var(identity));
                 }
-                let renamed_op = rename_op(
-                    op,
-                    block.op_instruction_addr(op_idx),
-                    ctx,
-                    &mut defined_vars,
-                    reg_names,
+                // An op without an instruction address is an instruction of
+                // its own for the lane temporaries.
+                let new_instruction = op_addr.is_none() || lane_instruction != Some(op_addr);
+                lane_instruction = Some(op_addr);
+                ctx.begin_op(
+                    (block_addr, op_idx),
+                    new_instruction,
+                    lane_write_widened_later(block, op_idx, ctx.families.as_deref()),
                 );
+                let renamed_op = rename_op(op, op_addr, ctx, &mut defined_vars, reg_names);
+                let block_ops = result.blocks.get_mut(&block_addr).unwrap();
+                block_ops.append(&mut ctx.lanes.prefix);
                 record_renamed_op_storage(op, &renamed_op, result);
-                result.blocks.get_mut(&block_addr).unwrap().push(renamed_op);
+                let block_ops = result.blocks.get_mut(&block_addr).unwrap();
+                block_ops.push(renamed_op);
+                block_ops.append(&mut ctx.lanes.suffix);
+                for (var, storage) in ctx.lanes.storage.drain(..) {
+                    record_canonical_storage(
+                        &mut result.canonical_storage_by_var,
+                        &mut result.ambiguous_storage_vars,
+                        &var,
+                        storage,
+                    );
+                }
 
                 if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
                     && let Some(boundary) = call_boundaries
@@ -491,8 +661,67 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
     Ok(())
 }
 
+/// Whether a value is a lane temporary: a projection of a register root with
+/// no storage of its own.
+pub(crate) fn is_lane_temp(var: &SSAVar) -> bool {
+    var.name.starts_with("tmp:lane:")
+}
+
+/// The lane this operation writes is superseded within the instruction: a
+/// later operation writes the whole root -- the lift's own `IntZExt`, or the
+/// select a guarded write became -- before anything reads the root, so the
+/// root's definition is that operation's and the lane needs no insert.
+fn lane_write_widened_later(
+    block: &crate::cfg::BasicBlock,
+    op_idx: usize,
+    families: Option<&RegisterFamilyInfo>,
+) -> bool {
+    let Some(lane) = block.ops[op_idx].output() else {
+        return false;
+    };
+    let Some(root) = register_root_slot(lane, families) else {
+        return false;
+    };
+    let Some(instruction) = block.op_instruction_addr(op_idx) else {
+        return false;
+    };
+    let root_end = root.offset + u64::from(root.width);
+    let overlaps_root = |varnode: &r2il::Varnode| {
+        matches!(varnode.space, r2il::SpaceId::Register)
+            && varnode.offset < root_end
+            && varnode.offset + u64::from(varnode.size) > root.offset
+    };
+    let is_lane = |varnode: &r2il::Varnode| {
+        varnode.space == lane.space && varnode.offset == lane.offset && varnode.size == lane.size
+    };
+    for later_idx in op_idx + 1..block.ops.len() {
+        if block.op_instruction_addr(later_idx) != Some(instruction) {
+            return false;
+        }
+        let later = &block.ops[later_idx];
+        // A read of the root, or of any other lane of it, needs the insert.
+        if later
+            .inputs()
+            .iter()
+            .any(|input| overlaps_root(input) && !is_lane(input))
+        {
+            return false;
+        }
+        if later.output().is_some_and(|out| {
+            matches!(out.space, r2il::SpaceId::Register)
+                && out.offset == root.offset
+                && out.size == root.width
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 fn record_renamed_op_storage(source: &r2il::R2ILOp, renamed: &SSAOp, result: &mut RenamedFunction) {
-    if let (Some(varnode), Some(var)) = (source.output(), renamed.dst()) {
+    if let (Some(varnode), Some(var)) = (source.output(), renamed.dst())
+        && !is_lane_temp(var)
+    {
         record_canonical_storage(
             &mut result.canonical_storage_by_var,
             &mut result.ambiguous_storage_vars,
@@ -510,6 +739,9 @@ fn record_renamed_op_storage(source: &r2il::R2ILOp, renamed: &SSAOp, result: &mu
         return;
     }
     for (varnode, var) in source_inputs.into_iter().zip(renamed_inputs) {
+        if is_lane_temp(var) {
+            continue;
+        }
         record_canonical_storage(
             &mut result.canonical_storage_by_var,
             &mut result.ambiguous_storage_vars,
@@ -553,11 +785,21 @@ fn append_call_boundary_defs(
     };
     let mut retained = Vec::new();
 
+    // Every width the convention names a register at is one family, and the
+    // callee clobbers its root once.
+    let mut clobbered: BTreeSet<RenameIdentity> = BTreeSet::new();
     for reg in &call_boundaries.defined_regs {
-        let mut actual_identities: BTreeSet<RenameIdentity> = ctx
-            .matching_identities_ci(&reg.name, reg.size)
-            .into_iter()
-            .collect();
+        let mut actual_identities: BTreeSet<RenameIdentity> = match ctx
+            .families
+            .as_deref()
+            .and_then(|families| families.widest_slot_for_name(&reg.name))
+        {
+            Some(root) => BTreeSet::from([RenameIdentity::for_root_slot(root, reg_names)]),
+            None => ctx
+                .matching_identities_ci(&reg.name, reg.size)
+                .into_iter()
+                .collect(),
+        };
         if actual_identities.is_empty()
             && let Some(reg_names) = reg_names
         {
@@ -577,19 +819,20 @@ fn append_call_boundary_defs(
         if actual_identities.is_empty() {
             actual_identities.insert(RenameIdentity::synthetic(&reg.name, reg.size));
         }
-        for identity in actual_identities {
-            let storage = identity.storage;
-            if preserved_by_callee.is_some_and(|preserved| preserved.contains(&storage)) {
-                continue;
-            }
-            ctx.init_identity(identity.clone());
-            let dst = ctx.write_var(&identity);
-            defined_vars.push(identity);
-            if matches!(storage.space, crate::CanonicalStorageSpace::Register) {
-                retained.push((dst.clone(), storage));
-            }
-            block_ops.push(SSAOp::CallDefine { dst });
+        clobbered.extend(actual_identities);
+    }
+    for identity in clobbered {
+        let storage = identity.storage;
+        if preserved_by_callee.is_some_and(|preserved| preserved.contains(&storage)) {
+            continue;
         }
+        ctx.init_identity(identity.clone());
+        let dst = ctx.write_var(&identity);
+        defined_vars.push(identity);
+        if matches!(storage.space, crate::CanonicalStorageSpace::Register) {
+            retained.push((dst.clone(), storage));
+        }
+        block_ops.push(SSAOp::CallDefine { dst });
     }
     retained
 }
@@ -657,6 +900,10 @@ fn write_varnode(
     defined_vars: &mut Vec<RenameIdentity>,
     reg_names: Option<&RegisterNameMap>,
 ) -> SSAVar {
+    if let Some(root) = register_root_slot(varnode, ctx.families.as_deref()) {
+        return ctx.write_lane(varnode, root, defined_vars, reg_names);
+    }
+    ctx.forget_lanes_of(varnode);
     let identity = RenameIdentity::from_varnode(varnode, reg_names);
     let renamed = ctx.write_var(&identity);
     defined_vars.push(identity);
@@ -1489,7 +1736,7 @@ where
 /// Read a varnode and return an SSAVar.
 fn read_varnode(
     vn: &r2il::Varnode,
-    ctx: &RenameContext,
+    ctx: &mut RenameContext,
     reg_names: Option<&RegisterNameMap>,
 ) -> SSAVar {
     use r2il::SpaceId;
@@ -1500,6 +1747,9 @@ fn read_varnode(
             SSAVar::constant(vn.offset, vn.size)
         }
         _ => {
+            if let Some(root) = register_root_slot(vn, ctx.families.as_deref()) {
+                return ctx.read_lane(vn, root, reg_names);
+            }
             let identity = RenameIdentity::from_varnode(vn, reg_names);
             ctx.read_var(&identity)
         }

@@ -474,13 +474,17 @@ impl<'a> AddressCollector<'a> {
             | SSAOp::Cast { dst, src }
             | SSAOp::New { dst, src }
             | SSAOp::IntZExt { dst, src }
-            | SSAOp::IntSExt { dst, src }
-            | SSAOp::Trunc { dst, src }
+            | SSAOp::IntSExt { dst, src } => self
+                .expression_for_var(src)
+                .map(|expression| (dst, expression)),
+            // A narrowed address is not the address: the low lane of a
+            // pointer parameter is a scalar the body computes with.
+            SSAOp::Trunc { dst, src }
             | SSAOp::Subpiece {
                 dst,
                 src,
                 offset: 0,
-            } => self
+            } if dst.size == src.size => self
                 .expression_for_var(src)
                 .map(|expression| (dst, expression)),
             SSAOp::IntAdd { dst, a, b } => self
@@ -976,12 +980,18 @@ mod tests {
             b: Varnode::constant(4, 4),
         });
         let artifact = SsaArtifact::for_symbolic(&[block], Some(&arch)).expect("artifact");
+        // The body reads four bytes of `x1` and no more, so that read is the
+        // value itself; either way it is not the parameter's address base.
         let scalar = artifact
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name == "w1")
-            .expect("narrow formal");
+            .find(|value| {
+                value.var.size == 4
+                    && (value.var.name.eq_ignore_ascii_case("w1")
+                        || value.var.name.starts_with("tmp:lane:"))
+            })
+            .expect("narrow formal read");
         assert!(
             artifact
                 .addresses()

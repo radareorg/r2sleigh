@@ -1247,18 +1247,7 @@ pub struct ReturnValueRenderFact {
     pub op_index: usize,
     pub value: r2ssa::ValueId,
     pub width: u32,
-    /// Ordered contained-slice writes over `value`, empty for an ordinary
-    /// return. See `r2ssa::ReturnValueCertificate::overlays`: when this is not
-    /// empty `value` is the base rather than the whole returned value.
-    pub overlays: Vec<r2ssa::ReturnValueOverlay>,
     pub control_domain: r2ssa::ControlDomain,
-}
-
-impl ReturnValueRenderFact {
-    /// Every value this return carries, base first and overlays in order.
-    pub fn values(&self) -> impl Iterator<Item = r2ssa::ValueId> + '_ {
-        std::iter::once(self.value).chain(self.overlays.iter().map(|overlay| overlay.value))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2028,13 +2017,19 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
             .iter()
             .find(|candidate| candidate.index() == *index)?;
         let graph_value = source.graph().value(parameter.value)?;
+        // The formal's value is the carrier's entry value, or the projection
+        // minted for a lane of it (doc/adr-register-identity.md §8, 6).
+        let entry_value = graph_value.canonical_storage == Some(parameter.graph_storage)
+            && graph_value.var.size == parameter.graph_storage.size
+            && graph_value.var.version == 0
+            && source.graph().def_inst(parameter.value).is_none();
+        let projection = source.graph().formal_projection_storage(parameter.value)
+            == Some(parameter.graph_storage)
+            && graph_value.var.size == parameter.graph_storage.size;
         if parameter.index != *index
             || Some(parameter.abi_storage) != source_parameter.register_storage()
             || parameter.abi_storage != abi_slot.storage()
-            || graph_value.canonical_storage != Some(parameter.graph_storage)
-            || graph_value.var.size != parameter.graph_storage.size
-            || graph_value.var.version != 0
-            || source.graph().def_inst(parameter.value).is_some()
+            || !(entry_value || projection)
             || resolver
                 .slots_by_value
                 .insert(parameter.value, slot)
@@ -2949,16 +2944,23 @@ impl FunctionFacts {
             .values()
             .flat_map(|callsite| callsite.argument_values.iter().copied())
             .collect::<BTreeSet<_>>();
-        let mut entry_values_by_slot = BTreeMap::<u32, (BTreeSet<r2ssa::ValueId>, u32)>::new();
-        for value in &prepared.graph().values {
-            if value.var.version != 0
-                || !parameter_entry_value_has_live_use(prepared, value.id, &implicit_call_arguments)
-            {
-                continue;
-            }
-            let Some(slot) = param_slots.slot_for_value(value.id) else {
+        // The resolver names each formal's one value -- the carrier's entry
+        // value or the lane projection minted for it -- and its width is the
+        // formal's (doc/adr-register-identity.md).
+        let mut entry_value_by_slot = BTreeMap::<u32, (r2ssa::ValueId, u32)>::new();
+        let mut resolved = param_slots
+            .slots_by_value
+            .iter()
+            .map(|(value, slot)| (*value, *slot))
+            .collect::<Vec<_>>();
+        resolved.sort_unstable();
+        for (value_id, slot) in resolved {
+            let Some(value) = prepared.graph().value(value_id) else {
                 continue;
             };
+            if !parameter_entry_value_has_live_use(prepared, value.id, &implicit_call_arguments) {
+                continue;
+            }
             let Some(parameter_id) = r2ssa::SemanticId::parameter(slot) else {
                 continue;
             };
@@ -2977,13 +2979,11 @@ impl FunctionFacts {
                 value.var.size,
                 value.canonical_storage
             );
-            let entry = entry_values_by_slot.entry(slot as u32).or_default();
-            entry.0.insert(value.id);
-            entry.1 = entry.1.max(value.var.size);
+            entry_value_by_slot.insert(slot as u32, (value.id, value.var.size));
         }
-        let mut parameter_slot_by_value = entry_values_by_slot
+        let mut parameter_slot_by_value = entry_value_by_slot
             .iter()
-            .flat_map(|(slot, (values, _))| values.iter().map(move |value| (*value, *slot)))
+            .map(|(slot, (value, _))| (*value, *slot))
             .collect::<BTreeMap<_, _>>();
         for reload in prepared.certificates().stack_reloads.values() {
             let mut slots = [reload.canonical_source, reload.source]
@@ -3048,7 +3048,7 @@ impl FunctionFacts {
                 changed = true;
             }
         }
-        for (slot, (entry_values, carrier_width)) in entry_values_by_slot {
+        for (slot, (entry_value, carrier_width)) in entry_value_by_slot {
             let id = r2ssa::SemanticId::Parameter(slot);
             r2il::refusal_evidence!(
                 "parameter-entity",
@@ -3084,7 +3084,7 @@ impl FunctionFacts {
                 CertifiedEntity::Parameter {
                     id,
                     slot,
-                    entry_values,
+                    entry_values: BTreeSet::from([entry_value]),
                     carrier_width,
                     ty,
                 },
@@ -4505,7 +4505,6 @@ fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRenderFacts {
                         op_index: cert.op_index,
                         value: cert.value,
                         width: cert.width,
-                        overlays: cert.overlays.clone(),
                         control_domain,
                     },
                 },
@@ -7523,8 +7522,16 @@ mod tests {
             addr: Varnode::unique(0x118, 8),
         });
         let prepared = x86_stack_home_prepared(&[block]);
+        let load_index = prepared
+            .function()
+            .get_block(0x401000)
+            .expect("block")
+            .ops
+            .iter()
+            .position(|op| matches!(op, r2ssa::SSAOp::Load { .. }))
+            .expect("array load");
         let index_value = prepared
-            .memory_certificate_for_op_site(0x401000, 4, false)
+            .memory_certificate_for_op_site(0x401000, load_index, false)
             .expect("array load certificate")
             .address;
         let index_value = prepared
@@ -7549,7 +7556,7 @@ mod tests {
             scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
                 slot: 0,
                 block_addr: 0x401000,
-                op_index: 4,
+                op_index: load_index,
                 is_write: false,
                 field_offset: 4,
                 element_stride: 16,
@@ -7574,18 +7581,18 @@ mod tests {
         let render = facts.render().expect("render facts");
         assert!(
             render
-                .member_access_for_op(0x401000, 4, false, "score", 4, Some(4))
+                .member_access_for_op(0x401000, load_index, false, "score", 4, Some(4))
                 .is_some(),
             "scalar array candidate plus field certificate must authorize indexed member rendering"
         );
         assert!(
             render
-                .array_access_for_op(0x401000, 4, false, 4, 16, Some(4))
+                .array_access_for_op(0x401000, load_index, false, 4, 16, Some(4))
                 .is_some(),
             "scalar array candidate must still authorize array rendering"
         );
         let array = render
-            .array_access_for_op(0x401000, 4, false, 4, 16, Some(4))
+            .array_access_for_op(0x401000, load_index, false, 4, 16, Some(4))
             .expect("stable array render fact");
         assert_eq!(array.base, Some(r2ssa::SemanticId::Parameter(0)));
         assert_eq!(
@@ -7816,7 +7823,6 @@ mod tests {
                             op_index: 2,
                             value,
                             width: 8,
-                            overlays: Vec::new(),
                             control_domain: test_control_domain(),
                         },
                     },

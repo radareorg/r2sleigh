@@ -668,7 +668,13 @@ mod tests {
         let graph = SsaGraph::from_function(&func);
         let spans = StorageSpans::compute(&func, &graph);
 
-        let narrow = value_named(&graph, "EAX", 1);
+        // The narrow write is the lane temporary the extension widens.
+        let narrow = graph
+            .values
+            .iter()
+            .find(|value| value.var.name.starts_with("tmp:lane:") && value.var.size == 4)
+            .map(|value| value.id)
+            .expect("lane temporary");
         let wide = value_named(&graph, "RAX", 1);
         assert_ne!(spans.span_of(narrow), spans.span_of(wide));
         assert!(!spans.all_one_span([narrow, wide]));

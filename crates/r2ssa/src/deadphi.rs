@@ -55,6 +55,8 @@ pub struct DeadPhis {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProvenProgramObservations {
     values: BTreeSet<ValueId>,
+    /// The bits of each observed value some observation reaches.
+    bytes: std::collections::BTreeMap<ValueId, u64>,
     /// The value through which each observed value was reached, so a claim
     /// that something is observed can name the observation it rests on.
     parents: std::collections::BTreeMap<ValueId, ValueId>,
@@ -64,6 +66,7 @@ pub struct ProvenProgramObservations {
 
 struct Closure {
     values: BTreeSet<ValueId>,
+    bytes: std::collections::BTreeMap<ValueId, u64>,
     parents: std::collections::BTreeMap<ValueId, ValueId>,
 }
 
@@ -174,6 +177,7 @@ fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>
     }
     Closure {
         values: bytes.keys().copied().collect(),
+        bytes,
         parents,
     }
 }
@@ -205,6 +209,7 @@ impl ProvenProgramObservations {
         let closure = dependency_closure(graph, roots.keys().copied());
         Some(Self {
             values: closure.values,
+            bytes: closure.bytes,
             parents: closure.parents,
             roots,
         })
@@ -212,6 +217,21 @@ impl ProvenProgramObservations {
 
     pub fn contains(&self, value: ValueId) -> bool {
         self.values.contains(&value)
+    }
+
+    /// The bits of a value some observation reaches.
+    pub fn observed_bytes(&self, value: ValueId) -> Option<u64> {
+        self.bytes.get(&value).copied()
+    }
+
+    /// How many of a value's least significant bytes some observation
+    /// reaches, when the observed bits are exactly that low prefix of whole
+    /// bytes; `None` for a value nothing observes or one observed at a
+    /// higher lane only.
+    pub fn observed_low_bytes(&self, value: ValueId) -> Option<u32> {
+        let mask = *self.bytes.get(&value)?;
+        let bits = mask.trailing_ones();
+        (bits > 0 && bits % 8 == 0 && mask.checked_shr(bits).unwrap_or(0) == 0).then_some(bits / 8)
     }
 
     /// The chain of values from the root that observes `value` down to it.

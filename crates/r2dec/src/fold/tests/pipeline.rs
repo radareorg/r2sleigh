@@ -1096,11 +1096,13 @@ mod tests {
         let prepared = prepared_from_r2il_blocks(&[entry], &arch)
             .with_name("observed_exact_narrow_register_write");
         let block = prepared.function().get_block(0x1000).expect("entry block");
+        // The narrow addition defines a lane temporary; the root's definition
+        // is the lift's extension of it, which is the write rendered here.
         let copy_idx = block
             .ops
             .iter()
-            .position(|op| matches!(op, SSAOp::IntAdd { dst, .. } if dst.size == 4))
-            .expect("low-register write");
+            .position(|op| matches!(op, SSAOp::IntZExt { dst, .. } if dst.size == 8))
+            .expect("carrier extension");
         let copy_inst = prepared
             .graph()
             .inst_id_for_op_site(block.addr, copy_idx)
@@ -1118,50 +1120,32 @@ mod tests {
                 }
             ))
         ));
-        let copy_stmt = ctx
-            .op_to_stmt_with_args(&block.ops[copy_idx], block.addr, copy_idx)
-            .expect("supported copy lowering")
-            .expect("low-register assignment");
-        let CStmt::Expr(copy_expr) = copy_stmt.unobserved() else {
-            panic!("low-register write must remain an assignment");
-        };
-        let CExpr::Binary {
-            op: BinaryOp::Assign,
-            right: copy_rhs,
-            ..
-        } = copy_expr.unobserved()
-        else {
-            panic!("low-register write must remain an assignment expression");
-        };
-        // One cast, not two. The write zero-extends a thirty-two bit value
-        // into the sixty-four bit carrier, and the addition already produces
-        // that thirty-two bit value: C computes `uint32_t + uint32_t` in
-        // `uint32_t`. The `(uint32_t)` this once spelled underneath said so a
-        // second time. What has to be spelled is the extension itself, and
-        // that it is an extension of an unsigned value rather than a signed
-        // one, which the operand's own type carries.
+        // The narrow addition is the object; the extension into the carrier
+        // is the carrier's planned expression, one cast of that object and
+        // not a second conversion restating the width it already has.
+        let carrier = prepared
+            .graph()
+            .inst(copy_inst)
+            .and_then(|inst| inst.output)
+            .expect("the extension defines the carrier");
+        let extended = ctx
+            .planned_value_expr(carrier)
+            .expect("the carrier's planned expression");
         let CExpr::Cast {
             ty:
                 CType::Int {
                     bits: 64,
                     signedness: r2types::Signedness::Unsigned,
                 },
-            expr: extended,
+            expr: narrow,
             ..
-        } = copy_rhs.unobserved()
+        } = extended.unobserved()
         else {
-            panic!("the write must zero-extend into the carrier: {copy_rhs:?}");
+            panic!("the carrier zero-extends the narrow object: {extended:?}");
         };
         assert!(
-            matches!(
-                extended.unobserved(),
-                CExpr::Binary {
-                    op: BinaryOp::Add,
-                    ..
-                }
-            ),
-            "the extension applies to the thirty-two bit addition itself, \
-             with no conversion restating the width it already has: {extended:?}"
+            !matches!(narrow.unobserved(), CExpr::Cast { .. }),
+            "one cast, not two: {narrow:?}"
         );
 
         assert_eq!(*ctx.observation_error.borrow(), None);

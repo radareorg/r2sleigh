@@ -1,6 +1,8 @@
 # ADR: a register family has one SSA identity, and a lane is a projection of it
 
-Status: derived, not built. Ordered after the dominator-tree structurer
+Status: built. S1 and S2 landed together on 2026-09-10; section 10 records
+what each stage actually cost and what it exposed, and supersedes any
+"to check" above that it answers. Ordered after the dominator-tree structurer
 (`doc/adr-structure-dominator-tree.md`), as decided with the user on
 2026-09-10. Read `doc/handoff-location-ssa.md` from "A narrow formal, its
 carrier, and why the last fix was reverted" for the evidence that four layers
@@ -232,3 +234,74 @@ assertion, listed at `function.rs:6725`, `:6756`, `:10903-11795`.
 | the SSA has an insert op the projection can read as a carrier write | **verified** `SSAOp::Insert { dst, src, value, position }` exists (`op.rs:382`), lifted from p-code `INSERT` (`rename.rs:1425`); the projection has no arm for it yet and derives `MachineWriteProjection::Insert` from storage geometry instead (`machine.rs:2358`). S1 gives the projection the arm: `Insert` on a root is `Insert { bit_offset: position, width_bits: value.size*8, carrier: root.size*8 }`. |
 | no consumer keys on the `tmp:regalias` name | `grep regalias` outside `function.rs` finds only `integrity.rs:880` (a test fixture) -- **verified** this session |
 | the parameter entity's carrier width is always the declared carrier's | after S2 the max-of-entry-values rule has one input |
+
+## 10. What S1 and S2 cost, and the three things they exposed
+
+S1 and S2 landed together on 2026-09-11. The gate the ADR set -- every
+function that rendered before renders after -- is met: the local census over
+nine binaries rendered 699 of 720 against 697 before, gaining `bzip2-O2`
+`0x7d70` and `0x8350` and losing nothing, and the corpus gate passes 54 of 54
+on raw, differential, snapshot and all four audits. `split_entries` is zero on
+every binary, which is the S0 instrument's whole point: no register family is
+entered through more than one value anywhere in the census.
+
+The rewrite is what §2 to §5 describe, with three corrections the measurements
+forced.
+
+**The root is the program's, not the architecture's.** Ghidra models `XMM2` as
+a lane of a 512-bit `ZMM2` and `q0` as a lane of a 256-bit `z0`, and a function
+doing legacy SSE or NEON work never mentions the wider register. Rooting at the
+widest declared slot made every such function's first lane write read a value
+nothing supplied, and the rendering an uninitialised read of a 512-bit object;
+it also made the arm64 `-O2` `xxhash32` cell compute the wrong digest. The root
+is therefore the narrowest declared slot containing every range the function
+touches of the family, counting the convention's own boundary carriers and, in
+a function that calls, its clobber list (`function.rs`
+`RegisterFamilyInfo::with_program_roots`). The machine projection follows: a
+register value's geometry is the whole of itself, because the SSA has already
+made it its family's root, and re-basing it onto a register no program here
+mentions is what the old `Lane` and `Insert` write projections existed to
+paper over. Both are deleted, and a register write is now `Full` or the lift's
+own `ZeroExtend`.
+
+**A scratch register's incoming bits are not a value.** Even at the program's
+own root, a lane written into a register nothing read is not preserving
+anything. Where a root's entry value reaches nothing but inserts -- following
+it through the merges that carry the same undefined bits -- and the convention
+names no carrier there, the insert chain starts at zero
+(`function.rs::zero_scratch_insert_roots`). The argument is the same one the
+narrow-formal declaration rests on: nobody passed anything in that register, so
+nothing the program computes depends on what it held, and C has to spell
+something. A vector zero has no literal, so it is spelled as the prelude's
+zero-extension of a narrow one, which also raised the constant ceiling: a
+constant whose width is one the bit-vector prelude carries is now spellable
+rather than refused.
+
+**A lane read has to fold, or the rendering drowns in temporaries.** The lane
+model turns every narrow read into a `Subpiece` of the root and every narrow
+write into a temporary plus an `Insert`, so the optimizer needs to read a
+`Subpiece` through the definition of its source: the constant copied there, the
+value an `Insert` put at that position, the narrower value an extension
+widened, or a slice of a slice (`optimize.rs::fold_through_definition`).
+Constant propagation and instruction combining now run to a shared fixed point
+rather than once each, because a fold turns a lane read into a constant copy
+and that constant is what the next propagation round carries. A lane temporary
+a fold reduced to a copy of another value is that value, and its readers take
+it directly; a merge keeps its copy, because a merge's edge assignment is a
+statement about an object rather than an expression read.
+
+Two consequences reached the interface. A recovered parameter's width is now
+the bytes the body observes of the entry value rather than the register's
+(`deadphi.rs::observed_low_bytes`), which is what recovers `murmur3_32`'s and
+`xxhash32`'s third argument -- both were `signature_mismatch` cells before.
+And where the interface declares a narrow formal but the body reads the whole
+register, the root is rebuilt from the declared lanes with zero above them,
+because the declaration is the source's own statement of what the caller
+passed and no source expression names the bytes outside it.
+
+What §6 promised is done: the family pass, the alias temporaries, the
+per-alias call clobbers, the walk's slice fail-closed, the parameter entity's
+max-of-entry-values and `ParameterHomeWidthMismatch` are gone, and with them
+the return-register composition facts, which existed only to reassemble a
+register the SSA now assembles itself. About 5,500 lines were removed and
+3,300 added.

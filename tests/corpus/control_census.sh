@@ -43,14 +43,13 @@ certified=$(printf '%s\n' "$final" | grep -c '^control-certificate' || true)
 ok=$(printf '%s\n' "$final" | grep -c ': ok' || true)
 fail=$(printf '%s\n' "$final" | grep -c ': FAIL' || true)
 inverted=$(printf '%s\n' "$final" | grep -vc 'inversions=0' || true)
-# The register-identity census (doc/adr-register-identity.md, S0): functions
-# whose graph still carries alias temporaries or a family entered twice.
+# The register-identity census (doc/adr-register-identity.md): functions whose
+# graph enters one register family through more than one value.
 identity=$(awk '/^==MARK/ { if (last != "") print last; last = "" }
                 /^register-identity / { last = $0 }
                 END { if (last != "") print last }' "$out")
-regalias=$(printf '%s\n' "$identity" | grep -vc 'regalias=0 ' || true)
 split=$(printf '%s\n' "$identity" | grep -vc 'split_entries=0$' || true)
-echo "$(basename "$binary"): functions=$functions certified=$certified ok=$ok fail=$fail with-inversions=$inverted regalias=$regalias split-entries=$split out=$out"
+echo "$(basename "$binary"): functions=$functions certified=$certified ok=$ok fail=$fail with-inversions=$inverted split-entries=$split out=$out"
 # Clauses, by the number of functions whose final certificate names each.
 printf '%s\n' "$final" | grep ': FAIL' \
     | sed -E 's/^control-certificate [^ ]*: FAIL [0-9]+ //; s/ occurrences=.*$//' \

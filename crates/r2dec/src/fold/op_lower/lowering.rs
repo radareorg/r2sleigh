@@ -517,12 +517,7 @@ impl<'a> FoldingContext<'a> {
                 binding,
                 value: literal,
             } => {
-                let bits = literal.bits();
-                let rendered = if bits > i64::MAX as u64 {
-                    CExpr::UIntLit(bits)
-                } else {
-                    CExpr::IntLit(bits as i64)
-                };
+                let rendered = wide_aware_literal(literal.bits(), literal.width_bits());
                 // Every value owes a cell, and a constant reached as a leaf of
                 // a moved expression is rendered here rather than as an operand
                 // of an emitted statement, so this is where it is marked.
@@ -661,18 +656,13 @@ impl<'a> FoldingContext<'a> {
                 None => rendered,
             })
         };
-        let literal = |bits: u64| {
-            if bits > i64::MAX as u64 {
-                CExpr::UIntLit(bits)
-            } else {
-                CExpr::IntLit(bits as i64)
-            }
-        };
+        let literal =
+            |bits: r2ssa::MachineBitVector| wide_aware_literal(bits.bits(), bits.width_bits());
         Ok(match node.kind {
             Kind::Leaf(expr) => {
                 self.materialize_machine_expr(names, value, term, expr, depth + 1)?
             }
-            Kind::Literal(bits) => literal(bits.bits()),
+            Kind::Literal(bits) => literal(bits),
             Kind::Arithmetic { op, left, right } => CExpr::binary(
                 match op {
                     r2ssa::MachineArithmeticOp::Add => BinaryOp::Add,
@@ -1691,16 +1681,6 @@ impl<'a> FoldingContext<'a> {
             ))));
         }
         let normalized_site = self.normalized_site(block_addr, op_idx);
-        // A carrier extension the projection of an earlier write absorbed has
-        // no statement where the plan renders the two as one object: that
-        // write's statement has already zero-extended into the carrier, and
-        // this one would only spell `x = (uint64_t)(uint32_t)x`. Its cells are
-        // marked on that statement, below.
-        let source_inst =
-            normalized_site.and_then(|site| self.source_inst_for_normalized_site(site));
-        if source_inst.is_some_and(|inst| self.write_is_discharged_by_absorbing_write(inst)) {
-            return Ok(None);
-        }
         let source_call_site = source_site.or(Some((block_addr, op_idx)));
         let mut frame = LowerFrame::for_stmt(normalized_site, source_call_site, true);
         let (lowered, canonical) =
@@ -1733,27 +1713,13 @@ impl<'a> FoldingContext<'a> {
         let rendered = !matches!(stmt.unobserved(), CStmt::Comment(_) | CStmt::Empty);
         let stmt = if op.dst().is_some() && rendered {
             let mut stmt = self.observe_normalized_output_stmt(block_addr, op_idx, stmt);
-            let extensions = source_inst
-                .map(|inst| self.absorbed_extensions_discharged_by(inst))
-                .unwrap_or_default();
-            if !extensions.is_empty() {
-                stmt = self.observe_discharged_stmt(&extensions, &obligations, stmt);
-            }
-            // Two contracts on one statement, because a carrier extension and
-            // a producer a canonical term absorbed owe different cells. They
-            // are still one statement, so an instruction both name is marked
-            // once, and the effects the extensions already answered are not
-            // answered again -- two occurrences of one effect is exactly what
-            // the ledger is there to catch.
             if let Some((value, definition, absorbed)) = canonical {
-                let absorbed = absorbed
-                    .into_iter()
-                    .filter(|inst| !extensions.contains(inst))
-                    .collect::<Vec<_>>();
-                let mut answered = obligations.clone();
-                answered.extend(self.discharged_obligations(&extensions));
                 stmt = self.observe_canonical_assignment_stmt(
-                    value, definition, &absorbed, &answered, stmt,
+                    value,
+                    definition,
+                    &absorbed,
+                    &obligations,
+                    stmt,
                 );
             }
             stmt

@@ -292,7 +292,6 @@ pub struct TrustedSsaArtifact {
 /// See [`SsaArtifact::register_identity_census`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RegisterIdentityCensus {
-    pub regalias_ops: usize,
     pub split_entry_families: usize,
 }
 
@@ -346,6 +345,7 @@ impl SsaArtifact {
             r2il::refusal_evidence!("ssa-integrity", "{error:?}");
             malformed_ssa_input()
         })?;
+        function.mint_entry_lane_projections(&machine_context);
         machine_context.remap_memory_sites_to_prepared(&function);
         let mut graph = SsaGraph::from_function_with_storage(&function);
         crate::semantic::ensure_source_formal_parameter_values(&mut graph, &machine_context);
@@ -824,7 +824,7 @@ impl SsaArtifact {
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Option<Self> {
         let mut function = SSAFunction::from_blocks_raw(blocks, arch)?;
-        function.refresh_decompile_prep_facts(arch);
+        function.refresh_decompile_prep_facts();
         Some(Self::new_with_context(
             function,
             FunctionPrepareMode::Symbolic,
@@ -1236,12 +1236,6 @@ impl SsaArtifact {
     /// zero once a register family has one SSA identity
     /// (`doc/adr-register-identity.md`).
     pub fn register_identity_census(&self) -> RegisterIdentityCensus {
-        let regalias_ops = self
-            .graph
-            .values
-            .iter()
-            .filter(|value| value.var.name.starts_with("tmp:regalias"))
-            .count();
         let families = RegisterFamilyInfo::from_register_storages(
             self.machine_context
                 .register_storages_by_name()
@@ -1265,7 +1259,6 @@ impl SsaArtifact {
             }
         }
         RegisterIdentityCensus {
-            regalias_ops,
             split_entry_families: entries_by_family.values().filter(|n| **n > 1).count(),
         }
     }
@@ -1895,6 +1888,11 @@ pub struct SSAFunction {
     /// Values are attached from raw varnodes at the lift/SSA seam. Consumers
     /// must not reconstruct this information from `SSAVar::name`.
     canonical_storage_by_var: BTreeMap<SSAVar, CanonicalStorageId>,
+    /// Entry-lane projections: the value standing for a lane of a register as
+    /// the function was entered with it, defined at entry as a `Subpiece` of
+    /// the family root's entry value (doc/adr-register-identity.md §8, 6).
+    /// Keyed by the projection's variable, valued by the lane's storage.
+    formal_projections: BTreeMap<SSAVar, CanonicalStorageId>,
     /// Optional decompiler-prep fact snapshot for the current SSA state.
     decompile_prep_facts: Option<DecompilePrepFacts>,
     /// Structural def/use index for repeated SSA queries.
@@ -1919,6 +1917,7 @@ impl Clone for SSAFunction {
             blocks: self.blocks.clone(),
             block_order: self.block_order.clone(),
             canonical_storage_by_var: self.canonical_storage_by_var.clone(),
+            formal_projections: self.formal_projections.clone(),
             decompile_prep_facts: self.decompile_prep_facts.clone(),
             query_index: RwLock::new(None),
         }
@@ -2546,6 +2545,7 @@ impl SSAFunction {
                 .collect(),
             block_order,
             canonical_storage_by_var: BTreeMap::new(),
+            formal_projections: BTreeMap::new(),
             decompile_prep_facts: None,
             query_index: RwLock::new(None),
         }
@@ -2624,12 +2624,28 @@ impl SSAFunction {
         let stack_pointer_restored_by_callee = stack_pointer_carrier.filter(|_| {
             stack_pointer_restored_across_calls(call_preserved_carriers, function_interface)
         });
+        // The carriers the convention names at this function's own boundary:
+        // every caller reads the result register and writes the argument
+        // registers, so the whole of each is used even where the body's own
+        // operations name only a lane of one.
+        let abi_carriers = function_interface.map_or_else(Vec::new, |interface| {
+            interface
+                .parameters()
+                .iter()
+                .filter_map(crate::SourceAbiParameterSpec::register_storage)
+                .chain(match interface.return_kind() {
+                    crate::SourceFunctionReturn::Register { storage } => Some(storage),
+                    _ => None,
+                })
+                .collect()
+        });
         let mut func = Self::from_blocks_raw_for_decompile_with_carriers_and_control(
             blocks,
             arch,
             stack_pointer_restored_by_callee,
             callee_preserved_carriers,
             declared_successors,
+            &abi_carriers,
             control,
         )?;
         func.call_preserved_carriers = call_preserved_carriers;
@@ -2639,11 +2655,7 @@ impl SSAFunction {
             function_interface,
             control,
         )?;
-        func.refresh_decompile_prep_facts_with_interface_and_control(
-            arch,
-            function_interface,
-            control,
-        )?;
+        func.refresh_decompile_prep_facts_with_interface_and_control(function_interface, control)?;
         validate_ssa_function(&func).map_err(|_| malformed_ssa_input())?;
         control.poll()?;
         Ok(func)
@@ -2666,7 +2678,7 @@ impl SSAFunction {
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
         let mut func =
-            Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, control)?;
+            Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, &[], control)?;
         let cfg = crate::optimize::OptimizationConfig {
             max_iterations: 1,
             enable_sccp: true,
@@ -2677,7 +2689,7 @@ impl SSAFunction {
         func.invalidate_query_index();
         crate::optimize::optimize_function_with_control(&mut func, &cfg, control)?;
         validate_ssa_function(&func).map_err(|_| malformed_ssa_input())?;
-        func.refresh_decompile_prep_facts_with_control(arch, control)?;
+        func.refresh_decompile_prep_facts_with_control(control)?;
         control.poll()?;
         Ok(func)
     }
@@ -2725,7 +2737,7 @@ impl SSAFunction {
         arch: Option<&ArchSpec>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
-        Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, control)
+        Self::from_blocks_raw_with_policy_and_control(blocks, arch, None, None, &[], control)
     }
 
     /// Build raw SSA prepared with decompiler-safe call boundaries.
@@ -2749,6 +2761,7 @@ impl SSAFunction {
             None,
             &CalleePreservedCarriers::new(),
             None,
+            &[],
             control,
         )
     }
@@ -2760,6 +2773,7 @@ impl SSAFunction {
         stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
         callee_preserved_carriers: &CalleePreservedCarriers,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
+        abi_carriers: &[CanonicalStorageId],
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         let policy = decompile_call_boundary_config(
@@ -2772,6 +2786,7 @@ impl SSAFunction {
             arch,
             policy.as_ref(),
             declared_successors,
+            abi_carriers,
             control,
         )
     }
@@ -2781,6 +2796,7 @@ impl SSAFunction {
         arch: Option<&ArchSpec>,
         call_boundaries: Option<&CallBoundaryConfig>,
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
+        abi_carriers: &[CanonicalStorageId],
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
@@ -2799,10 +2815,54 @@ impl SSAFunction {
 
         let reg_names = arch.map(cached_register_name_map);
         let reg_names_ref = reg_names.as_deref();
+        // One identity per register family: a lane is renamed as a projection
+        // of its root (doc/adr-register-identity.md).
+        // One identity per register family, rooted at what this function
+        // touches of it rather than at the widest name the architecture has.
+        let families = arch.map(cached_register_family_info).map(|families| {
+            let mut used = Vec::new();
+            for block in cfg.blocks() {
+                for op in &block.ops {
+                    for varnode in op.inputs().into_iter().chain(op.output()) {
+                        if matches!(varnode.space, r2il::SpaceId::Register) {
+                            used.push((varnode.offset, varnode.size));
+                        }
+                    }
+                }
+            }
+            // The carriers the convention names at this function's boundary.
+            for carrier in abi_carriers {
+                if carrier.space == CanonicalStorageSpace::Register {
+                    used.push((carrier.offset, carrier.size));
+                }
+            }
+            // A convention's clobber list describes what a call does, so it
+            // widens a root only in a function that makes one.
+            let calls = cfg.blocks().any(|block| {
+                block
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, R2ILOp::Call { .. } | R2ILOp::CallInd { .. }))
+            });
+            if let Some(call_boundaries) = call_boundaries.filter(|_| calls) {
+                for reg in &call_boundaries.defined_regs {
+                    if let Some(slot) = families.slot_for_name(&reg.name) {
+                        used.push((slot.offset, reg.size.max(slot.width)));
+                    }
+                }
+            }
+            Arc::new(families.with_program_roots(used))
+        });
+        let families_ref = families.as_deref();
 
         // Collect variable definitions and sizes
         let (mut defs, mut storage_by_identity) =
-            collect_defs_from_cfg_with_names_storage_and_control(&cfg, reg_names_ref, control)?;
+            collect_defs_from_cfg_with_names_storage_and_control(
+                &cfg,
+                reg_names_ref,
+                families_ref,
+                control,
+            )?;
 
         // Place phi nodes
         let mut phi_placement = PhiPlacement::compute_with_storage_and_control(
@@ -2820,6 +2880,7 @@ impl SSAFunction {
                 &cfg,
                 call_boundaries,
                 reg_names_ref,
+                families_ref,
                 &mut defs,
                 &mut storage_by_identity,
             );
@@ -2830,7 +2891,13 @@ impl SSAFunction {
                 &storage_by_identity,
                 control,
             )?;
-            let live_in = crate::phi::live_in_by_block(&cfg, call_boundaries, reg_names_ref, &defs);
+            let live_in = crate::phi::live_in_by_block(
+                &cfg,
+                call_boundaries,
+                reg_names_ref,
+                families_ref,
+                &defs,
+            );
             phi_placement.merge_live_additions(complete, &live_in);
         }
 
@@ -2841,6 +2908,7 @@ impl SSAFunction {
             &phi_placement,
             &defs,
             reg_names_ref,
+            families.clone(),
             call_boundaries,
             control,
         )?;
@@ -2902,12 +2970,11 @@ impl SSAFunction {
             blocks: ssa_blocks,
             block_order: renamed.block_order,
             canonical_storage_by_var: renamed.canonical_storage_by_var,
+            formal_projections: BTreeMap::new(),
             decompile_prep_facts: None,
             query_index: RwLock::new(None),
         };
-        if let Some(arch) = arch {
-            function.normalize_register_alias_sources_with_control(arch, control)?;
-        }
+        function.zero_scratch_insert_roots(abi_carriers);
         // The validator answers with a typed integrity error naming the block
         // and the edge it disagreed about; discarding it left the reader with
         // "malformed SSA source input" and nothing to look at.
@@ -3288,239 +3355,6 @@ impl SSAFunction {
         )
     }
 
-    #[cfg(test)]
-    fn normalize_register_alias_sources(&mut self, arch: &ArchSpec) {
-        self.normalize_register_alias_sources_with_control(arch, &UncheckedSsaWorkControl)
-            .expect("unchecked register alias normalization cannot stop");
-    }
-
-    fn normalize_register_alias_sources_with_control<C: SsaWorkControl + ?Sized>(
-        &mut self,
-        arch: &ArchSpec,
-        control: &C,
-    ) -> Result<(), SsaExecutionStopReason> {
-        control.poll()?;
-        self.decompile_prep_facts = None;
-        self.invalidate_query_index();
-        let family_info = cached_register_family_info(arch);
-        if family_info.name_to_member.is_empty() {
-            return Ok(());
-        }
-
-        let block_in_states = self
-            .compute_decompile_family_states_with_control(&family_info, control)?
-            .incoming;
-        let canonical_storage_by_var = &self.canonical_storage_by_var;
-
-        for &addr in &self.block_order {
-            control.poll()?;
-            let mut state = block_in_states.get(&addr).cloned().unwrap_or_default();
-            let Some(block) = self.blocks.get_mut(&addr) else {
-                continue;
-            };
-
-            control.poll()?;
-            apply_block_phi_family_effects(
-                &block.phis,
-                &mut state,
-                &family_info,
-                canonical_storage_by_var,
-            );
-
-            let original_ops = std::mem::take(&mut block.ops);
-            let mut normalized_ops = Vec::with_capacity(original_ops.len());
-            for (op_index, op) in original_ops.into_iter().enumerate() {
-                control.poll()?;
-                let (materialized, rewritten) = materialize_register_alias_sources(
-                    &op,
-                    &state,
-                    &family_info,
-                    canonical_storage_by_var,
-                    addr,
-                    op_index,
-                );
-                normalized_ops.extend(materialized);
-                apply_op_family_effect(
-                    &rewritten,
-                    &mut state,
-                    &family_info,
-                    canonical_storage_by_var,
-                );
-                normalized_ops.push(rewritten);
-            }
-            block.ops = normalized_ops;
-        }
-
-        // Renaming treats overlapping register names as independent variables,
-        // so a phi for a contained lane can still carry its version-zero name
-        // on an edge where the predecessor actually wrote the wide register.
-        // Recompute after ordinary source normalization: this makes edge state
-        // refer to the materialized lane producers created above rather than to
-        // stale alias names from the lifted input.
-        let family_states =
-            self.compute_decompile_family_states_with_control(&family_info, control)?;
-        self.materialize_register_alias_phi_sources(
-            &family_states.outgoing,
-            &family_info,
-            control,
-        )?;
-        control.poll()?;
-        Ok(())
-    }
-
-    fn materialize_register_alias_phi_sources<C: SsaWorkControl + ?Sized>(
-        &mut self,
-        block_out_states: &HashMap<u64, FamilyRootState>,
-        family_info: &RegisterFamilyInfo,
-        control: &C,
-    ) -> Result<(), SsaExecutionStopReason> {
-        struct PhiSourceRewrite {
-            block_addr: u64,
-            phi_index: usize,
-            source_index: usize,
-            replacement: SSAVar,
-            projection: Option<(u64, Vec<SSAOp>)>,
-        }
-
-        let mut rewrites = Vec::new();
-        for &block_addr in &self.block_order {
-            control.poll()?;
-            let Some(block) = self.blocks.get(&block_addr) else {
-                continue;
-            };
-            for (phi_index, phi) in block.phis.iter().enumerate() {
-                control.poll()?;
-                for (source_index, (pred_addr, source)) in phi.sources.iter().enumerate() {
-                    let Some(member) = register_family_member_for(
-                        source,
-                        family_info,
-                        &self.canonical_storage_by_var,
-                    ) else {
-                        continue;
-                    };
-                    let requested = RegisterFamilySlot {
-                        family_id: member.family_id,
-                        offset: member.offset,
-                        width: source.size,
-                    };
-                    let Some(state) = block_out_states.get(pred_addr) else {
-                        continue;
-                    };
-                    let Some(root) = family_root_slice_for_range(state, requested) else {
-                        // No single definition covers the range. Where several
-                        // cover it exactly, they are assembled the same way an
-                        // ordinary read of the same range is assembled -- by an
-                        // explicit `Piece` written into the predecessor -- and
-                        // where they do not, the range stays unresolved.
-                        //
-                        // A merge source is a read, and leaving it alone was not
-                        // neutral: it left the merge taking whichever whole-width
-                        // definition came before, which is a stale value once the
-                        // predecessor has redefined the register through its
-                        // parts. `fmov w11, s0` is exactly that -- the low half
-                        // and a zeroed upper half -- and the merge went on
-                        // carrying the register's previous contents.
-                        // The pieces are written into the predecessor, so the
-                        // name has to carry the merge they serve, not that block.
-                        let mut materialized = Vec::new();
-                        if let Some(composed) = piece_family_tiles(
-                            state,
-                            requested,
-                            source,
-                            &format!("phi:{block_addr:x}:{phi_index:x}:{source_index:x}"),
-                            &mut materialized,
-                        ) && composed != *source
-                        {
-                            rewrites.push(PhiSourceRewrite {
-                                block_addr,
-                                phi_index,
-                                source_index,
-                                replacement: composed,
-                                projection: Some((*pred_addr, materialized)),
-                            });
-                        }
-                        continue;
-                    };
-                    if let Some(direct) = direct_family_root_value(&root, source.size) {
-                        if direct != *source {
-                            rewrites.push(PhiSourceRewrite {
-                                block_addr,
-                                phi_index,
-                                source_index,
-                                replacement: direct,
-                                projection: None,
-                            });
-                        }
-                        continue;
-                    }
-                    if root.value == *source && root.offset == 0 {
-                        continue;
-                    }
-                    let projected = SSAVar::new(
-                        format!("tmp:regalias:phi:{block_addr:x}:{phi_index:x}:{source_index:x}"),
-                        1,
-                        source.size,
-                    );
-                    rewrites.push(PhiSourceRewrite {
-                        block_addr,
-                        phi_index,
-                        source_index,
-                        replacement: projected.clone(),
-                        projection: Some((
-                            *pred_addr,
-                            vec![SSAOp::Subpiece {
-                                dst: projected,
-                                src: root.value,
-                                offset: root.offset,
-                            }],
-                        )),
-                    });
-                }
-            }
-        }
-
-        for rewrite in rewrites {
-            control.poll()?;
-            let projection_inserted = match rewrite.projection {
-                Some((pred_addr, projection)) => {
-                    let Some(pred) = self.blocks.get_mut(&pred_addr) else {
-                        continue;
-                    };
-                    let insert_at = pred
-                        .ops
-                        .last()
-                        .filter(|op| {
-                            matches!(
-                                op,
-                                SSAOp::Branch { .. }
-                                    | SSAOp::CBranch { .. }
-                                    | SSAOp::BranchInd { .. }
-                                    | SSAOp::Return { .. }
-                            )
-                        })
-                        .map_or(pred.ops.len(), |_| pred.ops.len().saturating_sub(1));
-                    for (offset, op) in projection.into_iter().enumerate() {
-                        pred.ops.insert(insert_at + offset, op);
-                    }
-                    true
-                }
-                None => true,
-            };
-            if !projection_inserted {
-                continue;
-            }
-            if let Some(phi) = self
-                .blocks
-                .get_mut(&rewrite.block_addr)
-                .and_then(|block| block.phis.get_mut(rewrite.phi_index))
-                && let Some((_, source)) = phi.sources.get_mut(rewrite.source_index)
-            {
-                *source = rewrite.replacement;
-            }
-        }
-        Ok(())
-    }
-
     /// Snapshot the current decompiler-prep fact view, if available.
     pub fn decompile_prep_facts(&self) -> Option<&DecompilePrepFacts> {
         self.decompile_prep_facts.as_ref()
@@ -3530,6 +3364,395 @@ impl SSAFunction {
     /// decompiler preparation view. This deliberately accepts `ValueId`
     /// facts, then resolves the already-built graph value back to its `SSAVar`;
     /// no register spelling participates in slot identity.
+    /// The storage an entry-lane projection stands for.
+    pub fn formal_projection_storage(&self, var: &SSAVar) -> Option<CanonicalStorageId> {
+        self.formal_projections.get(var).copied()
+    }
+
+    pub(crate) fn formal_projection_vars(
+        &self,
+    ) -> impl Iterator<Item = (&SSAVar, &CanonicalStorageId)> {
+        self.formal_projections.iter()
+    }
+
+    /// Give every lane of a register read as the function was entered with it
+    /// one value: a `Subpiece` of the root's entry value, defined at entry.
+    ///
+    /// A formal declared narrower than its carrier is such a lane whether or
+    /// not the body reads it, so it is minted from the interface; every other
+    /// entry-lane read the renamer produced -- one `Subpiece` per reading
+    /// instruction -- becomes a copy of the one projection. The projection has
+    /// no register storage of its own: it is a temporary the boundary facts
+    /// know by this table (doc/adr-register-identity.md §8, 6).
+    /// Start a scratch register's lane writes from zero rather than from what
+    /// the caller left in it.
+    ///
+    /// A lane written into a register the function never read is not
+    /// preserving anything: `pinsrd xmm3, eax, 0` into a register no earlier
+    /// instruction defined reads bits the caller happened to leave, and no
+    /// compiled program depends on them. The insert still needs a value to
+    /// build on, and C has to spell it, so where the root's entry value is
+    /// read by nothing but the inserts themselves -- and the convention names
+    /// no carrier there, so nobody passed anything in it -- the chain starts
+    /// at zero and the rendering has no uninitialised read.
+    fn zero_scratch_insert_roots(&mut self, abi_carriers: &[CanonicalStorageId]) {
+        // A candidate's bits reach nothing but inserts. A merge passes the
+        // same undefined bits along, so a use as a phi source is followed to
+        // that merge and asked the same question; any other read -- a spill of
+        // a callee-saved register, a return of an untouched argument -- is a
+        // use of what the caller left, and disqualifies it.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum ScratchUse {
+            InsertSource,
+            Carried,
+            Observed,
+        }
+        let mut uses = BTreeMap::<SSAVar, Vec<(ScratchUse, SSAVar)>>::new();
+        for block in self.blocks.values() {
+            for phi in &block.phis {
+                for (_, src) in &phi.sources {
+                    uses.entry(src.clone())
+                        .or_default()
+                        .push((ScratchUse::Carried, phi.dst.clone()));
+                }
+            }
+            for op in &block.ops {
+                if let SSAOp::Insert {
+                    src,
+                    value,
+                    position,
+                    ..
+                } = op
+                {
+                    uses.entry(src.clone())
+                        .or_default()
+                        .push((ScratchUse::InsertSource, src.clone()));
+                    for other in [value, position] {
+                        uses.entry((*other).clone())
+                            .or_default()
+                            .push((ScratchUse::Observed, (*other).clone()));
+                    }
+                } else {
+                    for src in op.sources() {
+                        uses.entry(src.clone())
+                            .or_default()
+                            .push((ScratchUse::Observed, src.clone()));
+                    }
+                }
+            }
+        }
+        let reaches_inserts_only = |start: &SSAVar| {
+            let mut pending = vec![start.clone()];
+            let mut seen = BTreeSet::new();
+            let mut inserted = false;
+            while let Some(var) = pending.pop() {
+                if !seen.insert(var.clone()) {
+                    continue;
+                }
+                for (kind, next) in uses.get(&var).into_iter().flatten() {
+                    match kind {
+                        ScratchUse::InsertSource => inserted = true,
+                        ScratchUse::Carried => pending.push(next.clone()),
+                        ScratchUse::Observed => return false,
+                    }
+                }
+            }
+            inserted
+        };
+        let scratch = uses
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter(|var| var.version == 0 && reaches_inserts_only(var))
+            .filter_map(|var| {
+                let storage = self.canonical_storage_by_var.get(&var).copied()?;
+                (storage.space == CanonicalStorageSpace::Register
+                    && !abi_carriers.iter().any(|carrier| {
+                        carrier.space == storage.space
+                            && carrier.offset < storage.offset + u64::from(storage.size)
+                            && storage.offset < carrier.offset + u64::from(carrier.size)
+                    }))
+                .then_some(var)
+            })
+            .collect::<BTreeSet<_>>();
+        if scratch.is_empty() {
+            return;
+        }
+        // A vector register is wider than any C constant, so its zero is the
+        // zero-extension of a narrow one -- the same operation the prelude
+        // spells for every other wide value.
+        let mut minted = Vec::new();
+        let zeros = scratch
+            .iter()
+            .map(|var| {
+                let zero = if var.size <= 16 {
+                    SSAVar::constant(0, var.size)
+                } else {
+                    let disambiguator = self
+                        .canonical_storage_by_var
+                        .keys()
+                        .filter(|other| other.name == var.name)
+                        .map(SSAVar::rename_disambiguator)
+                        .max()
+                        .map_or(1, |max| max + 1);
+                    // Version one: it is a definition, and version zero is
+                    // reserved for the value a block was entered with.
+                    let zero = SSAVar::new(var.name.clone(), 1, var.size)
+                        .with_rename_disambiguator(disambiguator);
+                    minted.push(SSAOp::IntZExt {
+                        dst: zero.clone(),
+                        src: SSAVar::constant(0, 4),
+                    });
+                    if let Some(storage) = self.canonical_storage_by_var.get(var).copied() {
+                        self.canonical_storage_by_var.insert(zero.clone(), storage);
+                    }
+                    zero
+                };
+                (var.clone(), zero)
+            })
+            .collect::<BTreeMap<_, _>>();
+        for block in self.blocks.values_mut() {
+            for phi in &mut block.phis {
+                for (_, src) in &mut phi.sources {
+                    if let Some(zero) = zeros.get(src) {
+                        *src = zero.clone();
+                    }
+                }
+            }
+            for op in &mut block.ops {
+                if let SSAOp::Insert { src, .. } = op
+                    && let Some(zero) = zeros.get(src)
+                {
+                    *src = zero.clone();
+                }
+            }
+        }
+        if let Some(entry) = self.blocks.get_mut(&self.entry) {
+            entry.ops.splice(0..0, minted);
+        }
+        self.invalidate_query_index();
+    }
+
+    pub(crate) fn mint_entry_lane_projections(&mut self, machine_context: &SourceMachineContext) {
+        let is_root_entry = |var: &SSAVar, storage: Option<CanonicalStorageId>| {
+            var.version == 0
+                && storage.is_some_and(|storage| {
+                    storage.space == CanonicalStorageSpace::Register && storage.size == var.size
+                })
+        };
+        // Lane key: (root storage, byte offset in the root, width) -> the root's
+        // entry variable and the reads to fold into the projection.
+        // Lane key: (root storage, byte offset in the root, width) -> the root's
+        // entry variable and the reads inside the lane, each with its offset
+        // from the lane's start.
+        let mut lanes = BTreeMap::<
+            (CanonicalStorageId, u32, u32),
+            (Option<SSAVar>, Vec<(u64, usize, u32)>),
+        >::new();
+        for projection in crate::semantic::source_formal_parameter_projections(machine_context) {
+            if projection.graph_storage == projection.abi_storage {
+                continue;
+            }
+            let Some(offset) = projection
+                .graph_storage
+                .offset
+                .checked_sub(projection.abi_storage.offset)
+                .and_then(|offset| u32::try_from(offset).ok())
+            else {
+                continue;
+            };
+            lanes
+                .entry((
+                    projection.abi_storage,
+                    offset,
+                    projection.graph_storage.size,
+                ))
+                .or_default();
+        }
+        if lanes.is_empty() {
+            return;
+        }
+        // Only a lane the interface declares is a formal; any other lane read
+        // of an entry root stays the `Subpiece` of the caller's value it is.
+        for addr in self.block_order.clone() {
+            let Some(block) = self.blocks.get(&addr) else {
+                continue;
+            };
+            for (op_index, op) in block.ops.iter().enumerate() {
+                let SSAOp::Subpiece { dst, src, offset } = op else {
+                    continue;
+                };
+                let storage = self.canonical_storage_by_var.get(src).copied();
+                if !is_root_entry(src, storage) {
+                    continue;
+                }
+                let Some(root) = storage else {
+                    continue;
+                };
+                // A read inside a declared lane reads the formal, whether it
+                // is the whole lane or a byte of it.
+                let Some((key, inside)) = lanes.keys().find_map(|key| {
+                    (key.0 == root && key.1 <= *offset && *offset + dst.size <= key.1 + key.2)
+                        .then_some((*key, *offset - key.1))
+                }) else {
+                    continue;
+                };
+                let lane = lanes.get_mut(&key).expect("a key just found");
+                lane.0.get_or_insert_with(|| src.clone());
+                lane.1.push((addr, op_index, inside));
+            }
+        }
+        let mut minted = Vec::new();
+        // Each root's declared lanes, to rebuild the root from them below.
+        let mut lanes_by_root = BTreeMap::<SSAVar, (CanonicalStorageId, Vec<(SSAVar, u32)>)>::new();
+        for ((root, offset, width), (root_var, reads)) in lanes {
+            // The root's entry value is the renamer's, when it named one; a
+            // fresh name would enter the family a second time.
+            let root_var = root_var
+                .or_else(|| {
+                    self.canonical_storage_by_var
+                        .iter()
+                        .find(|(var, storage)| var.version == 0 && **storage == root)
+                        .map(|(var, _)| var.clone())
+                })
+                .unwrap_or_else(|| {
+                    let name = machine_context
+                        .register_name(root)
+                        .unwrap_or_else(|| format!("reg:{:x}", root.offset));
+                    SSAVar::initial(name, root.size)
+                });
+            let lane_storage = CanonicalStorageId {
+                space: CanonicalStorageSpace::Register,
+                offset: root.offset + u64::from(offset),
+                size: width,
+            };
+            // The formal is named as the lane register the caller filled, the
+            // way an entry value is named after its register.
+            let name = machine_context
+                .register_name(lane_storage)
+                .map(|name| name.to_ascii_uppercase())
+                .unwrap_or_else(|| format!("reg:{:x}:{width}", lane_storage.offset));
+            let projection = SSAVar::new(name, 0, width);
+            self.canonical_storage_by_var
+                .entry(root_var.clone())
+                .or_insert(root);
+            self.formal_projections
+                .insert(projection.clone(), lane_storage);
+            for (addr, op_index, inside) in reads {
+                if let Some(block) = self.blocks.get_mut(&addr)
+                    && let Some(SSAOp::Subpiece { dst, .. }) = block.ops.get(op_index)
+                {
+                    let dst = dst.clone();
+                    block.ops[op_index] = if inside == 0 && dst.size == width {
+                        SSAOp::Copy {
+                            dst,
+                            src: projection.clone(),
+                        }
+                    } else {
+                        SSAOp::Subpiece {
+                            dst,
+                            src: projection.clone(),
+                            offset: inside,
+                        }
+                    };
+                }
+            }
+            lanes_by_root
+                .entry(root_var.clone())
+                .or_insert((root, Vec::new()))
+                .1
+                .push((projection.clone(), offset));
+            minted.push(SSAOp::Subpiece {
+                dst: projection,
+                src: root_var,
+                offset,
+            });
+        }
+        // The caller's root is its formals: a read of the whole register --
+        // a merge input, a spill -- takes the declared lanes with zero above
+        // them, so no rendering reads a register byte no formal names.
+        //
+        // The bytes above a declared lane are not the caller's to describe.
+        // The declaration is the source's own statement of what it passed, so
+        // no source expression names them, and where the interface was
+        // recovered rather than declared they are exactly the bytes no
+        // observation reached -- which is why the recovery declared the lane
+        // narrow in the first place. Either way nothing the program computes
+        // depends on them, and zero is as good a value as the register held.
+        for (root_var, (root, lanes)) in lanes_by_root {
+            // Only for a root a C integer can hold; a vector register's
+            // lanes are not parameters and have no declaration to rest on.
+            if root.size > 8 {
+                continue;
+            }
+            let read_elsewhere = self.blocks.values().any(|block| {
+                block
+                    .phis
+                    .iter()
+                    .any(|phi| phi.sources.iter().any(|(_, src)| *src == root_var))
+                    || block.ops.iter().any(|op| op.sources().contains(&&root_var))
+            });
+            if !read_elsewhere {
+                continue;
+            }
+            let disambiguator = self
+                .canonical_storage_by_var
+                .keys()
+                .filter(|var| var.name == root_var.name)
+                .map(SSAVar::rename_disambiguator)
+                .max()
+                .map_or(1, |max| max + 1);
+            let composed = SSAVar::new(root_var.name.clone(), 0, root.size)
+                .with_rename_disambiguator(disambiguator);
+            match lanes.as_slice() {
+                [(lane, 0)] if lane.size < root.size => minted.push(SSAOp::IntZExt {
+                    dst: composed.clone(),
+                    src: lane.clone(),
+                }),
+                _ => {
+                    let mut carried = SSAVar::constant(0, root.size);
+                    for (index, (lane, offset)) in lanes.iter().enumerate() {
+                        let dst = if index + 1 == lanes.len() {
+                            composed.clone()
+                        } else {
+                            SSAVar::new(format!("tmp:root:{}:{index}", root_var.name), 1, root.size)
+                        };
+                        minted.push(SSAOp::Insert {
+                            dst: dst.clone(),
+                            src: carried,
+                            value: lane.clone(),
+                            position: SSAVar::constant(u64::from(*offset) * 8, 4),
+                        });
+                        carried = dst;
+                    }
+                }
+            }
+            self.canonical_storage_by_var.insert(composed.clone(), root);
+            let replace = |var: &SSAVar| {
+                if *var == root_var {
+                    composed.clone()
+                } else {
+                    var.clone()
+                }
+            };
+            for block in self.blocks.values_mut() {
+                for phi in &mut block.phis {
+                    for (_, src) in &mut phi.sources {
+                        *src = replace(src);
+                    }
+                }
+                for op in &mut block.ops {
+                    *op = crate::optimize::map_sources_in_op(op, &replace);
+                }
+            }
+        }
+        if let Some(entry) = self.blocks.get_mut(&self.entry) {
+            entry.ops.splice(0..0, minted);
+        }
+        self.invalidate_query_index();
+    }
+
     fn install_exact_formal_parameters(
         &mut self,
         graph: &SsaGraph,
@@ -3547,12 +3770,13 @@ impl SSAFunction {
             let Some(value) = graph.value(parameter.value) else {
                 continue;
             };
-            if parameter.index != *slot
-                || graph.def_inst(parameter.value).is_some()
-                || value.var.version != 0
-                || value.var.size != parameter.graph_storage.size
-                || value.canonical_storage != Some(parameter.graph_storage)
-            {
+            let entry_value = graph.def_inst(parameter.value).is_none()
+                && value.var.version == 0
+                && value.var.size == parameter.graph_storage.size
+                && value.canonical_storage == Some(parameter.graph_storage);
+            let projection =
+                graph.formal_projection_storage(parameter.value) == Some(parameter.graph_storage);
+            if parameter.index != *slot || !(entry_value || projection) {
                 continue;
             }
             prep.formal_parameters.insert(value.var.clone(), index);
@@ -3563,9 +3787,8 @@ impl SSAFunction {
     }
 
     /// Refresh the cached decompiler-prep facts for the current SSA state.
-    pub fn refresh_decompile_prep_facts(&mut self, arch: Option<&ArchSpec>) {
+    pub fn refresh_decompile_prep_facts(&mut self) {
         self.refresh_decompile_prep_facts_with_interface_and_control(
-            arch,
             None,
             &UncheckedSsaWorkControl,
         )
@@ -3574,20 +3797,17 @@ impl SSAFunction {
 
     fn refresh_decompile_prep_facts_with_control<C: SsaWorkControl + ?Sized>(
         &mut self,
-        arch: Option<&ArchSpec>,
         control: &C,
     ) -> Result<(), SsaExecutionStopReason> {
-        self.refresh_decompile_prep_facts_with_interface_and_control(arch, None, control)
+        self.refresh_decompile_prep_facts_with_interface_and_control(None, control)
     }
 
     fn refresh_decompile_prep_facts_with_interface_and_control<C: SsaWorkControl + ?Sized>(
         &mut self,
-        arch: Option<&ArchSpec>,
         function_interface: Option<&SourceFunctionInterface>,
         control: &C,
     ) -> Result<(), SsaExecutionStopReason> {
-        let facts =
-            self.collect_decompile_prep_facts_with_control(arch, function_interface, control)?;
+        let facts = self.collect_decompile_prep_facts_with_control(function_interface, control)?;
         control.poll()?;
         self.decompile_prep_facts = Some(facts);
         Ok(())
@@ -3595,19 +3815,10 @@ impl SSAFunction {
 
     fn collect_decompile_prep_facts_with_control<C: SsaWorkControl + ?Sized>(
         &self,
-        arch: Option<&ArchSpec>,
         function_interface: Option<&SourceFunctionInterface>,
         control: &C,
     ) -> Result<DecompilePrepFacts, SsaExecutionStopReason> {
         control.poll()?;
-        let cached_family_info = arch.map(cached_register_family_info);
-        let empty_family_info = RegisterFamilyInfo::default();
-        let family_info = cached_family_info.as_deref().unwrap_or(&empty_family_info);
-        let family_in_states = if family_info.name_to_member.is_empty() {
-            HashMap::new()
-        } else {
-            self.compute_decompile_family_in_states_with_control(family_info, control)?
-        };
         // A call only threatens entry-relative facts if it can leave the stack
         // and frame carriers changed. The convention states which carriers a
         // callee restores, and the source now carries that statement, so a
@@ -3706,7 +3917,6 @@ impl SSAFunction {
             changed = false;
             for &addr in &self.block_order {
                 control.poll()?;
-                let mut family_state = family_in_states.get(&addr).cloned().unwrap_or_default();
                 let Some(block) = self.get_block(addr) else {
                     continue;
                 };
@@ -3716,14 +3926,7 @@ impl SSAFunction {
                     let source_roots = phi
                         .sources
                         .iter()
-                        .map(|(_, src)| {
-                            resolve_value_root(
-                                src,
-                                &facts.canonical_value_roots,
-                                &family_state,
-                                family_info,
-                            )
-                        })
+                        .map(|(_, src)| resolve_value_root(src, &facts.canonical_value_roots))
                         .collect::<Vec<_>>();
                     if let Some(root) = common_root(&source_roots) {
                         changed |= insert_canonical_root(
@@ -3737,8 +3940,6 @@ impl SSAFunction {
                         &phi.sources,
                         &facts.canonical_value_roots,
                         &facts.stack_address_roots,
-                        &family_state,
-                        family_info,
                     ) {
                         changed |= insert_stack_root(
                             &mut facts.stack_address_roots,
@@ -3753,8 +3954,6 @@ impl SSAFunction {
                         &phi.sources,
                         &facts.canonical_value_roots,
                         &facts.entry_stack_address_roots,
-                        &family_state,
-                        family_info,
                     ) {
                         changed |= insert_stack_root(
                             &mut facts.entry_stack_address_roots,
@@ -3763,25 +3962,13 @@ impl SSAFunction {
                         );
                     }
                 }
-                apply_block_phi_family_effects(
-                    &block.phis,
-                    &mut family_state,
-                    family_info,
-                    &self.canonical_storage_by_var,
-                );
-
                 for op in &block.ops {
                     control.poll()?;
                     match op {
                         SSAOp::Copy { dst, src }
                         | SSAOp::Cast { dst, src }
                         | SSAOp::CallRestore { dst, src } => {
-                            let src_root = resolve_value_root(
-                                src,
-                                &facts.canonical_value_roots,
-                                &family_state,
-                                family_info,
-                            );
+                            let src_root = resolve_value_root(src, &facts.canonical_value_roots);
                             changed |= insert_canonical_root(
                                 &mut facts.canonical_value_roots,
                                 dst.clone(),
@@ -3791,8 +3978,6 @@ impl SSAFunction {
                                 src,
                                 &facts.canonical_value_roots,
                                 &facts.stack_address_roots,
-                                &family_state,
-                                family_info,
                             ) {
                                 changed |= insert_stack_root(
                                     &mut facts.stack_address_roots,
@@ -3806,8 +3991,6 @@ impl SSAFunction {
                                     src,
                                     &facts.canonical_value_roots,
                                     &facts.entry_stack_address_roots,
-                                    &family_state,
-                                    family_info,
                                 )
                             {
                                 changed |= insert_stack_root(
@@ -3818,13 +4001,8 @@ impl SSAFunction {
                             }
                         }
                         SSAOp::Trunc { dst, src } | SSAOp::Subpiece { dst, src, .. } => {
-                            let src_root = resolve_value_root(
-                                src,
-                                &facts.canonical_value_roots,
-                                &family_state,
-                                family_info,
-                            );
-                            let adapted = adapt_family_root(&src_root, dst.size)
+                            let src_root = resolve_value_root(src, &facts.canonical_value_roots);
+                            let adapted = adapt_root_width(&src_root, dst.size)
                                 .unwrap_or_else(|| src_root.clone());
                             changed |= insert_canonical_root(
                                 &mut facts.canonical_value_roots,
@@ -3843,8 +4021,6 @@ impl SSAFunction {
                                     &facts.canonical_value_roots,
                                     &facts.stack_address_roots,
                                     &facts.indexed_stack_address_roots,
-                                    &family_state,
-                                    family_info,
                                 )
                             {
                                 changed |= insert_stack_root(
@@ -3858,8 +4034,6 @@ impl SSAFunction {
                                 b,
                                 &facts.canonical_value_roots,
                                 &facts.stack_address_roots,
-                                &family_state,
-                                family_info,
                             ) {
                                 changed |= insert_stack_root(
                                     &mut facts.stack_address_roots,
@@ -3874,8 +4048,6 @@ impl SSAFunction {
                                 b,
                                 &facts.canonical_value_roots,
                                 &facts.entry_stack_address_roots,
-                                &family_state,
-                                family_info,
                             ) {
                                 changed |= insert_stack_root(
                                     &mut facts.entry_stack_address_roots,
@@ -3890,8 +4062,6 @@ impl SSAFunction {
                                 b,
                                 &facts.canonical_value_roots,
                                 &facts.stack_address_roots,
-                                &family_state,
-                                family_info,
                             ) {
                                 changed |= insert_stack_root(
                                     &mut facts.stack_address_roots,
@@ -3906,8 +4076,6 @@ impl SSAFunction {
                                 b,
                                 &facts.canonical_value_roots,
                                 &facts.entry_stack_address_roots,
-                                &family_state,
-                                family_info,
                             ) {
                                 changed |= insert_stack_root(
                                     &mut facts.entry_stack_address_roots,
@@ -3921,12 +4089,6 @@ impl SSAFunction {
                     }
 
                     if let Some(dst) = op.dst() {
-                        apply_op_family_effect(
-                            op,
-                            &mut family_state,
-                            family_info,
-                            &self.canonical_storage_by_var,
-                        );
                         changed |= ensure_value_root_identity(
                             &mut facts.canonical_value_roots,
                             dst.clone(),
@@ -3938,153 +4100,6 @@ impl SSAFunction {
 
         control.poll()?;
         Ok(facts)
-    }
-
-    fn compute_decompile_family_in_states_with_control<C: SsaWorkControl + ?Sized>(
-        &self,
-        family_info: &RegisterFamilyInfo,
-        control: &C,
-    ) -> Result<HashMap<u64, FamilyRootState>, SsaExecutionStopReason> {
-        Ok(self
-            .compute_decompile_family_states_with_control(family_info, control)?
-            .incoming)
-    }
-
-    fn compute_decompile_family_states_with_control<C: SsaWorkControl + ?Sized>(
-        &self,
-        family_info: &RegisterFamilyInfo,
-        control: &C,
-    ) -> Result<DecompileFamilyStates, SsaExecutionStopReason> {
-        control.poll()?;
-        let mut in_states: HashMap<u64, FamilyRootState> = HashMap::new();
-        let mut out_states: HashMap<u64, FamilyRootState> = HashMap::new();
-        let entry_state = self.entry_register_family_state(family_info);
-
-        // A block is recomputed only when a predecessor's exit state moved;
-        // the meet is monotone, so this reaches the same fixed point as a
-        // sweep over every block per round, without re-walking the rest.
-        let mut worklist: std::collections::VecDeque<u64> =
-            self.block_order.iter().copied().collect();
-        let mut queued: HashSet<u64> = worklist.iter().copied().collect();
-        while let Some(addr) = worklist.pop_front() {
-            control.poll()?;
-            queued.remove(&addr);
-            let preds = self.predecessors(addr);
-            let next_in = if addr == self.entry {
-                let mut state = entry_state.clone();
-                for predecessor in &preds {
-                    if let Some(predecessor) = out_states.get(predecessor) {
-                        state.retain(|slot, root| predecessor.get(slot) == Some(root));
-                    }
-                }
-                state
-            } else {
-                meet_family_states(&preds, &out_states)
-            };
-            if in_states.get(&addr) == Some(&next_in) && out_states.contains_key(&addr) {
-                continue;
-            }
-            let next_out = self.transfer_family_state_for_block(addr, &next_in, family_info);
-            in_states.insert(addr, next_in);
-            if out_states.get(&addr) != Some(&next_out) {
-                out_states.insert(addr, next_out);
-                for successor in self.successors(addr) {
-                    if queued.insert(successor) {
-                        worklist.push_back(successor);
-                    }
-                }
-            }
-        }
-
-        control.poll()?;
-        Ok(DecompileFamilyStates {
-            incoming: in_states,
-            outgoing: out_states,
-        })
-    }
-
-    /// Canonical register values present on the implicit function-entry edge.
-    ///
-    /// Renaming gives overlapping entry views independent version-zero names.
-    /// Seeding the widest available view first makes those names one physical
-    /// state: a later partial write can preserve the untouched slices and a
-    /// wide read is composed from the old carrier plus the new lane. Without
-    /// this seed, an `AH` write followed by an `RAX` read incorrectly returned
-    /// the untouched entry `RAX` value.
-    fn entry_register_family_state(&self, family_info: &RegisterFamilyInfo) -> FamilyRootState {
-        let mut candidates = self
-            .canonical_storage_by_var
-            .iter()
-            .filter(|(var, storage)| {
-                var.version == 0 && storage.space == CanonicalStorageSpace::Register
-            })
-            .filter_map(|(var, storage)| {
-                let member = family_info.member_at_offset(storage.offset, storage.size)?;
-                Some((
-                    RegisterFamilySlot {
-                        family_id: member.family_id,
-                        offset: member.offset,
-                        width: storage.size,
-                    },
-                    var,
-                ))
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|(left_slot, left), (right_slot, right)| {
-            left_slot
-                .family_id
-                .cmp(&right_slot.family_id)
-                .then_with(|| right_slot.width.cmp(&left_slot.width))
-                .then_with(|| left_slot.offset.cmp(&right_slot.offset))
-                .then_with(|| left.cmp(right))
-        });
-
-        let mut state = FamilyRootState::new();
-        for (slot, var) in candidates {
-            if family_root_slice_for_range(&state, slot).is_some() {
-                continue;
-            }
-            seed_family_roots(&mut state, family_info, slot, var, var);
-        }
-        state
-    }
-
-    fn transfer_family_state_for_block(
-        &self,
-        addr: u64,
-        input: &FamilyRootState,
-        family_info: &RegisterFamilyInfo,
-    ) -> FamilyRootState {
-        let mut state = input.clone();
-        let Some(block) = self.get_block(addr) else {
-            return state;
-        };
-
-        apply_block_phi_family_effects(
-            &block.phis,
-            &mut state,
-            family_info,
-            &self.canonical_storage_by_var,
-        );
-
-        for op in &block.ops {
-            let rewritten = crate::optimize::map_sources_in_op(op, &|src| {
-                rewrite_decompile_family_source(
-                    src,
-                    &state,
-                    family_info,
-                    &self.canonical_storage_by_var,
-                )
-            });
-            apply_op_family_effect(
-                &rewritten,
-                &mut state,
-                family_info,
-                &self.canonical_storage_by_var,
-            );
-        }
-
-        state
     }
 
     /// Get the switch-selector SSA value that drives a switch block, if recoverable.
@@ -4421,30 +4436,12 @@ pub struct RegisterFamilyInfo {
     /// Whether a 32-bit write to a general register clears the rest of it.
     /// Which family covers a register-space range, for storage the arch does not name.
     family_ranges: Vec<(u64, u64, usize)>,
-    family_widths_by_offset: HashMap<(usize, u64), Vec<u32>>,
     family_slots: HashMap<usize, Vec<RegisterFamilySlot>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RegisterFamilyRoot {
-    /// One real SSA definition that contains this storage range.
-    value: SSAVar,
-    /// Byte offset of the range inside `value`.
-    offset: u32,
-}
-
-impl RegisterFamilyRoot {
-    fn exact(value: SSAVar) -> Self {
-        Self { value, offset: 0 }
-    }
-}
-
-type FamilyRootState = HashMap<RegisterFamilySlot, RegisterFamilyRoot>;
-
-#[derive(Debug, Clone, Default)]
-struct DecompileFamilyStates {
-    incoming: HashMap<u64, FamilyRootState>,
-    outgoing: HashMap<u64, FamilyRootState>,
+    /// The narrowest declared slot of each family that contains every range
+    /// one function touches of it; see [`Self::with_program_roots`].
+    program_roots: HashMap<usize, RegisterFamilySlot>,
+    /// Whether a register's lowest address holds its most significant byte.
+    big_endian: bool,
 }
 
 fn register_family_info_cache() -> &'static RwLock<HashMap<ArchCacheTag, Arc<RegisterFamilyInfo>>> {
@@ -4453,7 +4450,7 @@ fn register_family_info_cache() -> &'static RwLock<HashMap<ArchCacheTag, Arc<Reg
     CACHE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn cached_register_family_info(arch: &ArchSpec) -> Arc<RegisterFamilyInfo> {
+pub(crate) fn cached_register_family_info(arch: &ArchSpec) -> Arc<RegisterFamilyInfo> {
     let cache_tag = ArchCacheTag::from_arch(arch);
 
     if let Some(cached) = register_family_info_cache()
@@ -4486,6 +4483,68 @@ impl RegisterFamilyInfo {
                 .iter()
                 .map(|reg| (reg.name.as_str(), reg.offset, reg.size)),
         )
+        .with_big_endian(arch.register_bytes_are_big_endian())
+    }
+
+    /// The same families with the register file's byte order stated.
+    pub fn with_big_endian(mut self, big_endian: bool) -> Self {
+        self.big_endian = big_endian;
+        self
+    }
+
+    /// The same families with each one's root narrowed to what a function
+    /// actually touches of it.
+    ///
+    /// The architecture names ranges no program uses: Ghidra models `XMM2` as
+    /// a lane of a 512-bit `ZMM2`, and a function doing legacy SSE work never
+    /// mentions the wider register at all. Renaming such a lane as a
+    /// projection of `ZMM2` would make its first write read a 512-bit value
+    /// nothing supplied, and the rendering an uninitialised read. The root is
+    /// therefore the narrowest declared slot containing every range this
+    /// function reads or writes of the family, which is `XMM2` there and the
+    /// full register wherever the program really uses it -- a call's clobber
+    /// of the whole carrier included, which is why those ranges are counted
+    /// here too.
+    pub fn with_program_roots(&self, used: impl IntoIterator<Item = (u64, u32)>) -> Self {
+        let mut extents = HashMap::<usize, (u64, u64)>::new();
+        for (offset, size) in used {
+            let Some(member) = self.member_at_offset(offset, size) else {
+                continue;
+            };
+            let end = offset.saturating_add(u64::from(size));
+            let extent = extents.entry(member.family_id).or_insert((offset, end));
+            extent.0 = extent.0.min(offset);
+            extent.1 = extent.1.max(end);
+        }
+        let mut program_roots = HashMap::new();
+        for (family_id, (start, end)) in extents {
+            let Some(slots) = self.family_slots.get(&family_id) else {
+                continue;
+            };
+            if let Some(slot) = slots
+                .iter()
+                .filter(|slot| {
+                    slot.offset <= start && end <= slot.offset.saturating_add(u64::from(slot.width))
+                })
+                .min_by_key(|slot| slot.width)
+            {
+                program_roots.insert(family_id, *slot);
+            }
+        }
+        Self {
+            program_roots,
+            ..self.clone()
+        }
+    }
+
+    /// The byte a lane starts at, counted from its root's least significant
+    /// byte, which is the offset a `Subpiece` or `Insert` of the root takes.
+    pub fn lane_lsb_byte(&self, root: RegisterFamilySlot, offset: u64, size: u32) -> u64 {
+        if self.big_endian {
+            (root.offset + u64::from(root.width)) - (offset + u64::from(size))
+        } else {
+            offset - root.offset
+        }
     }
 
     /// Build the families from register storage geometry alone.
@@ -4623,8 +4682,9 @@ impl RegisterFamilyInfo {
         Self {
             name_to_member,
             family_ranges: merged,
-            family_widths_by_offset,
             family_slots,
+            program_roots: HashMap::new(),
+            big_endian: false,
         }
     }
 
@@ -4655,36 +4715,34 @@ impl RegisterFamilyInfo {
     }
 
     /// The whole register a storage range is part of.
+    /// The widest register containing a storage range: the identity every
+    /// value of the family has under `doc/adr-register-identity.md`. `None`
+    /// for a range no family covers, and for one that is already its root.
+    pub(crate) fn root_slot_over(&self, offset: u64, size: u32) -> Option<RegisterFamilySlot> {
+        let member = self.member_at_offset(offset, size)?;
+        let end = offset.saturating_add(u64::from(size));
+        let root = self
+            .program_roots
+            .get(&member.family_id)
+            .copied()
+            .filter(|root| {
+                root.offset <= offset && end <= root.offset.saturating_add(u64::from(root.width))
+            })
+            .or_else(|| self.widest_slot_containing(member))?;
+        (root.offset != offset || root.width != size).then_some(root)
+    }
+
     fn widest_slot_containing(&self, member: RegisterFamilyMember) -> Option<RegisterFamilySlot> {
         self.family_slots
             .get(&member.family_id)?
             .iter()
             .filter(|slot| {
-                family_slot_contains(
-                    **slot,
-                    RegisterFamilySlot {
-                        family_id: member.family_id,
-                        offset: member.offset,
-                        width: member.width,
-                    },
-                )
+                slot.offset <= member.offset
+                    && member.offset + u64::from(member.width)
+                        <= slot.offset + u64::from(slot.width)
             })
             .max_by_key(|slot| slot.width)
             .copied()
-    }
-
-    fn member_for(&self, var: &SSAVar) -> Option<RegisterFamilyMember> {
-        if let Some(member) = self.name_to_member.get(var.name.as_str()) {
-            return Some(*member);
-        }
-        if var.name.bytes().any(|byte| byte.is_ascii_uppercase())
-            && let Some(member) = self
-                .name_to_member
-                .get(var.name.to_ascii_lowercase().as_str())
-        {
-            return Some(*member);
-        }
-        self.member_at_offset(var.register_offset()?, var.size)
     }
 
     /// Which family a storage range belongs to, for a varnode the arch does not name.
@@ -4708,487 +4766,7 @@ impl RegisterFamilyInfo {
     }
 }
 
-/// Resolve one SSA register value through its canonical storage before using a
-/// source display name as a fallback for synthetic values.
-fn register_family_member_for(
-    var: &SSAVar,
-    family_info: &RegisterFamilyInfo,
-    canonical_storage_by_var: &BTreeMap<SSAVar, CanonicalStorageId>,
-) -> Option<RegisterFamilyMember> {
-    match canonical_storage_by_var.get(var) {
-        Some(storage) if storage.space == CanonicalStorageSpace::Register => {
-            family_info.member_at_offset(storage.offset, storage.size)
-        }
-        Some(_) => None,
-        None => family_info.member_for(var),
-    }
-}
-
-fn meet_family_states(
-    preds: &[u64],
-    out_states: &HashMap<u64, FamilyRootState>,
-) -> FamilyRootState {
-    let mut pred_states = preds.iter().filter_map(|pred| out_states.get(pred));
-    let Some(first_state) = pred_states.next() else {
-        return HashMap::new();
-    };
-    let mut merged = first_state.clone();
-    for state in pred_states {
-        merged.retain(|slot, root| state.get(slot) == Some(root));
-    }
-    merged
-}
-
-/// Fold a block's phi results into the register-family state.
-///
-/// A block's phis all take effect at one point, so the state they produce must
-/// not depend on the order they happen to be listed in. It did. Each phi kills
-/// the slots it overlaps before seeding its own, so the last phi to mention a
-/// register owns every width of it, and `block.phis` is ordered by the
-/// variable's display name. That name order puts `EDX` before `RDX` but `R8`
-/// before `R8D`, because the wide name is a prefix of the narrow one only for
-/// the extended registers. So a 32-bit loop carrier in `r8` erased its own
-/// 64-bit carrier root while the identical code in `rdx` did not, and only
-/// across a back edge, where no later program order re-establishes the carrier.
-///
-/// Widest last. The register's full merge owns it and the narrower merges stay
-/// slices of that, which is what program order already produces for a straight
-/// line of writes inside a block.
-fn apply_block_phi_family_effects(
-    phis: &[PhiNode],
-    state: &mut FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-    canonical_storage_by_var: &BTreeMap<SSAVar, CanonicalStorageId>,
-) {
-    let mut widest_last: Vec<&PhiNode> = phis.iter().collect();
-    widest_last.sort_by_key(|phi| phi.dst.size);
-    for phi in widest_last {
-        apply_phi_family_effect(phi, state, family_info, canonical_storage_by_var);
-    }
-}
-
-fn apply_phi_family_effect(
-    phi: &PhiNode,
-    state: &mut FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-    canonical_storage_by_var: &BTreeMap<SSAVar, CanonicalStorageId>,
-) {
-    let Some(member) = register_family_member_for(&phi.dst, family_info, canonical_storage_by_var)
-    else {
-        return;
-    };
-    let written = RegisterFamilySlot {
-        family_id: member.family_id,
-        offset: member.offset,
-        width: phi.dst.size,
-    };
-    kill_overlapping_family_roots(state, written);
-    seed_family_roots(state, family_info, written, &phi.dst, &phi.dst);
-}
-
-fn apply_op_family_effect(
-    op: &SSAOp,
-    state: &mut FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-    canonical_storage_by_var: &BTreeMap<SSAVar, CanonicalStorageId>,
-) {
-    let Some(dst) = op.dst() else {
-        return;
-    };
-    let Some(member) = register_family_member_for(dst, family_info, canonical_storage_by_var)
-    else {
-        return;
-    };
-    let written = RegisterFamilySlot {
-        family_id: member.family_id,
-        offset: member.offset,
-        width: dst.size,
-    };
-
-    let preserved_narrow_roots = preserved_narrow_family_roots_for_widening(
-        op,
-        state,
-        family_info,
-        canonical_storage_by_var,
-        member,
-    );
-    // A callee may write the whole register whatever width the clobber is
-    // modelled at, so nothing of the old value survives a call.
-    if matches!(op, SSAOp::CallDefine { .. })
-        && let Some(widest) = family_info.widest_slot_containing(member)
-    {
-        kill_overlapping_family_roots(state, widest);
-    }
-    kill_overlapping_family_roots(state, written);
-
-    match op {
-        SSAOp::Copy { src, .. } | SSAOp::Cast { src, .. } | SSAOp::CallRestore { src, .. } => {
-            let root = adapt_family_root(src, written.width).unwrap_or_else(|| dst.clone());
-            let exact_root = if family_slot_is_maximal(family_info, written) {
-                dst
-            } else {
-                &root
-            };
-            seed_family_roots(state, family_info, written, exact_root, &root);
-        }
-        SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. } => {
-            seed_family_roots(state, family_info, written, dst, dst);
-            for (slot, root) in preserved_narrow_roots {
-                state.insert(slot, root);
-            }
-            if src.size <= written.width {
-                state.insert(
-                    RegisterFamilySlot {
-                        family_id: member.family_id,
-                        offset: member.offset,
-                        width: src.size,
-                    },
-                    RegisterFamilyRoot::exact(src.clone()),
-                );
-            }
-        }
-        SSAOp::Trunc { src, .. } => {
-            let root = if src.is_const() {
-                extract_constant_family_slice(src, 0, written.width).unwrap_or_else(|| dst.clone())
-            } else {
-                dst.clone()
-            };
-            seed_family_roots(state, family_info, written, &root, &root);
-        }
-        SSAOp::Subpiece { src, offset, .. } => {
-            let root = if src.is_const() {
-                extract_constant_family_slice(src, *offset, written.width)
-                    .unwrap_or_else(|| dst.clone())
-            } else {
-                dst.clone()
-            };
-            seed_family_roots(state, family_info, written, &root, &root);
-        }
-        _ => {
-            seed_family_roots(state, family_info, written, dst, dst);
-        }
-    }
-}
-
-fn preserved_narrow_family_roots_for_widening(
-    op: &SSAOp,
-    state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-    canonical_storage_by_var: &BTreeMap<SSAVar, CanonicalStorageId>,
-    dst_member: RegisterFamilyMember,
-) -> Vec<(RegisterFamilySlot, RegisterFamilyRoot)> {
-    let src = match op {
-        SSAOp::IntZExt { src, .. } | SSAOp::IntSExt { src, .. } => src,
-        _ => return Vec::new(),
-    };
-    let Some(src_member) = register_family_member_for(src, family_info, canonical_storage_by_var)
-    else {
-        return Vec::new();
-    };
-    if src_member.family_id != dst_member.family_id
-        || src_member.offset != dst_member.offset
-        || src.size >= dst_member.width
-    {
-        return Vec::new();
-    }
-    let Some(widths) = family_info
-        .family_widths_by_offset
-        .get(&(dst_member.family_id, dst_member.offset))
-    else {
-        return Vec::new();
-    };
-
-    widths
-        .iter()
-        .copied()
-        .filter(|width| *width <= src.size)
-        .filter_map(|width| {
-            let slot = RegisterFamilySlot {
-                family_id: dst_member.family_id,
-                offset: dst_member.offset,
-                width,
-            };
-            state.get(&slot).cloned().map(|root| (slot, root))
-        })
-        .collect()
-}
-
-fn materialize_register_alias_sources(
-    op: &SSAOp,
-    state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-    canonical_storage_by_var: &BTreeMap<SSAVar, CanonicalStorageId>,
-    block_addr: u64,
-    op_index: usize,
-) -> (Vec<SSAOp>, SSAOp) {
-    let mut materialized = Vec::new();
-    let mut replacements = HashMap::<SSAVar, SSAVar>::new();
-    // A call boundary's restore is the exception, and it is the only one.
-    //
-    // Everything else here is a name the lift wrote down, and this pass exists
-    // because such a name means "whatever is in that register now" -- an `EAX`
-    // operand is a slice of the current `RAX`, whatever version that is. A
-    // restore does not name a register; it names the exact value the callee
-    // gave back, which is the one the carrier held before the call instruction
-    // spent it. Resolving it forward to the reaching definition would resolve
-    // it to the spend itself, which is precisely the value it exists to undo.
-    if matches!(op, SSAOp::CallRestore { .. }) {
-        return (materialized, op.clone());
-    }
-    let op = rewrite_decompile_family_subpiece(op, state, family_info, canonical_storage_by_var)
-        .unwrap_or_else(|| op.clone());
-
-    for (source_index, source) in op.sources().into_iter().enumerate() {
-        if replacements.contains_key(source) {
-            continue;
-        }
-        let rewritten =
-            rewrite_decompile_family_source(source, state, family_info, canonical_storage_by_var);
-        if rewritten != *source {
-            replacements.insert(source.clone(), rewritten);
-            continue;
-        }
-        let Some(member) =
-            register_family_member_for(source, family_info, canonical_storage_by_var)
-        else {
-            continue;
-        };
-        let requested = RegisterFamilySlot {
-            family_id: member.family_id,
-            offset: member.offset,
-            width: source.size,
-        };
-        let Some(root) = family_root_slice_for_range(state, requested) else {
-            if let Some(pieced) = piece_family_tiles(
-                state,
-                requested,
-                source,
-                &format!("{block_addr:x}:{op_index:x}:{source_index:x}"),
-                &mut materialized,
-            ) {
-                replacements.insert(source.clone(), pieced);
-            }
-            continue;
-        };
-        if let Some(direct) = direct_family_root_value(&root, source.size) {
-            if direct != *source {
-                replacements.insert(source.clone(), direct);
-            }
-            continue;
-        }
-        if root.value == *source && root.offset == 0 {
-            continue;
-        }
-        let extracted = SSAVar::new(
-            format!("tmp:regalias:{block_addr:x}:{op_index:x}:{source_index:x}"),
-            1,
-            source.size,
-        );
-        materialized.push(SSAOp::Subpiece {
-            dst: extracted.clone(),
-            src: root.value,
-            offset: root.offset,
-        });
-        replacements.insert(source.clone(), extracted);
-    }
-
-    let rewritten = crate::optimize::map_sources_in_op(&op, &|source| {
-        replacements
-            .get(source)
-            .cloned()
-            .unwrap_or_else(|| source.clone())
-    });
-    (materialized, rewritten)
-}
-
-/// Build the wide value a read asks for out of the parts that define it.
-fn piece_family_tiles(
-    state: &FamilyRootState,
-    requested: RegisterFamilySlot,
-    source: &SSAVar,
-    site: &str,
-    materialized: &mut Vec<SSAOp>,
-) -> Option<SSAVar> {
-    let tiles = family_root_tiles_for_range(state, requested)?;
-    let mut part = 0usize;
-    let name = |part: &mut usize| {
-        let named = SSAVar::new(format!("tmp:regpiece:{site}:{part:x}"), 1, source.size);
-        *part += 1;
-        named
-    };
-
-    let mut parts: Vec<(SSAVar, u32)> = Vec::new();
-    for (root, width) in tiles {
-        // The part as its own value, extracted when the definition holds more.
-        let piece = if root.offset == 0 && root.value.size == width {
-            root.value
-        } else {
-            let extracted = SSAVar::new(format!("tmp:regpiece:{site}:s{part:x}"), 1, width);
-            part += 1;
-            materialized.push(SSAOp::Subpiece {
-                dst: extracted.clone(),
-                src: root.value,
-                offset: root.offset,
-            });
-            extracted
-        };
-        parts.push((piece, width));
-    }
-
-    // Combined in adjacent pairs rather than one running total, so a value built
-    // from four lanes passes through 8 and 16 bytes rather than 12, and every
-    // width on the way is one C can spell.
-    while parts.len() > 1 {
-        let mut merged: Vec<(SSAVar, u32)> = Vec::with_capacity(parts.len().div_ceil(2));
-        let mut pairs = parts.into_iter();
-        while let Some((low, low_width)) = pairs.next() {
-            let Some((high, high_width)) = pairs.next() else {
-                merged.push((low, low_width));
-                break;
-            };
-            let mut dst = name(&mut part);
-            dst.size = low_width.checked_add(high_width)?;
-            let width = dst.size;
-            materialized.push(SSAOp::Piece {
-                dst: dst.clone(),
-                hi: high,
-                lo: low,
-            });
-            merged.push((dst, width));
-        }
-        parts = merged;
-    }
-
-    let (value, width) = parts.pop()?;
-    (width == source.size).then_some(value)
-}
-
-fn rewrite_decompile_family_subpiece(
-    op: &SSAOp,
-    state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-    canonical_storage_by_var: &BTreeMap<SSAVar, CanonicalStorageId>,
-) -> Option<SSAOp> {
-    let SSAOp::Subpiece { dst, src, offset } = op else {
-        return None;
-    };
-    let member = register_family_member_for(src, family_info, canonical_storage_by_var)?;
-    let requested_end = offset.checked_add(dst.size)?;
-    if requested_end > src.size {
-        return None;
-    }
-    let requested = RegisterFamilySlot {
-        family_id: member.family_id,
-        offset: member.offset.checked_add(u64::from(*offset))?,
-        width: dst.size,
-    };
-    let root = family_root_slice_for_range(state, requested)?;
-    if let Some(direct) = direct_family_root_value(&root, dst.size) {
-        return Some(SSAOp::Copy {
-            dst: dst.clone(),
-            src: direct,
-        });
-    }
-    Some(SSAOp::Subpiece {
-        dst: dst.clone(),
-        src: root.value,
-        offset: root.offset,
-    })
-}
-
-/// The definitions that exactly tile a requested range, low offset first.
-///
-/// A wide read of a register whose lanes were written separately has no single
-/// containing definition, so `family_root_slice_for_range` refuses it. The parts
-/// are still there, and concatenating them is what the machine did, so this
-/// reports the tiling and the caller writes the `Piece` that says so.
-fn family_root_tiles_for_range(
-    state: &FamilyRootState,
-    requested: RegisterFamilySlot,
-) -> Option<Vec<(RegisterFamilyRoot, u32)>> {
-    let end = requested.offset.checked_add(u64::from(requested.width))?;
-    let mut tiles = Vec::new();
-    let mut cursor = requested.offset;
-    while cursor < end {
-        let remaining = u32::try_from(end - cursor).ok()?;
-        // The widest part starting here that stays inside the request, so a
-        // range covered at two granularities is spelled with the fewer pieces.
-        let (width, root) = state
-            .iter()
-            .filter(|(slot, _)| {
-                slot.family_id == requested.family_id
-                    && slot.offset == cursor
-                    && slot.width <= remaining
-            })
-            .max_by_key(|(slot, _)| slot.width)
-            .map(|(slot, root)| (slot.width, root.clone()))?;
-        tiles.push((root, width));
-        cursor = cursor.checked_add(u64::from(width))?;
-    }
-    (tiles.len() > 1).then_some(tiles)
-}
-
-fn family_root_slice_for_range(
-    state: &FamilyRootState,
-    requested: RegisterFamilySlot,
-) -> Option<RegisterFamilyRoot> {
-    // A request must have one containing definition. A range spread over several
-    // is answered by `family_root_tiles_for_range` and an explicit Piece.
-    state
-        .iter()
-        .filter(|(slot, _)| family_slot_contains(**slot, requested))
-        .filter_map(|(slot, root)| {
-            let relative = requested.offset.checked_sub(slot.offset)?;
-            let relative = u32::try_from(relative).ok()?;
-            let offset = root.offset.checked_add(relative)?;
-            offset
-                .checked_add(requested.width)
-                .filter(|end| *end <= root.value.size)?;
-            Some((
-                slot.width,
-                slot.offset,
-                RegisterFamilyRoot {
-                    value: root.value.clone(),
-                    offset,
-                },
-            ))
-        })
-        .min_by_key(|(width, offset, _)| (*width, *offset))
-        .map(|(_, _, root)| root)
-}
-
-fn rewrite_decompile_family_source(
-    src: &SSAVar,
-    state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-    canonical_storage_by_var: &BTreeMap<SSAVar, CanonicalStorageId>,
-) -> SSAVar {
-    let Some(member) = register_family_member_for(src, family_info, canonical_storage_by_var)
-    else {
-        return src.clone();
-    };
-    let slot = RegisterFamilySlot {
-        family_id: member.family_id,
-        offset: member.offset,
-        width: src.size,
-    };
-    if src.version != 0 && member.width == src.size && family_slot_is_maximal(family_info, slot) {
-        return src.clone();
-    }
-    let Some(root) = state.get(&slot) else {
-        return src.clone();
-    };
-    let Some(adapted) = direct_family_root_value(root, src.size) else {
-        return src.clone();
-    };
-    if adapted == *src {
-        src.clone()
-    } else {
-        adapted
-    }
-}
-
-fn adapt_family_root(root: &SSAVar, width: u32) -> Option<SSAVar> {
+fn adapt_root_width(root: &SSAVar, width: u32) -> Option<SSAVar> {
     if root.size == width {
         return (!root.name_kind().is_constant() || root.constant_bits().is_some())
             .then(|| root.clone());
@@ -5196,182 +4774,19 @@ fn adapt_family_root(root: &SSAVar, width: u32) -> Option<SSAVar> {
     if let Some(value) = root.constant_bits() {
         return Some(SSAVar::constant(mask_const_to_width(value, width), width));
     }
-    if root.size > width && can_width_adapt_register_family_root(root) {
+    if root.size > width && can_width_adapt_root(root) {
         return Some(root.with_size(width));
     }
     None
 }
 
-fn direct_family_root_value(root: &RegisterFamilyRoot, width: u32) -> Option<SSAVar> {
-    if root.offset == 0 && root.value.size == width {
-        return Some(root.value.clone());
-    }
-    extract_constant_family_slice(&root.value, root.offset, width)
-}
-
-fn extract_constant_family_slice(root: &SSAVar, offset: u32, width: u32) -> Option<SSAVar> {
-    let value = const_value(root)?;
-    offset.checked_add(width).filter(|end| *end <= root.size)?;
-    let shift = offset.checked_mul(8)?;
-    let shifted = if shift >= u64::BITS {
-        0
-    } else {
-        value >> shift
-    };
-    Some(SSAVar::constant(mask_const_to_width(shifted, width), width))
-}
-
-fn can_width_adapt_register_family_root(root: &SSAVar) -> bool {
+fn can_width_adapt_root(root: &SSAVar) -> bool {
     !root.is_const()
         && !root.is_temp()
         && !matches!(
             root.name_kind(),
             SSAVarNameKind::Memory | SSAVarNameKind::AddressSpace
         )
-}
-
-fn seed_family_roots(
-    state: &mut FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-    written: RegisterFamilySlot,
-    exact_root: &SSAVar,
-    contained_root: &SSAVar,
-) {
-    if exact_root.size != written.width || contained_root.size != written.width {
-        return;
-    }
-    // Views are internal bookkeeping only. A later narrow use emits a real
-    // Subpiece before substituting the view into an SSA operation.
-    state.insert(written, RegisterFamilyRoot::exact(exact_root.clone()));
-    let Some(slots) = family_info.family_slots.get(&written.family_id) else {
-        return;
-    };
-    for &slot in slots {
-        if slot == written || !family_slot_contains(written, slot) {
-            continue;
-        }
-        let Some(relative) = slot.offset.checked_sub(written.offset) else {
-            continue;
-        };
-        let Ok(relative) = u32::try_from(relative) else {
-            continue;
-        };
-        state.insert(
-            slot,
-            RegisterFamilyRoot {
-                value: contained_root.clone(),
-                offset: relative,
-            },
-        );
-    }
-}
-
-fn family_slot_is_maximal(family_info: &RegisterFamilyInfo, slot: RegisterFamilySlot) -> bool {
-    family_info
-        .family_slots
-        .get(&slot.family_id)
-        .is_none_or(|slots| {
-            !slots
-                .iter()
-                .any(|candidate| *candidate != slot && family_slot_contains(*candidate, slot))
-        })
-}
-
-/// Forget what a write replaced, and only that.
-///
-/// Dropping every overlapping definition meant that writing one byte lane of a
-/// vector register threw away the whole-register value the load had just put
-/// there, so the fifteen lanes the write did not touch lost their connection to
-/// it and fell back to what the function was entered with. What a write
-/// invalidates is its own range; the parts around it still hold what they held.
-///
-/// This is only sound because a narrow write that clears the rest of its
-/// register says so in the lift: Sleigh emits the widening `IntZExt` itself,
-/// so nothing here preserves bytes the machine zeroed.
-fn kill_overlapping_family_roots(state: &mut FamilyRootState, written: RegisterFamilySlot) {
-    let Some(written_end) = written.offset.checked_add(u64::from(written.width)) else {
-        state.retain(|slot, _| !family_slots_overlap(*slot, written));
-        return;
-    };
-    let overlapping: Vec<_> = state
-        .iter()
-        .filter(|(slot, _)| family_slots_overlap(**slot, written))
-        .map(|(slot, root)| (*slot, root.clone()))
-        .collect();
-    for (slot, root) in overlapping {
-        state.remove(&slot);
-        let Some(slot_end) = slot.offset.checked_add(u64::from(slot.width)) else {
-            continue;
-        };
-        let mut keep = |start: u64, end: u64| {
-            let Some(width) = end.checked_sub(start).and_then(|w| u32::try_from(w).ok()) else {
-                return;
-            };
-            if width == 0 {
-                return;
-            }
-            let Some(shift) = start
-                .checked_sub(slot.offset)
-                .and_then(|s| u32::try_from(s).ok())
-            else {
-                return;
-            };
-            let Some(offset) = root.offset.checked_add(shift) else {
-                return;
-            };
-            if u64::from(offset) + u64::from(width) > u64::from(root.value.size) {
-                return;
-            }
-            // A slot the write did not touch already says what it holds, and it
-            // says it more precisely than the range this one was split out of.
-            state
-                .entry(RegisterFamilySlot {
-                    family_id: slot.family_id,
-                    offset: start,
-                    width,
-                })
-                .or_insert(RegisterFamilyRoot {
-                    value: root.value.clone(),
-                    offset,
-                });
-        };
-        if slot.offset < written.offset {
-            keep(slot.offset, written.offset.min(slot_end));
-        }
-        if slot_end > written_end {
-            keep(written_end.max(slot.offset), slot_end);
-        }
-    }
-}
-
-pub fn family_slot_contains(container: RegisterFamilySlot, contained: RegisterFamilySlot) -> bool {
-    if container.family_id != contained.family_id || contained.offset < container.offset {
-        return false;
-    }
-    let Some(container_end) = container.offset.checked_add(u64::from(container.width)) else {
-        return false;
-    };
-    let Some(contained_end) = contained.offset.checked_add(u64::from(contained.width)) else {
-        return false;
-    };
-    contained_end <= container_end
-}
-
-fn family_slots_overlap(a: RegisterFamilySlot, b: RegisterFamilySlot) -> bool {
-    if a.family_id != b.family_id {
-        return false;
-    }
-    let Some(a_end) = a.offset.checked_add(u64::from(a.width)) else {
-        return true;
-    };
-    let Some(b_end) = b.offset.checked_add(u64::from(b.width)) else {
-        return true;
-    };
-    a.offset < b_end && b.offset < a_end
-}
-
-fn const_value(var: &SSAVar) -> Option<u64> {
-    var.constant_bits()
 }
 
 fn mask_const_to_width(value: u64, width: u32) -> u64 {
@@ -5427,45 +4842,16 @@ fn common_root(values: &[SSAVar]) -> Option<SSAVar> {
     }
 }
 
-fn resolve_value_root(
-    var: &SSAVar,
-    roots: &BTreeMap<SSAVar, SSAVar>,
-    family_state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-) -> SSAVar {
-    let canonical = canonicalize_value_root(var, roots);
-    if canonical != *var {
-        return canonical;
-    }
-
-    if var.version != 0 {
-        return var.clone();
-    }
-
-    let Some(member) = family_info.member_for(var) else {
-        return var.clone();
-    };
-    let slot = RegisterFamilySlot {
-        family_id: member.family_id,
-        offset: member.offset,
-        width: var.size,
-    };
-    let Some(root) = family_state.get(&slot) else {
-        return var.clone();
-    };
-    direct_family_root_value(root, var.size)
-        .map(|root| canonicalize_value_root(&root, roots))
-        .unwrap_or_else(|| var.clone())
+fn resolve_value_root(var: &SSAVar, roots: &BTreeMap<SSAVar, SSAVar>) -> SSAVar {
+    canonicalize_value_root(var, roots)
 }
 
 fn resolve_stack_root(
     var: &SSAVar,
     roots: &BTreeMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-    family_state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
 ) -> Option<StackAddressRoot> {
-    let resolved = resolve_value_root(var, roots, family_state, family_info);
+    let resolved = resolve_value_root(var, roots);
     stack_roots
         .get(var)
         .copied()
@@ -5476,15 +4862,11 @@ fn common_stack_root(
     sources: &[(u64, SSAVar)],
     roots: &BTreeMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-    family_state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
 ) -> Option<StackAddressRoot> {
     let mut iter = sources.iter();
     let (_, first_src) = iter.next()?;
-    let first = resolve_stack_root(first_src, roots, stack_roots, family_state, family_info)?;
-    if iter.all(|(_, src)| {
-        resolve_stack_root(src, roots, stack_roots, family_state, family_info) == Some(first)
-    }) {
+    let first = resolve_stack_root(first_src, roots, stack_roots)?;
+    if iter.all(|(_, src)| resolve_stack_root(src, roots, stack_roots) == Some(first)) {
         Some(first)
     } else {
         None
@@ -5495,10 +4877,8 @@ fn stack_root_from_operand(
     var: &SSAVar,
     roots: &BTreeMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-    family_state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
 ) -> Option<StackAddressRoot> {
-    resolve_stack_root(var, roots, stack_roots, family_state, family_info)
+    resolve_stack_root(var, roots, stack_roots)
 }
 
 fn stack_address_root_from_add(
@@ -5506,12 +4886,10 @@ fn stack_address_root_from_add(
     b: &SSAVar,
     roots: &BTreeMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-    family_state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
 ) -> Option<StackAddressRoot> {
     if let (Some(base), Some(delta)) = (
-        stack_root_from_operand(a, roots, stack_roots, family_state, family_info),
-        signed_stack_delta_through_roots(b, roots, family_state, family_info),
+        stack_root_from_operand(a, roots, stack_roots),
+        signed_stack_delta_through_roots(b, roots),
     ) {
         return Some(StackAddressRoot {
             base: base.base,
@@ -5519,8 +4897,8 @@ fn stack_address_root_from_add(
         });
     }
     if let (Some(base), Some(delta)) = (
-        stack_root_from_operand(b, roots, stack_roots, family_state, family_info),
-        signed_stack_delta_through_roots(a, roots, family_state, family_info),
+        stack_root_from_operand(b, roots, stack_roots),
+        signed_stack_delta_through_roots(a, roots),
     ) {
         return Some(StackAddressRoot {
             base: base.base,
@@ -5544,17 +4922,13 @@ fn indexed_stack_address_root_from_add(
     roots: &BTreeMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
     indexed_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-    family_state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
 ) -> Option<StackAddressRoot> {
     let base_of = |var: &SSAVar| {
-        stack_root_from_operand(var, roots, stack_roots, family_state, family_info).or_else(|| {
-            stack_root_from_operand(var, roots, indexed_roots, family_state, family_info)
-        })
+        stack_root_from_operand(var, roots, stack_roots)
+            .or_else(|| stack_root_from_operand(var, roots, indexed_roots))
     };
     let index_is_opaque = |var: &SSAVar| {
-        signed_stack_delta_through_roots(var, roots, family_state, family_info).is_none()
-            && base_of(var).is_none()
+        signed_stack_delta_through_roots(var, roots).is_none() && base_of(var).is_none()
     };
     if let Some(base) = base_of(a)
         && index_is_opaque(b)
@@ -5574,11 +4948,9 @@ fn stack_address_root_from_sub(
     b: &SSAVar,
     roots: &BTreeMap<SSAVar, SSAVar>,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
-    family_state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
 ) -> Option<StackAddressRoot> {
-    let base = stack_root_from_operand(a, roots, stack_roots, family_state, family_info)?;
-    let delta = signed_stack_delta_through_roots(b, roots, family_state, family_info)?;
+    let base = stack_root_from_operand(a, roots, stack_roots)?;
+    let delta = signed_stack_delta_through_roots(b, roots)?;
     Some(StackAddressRoot {
         base: base.base,
         offset: base.offset.checked_sub(delta)?,
@@ -5593,16 +4965,11 @@ fn stack_address_root_from_sub(
 /// left every frame pointer established that way without a stack root, and with
 /// it every address derived from the frame pointer -- which is most of a
 /// non-leaf function's locals.
-fn signed_stack_delta_through_roots(
-    var: &SSAVar,
-    roots: &BTreeMap<SSAVar, SSAVar>,
-    family_state: &FamilyRootState,
-    family_info: &RegisterFamilyInfo,
-) -> Option<i64> {
+fn signed_stack_delta_through_roots(var: &SSAVar, roots: &BTreeMap<SSAVar, SSAVar>) -> Option<i64> {
     if let Some(delta) = signed_stack_delta(var) {
         return Some(delta);
     }
-    let root = resolve_value_root(var, roots, family_state, family_info);
+    let root = resolve_value_root(var, roots);
     (root != *var).then(|| signed_stack_delta(&root)).flatten()
 }
 
@@ -6050,33 +5417,16 @@ mod tests {
                 offset: -0x70,
             },
         );
-        let family_state = super::FamilyRootState::new();
-        let family_info = super::RegisterFamilyInfo::default();
-
         let mut roots = BTreeMap::new();
         assert_eq!(
-            stack_address_root_from_add(
-                &sp,
-                &displacement,
-                &roots,
-                &stack_roots,
-                &family_state,
-                &family_info,
-            ),
+            stack_address_root_from_add(&sp, &displacement, &roots, &stack_roots,),
             None,
             "with nothing linking the temp to the constant there is no delta to add"
         );
 
         roots.insert(displacement.clone(), literal);
         assert_eq!(
-            stack_address_root_from_add(
-                &sp,
-                &displacement,
-                &roots,
-                &stack_roots,
-                &family_state,
-                &family_info,
-            ),
+            stack_address_root_from_add(&sp, &displacement, &roots, &stack_roots,),
             Some(StackAddressRoot {
                 base: StackAddressBase::StackPointer,
                 offset: -0x10,
@@ -6150,36 +5500,6 @@ mod tests {
         arch.add_register(RegisterDef::new("rsp", 16, 8));
         arch.add_register(RegisterDef::new("rbp", 24, 8));
         arch
-    }
-
-    fn make_x86_vector_alias_arch() -> ArchSpec {
-        let mut arch = ArchSpec::new("x86-64");
-        arch.add_register(RegisterDef::new("XMM0", 0x100, 16));
-        arch.add_register(RegisterDef::sub("XMM0_L0", 0x100, 4, "XMM0"));
-        arch.add_register(RegisterDef::sub("XMM0_L1", 0x104, 4, "XMM0"));
-        arch.add_register(RegisterDef::sub("XMM0_L2", 0x108, 4, "XMM0"));
-        arch.add_register(RegisterDef::sub("XMM0_L3", 0x10c, 4, "XMM0"));
-        arch.add_register(RegisterDef::sub("XMM0_LO", 0x100, 8, "XMM0"));
-        arch.add_register(RegisterDef::sub("XMM0_MID", 0x104, 8, "XMM0"));
-        arch.add_register(RegisterDef::sub("XMM0_HI", 0x108, 8, "XMM0"));
-        arch
-    }
-
-    fn normalize_manual_vector_alias_ops(ops: Vec<SSAOp>) -> Vec<SSAOp> {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-        let mut function =
-            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        function.get_block_mut(0x1000).expect("entry block").ops = ops;
-        function.normalize_register_alias_sources(&make_x86_vector_alias_arch());
-        function.get_block(0x1000).expect("entry block").ops.clone()
     }
 
     fn vector_loop_alias_arch(prefix: &str) -> ArchSpec {
@@ -6378,51 +5698,37 @@ mod tests {
             Some(&vector_loop_alias_arch(prefix)),
         )
         .expect("vector loop SSA should build");
+        let accumulator = |var: &SSAVar| {
+            function
+                .canonical_storage_for_var(var)
+                .is_some_and(|storage| {
+                    storage.space == CanonicalStorageSpace::Register
+                        && storage.offset == 0x100
+                        && storage.size == 16
+                })
+        };
+        // The accumulator is one family, so the loop carries one merge of it.
         let header = function.get_block(base + 4).expect("loop header");
         let accumulator_phis = header
             .phis
             .iter()
-            .filter(|phi| {
-                phi.canonical_storage.is_some_and(|storage| {
-                    storage.offset >= 0x100 && storage.offset < 0x110 && storage.size == 4
-                })
-            })
+            .filter(|phi| accumulator(&phi.dst))
             .collect::<Vec<_>>();
-        assert_eq!(accumulator_phis.len(), 4, "one accumulator phi per lane");
-
+        let [phi] = accumulator_phis.as_slice() else {
+            panic!("one accumulator phi, got {:?}", header.phis);
+        };
         let graph = SsaGraph::from_function(&function);
-        for phi in &accumulator_phis {
-            assert_eq!(phi.sources.len(), 2);
-            for (_, source) in &phi.sources {
-                let value = graph.value_id_for_var(source).expect("phi input value");
-                assert!(
-                    graph.def_inst(value).is_some(),
-                    "every lane phi input must have an SSA producer: {source}"
-                );
-            }
+        assert_eq!(phi.sources.len(), 2);
+        for (_, source) in &phi.sources {
+            let value = graph.value_id_for_var(source).expect("phi input value");
+            assert!(
+                graph.def_inst(value).is_some(),
+                "every merge input must have an SSA producer: {source}"
+            );
         }
 
-        let entry = function.get_block(base).expect("preheader");
-        let zero = entry
-            .ops
-            .iter()
-            .find_map(|op| match op {
-                SSAOp::IntXor { dst, .. } if dst.size == 16 => Some(dst.clone()),
-                _ => None,
-            })
-            .expect("wide zero definition");
-        let zero_lane_offsets = entry
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                SSAOp::Subpiece { src, offset, dst } if *src == zero && dst.size == 4 => {
-                    Some(*offset)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(zero_lane_offsets, vec![0, 4, 8, 12]);
-
+        // Each lane update reads its lane of the accumulator and of the load
+        // as a subpiece and inserts the sum back at the lane's position.
         let body = function.get_block(base + 12).expect("vector body");
         let loaded = body
             .ops
@@ -6432,30 +5738,41 @@ mod tests {
                 _ => None,
             })
             .expect("wide vector load");
-        let loaded_lane_offsets = body
+        let lane_reads_of = |source: &dyn Fn(&SSAVar) -> bool| {
+            body.ops
+                .iter()
+                .filter_map(|op| match op {
+                    SSAOp::Subpiece { src, offset, dst } if source(src) && dst.size == 4 => {
+                        Some(*offset)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lane_reads_of(&|src| *src == loaded), vec![0, 4, 8, 12]);
+        assert_eq!(lane_reads_of(&accumulator), vec![0, 4, 8, 12]);
+        let insert_positions = body
             .ops
             .iter()
             .filter_map(|op| match op {
-                SSAOp::Subpiece { src, offset, dst } if *src == loaded && dst.size == 4 => {
-                    Some(*offset)
+                SSAOp::Insert {
+                    dst,
+                    src,
+                    value,
+                    position,
+                } if accumulator(dst) && accumulator(src) && value.size == 4 => {
+                    position.constant_bits()
                 }
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(loaded_lane_offsets, vec![0, 4, 8, 12]);
+        assert_eq!(insert_positions, vec![0, 32, 64, 96]);
 
-        let low_phi = accumulator_phis
-            .iter()
-            .find(|phi| {
-                phi.canonical_storage
-                    .is_some_and(|storage| storage.offset == 0x100)
-            })
-            .expect("low-lane phi");
+        // The exit reads the low lane of the merged accumulator.
         let exit = function.get_block(base + 8).expect("loop exit");
         assert!(exit.ops.iter().any(|op| matches!(
             op,
-            SSAOp::Copy { dst, src }
-                if dst.size == 4 && *src == low_phi.dst
+            SSAOp::Subpiece { dst, src, offset: 0 } if dst.size == 4 && *src == phi.dst
         )));
         assert!(
             !function
@@ -6769,7 +6086,7 @@ mod tests {
     }
 
     #[test]
-    fn architecture_aware_raw_ssa_resolves_register_aliases_at_construction() {
+    fn a_lane_read_is_a_subpiece_of_the_root_it_reads() {
         let arch = make_arm64_alias_arch();
         let blocks = vec![R2ILBlock {
             addr: 0x1000,
@@ -6793,14 +6110,29 @@ mod tests {
         }];
 
         let func = SSAFunction::from_blocks_raw(&blocks, Some(&arch)).expect("raw SSA");
-        match &func.entry_block().expect("entry block").ops[1] {
-            SSAOp::Store { val, .. } => assert_eq!(val, &SSAVar::constant(0xdead, 4)),
-            other => panic!("expected store, got {other:?}"),
-        }
+        let ops = &func.entry_block().expect("entry block").ops;
+        let stored = ops
+            .iter()
+            .find_map(|op| match op {
+                SSAOp::Store { val, .. } => Some(val.clone()),
+                _ => None,
+            })
+            .expect("store");
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                SSAOp::Subpiece { dst, src, offset: 0 }
+                    if *dst == stored
+                        && src.name.eq_ignore_ascii_case("x9")
+                        && src.version == 1
+                        && src.size == 8
+            )),
+            "the lane read is a subpiece of the written root: {ops:?}"
+        );
     }
 
     #[test]
-    fn decompile_optimization_cannot_delete_register_alias_definition() {
+    fn a_lane_read_of_a_constant_root_is_the_constant() {
         let arch = make_arm64_alias_arch();
         let blocks = vec![R2ILBlock {
             addr: 0x1000,
@@ -6835,7 +6167,17 @@ mod tests {
                 _ => None,
             })
             .expect("observable store");
-        assert_eq!(store, &SSAVar::constant(0xdead, 4));
+        let stored = func
+            .entry_block()
+            .expect("entry block")
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                SSAOp::Copy { dst, src } if dst == store => Some(src.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| store.clone());
+        assert_eq!(stored, SSAVar::constant(0xdead, 4));
     }
 
     #[test]
@@ -6989,7 +6331,9 @@ mod tests {
             prepared.memory().defs_by_inst.contains_key(&store_inst),
             "store should define a new memory version"
         );
-        assert_eq!(entry.ops.len(), 5);
+        // The flag is a lane of `rbx`: its write inserts into the root and
+        // the branch's read is a subpiece of it.
+        assert_eq!(entry.ops.len(), 7);
 
         assert_eq!(prepared.predicates().predicates.len(), 1);
         let predicate = prepared
@@ -8767,10 +8111,6 @@ mod tests {
             offset: 0,
             size: 8,
         };
-        let lane_result = CanonicalStorageId {
-            size: 4,
-            ..full_result
-        };
         let convention =
             SourceConventionSlots::new("amd64", [], Some(full_result)).expect("result convention");
         let prepared = SsaArtifact::for_decompile_with_interfaces_roles_and_convention(
@@ -8785,33 +8125,39 @@ mod tests {
         let call = prepared
             .callsite_certificate_for_op(0x16c0, 0)
             .expect("convention-certified call");
+        // The call defines the root once; the lane the program reads is a
+        // `Subpiece` of it, certified as that result sliced.
         let eax = prepared
             .function()
             .get_block(0x16c0)
             .into_iter()
             .flat_map(|block| &block.ops)
             .find_map(|op| match op {
-                SSAOp::CallDefine { dst } if dst.name.eq_ignore_ascii_case("eax") => {
+                SSAOp::Subpiece {
+                    dst,
+                    src,
+                    offset: 0,
+                } if dst.size == 4 && src.name.eq_ignore_ascii_case("rax") => {
                     prepared.graph().value_id_for_var(dst)
                 }
                 _ => None,
             })
-            .expect("post-call EAX value");
+            .expect("post-call EAX lane read");
         let result = prepared
             .call_result_certificate_for_value(eax)
             .expect("observed return lane certificate");
         assert_eq!(result.call_site, call.call_site);
         assert_eq!(
             result.relation,
-            crate::semantic::CallResultValueRelation::Identity
+            crate::semantic::CallResultValueRelation::Derived
         );
+        assert_eq!(result.width, 4);
         assert_eq!(
             result.carrier,
             crate::semantic::ReturnCarrier::Register {
-                storage: lane_result
+                storage: full_result
             }
         );
-        assert_eq!(result.owner, Some(crate::semantic::ValueOwner::Value(eax)));
     }
 
     #[test]
@@ -10947,96 +10293,24 @@ mod tests {
     }
 
     #[test]
-    fn vector_alias_wide_definition_materializes_nonzero_lane_offsets() {
-        let ops_all = normalize_manual_vector_alias_ops(vec![
-            SSAOp::IntXor {
-                dst: SSAVar::new("XMM0", 1, 16),
-                a: SSAVar::new("XMM0", 0, 16),
-                b: SSAVar::new("XMM0", 0, 16),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:low", 1, 4),
-                src: SSAVar::new("XMM0_L0", 0, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:high", 1, 4),
-                src: SSAVar::new("XMM0_L2", 7, 4),
-            },
-        ]);
-        let ops: Vec<&SSAOp> = ops_all.iter().collect();
-
-        assert_eq!(ops.len(), 5);
-        match &ops[1] {
-            SSAOp::Subpiece { src, offset, .. } => {
-                assert_eq!(src, &SSAVar::new("XMM0", 1, 16));
-                assert_eq!(*offset, 0);
-            }
-            other => panic!("expected low-lane extraction, got {other:?}"),
-        }
-        match &ops[3] {
-            SSAOp::Subpiece { src, offset, .. } => {
-                assert_eq!(src, &SSAVar::new("XMM0", 1, 16));
-                assert_eq!(*offset, 8);
-            }
-            other => panic!("expected nonzero lane extraction, got {other:?}"),
-        }
-        assert!(ops.iter().skip(1).all(|op| {
-            op.sources()
-                .into_iter()
-                .all(|src| src.name != "XMM0_L0" && src.name != "XMM0_L2")
-        }));
-    }
-
-    #[test]
     fn vector_alias_loop_edges_keep_exact_lane_producers_across_names_and_relocation() {
         assert_vector_loop_alias_provenance(0x1000, "first_names");
         assert_vector_loop_alias_provenance(0x7fff_4000, "renamed_registers");
     }
 
     #[test]
-    fn register_alias_maximal_copy_retains_the_written_ssa_definition() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-        let mut arch = ArchSpec::new("x86-64");
-        arch.add_register(RegisterDef::new("RAX", 0, 8));
-        arch.add_register(RegisterDef::sub("EAX", 0, 4, "RAX"));
-
-        let mut function =
-            SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        function.get_block_mut(0x1000).expect("entry block").ops = vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("RAX", 2, 8),
-                src: SSAVar::constant(0x33, 8),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:returned", 1, 8),
-                src: SSAVar::new("RAX", 0, 8),
-            },
-        ];
-
-        function.normalize_register_alias_sources(&arch);
-
-        let ops = &function.get_block(0x1000).expect("entry block").ops;
-        assert_eq!(ops.len(), 2);
-        match &ops[1] {
-            SSAOp::Copy { src, .. } => assert_eq!(src, &SSAVar::new("RAX", 2, 8)),
-            other => panic!("expected maximal-register copy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn entry_carrier_is_composed_with_a_partial_high_byte_write() {
+    fn a_lane_write_inserts_into_the_entry_root() {
         let mut arch = ArchSpec::new("x86-64");
         arch.add_register(RegisterDef::new("RAX", 0, 8));
         arch.add_register(RegisterDef::sub("AH", 1, 1, "RAX"));
         let mut block = R2ILBlock::new(0x1000, 4);
+        // The caller's register is read on its own account, so it is not the
+        // scratch register whose lane writes start from zero.
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: make_const(0x1ff8, 8),
+            val: make_reg(0, 8),
+        });
         block.push(R2ILOp::Copy {
             dst: make_reg(1, 1),
             src: make_const(3, 1),
@@ -11050,356 +10324,39 @@ mod tests {
         let function = SSAFunction::from_blocks_with_arch(&[block], Some(&arch))
             .expect("partial-register fixture");
         let ops = &function.get_block(0x1000).expect("entry block").ops;
-        let stored = ops.iter().find_map(|op| match op {
-            SSAOp::Store { val, .. } => Some(val),
-            _ => None,
-        });
-        assert!(
-            stored.is_some_and(|value| value.name.starts_with("tmp:regpiece:")),
-            "the wide read must consume an explicit composition, not stale entry RAX: {ops:?}"
-        );
-        assert!(ops.iter().any(|op| matches!(
-            op,
-            SSAOp::Piece { hi, lo, .. }
-                if hi.constant_bits() == Some(3) || lo.constant_bits() == Some(3)
-        )));
-        assert!(ops.iter().any(|op| matches!(
-            op,
-            SSAOp::Subpiece { src, offset: 0, .. }
-                if *src == SSAVar::new("RAX", 0, 8)
-        )));
-        assert!(ops.iter().any(|op| matches!(
-            op,
-            SSAOp::Subpiece { src, offset: 2, .. }
-                if *src == SSAVar::new("RAX", 0, 8)
-        )));
-    }
-
-    #[test]
-    fn vector_alias_narrow_write_preserves_disjoint_lane_roots() {
-        let ops_all = normalize_manual_vector_alias_ops(vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0", 1, 16),
-                src: SSAVar::new("tmp:wide", 1, 16),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0_L2", 1, 4),
-                src: SSAVar::new("tmp:new_l2", 1, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:read_l0", 1, 4),
-                src: SSAVar::new("XMM0_L0", 0, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:read_l2", 1, 4),
-                src: SSAVar::new("XMM0_L2", 0, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:read_l3", 1, 4),
-                src: SSAVar::new("XMM0_L3", 0, 4),
-            },
-        ]);
-        let ops: Vec<&SSAOp> = ops_all.iter().collect();
-
-        let lane_slices = ops
+        let stored = ops
             .iter()
             .filter_map(|op| match op {
-                SSAOp::Subpiece { src, offset, .. } if src.name == "tmp:wide" => Some(*offset),
+                SSAOp::Store { val, .. } => Some(val.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        assert_eq!(lane_slices, vec![0, 12]);
-        let updated_lane_read = ops.iter().find_map(|op| match op {
-            SSAOp::Copy { dst, src } if dst.name == "tmp:read_l2" => Some(src),
-            _ => None,
-        });
-        assert_eq!(updated_lane_read, Some(&SSAVar::new("tmp:new_l2", 1, 4)));
-    }
-
-    #[test]
-    fn vector_alias_subpiece_uses_exact_updated_lane_without_stale_wide_live_in() {
-        let ops_all = normalize_manual_vector_alias_ops(vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0", 1, 16),
-                src: SSAVar::new("tmp:wide", 1, 16),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0_L2", 1, 4),
-                src: SSAVar::new("tmp:new_l2", 1, 4),
-            },
-            SSAOp::Subpiece {
-                dst: SSAVar::new("tmp:extracted_l2", 1, 4),
-                src: SSAVar::new("XMM0", 0, 16),
-                offset: 8,
-            },
-        ]);
-        let ops: Vec<&SSAOp> = ops_all.iter().collect();
-
-        assert_eq!(ops.len(), 3);
-        match &ops[2] {
-            SSAOp::Copy { dst, src } => {
-                assert_eq!(dst, &SSAVar::new("tmp:extracted_l2", 1, 4));
-                assert_eq!(src, &SSAVar::new("tmp:new_l2", 1, 4));
-            }
-            other => panic!("expected exact updated-lane copy, got {other:?}"),
-        }
-        assert!(ops[2].sources().into_iter().all(|src| src.name != "XMM0"));
-    }
-
-    #[test]
-    fn vector_alias_overlapping_write_composes_a_read_from_its_parts() {
-        let ops_all = normalize_manual_vector_alias_ops(vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0", 1, 16),
-                src: SSAVar::new("tmp:wide", 1, 16),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0_MID", 1, 8),
-                src: SSAVar::new("tmp:new_mid", 1, 8),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:unaffected_low", 1, 4),
-                src: SSAVar::new("XMM0_L0", 0, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:affected_low_half", 1, 8),
-                src: SSAVar::new("XMM0_LO", 0, 8),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:unaffected_high", 1, 4),
-                src: SSAVar::new("XMM0_L3", 0, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:unresolved_whole", 1, 16),
-                src: SSAVar::new("XMM0", 0, 16),
-            },
-        ]);
-        let ops: Vec<&SSAOp> = ops_all.iter().collect();
-
-        assert!(ops.iter().any(|op| matches!(
-            op,
-            SSAOp::Subpiece { src, offset: 0, .. } if src.name == "tmp:wide"
-        )));
-        assert!(ops.iter().any(|op| matches!(
-            op,
-            SSAOp::Subpiece { src, offset: 12, .. } if src.name == "tmp:wide"
-        )));
-        let piece_of = |name: &str| {
-            ops.iter().find_map(|op| match op {
-                SSAOp::Piece { dst, hi, lo } if dst.name == name => Some((hi.clone(), lo.clone())),
-                _ => None,
-            })
-        };
-        let source_of = |name: &str| {
-            ops.iter().find_map(|op| match op {
-                SSAOp::Copy { dst, src } if dst.name == name => Some(src.clone()),
-                _ => None,
-            })
-        };
-        let subpiece_of = |name: &str| {
-            ops.iter().find_map(|op| match op {
-                SSAOp::Subpiece { dst, src, offset } if dst.name == name => {
-                    Some((src.clone(), *offset))
-                }
-                _ => None,
-            })
-        };
-
-        // The low half spans the old wide value and the new middle write, so it
-        // is what the machine holds there: the two parts, concatenated.
-        let low_half = source_of("tmp:affected_low_half").expect("low half source");
-        let (hi, lo) = piece_of(&low_half.name).expect("low half is pieced");
-        assert_eq!(
-            subpiece_of(&hi.name),
-            Some((SSAVar::new("tmp:new_mid", 1, 8), 0))
-        );
-        assert_eq!(
-            subpiece_of(&lo.name),
-            Some((SSAVar::new("tmp:wide", 1, 16), 0))
-        );
-
-        // The whole register is the same story across three parts.
-        let whole = source_of("tmp:unresolved_whole").expect("whole source");
-        let (whole_hi, whole_lo) = piece_of(&whole.name).expect("whole is pieced");
-        assert_eq!(
-            subpiece_of(&whole_hi.name),
-            Some((SSAVar::new("tmp:wide", 1, 16), 12))
-        );
-        let (mid, low) = piece_of(&whole_lo.name).expect("whole low is pieced");
-        assert_eq!(mid, SSAVar::new("tmp:new_mid", 1, 8));
-        assert_eq!(
-            subpiece_of(&low.name),
-            Some((SSAVar::new("tmp:wide", 1, 16), 0))
-        );
-    }
-
-    #[test]
-    fn vector_alias_final_low_lane_survives_disjoint_lane_updates() {
-        let ops_all = normalize_manual_vector_alias_ops(vec![
-            SSAOp::IntXor {
-                dst: SSAVar::new("XMM0", 1, 16),
-                a: SSAVar::new("XMM0", 0, 16),
-                b: SSAVar::new("XMM0", 0, 16),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0_L1", 1, 4),
-                src: SSAVar::new("tmp:new_l1", 1, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0_L2", 1, 4),
-                src: SSAVar::new("tmp:new_l2", 1, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("XMM0_L3", 1, 4),
-                src: SSAVar::new("tmp:new_l3", 1, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:final_low", 1, 4),
-                src: SSAVar::new("XMM0_L0", 0, 4),
-            },
-        ]);
-        let ops: Vec<&SSAOp> = ops_all.iter().collect();
-
-        let final_low = ops
-            .windows(2)
-            .find_map(|window| match (&window[0], &window[1]) {
-                (SSAOp::Subpiece { src, offset, .. }, SSAOp::Copy { dst, .. })
-                    if dst.name == "tmp:final_low" =>
-                {
-                    Some((src, *offset))
-                }
-                _ => None,
-            })
-            .expect("final low-lane extraction");
-        assert_eq!(final_low, (&SSAVar::new("XMM0", 1, 16), 0));
-    }
-
-    #[test]
-    fn test_decompile_normalization_rewrites_same_block_subregister_root() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        let block = func.get_block_mut(0x1000).expect("entry block");
-        block.ops = vec![
-            SSAOp::IntZExt {
-                dst: SSAVar::new("x9", 1, 8),
-                src: SSAVar::new("tmp:24c00", 3, 4),
-            },
-            SSAOp::IntSExt {
-                dst: SSAVar::new("tmp:5f80", 1, 8),
-                src: SSAVar::new("w9", 0, 4),
-            },
-        ];
-
-        func.normalize_register_alias_sources(&make_arm64_alias_arch());
-
-        match &func.get_block(0x1000).expect("entry block").ops[1] {
-            SSAOp::IntSExt { src, .. } => {
-                assert_eq!(src, &SSAVar::new("tmp:24c00", 3, 4));
-            }
-            other => panic!("expected IntSExt, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_decompile_normalization_rewrites_narrow_alias_after_wide_zext_write() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        let block = func.get_block_mut(0x1000).expect("entry block");
-        block.ops = vec![
-            SSAOp::IntZExt {
-                dst: SSAVar::new("x8", 1, 8),
-                src: SSAVar::new("tmp:25500", 1, 1),
-            },
-            SSAOp::IntRight {
-                dst: SSAVar::new("tmp:18900", 1, 4),
-                a: SSAVar::new("w8", 0, 4),
-                b: SSAVar::constant(0, 4),
-            },
-        ];
-
-        func.normalize_register_alias_sources(&make_arm64_alias_arch());
-
-        let ops: Vec<&SSAOp> = func
-            .get_block(0x1000)
-            .expect("entry block")
-            .ops
+            .next_back()
+            .expect("the store after the lane write");
+        assert_eq!(stored, SSAVar::new("RAX", 1, 8), "{ops:?}");
+        let lane = ops
             .iter()
-            .collect();
-        let extracted = match &ops[1] {
-            SSAOp::Subpiece { dst, src, offset } => {
-                assert_eq!(src, &SSAVar::new("x8", 1, 8));
-                assert_eq!(*offset, 0);
-                dst.clone()
-            }
-            other => panic!("expected explicit narrow alias extraction, got {other:?}"),
-        };
-        match &ops[2] {
-            SSAOp::IntRight { a, .. } => assert_eq!(a, &extracted),
-            other => panic!("expected IntRight, got {other:?}"),
-        }
-    }
-
-    /// `ah` and `al` are one byte each of `rax`, and they are not the same
-    /// byte. A table keyed on register names cannot say so -- both spell
-    /// "the a register" -- and the tables this replaced gave them one key,
-    /// so an assumption about `ah` was applied to whatever `al` carried.
-    /// Geometry says it plainly: same family, different offset.
-    #[test]
-    fn register_families_separate_the_two_low_bytes_of_one_register() {
-        let families = RegisterFamilyInfo::from_register_storages([
-            ("RAX", 0x00u64, 8u32),
-            ("EAX", 0x00, 4),
-            ("AX", 0x00, 2),
-            ("AL", 0x00, 1),
-            ("AH", 0x01, 1),
-            ("RDX", 0x10, 8),
-            ("DL", 0x10, 1),
-        ]);
-
-        let al = families.slot_for_name("al").expect("al is named");
-        let ah = families.slot_for_name("ah").expect("ah is named");
-        let rax = families.slot_for_name("rax").expect("rax is named");
-
-        // One register, so one family.
-        assert_eq!(al.family_id, ah.family_id);
-        assert_eq!(al.family_id, rax.family_id);
-        // Two different bytes of it, so two different slots.
-        assert_ne!(al, ah);
-        assert_eq!(al.offset, 0x00);
-        assert_eq!(ah.offset, 0x01);
-        assert!(family_slot_contains(rax, al));
-        assert!(family_slot_contains(rax, ah));
-        assert!(!family_slot_contains(al, ah));
-
-        // A low alias shares the register's starting offset; a high byte does
-        // not, which is what separates "same parameter" from "same register".
-        for alias in ["rax", "eax", "ax", "al"] {
-            let slot = families.slot_for_name(alias).expect(alias);
-            assert_eq!(slot.offset, rax.offset, "{alias}");
-        }
-        assert_ne!(ah.offset, rax.offset);
-
-        // And a different register is a different family, whatever it is called.
-        let dl = families.slot_for_name("dl").expect("dl is named");
-        assert_ne!(dl.family_id, al.family_id);
+            .find_map(|op| match op {
+                SSAOp::Insert {
+                    dst,
+                    src,
+                    value,
+                    position,
+                } if *dst == stored && *src == SSAVar::new("RAX", 0, 8) => {
+                    assert_eq!(position.constant_bits(), Some(8));
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .expect("the high byte is inserted into the entry root");
+        assert!(
+            lane.constant_bits() == Some(3)
+                || ops.iter().any(|op| matches!(
+                    op,
+                    SSAOp::Copy { dst, src } if *dst == lane && src.constant_bits() == Some(3)
+                )),
+            "{ops:?}"
+        );
+        assert!(!ops.iter().any(|op| matches!(op, SSAOp::Piece { .. })));
     }
 
     /// The widest slot is the family's canonical identity, and every alias
@@ -11426,253 +10383,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decompile_normalization_seeds_missing_x86_low_byte_alias() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-        let mut arch = ArchSpec::new("x86-64");
-        arch.add_register(RegisterDef::new("RAX", 0x00, 8));
-        arch.add_register(RegisterDef::new("EAX", 0x00, 4));
-        arch.add_register(RegisterDef::new("AL", 0x00, 1));
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        let block = func.get_block_mut(0x1000).expect("entry block");
-        block.ops = vec![
-            SSAOp::IntZExt {
-                dst: SSAVar::new("EAX", 1, 4),
-                src: SSAVar::new("tmp:loaded_byte", 1, 1),
-            },
-            SSAOp::IntSub {
-                dst: SSAVar::new("tmp:cmp", 1, 1),
-                a: SSAVar::new("AL", 0, 1),
-                b: SSAVar::constant(0x30, 1),
-            },
-        ];
-
-        func.normalize_register_alias_sources(&arch);
-
-        match &func.get_block(0x1000).expect("entry block").ops[1] {
-            SSAOp::IntSub { a, .. } => {
-                assert_eq!(a, &SSAVar::new("tmp:loaded_byte", 1, 1));
-            }
-            other => panic!("expected IntSub, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_decompile_normalization_preserves_low_byte_after_x86_widening() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-        let mut arch = ArchSpec::new("x86-64");
-        arch.add_register(RegisterDef::new("RAX", 0x00, 8));
-        arch.add_register(RegisterDef::new("EAX", 0x00, 4));
-        arch.add_register(RegisterDef::new("AL", 0x00, 1));
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        let block = func.get_block_mut(0x1000).expect("entry block");
-        block.ops = vec![
-            SSAOp::IntZExt {
-                dst: SSAVar::new("EAX", 1, 4),
-                src: SSAVar::new("tmp:loaded_byte", 1, 1),
-            },
-            SSAOp::IntZExt {
-                dst: SSAVar::new("RAX", 2, 8),
-                src: SSAVar::new("EAX", 1, 4),
-            },
-            SSAOp::IntLess {
-                dst: SSAVar::new("CF", 1, 1),
-                a: SSAVar::new("AL", 0, 1),
-                b: SSAVar::constant(b'0' as u64, 1),
-            },
-        ];
-
-        func.normalize_register_alias_sources(&arch);
-
-        match &func.get_block(0x1000).expect("entry block").ops[2] {
-            SSAOp::IntLess { a, .. } => {
-                assert_eq!(a, &SSAVar::new("tmp:loaded_byte", 1, 1));
-            }
-            other => panic!("expected IntLess, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_decompile_normalization_reuses_exact_x86_narrow_root_after_widening() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-        let mut arch = ArchSpec::new("x86-64");
-        arch.add_register(RegisterDef::new("RAX", 0, 8));
-        arch.add_register(RegisterDef::sub("EAX", 0, 4, "RAX"));
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        let block = func.get_block_mut(0x1000).expect("entry block");
-        block.ops = vec![
-            SSAOp::IntAdd {
-                dst: SSAVar::new("EAX", 2, 4),
-                a: SSAVar::new("tmp:lhs", 1, 4),
-                b: SSAVar::new("tmp:rhs", 1, 4),
-            },
-            SSAOp::IntZExt {
-                dst: SSAVar::new("RAX", 2, 8),
-                src: SSAVar::new("EAX", 2, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:stored_exact", 1, 4),
-                src: SSAVar::new("EAX", 2, 4),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:stored_mismatched_name", 1, 4),
-                src: SSAVar::new("RAX", 2, 4),
-            },
-        ];
-
-        func.normalize_register_alias_sources(&arch);
-
-        let ops: Vec<&SSAOp> = func
-            .get_block(0x1000)
-            .expect("entry block")
-            .ops
-            .iter()
-            .collect();
-        assert_eq!(ops.len(), 4, "an exact narrow root needs no extraction");
-        match &ops[2] {
-            SSAOp::Copy { src, .. } => assert_eq!(src, &SSAVar::new("EAX", 2, 4)),
-            other => panic!("expected narrow copy, got {other:?}"),
-        }
-        match &ops[3] {
-            SSAOp::Copy { src, .. } => assert_eq!(src, &SSAVar::new("EAX", 2, 4)),
-            other => panic!("expected width-corrected narrow copy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_decompile_normalization_seeds_low_byte_after_x86_subpiece_write() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-        let mut arch = ArchSpec::new("x86-64");
-        arch.add_register(RegisterDef::new("R8", 0x40, 8));
-        arch.add_register(RegisterDef::new("R8D", 0x40, 4));
-        arch.add_register(RegisterDef::new("R8B", 0x40, 1));
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        let block = func.get_block_mut(0x1000).expect("entry block");
-        block.ops = vec![
-            SSAOp::Subpiece {
-                dst: SSAVar::new("R8D", 1, 4),
-                src: SSAVar::new("tmp:src", 1, 8),
-                offset: 0,
-            },
-            SSAOp::IntLess {
-                dst: SSAVar::new("CF", 1, 1),
-                a: SSAVar::new("R8B", 0, 1),
-                b: SSAVar::constant(0x1a, 1),
-            },
-        ];
-
-        func.normalize_register_alias_sources(&arch);
-
-        let ops: Vec<&SSAOp> = func
-            .get_block(0x1000)
-            .expect("entry block")
-            .ops
-            .iter()
-            .collect();
-        let extracted = match &ops[1] {
-            SSAOp::Subpiece { dst, src, offset } => {
-                assert_eq!(src, &SSAVar::new("R8D", 1, 4));
-                assert_eq!(*offset, 0);
-                dst.clone()
-            }
-            other => panic!("expected explicit low-byte extraction, got {other:?}"),
-        };
-        match &ops[2] {
-            SSAOp::IntLess { a, .. } => assert_eq!(a, &extracted),
-            other => panic!("expected IntLess, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_decompile_normalization_materializes_x86_eax_after_wide_temporary_write() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-        let mut arch = ArchSpec::new("x86-64");
-        arch.add_register(RegisterDef::new("RAX", 0, 8));
-        arch.add_register(RegisterDef::sub("EAX", 0, 4, "RAX"));
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        let block = func.get_block_mut(0x1000).expect("entry block");
-        block.ops = vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("RAX", 2, 8),
-                src: SSAVar::new("tmp:loaded_len", 1, 8),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:narrow_len", 1, 4),
-                src: SSAVar::new("EAX", 1, 4),
-            },
-        ];
-
-        func.normalize_register_alias_sources(&arch);
-
-        let ops: Vec<&SSAOp> = func
-            .get_block(0x1000)
-            .expect("entry block")
-            .ops
-            .iter()
-            .collect();
-        let extracted = match &ops[1] {
-            SSAOp::Subpiece { dst, src, offset } => {
-                assert_eq!(src, &SSAVar::new("tmp:loaded_len", 1, 8));
-                assert_eq!(*offset, 0);
-                dst.clone()
-            }
-            other => panic!("expected explicit EAX extraction, got {other:?}"),
-        };
-        match &ops[2] {
-            SSAOp::Copy { dst, src } => {
-                assert_eq!(dst, &SSAVar::new("tmp:narrow_len", 1, 4));
-                assert_eq!(src, &extracted);
-            }
-            other => panic!("expected narrow copy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_symbolic_ssa_normalizes_x86_low_byte_alias_sources() {
+    fn a_low_byte_read_of_a_constant_lane_write_is_the_constant() {
         let mut arch = ArchSpec::new("x86-64");
         arch.add_register(RegisterDef::new("RAX", 0x00, 8));
         arch.add_register(RegisterDef::new("EAX", 0x00, 4));
@@ -11696,181 +10407,32 @@ mod tests {
             op_metadata: Default::default(),
         }];
 
-        let artifact =
-            SsaArtifact::for_symbolic(&blocks, Some(&arch)).expect("symbolic SSA should build");
-        let block = artifact.function().get_block(0x1000).expect("entry block");
-
-        match &block.ops[1] {
-            SSAOp::IntEqual { a, .. } => {
-                assert_eq!(a, &SSAVar::constant(0x41, 1));
-            }
-            other => panic!("expected IntEqual, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_decompile_normalization_propagates_family_root_across_cfg_edge() {
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![R2ILOp::CBranch {
-                    target: make_const(0x1008, 8),
-                    cond: make_const(1, 1),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1004,
-                size: 4,
-                ops: vec![R2ILOp::Return {
-                    target: make_ram(0, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1008,
-                size: 4,
-                ops: vec![R2ILOp::Return {
-                    target: make_ram(0, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ];
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        func.get_block_mut(0x1000).expect("entry block").ops = vec![
-            SSAOp::IntZExt {
-                dst: SSAVar::new("x8", 1, 8),
-                src: SSAVar::new("tmp:24c00", 1, 4),
-            },
-            SSAOp::CBranch {
-                target: SSAVar::new("ram:1008", 0, 8),
-                cond: SSAVar::constant(1, 1),
-            },
-        ];
-        func.get_block_mut(0x1004).expect("fallthrough block").ops = vec![SSAOp::Copy {
-            dst: SSAVar::new("tmp:300", 1, 4),
-            src: SSAVar::new("w8", 0, 4),
-        }];
-        func.get_block_mut(0x1008).expect("taken block").ops = vec![SSAOp::Copy {
-            dst: SSAVar::new("tmp:301", 1, 4),
-            src: SSAVar::new("w8", 0, 4),
-        }];
-
-        func.normalize_register_alias_sources(&make_arm64_alias_arch());
-
-        for addr in [0x1004, 0x1008] {
-            match &func.get_block(addr).expect("block").ops[0] {
-                SSAOp::Copy { src, .. } => {
-                    assert_eq!(src, &SSAVar::new("tmp:24c00", 1, 4));
+        // The lane write inserts into `RAX`; reading the byte back through
+        // the insert and the constant is the optimizer's fold, so the fact is
+        // stated of the optimized function.
+        let mut func = SSAFunction::from_blocks_raw(&blocks, Some(&arch)).expect("raw SSA");
+        crate::optimize::optimize_function(
+            &mut func,
+            &crate::optimize::OptimizationConfig::default(),
+        );
+        // The byte read back is the constant, so the comparison folds to true.
+        let block = func.get_block(0x1000).expect("entry block");
+        let flag = block
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                SSAOp::Copy { dst, src } if dst.size == 1 && dst.name == "reg:200" => {
+                    Some(src.clone())
                 }
-                other => panic!("expected Copy, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_decompile_normalization_preserves_loop_invariant_family_root() {
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![
-                    R2ILOp::IntZExt {
-                        dst: make_reg(0x80, 8),
-                        src: make_unique(0x100, 4),
-                    },
-                    R2ILOp::Branch {
-                        target: make_ram(0x1004, 8),
-                    },
-                ],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1004,
-                size: 4,
-                ops: vec![R2ILOp::CBranch {
-                    target: make_ram(0x100c, 8),
-                    cond: make_unique(0x180, 1),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1008,
-                size: 4,
-                ops: vec![R2ILOp::Branch {
-                    target: make_ram(0x1004, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x100c,
-                size: 4,
-                ops: vec![
-                    R2ILOp::Copy {
-                        dst: make_unique(0x200, 4),
-                        src: make_reg(0x80, 4),
-                    },
-                    R2ILOp::Return {
-                        target: make_ram(0, 8),
-                    },
-                ],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ];
-
-        let func = SSAFunction::from_blocks_raw(&blocks, Some(&make_arm64_alias_arch()))
-            .expect("loop SSA should build");
-        let ops = &func.get_block(0x100c).expect("loop exit block").ops;
-        match &ops[0] {
-            SSAOp::Copy { src, .. } => {
-                assert_eq!(src, &SSAVar::new("tmp:100", 0, 4));
-            }
-            other => panic!("expected narrow alias copy, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_decompile_normalization_truncates_wide_const_for_narrow_alias_use() {
-        let blocks = vec![R2ILBlock {
-            addr: 0x1000,
-            size: 4,
-            ops: vec![R2ILOp::Return {
-                target: make_ram(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        }];
-
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA should build");
-        let block = func.get_block_mut(0x1000).expect("entry block");
-        block.ops = vec![
-            SSAOp::Copy {
-                dst: SSAVar::new("x9", 1, 8),
-                src: SSAVar::constant(0xdead, 8),
-            },
-            SSAOp::Copy {
-                dst: SSAVar::new("tmp:3e480", 1, 4),
-                src: SSAVar::new("w9", 0, 4),
-            },
-        ];
-
-        func.normalize_register_alias_sources(&make_arm64_alias_arch());
-
-        match &func.get_block(0x1000).expect("entry block").ops[1] {
-            SSAOp::Copy { src, .. } => {
-                assert_eq!(src, &SSAVar::constant(0xdead, 4));
-            }
-            other => panic!("expected Copy, got {other:?}"),
-        }
+                SSAOp::IntEqual { a, .. } => Some(a.clone()),
+                _ => None,
+            })
+            .expect("the comparison or its folded result survives");
+        assert!(
+            flag == SSAVar::constant(1, 1) || flag == SSAVar::constant(0x41, 1),
+            "{:?}",
+            block.ops
+        );
     }
 
     #[test]
@@ -12005,7 +10567,7 @@ mod tests {
                 b: SSAVar::constant(1, 8),
             },
         ];
-        func.refresh_decompile_prep_facts(None);
+        func.refresh_decompile_prep_facts();
 
         let facts = func.decompile_prep_facts().expect("prep facts");
         assert!(
@@ -12594,7 +11156,7 @@ mod tests {
                 b: SSAVar::constant(0xffffffffffffffe8, 8),
             },
         ];
-        func.refresh_decompile_prep_facts(None);
+        func.refresh_decompile_prep_facts();
 
         let facts = func.decompile_prep_facts().expect("prep facts");
         assert_eq!(
@@ -12615,13 +11177,13 @@ mod tests {
     fn test_constant_display_names_do_not_supply_bits() {
         let named_constant = SSAVar::new("const:0x1234", 0, 8);
         assert_eq!(named_constant.constant_bits(), None);
-        assert_eq!(adapt_family_root(&named_constant, 4), None);
+        assert_eq!(adapt_root_width(&named_constant, 4), None);
 
         let mut canonical_constant = SSAVar::constant(0x1234, 8);
         canonical_constant.name = "not-a-constant".to_string();
         assert_eq!(canonical_constant.constant_bits(), Some(0x1234));
         assert_eq!(
-            adapt_family_root(&canonical_constant, 4),
+            adapt_root_width(&canonical_constant, 4),
             Some(SSAVar::constant(0x1234, 4))
         );
     }

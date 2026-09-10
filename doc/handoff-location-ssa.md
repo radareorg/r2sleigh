@@ -20154,3 +20154,64 @@ the source is 6.2.3, so a reconfigure will move the share dir.
 Still open on the fork side: after 26682 merges, confirm no xrefs variant
 remains; after 26701 or 26702 merge, drop the corresponding commits from the
 integration branch on the next rebase.
+
+## One identity per register family, and the vector root the architecture invented
+
+The register-identity rewrite of `doc/adr-register-identity.md` is built, both
+stages together. A register family now has one SSA identity: a narrow read is a
+`Subpiece` of its root, a narrow write is a temporary and an `Insert` into it,
+and the family pass that used to guess which of several identities each read
+meant is gone with its 28 tests. Section 10 of the ADR records the shape and
+the numbers; this entry records the three things the measurements forced,
+because each was a fact about the model rather than a bug in the code.
+
+**The architecture's widest name is not the program's root.** Ghidra models
+`XMM2` inside a 512-bit `ZMM2` and `q0` inside a 256-bit `z0`. Rooting a family
+at the widest declared slot made a function that only ever does legacy SSE work
+read a 512-bit value nobody supplied, and arm64 `-O2` `xxhash32` compute the
+wrong digest. The root is the narrowest declared slot containing every range
+the function actually touches, plus the convention's boundary carriers and, in
+a function that calls, its clobber list. The machine projection had to follow:
+a register value's geometry is now the whole of itself, and the `Lane` and
+`Insert` write projections -- which existed to describe a write that does not
+cover its carrier -- are deleted along with the carrier-relative use slices and
+the absorbed-extension bookkeeping.
+
+**Nothing passed anything in a scratch register.** Even at the program's root,
+the first lane write into a register the function never read has no incoming
+value. Where the entry value reaches nothing but inserts, followed through the
+merges that carry the same undefined bits, and the convention names no carrier
+there, the chain starts at zero. A vector zero is spelled as the prelude's
+zero-extension of a narrow constant, which is also what let the constant
+ceiling rise: a constant whose width the bit-vector prelude carries is now
+spellable instead of refused.
+
+**The lane model needs the fold.** Every narrow read is a `Subpiece` and every
+narrow write an `Insert`, so the optimizer reads a `Subpiece` through its
+source's definition -- the constant, the inserted lane, the extension's input,
+or the outer slice -- and constant propagation and instruction combining run to
+a shared fixed point rather than once each. Without it the rendering is a wall
+of `tmp_lane_*` temporaries; with it the corpus renders as before.
+
+Two interface consequences came free. A recovered parameter's width is the
+bytes the body observes of the entry value rather than the register's, which is
+what recovered `murmur3_32`'s and `xxhash32`'s third argument -- four cells
+were `signature_mismatch` before. And where the interface declares a narrow
+formal but the body reads the whole register, the root is rebuilt from the
+declared lanes with zero above them, because the declaration is the source's
+own statement of what the caller passed.
+
+Numbers: local census 699 of 720 rendered, up from 697, gaining `bzip2-O2`
+`0x7d70` and `0x8350` and losing nothing; `split_entries` zero on all nine
+binaries; corpus gate green at 54 of 54 on raw, differential, snapshot and the
+four audits, with the snapshot baseline re-accepted because every rendering
+changed. DecBench has not been re-run since; that is the next measurement.
+
+What the tree still says here, in order of size: eight corpus cells compute a
+wrong digest through the *diagnostic* rewriting while their raw rendering is
+correct, so the differential gate passes on the raw basis and the type-rewrite
+path owes an explanation; the four `c_plugin_*` source tests fail on a clean
+checkout of `HEAD` as well, because they read strings from `r_anal_sleigh.c`
+that the fork-side work changed; the stack-clash probe loop at -O0 is still not
+stack geometry; and a copy of a stack address into a program pointer still asks
+for the elided base by name.

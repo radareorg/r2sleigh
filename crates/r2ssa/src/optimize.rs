@@ -99,21 +99,26 @@ pub(crate) fn optimize_function_with_interface_and_control<C: SsaWorkControl + ?
     let mut stats = OptimizationStats::default();
     let max_iters = config.max_iterations.max(1);
 
-    if config.enable_sccp {
-        let (consts, executable_edges) = sccp_with_control(func, control)?;
-        control.poll()?;
-        apply_sccp_results(
-            func,
-            &consts,
-            &executable_edges,
-            function_interface,
-            &mut stats,
-        );
-    }
-
+    // Constants and folds feed each other: a fold through a definition can
+    // turn a lane read into a constant copy, which is a constant the next
+    // propagation round carries to its readers. Both run until neither moves.
     for _ in 0..max_iters {
         control.poll()?;
         let mut changed = false;
+
+        if config.enable_sccp {
+            let (consts, executable_edges) = sccp_with_control(func, control)?;
+            control.poll()?;
+            if apply_sccp_results(
+                func,
+                &consts,
+                &executable_edges,
+                function_interface,
+                &mut stats,
+            ) {
+                changed = true;
+            }
+        }
 
         if config.enable_inst_combine && inst_combine(func, &mut stats) {
             changed = true;
@@ -983,15 +988,28 @@ fn count_source_replacements(before: &SSAOp, after: &SSAOp) -> usize {
 fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
     let mut changed = false;
     let block_addrs = func.block_addrs().to_vec();
+    let mut defs = func
+        .blocks()
+        .flat_map(|block| block.ops.iter())
+        .filter_map(|op| op.dst().map(|dst| (VarKey::from_var(dst), op.clone())))
+        .collect::<HashMap<_, _>>();
 
-    for addr in block_addrs {
-        let Some(block) = func.get_block_mut(addr) else {
+    for addr in &block_addrs {
+        let Some(block) = func.get_block_mut(*addr) else {
             continue;
         };
         for op in &mut block.ops {
-            if let Some(new_op) = simplify_op(op)
-                && &new_op != op
-            {
+            loop {
+                let Some(new_op) = fold_through_definition(op, &defs).or_else(|| simplify_op(op))
+                else {
+                    break;
+                };
+                if &new_op == op {
+                    break;
+                }
+                if let Some(dst) = new_op.dst() {
+                    defs.insert(VarKey::from_var(dst), new_op.clone());
+                }
                 *op = new_op;
                 stats.ops_simplified += 1;
                 changed = true;
@@ -999,7 +1017,111 @@ fn inst_combine(func: &mut SSAFunction, stats: &mut OptimizationStats) -> bool {
         }
     }
 
+    // A lane temporary that a fold made a copy of another value is that
+    // value: it is the construction's own scaffolding, not a move the
+    // program made, so its readers take the value and the copy goes dead.
+    let mut lane_copies = HashMap::new();
+    for (key, op) in &defs {
+        if let SSAOp::Copy { dst, src } = op
+            && crate::rename::is_lane_temp(dst)
+        {
+            lane_copies.insert(key.clone(), src.clone());
+        }
+    }
+    if !lane_copies.is_empty() {
+        let resolve = |var: &SSAVar| {
+            let mut current = var.clone();
+            let mut hops = 0;
+            while let Some(next) = lane_copies.get(&VarKey::from_var(&current)) {
+                current = next.clone();
+                hops += 1;
+                if hops > lane_copies.len() {
+                    break;
+                }
+            }
+            current
+        };
+        // A merge keeps its copy: its edge assignment is a statement of the
+        // copied object, not an expression read.
+        for addr in &block_addrs {
+            let Some(block) = func.get_block_mut(*addr) else {
+                continue;
+            };
+            for op in &mut block.ops {
+                let new_op = map_sources_in_op(op, &resolve);
+                if &new_op != op {
+                    *op = new_op;
+                    changed = true;
+                }
+            }
+        }
+    }
+
     changed
+}
+
+/// Read a `Subpiece` through the operation defining its source.
+///
+/// A lane read is a `Subpiece` of its root, and the root's definition says
+/// what the lane holds: the constant copied there, the value an `Insert` put
+/// at that position, the narrower value an extension widened, or a slice of
+/// a wider slice (doc/adr-register-identity.md §5). Copies of non-constants
+/// are left alone: a copy is a statement the prepared SSA keeps.
+fn fold_through_definition(op: &SSAOp, defs: &HashMap<VarKey, SSAOp>) -> Option<SSAOp> {
+    let SSAOp::Subpiece { dst, src, offset } = op else {
+        return None;
+    };
+    let producer = defs.get(&VarKey::from_var(src))?;
+    let lane_start = u64::from(*offset) * 8;
+    let lane_bits = u64::from(dst.size) * 8;
+    let lane_end = lane_start + lane_bits;
+    let subpiece = |src: &SSAVar, offset: u64| {
+        let offset = u32::try_from(offset).ok()?;
+        Some(if u64::from(src.size) * 8 == lane_bits && offset == 0 {
+            SSAOp::Copy {
+                dst: dst.clone(),
+                src: src.clone(),
+            }
+        } else {
+            SSAOp::Subpiece {
+                dst: dst.clone(),
+                src: src.clone(),
+                offset,
+            }
+        })
+    };
+    match producer {
+        SSAOp::Copy { src: value, .. } if value.constant_bits().is_some() => {
+            subpiece(value, u64::from(*offset))
+        }
+        SSAOp::Insert {
+            src: root,
+            value,
+            position,
+            ..
+        } => {
+            let position = position.constant_bits()?;
+            let inserted_end = position.checked_add(u64::from(value.size) * 8)?;
+            if position <= lane_start && lane_end <= inserted_end {
+                subpiece(value, (lane_start - position) / 8)
+            } else if lane_end <= position || inserted_end <= lane_start {
+                subpiece(root, u64::from(*offset))
+            } else {
+                None
+            }
+        }
+        SSAOp::IntZExt { src: narrow, .. } | SSAOp::IntSExt { src: narrow, .. }
+            if lane_end <= u64::from(narrow.size) * 8 =>
+        {
+            subpiece(narrow, u64::from(*offset))
+        }
+        SSAOp::Subpiece {
+            src: wider,
+            offset: inner,
+            ..
+        } => subpiece(wider, u64::from(*offset) + u64::from(*inner)),
+        _ => None,
+    }
 }
 
 fn simplify_op(op: &SSAOp) -> Option<SSAOp> {
@@ -2065,5 +2187,117 @@ mod sccp_tests {
         assert!(!func.cfg().has_edge(0x1000, 0x1004));
         assert!(stats.sccp_edges_pruned > 0);
         assert!(stats.sccp_blocks_removed > 0);
+    }
+
+    /// The definition-aware folds a lane read goes through
+    /// (doc/adr-register-identity.md §5).
+    #[test]
+    fn subpiece_folds_through_the_definition_of_its_source() {
+        let root = SSAVar::new("RAX", 1, 8);
+        let older = SSAVar::new("RAX", 0, 8);
+        let lane = SSAVar::new("tmp:lane:1000:1:0", 1, 4);
+        let byte = SSAVar::new("tmp:lane:1000:2:0", 1, 1);
+        let read = |offset: u32, size: u32| SSAOp::Subpiece {
+            dst: SSAVar::new("tmp:lane:1000:3:0", 1, size),
+            src: root.clone(),
+            offset,
+        };
+        let defined_by = |op: SSAOp| {
+            let mut defs = HashMap::new();
+            defs.insert(VarKey::from_var(&root), op);
+            defs
+        };
+
+        // A constant copied into the root: the lane is that constant's bytes.
+        let constant = defined_by(SSAOp::Copy {
+            dst: root.clone(),
+            src: SSAVar::constant(0x1122_3344_5566_7788, 8),
+        });
+        assert_eq!(
+            fold_through_definition(&read(4, 4), &constant),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                src: SSAVar::constant(0x1122_3344_5566_7788, 8),
+                offset: 4,
+            })
+        );
+
+        // A lane inserted at bit 32: a read inside it is the inserted value,
+        // a read outside it is the same read of the older root.
+        let inserted = defined_by(SSAOp::Insert {
+            dst: root.clone(),
+            src: older.clone(),
+            value: lane.clone(),
+            position: SSAVar::constant(32, 4),
+        });
+        assert_eq!(
+            fold_through_definition(&read(4, 4), &inserted),
+            Some(SSAOp::Copy {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                src: lane.clone(),
+            })
+        );
+        assert_eq!(
+            fold_through_definition(&read(5, 1), &inserted),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                src: lane.clone(),
+                offset: 1,
+            })
+        );
+        assert_eq!(
+            fold_through_definition(&read(0, 4), &inserted),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                src: older.clone(),
+                offset: 0,
+            })
+        );
+        assert_eq!(fold_through_definition(&read(2, 4), &inserted), None);
+
+        // A widened value: a read within the narrow width is the narrow value.
+        let widened = defined_by(SSAOp::IntZExt {
+            dst: root.clone(),
+            src: lane.clone(),
+        });
+        assert_eq!(
+            fold_through_definition(&read(0, 4), &widened),
+            Some(SSAOp::Copy {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 4),
+                src: lane.clone(),
+            })
+        );
+        assert_eq!(
+            fold_through_definition(&read(0, 1), &widened),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                src: lane.clone(),
+                offset: 0,
+            })
+        );
+        assert_eq!(fold_through_definition(&read(0, 8), &widened), None);
+
+        // A slice of a slice is one slice.
+        let sliced = defined_by(SSAOp::Subpiece {
+            dst: root.clone(),
+            src: SSAVar::new("XMM0", 1, 16),
+            offset: 8,
+        });
+        assert_eq!(
+            fold_through_definition(&read(2, 1), &sliced),
+            Some(SSAOp::Subpiece {
+                dst: SSAVar::new("tmp:lane:1000:3:0", 1, 1),
+                src: SSAVar::new("XMM0", 1, 16),
+                offset: 10,
+            })
+        );
+
+        // A copy of a non-constant is a statement the prepared SSA keeps.
+        let copied = defined_by(SSAOp::Copy {
+            dst: root.clone(),
+            src: older.clone(),
+        });
+        assert_eq!(fold_through_definition(&read(0, 4), &copied), None);
+        let _ = byte;
     }
 }

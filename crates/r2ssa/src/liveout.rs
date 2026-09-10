@@ -647,39 +647,46 @@ mod tests {
     }
 
     #[test]
-    fn wide_return_base_and_low_overlay_are_both_live() {
-        // `xor eax, eax; sete al` -- the caller reads a composition, so the
-        // full-width base and the byte laid over it are both what it reads.
+    fn a_lane_written_into_the_return_root_is_live_as_the_root() {
+        // `xor eax, eax; sete al` -- the byte is inserted into the root, and
+        // the root the caller reads is the value that insert defines.
         let func = return_alias_function("carrier", "low_lane");
-        assert_eq!(
-            live_storages(&func, &[storage(0, 8)]),
-            vec![storage(0, 1), storage(0, 8)]
-        );
+        assert_eq!(live_storages(&func, &[storage(0, 8)]), vec![storage(0, 8)]);
     }
 
+    /// A body that only ever writes the low half of the return register has
+    /// that half as its root, and the caller reads exactly what it wrote.
     #[test]
-    fn a_narrow_write_covering_the_logical_return_is_live() {
+    fn a_narrow_write_of_the_return_register_is_live_as_itself() {
         let func = narrow_return_function();
         assert_eq!(live_storages(&func, &[storage(0, 8)]), vec![storage(0, 4)]);
     }
 
     #[test]
-    fn a_return_merge_beneath_a_later_overlay_stays_live() {
-        // The overlay does not cover the whole register, so the merge under it
-        // still supplies the remaining bytes, and each arm still supplies the
-        // merge.
+    fn a_return_merge_beneath_a_later_lane_write_is_read_by_it() {
+        // The lane write inserts into the merged value, so the merge is read
+        // by the insert, and each arm is read by the merge.
         let func = return_phi_overlay_function();
         assert_eq!(
             live_storages(&func, &[storage(0, 8)]),
-            vec![storage(0, 1), storage(0, 8)],
-            "the overlay and the merge beneath it"
+            vec![storage(0, 8)],
+            "the insert over the merge"
         );
-        // The arms are not live *out*: the merge is the definition the caller
-        // reaches, and the walk stops there. They stay alive because the merge
-        // reads them, which is an ordinary use, and `is_read` is the question
-        // that covers both reasons a value survives.
         let graph = SsaGraph::from_function(&func);
         let live = FunctionLiveOut::compute(&func, &graph, &[storage(0, 8)]);
+        let merge = func
+            .get_block(0x100c)
+            .expect("merge block")
+            .phis
+            .iter()
+            .filter_map(|phi| graph.value_id_for_var(&phi.dst))
+            .collect::<Vec<_>>();
+        assert_eq!(merge.len(), 1);
+        assert!(is_read(&graph, &live, merge[0]));
+        assert!(
+            !live.contains(merge[0]),
+            "the insert, not the merge, reaches the caller"
+        );
         for arm in [0x1004, 0x1008] {
             let defined = func
                 .get_block(arm)
@@ -696,39 +703,32 @@ mod tests {
     }
 
     #[test]
-    fn a_shadowed_overlay_is_reported_live_although_the_caller_cannot_read_it() {
-        // Two writes to the low byte. The caller reads only the second, so the
-        // first supplies nothing, and dead code elimination used to say so.
-        // This walk does not: it stops only on a write that covers the whole
-        // return storage, so a narrower write never ends the search and every
-        // write to the location on the way is reported.
-        //
-        // The imprecision is in the safe direction -- a value called live is
-        // kept, and keeping one that is dead costs a statement rather than an
-        // answer -- which is why it is recorded here rather than fixed under a
-        // deletion. Making it exact means tracking which bytes a later write
-        // has already supplied, the way the removed pass did with its
-        // uncovered-range list, and that is a change to what every consumer of
-        // `FunctionLiveOut` sees.
+    fn an_overwritten_lane_is_read_by_the_write_that_overwrites_it() {
+        // Two writes to the low byte. Each inserts into the root the other
+        // left, so the first is an operand of the second rather than a value
+        // shadowed by it, and only the last root reaches the caller.
         for (whole, low) in [("whole_a", "slice_a"), ("whole_b", "slice_b")] {
             let func = shadowed_overlay_function(whole, low);
             let graph = SsaGraph::from_function(&func);
             let live = FunctionLiveOut::compute(&func, &graph, &[storage(0, 8)]);
-            let overlays = func
+            let roots = func
                 .get_block(0x1000)
                 .expect("return block")
                 .ops
                 .iter()
                 .filter_map(|op| op.dst())
-                .filter(|dst| func.canonical_storage_for_var(dst) == Some(storage(0, 1)))
+                .filter(|dst| func.canonical_storage_for_var(dst) == Some(storage(0, 8)))
                 .filter_map(|dst| graph.value_id_for_var(dst))
                 .collect::<Vec<_>>();
-            assert_eq!(overlays.len(), 2, "{whole}");
-            assert!(live.contains(overlays[1]), "the surviving write, {whole}");
-            assert!(
-                live.contains(overlays[0]),
-                "the shadowed write is over-approximated as live, {whole}"
-            );
+            assert_eq!(roots.len(), 3, "{whole}");
+            assert!(live.contains(roots[2]), "the last root, {whole}");
+            for earlier in &roots[..2] {
+                assert!(!live.contains(*earlier), "{whole}");
+                assert!(
+                    is_read(&graph, &live, *earlier),
+                    "read by the next insert, {whole}"
+                );
+            }
         }
     }
 

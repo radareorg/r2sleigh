@@ -509,7 +509,7 @@ pub(crate) fn collect_final_placement_occurrences(
             }
             PlacementObservationTarget::Write {
                 inst: inst_id,
-                projection,
+                projection: _,
                 block,
             } => {
                 let inst = graph
@@ -519,17 +519,6 @@ pub(crate) fn collect_final_placement_occurrences(
                     .output
                     .ok_or(PlacementAnalysisError::InvalidWrite { inst: inst_id })?;
                 if let Some(binding) = bound_value(names, value)? {
-                    if matches!(projection, r2ssa::MachineWriteProjection::Insert { .. }) {
-                        reads.push(FinalBindingRead {
-                            binding,
-                            value: None,
-                            statement,
-                            source: PlacementRead::PreservedCarrierWrite(inst_id),
-                            region,
-                            block,
-                            order,
-                        });
-                    }
                     writes.push(FinalBindingWrite {
                         binding,
                         inst: inst_id,
@@ -2239,23 +2228,7 @@ fn target_authorizes_binding(
             .is_some_and(|disposition| {
                 matches!(disposition, ValueDisposition::Bound { binding: owner } if *owner == binding)
             }),
-        (
-            PlacementObservationTarget::Write {
-                inst,
-                projection,
-                block: _,
-            },
-            SymbolAccess::Read,
-        ) => {
-            matches!(projection, r2ssa::MachineWriteProjection::Insert { .. })
-                && graph
-                .inst(inst)
-                .and_then(|inst| inst.output)
-                .and_then(|value| names.disposition_for_value(value))
-                .is_some_and(|disposition| {
-                    matches!(disposition, ValueDisposition::Bound { binding: owner } if *owner == binding)
-                })
-        }
+        (PlacementObservationTarget::Write { .. }, SymbolAccess::Read) => false,
         (
             PlacementObservationTarget::StackAccess {
                 access,
@@ -4056,14 +4029,6 @@ impl Occurrence {
                 call.0,
                 value.0 as usize,
             ),
-            OccurrenceKind::Read(PlacementRead::PreservedCarrierWrite(inst)) => (
-                self.statement,
-                self.read_rank(),
-                self.block,
-                self.region.index(),
-                inst.0,
-                0,
-            ),
             OccurrenceKind::Write { inst, .. } => (
                 self.statement,
                 1,
@@ -4744,57 +4709,6 @@ mod tests {
             decisions.decision(binding),
             Some(PlacementDecision::LexicalDeclaration { .. })
         ));
-    }
-
-    #[test]
-    fn inserted_carrier_write_reads_before_its_same_occurrence_write() {
-        let regions = regions_from(0x1000, vec![block_region(0x1000)]);
-        let cfg = TestCfg::new(0x1000, &[]);
-        let binding = BindingId::from_dense_index(0).expect("binding");
-        let block_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);
-        let inst = InstId(0);
-        let order = FinalOccurrenceOrder(0);
-        let reads = [FinalBindingRead {
-            statement: 0,
-            value: None,
-            binding,
-            source: PlacementRead::PreservedCarrierWrite(inst),
-            region: block_region,
-            block: 0x1000,
-            order,
-        }];
-        let writes = [FinalBindingWrite {
-            statement: 0,
-            defines: None,
-            effectful: false,
-            binding,
-            inst,
-            region: block_region,
-            block: 0x1000,
-            order,
-            observation: observation(0),
-            inline_eligible: true,
-        }];
-
-        let decisions = derive_with_cfg(
-            &regions,
-            &cfg,
-            1,
-            &BTreeSet::new(),
-            &BTreeSet::new(),
-            &reads,
-            &writes,
-        )
-        .expect("typed placement result");
-        assert_eq!(
-            decisions.decision(binding),
-            Some(PlacementDecision::Refused(
-                PlacementRefusal::ReadBeforeAssignment {
-                    binding,
-                    read: PlacementRead::PreservedCarrierWrite(inst),
-                }
-            ))
-        );
     }
 
     #[test]

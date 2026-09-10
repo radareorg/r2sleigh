@@ -491,6 +491,25 @@ fn type_from_size(size: u32) -> CType {
     }
 }
 
+/// One constant, spelled as a literal or -- where the width is one only the
+/// bit-vector prelude carries -- as the zero extension of its `u64` payload.
+fn wide_aware_literal(bits: u64, width_bits: u32) -> CExpr {
+    if projection::c_bitvector_width_is_supported(width_bits) {
+        return CExpr::call(
+            CExpr::External {
+                name: format!("r2sleigh_bits_zero_extend_64_{width_bits}"),
+                kind: crate::symbol::ExternalKind::Intrinsic,
+            },
+            vec![CExpr::UIntLit(bits)],
+        );
+    }
+    if bits > i64::MAX as u64 {
+        CExpr::UIntLit(bits)
+    } else {
+        CExpr::IntLit(bits as i64)
+    }
+}
+
 fn uint_type_from_size(size: u32) -> CType {
     match size {
         0 => CType::Unknown,

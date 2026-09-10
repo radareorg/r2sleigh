@@ -345,8 +345,14 @@ fn observed_entry_read_storages(
     for value in &graph.values {
         if observations.contains(value.id)
             && graph.def_inst(value.id).is_none()
-            && let Some(storage) = is_entry_read(func, &value.var)
+            && let Some(root) = is_entry_read(func, &value.var)
         {
+            // Every register value is its root, so the width the program
+            // read is the observed low lanes of it, not the register's.
+            let storage = observations
+                .observed_low_bytes(value.id)
+                .filter(|bytes| *bytes < root.size)
+                .map_or(root, |size| CanonicalStorageId { size, ..root });
             // Which observation this parameter rests on is the whole question
             // when the count is wrong, and it is knowable only here.
             let (root, chain) = observations.witness(value.id);
@@ -372,8 +378,9 @@ fn observed_entry_read_storages(
                 .collect::<Vec<_>>();
             r2il::refusal_evidence!(
                 "interface-recovery",
-                "entry read {storage:?} ({:?}) is observed from {}: {}",
+                "entry read {storage:?} ({:?}, bytes {:#x}) is observed from {}: {}",
                 value.id,
+                observations.observed_bytes(value.id).unwrap_or(0),
                 root.unwrap_or("?"),
                 steps.join(" <- ")
             );
@@ -491,13 +498,17 @@ fn recovered_result(
 /// convention is guessed here.
 fn narrow_zero_extend_input_size(graph: &SsaGraph, value: crate::ValueId) -> Option<u32> {
     let definition = graph.def_inst(value).and_then(|inst| graph.inst(inst))?;
-    let crate::graph::InstPayload::Op(crate::SSAOp::IntZExt { .. }) = &definition.payload else {
-        return None;
+    // The lane the carrier's definition widens, or inserts at its low end.
+    let input = match (&definition.payload, definition.inputs.as_slice()) {
+        (crate::graph::InstPayload::Op(crate::SSAOp::IntZExt { .. }), [input]) => *input,
+        (crate::graph::InstPayload::Op(crate::SSAOp::Insert { position, .. }), [_, input, _])
+            if position.constant_bits() == Some(0) =>
+        {
+            *input
+        }
+        _ => return None,
     };
-    let [input] = definition.inputs.as_slice() else {
-        return None;
-    };
-    let input = graph.value(*input)?;
+    let input = graph.value(input)?;
     let output = graph.value(value)?;
     let input_size = input.var.size;
     let output_size = output.var.size;
@@ -629,6 +640,18 @@ fn recover_interface_inner(
             live_out = candidate_live_out;
         }
     }
+    r2il::refusal_evidence!(
+        "interface-recovery",
+        "observation roots: live_out={} unresolved_blocks={} positive obligations={}",
+        live_out.len(),
+        live_out.unresolved_blocks().count(),
+        facts
+            .obligations
+            .obligations()
+            .values()
+            .filter(|obligation| obligation.id.kind.is_positive_observation_root())
+            .count()
+    );
     let Some(observations) =
         crate::deadphi::ProvenProgramObservations::find(&graph, &live_out, &facts)
     else {
@@ -674,6 +697,18 @@ fn recover_interface_inner(
             observed,
         });
     }
+    r2il::refusal_evidence!(
+        "interface-recovery",
+        "register parameters {:?} from reads {:?}",
+        parameters
+            .iter()
+            .map(|parameter| (parameter.slot.offset, parameter.observed.size))
+            .collect::<Vec<_>>(),
+        reads
+            .iter()
+            .map(|read| (read.offset, read.size))
+            .collect::<Vec<_>>()
+    );
     let return_mechanism = recovered_return_mechanism(&facts);
     // The convention fills every register slot before the argument area, so
     // a stack slot is a parameter only once each register slot is proven.

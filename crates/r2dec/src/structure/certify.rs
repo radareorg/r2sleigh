@@ -1057,8 +1057,8 @@ pub(crate) fn report(
         eprintln!("control-certificate {function}:   - {violation}");
     }
     eprintln!(
-        "register-identity {function}: regalias={} split_entries={}",
-        identity.regalias_ops, identity.split_entry_families
+        "register-identity {function}: split_entries={}",
+        identity.split_entry_families
     );
 }
 

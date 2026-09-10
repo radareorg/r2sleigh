@@ -2270,19 +2270,6 @@ fn placement_refusal_json(refusal: r2engine::PlacementAuditRefusal) -> serde_jso
                 serde_json::json!(access_ordinal),
             );
         }
-        Refusal::PreservedCarrierReadBeforeAssignment {
-            binding_index,
-            instruction_id,
-        } => {
-            cause.insert(
-                "binding_index".to_string(),
-                serde_json::json!(binding_index),
-            );
-            cause.insert(
-                "instruction_id".to_string(),
-                serde_json::json!(instruction_id),
-            );
-        }
         Refusal::UndeclaredNames { count } => {
             cause.insert("count".to_string(), serde_json::json!(count));
         }
@@ -4586,10 +4573,6 @@ mod tests {
                 instruction_id: 29,
                 access_ordinal: 30,
             },
-            Refusal::PreservedCarrierReadBeforeAssignment {
-                binding_index: 29,
-                instruction_id: 30,
-            },
             Refusal::UnprovableExecutionOrder { binding_index: 30 },
             Refusal::AmbiguousObservationExecutionOrder { observation_id: 31 },
             Refusal::MissingBinding { binding_index: 27 },
@@ -4622,7 +4605,7 @@ mod tests {
             assert!(kinds.insert(kind.to_string()), "duplicate wire kind {kind}");
             causes.push(cause);
         }
-        assert_eq!(kinds.len(), 45);
+        assert_eq!(kinds.len(), 44);
 
         let checker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/corpus/check_binding_audit_schema.py");
@@ -4648,7 +4631,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "45");
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "44");
 
         assert_eq!(
             placement_audit_json(Some(PlacementAudit::Applied)),

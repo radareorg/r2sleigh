@@ -575,6 +575,18 @@ impl Builder<'_> {
             }
             // A merge is not an expression; each of its edges is a copy,
             // typed as one.
+            // The root and the lane are both brought to their own unsigned
+            // widths; the mask and shift the spelling uses promote like any
+            // other integer operator, and the assignment narrows back.
+            MachineExprKind::InsertLane { root, lane, .. } => {
+                self.produced(*root);
+                self.produced(*lane);
+                let root_width = self.width(*root);
+                let lane_width = self.width(*lane);
+                self.require(id, 0, unsigned(root_width));
+                self.require(id, 1, unsigned(lane_width));
+                CValue::Typed(promoted(&own))
+            }
             MachineExprKind::Phi { inputs } => {
                 for input in inputs.iter() {
                     self.produced(*input);

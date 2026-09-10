@@ -702,10 +702,6 @@ pub struct SourceReturnBoundaryFact {
     pub values: Vec<CallBoundaryValueFact>,
     /// Exact source-declared return-address carrier consumed by this return.
     pub return_address: Option<SourceReturnAddressFact>,
-    /// Exact register values that require ordered contained-slice writes to
-    /// reconstruct. These are deliberately not also exposed through `values`:
-    /// a single stale full-width definition is not the value at the boundary.
-    pub register_compositions: Vec<SourceReturnRegisterCompositionFact>,
     /// Exact full-width stack-pointer value reaching this return when the
     /// source interface declares the typed stack-pointer carrier.
     pub exit_stack_pointer: Option<SourceReturnStackPointerFact>,
@@ -756,57 +752,6 @@ impl SourceReturnStackPointerFact {
             Self::PreservedEntry { .. } => None,
             Self::ReachingValue { value, .. } => Some(value),
         }
-    }
-}
-
-/// Schema for exact ABI return-register compositions.
-pub const SOURCE_RETURN_REGISTER_COMPOSITION_SCHEMA_VERSION: u32 = 1;
-
-/// One canonical register definition retained by a return composition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceReturnRegisterDefinitionFact {
-    pub storage: CanonicalStorageId,
-    pub value: ValueId,
-    pub producer: InstId,
-}
-
-/// One ordered contained-slice write over a full-width return-register base.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceReturnRegisterOverlayFact {
-    pub definition: SourceReturnRegisterDefinitionFact,
-    /// Physical byte offset from the start of the ABI return storage.
-    pub offset_bytes: u32,
-}
-
-/// Exact boundary value reconstructed from a full-width base and every later
-/// overlapping register write, in source order.
-///
-/// The base supplies every bit not replaced by an overlay. Validation binds
-/// each canonical storage/value/producer identity back to the source graph and
-/// rejects missing, reordered, intervening, or non-contained overlaps.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceReturnRegisterCompositionFact {
-    pub schema_version: u32,
-    pub slot: CallBoundarySlot,
-    pub base: SourceReturnRegisterDefinitionFact,
-    pub overlays: Vec<SourceReturnRegisterOverlayFact>,
-}
-
-impl SourceReturnRegisterCompositionFact {
-    /// Canonical definitions in the exact order needed for reconstruction.
-    pub fn ordered_definitions(&self) -> impl Iterator<Item = &SourceReturnRegisterDefinitionFact> {
-        std::iter::once(&self.base).chain(self.overlays.iter().map(|overlay| &overlay.definition))
-    }
-
-    /// Validate this composition against the exact prepared source artifact.
-    pub fn validate(
-        &self,
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        machine_context: &SourceMachineContext,
-        boundary_at: InstId,
-    ) -> bool {
-        validate_return_register_composition(self, function, graph, machine_context, boundary_at)
     }
 }
 
@@ -1650,19 +1595,6 @@ pub struct StackReloadSourceCertificate {
     pub load_inst: InstId,
 }
 
-/// One contained-slice write laid over a composed return's base.
-///
-/// `offset_bytes` is a physical offset from the start of the ABI return
-/// storage. Reading it as a shift is only correct where the low byte of the
-/// storage is at offset zero, so the certificate is refused outright on a
-/// target whose byte order does not say that.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReturnValueOverlay {
-    pub value: ValueId,
-    pub width: u32,
-    pub offset_bytes: u32,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnValueCertificate {
     pub at: InstId,
@@ -1670,32 +1602,11 @@ pub struct ReturnValueCertificate {
     pub op_index: usize,
     pub value: ValueId,
     pub width: u32,
-    /// Ordered contained-slice writes over `value`, empty for an ordinary
-    /// return.
-    ///
-    /// When this is not empty, `value` is the full-width base the overlays are
-    /// laid over rather than the whole returned value: the boundary's value is
-    /// the base with each overlay's bytes replacing it in order. Every reader
-    /// that asks which values a return carries must ask `values`, not `value`.
-    pub overlays: Vec<ReturnValueOverlay>,
     pub carrier: Option<ReturnCarrier>,
     /// Exact logical return projection declared by the immutable source
     /// interface. `None` preserves the physical ABI-carrier behavior for
     /// interfaces that carry no logical type graph.
     pub source_logical_value: Option<SourceLogicalValue>,
-}
-
-impl ReturnValueCertificate {
-    /// Every value this return carries, base first and overlays in the order
-    /// they are laid down. One value for an ordinary return.
-    pub fn values(&self) -> impl Iterator<Item = ValueId> + '_ {
-        std::iter::once(self.value).chain(self.overlays.iter().map(|overlay| overlay.value))
-    }
-
-    /// Whether this return is assembled from more than one definition.
-    pub fn is_composed(&self) -> bool {
-        !self.overlays.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2999,8 +2910,8 @@ pub(crate) fn private_stack_objects(
         if addresses.is_empty() {
             continue;
         }
-        let escapes = addresses.iter().any(|address| {
-            graph.use_sites(*address).iter().any(|site| {
+        let escape = addresses.iter().find_map(|address| {
+            graph.use_sites(*address).iter().find(|site| {
                 let addresses_this_object = ram_accesses.iter().any(|access| {
                     access.id.inst == site.inst
                         && access.object == *object
@@ -3019,10 +2930,18 @@ pub(crate) fn private_stack_objects(
                 !stays_inside
             })
         });
-        if escapes {
+        if let Some(site) = escape {
+            // Which use, of which address, is what says whether the object
+            // really escapes or the address model lost a frame address.
             r2il::refusal_evidence!(
                 "private-stack-objects",
-                "object {object:?} is not private: an address naming it is used outside its own accesses"
+                "object {object:?} is not private: an address naming it is used outside its own accesses at {site:?} by {:?}",
+                graph
+                    .inst(site.inst)
+                    .map(|inst| format!("{:?}", inst.payload)
+                        .chars()
+                        .take(120)
+                        .collect::<String>())
             );
         } else {
             private.insert(*object);
@@ -4229,7 +4148,6 @@ fn collect_source_boundary_facts(
     for inst in &graph.insts {
         if matches!(inst.payload, InstPayload::Op(SSAOp::Return { .. })) {
             let mut values = Vec::new();
-            let mut register_compositions = Vec::new();
             let mut return_address = None;
             let mut exit_stack_pointer = None;
             let mut complete = false;
@@ -4257,34 +4175,25 @@ fn collect_source_boundary_facts(
                     Some(SourceFunctionReturn::Register { .. }) if abi_is_coherent => {
                         if let Some((block_addr, op_index)) = graph.op_site_for_inst(inst.id) {
                             for slot in return_slots {
-                                match reaching_source_return_register_in_block(
+                                if let Some(value) = reaching_source_return_register_in_block(
                                     function,
                                     graph,
                                     machine_context,
                                     block_addr,
                                     op_index,
-                                    slot.index(),
                                     slot.storage(),
-                                    inst.id,
                                 ) {
-                                    Some(ReachingAbiReturnRegister::Exact(value)) => {
-                                        values.push(CallBoundaryValueFact {
-                                            slot: CallBoundarySlot::Register {
-                                                index: slot.index(),
-                                                storage: slot.storage(),
-                                            },
-                                            value,
-                                        });
-                                    }
-                                    Some(ReachingAbiReturnRegister::Composition(composition)) => {
-                                        register_compositions.push(composition);
-                                    }
-                                    None => {}
+                                    values.push(CallBoundaryValueFact {
+                                        slot: CallBoundarySlot::Register {
+                                            index: slot.index(),
+                                            storage: slot.storage(),
+                                        },
+                                        value,
+                                    });
                                 }
                             }
-                            complete = !return_slots.is_empty()
-                                && values.len().saturating_add(register_compositions.len())
-                                    == return_slots.len();
+                            complete =
+                                !return_slots.is_empty() && values.len() == return_slots.len();
                         }
                     }
                     _ => {}
@@ -4321,13 +4230,12 @@ fn collect_source_boundary_facts(
                     r2il::refusal_evidence!(
                         "return-boundary-completeness",
                         "coherent={abi_is_coherent} kind={:?} slots={} values={} \
-                         compositions={} exit_sp={} return_address={}",
+                         exit_sp={} return_address={}",
                         machine_context
                             .function_interface()
                             .map(|interface| interface.return_kind()),
                         machine_context.abi_model().return_registers().len(),
                         values.len(),
-                        register_compositions.len(),
                         exit_stack_pointer.is_some(),
                         return_address.is_some()
                     );
@@ -4339,7 +4247,6 @@ fn collect_source_boundary_facts(
                     at: inst.id,
                     values,
                     return_address,
-                    register_compositions,
                     exit_stack_pointer,
                     complete,
                     machine_state_complete,
@@ -4351,15 +4258,15 @@ fn collect_source_boundary_facts(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SourceFormalParameterProjection {
-    index: u32,
-    abi_storage: CanonicalStorageId,
-    graph_storage: CanonicalStorageId,
-    logical_value: Option<SourceLogicalValue>,
+pub(crate) struct SourceFormalParameterProjection {
+    pub(crate) index: u32,
+    pub(crate) abi_storage: CanonicalStorageId,
+    pub(crate) graph_storage: CanonicalStorageId,
+    pub(crate) logical_value: Option<SourceLogicalValue>,
 }
 
 /// Validate and project the source's ABI parameter slots once.
-fn source_formal_parameter_projections(
+pub(crate) fn source_formal_parameter_projections(
     machine_context: &SourceMachineContext,
 ) -> Vec<SourceFormalParameterProjection> {
     // Whole-ABI coherence also covers return and stack roles. Those unrelated
@@ -4455,6 +4362,15 @@ fn unique_entry_values_by_storage(
             .entry(storage)
             .and_modify(|existing| *existing = None)
             .or_insert(Some(value.id));
+    }
+    // A lane of an entry register is the projection minted for it
+    // (doc/adr-register-identity.md §8, 6), the one value every entry read of
+    // that lane is.
+    for (value, storage) in graph.formal_projections() {
+        values
+            .entry(*storage)
+            .and_modify(|existing| *existing = None)
+            .or_insert(Some(*value));
     }
     values
 }
@@ -4624,57 +4540,6 @@ fn projected_logical_register_storage(
     }
 }
 
-/// The source-declared part of one physical ABI result slot.
-///
-/// The interface constructor has already made the type graph and carrier
-/// projection coherent. Rechecking the exact slot here keeps a mismatched ABI
-/// model from turning that logical value into a boundary fact for another
-/// register.
-fn projected_return_value_storage(
-    machine_context: &SourceMachineContext,
-    abi_storage: CanonicalStorageId,
-) -> Option<CanonicalStorageId> {
-    let interface = machine_context.function_interface()?;
-    if interface.return_kind()
-        != (SourceFunctionReturn::Register {
-            storage: abi_storage,
-        })
-    {
-        return None;
-    }
-    match (interface.return_logical_value(), interface.type_graph()) {
-        (Some(logical_value), Some(type_graph)) => {
-            projected_logical_register_storage(abi_storage, logical_value, type_graph)
-        }
-        // No source types at all: the widest thing the interface can honestly
-        // say the return travels in is the carrier itself. This is not a
-        // refusal here, but it decides one downstream -- a 32-bit `int` return
-        // then has to be found as an exact 64-bit definition -- so which half
-        // was missing is worth naming.
-        (None, None) => {
-            r2il::refusal_evidence!(
-                "return-projection-untyped",
-                "carrier={abi_storage:?} logical=absent type_graph=absent"
-            );
-            Some(abi_storage)
-        }
-        (logical, graph) => {
-            r2il::refusal_evidence!(
-                "return-projection-partial",
-                "carrier={abi_storage:?} logical={} type_graph={}",
-                logical.is_some(),
-                graph.is_some()
-            );
-            None
-        }
-    }
-}
-
-enum ReachingAbiReturnRegister {
-    Exact(ValueId),
-    Composition(SourceReturnRegisterCompositionFact),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReachingAbiState {
     PreservedEntry,
@@ -4703,160 +4568,31 @@ struct ReachingAbiPolicy {
     transfer_carrier: Option<CanonicalStorageId>,
 }
 
-/// Resolve the value the source says a return exposes.
+/// The value the source says a return exposes in one ABI register.
 ///
-/// A narrow logical result may be written directly to the low lane (`seta al`)
-/// without ever defining the full ABI carrier. Prefer that exact lane. A full
-/// definition remains admissible as the existing exact value or composition;
-/// `exact_logical_return_projection` can verify an explicit extension when a
-/// single physical value carries it.
-#[allow(clippy::too_many_arguments)]
+/// Every write to a register defines its root, so the return's value is the
+/// root's reaching definition; the declared logical width narrows it in the
+/// certificate (doc/adr-register-identity.md).
 fn reaching_source_return_register_in_block(
     function: &SSAFunction,
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
     block_addr: u64,
     boundary_op_index: usize,
-    slot_index: u32,
     storage: CanonicalStorageId,
-    boundary_at: InstId,
-) -> Option<ReachingAbiReturnRegister> {
-    let logical_storage = projected_return_value_storage(machine_context, storage);
-    if let Some(logical_storage) = logical_storage
-        && logical_storage != storage
-        && let Some(value) = reaching_abi_value_in_block(
-            function,
-            graph,
-            machine_context,
-            block_addr,
-            boundary_op_index,
-            logical_storage,
-        )
-    {
-        return Some(ReachingAbiReturnRegister::Exact(value));
-    }
-    let found = reaching_abi_return_register_in_block(
+) -> Option<ValueId> {
+    let found = reaching_abi_value_in_block(
         function,
         graph,
         machine_context,
         block_addr,
         boundary_op_index,
-        slot_index,
         storage,
-        boundary_at,
     );
     if found.is_none() {
-        // The completeness evidence downstream names the ABI carrier the
-        // interface declared and nothing about the search that failed, so a
-        // boundary that refused because the declared carrier is 8 bytes wide
-        // and a boundary that refused because nothing reaches it read
-        // identically. These two operands separate them: whether a narrower
-        // logical lane was projected at all, and whether that projection was
-        // the carrier itself -- which is what decides that the cross-block
-        // walk above was skipped and only the block-local one ran.
-        r2il::refusal_evidence!(
-            "return-register-unreachable",
-            "carrier={:?} logical={:?} projected_narrower={}",
-            storage,
-            logical_storage,
-            logical_storage.is_some_and(|logical| logical != storage)
-        );
+        r2il::refusal_evidence!("return-register-unreachable", "carrier={storage:?}");
     }
     found
-}
-
-#[allow(clippy::too_many_arguments)]
-fn reaching_abi_return_register_in_block(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    machine_context: &SourceMachineContext,
-    block_addr: u64,
-    boundary_op_index: usize,
-    slot_index: u32,
-    storage: CanonicalStorageId,
-    boundary_at: InstId,
-) -> Option<ReachingAbiReturnRegister> {
-    let block = function.get_block(block_addr)?;
-    let mut reverse_overlays = Vec::new();
-
-    r2il::refusal_evidence!(
-        "return-register-walk",
-        "({block_addr:#x}, {boundary_op_index}) of {} ops, looking for {storage:?}",
-        block.ops.len()
-    );
-    for (op_index, op) in block.ops.get(..boundary_op_index)?.iter().enumerate().rev() {
-        if crate::reaching_rules::op_ends_reaching_walk(op) {
-            r2il::refusal_evidence!(
-                "return-register-walk",
-                "({block_addr:#x}, {op_index}) ends the walk: {op:?}"
-            );
-            return None;
-        }
-        if op.dst().is_none() {
-            continue;
-        }
-        let producer = graph.inst_id_for_op_site(block_addr, op_index)?;
-        let Some(dst_storage) = graph.inst(producer).and_then(|inst| inst.canonical_storage) else {
-            continue;
-        };
-        if !register_storages_overlap(dst_storage, storage) {
-            continue;
-        }
-        let value = graph.inst(producer)?.output?;
-        let definition = SourceReturnRegisterDefinitionFact {
-            storage: dst_storage,
-            value,
-            producer,
-        };
-        if dst_storage == storage {
-            if reverse_overlays.is_empty() {
-                return Some(ReachingAbiReturnRegister::Exact(value));
-            }
-            reverse_overlays.reverse();
-            let composition = SourceReturnRegisterCompositionFact {
-                schema_version: SOURCE_RETURN_REGISTER_COMPOSITION_SCHEMA_VERSION,
-                slot: CallBoundarySlot::Register {
-                    index: slot_index,
-                    storage,
-                },
-                base: definition,
-                overlays: reverse_overlays,
-            };
-            if !composition.validate(function, graph, machine_context, boundary_at) {
-                return None;
-            }
-            return Some(ReachingAbiReturnRegister::Composition(composition));
-        }
-        let offset_bytes = contained_register_storage_offset(storage, dst_storage)?;
-        // A call's alias clobber (`CallDefine EAX` beside `CallDefine RAX`)
-        // is the same event as the carrier's, not a partial write over it.
-        if matches!(op, SSAOp::CallDefine { .. }) {
-            continue;
-        }
-        reverse_overlays.push(SourceReturnRegisterOverlayFact {
-            definition,
-            offset_bytes,
-        });
-    }
-
-    if reverse_overlays.is_empty() {
-        reaching_abi_value_in_block(
-            function,
-            graph,
-            machine_context,
-            block_addr,
-            boundary_op_index,
-            storage,
-        )
-        .map(ReachingAbiReturnRegister::Exact)
-    } else {
-        r2il::refusal_evidence!(
-            "return-register-walk",
-            "({block_addr:#x}, {boundary_op_index}) has {} partial overlays of {storage:?} and no full definition",
-            reverse_overlays.len()
-        );
-        None
-    }
 }
 
 fn reaching_abi_value_in_block(
@@ -5328,160 +5064,6 @@ fn contained_register_storage_offset(
         return None;
     }
     u32::try_from(contained.offset.checked_sub(container.offset)?).ok()
-}
-
-fn canonical_register_definition(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    producer: InstId,
-) -> Option<(SourceReturnRegisterDefinitionFact, u64, usize)> {
-    let (block_addr, op_index) = graph.op_site_for_inst(producer)?;
-    let op = function.get_block(block_addr)?.ops.get(op_index)?;
-    let dst = op.dst()?;
-    let storage = graph.inst(producer)?.canonical_storage?;
-    if storage.space != CanonicalStorageSpace::Register || storage.size != dst.size {
-        return None;
-    }
-    let value = graph.inst(producer)?.output?;
-    if graph
-        .value(value)
-        .is_none_or(|graph_value| graph_value.var != *dst)
-    {
-        return None;
-    }
-    Some((
-        SourceReturnRegisterDefinitionFact {
-            storage,
-            value,
-            producer,
-        },
-        block_addr,
-        op_index,
-    ))
-}
-
-fn validate_return_register_composition(
-    composition: &SourceReturnRegisterCompositionFact,
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    machine_context: &SourceMachineContext,
-    boundary_at: InstId,
-) -> bool {
-    if composition.schema_version != SOURCE_RETURN_REGISTER_COMPOSITION_SCHEMA_VERSION
-        || composition.overlays.is_empty()
-    {
-        return false;
-    }
-    let CallBoundarySlot::Register {
-        index: return_index,
-        storage: return_storage,
-    } = composition.slot
-    else {
-        return false;
-    };
-    if return_storage.space != CanonicalStorageSpace::Register
-        || return_storage.size == 0
-        || !machine_context.abi_model().is_available()
-        || !machine_context.abi_model().is_coherent()
-        || machine_context
-            .function_interface()
-            .is_none_or(|interface| {
-                interface.return_kind()
-                    != (SourceFunctionReturn::Register {
-                        storage: return_storage,
-                    })
-            })
-        || machine_context
-            .abi_model()
-            .return_registers()
-            .iter()
-            .filter(|slot| slot.index() == return_index && slot.storage() == return_storage)
-            .count()
-            != 1
-        || machine_context.abi_model().return_registers().len() != 1
-    {
-        return false;
-    }
-    let Some((base, block_addr, base_op_index)) =
-        canonical_register_definition(function, graph, composition.base.producer)
-    else {
-        return false;
-    };
-    if base != composition.base || base.storage != return_storage {
-        return false;
-    }
-    let Some((boundary_block_addr, boundary_op_index)) = graph.op_site_for_inst(boundary_at) else {
-        return false;
-    };
-    if boundary_block_addr != block_addr
-        || base_op_index >= boundary_op_index
-        || !matches!(
-            function
-                .get_block(boundary_block_addr)
-                .and_then(|block| block.ops.get(boundary_op_index)),
-            Some(SSAOp::Return { .. })
-        )
-    {
-        return false;
-    }
-
-    let mut expected = Vec::with_capacity(composition.overlays.len().saturating_add(1));
-    expected.push(composition.base);
-    let mut previous_op_index = base_op_index;
-    for overlay in &composition.overlays {
-        let Some((definition, overlay_block_addr, op_index)) =
-            canonical_register_definition(function, graph, overlay.definition.producer)
-        else {
-            return false;
-        };
-        if definition != overlay.definition
-            || overlay_block_addr != block_addr
-            || op_index <= previous_op_index
-            || op_index >= boundary_op_index
-            || contained_register_storage_offset(return_storage, definition.storage)
-                != Some(overlay.offset_bytes)
-        {
-            return false;
-        }
-        previous_op_index = op_index;
-        expected.push(definition);
-    }
-
-    let Some(block) = function.get_block(block_addr) else {
-        return false;
-    };
-    let mut actual = Vec::new();
-    for op_index in base_op_index..boundary_op_index {
-        let Some(op) = block.ops.get(op_index) else {
-            return false;
-        };
-        if op_index != base_op_index
-            && matches!(
-                op,
-                SSAOp::Call { .. } | SSAOp::CallInd { .. } | SSAOp::Return { .. }
-            )
-        {
-            return false;
-        }
-        if op.dst().is_none() {
-            continue;
-        }
-        let Some(producer) = graph.inst_id_for_op_site(block_addr, op_index) else {
-            return false;
-        };
-        let Some(storage) = graph.inst(producer).and_then(|inst| inst.canonical_storage) else {
-            continue;
-        };
-        if !register_storages_overlap(storage, return_storage) {
-            continue;
-        }
-        let Some((definition, _, _)) = canonical_register_definition(function, graph, producer)
-        else {
-            return false;
-        };
-        actual.push(definition);
-    }
-    actual == expected
 }
 
 /// Values this function observes from an exact non-void call result.
@@ -6174,11 +5756,6 @@ fn collect_stack_frame_round_trip_certificates(
             })
         }) || boundaries.returns.values().any(|boundary| {
             boundary.values.iter().any(|value| value.value == entry_value)
-                || boundary.register_compositions.iter().any(|composition| {
-                    composition
-                        .ordered_definitions()
-                        .any(|definition| definition.value == entry_value)
-                })
         }) || machine_context
             .and_then(SourceMachineContext::function_interface)
             .is_some_and(|interface| {
@@ -6702,16 +6279,6 @@ fn collect_stack_geometry_certificate(
     }
     for boundary in boundaries.returns.values() {
         program_values.extend(boundary.values.iter().map(|value| value.value));
-        program_values.extend(
-            boundary
-                .register_compositions
-                .iter()
-                .flat_map(|composition| {
-                    composition
-                        .ordered_definitions()
-                        .map(|definition| definition.value)
-                }),
-        );
     }
 
     let mut values = graph
@@ -8372,7 +7939,7 @@ fn collect_return_value_certificates(
         if !matches!(inst.payload, InstPayload::Op(SSAOp::Return { .. })) {
             continue;
         }
-        let certificate = if boundary.register_compositions.is_empty() {
+        let certificate = {
             let [boundary_value] = boundary.values.as_slice() else {
                 // A complete void boundary is authoritative, but it owns no value.
                 if !boundary.values.is_empty() {
@@ -8403,107 +7970,15 @@ fn collect_return_value_certificates(
                 op_index,
                 value,
                 width,
-                overlays: Vec::new(),
                 carrier: return_carrier_for_boundary_value(boundary_value, stack_reloads),
                 source_logical_value,
             }
-        } else {
-            let Some(certificate) =
-                composed_return_certificate(boundary, graph, machine_context, block_addr, op_index)
-            else {
-                continue;
-            };
-            certificate
         };
         returns_by_inst.insert(boundary.at, returns.len());
         returns.push(certificate);
     }
 
     (returns, returns_by_inst)
-}
-
-/// The certificate for a return whose ABI register is assembled rather than
-/// written whole.
-///
-/// The boundary deliberately keeps a composition out of `values`, because a
-/// single stale full-width definition is not the value at the boundary. What
-/// is at the boundary is the base with each overlay's bytes laid over it, so
-/// the certificate carries all of them in that order and the renderer
-/// reassembles them.
-///
-/// Refused rather than guessed in three cases. More than one composition on
-/// one boundary has no defined order between them. A composition beside
-/// ordinary boundary values would mean two answers for one register. And an
-/// overlay's `offset_bytes` is a physical offset into the return storage,
-/// which is only a shift amount where the storage's low byte sits at offset
-/// zero; on any other byte order the arithmetic below would be wrong rather
-/// than merely unproven.
-fn composed_return_certificate(
-    boundary: &SourceReturnBoundaryFact,
-    graph: &SsaGraph,
-    machine_context: Option<&SourceMachineContext>,
-    block_addr: u64,
-    op_index: usize,
-) -> Option<ReturnValueCertificate> {
-    let [composition] = boundary.register_compositions.as_slice() else {
-        return None;
-    };
-    if !boundary.values.is_empty() {
-        return None;
-    }
-    let machine_context = machine_context?;
-    if machine_context.memory_model().default_endianness()
-        != crate::machine_context::MachineMemoryEndianness::Little
-    {
-        return None;
-    }
-    let CallBoundarySlot::Register {
-        storage: return_storage,
-        ..
-    } = composition.slot
-    else {
-        return None;
-    };
-    let base = graph.value(composition.base.value)?;
-    if base.canonical_storage != Some(composition.base.storage)
-        || composition.base.storage != return_storage
-        || base.var.size != return_storage.size
-        || return_storage.size == 0
-    {
-        return None;
-    }
-    let mut overlays = Vec::with_capacity(composition.overlays.len());
-    for overlay in &composition.overlays {
-        let value = graph.value(overlay.definition.value)?;
-        let width = value.var.size;
-        if value.canonical_storage != Some(overlay.definition.storage)
-            || overlay.definition.storage.size != width
-            || width == 0
-            || overlay.offset_bytes.checked_add(width)? > return_storage.size
-        {
-            return None;
-        }
-        overlays.push(ReturnValueOverlay {
-            value: overlay.definition.value,
-            width,
-            offset_bytes: overlay.offset_bytes,
-        });
-    }
-    Some(ReturnValueCertificate {
-        at: boundary.at,
-        block_addr,
-        op_index,
-        value: composition.base.value,
-        width: return_storage.size,
-        overlays,
-        // A composed register is written in place by its own overlays; it is
-        // not reloaded from a stack home, which is what a carrier records.
-        carrier: None,
-        // The logical projection describes one definition of the return
-        // storage. A composition has several, and nothing has said which the
-        // declared type applies to.
-        source_logical_value: None,
-    })
 }
 
 pub(crate) fn exact_logical_return_projection(
@@ -8633,15 +8108,12 @@ pub(crate) fn exact_logical_return_projection(
                 return None;
             }
             // The carrier's own definition is one extension of the logical
-            // width: certify the extension's input, which is the logical value
-            // itself and usually the named local, so the return names it
-            // rather than casting the carrier.
-            if let Some(input) = exact_single_extension_logical_input(
-                graph,
-                boundary.value,
-                physical_value,
-                logical_width,
-            ) {
+            // width, or the insert of that lane at its low end: certify the
+            // lane value itself, usually the named local, so the return names
+            // it rather than casting the carrier.
+            if let Some(input) =
+                exact_logical_lane_input(graph, boundary.value, physical_value, logical_width)
+            {
                 return Some((input, logical_width, Some(logical)));
             }
             // Otherwise the carrier holds the logical value in its low lane
@@ -8688,32 +8160,40 @@ pub(crate) fn exact_logical_return_projection(
     }
 }
 
-/// The value a single extension writes into `carrier`, when the carrier's own
-/// definition is exactly that extension.
+/// The lane value the carrier's own definition widens or inserts at its low
+/// end, when that lane is the logical width.
 ///
 /// Returns `None` for every other shape, including a merge, so the caller can
 /// go on to ask the wider question rather than refusing here.
-fn exact_single_extension_logical_input(
+fn exact_logical_lane_input(
     graph: &SsaGraph,
     carrier: ValueId,
     carrier_value: &crate::graph::GraphValue,
     logical_width: u32,
 ) -> Option<ValueId> {
     let producer = graph.def_inst(carrier).and_then(|id| graph.inst(id))?;
-    let [input] = producer.inputs.as_slice() else {
+    if producer.output != Some(carrier) {
         return None;
+    }
+    let (lane, lane_var) = match (&producer.payload, producer.inputs.as_slice()) {
+        (InstPayload::Op(SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src }), [input])
+            if *dst == carrier_value.var =>
+        {
+            (*input, src)
+        }
+        (
+            InstPayload::Op(SSAOp::Insert {
+                dst,
+                value,
+                position,
+                ..
+            }),
+            [_, input, _],
+        ) if *dst == carrier_value.var && position.constant_bits() == Some(0) => (*input, value),
+        _ => return None,
     };
-    let logical_value = graph.value(*input)?;
-    let InstPayload::Op(SSAOp::IntZExt { dst, src } | SSAOp::IntSExt { dst, src }) =
-        &producer.payload
-    else {
-        return None;
-    };
-    (producer.output == Some(carrier)
-        && *dst == carrier_value.var
-        && *src == logical_value.var
-        && logical_value.var.size == logical_width)
-        .then_some(*input)
+    let lane_value = graph.value(lane)?;
+    (lane_value.var == *lane_var && lane_value.var.size == logical_width).then_some(lane)
 }
 
 fn return_carrier_for_boundary_value(
@@ -12353,10 +11833,8 @@ mod tests {
         CallBoundarySlot, ControlGuard, ForLoopCertificate, GlobalObjectKey, InductionStep,
         LoopCertificate, MemoryDefFact, MemoryLocation, MemorySSAFacts, MemoryUseFact,
         MemoryVersion, ObjectFact, ObjectId, ObjectKind, ObjectModel, ObjectModelBuilder,
-        ObjectSpaceId, RelativeMemoryAddress, ReturnCarrier,
-        SOURCE_RETURN_REGISTER_COMPOSITION_SCHEMA_VERSION, SourceReturnRegisterCompositionFact,
-        SourceReturnRegisterDefinitionFact, StackReloadSourceCertificate, StructuredAccessId,
-        StructuredLoopKind, memory_locations_may_alias,
+        ObjectSpaceId, RelativeMemoryAddress, ReturnCarrier, StackReloadSourceCertificate,
+        StructuredAccessId, StructuredLoopKind, memory_locations_may_alias,
     };
     use crate::{
         AddressProvenanceFacts, AnalysisAssumption, AssumptionProvenance, AssumptionScope,
@@ -14245,7 +13723,6 @@ mod tests {
             .next()
             .expect("return boundary");
         assert!(boundary.complete);
-        assert!(boundary.register_compositions.is_empty());
         let [boundary_value] = boundary.values.as_slice() else {
             panic!("complete register return must expose one value")
         };
@@ -14274,35 +13751,6 @@ mod tests {
             .push(*boundary_value);
         let (certificates, by_inst) = super::collect_return_value_certificates(
             &ambiguous,
-            artifact.graph(),
-            Some(artifact.machine_context()),
-            &artifact.certificates().stack_reloads,
-        );
-        assert!(certificates.is_empty());
-        assert!(by_inst.is_empty());
-
-        let mut composed = artifact.facts().boundaries.clone();
-        let producer = artifact
-            .graph()
-            .def_inst(boundary_value.value)
-            .expect("returned value producer");
-        composed
-            .returns
-            .get_mut(&boundary.at)
-            .expect("return boundary")
-            .register_compositions
-            .push(SourceReturnRegisterCompositionFact {
-                schema_version: SOURCE_RETURN_REGISTER_COMPOSITION_SCHEMA_VERSION,
-                slot: boundary_value.slot,
-                base: SourceReturnRegisterDefinitionFact {
-                    storage,
-                    value: boundary_value.value,
-                    producer,
-                },
-                overlays: Vec::new(),
-            });
-        let (certificates, by_inst) = super::collect_return_value_certificates(
-            &composed,
             artifact.graph(),
             Some(artifact.machine_context()),
             &artifact.certificates().stack_reloads,
@@ -14347,14 +13795,11 @@ mod tests {
                 storage: register_storage(0, 8),
             })
         );
-        assert!(
-            artifact
-                .graph()
-                .value(certificate.value)
-                .is_some_and(|value| {
-                    value.var.size == 4 && value.canonical_storage == Some(register_storage(0, 4))
-                })
-        );
+        // The logical value is the narrow value the extension widened: the
+        // lane temporary the addition defined.
+        assert!(artifact.graph().value(certificate.value).is_some_and(
+            |value| value.var.size == 4 && artifact.graph().def_inst(value.id).is_some()
+        ));
         let return_value_obligations = artifact
             .obligations()
             .obligations_for_inst(boundary.at)
@@ -14541,7 +13986,6 @@ mod tests {
             .next()
             .expect("return boundary");
         assert!(boundary.complete);
-        assert!(boundary.register_compositions.is_empty());
         let [physical] = boundary.values.as_slice() else {
             panic!("one boundary value");
         };
@@ -16530,10 +15974,6 @@ mod tests {
                 userop: 7,
                 inputs: Vec::new(),
             },
-            R2ILOp::Copy {
-                dst: Varnode::register(32, 4),
-                src: Varnode::constant(0, 4),
-            },
         ]
         .into_iter()
         .enumerate()
@@ -16566,6 +16006,39 @@ mod tests {
             );
             assert!(!boundary.complete, "destructive SP case {case_index}");
         }
+
+        // A write to a lane of the stack pointer defines the whole register:
+        // the exit value is that definition, which is not the entry value.
+        let mut block = R2ILBlock::new(0x6300, 4);
+        block.push(R2ILOp::Copy {
+            dst: Varnode::unique(0x130, 8),
+            src: Varnode::register(32, 8),
+        });
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(32, 4),
+            src: Varnode::constant(0, 4),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+        let artifact = SsaArtifact::raw_with_interface(
+            &[block],
+            Some(&return_boundary_arch()),
+            preserved_stack_interface(),
+        )
+        .expect("lane-written stack artifact");
+        let boundary = artifact
+            .facts()
+            .boundaries
+            .returns
+            .values()
+            .next()
+            .expect("return boundary");
+        let exit = boundary
+            .exit_stack_pointer
+            .expect("the inserted lane defines the exit stack pointer");
+        let value = exit.value().expect("a defined value, not the entry");
+        assert!(artifact.graph().def_inst(value).is_some());
     }
 
     #[test]
@@ -16664,7 +16137,9 @@ mod tests {
     }
 
     #[test]
-    fn return_boundary_refuses_composition_without_typed_machine_roles() {
+    fn return_boundary_without_typed_machine_roles_is_incomplete() {
+        // The lane writes define the root, so the return's value is found; the
+        // boundary still lacks the exit machine state the interface never named.
         let artifact = composed_return_artifact(0x5000, "whole", "slice", "pc");
         let boundary = artifact
             .facts()
@@ -16674,39 +16149,21 @@ mod tests {
             .next()
             .expect("return boundary");
         assert!(!boundary.complete);
+        assert!(boundary.exit_stack_pointer.is_none());
         assert!(
             boundary.values.is_empty(),
-            "an incomplete interface must not select a stale generic return value"
+            "no coherent convention names a value"
         );
-        assert!(boundary.register_compositions.is_empty());
-        assert!(boundary.exit_stack_pointer.is_none());
-        assert_eq!(
-            super::reaching_abi_value_in_block(
-                artifact.function(),
-                artifact.graph(),
-                artifact.machine_context(),
-                0x5000,
-                3,
-                register_storage(0, 4),
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn return_register_composition_validation_is_unavailable_without_typed_machine_roles() {
-        let artifact = composed_return_artifact(0x5100, "whole", "slice", "pc");
-        let boundary = artifact
-            .facts()
-            .boundaries
-            .returns
-            .values()
-            .next()
-            .expect("return boundary");
-        assert!(!boundary.complete);
-        assert!(boundary.values.is_empty());
-        assert!(boundary.register_compositions.is_empty());
-        assert!(boundary.exit_stack_pointer.is_none());
+        let walked = super::reaching_abi_value_in_block(
+            artifact.function(),
+            artifact.graph(),
+            artifact.machine_context(),
+            0x5000,
+            5,
+            register_storage(0, 4),
+        )
+        .expect("the root the lane writes define");
+        assert!(artifact.graph().def_inst(walked).is_some());
     }
 
     #[test]
@@ -16740,11 +16197,10 @@ mod tests {
             .expect("return boundary");
         assert!(!boundary.complete);
         assert!(boundary.values.is_empty());
-        assert!(boundary.register_compositions.is_empty());
     }
 
     #[test]
-    fn return_composition_refusal_is_deterministic_name_and_address_independent() {
+    fn return_boundary_refusal_is_deterministic_name_and_address_independent() {
         let first = composed_return_artifact(0x5200, "whole_a", "slice_a", "pc_a");
         let repeated = composed_return_artifact(0x5200, "whole_a", "slice_a", "pc_a");
         let renamed = composed_return_artifact(0x5200, "whole_b", "slice_b", "pc_b");
@@ -16767,8 +16223,6 @@ mod tests {
         ] {
             assert_eq!(refused, first);
             assert!(!refused.complete);
-            assert!(refused.values.is_empty());
-            assert!(refused.register_compositions.is_empty());
             assert!(refused.exit_stack_pointer.is_none());
         }
     }

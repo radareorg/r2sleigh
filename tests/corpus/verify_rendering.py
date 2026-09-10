@@ -282,9 +282,6 @@ PLACEMENT_AUDIT_CAUSE_FIELDS = {
     "stack_access_read_before_assignment": frozenset(
         {"binding_index", "instruction_id", "access_ordinal"}
     ),
-    "preserved_carrier_read_before_assignment": frozenset(
-        {"binding_index", "instruction_id"}
-    ),
     "unprovable_execution_order": frozenset({"binding_index"}),
     "ambiguous_observation_execution_order": frozenset({"observation_id"}),
     "missing_binding": frozenset({"binding_index"}),

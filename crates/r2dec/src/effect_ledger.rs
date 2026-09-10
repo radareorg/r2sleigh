@@ -127,6 +127,16 @@ fn upstream_zero_occurrence_outcome(
     {
         return Some(Outcome::Elided(ElisionReason::DeadFrameSlotStore));
     }
+    // The lane of an entry register a formal was minted from: its definition
+    // is the declaration, so the minting operation owes no statement.
+    if source_inst.is_some_and(|inst| {
+        graph
+            .inst(inst)
+            .and_then(|inst| inst.output)
+            .is_some_and(|value| graph.formal_projection_storage(value).is_some())
+    }) {
+        return Some(Outcome::Elided(ElisionReason::CallerSuppliedEntryValue));
+    }
     // The push that records a call's return address. The call statement is the
     // transfer, and no C statement writes the machine's return address.
     if source_inst.is_some_and(|inst| {

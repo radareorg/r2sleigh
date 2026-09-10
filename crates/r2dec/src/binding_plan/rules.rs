@@ -363,6 +363,8 @@ pub(super) fn unread_defined_values(
         })
         .filter(|value| source.graph().use_sites(value.id).is_empty())
         .filter(|value| !certified.contains_key(&value.id))
+        // A formal the body never reads is still declared; it is not dead.
+        .filter(|value| !source.graph().caller_supplied(value.id))
         .map(|value| value.id)
         .collect()
 }
@@ -980,6 +982,13 @@ fn inlinable_core(
                 );
             }
         };
+        // A lane of an entry register is the formal it was minted for: the
+        // declaration is its only spelling, so it is never folded into a
+        // reader (doc/adr-register-identity.md §8, 6).
+        if graph.formal_projection_storage(value.id).is_some() {
+            rejected("formal projection");
+            continue;
+        }
         // A dead phi has no rendered statement and therefore makes no program
         // read. Its edge uses are still present in the SSA topology, so
         // counting one here makes a live one-reader temporary look
@@ -1485,6 +1494,25 @@ pub(crate) fn certificate_elided_cells(
             certificate.value_use,
             ElisionReason::DecomposedWideConstantStore,
         )?;
+    }
+    // A lane of an entry register is defined by the formal's declaration: the
+    // `Subpiece` minting it from the root's entry value has no statement, and
+    // its read of the root is not an occurrence (doc/adr-register-identity.md).
+    for (value, _) in graph.formal_projections() {
+        let Some(inst) = graph.def_inst(*value) else {
+            continue;
+        };
+        let definition = graph
+            .inst(inst)
+            .ok_or(CertificateElidedCellsError::InvalidWrite(inst))?;
+        insert_elided_write(&mut writes, inst, ElisionReason::CallerSuppliedEntryValue)?;
+        for input_idx in 0..definition.inputs.len() {
+            insert_elided_use(
+                &mut uses,
+                UseSite { inst, input_idx },
+                ElisionReason::CallerSuppliedEntryValue,
+            )?;
+        }
     }
     for site in &certificates.stack_geometry.uses {
         // A stack-root value has no standalone C occurrence, but an exact

@@ -1914,10 +1914,6 @@ pub enum PlacementAuditRefusal {
         instruction_id: u32,
         access_ordinal: u32,
     },
-    PreservedCarrierReadBeforeAssignment {
-        binding_index: usize,
-        instruction_id: u32,
-    },
     UnprovableExecutionOrder {
         binding_index: usize,
     },
@@ -1992,9 +1988,6 @@ impl PlacementAuditRefusal {
                 "certified_value_read_before_assignment"
             }
             Self::StackAccessReadBeforeAssignment { .. } => "stack_access_read_before_assignment",
-            Self::PreservedCarrierReadBeforeAssignment { .. } => {
-                "preserved_carrier_read_before_assignment"
-            }
             Self::UnprovableExecutionOrder { .. } => "unprovable_execution_order",
             Self::AmbiguousObservationExecutionOrder { .. } => {
                 "ambiguous_observation_execution_order"
@@ -3295,6 +3288,9 @@ impl Decompiler {
         {
             Ok(params) => params,
             Err(error) => {
+                // The parameter list is the first thing rendered, so a formal
+                // without a symbol is the whole function's refusal; say which.
+                r2il::refusal_evidence!("parameter-list", "{func_name}: {error:?}");
                 let refusal = rendered_identity_refusal_category(error);
                 return Ok(InternalBuildProduct::refused(
                     residual_function_for_render_boundary(
@@ -4873,13 +4869,30 @@ mod tests {
         let [boundary_value] = boundary.values.as_slice() else {
             panic!("logical low-byte return must carry one value")
         };
+        // The byte is inserted into `RAX`; the boundary carries that root and
+        // the certificate names the inserted lane at the declared width.
         assert!(
             prepared
                 .graph()
                 .value(boundary_value.value)
                 .is_some_and(|value| {
-                    value.var.size == 1 && value.canonical_storage == Some(storage(0, 1))
+                    value.var.size == 8 && value.canonical_storage == Some(storage(0, 8))
                 })
+        );
+        let (block_addr, op_index) = prepared
+            .graph()
+            .op_site_for_inst(boundary.at)
+            .expect("return op site");
+        let certificate = prepared
+            .return_certificate_for_op(block_addr, op_index)
+            .expect("logical low-byte certificate");
+        assert_eq!(certificate.width, 1);
+        assert!(
+            prepared
+                .graph()
+                .value(certificate.value)
+                .is_some_and(|value| value.var.size == 1),
+            "the certificate names the inserted byte"
         );
 
         let input = source_owned_decompiler_input(

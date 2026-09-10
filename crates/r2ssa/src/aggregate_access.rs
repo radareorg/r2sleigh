@@ -459,6 +459,26 @@ mod tests {
         artifact_with_interface(blocks, source_interface(exact_graph))
     }
 
+    /// The first operation of the block that `matches`; lane and formal
+    /// projections put operations before the lifted ones, so an index is not
+    /// a stable name for one.
+    fn first_op(
+        artifact: &crate::SsaArtifact,
+        block_addr: u64,
+        matches: impl Fn(&crate::SSAOp) -> bool,
+    ) -> crate::InstId {
+        let block = artifact.function().get_block(block_addr).expect("block");
+        let index = block
+            .ops
+            .iter()
+            .position(matches)
+            .expect("an operation of the requested kind");
+        artifact
+            .graph()
+            .inst_id_for_op_site(block_addr, index)
+            .expect("instruction for the operation")
+    }
+
     fn artifact_with_interface(
         blocks: &[R2ILBlock],
         interface: SourceFunctionInterface,
@@ -480,10 +500,9 @@ mod tests {
         );
         assert_eq!(projections.len(), 2);
 
-        let load_inst = artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 1)
-            .expect("load instruction");
+        let load_inst = first_op(&artifact, 0x1000, |op| {
+            matches!(op, crate::SSAOp::Load { .. })
+        });
         let load_access = StructuredAccessId {
             inst: load_inst,
             ordinal: 0,
@@ -508,10 +527,9 @@ mod tests {
         };
         assert_eq!(artifact.graph().def_inst(result), Some(load_inst));
 
-        let store_inst = artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 3)
-            .expect("store instruction");
+        let store_inst = first_op(&artifact, 0x1000, |op| {
+            matches!(op, crate::SSAOp::Store { .. })
+        });
         let store_access = StructuredAccessId {
             inst: store_inst,
             ordinal: 0,
@@ -599,10 +617,9 @@ mod tests {
         });
         let indexed = artifact(&[dynamic], true);
         let indexed_access = StructuredAccessId {
-            inst: indexed
-                .graph()
-                .inst_id_for_op_site(0x1000, 3)
-                .expect("indexed load instruction"),
+            inst: first_op(&indexed, 0x1000, |op| {
+                matches!(op, crate::SSAOp::Load { .. })
+            }),
             ordinal: 0,
         };
         let indexed_projection = indexed
@@ -664,10 +681,9 @@ mod tests {
 
         let positive = artifact(&exact_blocks, true);
         let load_id = StructuredAccessId {
-            inst: positive
-                .graph()
-                .inst_id_for_op_site(0x1000, 1)
-                .expect("load instruction"),
+            inst: first_op(&positive, 0x1000, |op| {
+                matches!(op, crate::SSAOp::Load { .. })
+            }),
             ordinal: 0,
         };
         let mut ambiguous_accesses = positive.structured().memory_accesses.clone();

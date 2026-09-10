@@ -2232,17 +2232,14 @@ mod tests {
         );
     }
 
+    /// `EAX` and `RAX` are one family, so a loop carrying both carries one
+    /// merge of the root, and normalization keeps exactly that merge.
     #[test]
-    fn overlapping_register_alias_phis_keep_exact_ssa_identities() {
-        let wide_storage = r2ssa::CanonicalStorageId {
+    fn a_register_family_carries_one_merge_through_a_loop() {
+        let root_storage = r2ssa::CanonicalStorageId {
             space: r2ssa::CanonicalStorageSpace::Register,
             offset: 0,
             size: 8,
-        };
-        let narrow_storage = r2ssa::CanonicalStorageId {
-            space: r2ssa::CanonicalStorageSpace::Register,
-            offset: 0,
-            size: 4,
         };
         let mut arch = ArchSpec::new("overlapping-alias-phi-test");
         arch.addr_size = 8;
@@ -2285,63 +2282,41 @@ mod tests {
             target: Varnode::constant(0, 8),
         });
         let func = SSAFunction::from_blocks_raw(&[entry, header, latch, exit], Some(&arch))
-            .expect("source-derived overlapping alias SSA");
+            .expect("source-derived register family SSA");
         let header = func.get_block(0x1004).expect("header");
-        let wide_phi = header
-            .phis
-            .iter()
-            .find(|phi| phi.canonical_storage == Some(wide_storage))
-            .expect("wide source-derived phi")
-            .dst
-            .clone();
-        let narrow_phi = header
-            .phis
-            .iter()
-            .find(|phi| phi.canonical_storage == Some(narrow_storage))
-            .expect("narrow source-derived phi")
-            .dst
-            .clone();
+        let [phi] = header.phis.as_slice() else {
+            panic!("one merge of the root, got {:?}", header.phis);
+        };
+        assert_eq!(phi.canonical_storage, Some(root_storage));
+        let root_phi = phi.dst.clone();
 
         let (normalized, origins, graph) = materialize_all_phis_with_origins(&func);
         origins
             .validate_against_graph(&normalized, &graph, None)
-            .expect("each overlapping alias phi keeps an exact origin ledger");
+            .expect("the merge keeps an exact origin ledger");
         assert!(
             normalized
                 .get_block(0x1004)
-                .is_some_and(|header| header.phis.is_empty()),
-            "renderer normalization must not discard the narrow phi in favor of the widest alias"
+                .is_some_and(|header| header.phis.is_empty())
         );
-
-        let wide_value = graph
-            .value_id_for_var(&wide_phi)
-            .expect("wide phi has an exact ValueId");
-        let narrow_value = graph
-            .value_id_for_var(&narrow_phi)
-            .expect("narrow phi has an exact ValueId");
-        assert_ne!(wide_value, narrow_value);
+        let root_value = graph
+            .value_id_for_var(&root_phi)
+            .expect("the merge has an exact ValueId");
         let removed = origins
             .removed_phis()
             .iter()
             .map(|origin| origin.definition.value)
             .collect::<BTreeSet<_>>();
+        assert_eq!(removed, BTreeSet::from([root_value]));
+        let copies = normalized
+            .blocks()
+            .flat_map(|block| block.ops.iter())
+            .filter(|op| matches!(op, SSAOp::Copy { dst, .. } if *dst == root_phi))
+            .count();
         assert_eq!(
-            removed,
-            BTreeSet::from([wide_value, narrow_value]),
-            "normalization records both SSA definitions instead of choosing a carrier by width"
+            copies, 2,
+            "the merge gets one entry-edge and one backedge assignment"
         );
-
-        for phi in [&wide_phi, &narrow_phi] {
-            let copies = normalized
-                .blocks()
-                .flat_map(|block| block.ops.iter())
-                .filter(|op| matches!(op, SSAOp::Copy { dst, .. } if dst == phi))
-                .count();
-            assert_eq!(
-                copies, 2,
-                "each exact phi gets one entry-edge and one backedge assignment"
-            );
-        }
     }
 
     #[test]

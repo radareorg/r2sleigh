@@ -465,33 +465,6 @@ impl SemanticObligationInventory {
                     &mut required,
                 );
             }
-            for composition in &boundary.register_compositions {
-                let values = std::iter::once(composition.base.value)
-                    .chain(
-                        composition
-                            .overlays
-                            .iter()
-                            .map(|overlay| overlay.definition.value),
-                    )
-                    .collect::<Vec<_>>();
-                seed_instruction_with_inputs(
-                    boundary.at,
-                    SemanticObligationKind::ReturnValue,
-                    boundary_component(composition.slot),
-                    values.clone(),
-                    &mut required,
-                    &mut explicit_inputs,
-                    &mut duplicate_seeds,
-                );
-                for value in values {
-                    seed_value_definition(
-                        graph,
-                        value,
-                        SemanticObligationKind::LiveValueProducer,
-                        &mut required,
-                    );
-                }
-            }
             if let Some(return_address) = boundary.return_address {
                 seed_value_definition(
                     graph,

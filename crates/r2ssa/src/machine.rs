@@ -234,7 +234,18 @@ impl MachineValueUse {
                         == Some((fact.block_addr, fact.op_index))
                     && artifact.objects().object(fact.object).is_some()
             })
-            .ok_or(MachineBuildError::EntityMismatch(access.inst))?;
+            .ok_or_else(|| {
+                // Which of the four terms failed is which layer to look at.
+                let fact = artifact.facts().structured.memory_accesses.get(&access);
+                r2il::refusal_evidence!(
+                    "memory-access-entity",
+                    "{access:?}: fact={:?} site={:?} object_known={}",
+                    fact.map(|fact| (fact.block_addr, fact.op_index, fact.provenance_complete)),
+                    artifact.graph().op_site_for_inst(access.inst),
+                    fact.is_some_and(|fact| artifact.objects().object(fact.object).is_some())
+                );
+                MachineBuildError::EntityMismatch(access.inst)
+            })?;
         let source_space = artifact
             .machine_context()
             .memory_space_at(fact.block_addr, fact.op_index)
@@ -473,6 +484,16 @@ impl MachineType {
 /// The widest constant a C integer literal can spell.
 const MAX_SPELLABLE_CONSTANT_BITS: u32 = 128;
 
+/// Whether a constant of this width has a C spelling.
+///
+/// A literal reaches 128 bits. Above that the value still has one wherever the
+/// bit-vector prelude carries the width, because a `u64` payload is spelled as
+/// its zero extension into the carrier -- which is exactly what a wider
+/// constant in this model is: a narrow value the lift gave a wide varnode.
+const fn constant_width_is_spellable(width_bits: u32) -> bool {
+    width_bits <= MAX_SPELLABLE_CONSTANT_BITS || matches!(width_bits, 256 | 512)
+}
+
 /// Exact bitvector constant carried by prepared SSA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct MachineBitVector {
@@ -505,7 +526,7 @@ impl MachineBitVector {
     }
 
     pub const fn zero(width_bits: u32) -> Option<Self> {
-        if width_bits == 0 || width_bits > MAX_SPELLABLE_CONSTANT_BITS {
+        if width_bits == 0 || !constant_width_is_spellable(width_bits) {
             return None;
         }
         Some(Self {
@@ -716,47 +737,11 @@ pub enum MachineWriteProjection {
     /// The definition replaces every bit of its carrier; the definition's
     /// output width is the carrier width.
     Full,
-    /// The definition replaces one carrier-relative slice and preserves bits
-    /// outside it. The carrier extent is explicit because offset plus width
-    /// does not identify the canonical carrier.
-    Insert {
-        bit_offset: u32,
-        width_bits: u32,
-        carrier_width_bits: u32,
-    },
     /// A full-carrier definition zero-extends an exact narrower input;
     /// `to_width_bits` is the carrier width.
     ZeroExtend {
         from_width_bits: u32,
         to_width_bits: u32,
-    },
-    /// The definition assigns one carrier-relative slice and says nothing about
-    /// the rest of the carrier, because the graph has no value for it.
-    ///
-    /// This is neither `Full` nor `Insert`. `Full` would claim the write
-    /// defines the whole register, which a byte write does not; `Insert` would
-    /// claim it preserves the register's other bits, which requires having
-    /// them, and an instruction has a value only by taking it as an input. A
-    /// write whose operands include nothing at this carrier is handed nothing
-    /// to preserve, and produces no carrier value for anything to read: the
-    /// bits outside the lane are not represented at all.
-    ///
-    /// Only ever a lane at the carrier's own offset, so it never displaces the
-    /// bit-field insert that a write into the middle of a register is.
-    ///
-    /// `pearson` at -O2 is the case. `xor r9b, byte [rdx + r8]` computes a byte
-    /// from two bytes, the only thing that goes on to read it is
-    /// `movzx edx, r9b`, and `R9`'s other seven bytes are neither defined nor
-    /// read before the next iteration overwrites the register. Reading the
-    /// projection off the register geometry alone made the write a read of the
-    /// object it was defining. `crc32_bitwise` at -O2 is the same shape at
-    /// vector width, where Ghidra models `XMM0` as a 128-bit lane of a 512-bit
-    /// `ZMM0` and the legacy SSE write really does leave the rest alone --
-    /// alone, and unread.
-    Lane {
-        bit_offset: u32,
-        width_bits: u32,
-        carrier_width_bits: u32,
     },
 }
 
@@ -873,6 +858,16 @@ pub enum MachineExprKind {
         high: MachineExprId,
         low: MachineExprId,
     },
+    /// `root` with `lane` written over its bits `lsb_bits..lsb_bits+width_bits`.
+    InsertLane {
+        root: MachineExprId,
+        lane: MachineExprId,
+        /// The constant operand carrying `lsb_bits`, kept so the operands
+        /// stay one-to-one with the instruction's.
+        position: MachineExprId,
+        lsb_bits: u32,
+        width_bits: u32,
+    },
     Select {
         condition: MachineExprId,
         if_true: MachineExprId,
@@ -908,6 +903,12 @@ impl MachineExprKind {
                 dividend, divisor, ..
             } => vec![*dividend, *divisor],
             Self::Concat { high, low } => vec![*high, *low],
+            Self::InsertLane {
+                root,
+                lane,
+                position,
+                ..
+            } => vec![*root, *lane, *position],
             Self::Shift { value, count, .. } => vec![*value, *count],
             Self::Select {
                 condition,
@@ -1104,19 +1105,6 @@ pub struct MachineProjection {
     use_dispositions: Box<[Box<[MachineUseDisposition]>]>,
     /// Dense by `InstId`; `None` is reserved for graph instructions with no output.
     write_dispositions: Box<[Option<MachineWriteDisposition>]>,
-    /// Dense by `InstId`: the carrier extensions each write's projection
-    /// absorbed, in the order the clearing chain consumed them. Empty for every
-    /// write that speaks only for itself.
-    absorbed_extensions: Box<[Box<[InstId]>]>,
-    /// Dense by `InstId`: for an absorbed extension, the immediately preceding
-    /// write whose projection stands for it. A consumer can then stop at an
-    /// object boundary instead of skipping across it to the outermost write.
-    immediate_absorbing_writes: Box<[Option<InstId>]>,
-    /// Values no read reaches outside of; see [`self_contained_values`].
-    self_contained: BTreeSet<ValueId>,
-    /// The subset of those a lane write actually defined; see
-    /// [`values_read_as_themselves`].
-    read_as_themselves: BTreeSet<ValueId>,
 }
 
 impl MachineProjection {
@@ -1179,10 +1167,7 @@ impl MachineProjection {
             }
         }
 
-        // Now that every operand read is known, decide which values hold
-        // exactly themselves, and settle the deferred writes against that.
-        let self_contained = self_contained_values(artifact, &builder.use_dispositions);
-        let mut absorbed_extensions = vec![Vec::new(); graph.insts.len()];
+        // Now that every operand read is known, settle the deferred writes.
         for (inst_index, inst) in graph.insts.iter().enumerate() {
             let Some(root) = pending_roots[inst_index] else {
                 continue;
@@ -1191,22 +1176,11 @@ impl MachineProjection {
                 .nodes
                 .get(root.index())
                 .ok_or(MachineBuildError::MissingWriteDisposition(inst.id))?;
-            let decision = machine_write_disposition(artifact, inst, root_expr, &self_contained);
-            write_dispositions[inst_index] = Some(decision.disposition);
-            absorbed_extensions[inst_index] = decision.absorbed;
+            write_dispositions[inst_index] =
+                Some(machine_write_disposition(artifact, inst, root_expr));
         }
-        let immediate_absorbing_writes = immediate_absorbing_writes(&absorbed_extensions);
-
-        // Only a value a lane write actually defined is read as itself. A
-        // sub-register the function merely reads is a window onto machine state
-        // the carrier still owns, and its reads stay carrier-relative.
-        let read_as_themselves =
-            values_read_as_themselves(artifact, &self_contained, &write_dispositions);
-        let use_dispositions = canonical_machine_use_dispositions(
-            artifact,
-            builder.use_dispositions,
-            &read_as_themselves,
-        )?;
+        let use_dispositions =
+            canonical_machine_use_dispositions(artifact, builder.use_dispositions)?;
         let projection = Self {
             machine: MachineFunction {
                 arena: MachineExprArena {
@@ -1224,14 +1198,6 @@ impl MachineProjection {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             write_dispositions: write_dispositions.into_boxed_slice(),
-            absorbed_extensions: absorbed_extensions
-                .into_iter()
-                .map(Vec::into_boxed_slice)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            immediate_absorbing_writes: immediate_absorbing_writes.into_boxed_slice(),
-            self_contained,
-            read_as_themselves,
         };
         projection.validate_against(artifact)?;
         Ok(projection)
@@ -1290,31 +1256,6 @@ impl MachineProjection {
     /// The carrier extensions this write's projection stands for, in the order
     /// the clearing chain consumed them.
     ///
-    /// A `ZeroExtend` certified by an adjacent chain -- `EAX = x` followed by
-    /// `RAX = zext(EAX)` -- already says everything the extension says, so the
-    /// extension has no statement of its own once the write is rendered that
-    /// way. This is a machine fact about which instructions the projection
-    /// consumed; whether the two definitions are one rendered object is the
-    /// binding plan's question, asked of this answer.
-    pub fn absorbed_extensions(&self, inst: InstId) -> &[InstId] {
-        self.absorbed_extensions
-            .get(inst.0 as usize)
-            .map_or(&[], Box::as_ref)
-    }
-
-    /// The immediately preceding write whose projection absorbed this extension.
-    ///
-    /// Nested clearing chains retain every adjacency. Whether an outer write
-    /// also stands for this extension depends on whether all intervening
-    /// definitions denote one rendered object, which is a consumer policy and
-    /// not a machine-projection fact.
-    pub fn immediate_absorbing_write(&self, inst: InstId) -> Option<InstId> {
-        self.immediate_absorbing_writes
-            .get(inst.0 as usize)
-            .copied()
-            .flatten()
-    }
-
     pub fn expr(&self, id: MachineExprId) -> Option<&MachineExpr> {
         self.machine.expr(id)
     }
@@ -1457,7 +1398,6 @@ impl MachineProjection {
                     input,
                     operation_relative,
                     *disposition,
-                    &self.read_as_themselves,
                 )?;
             }
         }
@@ -1493,26 +1433,15 @@ impl MachineProjection {
                     .machine
                     .expr(entity.root())
                     .ok_or(MachineBuildError::WriteDispositionMismatch(inst.id))?;
-                machine_write_disposition(artifact, inst, root, &self.self_contained)
+                machine_write_disposition(artifact, inst, root)
             } else if let Some(failure) = failures.get(&output) {
-                MachineWriteDecision::own(MachineWriteDisposition::Refused(
-                    write_refusal_for_error(failure.error()),
-                ))
+                MachineWriteDisposition::Refused(write_refusal_for_error(failure.error()))
             } else {
                 return Err(MachineBuildError::WriteDispositionMismatch(inst.id));
             };
-            if *actual != Some(expected.disposition) {
+            if *actual != Some(expected) {
                 return Err(MachineBuildError::WriteDispositionMismatch(inst.id));
             }
-            if self.absorbed_extensions(inst.id) != expected.absorbed.as_slice() {
-                return Err(MachineBuildError::WriteDispositionMismatch(inst.id));
-            }
-        }
-        if self.immediate_absorbing_writes.len() != graph.insts.len()
-            || self.immediate_absorbing_writes
-                != immediate_absorbing_writes(&self.absorbed_extensions).into_boxed_slice()
-        {
-            return Err(MachineBuildError::TopologyMismatch);
         }
         Ok(())
     }
@@ -1616,7 +1545,6 @@ fn canonical_machine_value_geometry(
 fn canonical_machine_use_dispositions(
     artifact: &SsaArtifact,
     operation_relative: Vec<Vec<MachineUseDisposition>>,
-    read_as_themselves: &BTreeSet<ValueId>,
 ) -> Result<Vec<Vec<MachineUseDisposition>>, MachineBuildError> {
     let graph = artifact.graph();
     if operation_relative.len() != graph.insts.len() {
@@ -1646,7 +1574,6 @@ fn canonical_machine_use_dispositions(
                 site,
                 input,
                 disposition,
-                read_as_themselves,
             )?);
         }
         canonical.push(canonical_row);
@@ -1654,92 +1581,11 @@ fn canonical_machine_use_dispositions(
     Ok(canonical)
 }
 
-/// The values that hold exactly themselves, and nothing of the register around
-/// them.
-///
-/// A partial write preserves the rest of its carrier, and that preservation is
-/// real as soon as something reads the carrier -- `mov ah, bl` followed by a
-/// read of `ax` is the case the genuine-lift tests keep. It is not real when
-/// every read of the value is expressed against the value's own width, whole or
-/// one of its own lanes: then nothing is composed out of the register, and the
-/// register is not the object's business. The x86 vector lanes are that case,
-/// written four at a time and recomposed by an explicit `Piece`.
-///
-/// A value nothing reads is deliberately excluded. There is nothing to observe
-/// either way, and the conservative answer keeps the model's statement about
-/// such a write as strong as it was.
-///
-/// This is asked of operand reads only, so it does not depend on any write
-/// decision -- which is why the projection settles every read before it settles
-/// any write, and why both rules can consult one answer.
-fn self_contained_values(
-    artifact: &SsaArtifact,
-    operation_relative: &[Vec<MachineUseDisposition>],
-) -> BTreeSet<ValueId> {
-    let graph = artifact.graph();
-    let mut self_contained = BTreeSet::new();
-    for value in &graph.values {
-        let Some(width_bits) = value.var.size.checked_mul(8).filter(|bits| *bits > 0) else {
-            continue;
-        };
-        let uses = graph.use_sites(value.id);
-        if uses.is_empty() {
-            continue;
-        }
-        let every_read_is_within = uses.iter().all(|site| {
-            matches!(
-                operation_relative
-                    .get(site.inst.0 as usize)
-                    .and_then(|row| row.get(site.input_idx)),
-                Some(MachineUseDisposition::Exact(slice))
-                    if slice.carrier_width_bits() == width_bits
-            )
-        });
-        if every_read_is_within {
-            self_contained.insert(value.id);
-        }
-    }
-    self_contained
-}
-
-/// The self-contained values a lane write actually defined.
-///
-/// Being read only at one's own width is not enough on its own: a sub-register
-/// the function merely reads, and never writes, is a window onto machine state
-/// the whole register still owns, and its reads have to stay relative to that
-/// register. Narrowing to values a lane write defined leaves exactly the case
-/// this exists for -- lanes the function itself wrote and recomposes through an
-/// explicit `Piece`.
-fn values_read_as_themselves(
-    artifact: &SsaArtifact,
-    self_contained: &BTreeSet<ValueId>,
-    write_dispositions: &[Option<MachineWriteDisposition>],
-) -> BTreeSet<ValueId> {
-    let graph = artifact.graph();
-    self_contained
-        .iter()
-        .copied()
-        .filter(|value| {
-            matches!(
-                graph.def_inst(*value).and_then(|inst| write_dispositions
-                    .get(inst.0 as usize)
-                    .and_then(|disposition| disposition.as_ref())),
-                Some(MachineWriteDisposition::Exact(MachineWriteProjection::Lane {
-                    width_bits,
-                    carrier_width_bits,
-                    ..
-                })) if width_bits != carrier_width_bits
-            )
-        })
-        .collect()
-}
-
 fn canonical_machine_use_disposition(
     artifact: &SsaArtifact,
     site: UseSite,
     input: ValueId,
     operation_relative: MachineUseDisposition,
-    read_as_themselves: &BTreeSet<ValueId>,
 ) -> Result<MachineUseDisposition, MachineBuildError> {
     let MachineUseDisposition::Exact(slice) = operation_relative else {
         return Ok(operation_relative);
@@ -1787,13 +1633,6 @@ fn canonical_machine_use_disposition(
             MachineUseRefusal::InvalidBitRange,
         ));
     }
-    // The object is the value, so reading it is not a projection at all.
-    // Re-basing here would apply the lane's offset a second time -- the
-    // extracting operation already applies it -- and every lane above the first
-    // would read as zero while still compiling.
-    if read_as_themselves.contains(&input) {
-        return Ok(MachineUseDisposition::Exact(whole_machine_use(source)));
-    }
     // A value this function computed is read at the width it holds; a value it
     // was entered with is read at the width the machine handed it over in.
     //
@@ -1822,7 +1661,6 @@ fn validate_canonical_machine_use_disposition(
     input: ValueId,
     operation_relative: MachineUseDisposition,
     actual: MachineUseDisposition,
-    read_as_themselves: &BTreeSet<ValueId>,
 ) -> Result<(), MachineBuildError> {
     let mismatch = || MachineBuildError::UseDispositionMismatch(site);
     let MachineUseDisposition::Exact(operation_slice) = operation_relative else {
@@ -1879,14 +1717,6 @@ fn validate_canonical_machine_use_disposition(
                 .ok_or_else(mismatch);
         }
     };
-    // Mirrors the derivation, from the one predicate both consult, and at the
-    // same point in the sequence: after the geometry is known to be exact, so
-    // that a refused geometry is still reported as a refusal by both.
-    if read_as_themselves.contains(&input) {
-        return (actual == MachineUseDisposition::Exact(whole_machine_use(source)))
-            .then_some(())
-            .ok_or_else(mismatch);
-    }
     // Mirrors the derivation: a computed value is read as itself.
     if artifact.graph().def_inst(input).is_some() {
         return (actual == MachineUseDisposition::Exact(whole_machine_use(source)))
@@ -2036,15 +1866,17 @@ fn exact_register_geometry(
     {
         return Err(MachineRegisterGeometryRefusal::InvalidBitRange);
     }
+    // The architecture's own carrier is checked above and then set aside: a
+    // register value in this SSA is its family's root already, chosen from
+    // what the function touches rather than from the widest name the
+    // specification has (doc/adr-register-identity.md). Its geometry is
+    // therefore the whole of itself, and re-basing it onto `ZMM0` would say
+    // a 128-bit load defines a slice of a register no program here mentions.
     Ok(ExactRegisterGeometry {
-        carrier: CanonicalStorageId {
-            space: CanonicalStorageSpace::Register,
-            offset: carrier.offset,
-            size: carrier.size,
-        },
-        bit_offset,
-        width_bits,
-        carrier_bits,
+        carrier: written,
+        bit_offset: 0,
+        width_bits: written_bits,
+        carrier_bits: written_bits,
     })
 }
 
@@ -2080,198 +1912,13 @@ fn exact_zero_extend_write(
     })
 }
 
-/// Project a narrow definition through the full-carrier extension the lift
-/// states for it.
-///
-/// This is a dataflow certificate, not an architecture or name heuristic. On
-/// x86-64 Sleigh emits the carrier clear itself -- `RAX = zext(EAX)` in the
-/// same instruction's p-code as the write of `EAX` -- and that op is the fact
-/// this reads.
-///
-/// It is deliberately not an adjacency test. The clear is emitted next to the
-/// write, but by the time this runs the graph has been through renaming, alias
-/// normalization and copy propagation, and any of them can put an op in
-/// between or rewrite the extension to name the value the write copied rather
-/// than the write's own output. Both are the same statement about the machine.
-/// So the question asked here is the one actually meant: before anything reads
-/// the carrier, does the block define it as a zero-extension of what this write
-/// left in its slice?
-///
-/// The instructions that certify the chain are returned beside the projection,
-/// in the order they were consumed. The projection stands for them: once the
-/// write is rendered as a zero-extension into the carrier, the extension
-/// itself has nothing left to say, and whoever renders the write has to know
-/// which instructions it has spoken for.
-fn exact_adjacent_cleared_carrier_write(
-    artifact: &SsaArtifact,
-    inst: &GraphInst,
-    root: &MachineExpr,
-    output: ExactRegisterGeometry,
-) -> Option<(MachineWriteProjection, Vec<InstId>)> {
-    if output.bit_offset != 0
-        || output.width_bits >= output.carrier_bits
-        || root.ty.width_bits() != output.width_bits
-    {
-        return None;
-    }
-    let value = inst.output?;
-    let graph = artifact.graph();
-    let storage_of = |candidate: ValueId| graph.value(candidate)?.canonical_storage;
-    let slice = storage_of(value)?;
-    let carrier = CanonicalStorageId {
-        space: CanonicalStorageSpace::Register,
-        offset: output.carrier.offset,
-        size: output.carrier.size,
-    };
-
-    // What this write leaves in its slice. A copy leaves exactly its source, so
-    // an extension naming that source states the same fact as one naming this
-    // write's output, and copy propagation is free to have rewritten it either
-    // way.
-    let mut written = vec![value];
-    if let InstPayload::Op(SSAOp::Copy { .. }) = &inst.payload
-        && let [source] = inst.inputs.as_slice()
-    {
-        written.push(*source);
-    }
-
-    let mut following: Vec<&GraphInst> = graph
-        .insts
-        .iter()
-        .filter(|candidate| candidate.block == inst.block && candidate.ordinal > inst.ordinal)
-        .collect();
-    following.sort_by_key(|candidate| candidate.ordinal);
-
-    // The carrier is not always cleared in one step. amd64 writes a byte and
-    // then widens it twice -- `xor cl, ...` is followed by `movzx ecx, cl` and
-    // `movzx rcx, ecx` -- so the instruction that finally answers for `RCX`
-    // zero-extends `ECX`, not the byte this write produced. Looking only for a
-    // single extension of the written slice found nothing there and left the
-    // write asserting that it preserved `RCX`'s other seven bytes, which the
-    // next two instructions go on to define as zero. `pearson` is refused for
-    // that at both -O1 and -O2.
-    //
-    // So the chain is followed: each step must extend something the chain has
-    // already established, and `covered_bytes` records how much of the carrier
-    // that is. It also decides what may be read on the way -- see below.
-    let carrier_start = carrier.offset;
-    let carrier_end = carrier_start.saturating_add(u64::from(carrier.size));
-    let in_carrier = |candidate: CanonicalStorageId| {
-        candidate.space == CanonicalStorageSpace::Register
-            && candidate.offset >= carrier_start
-            && candidate.offset.saturating_add(u64::from(candidate.size)) <= carrier_end
-    };
-    let mut covered_bytes = u64::from(slice.size);
-    let mut absorbed = Vec::new();
-
-    for next in following {
-        // A read of the carrier before it is cleared means the carrier still
-        // held something this write did not put there, so the write did not
-        // define it. With a chain that has to be asked of every storage inside
-        // the carrier, not only of the carrier itself: reading `ECX` after the
-        // byte write and before the widening would see the six stale bytes the
-        // projection is about to claim are zero.
-        if next.inputs.iter().any(|input| {
-            storage_of(*input).is_some_and(|read| {
-                in_carrier(read)
-                    && (read.offset != carrier_start || u64::from(read.size) > covered_bytes)
-            })
-        }) {
-            return None;
-        }
-        let Some(defined) = next.output.and_then(storage_of) else {
-            continue;
-        };
-        if !in_carrier(defined) {
-            continue;
-        }
-        // Anything the chain has already established, written again before the
-        // carrier was cleared: whatever clears the carrier later is about that
-        // later value, not this one. A write anywhere else inside the carrier
-        // disturbs bits the extension would have to have zeroed.
-        if defined.offset != carrier_start || u64::from(defined.size) <= covered_bytes {
-            return None;
-        }
-        // The op that answers for this much of the carrier. It certifies the
-        // chain only if it is a zero-extension of what the chain has so far.
-        let InstPayload::Op(SSAOp::IntZExt { .. }) = &next.payload else {
-            return None;
-        };
-        let [extended] = next.inputs.as_slice() else {
-            return None;
-        };
-        if !written.contains(extended) {
-            return None;
-        }
-        absorbed.push(next.id);
-        if defined == carrier {
-            return Some((
-                MachineWriteProjection::ZeroExtend {
-                    from_width_bits: output.width_bits,
-                    to_width_bits: output.carrier_bits,
-                },
-                absorbed,
-            ));
-        }
-        let widened = next.output?;
-        written.push(widened);
-        covered_bytes = u64::from(defined.size);
-    }
-    None
-}
-
-/// For each absorbed extension, the immediately preceding write that absorbed it.
-///
-/// Chains nest: a byte write widened twice is absorbed by the byte write, and
-/// the first widening absorbs the second on its own account. Recording the
-/// first member of each chain retains those adjacencies in one O(n) build and
-/// gives consumers an O(1) reverse lookup without a whole-function scan.
-fn immediate_absorbing_writes<T: AsRef<[InstId]>>(
-    absorbed_extensions: &[T],
-) -> Vec<Option<InstId>> {
-    let mut absorbing = vec![None; absorbed_extensions.len()];
-    for (index, chain) in absorbed_extensions.iter().enumerate() {
-        let head = InstId(index as u32);
-        let Some(member) = chain.as_ref().first() else {
-            continue;
-        };
-        if let Some(slot) = absorbing.get_mut(member.0 as usize) {
-            *slot = Some(head);
-        }
-    }
-    absorbing
-}
-
-/// One settled write: how the definition writes its carrier, and which
-/// instructions that statement has taken over.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MachineWriteDecision {
-    disposition: MachineWriteDisposition,
-    /// The carrier extensions a `ZeroExtend` certified by an adjacent clearing
-    /// chain absorbed, in the order the chain consumed them. Empty for every
-    /// other projection: nothing else speaks for another instruction.
-    absorbed: Vec<InstId>,
-}
-
-impl MachineWriteDecision {
-    const fn own(disposition: MachineWriteDisposition) -> Self {
-        Self {
-            disposition,
-            absorbed: Vec::new(),
-        }
-    }
-}
-
 fn machine_write_disposition(
     artifact: &SsaArtifact,
     inst: &GraphInst,
     root: &MachineExpr,
-    self_contained: &BTreeSet<ValueId>,
-) -> MachineWriteDecision {
+) -> MachineWriteDisposition {
     let Some(output) = inst.output else {
-        return MachineWriteDecision::own(MachineWriteDisposition::Refused(
-            MachineWriteRefusal::IncoherentOperation,
-        ));
+        return MachineWriteDisposition::Refused(MachineWriteRefusal::IncoherentOperation);
     };
     // A phi is not a machine event. It merges the values reaching a point; no
     // instruction there writes a slice of a register and preserves the rest.
@@ -2281,9 +1928,7 @@ fn machine_write_disposition(
     // nor could. Where the carrier is live across the merge it has a phi of
     // its own, and that phi is what answers for it.
     if matches!(inst.payload, InstPayload::Phi { .. }) {
-        return MachineWriteDecision::own(MachineWriteDisposition::Exact(
-            MachineWriteProjection::Full,
-        ));
+        return MachineWriteDisposition::Exact(MachineWriteProjection::Full);
     }
     // A call's definition of a register preserves nothing. The callee wrote
     // that register, so whatever sits outside the lane the prototype names is
@@ -2296,102 +1941,40 @@ fn machine_write_disposition(
         inst.payload,
         InstPayload::Op(crate::op::SSAOp::CallDefine { .. })
     ) {
-        return MachineWriteDecision::own(MachineWriteDisposition::Exact(
-            MachineWriteProjection::Full,
-        ));
+        return MachineWriteDisposition::Exact(MachineWriteProjection::Full);
+    }
+    // A lane written into its root reads the root it keeps as an operand, so
+    // the write is a full definition of the root from explicit inputs; the
+    // expression kind, not the projection, says where the lane sits.
+    if matches!(root.kind, MachineExprKind::InsertLane { .. }) {
+        return MachineWriteDisposition::Exact(MachineWriteProjection::Full);
     }
     let Some(storage) = artifact
         .graph()
         .value(output)
         .and_then(|value| value.canonical_storage)
     else {
-        return MachineWriteDecision::own(MachineWriteDisposition::Exact(
-            MachineWriteProjection::Full,
-        ));
+        return MachineWriteDisposition::Exact(MachineWriteProjection::Full);
     };
     if storage.space != CanonicalStorageSpace::Register {
-        return MachineWriteDecision::own(MachineWriteDisposition::Exact(
-            MachineWriteProjection::Full,
-        ));
+        return MachineWriteDisposition::Exact(MachineWriteProjection::Full);
     }
     let geometry = match exact_register_geometry(artifact, storage) {
         Ok(geometry) => geometry,
         Err(reason) => {
-            return MachineWriteDecision::own(MachineWriteDisposition::Refused(
-                write_refusal_for_register_geometry(reason),
-            ));
+            return MachineWriteDisposition::Refused(write_refusal_for_register_geometry(reason));
         }
     };
-    if let Some((zero_extend, absorbed)) =
-        exact_adjacent_cleared_carrier_write(artifact, inst, root, geometry)
-    {
-        return MachineWriteDecision {
-            disposition: MachineWriteDisposition::Exact(zero_extend),
-            absorbed,
-        };
-    }
     if let Some(zero_extend) = exact_zero_extend_write(artifact, inst, root, geometry) {
-        return MachineWriteDecision::own(MachineWriteDisposition::Exact(zero_extend));
+        return MachineWriteDisposition::Exact(zero_extend);
     }
     if geometry.bit_offset == 0 && geometry.width_bits == geometry.carrier_bits {
-        return MachineWriteDecision::own(MachineWriteDisposition::Exact(
-            MachineWriteProjection::Full,
-        ));
+        return MachineWriteDisposition::Exact(MachineWriteProjection::Full);
     }
-    // An insert keeps the carrier's other bits, so the instruction has to have
-    // them, and in SSA it has a value only by taking it as an input. Where no
-    // operand sits at this carrier there is nothing to keep and no carrier
-    // value for anything to read.
-    //
-    // Only for a lane at the carrier's own offset. A write into the middle of a
-    // register -- `mov ah, bl` is the one the genuine-lift tests keep -- is a
-    // bit-field insert in its own right, and the value it produces is the one a
-    // later read of the carrier is composed from, so the preservation is real
-    // whether or not this instruction was handed the carrier.
-    // A lane at a non-zero offset is still a lane when nothing composes the
-    // register around it -- see `self_contained_values`. Where something does,
-    // the preservation is real and this is a bit-field insert.
-    if instruction_carries_wider_value_at(artifact, inst, storage)
-        || (geometry.bit_offset != 0 && !self_contained.contains(&output))
-    {
-        return MachineWriteDecision::own(MachineWriteDisposition::Exact(
-            MachineWriteProjection::Insert {
-                bit_offset: geometry.bit_offset,
-                width_bits: geometry.width_bits,
-                carrier_width_bits: geometry.carrier_bits,
-            },
-        ));
-    }
-    MachineWriteDecision::own(MachineWriteDisposition::Exact(
-        MachineWriteProjection::Lane {
-            bit_offset: geometry.bit_offset,
-            width_bits: geometry.width_bits,
-            carrier_width_bits: geometry.carrier_bits,
-        },
-    ))
-}
-
-/// Whether some operand of this instruction holds the bits an insert would
-/// keep: the same storage location, reaching beyond the lane being written.
-fn instruction_carries_wider_value_at(
-    artifact: &SsaArtifact,
-    inst: &GraphInst,
-    storage: CanonicalStorageId,
-) -> bool {
-    let graph = artifact.graph();
-    let written_end = storage.offset.saturating_add(u64::from(storage.size));
-    inst.inputs.iter().any(|input| {
-        graph
-            .value(*input)
-            .and_then(|value| value.canonical_storage)
-            .is_some_and(|operand| {
-                let operand_end = operand.offset.saturating_add(u64::from(operand.size));
-                operand.space == storage.space
-                    && operand.offset <= storage.offset
-                    && operand_end >= written_end
-                    && operand.size > storage.size
-            })
-    })
+    // Every register value is its family's root (doc/adr-register-identity.md),
+    // so a definition at any other geometry is not a machine event this
+    // projection can describe.
+    MachineWriteDisposition::Refused(MachineWriteRefusal::InvalidBitRange)
 }
 
 fn validate_machine_use_slice(slice: MachineUseSlice, carrier_width_bits: u32) -> Result<(), ()> {
@@ -2917,6 +2500,21 @@ impl MachineFunction {
                 lsb_bits
                     .checked_add(expr.ty.width_bits())
                     .is_some_and(|end| end <= input_bits)
+            }
+            MachineExprKind::InsertLane {
+                root,
+                lane,
+                lsb_bits,
+                width_bits,
+                ..
+            } => {
+                let root = child(*root)?;
+                let lane = child(*lane)?;
+                root.ty.width_bits() == expr.ty.width_bits()
+                    && lane.ty.width_bits() == *width_bits
+                    && lsb_bits
+                        .checked_add(*width_bits)
+                        .is_some_and(|end| end <= expr.ty.width_bits())
             }
             MachineExprKind::Concat { high, low } => {
                 let high = child(*high)?;
@@ -4127,6 +3725,61 @@ impl MachineBuilder {
                 self.record_whole_use(graph, inst, 1)?;
                 Ok((unsigned, MachineExprKind::Concat { high, low }))
             }
+            SSAOp::Insert { .. } => {
+                // A lane written into its root (doc/adr-register-identity.md
+                // §2): the root read whole, the lane value, and a constant
+                // bit position. The projection of the write says the rest.
+                if inst.inputs.len() != 3 {
+                    return Err(MachineBuildError::WrongOperandCount {
+                        inst: inst.id,
+                        expected: 3,
+                        actual: inst.inputs.len(),
+                    });
+                }
+                let root_value = graph
+                    .value(inst.inputs[0])
+                    .ok_or(MachineBuildError::MissingGraphValue(inst.inputs[0]))?;
+                let lane_value = graph
+                    .value(inst.inputs[1])
+                    .ok_or(MachineBuildError::MissingGraphValue(inst.inputs[1]))?;
+                let position_value = graph
+                    .value(inst.inputs[2])
+                    .ok_or(MachineBuildError::MissingGraphValue(inst.inputs[2]))?;
+                let position = position_value
+                    .var
+                    .constant_bits()
+                    .and_then(|bits| u32::try_from(bits).ok())
+                    .ok_or(MachineBuildError::MissingGraphValue(inst.inputs[2]))?;
+                let root_bits = binding_for_value(root_value)?.width_bits;
+                let lane_bits = binding_for_value(lane_value)?.width_bits;
+                if root_bits != output.width_bits
+                    || position
+                        .checked_add(lane_bits)
+                        .is_none_or(|end| end > root_bits)
+                {
+                    return Err(MachineBuildError::WidthMismatch {
+                        inst: inst.id,
+                        expected_bits: output.width_bits,
+                        actual_bits: root_bits,
+                    });
+                }
+                let root = self.intern_value(root_value)?;
+                let lane = self.intern_value(lane_value)?;
+                let position_expr = self.intern_value(position_value)?;
+                self.record_whole_use(graph, inst, 0)?;
+                self.record_whole_use(graph, inst, 1)?;
+                self.record_whole_use(graph, inst, 2)?;
+                Ok((
+                    unsigned,
+                    MachineExprKind::InsertLane {
+                        root,
+                        lane,
+                        position: position_expr,
+                        lsb_bits: position,
+                        width_bits: lane_bits,
+                    },
+                ))
+            }
             SSAOp::Select { .. } => {
                 if inst.inputs.len() != 3 {
                     return Err(MachineBuildError::WrongOperandCount {
@@ -4254,7 +3907,7 @@ fn bit_vector(
     //
     // The ceiling is what the rest of the model spells: declaration widths go
     // to 512, but a C integer is spellable only to 128.
-    if width_bits > MAX_SPELLABLE_CONSTANT_BITS {
+    if !constant_width_is_spellable(width_bits) {
         return Err(MachineBuildError::ConstantTooWide { value, width_bits });
     }
     let mask = if width_bits >= 64 {
@@ -4507,6 +4160,7 @@ fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
                 }
             )
             | (SSAOp::Piece { .. }, MachineExprKind::Concat { .. })
+            | (SSAOp::Insert { .. }, MachineExprKind::InsertLane { .. })
             | (SSAOp::Select { .. }, MachineExprKind::Select { .. })
     )
 }
@@ -4555,6 +4209,7 @@ fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bo
         | SSAOp::Cast { .. }
         | SSAOp::Piece { .. }
         | SSAOp::Subpiece { .. }
+        | SSAOp::Insert { .. }
         | SSAOp::Select { .. } => *ty == unsigned,
         _ => false,
     }
@@ -4780,231 +4435,6 @@ mod tests {
         assert_eq!(MachineBitVector::zero(0), None);
         assert_eq!(MachineBitVector::zero(129), None);
         assert_eq!(MachineBitVector::zero(u32::MAX), None);
-    }
-
-    #[test]
-    fn value_geometry_is_dense_and_keeps_ah_in_the_rax_carrier() {
-        let arch = register_geometry_arch();
-        let artifact = artifact_with_arch(
-            [
-                R2ILOp::Copy {
-                    dst: Varnode::unique(0x10, 1),
-                    src: Varnode::register(1, 1),
-                },
-                R2ILOp::IntAdd {
-                    dst: Varnode::register(0, 4),
-                    a: Varnode::unique(0x20, 4),
-                    b: Varnode::constant(1, 4),
-                },
-            ],
-            &arch,
-        );
-        let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
-
-        assert_eq!(
-            projection.value_geometries().len(),
-            artifact.graph().values.len()
-        );
-        for (index, value) in artifact.graph().values.iter().enumerate() {
-            assert_eq!(value.id.0 as usize, index);
-            assert_eq!(
-                projection.value_geometry(value.id),
-                projection.value_geometries().get(index)
-            );
-            if value
-                .canonical_storage
-                .is_none_or(|storage| storage.space != CanonicalStorageSpace::Register)
-            {
-                assert!(matches!(
-                    projection.value_geometry(value.id),
-                    Some(MachineValueGeometryDisposition::Direct(_))
-                ));
-            }
-        }
-        assert_eq!(
-            projection.value_geometry(ValueId(artifact.graph().values.len() as u32)),
-            None
-        );
-
-        let ah = CanonicalStorageId {
-            space: CanonicalStorageSpace::Register,
-            offset: 1,
-            size: 1,
-        };
-        let rax = CanonicalStorageId {
-            space: CanonicalStorageSpace::Register,
-            offset: 0,
-            size: 8,
-        };
-        let geometry = value_geometry_for_storage(&projection, &artifact, ah);
-        assert_eq!(
-            geometry,
-            MachineValueGeometryDisposition::ExactRegister(MachineRegisterValueGeometry {
-                carrier: rax,
-                bit_offset: 8,
-                value_width_bits: 8,
-                carrier_width_bits: 64,
-            })
-        );
-        let MachineValueGeometryDisposition::ExactRegister(geometry) = geometry else {
-            panic!("AH must have exact register geometry");
-        };
-        assert_eq!(geometry.carrier_storage(), rax);
-        assert_eq!(geometry.carrier_location(), rax.location());
-
-        let eax = CanonicalStorageId {
-            space: CanonicalStorageSpace::Register,
-            offset: 0,
-            size: 4,
-        };
-        assert_eq!(
-            value_geometry_for_storage(&projection, &artifact, eax),
-            MachineValueGeometryDisposition::ExactRegister(MachineRegisterValueGeometry {
-                carrier: rax,
-                bit_offset: 0,
-                value_width_bits: 32,
-                carrier_width_bits: 64,
-            })
-        );
-        projection
-            .validate_against(&artifact)
-            .expect("every dense geometry remains source-bound");
-
-        let mut corrupted = projection;
-        corrupted.value_geometries[0] =
-            MachineValueGeometryDisposition::Refused(MachineValueGeometryRefusal::InvalidBitRange);
-        assert_eq!(
-            corrupted.validate_against(&artifact),
-            Err(MachineBuildError::TopologyMismatch)
-        );
-    }
-
-    #[test]
-    fn value_geometry_ignores_register_names_and_definition_order() {
-        let original = register_geometry_arch();
-        let mut renamed = register_geometry_arch();
-        for register in &mut renamed.registers {
-            register.name = match (register.offset, register.size) {
-                (0, 4) => "narrow_accumulator".to_string(),
-                (0, 8) => "wide_accumulator".to_string(),
-                (1, 1) => "upper_low_byte".to_string(),
-                _ => unreachable!("geometry fixture has three registers"),
-            };
-        }
-        renamed.registers.reverse();
-        for storage in [
-            CanonicalStorageId {
-                space: CanonicalStorageSpace::Register,
-                offset: 1,
-                size: 1,
-            },
-            CanonicalStorageId {
-                space: CanonicalStorageSpace::Register,
-                offset: 0,
-                size: 4,
-            },
-        ] {
-            // One exact view per fixture keeps this a geometry test. When two
-            // overlapping entry views occur in one function, alias
-            // normalization intentionally chooses the widest as the canonical
-            // SSA root and materializes narrower reads as Subpiece operations.
-            let ops = || {
-                [R2ILOp::Copy {
-                    dst: Varnode::unique(0x10, storage.size),
-                    src: Varnode::register(storage.offset, storage.size),
-                }]
-            };
-            let original_artifact = artifact_with_arch(ops(), &original);
-            let renamed_artifact = artifact_with_arch(ops(), &renamed);
-            let original_projection =
-                MachineProjection::from_artifact(&original_artifact).expect("original projection");
-            let renamed_projection =
-                MachineProjection::from_artifact(&renamed_artifact).expect("renamed projection");
-            assert_eq!(
-                value_geometry_for_storage(&original_projection, &original_artifact, storage,),
-                value_geometry_for_storage(&renamed_projection, &renamed_artifact, storage)
-            );
-            let original_name = &original_artifact
-                .graph()
-                .values
-                .iter()
-                .find(|value| value.canonical_storage == Some(storage))
-                .expect("original register value")
-                .var
-                .name;
-            let renamed_name = &renamed_artifact
-                .graph()
-                .values
-                .iter()
-                .find(|value| value.canonical_storage == Some(storage))
-                .expect("renamed register value")
-                .var
-                .name;
-            assert_ne!(original_name, renamed_name);
-        }
-    }
-
-    #[test]
-    fn value_geometry_preserves_register_geometry_refusals() {
-        let source = Varnode::register(1, 1);
-        let read = |arch: &ArchSpec| {
-            let artifact = artifact_with_arch(
-                [R2ILOp::Copy {
-                    dst: Varnode::unique(0x10, 1),
-                    src: source.clone(),
-                }],
-                arch,
-            );
-            let projection = MachineProjection::from_artifact(&artifact).expect("typed geometry");
-            value_geometry_for_storage(
-                &projection,
-                &artifact,
-                CanonicalStorageId {
-                    space: CanonicalStorageSpace::Register,
-                    offset: 1,
-                    size: 1,
-                },
-            )
-        };
-
-        let mut missing = register_geometry_arch();
-        missing.register_projections.clear();
-        assert_eq!(
-            read(&missing),
-            MachineValueGeometryDisposition::Refused(
-                MachineValueGeometryRefusal::MissingRegisterGeometry
-            )
-        );
-
-        let mut refused = register_geometry_arch();
-        for projection in &mut refused.register_projections {
-            projection.disposition = RegisterProjectionDisposition::Refused {
-                reason: RegisterProjectionRefusal::MissingRegisterEndianness,
-            };
-        }
-        assert_eq!(
-            read(&refused),
-            MachineValueGeometryDisposition::Refused(
-                MachineValueGeometryRefusal::RegisterGeometry(
-                    RegisterProjectionRefusal::MissingRegisterEndianness
-                )
-            )
-        );
-
-        let mut malformed = refused;
-        malformed.register_projections[0].disposition = RegisterProjectionDisposition::Bound {
-            carrier: RegisterStorage { offset: 0, size: 8 },
-            slice: RegisterBitSlice {
-                lsb_bit_offset: 0,
-                size_bits: 32,
-            },
-        };
-        assert_eq!(
-            read(&malformed),
-            MachineValueGeometryDisposition::Refused(
-                MachineValueGeometryRefusal::MalformedRegisterGeometry
-            )
-        );
     }
 
     #[test]
@@ -5279,6 +4709,7 @@ mod tests {
             value_by_var: [(value.var, ValueId(0))].into(),
             op_inst_by_site: [((0x1000, 0), InstId(0))].into(),
             op_site_by_inst: [(InstId(0), (0x1000, 0))].into(),
+            formal_projections: BTreeMap::new(),
         };
         let inst = graph.inst(InstId(0)).expect("shift instruction");
         let mut builder = MachineBuilder::for_graph(&graph);
@@ -6360,337 +5791,6 @@ mod tests {
     }
 
     #[test]
-    fn dense_write_projections_cover_full_lane_insert_and_zero_extension() {
-        let arch = register_geometry_arch();
-        let full = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::register(0, 8),
-                src: Varnode::constant(7, 8),
-            }],
-            &arch,
-        );
-        let full_projection = MachineProjection::from_artifact(&full).expect("full projection");
-        assert_eq!(
-            exact_write(&full_projection, &full, 0),
-            MachineWriteProjection::Full
-        );
-
-        let low = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::register(0, 4),
-                src: Varnode::constant(7, 4),
-            }],
-            &arch,
-        );
-        let low_projection = MachineProjection::from_artifact(&low).expect("low projection");
-        assert_eq!(
-            exact_write(&low_projection, &low, 0),
-            MachineWriteProjection::Lane {
-                bit_offset: 0,
-                width_bits: 32,
-                carrier_width_bits: 64,
-            },
-            "a constant copied into a lane is handed nothing of the carrier to keep"
-        );
-
-        // The same lane, written from the carrier itself. Here the instruction
-        // does hold the bits outside the lane, so the write can and does
-        // preserve them.
-        let inserting = artifact_with_arch(
-            [R2ILOp::Subpiece {
-                dst: Varnode::register(0, 4),
-                src: Varnode::register(0, 8),
-                offset: 0,
-            }],
-            &arch,
-        );
-        let inserting_projection =
-            MachineProjection::from_artifact(&inserting).expect("inserting projection");
-        assert_eq!(
-            exact_write(&inserting_projection, &inserting, 0),
-            MachineWriteProjection::Insert {
-                bit_offset: 0,
-                width_bits: 32,
-                carrier_width_bits: 64,
-            },
-            "an operand at the carrier is what makes preservation expressible"
-        );
-
-        // The clear is the lift's own statement, not an architecture name:
-        // Sleigh emits `RAX = zext(EAX)` on the op after the narrow write, and
-        // that is the op the certificate reads.
-        let clearing_low = artifact_with_arch(
-            [
-                R2ILOp::IntAdd {
-                    dst: Varnode::register(0, 4),
-                    a: Varnode::register(0, 4),
-                    b: Varnode::constant(7, 4),
-                },
-                R2ILOp::IntZExt {
-                    dst: Varnode::register(0, 8),
-                    src: Varnode::register(0, 4),
-                },
-            ],
-            &arch,
-        );
-        let clearing_projection =
-            MachineProjection::from_artifact(&clearing_low).expect("clearing projection");
-        assert_eq!(
-            exact_write(&clearing_projection, &clearing_low, 0),
-            MachineWriteProjection::ZeroExtend {
-                from_width_bits: 32,
-                to_width_bits: 64,
-            },
-            "the adjacent source-owned full-carrier extension certifies the narrow write"
-        );
-        // The projection names the extension it absorbed, and the extension
-        // names the write that absorbed it: whoever renders the write as the
-        // zero-extension has to know which instruction it has spoken for.
-        let narrow_write = clearing_low
-            .graph()
-            .inst_id_for_op_site(0x1000, 0)
-            .expect("narrow write");
-        let extension = clearing_low
-            .graph()
-            .inst_id_for_op_site(0x1000, 1)
-            .expect("carrier extension");
-        assert_eq!(
-            clearing_projection.absorbed_extensions(narrow_write),
-            &[extension]
-        );
-        assert_eq!(
-            clearing_projection.immediate_absorbing_write(extension),
-            Some(narrow_write)
-        );
-        assert!(
-            clearing_projection
-                .absorbed_extensions(extension)
-                .is_empty()
-        );
-        assert_eq!(
-            clearing_projection.immediate_absorbing_write(narrow_write),
-            None
-        );
-
-        // A byte written and widened twice: the byte write absorbs both
-        // widenings, the first widening absorbs the second on its own
-        // account, and the byte write is the one that answers for both,
-        // because it is the one with a statement.
-        let widened_twice = artifact_with_arch(
-            [
-                R2ILOp::IntAdd {
-                    dst: Varnode::register(0, 1),
-                    a: Varnode::register(0, 1),
-                    b: Varnode::constant(7, 1),
-                },
-                R2ILOp::IntZExt {
-                    dst: Varnode::register(0, 4),
-                    src: Varnode::register(0, 1),
-                },
-                R2ILOp::IntZExt {
-                    dst: Varnode::register(0, 8),
-                    src: Varnode::register(0, 4),
-                },
-            ],
-            &arch,
-        );
-        let widened_projection =
-            MachineProjection::from_artifact(&widened_twice).expect("widened projection");
-        let at = |op_index: usize| {
-            widened_twice
-                .graph()
-                .inst_id_for_op_site(0x1000, op_index)
-                .expect("operation instruction")
-        };
-        assert_eq!(
-            exact_write(&widened_projection, &widened_twice, 0),
-            MachineWriteProjection::ZeroExtend {
-                from_width_bits: 8,
-                to_width_bits: 64,
-            }
-        );
-        assert_eq!(
-            widened_projection.absorbed_extensions(at(0)),
-            &[at(1), at(2)]
-        );
-        assert_eq!(widened_projection.absorbed_extensions(at(1)), &[at(2)]);
-        assert_eq!(
-            widened_projection.immediate_absorbing_write(at(1)),
-            Some(at(0))
-        );
-        assert_eq!(
-            widened_projection.immediate_absorbing_write(at(2)),
-            Some(at(1)),
-            "the reverse index retains the nested boundary instead of skipping to the outer write"
-        );
-
-        let high = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::register(1, 1),
-                src: Varnode::constant(7, 1),
-            }],
-            &arch,
-        );
-        let high_projection = MachineProjection::from_artifact(&high).expect("high projection");
-        assert_eq!(
-            exact_write(&high_projection, &high, 0),
-            MachineWriteProjection::Insert {
-                bit_offset: 8,
-                width_bits: 8,
-                carrier_width_bits: 64,
-            },
-            "a write into the middle of a register is a bit-field insert"
-        );
-
-        let zero_extend = artifact_with_arch(
-            [R2ILOp::IntZExt {
-                dst: Varnode::register(0, 8),
-                src: Varnode::register(0, 4),
-            }],
-            &arch,
-        );
-        let zero_projection =
-            MachineProjection::from_artifact(&zero_extend).expect("zero-extension projection");
-        assert_eq!(
-            exact_write(&zero_projection, &zero_extend, 0),
-            MachineWriteProjection::ZeroExtend {
-                from_width_bits: 32,
-                to_width_bits: 64,
-            }
-        );
-        assert_eq!(
-            zero_projection.write_dispositions().len(),
-            zero_extend.graph().insts.len()
-        );
-
-        let external_zero_extend = artifact_with_arch(
-            [R2ILOp::IntZExt {
-                dst: Varnode::register(0, 8),
-                src: Varnode::unique(0x80, 4),
-            }],
-            &arch,
-        );
-        let external_projection = MachineProjection::from_artifact(&external_zero_extend)
-            .expect("external zero-extension projection");
-        assert_eq!(
-            exact_write(&external_projection, &external_zero_extend, 0),
-            MachineWriteProjection::ZeroExtend {
-                from_width_bits: 32,
-                to_width_bits: 64,
-            }
-        );
-    }
-
-    #[test]
-    fn register_use_slices_are_relative_to_the_canonical_carrier() {
-        let arch = register_geometry_arch();
-        let artifact = artifact_with_arch(
-            [
-                R2ILOp::Copy {
-                    dst: Varnode::unique(0x10, 4),
-                    src: Varnode::register(0, 4),
-                },
-                R2ILOp::Copy {
-                    dst: Varnode::unique(0x20, 1),
-                    src: Varnode::register(1, 1),
-                },
-            ],
-            &arch,
-        );
-        let projection = MachineProjection::from_artifact(&artifact).expect("use projection");
-
-        assert_eq!(
-            exact_use(&projection, &artifact, 0, 0),
-            MachineUseSlice {
-                bit_offset: 0,
-                width_bits: 32,
-                carrier_width_bits: 64,
-                conversion: None,
-            }
-        );
-        // The narrow read normalises into an extracting operation, and an
-        // extracting operation reads its operand whole -- it renders the offset
-        // itself, so the read no longer carries it. Describing the offset in
-        // both places applied it twice.
-        assert_eq!(
-            exact_use(&projection, &artifact, 1, 0),
-            MachineUseSlice {
-                bit_offset: 0,
-                width_bits: 32,
-                carrier_width_bits: 64,
-                conversion: None,
-            }
-        );
-        projection
-            .validate_against(&artifact)
-            .expect("carrier-relative uses remain source-bound");
-
-        let mut corrupted = projection;
-        let high_inst = artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 1)
-            .expect("high-byte copy instruction");
-        let MachineUseDisposition::Exact(high_slice) =
-            &mut corrupted.use_dispositions[high_inst.0 as usize][0]
-        else {
-            panic!("high-byte use must be exact");
-        };
-        // A wrong offset, not the right one: the extracting operation now reads
-        // its operand whole, so zero is what this slice correctly holds and
-        // setting it to zero would corrupt nothing.
-        high_slice.bit_offset = 8;
-        assert_eq!(
-            corrupted.validate_against(&artifact),
-            Err(MachineBuildError::UseDispositionMismatch(UseSite {
-                inst: high_inst,
-                input_idx: 0,
-            }))
-        );
-
-        let mut corrupted =
-            MachineProjection::from_artifact(&artifact).expect("valid carrier-relative projection");
-        let MachineUseDisposition::Exact(high_slice) =
-            &mut corrupted.use_dispositions[high_inst.0 as usize][0]
-        else {
-            panic!("high-byte use must be exact");
-        };
-        high_slice.carrier_width_bits = 16;
-        assert_eq!(
-            corrupted.validate_against(&artifact),
-            Err(MachineBuildError::UseDispositionMismatch(UseSite {
-                inst: high_inst,
-                input_idx: 0,
-            }))
-        );
-    }
-
-    #[test]
-    fn big_endian_register_use_slice_keeps_upstream_byte_significance() {
-        let arch = big_endian_register_geometry_arch();
-        let artifact = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::unique(0x10, 1),
-                src: Varnode::register(6, 1),
-            }],
-            &arch,
-        );
-        let projection = MachineProjection::from_artifact(&artifact).expect("use projection");
-
-        assert_eq!(
-            exact_use(&projection, &artifact, 0, 0),
-            MachineUseSlice {
-                bit_offset: 8,
-                width_bits: 8,
-                carrier_width_bits: 64,
-                conversion: None,
-            }
-        );
-        projection
-            .validate_against(&artifact)
-            .expect("big-endian carrier-relative use remains source-bound");
-    }
-
-    #[test]
     fn register_use_slices_compose_nested_offsets_and_refuse_overflow() {
         let operation_relative = MachineUseSlice {
             bit_offset: 4,
@@ -6773,290 +5873,6 @@ mod tests {
             MachineUseDisposition::Refused(MachineUseRefusal::RegisterGeometry(
                 RegisterProjectionRefusal::NoContainingCarrier
             ))
-        );
-    }
-
-    #[test]
-    fn write_projection_refuses_missing_and_upstream_refused_geometry() {
-        let mut missing = register_geometry_arch();
-        missing.register_projections.clear();
-        let missing_artifact = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::register(0, 4),
-                src: Varnode::constant(1, 4),
-            }],
-            &missing,
-        );
-        let missing_projection =
-            MachineProjection::from_artifact(&missing_artifact).expect("typed refusal");
-        let missing_inst = missing_artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 0)
-            .expect("copy instruction");
-        assert_eq!(
-            missing_projection.write_disposition(missing_inst),
-            Some(&MachineWriteDisposition::Refused(
-                MachineWriteRefusal::MissingRegisterGeometry
-            ))
-        );
-
-        let mut refused = register_geometry_arch();
-        for projection in &mut refused.register_projections {
-            projection.disposition = RegisterProjectionDisposition::Refused {
-                reason: RegisterProjectionRefusal::MissingRegisterEndianness,
-            };
-        }
-        let refused_artifact = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::register(0, 4),
-                src: Varnode::constant(1, 4),
-            }],
-            &refused,
-        );
-        let refused_projection =
-            MachineProjection::from_artifact(&refused_artifact).expect("upstream refusal");
-        let refused_inst = refused_artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 0)
-            .expect("copy instruction");
-        assert_eq!(
-            refused_projection.write_disposition(refused_inst),
-            Some(&MachineWriteDisposition::Refused(
-                MachineWriteRefusal::RegisterGeometry(
-                    RegisterProjectionRefusal::MissingRegisterEndianness
-                )
-            ))
-        );
-
-        let mut malformed = refused;
-        malformed.register_projections[0].disposition = RegisterProjectionDisposition::Bound {
-            carrier: RegisterStorage { offset: 0, size: 8 },
-            slice: RegisterBitSlice {
-                lsb_bit_offset: 0,
-                size_bits: 32,
-            },
-        };
-        let malformed_artifact = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::register(0, 4),
-                src: Varnode::constant(1, 4),
-            }],
-            &malformed,
-        );
-        let malformed_projection =
-            MachineProjection::from_artifact(&malformed_artifact).expect("malformed refusal");
-        let malformed_inst = malformed_artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 0)
-            .expect("copy instruction");
-        assert_eq!(
-            malformed_projection.write_disposition(malformed_inst),
-            Some(&MachineWriteDisposition::Refused(
-                MachineWriteRefusal::MalformedRegisterGeometry
-            ))
-        );
-        assert_ne!(
-            missing_artifact.machine_context().semantic_identity_bytes(),
-            malformed_artifact
-                .machine_context()
-                .semantic_identity_bytes()
-        );
-    }
-
-    #[test]
-    fn write_projection_uses_source_certified_unnamed_vector_lanes() {
-        let q0 = RegisterStorage {
-            offset: 0x5000,
-            size: 16,
-        };
-        let s0 = RegisterStorage {
-            offset: 0x5000,
-            size: 4,
-        };
-        let q4 = RegisterStorage {
-            offset: 0x5040,
-            size: 16,
-        };
-        let b4 = RegisterStorage {
-            offset: 0x5040,
-            size: 1,
-        };
-        let mut arch = ArchSpec::new("aarch64-vector-lanes");
-        for (name, storage) in [("q0", q0), ("s0", s0), ("q4", q4), ("b4", b4)] {
-            arch.add_register(RegisterDef::new(name, storage.offset, storage.size));
-        }
-        arch.register_projections = vec![
-            RegisterProjection {
-                written: s0,
-                disposition: RegisterProjectionDisposition::Bound {
-                    carrier: q0,
-                    slice: RegisterBitSlice {
-                        lsb_bit_offset: 0,
-                        size_bits: 32,
-                    },
-                },
-            },
-            RegisterProjection {
-                written: q0,
-                disposition: RegisterProjectionDisposition::Bound {
-                    carrier: q0,
-                    slice: RegisterBitSlice {
-                        lsb_bit_offset: 0,
-                        size_bits: 128,
-                    },
-                },
-            },
-            RegisterProjection {
-                written: b4,
-                disposition: RegisterProjectionDisposition::Bound {
-                    carrier: q4,
-                    slice: RegisterBitSlice {
-                        lsb_bit_offset: 0,
-                        size_bits: 8,
-                    },
-                },
-            },
-            RegisterProjection {
-                written: q4,
-                disposition: RegisterProjectionDisposition::Bound {
-                    carrier: q4,
-                    slice: RegisterBitSlice {
-                        lsb_bit_offset: 0,
-                        size_bits: 128,
-                    },
-                },
-            },
-        ];
-        let artifact = artifact_with_arch(
-            [
-                R2ILOp::IntAdd {
-                    dst: Varnode::register(0x5004, 4),
-                    a: Varnode::unique(0x10, 4),
-                    b: Varnode::unique(0x14, 4),
-                },
-                R2ILOp::IntAnd {
-                    dst: Varnode::register(0x5041, 1),
-                    a: Varnode::unique(0x18, 1),
-                    b: Varnode::unique(0x19, 1),
-                },
-            ],
-            &arch,
-        );
-        let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
-        let word_inst = artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 0)
-            .expect("word-lane instruction");
-        let byte_inst = artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 1)
-            .expect("byte-lane instruction");
-        assert_eq!(
-            projection.write_disposition(word_inst),
-            Some(&MachineWriteDisposition::Exact(
-                MachineWriteProjection::Insert {
-                    bit_offset: 32,
-                    width_bits: 32,
-                    carrier_width_bits: 128,
-                }
-            ))
-        );
-        assert_eq!(
-            projection.write_disposition(byte_inst),
-            Some(&MachineWriteDisposition::Exact(
-                MachineWriteProjection::Insert {
-                    bit_offset: 8,
-                    width_bits: 8,
-                    carrier_width_bits: 128,
-                }
-            ))
-        );
-    }
-
-    /// The other half of the lane rule, and the half that keeps it sound.
-    ///
-    /// A partial write preserves the rest of its carrier, and that preservation
-    /// is real as soon as something reads the carrier. Here the byte written at
-    /// offset eight is followed by a read of the whole eight-byte register, so
-    /// the write must stay an insert: rendering it as a lane would assign the
-    /// whole object from one byte and lose the other seven.
-    #[test]
-    fn a_partial_write_read_through_its_carrier_stays_an_insert() {
-        let arch = register_geometry_arch();
-        let artifact = artifact_with_arch(
-            [
-                R2ILOp::Copy {
-                    dst: Varnode::register(1, 1),
-                    src: Varnode::constant(7, 1),
-                },
-                R2ILOp::Copy {
-                    dst: Varnode::register(16, 8),
-                    src: Varnode::register(0, 8),
-                },
-            ],
-            &arch,
-        );
-        let projection = MachineProjection::from_artifact(&artifact).expect("projection");
-        assert_eq!(
-            exact_write(&projection, &artifact, 0),
-            MachineWriteProjection::Insert {
-                bit_offset: 8,
-                width_bits: 8,
-                carrier_width_bits: 64,
-            },
-            "the carrier is read whole, so the write's preservation is observable"
-        );
-    }
-
-    #[test]
-    fn corrupted_write_disposition_is_rejected() {
-        let arch = register_geometry_arch();
-        let artifact = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::register(0, 8),
-                src: Varnode::constant(7, 8),
-            }],
-            &arch,
-        );
-        let mut projection = MachineProjection::from_artifact(&artifact).expect("projection");
-        let inst = artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 0)
-            .expect("copy instruction");
-        projection.write_dispositions[inst.0 as usize] = Some(MachineWriteDisposition::Exact(
-            MachineWriteProjection::Insert {
-                bit_offset: 0,
-                width_bits: 32,
-                carrier_width_bits: 64,
-            },
-        ));
-        assert_eq!(
-            projection.validate_against(&artifact),
-            Err(MachineBuildError::WriteDispositionMismatch(inst))
-        );
-
-        let artifact = artifact_with_arch(
-            [R2ILOp::Copy {
-                dst: Varnode::register(1, 1),
-                src: Varnode::constant(7, 1),
-            }],
-            &arch,
-        );
-        let mut projection = MachineProjection::from_artifact(&artifact).expect("projection");
-        let inst = artifact
-            .graph()
-            .inst_id_for_op_site(0x1000, 0)
-            .expect("copy instruction");
-        projection.write_dispositions[inst.0 as usize] = Some(MachineWriteDisposition::Exact(
-            MachineWriteProjection::Insert {
-                bit_offset: 8,
-                width_bits: 8,
-                carrier_width_bits: 16,
-            },
-        ));
-        assert_eq!(
-            projection.validate_against(&artifact),
-            Err(MachineBuildError::WriteDispositionMismatch(inst))
         );
     }
 
@@ -7301,6 +6117,657 @@ mod tests {
         assert_eq!(
             projection.validate_against(&artifact),
             Err(MachineBuildError::TopologyMismatch)
+        );
+    }
+
+    /// Every register value is its family's root, so its geometry is the
+    /// carrier itself (doc/adr-register-identity.md).
+    #[test]
+    fn value_geometry_is_dense_and_every_register_value_is_its_root() {
+        let arch = register_geometry_arch();
+        // The whole carrier is used, so it is this function's root.
+        let artifact = artifact_with_arch(
+            [
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x8, 8),
+                    src: Varnode::register(0, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x10, 1),
+                    src: Varnode::register(1, 1),
+                },
+                R2ILOp::IntAdd {
+                    dst: Varnode::register(0, 4),
+                    a: Varnode::unique(0x20, 4),
+                    b: Varnode::constant(1, 4),
+                },
+            ],
+            &arch,
+        );
+        let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
+
+        assert_eq!(
+            projection.value_geometries().len(),
+            artifact.graph().values.len()
+        );
+        let rax = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: 0,
+            size: 8,
+        };
+        let mut register_values = 0;
+        for (index, value) in artifact.graph().values.iter().enumerate() {
+            assert_eq!(value.id.0 as usize, index);
+            assert_eq!(
+                projection.value_geometry(value.id),
+                projection.value_geometries().get(index)
+            );
+            match value.canonical_storage {
+                Some(storage) if storage.space == CanonicalStorageSpace::Register => {
+                    assert_eq!(storage, rax, "the lane read and write both name the root");
+                    register_values += 1;
+                    assert_eq!(
+                        projection.value_geometry(value.id),
+                        Some(&MachineValueGeometryDisposition::ExactRegister(
+                            MachineRegisterValueGeometry {
+                                carrier: rax,
+                                bit_offset: 0,
+                                value_width_bits: 64,
+                                carrier_width_bits: 64,
+                            }
+                        ))
+                    );
+                }
+                _ => assert!(matches!(
+                    projection.value_geometry(value.id),
+                    Some(MachineValueGeometryDisposition::Direct(_))
+                )),
+            }
+        }
+        assert!(register_values >= 2, "the entry root and the inserted root");
+        assert_eq!(
+            projection.value_geometry(ValueId(artifact.graph().values.len() as u32)),
+            None
+        );
+        let MachineValueGeometryDisposition::ExactRegister(geometry) =
+            value_geometry_for_storage(&projection, &artifact, rax)
+        else {
+            panic!("the root has exact register geometry");
+        };
+        assert_eq!(geometry.carrier_storage(), rax);
+        assert_eq!(geometry.carrier_location(), rax.location());
+        projection
+            .validate_against(&artifact)
+            .expect("every dense geometry remains source-bound");
+
+        let mut corrupted = projection;
+        corrupted.value_geometries[0] =
+            MachineValueGeometryDisposition::Refused(MachineValueGeometryRefusal::InvalidBitRange);
+        assert_eq!(
+            corrupted.validate_against(&artifact),
+            Err(MachineBuildError::TopologyMismatch)
+        );
+    }
+
+    #[test]
+    fn value_geometry_ignores_register_names_and_definition_order() {
+        let original = register_geometry_arch();
+        let mut renamed = register_geometry_arch();
+        for register in &mut renamed.registers {
+            register.name = match (register.offset, register.size) {
+                (0, 4) => "narrow_accumulator".to_string(),
+                (0, 8) => "wide_accumulator".to_string(),
+                (1, 1) => "upper_low_byte".to_string(),
+                _ => unreachable!("geometry fixture has three registers"),
+            };
+        }
+        renamed.registers.reverse();
+        let root = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: 0,
+            size: 8,
+        };
+        for (offset, size) in [(1, 1), (0, 4)] {
+            // The whole carrier is used, so it is this function's root.
+            let ops = || {
+                [
+                    R2ILOp::Copy {
+                        dst: Varnode::unique(0x8, 8),
+                        src: Varnode::register(0, 8),
+                    },
+                    R2ILOp::Copy {
+                        dst: Varnode::unique(0x10, size),
+                        src: Varnode::register(offset, size),
+                    },
+                ]
+            };
+            let original_artifact = artifact_with_arch(ops(), &original);
+            let renamed_artifact = artifact_with_arch(ops(), &renamed);
+            let original_projection =
+                MachineProjection::from_artifact(&original_artifact).expect("original projection");
+            let renamed_projection =
+                MachineProjection::from_artifact(&renamed_artifact).expect("renamed projection");
+            assert_eq!(
+                value_geometry_for_storage(&original_projection, &original_artifact, root),
+                value_geometry_for_storage(&renamed_projection, &renamed_artifact, root)
+            );
+            let name_of = |artifact: &SsaArtifact| {
+                artifact
+                    .graph()
+                    .values
+                    .iter()
+                    .find(|value| value.canonical_storage == Some(root))
+                    .expect("root register value")
+                    .var
+                    .name
+                    .clone()
+            };
+            assert_ne!(name_of(&original_artifact), name_of(&renamed_artifact));
+        }
+    }
+
+    #[test]
+    fn value_geometry_preserves_register_geometry_refusals() {
+        let root = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: 0,
+            size: 8,
+        };
+        let read = |arch: &ArchSpec| {
+            let artifact = artifact_with_arch(
+                [
+                    R2ILOp::Copy {
+                        dst: Varnode::unique(0x8, 8),
+                        src: Varnode::register(0, 8),
+                    },
+                    R2ILOp::Copy {
+                        dst: Varnode::unique(0x10, 1),
+                        src: Varnode::register(1, 1),
+                    },
+                ],
+                arch,
+            );
+            let projection = MachineProjection::from_artifact(&artifact).expect("typed geometry");
+            value_geometry_for_storage(&projection, &artifact, root)
+        };
+
+        let mut missing = register_geometry_arch();
+        missing.register_projections.clear();
+        assert_eq!(
+            read(&missing),
+            MachineValueGeometryDisposition::Refused(
+                MachineValueGeometryRefusal::MissingRegisterGeometry
+            )
+        );
+
+        let mut refused = register_geometry_arch();
+        for projection in &mut refused.register_projections {
+            projection.disposition = RegisterProjectionDisposition::Refused {
+                reason: RegisterProjectionRefusal::MissingRegisterEndianness,
+            };
+        }
+        assert_eq!(
+            read(&refused),
+            MachineValueGeometryDisposition::Refused(
+                MachineValueGeometryRefusal::RegisterGeometry(
+                    RegisterProjectionRefusal::MissingRegisterEndianness
+                )
+            )
+        );
+    }
+
+    /// A lane write defines its root whole, from the root it keeps and the
+    /// lane it inserts; only the lift's own extension of a lane into the root
+    /// is a zero-extending write.
+    #[test]
+    fn dense_write_projections_cover_full_and_zero_extension() {
+        let arch = register_geometry_arch();
+        let full = artifact_with_arch(
+            [R2ILOp::Copy {
+                dst: Varnode::register(0, 8),
+                src: Varnode::constant(7, 8),
+            }],
+            &arch,
+        );
+        let full_projection = MachineProjection::from_artifact(&full).expect("full projection");
+        assert_eq!(
+            exact_write(&full_projection, &full, 0),
+            MachineWriteProjection::Full
+        );
+
+        // `Copy tmp = 7; RAX_1 = Insert(RAX_0, tmp, 0)`: the insert is the
+        // root's definition. The trailing whole read is what makes the
+        // carrier this function's root rather than the lane itself.
+        let low = artifact_with_arch(
+            [
+                R2ILOp::Copy {
+                    dst: Varnode::register(0, 4),
+                    src: Varnode::constant(7, 4),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x40, 8),
+                    src: Varnode::register(0, 8),
+                },
+            ],
+            &arch,
+        );
+        let low_projection = MachineProjection::from_artifact(&low).expect("low projection");
+        assert_eq!(
+            exact_write(&low_projection, &low, 1),
+            MachineWriteProjection::Full
+        );
+        let inserted = low
+            .graph()
+            .inst_id_for_op_site(0x1000, 1)
+            .expect("insert instruction");
+        assert!(matches!(
+            low.graph().inst(inserted).map(|inst| &inst.payload),
+            Some(InstPayload::Op(SSAOp::Insert { .. }))
+        ));
+
+        // `mov ah, 7`: a lane in the middle of the register is the same insert
+        // at its own position.
+        let high = artifact_with_arch(
+            [
+                R2ILOp::Copy {
+                    dst: Varnode::register(1, 1),
+                    src: Varnode::constant(7, 1),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x40, 8),
+                    src: Varnode::register(0, 8),
+                },
+            ],
+            &arch,
+        );
+        let high_projection = MachineProjection::from_artifact(&high).expect("high projection");
+        assert_eq!(
+            exact_write(&high_projection, &high, 1),
+            MachineWriteProjection::Full
+        );
+        let root = high
+            .graph()
+            .inst_id_for_op_site(0x1000, 1)
+            .and_then(|inst| high.graph().inst(inst))
+            .and_then(|inst| inst.output)
+            .expect("inserted root");
+        let entity = high_projection
+            .entity_for_output(root)
+            .expect("the root's machine entity");
+        let Some(MachineExpr {
+            kind:
+                MachineExprKind::InsertLane {
+                    position,
+                    lsb_bits,
+                    width_bits,
+                    ..
+                },
+            ..
+        }) = high_projection.expr(entity.root())
+        else {
+            panic!("the root is defined by a lane insert");
+        };
+        assert_eq!((*lsb_bits, *width_bits), (8, 8));
+        assert!(high_projection.expr(*position).is_some());
+
+        // `EAX = EAX + 7` and `RAX = zext(EAX)` as two instructions: the
+        // first inserts its lane, the second redefines the root by extension.
+        // Within one instruction the lift's own extension supersedes the
+        // insert; the genuine-lift tests state that case.
+        let clearing_low = artifact_with_arch(
+            [
+                R2ILOp::IntAdd {
+                    dst: Varnode::register(0, 4),
+                    a: Varnode::register(0, 4),
+                    b: Varnode::constant(7, 4),
+                },
+                R2ILOp::IntZExt {
+                    dst: Varnode::register(0, 8),
+                    src: Varnode::register(0, 4),
+                },
+            ],
+            &arch,
+        );
+        let clearing_projection =
+            MachineProjection::from_artifact(&clearing_low).expect("clearing projection");
+        let ops = &clearing_low
+            .function()
+            .get_block(0x1000)
+            .expect("block")
+            .ops;
+        let extension = ops
+            .iter()
+            .position(|op| matches!(op, SSAOp::IntZExt { .. }))
+            .expect("the lift's extension");
+        assert!(
+            ops.iter().any(|op| matches!(op, SSAOp::Insert { .. })),
+            "a lane written by one instruction is inserted into its root: {ops:?}"
+        );
+        assert_eq!(
+            exact_write(&clearing_projection, &clearing_low, extension),
+            MachineWriteProjection::ZeroExtend {
+                from_width_bits: 32,
+                to_width_bits: 64,
+            }
+        );
+        assert_eq!(
+            clearing_projection.write_dispositions().len(),
+            clearing_low.graph().insts.len()
+        );
+
+        let external_zero_extend = artifact_with_arch(
+            [R2ILOp::IntZExt {
+                dst: Varnode::register(0, 8),
+                src: Varnode::unique(0x80, 4),
+            }],
+            &arch,
+        );
+        let external_projection = MachineProjection::from_artifact(&external_zero_extend)
+            .expect("external zero-extension projection");
+        assert_eq!(
+            exact_write(&external_projection, &external_zero_extend, 0),
+            MachineWriteProjection::ZeroExtend {
+                from_width_bits: 32,
+                to_width_bits: 64,
+            }
+        );
+    }
+
+    /// A register is read whole: the lane a narrow read wants is the
+    /// `Subpiece` the read became, and its operand is the root.
+    #[test]
+    fn register_uses_read_the_root_whole() {
+        let arch = register_geometry_arch();
+        // The whole carrier is used too, so it is this function's root.
+        let artifact = artifact_with_arch(
+            [
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x8, 8),
+                    src: Varnode::register(0, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x10, 4),
+                    src: Varnode::register(0, 4),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x20, 1),
+                    src: Varnode::register(1, 1),
+                },
+            ],
+            &arch,
+        );
+        let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+        let subpieces = ops
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| match op {
+                SSAOp::Subpiece { offset, dst, .. } => Some((index, *offset, dst.size)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(subpieces.len(), 2, "{ops:?}");
+        assert_eq!((subpieces[0].1, subpieces[0].2), (0, 4));
+        assert_eq!((subpieces[1].1, subpieces[1].2), (1, 1));
+        let projection = MachineProjection::from_artifact(&artifact).expect("use projection");
+        for (index, _, _) in &subpieces {
+            assert_eq!(
+                exact_use(&projection, &artifact, *index, 0),
+                MachineUseSlice {
+                    bit_offset: 0,
+                    width_bits: 64,
+                    carrier_width_bits: 64,
+                    conversion: None,
+                }
+            );
+        }
+        projection
+            .validate_against(&artifact)
+            .expect("whole reads remain source-bound");
+
+        let read = artifact
+            .graph()
+            .inst_id_for_op_site(0x1000, subpieces[1].0)
+            .expect("high-byte read");
+        for corrupt in [
+            |slice: &mut MachineUseSlice| slice.bit_offset = 8,
+            |slice: &mut MachineUseSlice| slice.carrier_width_bits = 16,
+        ] {
+            let mut corrupted =
+                MachineProjection::from_artifact(&artifact).expect("valid projection");
+            let MachineUseDisposition::Exact(slice) =
+                &mut corrupted.use_dispositions[read.0 as usize][0]
+            else {
+                panic!("the root read must be exact");
+            };
+            corrupt(slice);
+            assert_eq!(
+                corrupted.validate_against(&artifact),
+                Err(MachineBuildError::UseDispositionMismatch(UseSite {
+                    inst: read,
+                    input_idx: 0,
+                }))
+            );
+        }
+    }
+
+    /// On a big-endian register file the lane at the highest address is the
+    /// least significant, so its `Subpiece` offset counts from that end.
+    #[test]
+    fn big_endian_lane_positions_count_from_the_least_significant_byte() {
+        let arch = big_endian_register_geometry_arch();
+        let artifact = artifact_with_arch(
+            [
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x8, 8),
+                    src: Varnode::register(0, 8),
+                },
+                R2ILOp::Copy {
+                    dst: Varnode::unique(0x10, 1),
+                    src: Varnode::register(6, 1),
+                },
+            ],
+            &arch,
+        );
+        let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                SSAOp::Subpiece { offset: 1, dst, .. } if dst.size == 1
+            )),
+            "byte 6 of 8 is one byte above the least significant: {ops:?}"
+        );
+        let projection = MachineProjection::from_artifact(&artifact).expect("use projection");
+        assert_eq!(
+            exact_use(&projection, &artifact, 0, 0),
+            MachineUseSlice {
+                bit_offset: 0,
+                width_bits: 64,
+                carrier_width_bits: 64,
+                conversion: None,
+            }
+        );
+        projection
+            .validate_against(&artifact)
+            .expect("big-endian root read remains source-bound");
+    }
+
+    #[test]
+    fn write_projection_refuses_missing_and_upstream_refused_geometry() {
+        let write = || {
+            [R2ILOp::Copy {
+                dst: Varnode::register(0, 8),
+                src: Varnode::constant(1, 8),
+            }]
+        };
+        let mut missing = register_geometry_arch();
+        missing.register_projections.clear();
+        let missing_artifact = artifact_with_arch(write(), &missing);
+        let missing_projection =
+            MachineProjection::from_artifact(&missing_artifact).expect("typed refusal");
+        let missing_inst = missing_artifact
+            .graph()
+            .inst_id_for_op_site(0x1000, 0)
+            .expect("copy instruction");
+        assert_eq!(
+            missing_projection.write_disposition(missing_inst),
+            Some(&MachineWriteDisposition::Refused(
+                MachineWriteRefusal::MissingRegisterGeometry
+            ))
+        );
+
+        let mut refused = register_geometry_arch();
+        for projection in &mut refused.register_projections {
+            projection.disposition = RegisterProjectionDisposition::Refused {
+                reason: RegisterProjectionRefusal::MissingRegisterEndianness,
+            };
+        }
+        let refused_artifact = artifact_with_arch(write(), &refused);
+        let refused_projection =
+            MachineProjection::from_artifact(&refused_artifact).expect("upstream refusal");
+        let refused_inst = refused_artifact
+            .graph()
+            .inst_id_for_op_site(0x1000, 0)
+            .expect("copy instruction");
+        assert_eq!(
+            refused_projection.write_disposition(refused_inst),
+            Some(&MachineWriteDisposition::Refused(
+                MachineWriteRefusal::RegisterGeometry(
+                    RegisterProjectionRefusal::MissingRegisterEndianness
+                )
+            ))
+        );
+
+        let mut malformed = refused;
+        malformed.register_projections[0].disposition = RegisterProjectionDisposition::Bound {
+            carrier: RegisterStorage { offset: 0, size: 8 },
+            slice: RegisterBitSlice {
+                lsb_bit_offset: 0,
+                size_bits: 32,
+            },
+        };
+        let malformed_artifact = artifact_with_arch(write(), &malformed);
+        let malformed_projection =
+            MachineProjection::from_artifact(&malformed_artifact).expect("malformed refusal");
+        let malformed_inst = malformed_artifact
+            .graph()
+            .inst_id_for_op_site(0x1000, 0)
+            .expect("copy instruction");
+        assert_eq!(
+            malformed_projection.write_disposition(malformed_inst),
+            Some(&MachineWriteDisposition::Refused(
+                MachineWriteRefusal::MalformedRegisterGeometry
+            ))
+        );
+        assert_ne!(
+            missing_artifact.machine_context().semantic_identity_bytes(),
+            malformed_artifact
+                .machine_context()
+                .semantic_identity_bytes()
+        );
+    }
+
+    /// A lane the architecture does not name still belongs to the register
+    /// containing it, so writing it inserts into that register's root.
+    #[test]
+    fn unnamed_vector_lanes_insert_into_their_root() {
+        let q0 = RegisterStorage {
+            offset: 0x5000,
+            size: 16,
+        };
+        let s0 = RegisterStorage {
+            offset: 0x5000,
+            size: 4,
+        };
+        let q4 = RegisterStorage {
+            offset: 0x5040,
+            size: 16,
+        };
+        let b4 = RegisterStorage {
+            offset: 0x5040,
+            size: 1,
+        };
+        let mut arch = ArchSpec::new("aarch64-vector-lanes");
+        for (name, storage) in [("q0", q0), ("s0", s0), ("q4", q4), ("b4", b4)] {
+            arch.add_register(RegisterDef::new(name, storage.offset, storage.size));
+        }
+        let full = |storage: RegisterStorage| RegisterProjection {
+            written: storage,
+            disposition: RegisterProjectionDisposition::Bound {
+                carrier: storage,
+                slice: RegisterBitSlice {
+                    lsb_bit_offset: 0,
+                    size_bits: u64::from(storage.size) * 8,
+                },
+            },
+        };
+        arch.register_projections = vec![full(q0), full(q4)];
+        arch.register_projections
+            .sort_by_key(|projection| (projection.written.offset, projection.written.size));
+        let artifact = artifact_with_arch(
+            [
+                R2ILOp::IntAdd {
+                    dst: Varnode::register(0x5004, 4),
+                    a: Varnode::unique(0x10, 4),
+                    b: Varnode::unique(0x14, 4),
+                },
+                R2ILOp::IntAnd {
+                    dst: Varnode::register(0x5041, 1),
+                    a: Varnode::unique(0x18, 1),
+                    b: Varnode::unique(0x19, 1),
+                },
+            ],
+            &arch,
+        );
+        let projection = MachineProjection::from_artifact(&artifact).expect("machine projection");
+        let ops = &artifact.function().get_block(0x1000).expect("block").ops;
+        let inserts = ops
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| match op {
+                SSAOp::Insert { dst, position, .. } => {
+                    Some((index, dst.size, position.constant_bits()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(inserts.len(), 2, "{ops:?}");
+        assert_eq!((inserts[0].1, inserts[0].2), (16, Some(32)));
+        assert_eq!((inserts[1].1, inserts[1].2), (16, Some(8)));
+        for (index, _, _) in &inserts {
+            assert_eq!(
+                exact_write(&projection, &artifact, *index),
+                MachineWriteProjection::Full
+            );
+        }
+        projection
+            .validate_against(&artifact)
+            .expect("unnamed lane inserts remain source-bound");
+    }
+
+    #[test]
+    fn corrupted_write_disposition_is_rejected() {
+        let arch = register_geometry_arch();
+        let artifact = artifact_with_arch(
+            [R2ILOp::Copy {
+                dst: Varnode::register(0, 8),
+                src: Varnode::constant(7, 8),
+            }],
+            &arch,
+        );
+        let mut projection = MachineProjection::from_artifact(&artifact).expect("projection");
+        let inst = artifact
+            .graph()
+            .inst_id_for_op_site(0x1000, 0)
+            .expect("copy instruction");
+        projection.write_dispositions[inst.0 as usize] = Some(MachineWriteDisposition::Exact(
+            MachineWriteProjection::ZeroExtend {
+                from_width_bits: 32,
+                to_width_bits: 64,
+            },
+        ));
+        assert_eq!(
+            projection.validate_against(&artifact),
+            Err(MachineBuildError::WriteDispositionMismatch(inst))
         );
     }
 }

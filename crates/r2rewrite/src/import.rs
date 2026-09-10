@@ -528,7 +528,10 @@ impl Importer<'_> {
                     substituted,
                 ))
             }
+            // A lane insert keeps its statement: it is the root's definition,
+            // not an expression to fold into a reader.
             MachineExprKind::Phi { .. }
+            | MachineExprKind::InsertLane { .. }
             | MachineExprKind::PopulationCount { .. }
             | MachineExprKind::UnsignedDivide { .. }
             | MachineExprKind::UnsignedRemainder { .. } => None,

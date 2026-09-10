@@ -4571,7 +4571,11 @@ mod tests {
         );
         let abi = prepared.abi().expect("exact ABI");
         let block = prepared.function().get_block(0x4300).expect("block");
-        let SSAOp::Store { addr, val, .. } = &block.ops[1] else {
+        let Some(SSAOp::Store { addr, val, .. }) = block
+            .ops
+            .iter()
+            .find(|op| matches!(op, SSAOp::Store { .. }))
+        else {
             panic!("expected store");
         };
         let addr_id = prepared
@@ -4672,7 +4676,11 @@ mod tests {
         );
         let abi = prepared.abi().expect("exact ABI");
         let block = prepared.function().get_block(0x4310).expect("block");
-        let SSAOp::Store { addr, val, .. } = &block.ops[1] else {
+        let Some(SSAOp::Store { addr, val, .. }) = block
+            .ops
+            .iter()
+            .find(|op| matches!(op, SSAOp::Store { .. }))
+        else {
             panic!("expected store");
         };
         let addr_id = prepared

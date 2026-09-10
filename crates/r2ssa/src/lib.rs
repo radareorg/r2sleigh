@@ -92,7 +92,7 @@ pub use function::{
     FunctionPrepareMode, GenuineNativeInstructionSpan, PhiNode, RegisterFamilyInfo,
     RegisterFamilySlot, RegisterIdentityCensus, SSABlock as FunctionSSABlock, SSAFunction,
     SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
-    StackAddressBase, StackAddressRoot, SwitchInfo, TrustedSsaArtifact, family_slot_contains,
+    StackAddressBase, StackAddressRoot, SwitchInfo, TrustedSsaArtifact,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -163,18 +163,16 @@ pub use semantic::{
     ObjectSpaceId, ParameterObjectKey, PredicateFact, PredicateFacts, PredicateId,
     PreparedAssumptionBinding, PreparedAssumptionBindingKind, PreparedFunctionCertificates,
     PreparedFunctionFacts, PreparedProofFailure, ProofNodeId, RelativeMemoryAddress, ReturnCarrier,
-    ReturnValueCertificate, ReturnValueOverlay, SOURCE_RETURN_REGISTER_COMPOSITION_SCHEMA_VERSION,
-    SemanticId, SourceBoundaryFacts, SourceCallArgumentFact, SourceCallArgumentValue,
-    SourceCallBoundaryFact, SourceFormalParameterFact, SourceReturnAddressFact,
-    SourceReturnBoundaryFact, SourceReturnRegisterCompositionFact,
-    SourceReturnRegisterDefinitionFact, SourceReturnRegisterOverlayFact,
-    SourceReturnStackPointerFact, StackArrayElementCertificate, StackArrayElementIndex,
-    StackArrayLayoutCertificate, StackArrayLayoutDisposition, StackArrayLayoutRefusal,
-    StackFrameRoundTripCertificate, StackGeometryCertificate, StackObjectKey, StackSlotCertificate,
-    StructuredAccessId, StructuredDataflowFacts, StructuredLoopFact, StructuredLoopKind,
-    StructuredMemoryAccessFact, StructuredRecursiveCallFact, SwitchCertificate,
-    SwitchPredicateFact, ValueOwner, VariadicCallsiteArgumentCountEvidence,
-    VariadicCallsiteArgumentCountRefusal, VariadicCallsiteArgumentCountSource,
+    ReturnValueCertificate, SemanticId, SourceBoundaryFacts, SourceCallArgumentFact,
+    SourceCallArgumentValue, SourceCallBoundaryFact, SourceFormalParameterFact,
+    SourceReturnAddressFact, SourceReturnBoundaryFact, SourceReturnStackPointerFact,
+    StackArrayElementCertificate, StackArrayElementIndex, StackArrayLayoutCertificate,
+    StackArrayLayoutDisposition, StackArrayLayoutRefusal, StackFrameRoundTripCertificate,
+    StackGeometryCertificate, StackObjectKey, StackSlotCertificate, StructuredAccessId,
+    StructuredDataflowFacts, StructuredLoopFact, StructuredLoopKind, StructuredMemoryAccessFact,
+    StructuredRecursiveCallFact, SwitchCertificate, SwitchPredicateFact, ValueOwner,
+    VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal,
+    VariadicCallsiteArgumentCountSource,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};

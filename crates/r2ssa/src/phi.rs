@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::cfg::CFG;
 use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::domtree::DomTree;
+use crate::function::{RegisterFamilyInfo, RegisterFamilySlot};
 use crate::naming::{RegisterNameMap, varnode_to_name};
 use crate::var::{CanonicalStorageId, SSAVar};
 
@@ -39,6 +40,35 @@ impl RenameIdentity {
             varnode_to_name(varnode, reg_names),
             CanonicalStorageId::from_varnode(varnode),
         )
+    }
+
+    /// The identity a varnode is renamed under: its register family's root
+    /// when the architecture's geometry puts it inside a wider register, and
+    /// the exact varnode otherwise (doc/adr-register-identity.md §2).
+    pub fn for_varnode(
+        varnode: &r2il::Varnode,
+        reg_names: Option<&RegisterNameMap>,
+        families: Option<&RegisterFamilyInfo>,
+    ) -> Self {
+        match register_root_slot(varnode, families) {
+            Some(root) => Self::for_root_slot(root, reg_names),
+            None => Self::from_varnode(varnode, reg_names),
+        }
+    }
+
+    /// The root's identity is the one its own varnode would get, so a whole
+    /// read of the register and a lane read of it name one value.
+    pub(crate) fn for_root_slot(
+        root: RegisterFamilySlot,
+        reg_names: Option<&RegisterNameMap>,
+    ) -> Self {
+        let varnode = r2il::Varnode {
+            space: r2il::SpaceId::Register,
+            offset: root.offset,
+            size: root.width,
+            meta: None,
+        };
+        Self::from_varnode(&varnode, reg_names)
     }
 
     pub fn synthetic(name: impl Into<String>, size: u32) -> Self {
@@ -163,10 +193,23 @@ impl PhiPlacement {
     }
 }
 
+/// The root slot a register varnode lies inside, when it is a lane of a wider
+/// register the architecture declares.
+pub(crate) fn register_root_slot(
+    varnode: &r2il::Varnode,
+    families: Option<&RegisterFamilyInfo>,
+) -> Option<RegisterFamilySlot> {
+    if !matches!(varnode.space, r2il::SpaceId::Register) {
+        return None;
+    }
+    families?.root_slot_over(varnode.offset, varnode.size)
+}
+
 /// Collect definitions and storage while polling the block/operation scan.
 pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + ?Sized>(
     cfg: &CFG,
     reg_names: Option<&RegisterNameMap>,
+    families: Option<&RegisterFamilyInfo>,
     control: &C,
 ) -> Result<DefinitionCollection, SsaExecutionStopReason> {
     control.poll()?;
@@ -182,13 +225,13 @@ pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + 
             control.poll()?;
             for varnode in op.inputs() {
                 if !matches!(varnode.space, r2il::SpaceId::Const) {
-                    let identity = RenameIdentity::from_varnode(varnode, reg_names);
+                    let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
                     defs.entry(identity.clone()).or_default();
                     storage_by_identity.insert(identity.clone(), identity.storage);
                 }
             }
             if let Some(varnode) = get_op_output_varnode(op) {
-                let identity = RenameIdentity::from_varnode(varnode, reg_names);
+                let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
                 defs.entry(identity.clone()).or_default().insert(block.addr);
                 storage_by_identity.insert(identity.clone(), identity.storage);
             }
@@ -208,7 +251,13 @@ pub fn call_boundary_identities(
     defs: &DefinitionSitesByIdentity,
     reg: &crate::rename::CallBoundaryDef,
     reg_names: Option<&RegisterNameMap>,
+    families: Option<&RegisterFamilyInfo>,
 ) -> BTreeSet<RenameIdentity> {
+    // A convention register is one family: whatever width it is named at,
+    // the identity it defines or reads is the family's root.
+    if let Some(root) = families.and_then(|families| families.widest_slot_for_name(&reg.name)) {
+        return BTreeSet::from([RenameIdentity::for_root_slot(root, reg_names)]);
+    }
     let needle = reg.name.to_ascii_lowercase();
     let mut identities = defs
         .keys()
@@ -249,6 +298,7 @@ pub fn add_call_boundary_def_sites(
     cfg: &CFG,
     call_boundaries: &crate::rename::CallBoundaryConfig,
     reg_names: Option<&RegisterNameMap>,
+    families: Option<&RegisterFamilyInfo>,
     defs: &mut DefinitionSitesByIdentity,
     storage_by_identity: &mut CanonicalStorageByIdentity,
 ) {
@@ -259,7 +309,7 @@ pub fn add_call_boundary_def_sites(
         .defined_regs
         .iter()
         .map(|reg| {
-            let identities = call_boundary_identities(defs, reg, reg_names);
+            let identities = call_boundary_identities(defs, reg, reg_names, families);
             identities
                 .into_iter()
                 .filter(|identity| defs.contains_key(identity))
@@ -301,11 +351,12 @@ pub fn live_in_by_block(
     cfg: &CFG,
     call_boundaries: &crate::rename::CallBoundaryConfig,
     reg_names: Option<&RegisterNameMap>,
+    families: Option<&RegisterFamilyInfo>,
     defs: &DefinitionSitesByIdentity,
 ) -> HashMap<u64, BTreeSet<RenameIdentity>> {
     let resolve = |regs: &[crate::rename::CallBoundaryDef]| {
         regs.iter()
-            .flat_map(|reg| call_boundary_identities(defs, reg, reg_names))
+            .flat_map(|reg| call_boundary_identities(defs, reg, reg_names, families))
             .filter(|identity| defs.contains_key(identity))
             .collect::<BTreeSet<_>>()
     };
@@ -340,12 +391,16 @@ pub fn live_in_by_block(
                     r2il::R2ILOp::Return { .. } => live.extend(returned.iter().cloned()),
                     _ => {}
                 }
-                if let Some(varnode) = get_op_output_varnode(op) {
-                    live.remove(&RenameIdentity::from_varnode(varnode, reg_names));
+                // A lane write keeps the rest of its root alive, so only a
+                // write of the whole identity kills it.
+                if let Some(varnode) = get_op_output_varnode(op)
+                    && register_root_slot(varnode, families).is_none()
+                {
+                    live.remove(&RenameIdentity::for_varnode(varnode, reg_names, families));
                 }
                 for varnode in op.inputs() {
                     if !matches!(varnode.space, r2il::SpaceId::Const) {
-                        live.insert(RenameIdentity::from_varnode(varnode, reg_names));
+                        live.insert(RenameIdentity::for_varnode(varnode, reg_names, families));
                     }
                 }
             }

@@ -3,7 +3,7 @@
 //! This module does not decide which bits a use reads. It only translates the
 //! exact [`r2ssa::MachineUseSlice`] selected upstream into a C expression.
 
-use crate::ast::{BinaryOp, CExpr, CType, UnaryOp};
+use crate::ast::{BinaryOp, CExpr, CType};
 use r2rewrite::CValue;
 use r2ssa::{MachineCastKind, MachineUseSlice, MachineWriteProjection};
 
@@ -16,18 +16,13 @@ pub(super) enum MachineUseProjectionError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MachineWriteProjectionError {
     UnsupportedIntegerWidth(u32),
-    InvalidSlice {
-        bit_offset: u32,
-        width_bits: u32,
-        carrier_width_bits: u32,
-    },
 }
 
 const fn c_integer_width_is_spellable(width_bits: u32) -> bool {
     matches!(width_bits, 8 | 16 | 32 | 64 | 128)
 }
 
-const fn c_bitvector_width_is_supported(width_bits: u32) -> bool {
+pub(super) const fn c_bitvector_width_is_supported(width_bits: u32) -> bool {
     matches!(width_bits, 256 | 512)
 }
 
@@ -218,14 +213,6 @@ pub(super) fn project_machine_write(
     };
     match projection {
         MachineWriteProjection::Full => Ok((lhs, rhs, rhs_type.cloned())),
-        // The lane is assigned and the carrier's other bits are not mentioned,
-        // which is the whole difference from `Insert`: there is no read of the
-        // target here, because there is nothing to preserve.
-        MachineWriteProjection::Lane { width_bits, .. } => {
-            let lane = checked_write_uint_type(width_bits)?;
-            let rhs = convert(rhs, rhs_type, &lane);
-            Ok((lhs, rhs, Some(CValue::Typed(lane))))
-        }
         MachineWriteProjection::ZeroExtend {
             from_width_bits,
             to_width_bits,
@@ -252,95 +239,6 @@ pub(super) fn project_machine_write(
             // narrow width so that it zero-fills.
             let rhs = convert(rhs, rhs_type, &from);
             Ok((lhs, CExpr::cast(to.clone(), rhs), Some(CValue::Typed(to))))
-        }
-        MachineWriteProjection::Insert {
-            bit_offset,
-            width_bits,
-            carrier_width_bits,
-        } => {
-            let Some(end) = bit_offset.checked_add(width_bits) else {
-                return Err(MachineWriteProjectionError::InvalidSlice {
-                    bit_offset,
-                    width_bits,
-                    carrier_width_bits,
-                });
-            };
-            if width_bits == 0 || end > carrier_width_bits {
-                return Err(MachineWriteProjectionError::InvalidSlice {
-                    bit_offset,
-                    width_bits,
-                    carrier_width_bits,
-                });
-            }
-
-            if c_bitvector_width_is_supported(carrier_width_bits) {
-                if !c_integer_width_is_spellable(width_bits) {
-                    return Err(MachineWriteProjectionError::UnsupportedIntegerWidth(
-                        width_bits,
-                    ));
-                }
-                let preserved = lhs.clone_without_render_observations();
-                return Ok((
-                    lhs,
-                    bitvector_helper(
-                        format!("r2sleigh_bits_insert_{carrier_width_bits}_{width_bits}"),
-                        vec![preserved, rhs, CExpr::UIntLit(u64::from(bit_offset))],
-                    ),
-                    Some(CValue::Typed(CType::BitVector(carrier_width_bits))),
-                ));
-            }
-
-            let carrier = checked_write_uint_type(carrier_width_bits)?;
-            let field = checked_write_uint_type(width_bits)?;
-            let all_ones = CExpr::unary(
-                UnaryOp::BitNot,
-                CExpr::cast(carrier.clone(), CExpr::UIntLit(0)),
-            );
-            let field_mask = if width_bits == carrier_width_bits {
-                all_ones
-            } else {
-                CExpr::binary(
-                    BinaryOp::Shr,
-                    all_ones,
-                    CExpr::UIntLit(u64::from(carrier_width_bits - width_bits)),
-                )
-            };
-            let shifted_mask = if bit_offset == 0 {
-                field_mask.clone()
-            } else {
-                CExpr::binary(
-                    BinaryOp::Shl,
-                    field_mask.clone(),
-                    CExpr::UIntLit(u64::from(bit_offset)),
-                )
-            };
-            let preserved = CExpr::binary(
-                BinaryOp::BitAnd,
-                CExpr::cast(carrier.clone(), lhs.clone_without_render_observations()),
-                CExpr::unary(UnaryOp::BitNot, shifted_mask),
-            );
-            let inserted = CExpr::binary(
-                BinaryOp::BitAnd,
-                CExpr::cast(carrier.clone(), convert(rhs, rhs_type, &field)),
-                field_mask,
-            );
-            let inserted = if bit_offset == 0 {
-                inserted
-            } else {
-                CExpr::binary(
-                    BinaryOp::Shl,
-                    inserted,
-                    CExpr::UIntLit(u64::from(bit_offset)),
-                )
-            };
-            Ok((
-                lhs,
-                CExpr::cast(
-                    carrier.clone(),
-                    CExpr::binary(BinaryOp::BitOr, preserved, inserted),
-                ),
-                Some(CValue::Typed(carrier)),
-            ))
         }
     }
 }
@@ -401,86 +299,6 @@ mod tests {
             } if matches!(*expr, CExpr::Cast { ty: CType::Int { bits: 32, signedness: r2types::Signedness::Unsigned }, .. })
         ));
         assert_eq!(ty, Some(CValue::Typed(CType::u64())));
-    }
-
-    #[test]
-    fn inserted_write_preserves_the_unwritten_carrier_bits() {
-        let lhs = binding_expr();
-        let (_, rhs, _) = project_machine_write(
-            lhs.clone(),
-            CExpr::UIntLit(0xaa),
-            Some(&CValue::Constant),
-            MachineWriteProjection::Insert {
-                bit_offset: 8,
-                width_bits: 8,
-                carrier_width_bits: 64,
-            },
-            64,
-        )
-        .expect("inserted write");
-        let CExpr::Cast {
-            ty:
-                CType::Int {
-                    bits: 64,
-                    signedness: r2types::Signedness::Unsigned,
-                },
-            expr: combined,
-            ..
-        } = rhs
-        else {
-            panic!("insert must return the carrier type");
-        };
-        let CExpr::Binary {
-            op: BinaryOp::BitOr,
-            left: preserved,
-            ..
-        } = *combined
-        else {
-            panic!("insert must combine preserved and replaced bits");
-        };
-        let CExpr::Binary {
-            op: BinaryOp::BitAnd,
-            left: preserved_carrier,
-            ..
-        } = *preserved
-        else {
-            panic!("insert must mask the old carrier");
-        };
-        let CExpr::Cast {
-            expr: old_value, ..
-        } = *preserved_carrier
-        else {
-            panic!("insert must read the old carrier at carrier width");
-        };
-        assert!(old_value.transparently_eq(&lhs));
-    }
-
-    #[test]
-    fn wide_insert_uses_the_exact_external_bitvector_contract() {
-        let lhs = binding_expr();
-        let (_, rhs, _) = project_machine_write(
-            lhs.clone(),
-            CExpr::UIntLit(0xa5),
-            Some(&CValue::Constant),
-            MachineWriteProjection::Insert {
-                bit_offset: 127,
-                width_bits: 8,
-                carrier_width_bits: 256,
-            },
-            64,
-        )
-        .expect("wide inserted write");
-
-        let CExpr::Call { func, args, .. } = rhs else {
-            panic!("wide insertion must lower through the certified prelude helper");
-        };
-        assert!(matches!(
-            func.as_ref(),
-            CExpr::External { name, .. } if name == "r2sleigh_bits_insert_256_8"
-        ));
-        assert_eq!(args.len(), 3);
-        assert!(args[0].transparently_eq(&lhs));
-        assert_eq!(args[2], CExpr::UIntLit(127));
     }
 
     fn slice(offset: u32, width: u32, carrier: u32) -> MachineUseSlice {

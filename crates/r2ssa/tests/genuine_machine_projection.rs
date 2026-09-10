@@ -64,12 +64,12 @@ fn genuine_projection_allowing_residuals(
     (artifact, projection, arch)
 }
 
-fn exact_single_write_between_storages(
+/// The one surviving definition of `destination`, and its write projection.
+fn exact_single_write_to(
     artifact: &SsaArtifact,
     projection: &MachineProjection,
-    source: CanonicalStorageId,
     destination: CanonicalStorageId,
-) -> MachineWriteProjection {
+) -> (r2ssa::InstId, MachineWriteProjection) {
     let writes = artifact
         .graph()
         .insts
@@ -79,19 +79,12 @@ fn exact_single_write_between_storages(
                 .and_then(|output| artifact.graph().value(output))
                 .and_then(|value| value.canonical_storage)
                 == Some(destination)
-                && inst.inputs.iter().any(|input| {
-                    artifact
-                        .graph()
-                        .value(*input)
-                        .and_then(|value| value.canonical_storage)
-                        == Some(source)
-                })
         })
         .collect::<Vec<_>>();
     assert_eq!(
         writes.len(),
         1,
-        "source-to-destination storage write must have exactly one surviving definition, got {:?}",
+        "the destination must have exactly one surviving definition, got {:?}",
         writes
             .iter()
             .map(|write| (write, projection.write_disposition(write.id)))
@@ -102,11 +95,21 @@ fn exact_single_write_between_storages(
         .copied()
         .expect("dense storage write disposition")
     {
-        MachineWriteDisposition::Exact(write) => write,
+        MachineWriteDisposition::Exact(write) => (writes[0].id, write),
         MachineWriteDisposition::Refused(reason) => {
             panic!("storage write must be exact, got {reason:?}")
         }
     }
+}
+
+fn no_insert_survives(artifact: &SsaArtifact) {
+    assert!(
+        !artifact.graph().insts.iter().any(|inst| matches!(
+            inst.payload,
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::Insert { .. })
+        )),
+        "the lift's own extension of the lane into its root supersedes the insert"
+    );
 }
 
 fn exact_uses_from_storage(
@@ -155,6 +158,9 @@ fn exact_uses_from_storage(
         .collect()
 }
 
+/// `mov eax, ebx`: the lane read is a `Subpiece` of `RBX`, read whole, and
+/// the lift's own clear of `RAX` is the root's one definition, a zero
+/// extension of the lane (doc/adr-register-identity.md).
 #[test]
 fn genuine_x86_eax_write_survives_as_one_carrier_zero_extension() {
     let (artifact, projection, arch) = genuine_optimized_projection(
@@ -162,14 +168,23 @@ fn genuine_x86_eax_write_survives_as_one_carrier_zero_extension() {
         &[0x89, 0xd8], // mov eax, ebx
     );
     let rax = declared_register_storage(&arch, "RAX");
+    // Nothing here touches more of `RBX` than the instruction names, so the
+    // four-byte register is this function's root for that family and the read
+    // is of the whole of it.
     let ebx = declared_register_storage(&arch, "EBX");
 
     assert_eq!(
-        exact_single_write_between_storages(&artifact, &projection, ebx, rax),
+        exact_single_write_to(&artifact, &projection, rax).1,
         MachineWriteProjection::ZeroExtend {
             from_width_bits: 32,
             to_width_bits: 64,
         }
+    );
+    no_insert_survives(&artifact);
+    assert!(
+        exact_uses_from_storage(&artifact, &projection, ebx)
+            .iter()
+            .all(|slice| slice.bit_offset() == 0 && slice.width_bits() == 32)
     );
 }
 
@@ -183,84 +198,116 @@ fn genuine_aarch64_w0_write_survives_as_one_carrier_zero_extension() {
     let w1 = declared_register_storage(&arch, "w1");
 
     assert_eq!(
-        exact_single_write_between_storages(&artifact, &projection, w1, x0),
+        exact_single_write_to(&artifact, &projection, x0).1,
         MachineWriteProjection::ZeroExtend {
             from_width_bits: 32,
             to_width_bits: 64,
         }
     );
+    no_insert_survives(&artifact);
+    assert!(
+        exact_uses_from_storage(&artifact, &projection, w1)
+            .iter()
+            .all(|slice| slice.bit_offset() == 0 && slice.width_bits() == 32)
+    );
 }
 
+/// `mov ah, bl`: the byte is inserted into `RAX` at bit 8, and that insert is
+/// the root's full definition from explicit inputs.
+///
+/// The `mov rcx, rax` after it is what makes `RAX` the root: a function that
+/// touches only `AH` has `AH` itself for a root and composes nothing.
 #[test]
 fn genuine_x86_ah_write_survives_as_one_high_slice_insert() {
     let (artifact, projection, arch) = genuine_optimized_projection(
         TrustedSleighProfile::X86_64,
-        &[0x88, 0xdc], // mov ah, bl
+        &[0x88, 0xdc, 0x48, 0x89, 0xc1], // mov ah, bl; mov rcx, rax
     );
-    let ah = declared_register_storage(&arch, "AH");
-    let bl = declared_register_storage(&arch, "BL");
+    let rax = declared_register_storage(&arch, "RAX");
 
-    assert_eq!(
-        exact_single_write_between_storages(&artifact, &projection, bl, ah),
-        MachineWriteProjection::Insert {
-            bit_offset: 8,
-            width_bits: 8,
-            carrier_width_bits: 64,
-        }
-    );
+    let (definition, write) = exact_single_write_to(&artifact, &projection, rax);
+    assert_eq!(write, MachineWriteProjection::Full);
+    let Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::Insert {
+        position, value, ..
+    })) = artifact.graph().inst(definition).map(|inst| &inst.payload)
+    else {
+        panic!("the high byte write inserts into the root");
+    };
+    assert_eq!(position.constant_bits(), Some(8));
+    assert_eq!(value.size, 1);
 }
 
+/// `mov bl, ah`: the byte is read as a `Subpiece` of `RAX` one byte up, and
+/// the read of `RAX` underneath is whole.
 #[test]
 fn genuine_x86_ah_read_is_relative_to_rax() {
     let (artifact, projection, arch) = genuine_optimized_projection(
         TrustedSleighProfile::X86_64,
-        &[0x88, 0xe3], // mov bl, ah
+        &[0x88, 0xe3, 0x48, 0x89, 0xc1], // mov bl, ah; mov rcx, rax
     );
-    let ah = declared_register_storage(&arch, "AH");
+    let rax = declared_register_storage(&arch, "RAX");
 
-    let slices = exact_uses_from_storage(&artifact, &projection, ah);
-    assert_eq!(slices.len(), 1);
+    let slices = exact_uses_from_storage(&artifact, &projection, rax);
+    assert_eq!(slices.len(), 2);
     assert!(slices.iter().all(|slice| {
-        slice.bit_offset() == 8
-            && slice.width_bits() == 8
+        slice.bit_offset() == 0
+            && slice.width_bits() == 64
             && slice.carrier_width_bits() == 64
             && slice.conversion().is_none()
     }));
+    assert!(artifact.graph().insts.iter().any(|inst| matches!(
+        &inst.payload,
+        r2ssa::InstPayload::Op(r2ssa::SSAOp::Subpiece { dst, offset: 1, .. }) if dst.size == 1
+    )));
 }
 
+/// `movzx eax, ah`: the byte lane is read a byte up the root, and the root is
+/// redefined by the lift's own extension of the widened lane.
 #[test]
-fn genuine_x86_ah_zero_extend_preserves_rax_relative_source_slice() {
+fn genuine_x86_ah_zero_extend_redefines_rax_from_the_lane() {
     let (artifact, projection, arch) = genuine_optimized_projection(
         TrustedSleighProfile::X86_64,
         &[0x0f, 0xb6, 0xc4], // movzx eax, ah
     );
-    let ah = declared_register_storage(&arch, "AH");
+    let rax = declared_register_storage(&arch, "RAX");
 
-    let slices = exact_uses_from_storage(&artifact, &projection, ah);
-    assert_eq!(slices.len(), 1);
-    let slice = slices[0];
-    assert_eq!(slice.bit_offset(), 8);
-    assert_eq!(slice.width_bits(), 8);
-    assert_eq!(slice.carrier_width_bits(), 64);
-    let conversion = slice
-        .conversion()
-        .expect("movzx use must retain conversion");
-    assert_eq!(conversion.kind(), r2ssa::MachineCastKind::ZeroExtend);
-    assert_eq!(conversion.to_width_bits(), 32);
+    let slices = exact_uses_from_storage(&artifact, &projection, rax);
+    assert!(
+        slices
+            .iter()
+            .all(|slice| slice.bit_offset() == 0 && slice.width_bits() == 64),
+        "{slices:?}"
+    );
+    assert_eq!(
+        exact_single_write_to(&artifact, &projection, rax).1,
+        MachineWriteProjection::ZeroExtend {
+            from_width_bits: 32,
+            to_width_bits: 64,
+        }
+    );
+    no_insert_survives(&artifact);
 }
 
 #[test]
 fn genuine_x86_eax_read_is_relative_to_rax() {
     let (artifact, projection, arch) = genuine_optimized_projection(
         TrustedSleighProfile::X86_64,
-        &[0x89, 0xc3], // mov ebx, eax
+        &[0x89, 0xc3, 0x48, 0x89, 0xc1], // mov ebx, eax; mov rcx, rax
     );
-    let eax = declared_register_storage(&arch, "EAX");
+    let rax = declared_register_storage(&arch, "RAX");
+    let rbx = declared_register_storage(&arch, "RBX");
 
-    let slices = exact_uses_from_storage(&artifact, &projection, eax);
+    let slices = exact_uses_from_storage(&artifact, &projection, rax);
     assert!(slices.iter().all(|slice| {
-        slice.bit_offset() == 0 && slice.width_bits() == 32 && slice.carrier_width_bits() == 64
+        slice.bit_offset() == 0 && slice.width_bits() == 64 && slice.carrier_width_bits() == 64
     }));
+    assert_eq!(
+        exact_single_write_to(&artifact, &projection, rbx).1,
+        MachineWriteProjection::ZeroExtend {
+            from_width_bits: 32,
+            to_width_bits: 64,
+        }
+    );
 }
 
 /// A subpiece reads its operand whole, and the carrier is still the source's.
@@ -277,6 +324,7 @@ fn genuine_x86_xmm_subpieces_read_their_operand_whole_of_the_owned_carrier() {
         .lift_genuine_block(&[0x90], 0x1000, 1)
         .expect("genuine x86 authority");
     let arch = lifted.authority().arch_spec().clone();
+    // The block touches only `XMM2`, so that is the family's root here.
     let xmm2 = declared_register_storage(&arch, "XMM2");
     let blocks = [r2il::R2ILBlock {
         addr: 0x1000,
@@ -295,7 +343,9 @@ fn genuine_x86_xmm_subpieces_read_their_operand_whole_of_the_owned_carrier() {
     let slices = exact_uses_from_storage(&artifact, &projection, xmm2);
     assert!(!slices.is_empty(), "the subpiece must record a use of XMM2");
     assert!(
-        slices.iter().all(|slice| slice.bit_offset() == 0),
+        slices
+            .iter()
+            .all(|slice| slice.bit_offset() == 0 && slice.width_bits() == 128),
         "an extracting operation reads its operand whole: {slices:?}"
     );
 }

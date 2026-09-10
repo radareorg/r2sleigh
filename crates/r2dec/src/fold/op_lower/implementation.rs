@@ -96,122 +96,6 @@ impl<'a> FoldingContext<'a> {
     /// marked as a certified read of its own: the boundary seeds one
     /// obligation per value and this expression is where all of them are
     /// discharged.
-    /// The values a composed return carries, base first then overlays.
-    fn composed_return_values(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-        source_inst: r2ssa::InstId,
-    ) -> OpLoweringResult<Vec<r2ssa::ValueId>> {
-        let _ = source_inst;
-        let certified = self
-            .certified_return_for_normalized_op(block_addr, op_idx)
-            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-        Ok(certified.values().collect())
-    }
-
-    fn composed_return_stmt(
-        &self,
-        block_addr: u64,
-        op_idx: usize,
-        source_inst: r2ssa::InstId,
-    ) -> OpLoweringResult<CStmt> {
-        let prepared = self
-            .prepared_ssa()
-            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-        let (source_block, source_op) = prepared
-            .inst_op_site(source_inst)
-            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-        let certificate = prepared
-            .return_certificate_for_op(source_block, source_op)
-            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-        let certified = self
-            .certified_return_for_normalized_op(block_addr, op_idx)
-            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-        if certificate.at != source_inst
-            || certificate.block_addr != source_block
-            || certificate.op_index != source_op
-            || certified.block_addr != source_block
-            || certified.op_index != source_op
-            || certified.value != certificate.value
-            || certified.width != certificate.width
-            || !certified.values().eq(certificate.values())
-            || !certificate.is_composed()
-        {
-            return Err(OpLoweringRefusal::missing_machine_projection());
-        }
-
-        let width_bits = certificate
-            .width
-            .checked_mul(8)
-            .filter(|bits| *bits <= 64)
-            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-        let composed_ty = CType::machine_bits(width_bits);
-        let read = |value: r2ssa::ValueId| -> OpLoweringResult<CExpr> {
-            let expr = self.planned_value_expr(value).map_err(|error| {
-                self.retain_first_observation_error(error);
-                OpLoweringRefusal::missing_machine_projection()
-            })?;
-            Ok(self.observe_certified_value_read_expr(value, certificate.at, expr))
-        };
-
-        let mut expr = self.convert_from(
-            read(certificate.value)?,
-            self.value_type(certificate.value).as_ref(),
-            &composed_ty,
-        );
-        for overlay in &certificate.overlays {
-            let overlay_bits = overlay
-                .width
-                .checked_mul(8)
-                .filter(|bits| *bits > 0 && *bits <= width_bits)
-                .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-            let shift = overlay
-                .offset_bytes
-                .checked_mul(8)
-                .filter(|bits| bits.checked_add(overlay_bits) <= Some(width_bits))
-                .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-            // The bits this overlay supplies, in place. Built at the composed
-            // width so the mask cannot be narrower than the value it clears.
-            let span: u64 = if overlay_bits == 64 {
-                u64::MAX
-            } else {
-                (1u64 << overlay_bits) - 1
-            };
-            let mask = span
-                .checked_shl(shift)
-                .ok_or_else(OpLoweringRefusal::missing_machine_projection)?;
-            let kept = CExpr::Binary {
-                op: BinaryOp::BitAnd,
-                left: Box::new(CExpr::Paren(Box::new(expr))),
-                right: Box::new(CExpr::UIntLit(!mask)),
-            };
-            let mut laid = self.convert_from(
-                read(overlay.value)?,
-                self.value_type(overlay.value).as_ref(),
-                &composed_ty,
-            );
-            laid = CExpr::Binary {
-                op: BinaryOp::BitAnd,
-                left: Box::new(CExpr::Paren(Box::new(laid))),
-                right: Box::new(CExpr::UIntLit(span)),
-            };
-            if shift != 0 {
-                laid = CExpr::Binary {
-                    op: BinaryOp::Shl,
-                    left: Box::new(CExpr::Paren(Box::new(laid))),
-                    right: Box::new(CExpr::UIntLit(u64::from(shift))),
-                };
-            }
-            expr = CExpr::Binary {
-                op: BinaryOp::BitOr,
-                left: Box::new(CExpr::Paren(Box::new(kept))),
-                right: Box::new(CExpr::Paren(Box::new(laid))),
-            };
-        }
-        Ok(CStmt::Return(Some(expr)))
-    }
-
     fn source_return_boundary_for_normalized_op(
         &self,
         block_addr: u64,
@@ -1410,6 +1294,15 @@ impl<'a> FoldingContext<'a> {
                                 .certificates()
                                 .call_return_address_stores
                                 .contains(&inst)
+                            // The lane of an entry register a formal was
+                            // minted from: the declaration is its definition.
+                            || prepared
+                                .graph()
+                                .inst(inst)
+                                .and_then(|inst| inst.output)
+                                .is_some_and(|value| {
+                                    prepared.graph().formal_projection_storage(value).is_some()
+                                })
                     })
                 })
             {
@@ -1433,35 +1326,12 @@ impl<'a> FoldingContext<'a> {
                 if boundary.at != source_inst || !boundary.complete {
                     r2il::refusal_evidence!(
                         "return-boundary",
-                        "at_mismatch={} incomplete={} compositions={} values={}",
+                        "at_mismatch={} incomplete={} values={}",
                         boundary.at != source_inst,
                         !boundary.complete,
-                        boundary.register_compositions.len(),
                         boundary.values.len()
                     );
                     return Err(OpLoweringRefusal::missing_machine_projection());
-                }
-
-                // A composed return keeps its values out of `boundary.values`,
-                // because a stale full-width definition is not the value at
-                // the boundary. Its certificate carries the base and every
-                // overlay instead.
-                if !boundary.register_compositions.is_empty() {
-                    let carried = self.composed_return_values(block.addr, op_idx, source_inst)?;
-                    let stmt = self.composed_return_stmt(block.addr, op_idx, source_inst)?;
-                    let obligations = self.exact_effect_obligations_for_normalized_values(
-                        EffectOccurrenceKind::Return,
-                        block.addr,
-                        op_idx,
-                        &carried,
-                    );
-                    stmts.push(FoldedOpStmt {
-                        site: self
-                            .normalized_site(block.addr, op_idx)
-                            .ok_or_else(OpLoweringRefusal::missing_machine_projection)?,
-                        stmt: self.observe_effect_stmt(&obligations, stmt),
-                    });
-                    break;
                 }
 
                 let (return_value, stmt) = match boundary.values.as_slice() {
@@ -1504,11 +1374,18 @@ impl<'a> FoldingContext<'a> {
                                 return Err(OpLoweringRefusal::missing_machine_projection());
                             }
                         };
-                        let expr = self.observe_certified_value_read_expr(
-                            certified.value,
-                            certificate.at,
-                            expr,
-                        );
+                        // An inlined value is spelled as its expression and
+                        // reads no program variable; only a bound one is a
+                        // certified read the journal records.
+                        let expr = if self.value_is_bound(certified.value) {
+                            self.observe_certified_value_read_expr(
+                                certified.value,
+                                certificate.at,
+                                expr,
+                            )
+                        } else {
+                            expr
+                        };
                         // The certificate names the logical value returned,
                         // while the binding plan may deliberately retain the
                         // full machine carrier as its declared object. C
@@ -2028,6 +1905,97 @@ impl<'a> FoldingContext<'a> {
                 let rhs = CExpr::binary(BinaryOp::BitOr, shifted, lo_cast);
                 self.assign_stmt(lhs, rhs)
             }
+            SSAOp::Insert {
+                dst,
+                src,
+                value,
+                position,
+            } => {
+                // A lane written into its root: keep the root's other bits
+                // and put the lane's, widened to the root, at its position.
+                let lhs = self.assignment_lhs_expr(dst)?;
+                let Some(lsb_bits) = position.constant_bits() else {
+                    return Err(OpLoweringRefusal::unrepresentable_operation());
+                };
+                let width_bits = u64::from(value.size) * 8;
+                let root_bits = u64::from(dst.size) * 8;
+                let lane_ty = uint_type_from_size(value.size);
+                let dst_ty = uint_type_from_size(dst.size);
+                let root = self.required_input(frame, 0, src, Some(&dst_ty))?;
+                let lane = self.required_input(frame, 1, value, Some(&lane_ty))?;
+                // The position is an operand of the operation, read here as
+                // the shift count so its use is the rendered one.
+                let shift = self.required_input(frame, 2, position, None)?;
+                // A root wider than any C integer is a bit vector, inserted by
+                // the prelude helper the wide write projection used to name.
+                if projection::c_bitvector_width_is_supported(
+                    u32::try_from(root_bits).unwrap_or(0),
+                ) {
+                    // A bit vector has no literal, so a zero carrier is
+                    // spelled as the prelude's zero-extension of a zero lane;
+                    // at position zero that extension is the whole write.
+                    let zero_extend = |value| {
+                        CExpr::call(
+                            CExpr::External {
+                                name: format!(
+                                    "r2sleigh_bits_zero_extend_{width_bits}_{root_bits}"
+                                ),
+                                kind: crate::symbol::ExternalKind::Intrinsic,
+                            },
+                            vec![value],
+                        )
+                    };
+                    if src.constant_bits() == Some(0) {
+                        let rhs = if lsb_bits == 0 {
+                            zero_extend(lane)
+                        } else {
+                            CExpr::call(
+                                CExpr::External {
+                                    name: format!(
+                                        "r2sleigh_bits_insert_{root_bits}_{width_bits}"
+                                    ),
+                                    kind: crate::symbol::ExternalKind::Intrinsic,
+                                },
+                                vec![
+                                    zero_extend(CExpr::cast(lane_ty, CExpr::UIntLit(0))),
+                                    lane,
+                                    shift,
+                                ],
+                            )
+                        };
+                        return Ok(self.assign_stmt(lhs, rhs));
+                    }
+                    let helper = CExpr::External {
+                        name: format!("r2sleigh_bits_insert_{root_bits}_{width_bits}"),
+                        kind: crate::symbol::ExternalKind::Intrinsic,
+                    };
+                    let rhs = CExpr::call(helper, vec![root, lane, shift]);
+                    return Ok(self.assign_stmt(lhs, rhs));
+                }
+                // The lane's own all-ones, at the root's width and shifted
+                // into place. Spelled rather than folded so a root wider than
+                // sixty-four bits keeps every bit of its mask, and shifted by
+                // the position's value rather than by the operand: the mask is
+                // this lowering's own, and the operand is read once, below.
+                let lane_ones = CExpr::unary(
+                    UnaryOp::BitNot,
+                    CExpr::cast(lane_ty, CExpr::UIntLit(0)),
+                );
+                let mask = CExpr::binary(
+                    BinaryOp::Shl,
+                    CExpr::cast(dst_ty.clone(), lane_ones),
+                    CExpr::UIntLit(lsb_bits),
+                );
+                let kept = CExpr::binary(
+                    BinaryOp::BitAnd,
+                    root,
+                    CExpr::unary(UnaryOp::BitNot, mask),
+                );
+                let widened = CExpr::cast(dst_ty, lane);
+                let placed = CExpr::binary(BinaryOp::Shl, widened, shift);
+                let rhs = CExpr::binary(BinaryOp::BitOr, kept, placed);
+                self.assign_stmt(lhs, rhs)
+            }
             SSAOp::Subpiece { dst, src, offset } => {
                 let lhs = self.assignment_lhs_expr(dst)?;
                 // The source is brought to its own unsigned width -- a
@@ -2037,6 +2005,26 @@ impl<'a> FoldingContext<'a> {
                 // selection is spelled on that.
                 let src_expr =
                     self.required_input(frame, 0, src, Some(&uint_type_from_size(src.size)))?;
+                // A source wider than any C integer is a bit vector; its
+                // lane comes out through the prelude helper.
+                if projection::c_bitvector_width_is_supported(
+                    src.size.saturating_mul(8),
+                ) && dst.size < src.size
+                {
+                    let helper = CExpr::External {
+                        name: format!(
+                            "r2sleigh_bits_extract_{}_{}",
+                            u64::from(src.size) * 8,
+                            u64::from(dst.size) * 8
+                        ),
+                        kind: crate::symbol::ExternalKind::Intrinsic,
+                    };
+                    let rhs = CExpr::call(
+                        helper,
+                        vec![src_expr, CExpr::UIntLit(u64::from(*offset) * 8)],
+                    );
+                    return Ok(self.assign_stmt(lhs, rhs));
+                }
                 let rhs = if *offset == 0 && dst.size == src.size {
                     src_expr
                 } else if *offset == 0 {
@@ -2271,6 +2259,7 @@ impl<'a> FoldingContext<'a> {
                         .and_then(|value| {
                             self.inputs.prepared_ssa?.graph().def_inst(value)
                         })
+                        .filter(|_| self.value_is_bound(carrier_value))
                         .map_or(carrier.clone(), |at| {
                             self.observe_certified_value_read_expr(carrier_value, at, carrier)
                         });

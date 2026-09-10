@@ -1066,13 +1066,6 @@ fn placement_refusal(
             instruction_id: access.inst.0,
             access_ordinal: access.ordinal,
         },
-        Private::ReadBeforeAssignment {
-            binding,
-            read: crate::binding_plan::PlacementRead::PreservedCarrierWrite(inst),
-        } => Public::PreservedCarrierReadBeforeAssignment {
-            binding_index: binding.index(),
-            instruction_id: inst.0,
-        },
         Private::UnprovableExecutionOrder { binding } => Public::UnprovableExecutionOrder {
             binding_index: binding.index(),
         },
@@ -1937,8 +1930,19 @@ impl LegacyObservationJournal {
                 // read before it is assigned, and the stack pointer has no
                 // declaration on either side of this copy, because the frame
                 // it addresses is not a C object at all.
+                // A copy of an entry value into the object that is the entry
+                // value says nothing either; the exclusion below is for a
+                // copy that would move an undeclared live-in somewhere else.
+                let same_object_as_source = graph.value_id_for_var(src).is_some_and(|source| {
+                    matches!(
+                        (plan.disposition(source), normalized_projections[block_id.0 as usize][op_idx].output.map(|output| plan.disposition(output.value))),
+                        (Some(ValueDisposition::Bound { binding: input }), Some(Some(ValueDisposition::Bound { binding: output })))
+                            if input == output
+                    )
+                });
                 if !matches!(op, r2ssa::SSAOp::CallRestore { .. })
                     && src.version == 0
+                    && !same_object_as_source
                     && !copy_source_is_a_parameter(&plan, graph, src)
                 {
                     continue;
@@ -2158,7 +2162,7 @@ impl LegacyObservationJournal {
                             "conflicting use {site:?}: certificate reason {existing:?}, normalization reason RedundantPhiEdge"
                         );
                     }
-                    return Err(LegacyObservationJournalError::ConflictingUse(site));
+                    return Err(conflicting_use(site));
                 }
             }
         }
@@ -2176,14 +2180,14 @@ impl LegacyObservationJournal {
                             "conflicting use {site:?}: certificate reason {existing:?}, normalization reason CoalescedCopy"
                         );
                     }
-                    return Err(LegacyObservationJournalError::ConflictingUse(site));
+                    return Err(conflicting_use(site));
                 }
             }
         }
         for inst in self.coalesced_carrier_phi_writes.iter().copied() {
             match elided_writes.insert(inst, r2ssa::ledger::ElisionReason::CoalescedIdentityPhi) {
                 Some(r2ssa::ledger::ElisionReason::CoalescedIdentityPhi) | None => {}
-                Some(_) => return Err(LegacyObservationJournalError::ConflictingWrite(inst)),
+                Some(_) => return Err(conflicting_write(inst)),
             }
         }
         // A program copy that says nothing owes no write either. The object
@@ -2193,7 +2197,7 @@ impl LegacyObservationJournal {
         for inst in self.coalesced_copy_writes.iter().copied() {
             match elided_writes.insert(inst, r2ssa::ledger::ElisionReason::CoalescedCopy) {
                 Some(r2ssa::ledger::ElisionReason::CoalescedCopy) | None => {}
-                Some(_) => return Err(LegacyObservationJournalError::ConflictingWrite(inst)),
+                Some(_) => return Err(conflicting_write(inst)),
             }
         }
         let removed_phis = origins
@@ -2233,7 +2237,7 @@ impl LegacyObservationJournal {
                                 "conflicting use {site:?}: certificate reason {existing:?}, normalization reason CoalescedImmutablePhi"
                             );
                         }
-                        return Err(LegacyObservationJournalError::ConflictingUse(site));
+                        return Err(conflicting_use(site));
                     }
                 }
             }
@@ -2241,7 +2245,7 @@ impl LegacyObservationJournal {
             {
                 Some(r2ssa::ledger::ElisionReason::CoalescedImmutablePhi) | None => {}
                 Some(_) => {
-                    return Err(LegacyObservationJournalError::ConflictingWrite(inst.id));
+                    return Err(conflicting_write(inst.id));
                 }
             }
         }
@@ -2320,7 +2324,7 @@ impl LegacyObservationJournal {
                 let input_reason = *reason;
                 match elided_uses.insert(site, input_reason) {
                     Some(existing) if existing != input_reason => {
-                        return Err(LegacyObservationJournalError::ConflictingUse(site));
+                        return Err(conflicting_use(site));
                     }
                     _ => {}
                 }
@@ -2449,7 +2453,7 @@ impl LegacyObservationJournal {
                         "conflicting use {site:?}: recorded {slot:?}, elision reason {reason:?}"
                     );
                 }
-                return Err(LegacyObservationJournalError::ConflictingUse(site));
+                return Err(conflicting_use(site));
             }
         }
         for (inst, reason) in elided_writes {
@@ -2712,34 +2716,6 @@ impl LegacyObservationJournal {
         let mut marked = expr;
         for id in self.allocate_many(targets)? {
             marked = CExpr::observed(id, marked);
-        }
-        Ok(marked)
-    }
-
-    /// Mark every cell the instructions a rendered statement discharges.
-    ///
-    /// The statement twin of [`Self::observe_rendered_replacement_expr`], for a
-    /// definition whose write projection stands for other instructions: a
-    /// write the machine projection certified as a zero-extension into its
-    /// carrier has spoken for the extensions that certified it, and those have
-    /// no statement of their own. The statement already carries its own value
-    /// and write markers from [`Self::observe_normalized_output_stmt`]; this
-    /// adds the discharged instructions' writes, operands and outputs, exact,
-    /// on the one occurrence that now renders them.
-    ///
-    /// Those operands read the very value the statement defines, so placement
-    /// is told which reads name what their own statement produced -- see
-    /// `Occurrence::self_defined` -- rather than being left to order a read of
-    /// the object before the write that assigns it.
-    pub(crate) fn observe_discharged_stmt(
-        &mut self,
-        discharged: &[InstId],
-        stmt: CStmt,
-    ) -> Result<CStmt, LegacyObservationJournalError> {
-        let targets = self.discharged_instruction_targets(None, discharged, None)?;
-        let mut marked = stmt;
-        for id in self.allocate_many(targets)? {
-            marked = CStmt::observed(id, marked);
         }
         Ok(marked)
     }
@@ -3590,7 +3566,7 @@ impl LegacyObservationJournal {
             let value = ValueId(index as u32);
             // A call clobber is supplied from outside this function too, by the
             // callee rather than the caller, and the plan is what says so.
-            let supplied_from_outside = if graph.def_inst(value).is_none() {
+            let supplied_from_outside = if graph.caller_supplied(value) {
                 r2ssa::ledger::ElisionReason::CallerSuppliedEntryValue
             } else if self.plan.value_is_call_clobber(value) {
                 r2ssa::ledger::ElisionReason::UnclaimedCallClobber
@@ -4027,7 +4003,7 @@ impl LegacyObservationJournal {
                         Some(LegacyUseObservation::Refused(_)) => *slot = None,
                         Some(LegacyUseObservation::Elided(_)) => continue,
                         Some(_) => {
-                            return Err(LegacyObservationJournalError::ConflictingUse(site));
+                            return Err(conflicting_use(site));
                         }
                     }
                 }
@@ -4052,7 +4028,7 @@ impl LegacyObservationJournal {
                             if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
                                 eprintln!("gapped write {inst:?}: already recorded {existing:?}");
                             }
-                            return Err(LegacyObservationJournalError::ConflictingWrite(inst));
+                            return Err(conflicting_write(inst));
                         }
                     }
                 }
@@ -4126,7 +4102,7 @@ impl LegacyObservationJournal {
             if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
                 eprintln!("conflicting use {site:?}: recorded {slot:?}, refusal {observation:?}");
             }
-            Err(LegacyObservationJournalError::ConflictingUse(site))
+            Err(conflicting_use(site))
         } else {
             Ok(())
         }
@@ -4449,7 +4425,7 @@ impl LegacyObservationJournal {
                                     .collect::<String>())
                                 );
                             }
-                            Err(LegacyObservationJournalError::ConflictingUse(site))
+                            Err(conflicting_use(site))
                         } else {
                             Ok(())
                         }
@@ -4946,6 +4922,28 @@ fn assignment_rhs(stmt: &CStmt) -> Option<&CExpr> {
         } => Some(right),
         _ => None,
     }
+}
+
+/// A use cell answered twice. Which site noticed is what a repair needs;
+/// the error itself names only the cell.
+#[track_caller]
+fn conflicting_use(site: UseSite) -> LegacyObservationJournalError {
+    r2il::refusal_evidence!(
+        "conflicting-use",
+        "{site:?} at {}",
+        std::panic::Location::caller()
+    );
+    LegacyObservationJournalError::ConflictingUse(site)
+}
+
+#[track_caller]
+fn conflicting_write(inst: InstId) -> LegacyObservationJournalError {
+    r2il::refusal_evidence!(
+        "conflicting-write",
+        "{inst:?} at {}",
+        std::panic::Location::caller()
+    );
+    LegacyObservationJournalError::ConflictingWrite(inst)
 }
 
 fn record_same<T: Copy + Eq>(slot: &mut Option<T>, observation: T) -> Result<(), ()> {

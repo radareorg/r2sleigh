@@ -296,6 +296,7 @@ pub(super) fn binding_components_with(
             // at arm64 -O2 is the case -- one p-code temporary carries both
             // `w10` and `w11`, and `eor w10, w10, w11` reads two of its versions.
             if merge_would_interfere(&mut parent, &values) {
+                r2il::refusal_evidence!("span-declined", "{span:?} members {values:?}");
                 continue;
             }
             let first = values.first().copied().expect("multi-member span");
@@ -341,9 +342,8 @@ pub(super) fn binding_components_with(
                     // consumer sees only that the values kept their own objects.
                     r2il::refusal_evidence!(
                         "coalescing-declined",
-                        "entity {:?} of {} values: interferes={interferes} outlives_redefinition={outlives}",
-                        entity.id(),
-                        values.len()
+                        "entity {:?} members {values:?}: interferes={interferes} outlives_redefinition={outlives}",
+                        entity.id()
                     );
                     continue;
                 }
@@ -462,38 +462,6 @@ fn binding_width(
         };
         let carrier_width_bits = match *write {
             MachineWriteProjection::Full => member_width_bits,
-            // A lane write says nothing about the carrier, so it is no evidence
-            // that the object is carrier-wide. Only the lane it assigns is.
-            MachineWriteProjection::Lane {
-                bit_offset,
-                width_bits,
-                carrier_width_bits,
-            } => {
-                let valid_end = bit_offset
-                    .checked_add(width_bits)
-                    .is_some_and(|end| end <= carrier_width_bits);
-                if width_bits == 0 || !valid_end {
-                    return Ok(BindingWidth::Refused(
-                        ValueRefusal::IncoherentWriteProjection { value: *value },
-                    ));
-                }
-                width_bits
-            }
-            MachineWriteProjection::Insert {
-                bit_offset,
-                width_bits,
-                carrier_width_bits,
-            } => {
-                let valid_end = bit_offset
-                    .checked_add(width_bits)
-                    .is_some_and(|end| end <= carrier_width_bits);
-                if width_bits == 0 || carrier_width_bits < member_width_bits || !valid_end {
-                    return Ok(BindingWidth::Refused(
-                        ValueRefusal::IncoherentWriteProjection { value: *value },
-                    ));
-                }
-                carrier_width_bits
-            }
             MachineWriteProjection::ZeroExtend {
                 from_width_bits,
                 to_width_bits,
@@ -771,11 +739,13 @@ impl BindingPlan {
                     BindingPlanSourceMismatch::CertificateMembership { binding },
                 ))?;
             // A member with no defining instruction entered this function
-            // already holding its value, so the object exists from entry.
+            // already holding its value, so the object exists from entry; so
+            // does a lane of an entry register, which is minted from its root
+            // (doc/adr-register-identity.md §8, 6).
             let caller_supplied = component
                 .members
                 .iter()
-                .any(|value| graph.def_inst(*value).is_none());
+                .any(|value| graph.caller_supplied(*value));
             let mut call_clobbered = false;
             for value in &component.members {
                 if value_is_unclaimed_call_clobber(source_owned, graph, *value) {

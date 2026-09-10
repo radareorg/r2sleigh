@@ -17570,17 +17570,33 @@ mod tests {
         let prepared =
             r2ssa::SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
                 .expect("prepared indexed load");
+        let load_index = prepared
+            .function()
+            .get_block(0x401000)
+            .expect("block")
+            .ops
+            .iter()
+            .position(|op| matches!(op, r2ssa::SSAOp::Load { .. }))
+            .expect("indexed load");
         let address = prepared
-            .memory_certificate_for_op_site(0x401000, 2, false)
+            .memory_certificate_for_op_site(0x401000, load_index, false)
             .expect("memory certificate");
         let parameter_address = prepared
             .addresses()
             .parameter_expression(address.address)
             .expect("parameter-relative address");
         let index_value = parameter_address.terms[0].value;
+        let custom_index = prepared
+            .function()
+            .get_block(0x401000)
+            .expect("block")
+            .ops
+            .iter()
+            .position(|op| matches!(op, r2ssa::SSAOp::Load { space, .. } if *space == r2il::SpaceId::Custom(7)))
+            .expect("custom-space load");
         assert!(
             prepared
-                .memory_certificate_for_op_site(0x401000, 3, false)
+                .memory_certificate_for_op_site(0x401000, custom_index, false)
                 .is_some(),
             "the Custom-space access must exist before writeback filtering"
         );
@@ -17592,7 +17608,7 @@ mod tests {
             vec![ScalarArrayRenderCandidate {
                 slot: 0,
                 block_addr: 0x401000,
-                op_index: 2,
+                op_index: load_index,
                 is_write: false,
                 field_offset: 0,
                 element_stride: 1,

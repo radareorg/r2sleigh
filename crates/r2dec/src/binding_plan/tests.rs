@@ -973,6 +973,8 @@ fn declaration_width_uses_exact_machine_carriers_not_register_view_widths() {
     ]);
     let source = source_owned.source();
     let plan = BindingPlan::build_shadow(&source_owned).expect("sealed carrier-width plan");
+    // The `AH` read and write are a subpiece of and an insert into `RAX`, so
+    // every register value here is the root, and the object is 64 bits wide.
     let register_values = source
         .graph()
         .values
@@ -980,13 +982,16 @@ fn declaration_width_uses_exact_machine_carriers_not_register_view_widths() {
         .filter(|value| {
             value.canonical_storage.is_some_and(|storage| {
                 storage.space == CanonicalStorageSpace::Register
-                    && storage.offset == 1
-                    && storage.size == 1
+                    && storage.offset == 0
+                    && storage.size == 8
             })
         })
         .map(|value| value.id)
         .collect::<Vec<_>>();
-    assert!(!register_values.is_empty());
+    assert!(
+        register_values.len() >= 2,
+        "the entry root and the inserted root"
+    );
     let mut carrier_binding = None;
     for value in register_values {
         let Some(ValueDisposition::Bound { binding }) = plan.disposition(value) else {
@@ -1115,12 +1120,17 @@ fn unsupported_c_scalar_width_is_a_typed_value_refusal() {
             val: Varnode::unique(0x10, 3),
         },
     ]);
+    // The register read is a lane subpiece folded into its one reader; the
+    // copied unique is the value read twice.
     let output = source_owned
         .source()
         .graph()
         .insts
         .iter()
-        .find_map(|inst| inst.output)
+        .find_map(|inst| match &inst.payload {
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) => inst.output,
+            _ => None,
+        })
         .expect("copy output");
     let plan = BindingPlan::build_shadow(&source_owned).expect("typed refusal plan");
 

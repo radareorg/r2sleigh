@@ -201,6 +201,9 @@ pub struct SsaGraph {
     pub value_by_var: BTreeMap<SSAVar, ValueId>,
     pub op_inst_by_site: BTreeMap<(u64, usize), InstId>,
     pub op_site_by_inst: BTreeMap<InstId, (u64, usize)>,
+    /// Entry-lane projections by value, valued by the lane's storage
+    /// (`SSAFunction::mint_entry_lane_projections`).
+    pub(crate) formal_projections: BTreeMap<ValueId, CanonicalStorageId>,
 }
 
 impl SsaGraph {
@@ -408,6 +411,10 @@ impl SsaGraph {
             .copied()
             .unwrap_or(BlockId(0));
 
+        let formal_projections = function
+            .formal_projection_vars()
+            .filter_map(|(var, storage)| value_by_var.get(var).map(|value| (*value, *storage)))
+            .collect();
         Self {
             entry,
             block_order,
@@ -420,7 +427,24 @@ impl SsaGraph {
             value_by_var,
             op_inst_by_site,
             op_site_by_inst,
+            formal_projections,
         }
+    }
+
+    /// Whether the caller supplied this value: an entry value with no
+    /// defining instruction, or a lane the declaration mints from one.
+    pub fn caller_supplied(&self, value: ValueId) -> bool {
+        self.def_inst(value).is_none() || self.formal_projections.contains_key(&value)
+    }
+
+    /// The lane storage an entry-lane projection stands for.
+    pub fn formal_projection_storage(&self, value: ValueId) -> Option<CanonicalStorageId> {
+        self.formal_projections.get(&value).copied()
+    }
+
+    /// Every entry-lane projection with the lane it stands for.
+    pub fn formal_projections(&self) -> impl Iterator<Item = (&ValueId, &CanonicalStorageId)> {
+        self.formal_projections.iter()
     }
 
     pub fn block_id_for_addr(&self, addr: u64) -> Option<BlockId> {

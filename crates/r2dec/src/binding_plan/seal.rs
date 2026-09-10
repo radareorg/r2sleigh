@@ -57,7 +57,11 @@ fn seal_binding_components_with(
         // machine location is not on its own a licence to share a C object, and
         // one instruction reading two members makes it impossible whichever
         // derivation proposed the merge.
-        if members.len() > 1 && !super::rules::set_interferes(&read_together, &members) {
+        if members.len() > 1 {
+            if super::rules::set_interferes(&read_together, &members) {
+                r2il::refusal_evidence!("seal-span-declined", "{span:?} members {members:?}");
+                continue;
+            }
             members_by_source.insert(BindingCertificateSource::StorageSpan(span), members);
         }
     }
@@ -81,17 +85,26 @@ fn seal_binding_components_with(
                 })
                 .collect::<Result<BTreeSet<_>, _>>()?;
             // What this certificate would put in one object: its own members
-            // and everything already sharing a run with any of them.
+            // and everything already sharing an accepted run with any of them.
+            // A run's ineligible values own no object, so they cannot interfere.
             let mut merged = members.clone();
             for value in &members {
                 if let Some(span) = source.storage_spans().span_of(*value)
-                    && let Some(span_members) = source.storage_spans().members(span)
+                    && let Some(span_members) =
+                        members_by_source.get(&BindingCertificateSource::StorageSpan(span))
                 {
                     merged.extend(span_members.iter().copied());
                 }
             }
             let interferes = super::rules::set_interferes(&read_together, &merged)
                 || super::rules::set_outlives_a_redefinition(graph, &members);
+            if interferes {
+                r2il::refusal_evidence!(
+                    "seal-coalescing-declined",
+                    "entity {:?} members {members:?} merged {merged:?}",
+                    entity.id()
+                );
+            }
             if !members.is_empty() && !interferes {
                 members_by_source
                     .entry(BindingCertificateSource::CertifiedEntity(entity.id()))
@@ -208,38 +221,6 @@ fn seal_width_evidence(
         };
         match *write {
             MachineWriteProjection::Full => lower_bounds.push(member_width_bits),
-            // The same question the construction pass asks: a lane write is no
-            // evidence that the object is carrier-wide.
-            MachineWriteProjection::Lane {
-                bit_offset,
-                width_bits,
-                carrier_width_bits,
-            } => {
-                let valid_end = bit_offset
-                    .checked_add(width_bits)
-                    .is_some_and(|end| end <= carrier_width_bits);
-                if width_bits == 0 || !valid_end {
-                    return Ok(SealWidthEvidence::Refused(
-                        ValueRefusal::IncoherentWriteProjection { value: *value },
-                    ));
-                }
-                lower_bounds.push(width_bits);
-            }
-            MachineWriteProjection::Insert {
-                bit_offset,
-                width_bits,
-                carrier_width_bits,
-            } => {
-                let valid_end = bit_offset
-                    .checked_add(width_bits)
-                    .is_some_and(|end| end <= carrier_width_bits);
-                if width_bits == 0 || carrier_width_bits < member_width_bits || !valid_end {
-                    return Ok(SealWidthEvidence::Refused(
-                        ValueRefusal::IncoherentWriteProjection { value: *value },
-                    ));
-                }
-                lower_bounds.push(carrier_width_bits);
-            }
             MachineWriteProjection::ZeroExtend {
                 from_width_bits,
                 to_width_bits,
@@ -710,7 +691,7 @@ impl BindingPlan {
                     let expected_caller_supplied = component
                         .members
                         .iter()
-                        .any(|value| graph.def_inst(*value).is_none())
+                        .any(|value| graph.caller_supplied(*value))
                         || component.sources.iter().any(|source| match source {
                             BindingCertificateSource::CertifiedEntity(SemanticId::StackSlot(
                                 object,
@@ -746,6 +727,20 @@ impl BindingPlan {
                         || binding.call_clobbered != expected_call_clobbered
                         || !clobber_set_agrees
                     {
+                        // Which of the five terms disagreed is which layer to
+                        // look at; the refusal alone names only the binding.
+                        r2il::refusal_evidence!(
+                            "seal-certificate-membership",
+                            "{binding_id:?}: members {actual:?} vs {:?}; sources {:?} vs {:?}; caller_supplied={}/{} call_clobbered={}/{} clobber_set={}",
+                            component.members,
+                            binding.certificate.sources,
+                            expected_sources,
+                            binding.caller_supplied,
+                            expected_caller_supplied,
+                            binding.call_clobbered,
+                            expected_call_clobbered,
+                            clobber_set_agrees
+                        );
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::CertificateMembership {
                                 binding: binding_id,

@@ -374,16 +374,7 @@ impl<'a> FoldingContext<'a> {
             }
         }
         for boundary in prepared.facts().boundaries.returns.values() {
-            for value in boundary.values.iter().map(|fact| fact.value).chain(
-                boundary
-                    .register_compositions
-                    .iter()
-                    .flat_map(|composition| {
-                        composition
-                            .ordered_definitions()
-                            .map(|definition| definition.value)
-                    }),
-            ) {
+            for value in boundary.values.iter().map(|fact| fact.value) {
                 implicit_readers
                     .entry(value)
                     .or_default()
@@ -841,6 +832,16 @@ impl<'a> FoldingContext<'a> {
         self.exact_value_obligations(kind, source_inst, value.as_slice())
     }
 
+    /// Whether the plan gives this value a program variable of its own.
+    pub(crate) fn value_is_bound(&self, value: r2ssa::ValueId) -> bool {
+        matches!(
+            self.inputs
+                .binding_names
+                .and_then(|names| names.disposition_for_value(value)),
+            Some(crate::binding_plan::ValueDisposition::Bound { .. })
+        )
+    }
+
     pub(crate) fn observe_certified_value_read_expr(
         &self,
         value: r2ssa::ValueId,
@@ -978,102 +979,6 @@ impl<'a> FoldingContext<'a> {
                 fallback
             }
         }
-    }
-
-    /// Whether this instruction's statement is spoken for by the write whose
-    /// projection absorbed it. The same question as
-    /// [`Self::absorbed_extensions_discharged_by`], asked from the other side,
-    /// so the two cannot disagree.
-    pub(crate) fn write_is_discharged_by_absorbing_write(&self, inst: r2ssa::InstId) -> bool {
-        let Some(head) = self.inputs.binding_names.and_then(|names| {
-            names
-                .plan()
-                .machine_projection()
-                .immediate_absorbing_write(inst)
-        }) else {
-            return false;
-        };
-        self.absorbed_extensions_discharged_by(head).contains(&inst)
-    }
-
-    /// The carrier extensions a definition's statement speaks for.
-    ///
-    /// The machine projection says which extensions certified a write as a
-    /// zero-extension into its carrier -- `EAX = x` followed by
-    /// `RAX = zext(EAX)` -- and that is a fact about the machine. Whether the
-    /// extension then has anything left to say is the plan's question: where
-    /// the write and the extension are one rendered object, the statement
-    /// `x = (uint64_t)(uint32_t)...` has already performed the extension, and
-    /// rendering it again spells `x = (uint64_t)(uint32_t)x`. Where they are
-    /// two objects the extension is a real assignment from one to the other
-    /// and keeps its statement. The chain is taken as a prefix: an extension
-    /// that lands in another object ends what this statement can stand for.
-    pub(crate) fn absorbed_extensions_discharged_by(
-        &self,
-        inst: r2ssa::InstId,
-    ) -> Vec<r2ssa::InstId> {
-        let (Some(names), Some(prepared)) = (self.inputs.binding_names, self.inputs.prepared_ssa)
-        else {
-            return Vec::new();
-        };
-        let graph = prepared.graph();
-        let projection = names.plan().machine_projection();
-        let Some(crate::binding_plan::ValueDisposition::Bound { binding }) = graph
-            .inst(inst)
-            .and_then(|inst| inst.output)
-            .and_then(|output| names.disposition_for_value(output))
-        else {
-            return Vec::new();
-        };
-        let mut discharged = Vec::new();
-        for member in projection.absorbed_extensions(inst) {
-            let same_object = graph
-                .inst(*member)
-                .and_then(|inst| inst.output)
-                .and_then(|output| names.disposition_for_value(output))
-                .is_some_and(|disposition| {
-                    matches!(disposition, crate::binding_plan::ValueDisposition::Bound { binding: other } if other == binding)
-                });
-            if !same_object {
-                break;
-            }
-            discharged.push(*member);
-        }
-        discharged
-    }
-
-    /// Statement twin of [`Self::observe_discharged_expr`]: the cells and the
-    /// effects of the instructions a rendered definition's projection stands
-    /// for, on that definition's statement.
-    /// `already` is the obligation set the caller will mark on this same
-    /// statement for its own operation. A machine instruction lifts to several
-    /// p-code operations, so a narrow write and the carrier clear that
-    /// certifies it are frequently *one* `CanonicalInstructionId` carrying one
-    /// obligation. Marking it here as well as there renders it twice, and the
-    /// ledger scores an obligation with two occurrences as
-    /// `DuplicateRenderedOccurrence` -- which is a refusal, and the right one:
-    /// two occurrences of one effect is exactly what it is there to catch.
-    pub(crate) fn observe_discharged_stmt(
-        &self,
-        discharged: &[r2ssa::InstId],
-        already: &BTreeSet<SemanticObligationId>,
-        stmt: crate::ast::CStmt,
-    ) -> crate::ast::CStmt {
-        let Some(journal) = self.inputs.observation_journal else {
-            return stmt;
-        };
-        let fallback = stmt.clone();
-        let marked = match journal
-            .borrow_mut()
-            .observe_discharged_stmt(discharged, stmt)
-        {
-            Ok(marked) => marked,
-            Err(error) => {
-                self.retain_first_observation_error(error);
-                return fallback;
-            }
-        };
-        self.observe_discharged_effects(discharged, already, marked)
     }
 
     /// The cells and effects a bound value's canonical-term assignment owes,
@@ -1227,9 +1132,7 @@ impl<'a> FoldingContext<'a> {
         self.source_op_site_for_normalized_op(block_addr, op_idx)
     }
 
-    /// Takes every value the occurrence carries, because a return can carry
-    /// more than one: a composed ABI register is a base with ordered overlays
-    /// laid over it, and each of them is seeded as its own obligation.
+    /// Takes every value the occurrence carries.
     fn exact_value_obligations(
         &self,
         kind: EffectOccurrenceKind,
@@ -1276,10 +1179,7 @@ impl<'a> FoldingContext<'a> {
                 .returns
                 .get(&source_inst)
                 .is_some_and(|boundary| {
-                    boundary.at == source_inst
-                        && boundary.complete
-                        && boundary.values.is_empty()
-                        && boundary.register_compositions.is_empty()
+                    boundary.at == source_inst && boundary.complete && boundary.values.is_empty()
                 });
         let return_certified = void_return
             || source_site
@@ -1288,7 +1188,7 @@ impl<'a> FoldingContext<'a> {
                         .render_facts()?
                         .return_for_op(block_addr, op_idx)
                 })
-                .is_some_and(|fact| fact.values().eq(values.iter().copied()));
+                .is_some_and(|fact| values == [fact.value]);
         let rendered_call = call_fact.filter(|fact| {
             !matches!(
                 fact.disposition,
@@ -1472,9 +1372,7 @@ impl<'a> FoldingContext<'a> {
         )
     }
 
-    /// The occurrence carries several values, which only a composed return
-    /// does: its ABI register is a base with ordered overlays laid over it and
-    /// every one of them owns an obligation the single expression discharges.
+    /// The obligations of an occurrence carrying every one of these values.
     pub(crate) fn exact_effect_obligations_for_normalized_values(
         &self,
         kind: EffectOccurrenceKind,

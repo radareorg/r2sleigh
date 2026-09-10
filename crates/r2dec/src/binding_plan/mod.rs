@@ -238,7 +238,7 @@ pub(crate) fn certified_boundary_read_values(
                 && matches!(payload, r2ssa::InstPayload::Op(r2ssa::SSAOp::Return { .. }))
         })
     {
-        values.extend(certificate.values());
+        values.insert(certificate.value);
     }
 
     // A derived-width result is defined by this instruction from the identity
@@ -935,7 +935,6 @@ pub(crate) enum PlacementRead {
         call: InstId,
         value: ValueId,
     },
-    PreservedCarrierWrite(InstId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
