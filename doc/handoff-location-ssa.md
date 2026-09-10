@@ -20007,3 +20007,25 @@ the ADR's second duality), the cold-partition decision (9, unchanged, with
 the user), the complexity limit (8, the plan triple), and the flag carriers
 that keep the -O0 guard chains from folding into `&&`.
 
+
+## The radare2 fork rebased onto upstream master
+
+`anal/subregister-argument-spills` was 58 ahead and 25 behind; it is now 53
+commits on upstream master (84e28a449e). Every conflict was an older form of a
+pull request upstream has since merged (26676, 26686, 26687, 26689, 26692,
+26694), resolved by keeping upstream's form; the fork's later deletions kept
+what upstream now carries. The pre-rebase branch is saved as
+`backup/anal-subregister-argument-spills-20260910`. Not pushed yet.
+
+The measurement that matters: the runtime loads `~/.local/lib/libr_*.dylib`,
+even from `binr/radare2/radare2`, so a rebuilt tree measures nothing until
+`make install` runs. Installed and re-measured: `r2r` on `db/anal`, `db/types`
+and `db/cmd/cmd_afl` has no failure; plugin gates 54 on every column and all
+54 snapshots match; local census 93 -> 81 of 854, fourteen gained from
+upstream's analysis fixes and two lost in `zlib_example` (0x1ea0
+`PlannedElidedValueRendered` on a DeadStackBase asked by name at
+`memory_renderer.rs:677`; 0xfbc0 `RenderedValueRequired`), both untraced.
+
+Open upstream PRs: 26682 and 26629 on their own branches, mergeable; 26646
+(the integration PR, head is this branch) shows conflicting until the rebased
+branch is pushed.
