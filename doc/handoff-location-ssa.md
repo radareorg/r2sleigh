@@ -19822,3 +19822,24 @@ variadic arguments from an always-inline function, and the fortified headers
 use it for exactly this. A thunk for `sprintf` is therefore
 `return sprintf(s, fmt, __builtin_va_arg_pack());` with the fixed arguments
 from the callee's prototype and no count needed. Not built yet.
+
+## Where the session paused
+
+The goal was paused at 8b (this commit's parent chain: e5312fc7 cubic scan,
+95570975 alias-family worklist, and the phi-edge liveness worklist). Local
+census 93 of 854; DecBench 668 of 860 on e5312fc7, not re-run for the two
+worklist commits. Tree is clean on `arch/location-ssa`; the multi-exit
+continuation attempt is whole on `wip/multi-exit-continuation`.
+
+Three decisions are with the user and block the largest remaining classes:
+the entry-register identity rewrite (`calls.rs:165`, `calls.rs:276`, the
+`deflatePrime` type class), node splitting for irreducible loops (12 on
+DecBench as `BindingPlanBuild`), and how to render cold partitions (9). The
+continuation needs the composer to structure the exit subgraph; the variadic
+thunk has its spelling (`__builtin_va_arg_pack()`) and is unbuilt; `gzprintf`
+refuses because radare2 sizes `va_list` at zero and the plugin reads its
+argument-area slots as undeclared parameters.
+
+`inflate` with the limits lifted is now 2.4 seconds, with
+`rewrite_inlining_partition` (three derivations per plan: construction, the
+oracle, the seal) and `inlinable_core` the largest remaining costs.
