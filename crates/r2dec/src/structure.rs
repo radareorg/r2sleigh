@@ -2739,6 +2739,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                     reason: r2ssa::ledger::ElisionReason::UnobservedMerge,
                     ..
                 }) => continue,
+                // A stack-base address renders nowhere, so an edge cannot say
+                // which one it brought and this rewrite has nothing to say.
+                Err(crate::observation_journal::LegacyObservationJournalError::PlannedElidedValueRendered {
+                    reason: r2ssa::ledger::ElisionReason::DeadStackBase,
+                    ..
+                }) => return Ok(None),
                 Err(error) => {
                     r2il::refusal_evidence!(
                         "program-variable",

@@ -19424,3 +19424,43 @@ into the rendered column, because the next thing it meets is a different defect
 in the tree, so it comes back with the rendering side that completes it: the
 slice spelling for an access narrower than its slot, and the width check on the
 owner path.
+
+## DecBench says the pruning was worth four functions
+
+The correction above is about the local census, which the pruning left exactly
+where it was. DecBench disagrees and it is the independent measure: 640 of 860
+before the pruning, 644 after, with the gap column at nine and `proven` at 635.
+Local coverage and DecBench coverage are different populations -- the census
+asks about every address `afl` finds, DecBench about the DWARF subprograms --
+and a change can move one and not the other. Report both.
+
+## A shared exit cannot say which stack address an edge brought
+
+`missing program-variable authorization` was three of the local refusals and
+eight of DecBench's. Traced on `zlib_example`'s `fcn_1600`:
+
+    program-variable: shared exit 0x16a2 from 0x1698: merge target ValueId(271)
+      of tmp:4e00_4 unplanned: PlannedElidedValueRendered { DeadStackBase }
+
+`shared_exit_merge_writes` moves a block out from under its edges and makes each
+edge say which value it brought, which is what the merge meant. Its own
+documentation states the limit: "Nothing is written if either side renders as a
+carrier rather than a name the function declares." A stack-base address is
+exactly that -- the plan elides it because every access through it renders as
+the named slot -- so the rewrite has nothing to say about such a merge and does
+not apply. It refused the function instead.
+
+Two narrower shapes were written and measured before that one. Skipping the
+single phi and keeping the rest gains three functions and costs `murmur3_32` at
+`arm64_O0` its structure: 190 statements and no marked construct become 181 and
+a `control-domain coverage mismatch` residual. Requiring both sides of the merge
+to be stack-base addresses before skipping costs the same. Declining the whole
+rewrite gains two functions, leaves every one of the 54 snapshots byte-identical
+and every audit passing. The lesson is in the docstring that was already there:
+this rewrite is all or nothing per edge, so a merge it cannot speak for makes
+the rewrite inapplicable rather than one phi skippable.
+
+One flake worth naming: the `diagnostic` column reported `fnv1a64` at `x64_O0`
+as wrong on one run and as passing on the next with all 54 snapshots matching
+both times, so it is not a function of the rendered text. It is not one of the
+gated columns; treat a single move in it as noise and re-run before believing it.
