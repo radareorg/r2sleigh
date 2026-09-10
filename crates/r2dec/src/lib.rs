@@ -3491,7 +3491,12 @@ impl Decompiler {
                         .is_some_and(|name| declarations.get(name).is_some_and(|d| d.noreturn))
                 },
             );
-            structure::certify::report(&func_name, &certificate, &structure_rewrites);
+            structure::certify::report(
+                &func_name,
+                &certificate,
+                &structure_rewrites,
+                prepared.register_identity_census(),
+            );
             crate::stage_timing::mark("control_certificate");
         }
         if let Some(structured_body) = routed_body.structured_body()

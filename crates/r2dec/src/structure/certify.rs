@@ -1037,8 +1037,14 @@ fn reporting() -> bool {
 }
 
 /// Print one line per function under `R2DEC_CONTROL_CERTIFICATE`, and the
-/// same line on the refusal-evidence channel.
-pub(crate) fn report(function: &str, certificate: &ControlCertificate, rewrites: &str) {
+/// same line on the refusal-evidence channel. The register-identity census
+/// (`doc/adr-register-identity.md`, S0) rides on the same switch.
+pub(crate) fn report(
+    function: &str,
+    certificate: &ControlCertificate,
+    rewrites: &str,
+    identity: r2ssa::RegisterIdentityCensus,
+) {
     r2il::refusal_evidence!(
         "control-certificate",
         "{function}: {certificate} rewrites={rewrites}"
@@ -1050,6 +1056,10 @@ pub(crate) fn report(function: &str, certificate: &ControlCertificate, rewrites:
     for violation in certificate.violations.iter().take(12) {
         eprintln!("control-certificate {function}:   - {violation}");
     }
+    eprintln!(
+        "register-identity {function}: regalias={} split_entries={}",
+        identity.regalias_ops, identity.split_entry_families
+    );
 }
 
 #[cfg(test)]

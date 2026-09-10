@@ -289,6 +289,13 @@ pub struct TrustedSsaArtifact {
     arch: ArchSpec,
 }
 
+/// See [`SsaArtifact::register_identity_census`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegisterIdentityCensus {
+    pub regalias_ops: usize,
+    pub split_entry_families: usize,
+}
+
 impl SsaArtifact {
     #[cfg(test)]
     fn new(function: SSAFunction, mode: FunctionPrepareMode) -> Self {
@@ -1223,6 +1230,46 @@ impl SsaArtifact {
     /// This is deliberately separate from [`Self::stack_address_root_for_value`]:
     /// a frame-pointer-relative value can have a current-frame coordinate while
     /// lacking the stronger entry-stack proof after an unknown machine effect.
+    /// How far this graph is from one identity per register family: the
+    /// alias temporaries normalization had to mint, and the families that
+    /// entered the function under more than one version-zero value. Both are
+    /// zero once a register family has one SSA identity
+    /// (`doc/adr-register-identity.md`).
+    pub fn register_identity_census(&self) -> RegisterIdentityCensus {
+        let regalias_ops = self
+            .graph
+            .values
+            .iter()
+            .filter(|value| value.var.name.starts_with("tmp:regalias"))
+            .count();
+        let families = RegisterFamilyInfo::from_register_storages(
+            self.machine_context
+                .register_storages_by_name()
+                .iter()
+                .filter(|(_, storage)| storage.space == CanonicalStorageSpace::Register)
+                .map(|(name, storage)| (name.as_str(), storage.offset, storage.size)),
+        );
+        let mut entries_by_family = HashMap::<usize, usize>::new();
+        for value in &self.graph.values {
+            if value.var.version != 0 || self.graph.def_inst(value.id).is_some() {
+                continue;
+            }
+            let Some(storage) = value
+                .canonical_storage
+                .filter(|storage| storage.space == CanonicalStorageSpace::Register)
+            else {
+                continue;
+            };
+            if let Some(member) = families.member_at_offset(storage.offset, storage.size) {
+                *entries_by_family.entry(member.family_id).or_default() += 1;
+            }
+        }
+        RegisterIdentityCensus {
+            regalias_ops,
+            split_entry_families: entries_by_family.values().filter(|n| **n > 1).count(),
+        }
+    }
+
     pub fn entry_stack_address_root_for_value(
         &self,
         value_id: crate::graph::ValueId,
