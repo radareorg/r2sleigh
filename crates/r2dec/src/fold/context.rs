@@ -179,6 +179,9 @@ pub(crate) struct FoldingContext<'a> {
     /// refusal is met: that is the whole point of planning it, since by the
     /// time the refusal was met a reader had already claimed its cells.
     pub(crate) gap_anchors: std::cell::RefCell<std::collections::BTreeMap<InstId, GapReason>>,
+    /// What each planned gap owns, so opening it does not mistake its own
+    /// plan for another gap's claim.
+    pub(crate) gap_plans: std::cell::RefCell<std::collections::BTreeMap<InstId, BTreeSet<InstId>>>,
 }
 
 /// Why a gap was planned, in the terms the marker prints.
@@ -265,6 +268,7 @@ impl<'a> FoldingContext<'a> {
             pending_lowering_refusal: Cell::new(None),
             gapped_sites: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             gap_anchors: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            gap_plans: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         }
     }
 
@@ -404,6 +408,21 @@ impl<'a> FoldingContext<'a> {
             statement_mates.entry(result.at).or_default().push(call);
         }
 
+        // An instruction an earlier gap owns is accounted for already; a
+        // second gap claiming its cells would answer them twice.
+        let mut already = self.gapped_sites.borrow().clone();
+        if let Some(planned) = self.gap_plans.borrow().get(&seed) {
+            for site in planned {
+                already.remove(site);
+            }
+        }
+        if already.contains(&seed) {
+            r2il::refusal_evidence!(
+                "gap",
+                "the operation at {block_addr:#x} is already inside a marked gap"
+            );
+            return None;
+        }
         let mut owned: BTreeSet<InstId> = BTreeSet::new();
         owned.insert(seed);
         let mut worklist = vec![seed];
@@ -412,7 +431,7 @@ impl<'a> FoldingContext<'a> {
                 continue;
             };
             for mate in statement_mates.get(&inst).into_iter().flatten().copied() {
-                if owned.insert(mate) {
+                if !already.contains(&mate) && owned.insert(mate) {
                     worklist.push(mate);
                 }
             }
@@ -433,7 +452,7 @@ impl<'a> FoldingContext<'a> {
                     .map(|site| site.inst)
                     .chain(implicit)
                 {
-                    if owned.insert(reader) {
+                    if !already.contains(&reader) && owned.insert(reader) {
                         worklist.push(reader);
                     }
                 }
@@ -445,6 +464,7 @@ impl<'a> FoldingContext<'a> {
                     continue;
                 };
                 if owned.contains(&definition)
+                    || already.contains(&definition)
                     || !matches!(
                         names.disposition_for_value(input),
                         Some(crate::binding_plan::ValueDisposition::Inline { .. })
@@ -563,6 +583,9 @@ impl<'a> FoldingContext<'a> {
         self.gap_anchors
             .borrow_mut()
             .insert(anchor, GapReason::from_lowering(refusal));
+        self.gap_plans
+            .borrow_mut()
+            .insert(anchor, closure.sites.clone());
         self.gapped_sites.borrow_mut().extend(closure.sites);
         r2il::refusal_evidence!(
             "gap",
@@ -588,6 +611,9 @@ impl<'a> FoldingContext<'a> {
         self.gap_anchors
             .borrow_mut()
             .insert(anchor, GapReason::from_proof(kind));
+        self.gap_plans
+            .borrow_mut()
+            .insert(anchor, closure.sites.clone());
         self.gapped_sites.borrow_mut().extend(closure.sites);
         r2il::refusal_evidence!(
             "gap",

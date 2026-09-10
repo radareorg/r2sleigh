@@ -19588,3 +19588,29 @@ in either direction, and `missing_definition`, which led the cause list at 16
 three runs ago, is no longer in the top seven. Read the number as flat with a
 sharper refusal profile, and treat `deflate` deltas as the deadline until the
 work bound replaces it.
+
+## Two gaps must partition what they own, and `fcn_7b50` shows the loop spiralling
+
+The retry loop plans one gap per attempt, and a later gap's closure could reach
+an instruction an earlier gap already owned. The fold skipped it, since
+`gapped_sites` is shared, but `open_gap` still claimed its cells, and
+`gap_stmt` refused the second claim as `ConflictingUse`. A closure now treats
+instructions another gap owns as already accounted for -- it neither adds them
+nor claims their cells -- and a seed that is itself inside another gap opens
+nothing. The gap's own planned sites are subtracted first, because planning
+extends `gapped_sites` before the anchor is reached and the first version of
+this guard refused every gap as "already inside a marked gap", which is what
+`fcn_7b50`'s brief `OpLowering(function.rs:250)` was.
+
+Local census 104 -> 103, `zlib_example`'s `fcn_22c0` gained, nothing lost;
+gates 54 pass on every column and all 54 snapshots match.
+
+`bzip2_O2`'s `fcn_7b50` itself is now a different kind of evidence. Each
+attempt names one more anchor -- 194, 196, 197, 227, 229, 230, 231 and on --
+and the loop runs to its bound without converging, ending on an SSA-layer
+refusal of 526 obligations. That is the "placement refusals mostly chase a
+symptom" observation from earlier in this document, seen from inside one
+function: every seed is a consequence of a cause the loop cannot name. The
+next step there is not another gap rule; it is to print the first attempt's
+refusal with its witness chain, as the interface recovery now does, and trace
+that.
