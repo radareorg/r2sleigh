@@ -480,23 +480,6 @@ impl NormalizationOrigins {
         &self.replaced_phi_edges
     }
 
-    pub(crate) fn is_unconditional_phi_edge_copy(
-        &self,
-        site: NormalizedOpSite,
-        successor: u64,
-    ) -> bool {
-        let Some(block) = self.blocks.get(site.block.0 as usize) else {
-            return false;
-        };
-        matches!(
-            self.origin(site),
-            Some(NormalizedOpOrigin::PhiEdgeCopy(origin))
-                if origin.predecessor == block.address
-                    && origin.target == successor
-                    && origin.guarded.is_none()
-        )
-    }
-
     /// Whether this exact normalized operation was introduced to materialize a
     /// source phi edge.
     ///

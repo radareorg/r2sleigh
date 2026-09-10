@@ -189,6 +189,9 @@ impl CodeGenerator {
         // true of a prototype the reader has to be handed separately.
         for declaration in &func.externs {
             self.emit_indent();
+            if declaration.noreturn {
+                self.output.push_str("__attribute__((noreturn)) ");
+            }
             self.emit_type(&declaration.ret_type);
             self.output.push(' ');
             self.output.push_str(&declaration.name);
@@ -417,6 +420,14 @@ impl CodeGenerator {
                     self.output.push_str("default:\n");
                     self.indent_level += 1;
                     self.emit_stmt_sequence(default_stmts);
+                    self.indent_level -= 1;
+                }
+                // C has no label at the end of a compound statement, so an
+                // arm that renders nothing leaves the switch explicitly.
+                if self.output.ends_with(":\n") {
+                    self.indent_level += 1;
+                    self.emit_indent();
+                    self.output.push_str("break;\n");
                     self.indent_level -= 1;
                 }
 
@@ -1233,6 +1244,7 @@ mod tests {
                     ret_type: CType::uint(64),
                     params,
                     variadic,
+                    noreturn: false,
                 }],
                 extern_objects: Vec::new(),
                 name: "caller".to_string(),

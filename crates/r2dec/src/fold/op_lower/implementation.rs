@@ -1315,15 +1315,6 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
-    pub(crate) fn fold_block(
-        &self,
-        block: &SSABlock,
-        current_block_addr: u64,
-    ) -> OpLoweringResult<Vec<CStmt>> {
-        self.fold_block_with_sites(block, current_block_addr)
-            .map(|stmts| stmts.into_iter().map(|stmt| stmt.stmt).collect())
-    }
-
     pub(crate) fn fold_block_with_sites(
         &self,
         block: &SSABlock,

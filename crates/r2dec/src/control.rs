@@ -72,8 +72,4 @@ impl<'a> DecompileWorkControl<'a> {
             .poll()
             .map_err(|reason| DecompileExecutionStop::new(self.phase, reason))
     }
-
-    pub(crate) const fn raw(self) -> &'a dyn SsaWorkControl {
-        self.control
-    }
 }

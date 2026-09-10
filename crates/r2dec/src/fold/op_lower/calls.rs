@@ -197,6 +197,14 @@ impl<'a> FoldingContext<'a> {
         Ok((ret_type, params, variadic))
     }
 
+    /// The source declared a call to this callee terminal, so its prototype
+    /// says it never returns.
+    pub(crate) fn mark_callee_noreturn(&self, name: &str) {
+        if let Some(declaration) = self.callee_declarations.borrow_mut().get_mut(name) {
+            declaration.noreturn = true;
+        }
+    }
+
     pub(super) fn record_callee_declaration(
         &self,
         func_expr: &CExpr,
@@ -220,6 +228,7 @@ impl<'a> FoldingContext<'a> {
             ret_type,
             params: Some(params),
             variadic,
+            noreturn: false,
         };
         match self
             .callee_declarations
@@ -248,7 +257,11 @@ impl<'a> FoldingContext<'a> {
             // name-keyed insert does, declares one call's shape and leaves the
             // other contradicting it.
             std::collections::btree_map::Entry::Occupied(slot) => {
-                if *slot.get() == declaration {
+                // `noreturn` is a fact one terminal call site established for
+                // the callee; a later call site does not contradict it.
+                let mut agreed = declaration.clone();
+                agreed.noreturn = slot.get().noreturn;
+                if *slot.get() == agreed {
                     return Ok(());
                 }
                 r2il::refusal_evidence!(

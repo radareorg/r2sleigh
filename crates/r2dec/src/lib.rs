@@ -40,7 +40,6 @@ pub(crate) mod normalize;
 mod observation_journal;
 mod placement;
 pub(crate) mod planner;
-pub mod region;
 mod shadow_report;
 pub(crate) mod single_evaluation;
 pub(crate) mod stage_timing;
@@ -64,11 +63,9 @@ pub use highlight::highlight_c_ansi;
 use r2ssa::SSAFunction;
 #[cfg(test)]
 use r2ssa::SSAOp;
-use r2ssa::cfg::BlockTerminator;
 #[cfg(test)]
 use r2types::{ExternalTypeDb, FunctionType};
 use r2types::{FunctionFacts, FunctionTypeFacts};
-pub use region::{Region, RegionAnalyzer};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -2885,226 +2882,6 @@ impl Decompiler {
         }
     }
 
-    fn linearize_function_body(
-        &self,
-        func: &SSAFunction,
-        fold_ctx: &FoldingContext<'_>,
-    ) -> structure::ControlFlowStructureResult<Vec<CStmt>> {
-        let blocks: Vec<_> = func.blocks().cloned().collect();
-        // A multi-way dispatch cannot be linearized. The terminator arm below
-        // described one -- `/* case 0: goto loc_...; */` -- and a comment is not
-        // a transfer: the block fell through to whichever arm the linearizer
-        // placed next, and the function compiled cleanly and computed the wrong
-        // answer. Refusing is the honest answer, and it is what the structured
-        // path already does when it cannot express the switch.
-        if blocks.iter().any(|block| {
-            func.cfg().get_block(block.addr).is_some_and(|cfg_block| {
-                matches!(cfg_block.terminator, BlockTerminator::Switch { .. })
-            })
-        }) {
-            return Err(
-                crate::fold::op_lower::OpLoweringRefusal::unrepresentable_operation().into(),
-            );
-        }
-        // An unclassified transfer whose target is not a block of this function
-        // cannot be linearized. The terminator arm below spells it as
-        // `goto loc_<addr>`, but an outside target has no block to carry that
-        // label. A source-proven tail jump is different: its callsite fact
-        // renders a terminal return in the folded body, so the absent target is
-        // no longer a label the linear form owes. Every other outside branch
-        // stays behind this refusal; a target that is not a function entry is
-        // still a jump, and inventing a call for it would be a wrong answer.
-        let own_blocks: std::collections::BTreeSet<u64> =
-            blocks.iter().map(|block| block.addr).collect();
-        if blocks.iter().any(|block| {
-            let terminal_call = block.ops.iter().enumerate().any(|(op_idx, _)| {
-                fold_ctx
-                    .certified_call_render_fact_for_op(block.addr, op_idx)
-                    .is_some_and(|fact| fact.disposition.is_terminal_return())
-            });
-            func.cfg().get_block(block.addr).is_some_and(|cfg_block| {
-                !terminal_call
-                    && Self::linearized_transfer_targets(&cfg_block.terminator)
-                        .iter()
-                        .any(|target| !own_blocks.contains(target))
-            })
-        }) {
-            return Err(
-                crate::fold::op_lower::OpLoweringRefusal::unrepresentable_operation().into(),
-            );
-        }
-        let mut labelled = Vec::new();
-
-        for block in &blocks {
-            let mut body = Vec::new();
-            for stmt in fold_ctx.fold_block(block, block.addr)? {
-                if !matches!(stmt, CStmt::Empty) {
-                    body.push(stmt);
-                }
-            }
-            if let Some(terminator_stmt) = Self::linearized_terminator_stmt(func, fold_ctx, block) {
-                body.push(terminator_stmt);
-            }
-            labelled.push((Self::linear_block_label(block.addr), body));
-        }
-
-        // A block gets a label only if something jumps to it. Labelling every
-        // block is how the linear form used to be written, and it emits names
-        // no `goto` mentions, which a strict compile rejects. The set has to be
-        // collected across the whole body first, because a jump backwards is
-        // the normal case here.
-        let mut targets = std::collections::BTreeSet::new();
-        for (_, body) in &labelled {
-            for stmt in body {
-                collect_goto_targets(stmt, &mut targets);
-            }
-        }
-
-        let mut stmts = Vec::new();
-        for (label, body) in labelled {
-            if targets.contains(&label) {
-                stmts.push(CStmt::Label(label));
-            }
-            stmts.extend(body);
-        }
-
-        Ok(stmts)
-    }
-
-    fn linear_block_label(addr: u64) -> String {
-        format!("loc_{addr:x}")
-    }
-
-    /// Every address the linear form would spell as a `goto` for this
-    /// terminator. Kept beside `linearized_terminator_stmt` so the two cannot
-    /// drift: a target that arm turns into a label has to be listed here, or
-    /// the containment check above stops seeing it.
-    fn linearized_transfer_targets(terminator: &BlockTerminator) -> Vec<u64> {
-        match terminator {
-            BlockTerminator::ConditionalBranch {
-                true_target,
-                false_target,
-            } => vec![*true_target, *false_target],
-            BlockTerminator::Branch { target } | BlockTerminator::Fallthrough { next: target } => {
-                vec![*target]
-            }
-            BlockTerminator::Call {
-                fallthrough: Some(target),
-                ..
-            }
-            | BlockTerminator::IndirectCall {
-                fallthrough: Some(target),
-            } => vec![*target],
-            BlockTerminator::Switch { cases, default } => cases
-                .iter()
-                .map(|(_, target)| *target)
-                .chain(default.iter().copied())
-                .collect(),
-            BlockTerminator::IndirectBranch
-            | BlockTerminator::Call {
-                fallthrough: None, ..
-            }
-            | BlockTerminator::IndirectCall { fallthrough: None }
-            | BlockTerminator::Return
-            | BlockTerminator::None => Vec::new(),
-        }
-    }
-
-    fn linearized_terminator_stmt(
-        func: &SSAFunction,
-        fold_ctx: &FoldingContext<'_>,
-        block: &r2ssa::FunctionSSABlock,
-    ) -> Option<CStmt> {
-        let terminator = &func.cfg().get_block(block.addr)?.terminator;
-        if matches!(terminator, BlockTerminator::Branch { .. })
-            && block.ops.iter().enumerate().any(|(op_idx, _)| {
-                fold_ctx
-                    .certified_call_render_fact_for_op(block.addr, op_idx)
-                    .is_some_and(|fact| fact.disposition.is_terminal_return())
-            })
-        {
-            return None;
-        }
-        match terminator {
-            BlockTerminator::ConditionalBranch {
-                true_target,
-                false_target,
-            } => fold_ctx
-                .extract_condition_from_block(block)
-                .map(|cond| {
-                    let stmt = CStmt::if_stmt(
-                        cond,
-                        CStmt::Goto(Self::linear_block_label(*true_target)),
-                        Some(CStmt::Goto(Self::linear_block_label(*false_target))),
-                    );
-                    Self::observe_linearized_control_terminator(fold_ctx, block, stmt)
-                })
-                .or_else(|| {
-                    Some(CStmt::comment(format!(
-                        "conditional branch condition unresolved; true_target={}, false_target={}",
-                        Self::linear_block_label(*true_target),
-                        Self::linear_block_label(*false_target)
-                    )))
-                }),
-            BlockTerminator::Branch { target } | BlockTerminator::Fallthrough { next: target } => {
-                Some(Self::observe_linearized_control_terminator(
-                    fold_ctx,
-                    block,
-                    CStmt::Goto(Self::linear_block_label(*target)),
-                ))
-            }
-            BlockTerminator::Call {
-                fallthrough: Some(target),
-                ..
-            }
-            | BlockTerminator::IndirectCall {
-                fallthrough: Some(target),
-            } => Some(CStmt::Goto(Self::linear_block_label(*target))),
-            BlockTerminator::Switch { cases, default } => {
-                let mut stmts = Vec::new();
-                for (value, target) in cases {
-                    stmts.push(CStmt::comment(format!(
-                        "case {value}: goto {};",
-                        Self::linear_block_label(*target)
-                    )));
-                }
-                if let Some(target) = default {
-                    stmts.push(CStmt::comment(format!(
-                        "default: goto {};",
-                        Self::linear_block_label(*target)
-                    )));
-                }
-                (!stmts.is_empty()).then_some(CStmt::Block(stmts))
-            }
-            BlockTerminator::IndirectBranch => Some(CStmt::comment(
-                "indirect branch target unresolved".to_string(),
-            )),
-            BlockTerminator::Call {
-                fallthrough: None, ..
-            }
-            | BlockTerminator::IndirectCall { fallthrough: None }
-            | BlockTerminator::Return
-            | BlockTerminator::None => None,
-        }
-    }
-
-    fn observe_linearized_control_terminator(
-        fold_ctx: &FoldingContext<'_>,
-        block: &r2ssa::FunctionSSABlock,
-        stmt: CStmt,
-    ) -> CStmt {
-        let Some(op_idx) = block.ops.len().checked_sub(1) else {
-            return stmt;
-        };
-        let obligations = fold_ctx.exact_effect_obligations_for_normalized_value(
-            crate::fold::context::EffectOccurrenceKind::Expression,
-            block.addr,
-            op_idx,
-            None,
-        );
-        fold_ctx.observe_effect_stmt(&obligations, stmt)
-    }
-
     #[cfg(test)]
     pub(crate) fn prepend_comment(stmt: CStmt, text: String) -> CStmt {
         let (semantic, observations) = stmt.into_semantic_with_observations();
@@ -3637,27 +3414,19 @@ impl Decompiler {
         let structure_checkpoint = observation_journal.borrow().checkpoint();
         let structure_observation_error = fold_ctx.observation_error.borrow().clone();
         let mut structure_attempt = 0usize;
+        let structure_labels: std::collections::HashMap<u64, String>;
+        let structure_rewrites: String;
         let routed_body = loop {
             structure_attempt += 1;
             let mut structurer =
                 ControlFlowStructurer::new_with_control(func, &fold_ctx, structuring_work)?;
-            let tentative_observation_checkpoint = observation_journal.borrow().checkpoint();
-            let tentative_observation_error = fold_ctx.observation_error.borrow().clone();
-
-            match consumer_structured::primary_native_body(
-                &mut structurer,
-                || self.linearize_function_body(func, &fold_ctx),
-                || {
-                    observation_journal
-                        .borrow_mut()
-                        .rollback(tentative_observation_checkpoint);
-                    *fold_ctx.observation_error.borrow_mut() = tentative_observation_error.clone();
-                },
-            ) {
+            match consumer_structured::primary_native_body(&mut structurer) {
                 Ok(body) => {
                     if let Some(stop) = structurer.execution_stop() {
                         return Err(stop);
                     }
+                    structure_labels = structurer.labels().clone();
+                    structure_rewrites = structurer.rewrite_report();
                     break body;
                 }
                 Err(structure::ControlFlowStructureError::Lowering(refusal)) => {
@@ -3697,6 +3466,34 @@ impl Decompiler {
         };
         structuring_work.poll()?;
         crate::stage_timing::mark("structure_route");
+        if let Some(structured_body) = routed_body.structured_body() {
+            let journal = observation_journal.borrow();
+            let labels_by_name: std::collections::HashMap<&str, u64> = structure_labels
+                .iter()
+                .map(|(addr, name)| (name.as_str(), *addr))
+                .collect();
+            // The linear form labels a block by its address.
+            let label_block = |name: &str| {
+                labels_by_name.get(name).copied().or_else(|| {
+                    name.strip_prefix("loc_")
+                        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+                })
+            };
+            let declarations = fold_ctx.callee_declarations.borrow();
+            let certificate = structure::certify::certify(
+                structured_body.stmt(),
+                func.cfg(),
+                func.entry,
+                &|id| journal.observation_block(id),
+                &label_block,
+                &|stmt| {
+                    structure::certify::stmt_callee_name(stmt)
+                        .is_some_and(|name| declarations.get(name).is_some_and(|d| d.noreturn))
+                },
+            );
+            structure::certify::report(&func_name, &certificate, &structure_rewrites);
+            crate::stage_timing::mark("control_certificate");
+        }
         if let Some(structured_body) = routed_body.structured_body()
             && let Err(refusal) = validate_sealed_region_occurrence_coverage(structured_body)
         {
@@ -4026,99 +3823,6 @@ pub(crate) fn collect_expr_var_names(expr: &CExpr, out: &mut HashSet<crate::symb
         | CExpr::Sizeof(_)
         | CExpr::SizeofType(_) => {}
     }
-}
-
-/// Names a statement introduces, wherever it sits in the body.
-pub(crate) fn collect_stmt_var_names(stmts: &[CStmt]) -> HashSet<crate::symbol::SymbolId> {
-    fn visit_stmt(stmt: &CStmt, out: &mut HashSet<crate::symbol::SymbolId>) {
-        match stmt {
-            CStmt::StructuredRegion { stmt, .. } => visit_stmt(stmt, out),
-            CStmt::Observed { stmt, .. } => visit_stmt(stmt, out),
-            CStmt::Empty
-            | CStmt::Break
-            | CStmt::Continue
-            | CStmt::Comment(_)
-            | CStmt::Gap(_)
-            | CStmt::Goto(_)
-            | CStmt::Label(_) => {}
-            CStmt::Expr(expr) => collect_expr_var_names(expr, out),
-            CStmt::Return(expr) => {
-                if let Some(expr) = expr {
-                    collect_expr_var_names(expr, out);
-                }
-            }
-            CStmt::Decl { init, .. } => {
-                if let Some(init) = init {
-                    collect_expr_var_names(init, out);
-                }
-            }
-            CStmt::Block(stmts) => {
-                for stmt in stmts {
-                    visit_stmt(stmt, out);
-                }
-            }
-            CStmt::If {
-                cond,
-                then_body,
-                else_body,
-            } => {
-                collect_expr_var_names(cond, out);
-                visit_stmt(then_body, out);
-                if let Some(else_body) = else_body {
-                    visit_stmt(else_body, out);
-                }
-            }
-            CStmt::While { cond, body } => {
-                collect_expr_var_names(cond, out);
-                visit_stmt(body, out);
-            }
-            CStmt::DoWhile { body, cond } => {
-                visit_stmt(body, out);
-                collect_expr_var_names(cond, out);
-            }
-            CStmt::For {
-                init,
-                cond,
-                update,
-                body,
-            } => {
-                if let Some(init) = init {
-                    visit_stmt(init, out);
-                }
-                if let Some(cond) = cond {
-                    collect_expr_var_names(cond, out);
-                }
-                if let Some(update) = update {
-                    collect_expr_var_names(update, out);
-                }
-                visit_stmt(body, out);
-            }
-            CStmt::Switch {
-                expr,
-                cases,
-                default,
-            } => {
-                collect_expr_var_names(expr, out);
-                for case in cases {
-                    collect_expr_var_names(&case.value, out);
-                    for stmt in &case.body {
-                        visit_stmt(stmt, out);
-                    }
-                }
-                if let Some(default) = default {
-                    for stmt in default {
-                        visit_stmt(stmt, out);
-                    }
-                }
-            }
-        }
-    }
-
-    let mut names = HashSet::new();
-    for stmt in stmts {
-        visit_stmt(stmt, &mut names);
-    }
-    names
 }
 
 /// Which locals the body still assigns, printed between passes.
@@ -4849,63 +4553,6 @@ fn typed_integer_literal_expr(value: u64, is_signed: bool, bits: u32) -> CExpr {
     }
 }
 
-/// Every label a `goto` in this statement names.
-fn collect_goto_targets(statement: &CStmt, into: &mut std::collections::BTreeSet<String>) {
-    match statement {
-        CStmt::Goto(label) => {
-            into.insert(label.clone());
-        }
-        CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => {
-            collect_goto_targets(stmt, into);
-        }
-        CStmt::Block(statements) => {
-            for statement in statements {
-                collect_goto_targets(statement, into);
-            }
-        }
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            collect_goto_targets(then_body, into);
-            if let Some(else_body) = else_body {
-                collect_goto_targets(else_body, into);
-            }
-        }
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            collect_goto_targets(body, into);
-        }
-        CStmt::For { init, body, .. } => {
-            if let Some(init) = init {
-                collect_goto_targets(init, into);
-            }
-            collect_goto_targets(body, into);
-        }
-        CStmt::Switch { cases, default, .. } => {
-            for case in cases {
-                for statement in &case.body {
-                    collect_goto_targets(statement, into);
-                }
-            }
-            if let Some(default) = default {
-                for statement in default {
-                    collect_goto_targets(statement, into);
-                }
-            }
-        }
-        CStmt::Empty
-        | CStmt::Expr(_)
-        | CStmt::Decl { .. }
-        | CStmt::Return(_)
-        | CStmt::Break
-        | CStmt::Continue
-        | CStmt::Label(_)
-        | CStmt::Comment(_)
-        | CStmt::Gap(_) => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5051,7 +4698,6 @@ mod tests {
         ArchSpec, R2ILBlock, R2ILOp, RegisterBitSlice, RegisterDef, RegisterProjection,
         RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
     };
-    use r2ssa::SSAFunction;
     use r2types::{FunctionParamSpec, FunctionSignatureSpec};
     use std::collections::{BTreeMap, HashMap};
 
@@ -5081,53 +4727,6 @@ mod tests {
             binding_names: None,
             prepared_semantic_view: None,
         })
-    }
-
-    #[test]
-    fn linearized_conditional_branch_without_predicate_is_residual_comment() {
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![R2ILOp::CBranch {
-                    target: Varnode::constant(0x2000, 8),
-                    cond: Varnode::constant(1, 1),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1004,
-                size: 4,
-                ops: vec![R2ILOp::Return {
-                    target: Varnode::constant(0, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x2000,
-                size: 4,
-                ops: vec![R2ILOp::Return {
-                    target: Varnode::constant(1, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ];
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&blocks).expect("raw SSA function");
-        func.get_block_mut(0x1000).expect("entry block").ops.clear();
-        let block = func.get_block(0x1000).expect("entry block");
-        let fold_ctx = empty_fold_context_for_linearization();
-
-        let stmt = Decompiler::linearized_terminator_stmt(&func, &fold_ctx, block)
-            .expect("linearized residual terminator");
-        let CStmt::Comment(comment) = stmt else {
-            panic!("unresolved conditional branch must not fabricate executable control: {stmt:?}");
-        };
-        assert!(comment.contains("conditional branch condition unresolved"));
-        assert!(comment.contains("true_target=loc_2000"));
-        assert!(comment.contains("false_target=loc_1004"));
     }
 
     fn prepared_from_ops(ops: Vec<R2ILOp>, arch: &ArchSpec) -> r2ssa::SsaArtifact {

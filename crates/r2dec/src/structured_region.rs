@@ -1,6 +1,6 @@
 //! Immutable lexical-region identity for the final lowering phases.
 //!
-//! [`Region`](crate::region::Region) is an analysis result.  The control-flow
+//! The structurer's placement is an analysis result.  The control-flow
 //! structurer currently consumes that result while it builds the C AST, and it
 //! can append shared joins and shared exits that were not children of the raw
 //! region tree.  Declaration placement therefore cannot use either block
@@ -16,7 +16,6 @@
 use std::sync::Arc;
 
 use crate::ast::{CStmt, SwitchCase};
-use crate::region::Region;
 
 /// Dense identity of one lexical region occurrence in a sealed artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -87,16 +86,14 @@ impl std::hash::Hash for StructuredRegionArtifactAuthority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StructuredRegionKind {
     FunctionBody,
+    /// One block's own text: its label, statements, arms and merges.
     Block,
-    Sequence,
+    /// A conditional and its two arms, which are exclusive.
     IfThenElse,
-    WhileLoop,
-    DoWhileLoop,
-    MultiExit,
-    Transfer,
+    /// A `for (;;)` around a natural loop's body.
+    Loop,
+    /// A switch and its arms, which are exclusive.
     Switch,
-    Irreducible,
-    Synthetic(SyntheticRegionKind),
 }
 
 /// Construction metadata carried by an exact statement occurrence.
@@ -131,16 +128,13 @@ impl StructuredRegionMarker {
         self.kind
     }
 
+    pub(crate) const fn entry(&self) -> u64 {
+        self.entry
+    }
+
     fn authority(&self) -> Option<&StructuredRegionArtifactAuthority> {
         self.authority.as_ref()
     }
-}
-
-/// Why a statement occurrence exists outside the analyzed [`Region`] tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SyntheticRegionKind {
-    SharedJoin,
-    DeferredSharedExit,
 }
 
 /// One immutable lexical occurrence.
@@ -503,42 +497,6 @@ pub(crate) struct StructuredRegionDraft {
 }
 
 impl StructuredRegionDraft {
-    /// Retain one analyzed region tree in deterministic render preorder.
-    #[cfg(test)]
-    pub(crate) fn from_region(
-        function_entry: u64,
-        region: &Region,
-    ) -> Result<Self, StructuredRegionBuildError> {
-        let source = test_source_authority();
-        let mut draft = Self {
-            authority: StructuredRegionArtifactAuthority::new(&source),
-            #[cfg(test)]
-            root: RegionId(0),
-            nodes: Vec::new(),
-        };
-        let root = draft.push_node(None, 0, function_entry, StructuredRegionKind::FunctionBody)?;
-        debug_assert_eq!(root, draft.root);
-
-        // An explicit stack keeps artifact construction independent of Rust
-        // call-stack depth. Children are pushed in reverse so allocation
-        // remains the exact forward render preorder.
-        let mut pending = vec![(root, region)];
-        while let Some((parent, current)) = pending.pop() {
-            let depth = draft.nodes[parent.index()]
-                .depth
-                .checked_add(1)
-                .ok_or(StructuredRegionBuildError::RegionDepthOverflow)?;
-            let id = draft.push_node(Some(parent), depth, current.entry(), kind_of(current))?;
-            draft.nodes[parent.index()].children.push(id);
-
-            let children = direct_children(current);
-            for child in children.into_iter().rev() {
-                pending.push((id, child));
-            }
-        }
-        Ok(draft)
-    }
-
     #[cfg(test)]
     pub(crate) const fn authority(&self) -> &StructuredRegionArtifactAuthority {
         &self.authority
@@ -547,27 +505,6 @@ impl StructuredRegionDraft {
     /// Anchor that the structurer must attach to the emitted occurrence.
     pub(crate) fn emission_anchor(&self, id: RegionId) -> Option<RegionEmissionAnchor> {
         self.nodes.get(id.index()).map(|node| node.emission_anchor)
-    }
-
-    /// Record one root-level statement appended after the analyzed region.
-    #[cfg(test)]
-    pub(crate) fn append_synthetic(
-        &mut self,
-        kind: SyntheticRegionKind,
-        entry: u64,
-    ) -> Result<(RegionId, RegionEmissionAnchor), StructuredRegionBuildError> {
-        let depth = self.nodes[self.root.index()]
-            .depth
-            .checked_add(1)
-            .ok_or(StructuredRegionBuildError::RegionDepthOverflow)?;
-        let id = self.push_node(
-            Some(self.root),
-            depth,
-            entry,
-            StructuredRegionKind::Synthetic(kind),
-        )?;
-        self.nodes[self.root.index()].children.push(id);
-        Ok((id, self.nodes[id.index()].emission_anchor))
     }
 
     /// Consume all mutable construction state and expose an immutable artifact.
@@ -626,6 +563,11 @@ pub(crate) struct SealedStructuredBody {
 impl SealedStructuredBody {
     pub(crate) fn regions(&self) -> &SealedStructuredRegionArtifact {
         &self.regions
+    }
+
+    /// The still-marked tree, for a reader that only looks.
+    pub(crate) fn stmt(&self) -> &CStmt {
+        &self.stmt
     }
 
     #[cfg(test)]
@@ -1076,61 +1018,11 @@ fn strip_region_markers(stmt: &mut CStmt) {
     }
 }
 
-pub(crate) fn kind_of(region: &Region) -> StructuredRegionKind {
-    match region {
-        Region::Block(_) => StructuredRegionKind::Block,
-        Region::Goto { .. } => StructuredRegionKind::Transfer,
-        Region::Sequence(_) => StructuredRegionKind::Sequence,
-        Region::IfThenElse { .. } => StructuredRegionKind::IfThenElse,
-        Region::WhileLoop { .. } => StructuredRegionKind::WhileLoop,
-        Region::DoWhileLoop { .. } => StructuredRegionKind::DoWhileLoop,
-        Region::MultiExit { .. } => StructuredRegionKind::MultiExit,
-        Region::Transfer { .. } => StructuredRegionKind::Transfer,
-        Region::Switch { .. } => StructuredRegionKind::Switch,
-        Region::Irreducible { .. } => StructuredRegionKind::Irreducible,
-    }
-}
-
-#[cfg(test)]
-fn direct_children(region: &Region) -> Vec<&Region> {
-    match region {
-        Region::Block(_)
-        | Region::Goto { .. }
-        | Region::Transfer { .. }
-        | Region::Irreducible { .. } => Vec::new(),
-        Region::Sequence(regions) => regions.iter().collect(),
-        Region::IfThenElse {
-            then_region,
-            else_region,
-            ..
-        } => {
-            let mut children = vec![then_region.as_ref()];
-            if let Some(else_region) = else_region {
-                children.push(else_region.as_ref());
-            }
-            children
-        }
-        Region::WhileLoop { body, .. }
-        | Region::DoWhileLoop { body, .. }
-        | Region::MultiExit { head: body, .. } => vec![body.as_ref()],
-        Region::Switch { cases, default, .. } => {
-            let mut children = cases
-                .iter()
-                .map(|(_, region)| region.as_ref())
-                .collect::<Vec<_>>();
-            if let Some(default) = default {
-                children.push(default.as_ref());
-            }
-            children
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::seal_structured_body_for_test as seal_structured_body;
     use super::*;
-    use crate::region::RegionTransferKind;
+    use crate::ast::CExpr;
 
     type NodeSignature = (
         Option<usize>,
@@ -1158,103 +1050,99 @@ mod tests {
             .collect()
     }
 
+    fn marker(entry: u64, kind: StructuredRegionKind, stmt: CStmt) -> CStmt {
+        CStmt::structured_region(StructuredRegionMarker::unsealed(entry, kind), stmt)
+    }
+
+    /// Body [ Block, IfThenElse [ then: Block, else: Loop [ Block ] ] ], which
+    /// seals in preorder as nodes 0..=5 with the function body at 0.
+    fn selection_tree() -> CStmt {
+        marker(
+            0x1000,
+            StructuredRegionKind::FunctionBody,
+            CStmt::Block(vec![
+                marker(0x1000, StructuredRegionKind::Block, CStmt::Empty),
+                marker(
+                    0x1010,
+                    StructuredRegionKind::IfThenElse,
+                    CStmt::if_stmt(
+                        CExpr::IntLit(1),
+                        marker(0x1020, StructuredRegionKind::Block, CStmt::Empty),
+                        Some(marker(
+                            0x1030,
+                            StructuredRegionKind::Loop,
+                            CStmt::For {
+                                init: None,
+                                cond: None,
+                                update: None,
+                                body: Box::new(marker(
+                                    0x1040,
+                                    StructuredRegionKind::Block,
+                                    CStmt::Empty,
+                                )),
+                            },
+                        )),
+                    ),
+                ),
+            ]),
+        )
+    }
+
     #[test]
     fn only_the_arms_of_a_selection_exclude_one_another() {
-        // Sequence [ Block, IfThenElse [ then: Block, else: While [ Block ] ] ]
-        // sealed in preorder as nodes 0..=6, with the function body at 0.
-        let region = Region::Sequence(vec![
-            Region::Block(0x1000),
-            Region::IfThenElse {
-                cond_block: 0x1010,
-                then_region: Box::new(Region::Block(0x1020)),
-                else_region: Some(Box::new(Region::WhileLoop {
-                    header: 0x1030,
-                    body: Box::new(Region::Block(0x1040)),
-                })),
-                merge_block: Some(0x1050),
-            },
-        ]);
-        let sealed = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("region draft")
-            .seal();
+        let (_, sealed) = seal_structured_body(selection_tree())
+            .expect("marker tree")
+            .into_marked_parts();
         let id = |index: u32| RegionId(index);
 
         // The two arms of the `if`, and a region nested inside one arm against
         // the other arm: one execution reaches at most one of them.
-        assert!(sealed.regions_are_exclusive(id(4), id(5)));
-        assert!(sealed.regions_are_exclusive(id(4), id(6)));
+        assert!(sealed.regions_are_exclusive(id(3), id(4)));
+        assert!(sealed.regions_are_exclusive(id(3), id(5)));
 
-        // Siblings in a sequence both run.
-        assert!(!sealed.regions_are_exclusive(id(2), id(3)));
-        assert!(!sealed.regions_are_exclusive(id(2), id(4)));
+        // Siblings in a body both run.
+        assert!(!sealed.regions_are_exclusive(id(1), id(2)));
+        assert!(!sealed.regions_are_exclusive(id(1), id(3)));
         // One containing the other is reached by the same execution.
-        assert!(!sealed.regions_are_exclusive(id(3), id(4)));
-        assert!(!sealed.regions_are_exclusive(id(5), id(6)));
+        assert!(!sealed.regions_are_exclusive(id(2), id(3)));
+        assert!(!sealed.regions_are_exclusive(id(4), id(5)));
         // A region does not exclude itself; two occurrences in one region are
         // two executions of it.
-        assert!(!sealed.regions_are_exclusive(id(4), id(4)));
+        assert!(!sealed.regions_are_exclusive(id(3), id(3)));
         // Nothing is claimed about a region the artifact does not have.
-        assert!(!sealed.regions_are_exclusive(id(4), id(99)));
+        assert!(!sealed.regions_are_exclusive(id(3), id(99)));
     }
 
     #[test]
-    fn raw_region_tree_seals_as_dense_deterministic_preorder() {
-        let region = Region::Sequence(vec![
-            Region::Block(0x1000),
-            Region::IfThenElse {
-                cond_block: 0x1010,
-                then_region: Box::new(Region::Block(0x1020)),
-                else_region: Some(Box::new(Region::WhileLoop {
-                    header: 0x1030,
-                    body: Box::new(Region::Block(0x1040)),
-                })),
-                merge_block: Some(0x1050),
-            },
-        ]);
-
-        let first = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("region draft")
-            .seal();
-        let second = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("region draft")
-            .seal();
+    fn marker_tree_seals_as_dense_deterministic_preorder() {
+        let (_, first) = seal_structured_body(selection_tree())
+            .expect("marker tree")
+            .into_marked_parts();
+        let (_, second) = seal_structured_body(selection_tree())
+            .expect("marker tree")
+            .into_marked_parts();
 
         let expected = vec![
             (
                 None,
                 0,
                 0x1000,
-                vec![1],
+                vec![1, 2],
                 0,
                 StructuredRegionKind::FunctionBody,
             ),
+            (Some(0), 1, 0x1000, vec![], 1, StructuredRegionKind::Block),
             (
                 Some(0),
                 1,
-                0x1000,
-                vec![2, 3],
-                1,
-                StructuredRegionKind::Sequence,
-            ),
-            (Some(1), 2, 0x1000, vec![], 2, StructuredRegionKind::Block),
-            (
-                Some(1),
-                2,
                 0x1010,
-                vec![4, 5],
-                3,
+                vec![3, 4],
+                2,
                 StructuredRegionKind::IfThenElse,
             ),
-            (Some(3), 3, 0x1020, vec![], 4, StructuredRegionKind::Block),
-            (
-                Some(3),
-                3,
-                0x1030,
-                vec![6],
-                5,
-                StructuredRegionKind::WhileLoop,
-            ),
-            (Some(5), 4, 0x1040, vec![], 6, StructuredRegionKind::Block),
+            (Some(2), 2, 0x1020, vec![], 3, StructuredRegionKind::Block),
+            (Some(2), 2, 0x1030, vec![5], 4, StructuredRegionKind::Loop),
+            (Some(4), 3, 0x1040, vec![], 5, StructuredRegionKind::Block),
         ];
         assert_eq!(node_signature(&first), expected);
         assert_eq!(node_signature(&first), node_signature(&second));
@@ -1269,70 +1157,20 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_appends_are_root_siblings_in_exact_emission_order() {
-        let region = Region::Block(0x1000);
-        let mut draft = StructuredRegionDraft::from_region(0x1000, &region).expect("region draft");
-        let authority = draft.authority().clone();
-        let (join, join_anchor) = draft
-            .append_synthetic(SyntheticRegionKind::SharedJoin, 0x1040)
-            .expect("shared join");
-        let (exit, exit_anchor) = draft
-            .append_synthetic(SyntheticRegionKind::DeferredSharedExit, 0x1080)
-            .expect("shared exit");
-        let sealed = draft.seal();
-
-        assert_eq!(*sealed.authority(), authority);
-        assert_eq!(
-            sealed.node(sealed.root()).expect("root").children(),
-            &[RegionId(1), join, exit]
-        );
-        assert_eq!(join.index(), 2);
-        assert_eq!(join_anchor.index(), 2);
-        assert_eq!(exit.index(), 3);
-        assert_eq!(exit_anchor.index(), 3);
-        assert_eq!(
-            sealed.node(join).expect("join").parent(),
-            Some(sealed.root())
-        );
-        assert_eq!(
-            sealed.node(exit).expect("exit").parent(),
-            Some(sealed.root())
-        );
-        assert_eq!(
-            sealed.node(join).expect("join").kind(),
-            StructuredRegionKind::Synthetic(SyntheticRegionKind::SharedJoin)
-        );
-        assert_eq!(
-            sealed.node(exit).expect("exit").kind(),
-            StructuredRegionKind::Synthetic(SyntheticRegionKind::DeferredSharedExit)
-        );
-    }
-
-    #[test]
-    fn transfer_occurrence_keeps_its_exact_region_entry_contract() {
-        let region = Region::Transfer {
-            loop_header: 0x1000,
-            source: 0x1010,
-            target: 0x1020,
-            kind: RegionTransferKind::Exit,
-        };
-        let artifact = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("region draft")
-            .seal();
-        let transfer = artifact.node(RegionId(1)).expect("transfer node");
-        assert_eq!(transfer.entry(), region.entry());
-        assert_eq!(transfer.kind(), StructuredRegionKind::Transfer);
-    }
-
-    #[test]
     fn independently_sealed_artifacts_never_share_authority() {
-        let region = Region::Block(0x1000);
-        let first = StructuredRegionDraft::from_region(0x1000, &region)
+        let tree = || {
+            marker(
+                0x1000,
+                StructuredRegionKind::FunctionBody,
+                marker(0x1000, StructuredRegionKind::Block, CStmt::Empty),
+            )
+        };
+        let (_, first) = seal_structured_body(tree())
             .expect("first")
-            .seal();
-        let second = StructuredRegionDraft::from_region(0x1000, &region)
+            .into_marked_parts();
+        let (_, second) = seal_structured_body(tree())
             .expect("second")
-            .seal();
+            .into_marked_parts();
         assert_ne!(first.authority(), second.authority());
         assert!(
             first
@@ -1392,7 +1230,7 @@ mod tests {
         let sealed = seal_structured_body(CStmt::structured_region(
             StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
             CStmt::structured_region(
-                StructuredRegionMarker::unsealed(0x1010, StructuredRegionKind::Sequence),
+                StructuredRegionMarker::unsealed(0x1010, StructuredRegionKind::Loop),
                 CStmt::structured_region(
                     StructuredRegionMarker::unsealed(0x1020, StructuredRegionKind::Block),
                     CStmt::Empty,
@@ -1413,7 +1251,7 @@ mod tests {
             stmt: child,
         } = *sequence
         else {
-            panic!("sequence marker")
+            panic!("loop marker")
         };
         let CStmt::StructuredRegion {
             marker: child_marker,
@@ -1490,47 +1328,6 @@ mod tests {
                 (visited[1].0, visited[1].1, 0x1010, "first".to_string()),
                 (visited[2].0, visited[2].1, 0x1010, "second".to_string()),
             ]
-        );
-    }
-
-    #[test]
-    fn sealed_body_keeps_synthetic_appends_as_function_body_children() {
-        let source = CStmt::structured_region(
-            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::Block),
-            CStmt::Comment("source".to_string()),
-        );
-        let join = CStmt::structured_region(
-            StructuredRegionMarker::unsealed(
-                0x1040,
-                StructuredRegionKind::Synthetic(SyntheticRegionKind::SharedJoin),
-            ),
-            CStmt::Comment("join".to_string()),
-        );
-        let exit = CStmt::structured_region(
-            StructuredRegionMarker::unsealed(
-                0x1080,
-                StructuredRegionKind::Synthetic(SyntheticRegionKind::DeferredSharedExit),
-            ),
-            CStmt::Comment("exit".to_string()),
-        );
-        let body = seal_structured_body(CStmt::structured_region(
-            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
-            CStmt::Block(vec![source, join, exit]),
-        ))
-        .expect("synthetic occurrence tree");
-
-        let children = body
-            .regions()
-            .children(body.regions().root())
-            .expect("function-body children");
-        assert_eq!(children.len(), 3);
-        assert_eq!(
-            body.regions().node(children[1]).expect("join").kind(),
-            StructuredRegionKind::Synthetic(SyntheticRegionKind::SharedJoin)
-        );
-        assert_eq!(
-            body.regions().node(children[2]).expect("exit").kind(),
-            StructuredRegionKind::Synthetic(SyntheticRegionKind::DeferredSharedExit)
         );
     }
 }

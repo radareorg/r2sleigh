@@ -4329,9 +4329,8 @@ impl DenseBindingSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::region::Region;
     use crate::structured_region::{
-        StructuredRegionDraft, StructuredRegionKind, StructuredRegionMarker,
+        StructuredRegionKind, StructuredRegionMarker,
         seal_structured_body_for_test as seal_structured_body,
     };
     use crate::symbol::{SymbolRole, SymbolTable};
@@ -4464,19 +4463,39 @@ mod tests {
         }
     }
 
+    /// A marker tree sealed the way the structurer seals its own.
+    fn regions_from(entry: u64, body: Vec<CStmt>) -> SealedStructuredRegionArtifact {
+        crate::structured_region::seal_structured_body_for_test(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(entry, StructuredRegionKind::FunctionBody),
+            CStmt::Block(body),
+        ))
+        .expect("marker tree")
+        .into_marked_parts()
+        .1
+    }
+
+    fn block_region(entry: u64) -> CStmt {
+        CStmt::structured_region(
+            StructuredRegionMarker::unsealed(entry, StructuredRegionKind::Block),
+            CStmt::Empty,
+        )
+    }
+
+    fn if_region(cond: u64, then_body: CStmt, else_body: CStmt) -> CStmt {
+        CStmt::structured_region(
+            StructuredRegionMarker::unsealed(cond, StructuredRegionKind::IfThenElse),
+            CStmt::if_stmt(CExpr::IntLit(1), then_body, Some(else_body)),
+        )
+    }
+
     fn diamond_regions() -> SealedStructuredRegionArtifact {
-        let region = Region::Sequence(vec![
-            Region::IfThenElse {
-                cond_block: 0x1000,
-                then_region: Box::new(Region::Block(0x1010)),
-                else_region: Some(Box::new(Region::Block(0x1020))),
-                merge_block: Some(0x1030),
-            },
-            Region::Block(0x1030),
-        ]);
-        StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("diamond region")
-            .seal()
+        regions_from(
+            0x1000,
+            vec![
+                if_region(0x1000, block_region(0x1010), block_region(0x1020)),
+                block_region(0x1030),
+            ],
+        )
     }
 
     fn region_with_entry(
@@ -4567,10 +4586,11 @@ mod tests {
             &writes,
         )
         .expect("placement");
-        let sequence = regions.source_root();
+        // The arms and the merge meet at the function body itself.
+        let body = regions.root();
         assert_eq!(
             decisions.decision(binding),
-            Some(PlacementDecision::LexicalDeclaration { region: sequence })
+            Some(PlacementDecision::LexicalDeclaration { region: body })
         );
     }
 
@@ -4630,21 +4650,14 @@ mod tests {
 
     #[test]
     fn duplicated_merge_reads_in_exclusive_arms_use_the_cfg_assignment_proof() {
-        let region = Region::IfThenElse {
-            cond_block: 0x1000,
-            then_region: Box::new(Region::Sequence(vec![
-                Region::Block(0x1010),
-                Region::Block(0x1030),
-            ])),
-            else_region: Some(Box::new(Region::Sequence(vec![
-                Region::Block(0x1020),
-                Region::Block(0x1030),
-            ]))),
-            merge_block: Some(0x1030),
-        };
-        let regions = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("duplicated merge-tail region")
-            .seal();
+        let regions = regions_from(
+            0x1000,
+            vec![if_region(
+                0x1000,
+                CStmt::Block(vec![block_region(0x1010), block_region(0x1030)]),
+                CStmt::Block(vec![block_region(0x1020), block_region(0x1030)]),
+            )],
+        );
         let cfg = diamond_cfg();
         let binding = BindingId::from_dense_index(0).expect("binding");
         let then_region = region_with_entry(&regions, 0x1010, StructuredRegionKind::Block);
@@ -4735,10 +4748,7 @@ mod tests {
 
     #[test]
     fn inserted_carrier_write_reads_before_its_same_occurrence_write() {
-        let region = Region::Block(0x1000);
-        let regions = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("single block region")
-            .seal();
+        let regions = regions_from(0x1000, vec![block_region(0x1000)]);
         let cfg = TestCfg::new(0x1000, &[]);
         let binding = BindingId::from_dense_index(0).expect("binding");
         let block_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);
@@ -4789,10 +4799,7 @@ mod tests {
 
     #[test]
     fn one_dominating_write_is_inlined_at_its_exact_assignment() {
-        let region = Region::Sequence(vec![Region::Block(0x1000), Region::Block(0x1010)]);
-        let regions = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("linear region")
-            .seal();
+        let regions = regions_from(0x1000, vec![block_region(0x1000), block_region(0x1010)]);
         let cfg = TestCfg::new(0x1000, &[(0x1000, 0x1010)]);
         let binding = BindingId::from_dense_index(0).expect("binding");
         let write_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);
@@ -4846,10 +4853,7 @@ mod tests {
 
     #[test]
     fn certified_parameter_read_uses_entry_assignment_without_a_local() {
-        let region = Region::Block(0x1000);
-        let regions = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("parameter region")
-            .seal();
+        let regions = regions_from(0x1000, vec![block_region(0x1000)]);
         let cfg = TestCfg::new(0x1000, &[]);
         let binding = BindingId::from_dense_index(0).expect("binding");
         let block_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);
@@ -4901,10 +4905,7 @@ mod tests {
 
     #[test]
     fn escaped_frame_object_address_uses_its_declaration_as_definition() {
-        let region = Region::Block(0x1000);
-        let regions = StructuredRegionDraft::from_region(0x1000, &region)
-            .expect("frame-object region")
-            .seal();
+        let regions = regions_from(0x1000, vec![block_region(0x1000)]);
         let cfg = TestCfg::new(0x1000, &[]);
         let binding = BindingId::from_dense_index(0).expect("binding");
         let block_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);

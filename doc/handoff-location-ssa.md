@@ -19843,3 +19843,167 @@ argument-area slots as undeclared parameters.
 `inflate` with the limits lifted is now 2.4 seconds, with
 `rewrite_inlining_partition` (three derivations per plan: construction, the
 oracle, the seal) and `inlinable_core` the largest remaining costs.
+
+## The structurer is derived as a dominator-tree placement, and S0's checker is measuring it
+
+The session opened with a comparison of this document against the tree and a
+decision on where the breakthrough is. Three model-level dualities account for
+the remaining refusal classes: the structurer recognises shapes and proves
+placement after the fact (every structural class), a value has two identities
+at version zero and a call result two values on one storage (`calls.rs`,
+`RenderedValueRequired`, `UnownedBindingSymbol`, `BindingPlanBuild`), and the
+gap loop re-renders whole functions to find one cell. The user chose control
+first, then value identity, then the incremental gap loop.
+
+`doc/adr-structure-dominator-tree.md` is the derivation, reviewed by the user
+with five defects fixed in the text: the recursion lacked a placement for an
+exit whose immediate dominator is an interior block (now the exit list of the
+outermost loop `Λ(y)` names), the order claim was wrong for irreducible
+cycles (backward `goto`s target loop headers and irreducible entries, nothing
+else), condition chains were outside clause (iii) (now a compound test over a
+chain proven by BDD equivalence), terminal calls needed the extractor to
+consult the `noreturn` prototype, and an indirect branch with declared
+successors had no arm (now a `switch` on the target value). The interim bound
+for S1 is derived: labels after S2 over the 537 structured functions must not
+exceed their `goto` count today.
+
+S0 is done and measured: `crates/r2dec/src/control_certificate.rs` reads the
+routed body back as a control graph over occurrences and compares it with the
+CFG, at the `structure_route` seam in `lib.rs`, reported under
+`R2DEC_CONTROL_CERTIFICATE=1`; `tests/corpus/control_census.sh` tallies it per
+function. Over nine local binaries: 720 functions, 686 with a body, 654
+certified, 32 not -- 31 of them a noreturn callee whose text continues
+(§7 of the ADR), and one real: `bzip2recover_O2 dbg_bsOpenReadStream`, whose
+first structuring certifies and whose gap retry drops the `return NULL` arm at
+`0x1e24`. The four facts the checker had to learn about today's tree are in
+the ADR's last section; each is something S1's placement produces by
+construction. Gate: 54 snapshots match, raw 54, differential 54; 389 unit
+tests; the change adds no output to `pd:s`. Uncommitted at the end of the
+session, on `arch/location-ssa`.
+
+Next is S1: `place.rs` and `certify.rs` as the ADR's §4 and §3, the old
+builders, proofs, linearizer and deadline deleted in the same change, with the
+if/else-merge, break, while and do-while rewrites landing with it as one
+DecBench delivery.
+
+## The structurer is the dominator tree now, and the certificate gates every rewrite
+
+S1 and S2 of `doc/adr-structure-dominator-tree.md` are built. `region.rs`
+and the old `structure.rs` are gone -- 13,111 lines, seven placement
+mechanisms, the DNF domain proof, the linearizer, the `safety_reason` channel
+and the structuring fallback -- and `crates/r2dec/src/structure/` holds what
+replaces them:
+
+  * `place.rs` (~430 lines): `Placement::compute` takes the dominator tree,
+    reverse postorder and the natural loops from the CFG alone, anchors every
+    block in its immediate dominator's region or in the exit list of the
+    outermost loop it leaves (`Λ(y)`), and writes every edge once -- inline
+    child, `if`/`switch` arm, `continue`, or `goto` to a label the edge
+    classification assigned beforehand. A natural loop is `for (;;)`; a
+    counted loop's initializer and update go into the `for` header. An
+    indirect branch with declared successors and no certified selector is a
+    `switch` on its target value. A default-less jump table puts `default:`
+    on its last arm so the compiler sees the switch does not fall out.
+  * `certify.rs`: the S0 checker, now also consulted inside the structurer.
+    A call to a callee the prototype declares `noreturn` ends the text; the
+    structurer marks the callee of a terminal block's last call
+    (`mark_callee_noreturn`), and codegen prints `__attribute__((noreturn))`.
+  * `shape.rs`: the structural rewrites -- switch-tail absorption (a case arm
+    that is one `goto` to the block after the switch takes that block, also
+    when the previous arm falls into it), jump-to-next elision, `break` and
+    `continue` from `goto`s whose target is the continuation of the
+    enclosing loop or switch (the loop's top carries its header label), then
+    loop rotation: `do { } while (c)` when the body's last act is the test,
+    `while (c)` when the header only tests, otherwise the `for (;;)` stays
+    with the test as a guard -- no comma-folded conditions any more.
+  * `rewrite.rs`: the old `cleanup` pass, unchanged except that the
+    guard-clause rewrite now sees through region markers and keeps the
+    branch's observations (`rewrap`).
+
+**Every rewrite stage runs under a gate**: the result must certify at least
+as well as the placed tree and keep every observed occurrence, or it is not
+applied, and the census line says which stage did what
+(`rewrites=shape:applied,cleanup:applied`). The gate caught, in order: the
+guard-clause rewrite dropping a branch's control observations (fixed); a
+cleanup that deleted an empty arm whose `return` a gap had taken (correctly
+refused, one function).
+
+Three defects found by measurement and fixed at the cause:
+
+  1. **Every edge writes the merge it carries** (`edge_merge_writes`), but the
+     decision is taken from the plan's dispositions before any expression is
+     asked for. Asking `planned_value_expr` observes a read, and observing a
+     stack-pointer phi on every edge made the prologue's `RSP` arithmetic
+     render as assignments to an uninitialised local (`xxhash32` raw compile).
+  2. **A callee marked `noreturn` by one call site refused every later call
+     site to it**, because `record_callee_declaration` compared the fresh
+     declaration for equality with the stored one. Twelve functions with
+     `exit`/`cleanUpAndFail` tails were lost to `RenderedValueRequired` until
+     the comparison ignored the flag.
+  3. **A block folded twice mints observation targets nothing emits**: the
+     terminal-callee lookup now reads the entries the block was folded into,
+     not a second fold of the cached block.
+
+Measured, nine local binaries, the census script's last attempt per function:
+
+    rendered            648 -> 654     (+6, -0)
+    certificate ok      654/686 -> 653/654; the one failure is main in
+                        minigzip_O2, whose two edges leave for a cold partition
+    labels over the 493 functions structured before:  19 gotos -> 61 labels
+    labels over everything rendered:                  4164 -> 618
+    gotos over everything rendered:                   6354 -> 1172
+
+Gate: raw 54 pass, differential 54 pass (the corpus digests never moved
+through any stage), snapshot 54 mismatch -- every body changed shape, and the
+baseline is re-blessed with this entry. Two raw failures on the way, both
+fixed at the cause: a switch whose last arm renders nothing left a `default:`
+at the end of the compound statement, and a default-less jump table let the
+compiler see the function fall out.
+
+The bounded duplication of the ADR's §5 landed as `duplicate_skipped_tails`:
+`if (c) { A; goto L; } T; L:` with `T` one block's straight-line text is the
+compiler's tail merge of `if (c) { A } else { T }`, so every path that does
+not jump gets a copy of `T` -- the first copy keeps the block's own
+observations, every further one is a fresh occurrence through
+`clone_cached_render_occurrence`, because the journal refuses a duplicated
+observation id outright (36 functions lost before that was understood). It
+runs after the first jump-elision pass, since the skipped block only shows
+once the jumps into it have gone. Labels over the 493: 61 -> 42, rendered
+654 either way, raw 54, differential 54.
+
+What the 42 are: at -O0 a chain of guards, each one `uint8_t ZF_n = …; if
+(!ZF_n) { … }` nesting thirteen deep with one `goto` at the bottom and the
+else paths converging on a shared exit. That is `if (a && b && … )` with the
+flag computations inlined into the condition, and the flags are bound locals
+the value layer keeps ("flag carriers" in the corpus's own noise metric), so
+the label is a value-layer question and not one the structurer can close. The
+interim bound of §10 (19) is therefore not met by structure alone, and the
+delivery is judged on DecBench.
+
+## DecBench after the structurer: 680 of 860, and every mean up
+
+Run `decbench-20260910T132813-5442`, zlib and bzip2 at O2, 860 functions,
+against the previous 668 of 860 on e5312fc7:
+
+    coverage      r2sleigh 680/860 (79.1%)    angr 799/860 (92.9%)
+    byte_match    0.401 over 680 | 0.317 all  angr 0.288 | 0.267
+    ged           14.673 over 52  | 0.014 all angr 17.247 | 0.020
+    type_match    0.243 over 539  | 0.152 all angr 0.180 | 0.136
+
+The refusal census on the 805 observed: BindingPlanBuild 13, cold partition
+9, complexity limit 8, UnownedBindingSymbol 8, `calls.rs:289` 7,
+RenderedValueRequired 7, `missing_definition` 6, `calls.rs:165` 6, then
+fives. Nothing structural is left on the list: `unrepresentable operation`,
+the structuring deadline and `region_does_not_dominate_occurrence` are gone.
+The per-function regression list (96 lines, against 172 gains) is measured
+against the fixed 598-function baseline, not the previous run, and is
+`byte_match` dips of a few hundredths on functions whose loops now render as
+`for (;;)` with a guard rather than a comma condition; two `ged` lines, both
+`snocString` 5 -> 8. The delivery lands on that number.
+
+What the census now points at, in order of size: the value-identity rewrite
+(BindingPlanBuild, `calls.rs`, UnownedBindingSymbol, RenderedValueRequired --
+the ADR's second duality), the cold-partition decision (9, unchanged, with
+the user), the complexity limit (8, the plan triple), and the flag carriers
+that keep the -O0 guard chains from folding into `&&`.
+
