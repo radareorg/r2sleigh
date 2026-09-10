@@ -4681,6 +4681,17 @@ enum ReachingAbiState {
     Value(ValueId),
 }
 
+/// What one path back from a boundary contributes to the value reaching it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReachingAbiPath {
+    Reaches(ReachingAbiState),
+    /// The path re-entered a block already on it without passing a
+    /// definition, so it carries whatever the other paths do. A loop nothing
+    /// in it writes brings the value that entered it round unchanged, and a
+    /// definition inside it would have put a merge at the header first.
+    Cycle,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ReachingAbiPolicy {
     allow_distinct_phi_inputs: bool,
@@ -5064,8 +5075,8 @@ fn reaching_abi_value_in_block_with_policy(
     storage: CanonicalStorageId,
     allow_distinct_phi_inputs: bool,
 ) -> Option<ReachingAbiState> {
-    let visited = BTreeSet::new();
-    reaching_abi_value_before(
+    let visited = BTreeMap::new();
+    match reaching_abi_value_before(
         function,
         graph,
         block_addr,
@@ -5077,7 +5088,10 @@ fn reaching_abi_value_in_block_with_policy(
             calls_are_barriers: true,
             transfer_carrier: machine_context.stack_pointer_carrier(),
         },
-    )
+    )? {
+        ReachingAbiPath::Reaches(state) => Some(state),
+        ReachingAbiPath::Cycle => None,
+    }
 }
 
 fn reaching_abi_value_before(
@@ -5086,21 +5100,34 @@ fn reaching_abi_value_before(
     block_addr: u64,
     boundary_op_index: usize,
     storage: CanonicalStorageId,
-    visited: &BTreeSet<u64>,
+    visited: &BTreeMap<u64, usize>,
     policy: ReachingAbiPolicy,
-) -> Option<ReachingAbiState> {
-    if visited.contains(&block_addr) {
-        return None;
+) -> Option<ReachingAbiPath> {
+    let block = function.get_block(block_addr)?;
+    // A block already on this path was scanned up to the boundary it was
+    // entered at; a back edge asks about the rest of it. What that rest
+    // defines reaches the boundary round the loop, and what it does not
+    // define leaves the path saying nothing new.
+    let scanned_from = visited.get(&block_addr).copied();
+    let scan_start = scanned_from.unwrap_or(0);
+    if scanned_from.is_some_and(|scanned| boundary_op_index <= scanned) {
+        return Some(ReachingAbiPath::Cycle);
     }
     let mut path_visited = visited.clone();
-    path_visited.insert(block_addr);
-    let block = function.get_block(block_addr)?;
+    path_visited.insert(block_addr, boundary_op_index);
     r2il::refusal_evidence!(
         "reaching-abi-value",
-        "walk ({block_addr:#x}, {boundary_op_index}) of {} ops for {storage:?}",
+        "walk ({block_addr:#x}, {scan_start}..{boundary_op_index}) of {} ops for {storage:?}",
         block.ops.len()
     );
-    for (op_index, op) in block.ops.get(..boundary_op_index)?.iter().enumerate().rev() {
+    for (op_index, op) in block
+        .ops
+        .get(scan_start..boundary_op_index)?
+        .iter()
+        .enumerate()
+        .map(|(index, op)| (scan_start + index, op))
+        .rev()
+    {
         // A call's clobbers are the `CallDefine`s that follow it, each a
         // definition the overlap check below sees; the call itself is a
         // barrier only for the carrier the transfer moves.
@@ -5167,7 +5194,10 @@ fn reaching_abi_value_before(
         return graph
             .inst(producer)
             .and_then(|inst| inst.output)
-            .map(ReachingAbiState::Value);
+            .map(|value| ReachingAbiPath::Reaches(ReachingAbiState::Value(value)));
+    }
+    if scanned_from.is_some() {
+        return Some(ReachingAbiPath::Cycle);
     }
     let phi_insts = block
         .phis
@@ -5179,7 +5209,9 @@ fn reaching_abi_value_before(
     if let [phi_inst] = phi_insts.as_slice() {
         let phi = graph.inst(*phi_inst)?;
         if policy.allow_distinct_phi_inputs {
-            return phi.output.map(ReachingAbiState::Value);
+            return phi
+                .output
+                .map(|value| ReachingAbiPath::Reaches(ReachingAbiState::Value(value)));
         }
         let [first, rest @ ..] = phi.inputs.as_slice() else {
             return None;
@@ -5187,7 +5219,7 @@ fn reaching_abi_value_before(
         return rest
             .iter()
             .all(|input| input == first)
-            .then_some(ReachingAbiState::Value(*first));
+            .then_some(ReachingAbiPath::Reaches(ReachingAbiState::Value(*first)));
     }
     if !phi_insts.is_empty() {
         r2il::refusal_evidence!(
@@ -5198,15 +5230,11 @@ fn reaching_abi_value_before(
         return None;
     }
     let predecessors = function.predecessors(block_addr);
-    if predecessors.is_empty() {
-        let block_id = graph.block_by_addr.get(&block_addr)?;
-        if *block_id != graph.entry {
-            r2il::refusal_evidence!(
-                "reaching-abi-value",
-                "{block_addr:#x} has no predecessors and is not the entry"
-            );
-            return None;
-        }
+    let mut values = Vec::new();
+    // The entry is one way in whatever loops come back to it: the value the
+    // function was entered with reaches its first boundary alongside what
+    // any back edge carries.
+    if graph.block_by_addr.get(&block_addr) == Some(&graph.entry) {
         let candidates = graph
             .values
             .iter()
@@ -5223,29 +5251,37 @@ fn reaching_abi_value_before(
             "{storage:?} reaches the entry from {block_addr:#x}: {} entry candidates",
             candidates.len()
         );
-        return match candidates.as_slice() {
-            [value] => Some(ReachingAbiState::Value(*value)),
-            [] => Some(ReachingAbiState::PreservedEntry),
-            _ => None,
-        };
-    }
-    let values = predecessors
-        .iter()
-        .map(|predecessor| {
-            let predecessor_block = function.get_block(*predecessor)?;
-            reaching_abi_value_before(
-                function,
-                graph,
-                *predecessor,
-                predecessor_block.ops.len(),
-                storage,
-                &path_visited,
-                policy,
-            )
-        })
-        .collect::<Option<Vec<_>>>()?;
-    let [first, rest @ ..] = values.as_slice() else {
+        values.push(match candidates.as_slice() {
+            [value] => ReachingAbiState::Value(*value),
+            [] => ReachingAbiState::PreservedEntry,
+            _ => return None,
+        });
+    } else if predecessors.is_empty() {
+        r2il::refusal_evidence!(
+            "reaching-abi-value",
+            "{block_addr:#x} has no predecessors and is not the entry"
+        );
         return None;
+    }
+    for predecessor in &predecessors {
+        let predecessor_block = function.get_block(*predecessor)?;
+        match reaching_abi_value_before(
+            function,
+            graph,
+            *predecessor,
+            predecessor_block.ops.len(),
+            storage,
+            &path_visited,
+            policy,
+        )? {
+            ReachingAbiPath::Reaches(state) => values.push(state),
+            ReachingAbiPath::Cycle => {}
+        }
+    }
+    let [first, rest @ ..] = values.as_slice() else {
+        // Every way in came round a loop: this block is reachable only
+        // through itself, and nothing outside it defined the storage.
+        return Some(ReachingAbiPath::Cycle);
     };
     if !rest.iter().all(|value| value == first) {
         r2il::refusal_evidence!(
@@ -5256,7 +5292,7 @@ fn reaching_abi_value_before(
         );
         return None;
     }
-    Some(*first)
+    Some(ReachingAbiPath::Reaches(*first))
 }
 
 fn register_storages_overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
@@ -6579,7 +6615,10 @@ fn collect_stack_geometry_certificate(
                         .iter()
                         .all(|input| stack_root(*input) == output_root)
             }
-            InstPayload::Op(SSAOp::Copy { .. }) => {
+            // A restore is the copy the convention states: construction mints
+            // it only for the carrier the callee brings back (rename.rs), so
+            // its output is exactly its input's geometry.
+            InstPayload::Op(SSAOp::Copy { .. } | SSAOp::CallRestore { .. }) => {
                 inst.inputs.len() == 1 && stack_root(inst.inputs[0]).is_some()
             }
             InstPayload::Op(SSAOp::IntAdd { .. }) => {
@@ -14637,7 +14676,7 @@ mod tests {
     }
 
     #[test]
-    fn return_boundary_recovery_accepts_identical_fanin_and_rejects_phi_free_cycles() {
+    fn return_boundary_recovery_accepts_identical_fanin_and_phi_free_cycles() {
         let mut entry = R2ILBlock::new(0x3000, 4);
         entry.push(R2ILOp::Copy {
             dst: Varnode::unique(0x80, 8),
@@ -14677,6 +14716,10 @@ mod tests {
         assert!(fanin.graph().def_inst(converged).is_none());
 
         let mut header = R2ILBlock::new(0x4000, 4);
+        header.push(R2ILOp::Copy {
+            dst: Varnode::unique(0x80, 8),
+            src: Varnode::register(0, 8),
+        });
         header.push(R2ILOp::CBranch {
             target: Varnode::ram(0x4000, 8),
             cond: Varnode::register(24, 1),
@@ -14691,17 +14734,89 @@ mod tests {
             return_boundary_interface(),
         )
         .expect("cycle boundary artifact");
-        assert_eq!(
-            super::reaching_abi_value_in_block(
-                cycle.function(),
-                cycle.graph(),
-                cycle.machine_context(),
-                0x4000,
-                1,
-                register_storage(0, 8),
-            ),
-            None
-        );
+        // A loop nothing in it writes brings the entry live-in round
+        // unchanged; the back edge adds no definition and no merge.
+        let round_the_loop = super::reaching_abi_value_in_block(
+            cycle.function(),
+            cycle.graph(),
+            cycle.machine_context(),
+            0x4000,
+            2,
+            register_storage(0, 8),
+        )
+        .expect("the loop carries the entry live-in round");
+        assert!(cycle.graph().def_inst(round_the_loop).is_none());
+    }
+
+    #[test]
+    fn reaching_abi_value_crosses_a_loop_that_defines_nothing_of_it() {
+        // rdi is set before the loop; the loop body writes only rax; the
+        // boundary after the loop asks for rdi.
+        let mut entry = R2ILBlock::new(0x5000, 4);
+        entry.push(R2ILOp::Copy {
+            dst: Varnode::register(8, 8),
+            src: Varnode::constant(7, 8),
+        });
+        entry.push(R2ILOp::Branch {
+            target: Varnode::ram(0x5004, 8),
+        });
+        let mut header = R2ILBlock::new(0x5004, 4);
+        header.push(R2ILOp::IntAdd {
+            dst: Varnode::register(0, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::constant(1, 8),
+        });
+        header.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x5004, 8),
+            cond: Varnode::register(24, 1),
+        });
+        let mut exit = R2ILBlock::new(0x5008, 4);
+        exit.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+        let artifact = SsaArtifact::raw_with_interface(
+            &[entry, header, exit],
+            Some(&return_boundary_arch()),
+            return_boundary_interface(),
+        )
+        .expect("loop artifact");
+        let reaching = super::reaching_abi_value_in_block(
+            artifact.function(),
+            artifact.graph(),
+            artifact.machine_context(),
+            0x5008,
+            0,
+            register_storage(8, 8),
+        )
+        .expect("the definition before the loop reaches the boundary after it");
+        let definition = artifact
+            .graph()
+            .def_inst(reaching)
+            .and_then(|inst| artifact.graph().inst(inst))
+            .expect("rdi's definition");
+        assert!(matches!(
+            definition.payload,
+            InstPayload::Op(SSAOp::Copy { .. })
+        ));
+        // rax is written in the loop, and the body's last write is what
+        // reaches the exit.
+        let written = super::reaching_abi_value_in_block(
+            artifact.function(),
+            artifact.graph(),
+            artifact.machine_context(),
+            0x5008,
+            0,
+            register_storage(0, 8),
+        )
+        .expect("the loop's own carrier reaches the boundary from its body");
+        assert!(matches!(
+            artifact
+                .graph()
+                .def_inst(written)
+                .and_then(|inst| artifact.graph().inst(inst))
+                .map(|inst| &inst.payload),
+            Some(InstPayload::Op(SSAOp::IntAdd { .. }))
+        ));
     }
 
     #[test]
@@ -16049,6 +16164,79 @@ mod tests {
                     .iter()
                     .all(|input| geometry.values.contains(input))
         }));
+    }
+
+    #[test]
+    fn stack_geometry_certificate_closes_the_call_restore() {
+        let sp = Varnode::register(32, 8);
+        let ra = Varnode::register(16, 8);
+        let mut block = R2ILBlock::new(0x60c0, 16);
+        // The frame, then one call instruction: push the return address, call.
+        block.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(16, 8),
+        });
+        block.stamp_instruction(0, 0x60c0);
+        block.push(R2ILOp::IntSub {
+            dst: sp.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: sp.clone(),
+            val: ra,
+        });
+        block.push(R2ILOp::Call {
+            target: Varnode::ram(0x7000, 8),
+        });
+        for index in 1..=3 {
+            block.stamp_instruction(index, 0x60c4);
+        }
+        let address = Varnode::unique(0x60c0, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: address.clone(),
+            a: sp,
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: address,
+            val: Varnode::constant(7, 8),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+        for index in 4..=6 {
+            block.stamp_instruction(index, 0x60c9);
+        }
+
+        let artifact = SsaArtifact::for_decompile_with_interface(
+            &[block],
+            Some(&return_boundary_arch()),
+            preserved_stack_interface().with_preserved_call_carriers(true, false),
+        )
+        .expect("call restore artifact");
+        let graph = artifact.graph();
+        let restore = graph
+            .insts
+            .iter()
+            .find(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::CallRestore { .. })))
+            .expect("the call restores the carrier the convention preserves");
+        let output = restore.output.expect("restore output");
+        let geometry = &artifact.certificates().stack_geometry;
+
+        assert_eq!(
+            artifact.entry_stack_address_root_for_value(output),
+            Some(StackAddressRoot {
+                base: StackAddressBase::StackPointer,
+                offset: -16,
+            })
+        );
+        assert!(geometry.insts.contains(&restore.id));
+        assert!(geometry.values.contains(&output));
+        assert!(geometry.values.contains(&restore.inputs[0]));
     }
 
     #[test]

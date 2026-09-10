@@ -1922,20 +1922,13 @@ impl LegacyObservationJournal {
                     coalesced_copy_writes.insert(inst);
                     continue;
                 }
-                let is_call_restore = matches!(op, r2ssa::SSAOp::CallRestore { .. });
+                // A restore is a copy the convention states: construction
+                // mints it only for the carrier the callee brings back, so
+                // the operation's existence is the licence an edge copy has
+                // to earn below.
                 let src = match op {
-                    r2ssa::SSAOp::Copy { src, .. } => src,
-                    r2ssa::SSAOp::CallRestore { src, dst }
-                        if boundary_restores_carrier(source.source(), src, dst) =>
-                    {
-                        src
-                    }
-                    _ => {
-                        if is_call_restore && std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
-                            eprintln!("call restore at {site:?} has no preserved-carrier fact");
-                        }
-                        continue;
-                    }
+                    r2ssa::SSAOp::Copy { src, .. } | r2ssa::SSAOp::CallRestore { src, .. } => src,
+                    _ => continue,
                 };
                 // A restore's source is the carrier as the function was
                 // entered with it whenever the call is the first one, and that
@@ -1979,17 +1972,11 @@ impl LegacyObservationJournal {
                         None
                     }
                     None => {
-                        if is_call_restore && std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
-                            eprintln!("call restore at {site:?} has no normalization origin");
-                        }
                         continue;
                     }
                 };
                 let projection = &normalized_projections[block_id.0 as usize][op_idx];
                 let Some(output) = projection.output else {
-                    if is_call_restore && std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
-                        eprintln!("call restore at {site:?} has no output projection");
-                    }
                     continue;
                 };
                 let input = match incoming {
@@ -2000,22 +1987,8 @@ impl LegacyObservationJournal {
                     None => projection.inputs.first(),
                 };
                 let Some(input) = input else {
-                    if is_call_restore && std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
-                        eprintln!("call restore at {site:?} has no input projection");
-                    }
                     continue;
                 };
-                if matches!(op, r2ssa::SSAOp::CallRestore { .. })
-                    && std::env::var_os("R2DEC_TRACE_REFUSAL").is_some()
-                {
-                    eprintln!(
-                        "call-restore coalescing site={site:?} source={:?} output={:?} source-disposition={:?} output-disposition={:?}",
-                        input.value,
-                        output.value,
-                        plan.disposition(input.value),
-                        plan.disposition(output.value),
-                    );
-                }
                 // A restore states the convention rather than performing a
                 // copy the program wrote, so the question this asks of a
                 // program copy -- did anything write the object between the
@@ -2032,12 +2005,6 @@ impl LegacyObservationJournal {
                     plan.disposition(input.value),
                     plan.disposition(output.value),
                 );
-                if is_call_restore && std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
-                    eprintln!(
-                        "call restore at {site:?} projects input {:?} {:?}, output {:?} {:?}",
-                        input.value, dispositions.0, output.value, dispositions.1
-                    );
-                }
                 let same_binding = matches!(
                     dispositions,
                     (
@@ -2045,31 +2012,9 @@ impl LegacyObservationJournal {
                         Some(ValueDisposition::Bound { binding: output }),
                     ) if input == output
                 );
-                // A preserved carrier whose restored value has no reader is
-                // the other exact no-op shape. There is deliberately no
-                // output object to coalesce in that case: the binding plan's
-                // authority-bound elision proves the restored value is unused,
-                // while `boundary_restores_carrier` proves the call did not
-                // change the carrier. Together those facts answer the source
-                // operand read without inventing a C assignment.
-                let unused_boundary_restore = matches!(
-                    (
-                        op,
-                        plan.disposition(input.value),
-                        plan.disposition(output.value)
-                    ),
-                    (
-                        r2ssa::SSAOp::CallRestore { .. },
-                        Some(ValueDisposition::Bound { .. }),
-                        Some(ValueDisposition::Elided {
-                            reason: r2ssa::ledger::ElisionReason::UnusedStructuralValue,
-                            ..
-                        }),
-                    )
-                );
-                if same_binding || unused_boundary_restore {
+                if same_binding {
                     coalesced_carrier_copy_sites.insert(site);
-                    if same_binding && let Some(inst) = program_copy {
+                    if let Some(inst) = program_copy {
                         coalesced_copy_outputs.insert(output.value);
                         coalesced_copy_writes.insert(inst);
                     }
@@ -2335,10 +2280,10 @@ impl LegacyObservationJournal {
         // statement to carry their cells. An unused call clobber is structural
         // and owns no operands or semantic obligation. A restored carrier is
         // structural too, but it has one operand: the exact pre-call carrier.
-        // Its convention certificate says the restore is an identity, so that
-        // operand disappears with a dead restore output for the same reason it
-        // disappears when both ends are one live binding. Without that exact
-        // certificate the use stays open and the journal refuses.
+        // Construction mints a restore only for the carrier the convention
+        // brings back, so the restore is an identity by its existence, and
+        // its operand read disappears with a dead restore output for the same
+        // reason it disappears when both ends are one live binding.
         //
         // A pre-placement dead computation also loses the operand reads and
         // the LiveValueProducer obligation its statement would have carried.
@@ -2370,26 +2315,9 @@ impl LegacyObservationJournal {
                 continue;
             };
             elided_writes.entry(inst).or_insert(*reason);
-            let certified_dead_restore = *reason
-                == r2ssa::ledger::ElisionReason::UnusedStructuralValue
-                && matches!(
-                    &instruction.payload,
-                    r2ssa::InstPayload::Op(r2ssa::SSAOp::CallRestore { src, dst })
-                        if boundary_restores_carrier(source.source(), src, dst)
-                );
-            if *reason != r2ssa::ledger::ElisionReason::DeadUnusedTemporary
-                && !certified_dead_restore
-            {
-                continue;
-            }
             for input_idx in 0..instruction.inputs.len() {
                 let site = UseSite { inst, input_idx };
-                let input_reason = if certified_dead_restore {
-                    self.coalesced_carrier_uses.insert(site);
-                    r2ssa::ledger::ElisionReason::CoalescedCopy
-                } else {
-                    *reason
-                };
+                let input_reason = *reason;
                 match elided_uses.insert(site, input_reason) {
                     Some(existing) if existing != input_reason => {
                         return Err(LegacyObservationJournalError::ConflictingUse(site));
@@ -2963,12 +2891,52 @@ impl LegacyObservationJournal {
                     targets.push(ObservationTarget::Value(output));
                 }
             }
-            // Every operand the vanished statement read.
+            // Every operand the vanished statement read. One a certificate
+            // already answered -- the stack base an address was computed
+            // from -- is spelled nowhere in what stands here, and stays its.
             for input_idx in 0..inst.inputs.len() {
                 let site = UseSite {
                     inst: definition,
                     input_idx,
                 };
+                if matches!(
+                    self.uses
+                        .get(definition.0 as usize)
+                        .and_then(|row| row.get(input_idx)),
+                    Some(Some(LegacyUseObservation::Elided(_)))
+                ) {
+                    continue;
+                }
+                let input = inst.inputs[input_idx];
+                let bound_symbol_spelled =
+                    |journal: &Self, binding: crate::binding_plan::BindingId| {
+                        journal
+                            .names
+                            .symbol_for_binding(binding)
+                            .is_some_and(|symbol| rendered_symbols.contains(&symbol))
+                    };
+                // The base a stack address was computed from is absorbed by
+                // the object's name: `&slot` spells the slot, never the stack
+                // pointer it was measured from. That read is not an
+                // occurrence, and saying it was rendered would leave the
+                // pointer's value cell owed to nothing.
+                if expr.is_some()
+                    && let Some(ValueDisposition::Bound { binding }) = self.plan.disposition(input)
+                    && !bound_symbol_spelled(self, *binding)
+                    && self
+                        .source
+                        .entry_stack_address_root_for_value(input)
+                        .is_some()
+                {
+                    targets.push(ObservationTarget::Use {
+                        site,
+                        observation: LegacyUseObservation::Elided(
+                            r2ssa::ledger::ElisionReason::DeadStackBase,
+                        ),
+                        block,
+                    });
+                    continue;
+                }
                 let observation = self.rendered_use_observation(site)?;
                 targets.push(ObservationTarget::Use {
                     site,
@@ -2978,7 +2946,6 @@ impl LegacyObservationJournal {
                 let Some(_expr) = expr else {
                     continue;
                 };
-                let input = inst.inputs[input_idx];
                 if !produced.contains(&input) && !represented_values.contains(&input) {
                     let needs_value_target = match self.plan.disposition(input) {
                         // A discharge owns this exact use, but it can claim the
@@ -2987,10 +2954,9 @@ impl LegacyObservationJournal {
                         // rewriting may absorb the operand entirely; attaching
                         // its value cell to whatever unrelated syntax survived
                         // would then fabricate a second identity answer.
-                        Some(ValueDisposition::Bound { binding }) => self
-                            .names
-                            .symbol_for_binding(*binding)
-                            .is_some_and(|symbol| rendered_symbols.contains(&symbol)),
+                        Some(ValueDisposition::Bound { binding }) => {
+                            bound_symbol_spelled(self, *binding)
+                        }
                         Some(ValueDisposition::Inline { .. })
                             if self.source.graph().def_inst(input).is_none() =>
                         {
@@ -5160,46 +5126,6 @@ fn nothing_wrote_the_object_between(
     })
 }
 
-/// Whether the convention proves that a call leaves this carrier untouched.
-///
-/// This is the third thing that may license a coalescing here, beside a
-/// storage span and a certified entity, and it is a proof rather than an
-/// exemption. The two rules above decline to fold a save and restore around a
-/// clobber because nothing shows the object survived the clobber; the source
-/// shows exactly that for this one carrier, in the same statement the restore
-/// was built from -- radare2 reads it off the calling convention and publishes
-/// it even for a function whose signature it never linked.
-///
-/// It asks the certificate rather than the operation, and the difference is
-/// the point: a restore whose carrier the convention does not name, or one in
-/// a function for which the source made no such statement, is declined and
-/// keeps its own object. Reaching for the operation kind instead would be the
-/// exemption this exists to avoid.
-fn boundary_restores_carrier(
-    source: &r2ssa::SsaArtifact,
-    src: &r2ssa::SSAVar,
-    dst: &r2ssa::SSAVar,
-) -> bool {
-    let context = source.machine_context();
-    let Some(carrier) = context.stack_pointer_carrier() else {
-        return false;
-    };
-    let restored = context
-        .machine_roles()
-        .call_preserved_carriers()
-        .map_or_else(
-            || {
-                context.function_interface().is_some_and(
-                    r2ssa::SourceFunctionInterface::stack_pointer_preserved_across_calls,
-                )
-            },
-            |carriers| carriers.stack_pointer(),
-        );
-    restored
-        && source.graph().canonical_storage_for_var(src) == Some(carrier)
-        && source.graph().canonical_storage_for_var(dst) == Some(carrier)
-}
-
 /// Whether a copy's undefined source is a value the signature declares.
 ///
 /// A live-in register with no defining instruction is either a parameter,
@@ -5555,7 +5481,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_restore_closes_its_read_only_with_the_boundary_certificate() {
+    fn a_dead_restore_of_the_stack_carrier_is_stack_geometry() {
         let rsp = Varnode::register(0x28, 8);
         let ops = vec![
             R2ILOp::IntSub {
@@ -5592,24 +5518,25 @@ mod tests {
         };
         let source = source_owned_from_blocks_with_preserved_calls(std::slice::from_ref(&block));
         let graph = source.source().graph();
-        let (restore, output, src, dst) = graph
+        let (restore, output) = graph
             .insts
             .iter()
             .find_map(|inst| match &inst.payload {
-                r2ssa::InstPayload::Op(r2ssa::SSAOp::CallRestore { src, dst }) => {
-                    Some((inst.id, inst.output?, src, dst))
+                r2ssa::InstPayload::Op(r2ssa::SSAOp::CallRestore { .. }) => {
+                    Some((inst.id, inst.output?))
                 }
                 _ => None,
             })
             .expect("the preserved call restores its stack carrier");
         assert!(graph.use_sites(output).is_empty(), "restore output is dead");
-        assert!(boundary_restores_carrier(source.source(), src, dst));
 
+        // The restore is the copy the convention states, so the geometry
+        // certificate owns both its sides; the journal adds nothing of its own.
         let (_source, plan, _function, journal) = journal_fixture_for_source(source);
         assert!(matches!(
             plan.disposition(output),
             Some(ValueDisposition::Elided {
-                reason: r2ssa::ledger::ElisionReason::UnusedStructuralValue,
+                reason: r2ssa::ledger::ElisionReason::DeadStackBase,
                 ..
             })
         ));
@@ -5620,21 +5547,14 @@ mod tests {
         assert_eq!(
             journal.uses[restore.0 as usize][0],
             Some(LegacyUseObservation::Elided(
-                r2ssa::ledger::ElisionReason::CoalescedCopy
+                r2ssa::ledger::ElisionReason::DeadStackBase
             ))
         );
-        assert!(journal.coalesced_carrier_uses.contains(&use_site));
+        assert!(!journal.coalesced_carrier_uses.contains(&use_site));
 
+        // Without the convention's word no restore is minted at all: matching
+        // storage cannot replace the absent certificate.
         let uncertified = source_owned_from_blocks(&[block]);
-        let r2ssa::InstPayload::Op(r2ssa::SSAOp::IntSub { a, dst, .. }) =
-            &uncertified.source().graph().insts[0].payload
-        else {
-            panic!("call instruction starts by spending the stack carrier")
-        };
-        assert!(
-            !boundary_restores_carrier(uncertified.source(), a, dst),
-            "matching storage cannot replace the absent convention certificate"
-        );
         assert!(uncertified.source().graph().insts.iter().all(|inst| {
             !matches!(
                 inst.payload,
