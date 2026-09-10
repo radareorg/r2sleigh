@@ -114,6 +114,10 @@ static RAnalFunctionSignature *fcn_context_resolve_callee_signature(RAnal *anal,
 static bool fcn_context_has_callee(RList *callees, ut64 call_addr, ut64 addr);
 static bool fcn_context_append_callee(RAnal *anal, RList *callees, ut64 call_addr, ut64 addr, RAnalCallTransfer transfer);
 static const char *fcn_context_reloc_name(const RBinReloc *reloc);
+static bool fcn_context_callee_from_reloc(RAnal *anal, RAnalFcnCallee *callee, const RBinReloc *reloc);
+static FcnContextTransferKind fcn_context_classify_transfer(RAnal *anal, ut64 addr, const ut8 *bytes, int len, ut64 *target, ut64 *memory_operand, int *size);
+static const RBinReloc *fcn_context_plt_stub_reloc(RAnal *anal, ut64 addr);
+static bool fcn_context_is_callee_target(RAnal *anal, ut64 addr);
 static bool fcn_context_append_slot_callee(RAnal *anal, RList *callees, ut64 call_addr, ut64 slot, const RBinReloc *reloc);
 static FcnContextTransferKind fcn_context_block_transfer(RAnal *anal, const RAnalSnapshotBlock *block, ut64 transfer_addr, ut64 *target, ut64 *memory_operand);
 static bool fcn_context_offer_slot_callee(RAnal *anal, RList *callees, ut64 call_addr, ut64 slot);
@@ -791,13 +795,16 @@ static char *fcn_context_callee_symbol_name(RAnal *anal, ut64 addr) {
 	}
 	return R_STR_ISNOTEMPTY (name)? strdup (name): NULL;
 }
+/* The callee record is the one description of what a transfer reaches, so
+ * each of these answers for the function that starts exactly at `addr`. A
+ * function merely containing the address is a different callee. */
 static RAnalFcnCalleeLinkage fcn_context_resolve_callee_linkage(RAnal *anal, ut64 addr) {
 	RAnalFunction *callee_fcn;
 	R_RETURN_VAL_IF_FAIL (anal, R_ANAL_FCN_CALLEE_UNKNOWN);
 	if (fcn_context_callee_symbol_is_imported (anal, addr)) {
 		return R_ANAL_FCN_CALLEE_IMPORTED;
 	}
-	callee_fcn = r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
+	callee_fcn = r_anal_get_function_at (anal, addr);
 	if (!callee_fcn) {
 		return R_ANAL_FCN_CALLEE_UNKNOWN;
 	}
@@ -809,7 +816,7 @@ static RAnalFcnCalleeLinkage fcn_context_resolve_callee_linkage(RAnal *anal, ut6
 static char *fcn_context_resolve_callee_name(RAnal *anal, ut64 addr) {
 	RAnalFunction *callee_fcn;
 	R_RETURN_VAL_IF_FAIL (anal, NULL);
-	callee_fcn = r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
+	callee_fcn = r_anal_get_function_at (anal, addr);
 	if (callee_fcn && R_STR_ISNOTEMPTY (callee_fcn->name)) {
 		return strdup (callee_fcn->name);
 	}
@@ -818,9 +825,13 @@ static char *fcn_context_resolve_callee_name(RAnal *anal, ut64 addr) {
 static RAnalFunctionSignature *fcn_context_resolve_callee_signature(RAnal *anal, ut64 addr) {
 	RAnalFunction *callee_fcn;
 	R_RETURN_VAL_IF_FAIL (anal, NULL);
-	callee_fcn = r_anal_get_fcn_in (anal, addr, R_ANAL_FCN_TYPE_ANY);
+	callee_fcn = r_anal_get_function_at (anal, addr);
 	RAnalFunctionSignature *signature = callee_fcn
 		? r_anal_function_get_signature_current (callee_fcn): NULL;
+	// The body's own noreturn finding is part of what the signature says.
+	if (signature && callee_fcn->is_noreturn) {
+		signature->noreturn = true;
+	}
 	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
 		eprintf ("r2sleigh: callee signature %#" PFMT64x " fcn=%s signature=%d ret=%s\n",
 			addr, callee_fcn? r_str_get (callee_fcn->name): "(none)",
@@ -851,10 +862,21 @@ static bool fcn_context_append_callee(RAnal *anal, RList *callees, ut64 call_add
 	}
 	callee->call_addr = call_addr;
 	callee->addr = addr;
-	callee->name = fcn_context_resolve_callee_name (anal, addr);
-	callee->linkage = fcn_context_resolve_callee_linkage (anal, addr);
-	callee->signature = fcn_context_resolve_callee_signature (anal, addr);
 	callee->transfer = transfer;
+	// A PLT stub is a jump through its slot, so the callee the transfer
+	// reaches is the slot's, not the stub's; the address stays the stub's
+	// because that is what the instruction names.
+	const RBinReloc *reloc = fcn_context_plt_stub_reloc (anal, addr);
+	if (reloc) {
+		if (!fcn_context_callee_from_reloc (anal, callee, reloc)) {
+			fcn_context_callee_free (callee);
+			return false;
+		}
+	} else {
+		callee->name = fcn_context_resolve_callee_name (anal, addr);
+		callee->linkage = fcn_context_resolve_callee_linkage (anal, addr);
+		callee->signature = fcn_context_resolve_callee_signature (anal, addr);
+	}
 	r_list_append (callees, callee);
 	return true;
 }
@@ -872,22 +894,29 @@ static const char *fcn_context_reloc_name(const RBinReloc *reloc) {
 	}
 	return R_STR_ISNOTEMPTY (name->fname)? name->fname: NULL;
 }
-static bool fcn_context_append_slot_callee(RAnal *anal, RList *callees, ut64 call_addr, ut64 slot, const RBinReloc *reloc) {
-	RAnalFcnCallee *callee;
-	R_RETURN_VAL_IF_FAIL (anal && callees && reloc, false);
+/* Name, linkage and prototype of the callee a relocation names. A symbol
+ * defined in this binary is described by its own body, exactly as a direct
+ * call to it would be; an import is described by its declared type. */
+static bool fcn_context_callee_from_reloc(RAnal *anal, RAnalFcnCallee *callee, const RBinReloc *reloc) {
+	R_RETURN_VAL_IF_FAIL (anal && callee && reloc, false);
 	const char *name = fcn_context_reloc_name (reloc);
-	if (!name || fcn_context_has_callee (callees, call_addr, slot)) {
-		return true;
-	}
-	callee = R_NEW0 (RAnalFcnCallee);
-	if (!callee) {
+	if (!name) {
 		return false;
 	}
-	callee->call_addr = call_addr;
-	callee->addr = slot;
+	const ut64 body = reloc->symbol && !reloc->import? reloc->symbol->vaddr: UT64_MAX;
+	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
+		eprintf ("R2SLEIGH_RELOC call=0x%" PFMT64x " addr=0x%" PFMT64x " name=%s symbol=%d import=%d body=0x%" PFMT64x " function=%d\n",
+			callee->call_addr, callee->addr, name, reloc->symbol? 1: 0, reloc->import? 1: 0,
+			body, r_anal_get_function_at (anal, body)? 1: 0);
+	}
+	if (body != UT64_MAX && r_anal_get_function_at (anal, body)) {
+		callee->name = fcn_context_resolve_callee_name (anal, body);
+		callee->linkage = fcn_context_resolve_callee_linkage (anal, body);
+		callee->signature = fcn_context_resolve_callee_signature (anal, body);
+		return callee->name != NULL;
+	}
 	callee->name = strdup (name);
 	if (!callee->name) {
-		fcn_context_callee_free (callee);
 		return false;
 	}
 	callee->linkage = reloc->import? R_ANAL_FCN_CALLEE_IMPORTED
@@ -896,30 +925,47 @@ static bool fcn_context_append_slot_callee(RAnal *anal, RList *callees, ut64 cal
 	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
 		char *key = r_type_func_key (anal->sdb_types, name);
 		eprintf ("R2SLEIGH_SLOT call=0x%" PFMT64x " slot=0x%" PFMT64x " name=%s signature=%d key=%s exist=%d kind=%s\n",
-			call_addr, slot, name, callee->signature? 1: 0, key? key: "(none)",
+			callee->call_addr, callee->addr, name, callee->signature? 1: 0, key? key: "(none)",
 			r_type_func_prototype_exist (anal->sdb_types, name),
 			r_str_get (sdb_const_get (anal->sdb_types, name, 0)));
 		free (key);
 	}
+	return true;
+}
+static bool fcn_context_append_slot_callee(RAnal *anal, RList *callees, ut64 call_addr, ut64 slot, const RBinReloc *reloc) {
+	RAnalFcnCallee *callee;
+	R_RETURN_VAL_IF_FAIL (anal && callees && reloc, false);
+	if (!fcn_context_reloc_name (reloc) || fcn_context_has_callee (callees, call_addr, slot)) {
+		return true;
+	}
+	callee = R_NEW0 (RAnalFcnCallee);
+	if (!callee) {
+		return false;
+	}
+	callee->call_addr = call_addr;
+	callee->addr = slot;
 	callee->transfer = R_ANAL_CALL_TRANSFER_TAIL_SLOT;
+	if (!fcn_context_callee_from_reloc (anal, callee, reloc)) {
+		fcn_context_callee_free (callee);
+		return false;
+	}
 	r_list_append (callees, callee);
 	return true;
 }
-static FcnContextTransferKind fcn_context_block_transfer(RAnal *anal, const RAnalSnapshotBlock *block, ut64 transfer_addr, ut64 *target, ut64 *memory_operand) {
+static FcnContextTransferKind fcn_context_classify_transfer(RAnal *anal, ut64 addr, const ut8 *bytes, int len, ut64 *target, ut64 *memory_operand, int *size) {
 	RAnalOp op;
 	*target = UT64_MAX;
 	*memory_operand = UT64_MAX;
-	const ut64 offset = transfer_addr - block->addr;
-	if (offset >= block->size || block->size - offset > INT_MAX) {
-		return FCN_TRANSFER_NONE;
-	}
+	*size = 0;
 	r_anal_op_init (&op);
-	const int decoded = r_anal_op (anal, &op, transfer_addr, block->bytes + offset,
-		(int)(block->size - offset), R_ARCH_OP_MASK_BASIC);
+	const int decoded = r_anal_op (anal, &op, addr, bytes, len, R_ARCH_OP_MASK_BASIC);
 	const ut32 base = op.type & 0xffff;
 	const bool conditional = (op.type & R_ANAL_OP_TYPE_COND) != 0;
 	const bool through_memory = base == R_ANAL_OP_TYPE_JMP && (op.type & R_ANAL_OP_TYPE_MEM) != 0;
 	FcnContextTransferKind kind = FCN_TRANSFER_NONE;
+	if (decoded > 0) {
+		*size = op.size;
+	}
 	if (decoded > 0 && !conditional) {
 		if (base == R_ANAL_OP_TYPE_UJMP || through_memory) {
 			kind = FCN_TRANSFER_VALUE_JUMP;
@@ -940,6 +986,52 @@ static FcnContextTransferKind fcn_context_block_transfer(RAnal *anal, const RAna
 	}
 	r_anal_op_fini (&op);
 	return kind;
+}
+static FcnContextTransferKind fcn_context_block_transfer(RAnal *anal, const RAnalSnapshotBlock *block, ut64 transfer_addr, ut64 *target, ut64 *memory_operand) {
+	*target = UT64_MAX;
+	*memory_operand = UT64_MAX;
+	const ut64 offset = transfer_addr - block->addr;
+	if (offset >= block->size || block->size - offset > INT_MAX) {
+		return FCN_TRANSFER_NONE;
+	}
+	int size;
+	return fcn_context_classify_transfer (anal, transfer_addr, block->bytes + offset,
+		(int)(block->size - offset), target, memory_operand, &size);
+}
+/* The relocation a PLT stub at `addr` jumps through, or NULL when the bytes
+ * there are not a stub: a `jmp [slot]` with a relocated slot, optionally
+ * behind one landing pad such as `endbr64`. */
+static const RBinReloc *fcn_context_plt_stub_reloc(RAnal *anal, ut64 addr) {
+	if (addr == UT64_MAX || !anal->iob.read_at || !anal->binb.bin || !anal->binb.get_reloc_at) {
+		return NULL;
+	}
+	ut8 bytes[32] = {0};
+	if (anal->iob.read_at (anal->iob.io, addr, bytes, (int)sizeof (bytes)) != (int)sizeof (bytes)) {
+		return NULL;
+	}
+	int offset = 0;
+	int attempt;
+	for (attempt = 0; attempt < 2 && offset < (int)sizeof (bytes); attempt++) {
+		ut64 target, memory_operand;
+		int size;
+		const FcnContextTransferKind kind = fcn_context_classify_transfer (anal, addr + offset,
+			bytes + offset, (int)sizeof (bytes) - offset, &target, &memory_operand, &size);
+		if (kind == FCN_TRANSFER_VALUE_JUMP) {
+			return memory_operand == UT64_MAX? NULL
+				: anal->binb.get_reloc_at (anal->binb.bin, memory_operand);
+		}
+		if (kind != FCN_TRANSFER_NONE || size <= 0) {
+			return NULL;
+		}
+		offset += size;
+	}
+	return NULL;
+}
+/* Whether a direct transfer to `addr` reaches a callee: a function the
+ * analysis knows, or a PLT stub standing for one. */
+static bool fcn_context_is_callee_target(RAnal *anal, ut64 addr) {
+	return r_anal_get_function_at (anal, addr) != NULL
+		|| fcn_context_plt_stub_reloc (anal, addr) != NULL;
 }
 static bool fcn_context_offer_slot_callee(RAnal *anal, RList *callees, ut64 call_addr, ut64 slot) {
 	if (slot == UT64_MAX) {
@@ -997,7 +1089,7 @@ static bool fcn_context_collect_tail_callees(RAnal *anal, RList *callees, const 
 			const RAnalSnapshotSuccessor *successor = &block->successors[successor_index];
 			if (successor->kind != R_ANAL_SNAPSHOT_SUCCESSOR_DIRECT
 				|| function_image_target_classify (image, successor->target_addr) != 0
-				|| !r_anal_get_function_at (anal, successor->target_addr)) {
+				|| !fcn_context_is_callee_target (anal, successor->target_addr)) {
 				continue;
 			}
 			if (!fcn_context_append_callee (anal, callees, transfer_addr,
@@ -1020,7 +1112,7 @@ static bool fcn_context_collect_tail_callees(RAnal *anal, RList *callees, const 
 			anal, block, transfer_addr, &direct_target, &memory_operand);
 		if (kind == FCN_TRANSFER_DIRECT_JUMP) {
 			if (function_image_target_classify (image, direct_target) == 0
-				&& r_anal_get_function_at (anal, direct_target)
+				&& fcn_context_is_callee_target (anal, direct_target)
 				&& !fcn_context_append_callee (anal, callees, transfer_addr,
 					direct_target, R_ANAL_CALL_TRANSFER_TAIL_JUMP)) {
 				return false;
@@ -5054,21 +5146,16 @@ static bool call_site_interface_snapshot_collect_one(
 	interface->instruction_addr = callee->call_addr;
 	interface->target_addr = callee->addr;
 	interface->transfer = callee->transfer;
-	// A slot is not code, so no function is looked up at it: the relocation
-	// named the callee when it was collected, and the name and prototype it
-	// gave travel on the callee itself.
-	const bool through_slot = callee->transfer == R_ANAL_CALL_TRANSFER_TAIL_SLOT;
-	RAnalFunction *target = through_slot? NULL
-		: r_anal_get_fcn_in (anal, callee->addr, R_ANAL_FCN_TYPE_ANY);
-	const bool target_is_exact = target && target->addr == callee->addr;
-	const char *target_name = target_is_exact? target->name: through_slot? callee->name: NULL;
-	if (R_STR_ISNOTEMPTY (target_name)) {
-		interface->target_name = strdup (target_name);
+	// Whatever named the callee when it was collected -- the function at the
+	// address, a relocated slot, or the stub standing for one -- travels on
+	// the record, so nothing is looked up at the address again here.
+	if (R_STR_ISNOTEMPTY (callee->name)) {
+		interface->target_name = strdup (callee->name);
 		if (!interface->target_name) {
 			return false;
 		}
 	}
-	if (!callee->signature || (!target_is_exact && !through_slot)) {
+	if (!callee->signature) {
 		return true;
 	}
 	const char *calling_convention = callee->signature->callconv;
@@ -5114,9 +5201,9 @@ static bool call_site_interface_snapshot_collect_one(
 	interface->num_arguments = argument_count;
 	if (r_sys_getenv_asbool ("R2SLEIGH_DEBUG_INTERFACE")) {
 		eprintf ("R2SLEIGH_CALLSITE call=0x%" PFMT64x " target=0x%" PFMT64x
-			" name=%s exact=%d slot=%d arguments=%zu variadic=%d\n",
+			" name=%s linkage=%d transfer=%d arguments=%zu variadic=%d\n",
 			callee->call_addr, callee->addr, callee->name? callee->name: "",
-			target_is_exact? 1: 0, through_slot? 1: 0, argument_count,
+			(int)callee->linkage, (int)callee->transfer, argument_count,
 			signature_variadic? 1: 0);
 	}
 	bool arguments_complete = true;
@@ -5166,9 +5253,9 @@ static bool call_site_interface_snapshot_collect_one(
 		arguments_complete = false;
 	}
 	/* The signature in hand says whether the callee takes a variadic tail;
-	 * `target->is_variadic` is the body heuristic and does not override it. */
+	 * the body's variadic heuristic does not override it. */
 	interface->variadic = signature_variadic;
-	interface->noreturn = callee->signature->noreturn || (target && target->is_noreturn);
+	interface->noreturn = callee->signature->noreturn;
 	bool result_complete = false;
 	if (!strcmp (r_str_get (callee->signature->ret_type), "void")) {
 		interface->result_kind = R_ANAL_SNAPSHOT_RETURN_VOID;
