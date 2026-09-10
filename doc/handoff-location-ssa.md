@@ -20029,3 +20029,87 @@ upstream's analysis fixes and two lost in `zlib_example` (0x1ea0
 Open upstream PRs: 26682 and 26629 on their own branches, mergeable; 26646
 (the integration PR, head is this branch) shows conflicting until the rebased
 branch is pushed.
+
+## The stack pointer is geometry through a call, and a stub is its slot's callee
+
+Four refusal classes traced to their source and fixed there, in the order
+the DecBench census sized them.
+
+**An irreducible cycle was a construction failure of the obligation
+inventory.** `UnstructuredControlCycle` made every function with one a
+`BindingPlanBuild` refusal (13, `gz_write` and `gzgets` across the zlib
+binaries). The dominator-tree structurer places such a cycle with labels and
+gotos and its certificate reads every edge back, so the inventory has nothing
+to be incomplete about; the variant is gone (46399901).
+
+**A direct jump to a PLT stub had no callee.** `adler32` is
+`jmp sym.plt.adler32_z`; radare2 makes a function at a local PLT stub only when
+something calls it, so the tail transfer had no callee record and the function
+refused with one control transfer unaccounted (10). The capture now reads the
+bytes at a direct transfer's target: `jmp [slot]` behind an optional `endbr64`
+with a relocated slot is a stub, and the callee is what the relocation names, a
+local body described by itself and an import by its declared type -- the same
+resolution the tail-slot path already did, now shared. The call-site interface
+builder then had to believe the record: it re-looked the target up and kept the
+prototype only when a function started exactly there, because the record's own
+resolvers used `r_anal_get_fcn_in`. They answer for the function at the address
+now and the builder reads the record (d8f0d098). A body reached through a stub
+is not yet captured as a callee snapshot, so its declaration carries carriers
+rather than DWARF parameter types.
+
+**The stack-pointer family broke at every call.** The geometry certificate
+listed `Phi`, `Copy`, `IntAdd` and `IntSub` as exact stack geometry and not
+`CallRestore`, so a restored stack pointer and every value computed from it fell
+out of the certificate, stayed `Bound` to a binding no symbol owns, and the
+function refused `UnownedBindingSymbol` or `RenderedValueRequired` (15:
+`_tr_flush_block`, `gzputc`, `test_compress`, `generateMTFValues`). A restore
+is the copy the convention states -- construction mints it only for the carrier
+the callee brings back -- so the certificate now treats it as one. With the
+certificate owning the family, the journal's three restore special cases
+(`boundary_restores_carrier`, `unused_boundary_restore`,
+`certified_dead_restore`) were the same fact reconciled again and are deleted;
+a restore is a copy in the coalescing match, and a structurally unused
+definition's operand reads disappear with it whatever the operation is, which
+is what the dead-restore case had been saying for restores alone. The first
+measurement of that deletion lost 16 functions to a gap loop
+(`exact_use_requires_rendered_occurrence` on the restore after a `noreturn`
+call at -O0, where the stack pointer is not entry-relative because of the
+stack-clash probe); the operand-read rule above is what closed it.
+
+The second half of the class is the address that escapes: `lea rsi,
+[rsp+8]` handed to `compress` renders as `&sourceLen`, and the discharge
+accounting recorded the stack-pointer operand of the discharged `IntAdd` as an
+exact rendered use while nothing spelled it, leaving the pointer's value cell
+owed to nothing. An absorbed stack-rooted operand is now recorded as elided
+(`DeadStackBase`) in `discharged_instruction_targets`. An attempt to state
+this in the certificate instead -- every base operand of an exact address
+computation is not an occurrence -- lost 43 functions, because at -O0 the
+probe loop's `R11 = RSP - 0x4000` is exactly such a computation and its base
+is spelled; the fact is the renderer's, not the SSA's.
+
+**The ABI reaching-value walk refused every loop.** Walking predecessors from a
+call site back to the carrier's definition, the walk returned `None` on
+re-entering a block already on its path, so a call after any loop the carrier
+was live through had "no reaching value" (`calls.rs:165`, 13: `inflateSync`,
+`test_gzio`, `test_flush`). A back edge into a block scanned up to its boundary
+now scans the rest of that block and otherwise contributes nothing, the entry
+block combines its live-in with what its back edges carry, and the
+cycle-rejecting test states the opposite. `inflateSync` moves on to
+`RenderedValueRequired` on a `tmp:regalias:phi` read, which is the
+value-identity class.
+
+Numbers, over the four commits (46399901, d8f0d098, f470964a): local census
+692 -> 697 of 720 (`gz_write`, `gzgets` twice, `deflatePrime`... the
+irreducible four, then `inflateSync`; nothing lost); corpus gate raw 54,
+differential 54, snapshot 54 at each step. DecBench not re-run yet.
+
+What the tree still says, in order of size: the value-identity rewrite has its
+derivation in `doc/adr-register-identity.md` (S0 to S3 laid out there); the
+stack-clash probe loop at -O0 is not stack geometry and renders `RSP_0` as an
+undeclared variable; a copy of a stack address into a program pointer
+(`mov rcx, rsp` in `generateMTFValues`) asks for the elided base by name and
+needs the `&object` spelling the escaped call argument has; the shape stage's
+tail duplication proposes trees the certificate rejects for
+`terminal-fallthrough` after a `noreturn` call, which the gate declines
+correctly and which costs the rewrite rather than the function; `gzputc`'s
+`int c` is the narrow formal of the ADR.
