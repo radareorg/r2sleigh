@@ -1143,7 +1143,15 @@ mod tests {
             .graph()
             .values
             .iter()
-            .find(|value| value.var.name == "tmp:10" && value.var.version == 2)
+            .find(|value| {
+                value.var.name == "tmp:10"
+                    && artifact.graph().def_inst(value.id).is_some_and(|inst| {
+                        matches!(
+                            artifact.graph().inst(inst).map(|inst| &inst.payload),
+                            Some(crate::graph::InstPayload::Op(crate::SSAOp::Load { .. }))
+                        )
+                    })
+            })
             .expect("reloaded parameter");
         assert!(
             artifact

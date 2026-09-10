@@ -19516,3 +19516,48 @@ leave through several targets getting a continuation; the condition one is the
 user's "Certificate names the chain" answer. Neither is new. What this trace
 adds is the size: those two threads together are the whole
 `unrepresentable operation` column, and on DecBench that column is ten.
+
+## The DecBench move after the shared-exit fix is `deflate` on the deadline
+
+DecBench after "A shared exit cannot say which stack address an edge brought"
+reads 643 of 860 against 644 before it. The per-function diff of the two runs'
+`function_results.json` is exactly: lost `zlib/example::deflate` and
+`zlib/libz.so.1.2::deflate`, gained `zlib/minigzip::deflate`. That is the one
+function this project already knows renders or refuses on the wall-clock
+budget depending on load, and the fix touches nothing it renders. Read the
+number as flat, and read any future DecBench delta that is only `deflate` the
+same way until the deadline is replaced by the work bound.
+
+## Parameter recovery counts bytes nothing reads, and full phi pruning is not the cure
+
+The witness line the interface recovery now prints settled `inflateSync`'s
+phantom second parameter in one probe:
+
+    entry read RSI (ValueId(100)) is observed from ControlPredicate at
+      (0x9c27, 18): IntEqual <- IntAnd <- Subpiece <- phi <- phi <- Piece <-
+      Subpiece <- phi <- phi <- ValueId(100):entry
+
+The predicate is `test sil, sil`: a one-byte `Subpiece` at offset zero, `and`ed
+with itself, compared with zero. The byte it reads was written by a `SIL` store
+on every path. The other seven bytes of `RSI` are the caller's, threaded through
+`Piece(hi: RSI[1..8], lo: SIL)` -- which is the architecture, since a byte
+write does not clear the rest of the register -- and through four merges. The
+value-level closure in `ProvenProgramObservations` sees the predicate depend on
+the entry `RSI` and admits it as a parameter; the program reads no byte of it.
+`fcn_2140` then hands `inflateSync` a clobbered `RSI` as its "second argument"
+and refuses on the clobber's write.
+
+The fix at the cause is a byte-granular observation closure: carry the observed
+byte range through `Subpiece { offset }`, `Piece { hi, lo }`, `IntZExt` and an
+`IntAnd` with a constant mask, so an entry value is admitted only when bytes
+of it reach an observation. Everything else in the chain already exists.
+
+What is *not* the fix, measured: pruning every phi by liveness (not only the
+call-induced ones). Liveness is path-insensitive and byte-insensitive, so it
+keeps exactly the merge above, and it also removes merges something still
+reads through a relation the liveness does not model -- nine functions went to
+`missing program-variable authorization`, three came back, net 105 to 111 --
+and three unit tests that construct a dead merge to exercise the dead-phi
+certificate lose their fixture. Reverted; the targeted pruning stands. The
+unmodelled read those nine share has not been named; `fcn_11750` in
+`zlib_example` and `fcn_e6a0` in `minigzip_O2` are where to start.
