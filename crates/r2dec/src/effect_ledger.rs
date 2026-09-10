@@ -130,7 +130,10 @@ fn upstream_zero_occurrence_outcome(
     // The push that records a call's return address. The call statement is the
     // transfer, and no C statement writes the machine's return address.
     if source_inst.is_some_and(|inst| {
-        crate::binding_plan::certified_call_return_address_insts(prepared).contains(&inst)
+        prepared
+            .certificates()
+            .call_return_address_stores
+            .contains(&inst)
     }) {
         return Some(Outcome::Elided(ElisionReason::CallReturnAddress));
     }

@@ -679,15 +679,16 @@ pub(crate) fn certified_call_site(
 /// its ordinary rendering contract.
 pub(super) fn certified_direct_call_target_sites(source: &r2ssa::SsaArtifact) -> BTreeSet<UseSite> {
     let graph = source.graph();
-    graph
-        .insts
-        .iter()
-        .filter_map(|inst| {
-            let certificate = certified_call_site(source, inst.id)?;
+    source
+        .certificates()
+        .callsites
+        .values()
+        .filter_map(|certificate| {
             certificate.direct_target?;
+            let inst = graph.inst(certificate.at)?;
             let value = certificate.target;
             let site = UseSite {
-                inst: inst.id,
+                inst: certificate.at,
                 input_idx: 0,
             };
             (inst.inputs.first().copied() == Some(value) && graph.use_sites(value).contains(&site))
@@ -748,44 +749,7 @@ pub(super) fn certified_direct_call_target_insts(source: &r2ssa::SsaArtifact) ->
 /// call site falls through to, and it precedes that call in its own block.
 /// Nothing else in a function stores its own continuation address.
 pub(super) fn certified_call_return_address_insts(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
-    let graph = source.graph();
-    let Some(stack_pointer) = source.machine_context().stack_pointer_carrier() else {
-        return BTreeSet::new();
-    };
-    let mut insts = BTreeSet::new();
-    for certificate in source.certificates().callsites.values() {
-        let Some(call) = graph.inst(certificate.at) else {
-            continue;
-        };
-        // The nearest store before the call that writes a bare constant
-        // through the stack pointer. Sleigh lifts `call` as a stack-pointer
-        // decrement, this store of the address to come back to, and the
-        // transfer; nothing else in a function stores a literal at the stack
-        // pointer immediately before calling.
-        let push = graph
-            .insts
-            .iter()
-            .filter(|candidate| candidate.block == call.block && candidate.ordinal < call.ordinal)
-            .filter(|candidate| {
-                let r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { val, .. }) = &candidate.payload
-                else {
-                    return false;
-                };
-                let through_stack_pointer =
-                    candidate.inputs.first().is_some_and(|address: &ValueId| {
-                        graph
-                            .value(*address)
-                            .and_then(|value| value.canonical_storage)
-                            .is_some_and(|storage| storage.location() == stack_pointer.location())
-                    });
-                val.constant_bits().is_some() && through_stack_pointer
-            })
-            .max_by_key(|candidate| candidate.ordinal);
-        if let Some(push) = push {
-            insts.insert(push.id);
-        }
-    }
-    insts
+    source.certificates().call_return_address_stores.clone()
 }
 
 /// The return addresses those pushes write.

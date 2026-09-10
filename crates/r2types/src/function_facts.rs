@@ -5599,6 +5599,7 @@ mod tests {
             variadic_argument_count_evidence: None,
             variadic_argument_count_refusal: None,
             stack_argument_values: Vec::new(),
+            return_address_store: None,
             argument_certificates: Vec::new(),
         };
         let mut boundary = r2ssa::SourceCallBoundaryFact {

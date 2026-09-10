@@ -1557,6 +1557,9 @@ pub struct CallsiteCertificate {
     pub variadic_argument_count_evidence: Option<VariadicCallsiteArgumentCountEvidence>,
     pub variadic_argument_count_refusal: Option<VariadicCallsiteArgumentCountRefusal>,
     pub stack_argument_values: Vec<StackCallArgumentCertificate>,
+    /// The store of the return address the lift writes through the stack
+    /// pointer just before the transfer, where the convention pushes one.
+    pub return_address_store: Option<InstId>,
     pub argument_certificates: Vec<CallArgumentCertificate>,
 }
 
@@ -1719,6 +1722,8 @@ pub struct PreparedFunctionCertificates {
     pub machine_return_control_by_inst: BTreeMap<InstId, InstId>,
     pub callsites: BTreeMap<CallSiteId, CallsiteCertificate>,
     pub callsites_by_inst: BTreeMap<InstId, CallSiteId>,
+    /// Every call's return-address store, for the ledgers that ask per op.
+    pub call_return_address_stores: BTreeSet<InstId>,
     pub call_results: BTreeMap<ValueId, CallResultCertificate>,
     pub call_results_by_inst: BTreeMap<InstId, ValueId>,
     pub call_results_by_callsite: BTreeMap<CallSiteId, Vec<ValueId>>,
@@ -7574,6 +7579,39 @@ fn collect_prepared_function_certificates(
         })
         .collect();
 
+    // The stores of a constant through the stack pointer, per block: on
+    // amd64 the nearest one before a call is the return address the call
+    // pushed, and nothing else stores a literal there just before calling.
+    let stack_pointer = machine_context.and_then(SourceMachineContext::stack_pointer_carrier);
+    let mut constant_stack_stores: BTreeMap<crate::BlockId, Vec<(usize, InstId)>> = BTreeMap::new();
+    if let Some(stack_pointer) = stack_pointer {
+        for inst in &graph.insts {
+            let InstPayload::Op(SSAOp::Store { val, .. }) = &inst.payload else {
+                continue;
+            };
+            let through_stack_pointer = inst.inputs.first().is_some_and(|address| {
+                graph
+                    .value(*address)
+                    .and_then(|value| value.canonical_storage)
+                    .is_some_and(|storage| storage.location() == stack_pointer.location())
+            });
+            if val.constant_bits().is_some() && through_stack_pointer {
+                constant_stack_stores
+                    .entry(inst.block)
+                    .or_default()
+                    .push((inst.ordinal, inst.id));
+            }
+        }
+    }
+    let return_address_store_before = |call: InstId| {
+        let call = graph.inst(call)?;
+        constant_stack_stores
+            .get(&call.block)?
+            .iter()
+            .filter(|(ordinal, _)| *ordinal < call.ordinal)
+            .max_by_key(|(ordinal, _)| *ordinal)
+            .map(|(_, inst)| *inst)
+    };
     let mut callsites_by_inst = BTreeMap::new();
     let callsites = call_sites
         .by_id
@@ -7690,11 +7728,16 @@ fn collect_prepared_function_certificates(
                     variadic_argument_count_evidence: count_evidence,
                     variadic_argument_count_refusal: count_refusal,
                     stack_argument_values,
+                    return_address_store: return_address_store_before(fact.at),
                     argument_certificates,
                 },
             )
         })
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    let call_return_address_stores = callsites
+        .values()
+        .filter_map(|certificate: &CallsiteCertificate| certificate.return_address_store)
+        .collect::<BTreeSet<_>>();
 
     let (call_results, call_results_by_inst, call_results_by_callsite) =
         collect_call_result_certificates(
@@ -7762,6 +7805,7 @@ fn collect_prepared_function_certificates(
         machine_return_control_by_inst,
         callsites,
         callsites_by_inst,
+        call_return_address_stores,
         call_results,
         call_results_by_inst,
         call_results_by_callsite,

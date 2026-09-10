@@ -1415,7 +1415,9 @@ impl<'a> FoldingContext<'a> {
                                 .contains(&inst)
                             // The push that records where the call comes back
                             // to. The call statement is the transfer.
-                            || crate::binding_plan::certified_call_return_address_insts(prepared)
+                            || prepared
+                                .certificates()
+                                .call_return_address_stores
                                 .contains(&inst)
                     })
                 })
