@@ -1519,16 +1519,18 @@ pub struct MachineReturnControlCertificate {
     /// two sides; and one save serves every return the function has. Both
     /// accounts say it renders nothing, so neither has to be the only one.
     pub absorbed_insts: BTreeSet<InstId>,
-    /// The slot the return address was saved in, when this certificate answers
-    /// for the save as well as the reload. A slot that holds only the return
-    /// address between the prologue and the return is not an object the
-    /// function has; it is where the machine kept its control while the
-    /// function ran, and the certificate that accounts for the reload accounts
-    /// for the save with it.
-    pub stack_object: Option<ObjectId>,
-    /// The slot the return address was reloaded from, claimed or not: the
-    /// entry slot a call pushed it into, or the callee's own save of a link.
+    /// The slot the return address was reloaded from: the entry slot a call
+    /// pushed it into, or the callee's own save of a link register.
     pub reload_object: Option<ObjectId>,
+}
+
+impl MachineReturnControlCertificate {
+    /// The save slot this certificate answers for: its one write is the
+    /// prologue's save, its one read the reload, and both are absorbed here.
+    pub fn claimed_stack_object(&self) -> Option<ObjectId> {
+        self.reload_object
+            .filter(|_| !self.absorbed_insts.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6276,7 +6278,6 @@ fn collect_machine_return_control_certificates(
         let mut values = BTreeSet::from([return_address.value]);
         let mut current = return_address.value;
         let mut complete = true;
-        let mut claimed_stack_object = None;
         let mut reload_object = None;
         // The prologue saves the return address once however many returns the
         // function has, so every return's certificate describes that one save.
@@ -6391,7 +6392,6 @@ fn collect_machine_return_control_certificates(
                         insts.extend(save_insts);
                         values.extend(save_values);
                         values.insert(entry);
-                        claimed_stack_object = Some(access.object);
                     }
                     break;
                 }
@@ -6445,7 +6445,6 @@ fn collect_machine_return_control_certificates(
             values,
             uses,
             absorbed_insts: absorbed,
-            stack_object: claimed_stack_object,
             reload_object,
         };
         for inst in certificate

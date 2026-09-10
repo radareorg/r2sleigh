@@ -2693,37 +2693,32 @@ static void snapshot_relink_register_homes(RAnalFcnContext *ctx, const RAnalFunc
 		slot->arg_index = found;
 	}
 }
-/* A parameter the convention passes on the stack has no register home, so
- * radare2 gives its stack variable no formal ordinal. The variable and the
- * parameter come from the same declaration and carry the same name, which is
- * the link the ordinal would have carried; the consumer still checks that the
- * slot sits where the convention puts that parameter. */
-static void snapshot_link_stack_parameter_slots(RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface) {
+/* A stack parameter's slot is declared by the interface's parameter location;
+ * the variable radare2 names there restates it, so it is not carried twice. */
+static void snapshot_drop_stack_parameter_slots(RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface) {
+	RList *doomed = r_list_new ();
+	if (!doomed) {
+		return;
+	}
 	RListIter *iter;
 	RAnalFcnSlot *slot;
 	r_list_foreach (ctx->fcn_slots, iter, slot) {
-		if (!slot || slot->role != R_ANAL_FCN_SLOT_ARG || slot->arg_index >= 0
-			|| !slot->offset_valid) {
+		if (!slot || slot->role != R_ANAL_FCN_SLOT_ARG || !slot->offset_valid) {
 			continue;
 		}
-		/* The convention places each stack parameter at one entry offset,
-		 * so the slot at that offset is its storage whatever radare2 named
-		 * it: at -O2 its DWARF pass files `stream_size` where `version` is. */
-		int found = -1;
 		size_t i;
 		for (i = 0; i < interface->num_parameters; i++) {
 			const RAnalSnapshotParameter *parameter = &interface->parameters[i];
-			if (!parameter->on_stack || parameter->stack_offset != slot->offset) {
-				continue;
-			}
-			if (found >= 0) {
-				found = -1;
+			if (parameter->on_stack && parameter->stack_offset == slot->offset) {
+				r_list_push (doomed, slot);
 				break;
 			}
-			found = (int)i;
 		}
-		slot->arg_index = found;
 	}
+	r_list_foreach (doomed, iter, slot) {
+		r_list_delete_data (ctx->fcn_slots, slot);
+	}
+	r_list_free (doomed);
 }
 /* A parameter the convention passes in the argument area rather than in a
  * register. The convention names the slot from the stack pointer at the call
@@ -3005,33 +3000,10 @@ static bool snapshot_stack_slot_roles_complete(
 			continue;
 		}
 		if (slot->role == R_ANAL_FCN_SLOT_ARG) {
-			/* A parameter the convention passes on the stack: the slot is
-			 * the parameter's own storage, not a home for a register one.
-			 * One slot per parameter, and the parameter must say it lives
-			 * on the stack. */
-			if (slot->arg_index < 0
-				|| (size_t)slot->arg_index >= interface->num_parameters
-				|| !interface->parameters[slot->arg_index].on_stack) {
-				snapshot_stack_slot_role_report (slot, "argument slot names no stack parameter");
-				return false;
-			}
-			RListIter *earlier_iter;
-			RAnalFcnSlot *earlier;
-			r_list_foreach (ctx->fcn_slots, earlier_iter, earlier) {
-				if (earlier == slot) {
-					break;
-				}
-				/* The same coordinate under two names is one slot declared
-				 * twice, not a second home. */
-				if (earlier && earlier->role == R_ANAL_FCN_SLOT_ARG
-					&& earlier->arg_index == slot->arg_index
-					&& !(earlier->offset_valid && slot->offset_valid
-						&& earlier->offset == slot->offset)) {
-					snapshot_stack_slot_role_report (slot, "a second slot for one stack parameter");
-					return false;
-				}
-			}
-			continue;
+			/* Caller storage the interface declares no parameter at: the
+			 * body reads more of the argument area than the prototype says. */
+			snapshot_stack_slot_role_report (slot, "argument slot names no stack parameter");
+			return false;
 		}
 		if (slot->role != R_ANAL_FCN_SLOT_HOME || slot->arg_index < 0
 			|| (size_t)slot->arg_index >= interface->num_parameters
@@ -3306,7 +3278,7 @@ static bool function_interface_snapshot_collect(
 		|| snapshot_parameter_storages_overlap (interface->parameters, parameter_count)) {
 		parameters_complete = false;
 	}
-	snapshot_link_stack_parameter_slots (ctx, interface);
+	snapshot_drop_stack_parameter_slots (ctx, interface);
 	snapshot_relink_register_homes (ctx, interface);
 	if (!snapshot_promote_exact_dwarf_stack_homes (
 			anal, fcn, ctx, interface, calling_convention)) {

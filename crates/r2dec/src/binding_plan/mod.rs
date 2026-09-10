@@ -513,7 +513,7 @@ pub(super) fn certified_return_control_stack_objects(
         .certificates()
         .machine_return_controls
         .values()
-        .filter_map(|certificate| certificate.stack_object)
+        .filter_map(r2ssa::MachineReturnControlCertificate::claimed_stack_object)
         .collect()
 }
 
