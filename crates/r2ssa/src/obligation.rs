@@ -639,6 +639,11 @@ impl SemanticObligationInventory {
                 );
             }
             if !boundary.complete {
+                // The call, and only the call. What the boundary failed to
+                // prove is which value fills which argument position at this
+                // one site; the values reaching it are ordinary values this
+                // function computes, and a gap over the call is the whole of
+                // what cannot be rendered.
                 unsupported.insert(boundary.at);
                 seed_instruction(
                     boundary.at,
@@ -646,12 +651,32 @@ impl SemanticObligationInventory {
                     SemanticObligationComponent::Whole,
                     &mut required,
                 );
-                taint_incomplete_boundary_inputs(
-                    graph,
-                    boundary.at,
-                    &mut required,
-                    &mut unsupported,
-                );
+            }
+        }
+
+        // What an incomplete boundary keeps alive. The graph says a call may
+        // read every carrier its convention passes arguments in, which is true
+        // of the machine; a complete boundary then says which of them this call
+        // does read, and those producers are already kept live above. Where the
+        // boundary could not say, none of the carriers can be proven dead -- so
+        // this is the whole of what the taint used to claim, bounded by the
+        // convention's carriers instead of by the function's size.
+        for boundary in boundaries.calls.values() {
+            if boundary.complete {
+                continue;
+            }
+            for read in call_boundary_reads(graph, boundary.at) {
+                let Some(inst) = graph.inst(read) else {
+                    continue;
+                };
+                for input in &inst.inputs {
+                    seed_value_definition(
+                        graph,
+                        *input,
+                        SemanticObligationKind::LiveValueProducer,
+                        &mut required,
+                    );
+                }
             }
         }
 
@@ -1225,6 +1250,34 @@ fn taint_incomplete_boundary_inputs(
             required,
         );
     }
+}
+
+/// The boundary reads a call makes, which sit immediately before it.
+///
+/// The mirror of the `CallDefine` run that follows a call: construction emits
+/// them as one uninterrupted run, so the run ends at the first operation that
+/// is not one.
+fn call_boundary_reads(graph: &SsaGraph, call: InstId) -> Vec<InstId> {
+    let Some(call_inst) = graph.inst(call) else {
+        return Vec::new();
+    };
+    let Some(block) = graph.block(call_inst.block) else {
+        return Vec::new();
+    };
+    block
+        .insts
+        .iter()
+        .copied()
+        .take_while(|inst| *inst != call)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .take_while(|inst| {
+            graph
+                .inst(*inst)
+                .is_some_and(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::CallUse { .. })))
+        })
+        .collect()
 }
 
 fn block_can_reenter(graph: &SsaGraph, start: crate::graph::BlockId) -> bool {
@@ -2383,7 +2436,11 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_boundary_keeps_later_loop_definitions_unknown() {
+    fn a_call_keeps_the_definition_the_next_iteration_passes_it() {
+        let mut entry = R2ILBlock::new(0x3170, 4);
+        entry.push(R2ILOp::Branch {
+            target: Varnode::ram(0x3180, 8),
+        });
         let mut block = R2ILBlock::new(0x3180, 4);
         block.push(R2ILOp::Call {
             target: Varnode::ram(0x4000, 8),
@@ -2396,24 +2453,46 @@ mod tests {
             target: Varnode::ram(0x3180, 8),
         });
 
-        let artifact =
-            SsaArtifact::raw(&[block], Some(&x86_64_call_arch())).expect("loop artifact");
+        let artifact = SsaArtifact::for_decompile(&[entry, block], Some(&x86_64_call_arch()))
+            .expect("loop artifact");
+        // The copy writes an argument carrier the call reads on the next turn
+        // of the loop, so it is live. Nothing about the boundary being
+        // incomplete makes it an unknown effect: the value is one this
+        // function computes and can spell.
+        let (block_addr, op_index) = artifact
+            .function()
+            .get_block(0x3180)
+            .expect("loop block")
+            .ops
+            .iter()
+            .enumerate()
+            .find_map(|(index, op)| {
+                matches!(op, crate::op::SSAOp::Copy { dst, .. } if dst.name == "rdi")
+                    .then_some((0x3180u64, index as u64))
+            })
+            .expect("argument-carrier definition");
         let next_iteration_argument = artifact
             .obligations()
             .instructions
             .get(&CanonicalInstructionId {
-                block_addr: 0x3180,
-                site: CanonicalInstructionSite::Op(1),
+                block_addr,
+                site: CanonicalInstructionSite::Op(op_index),
             })
             .expect("next-iteration argument producer");
         assert_eq!(
             next_iteration_argument.state,
-            SemanticInstructionState::UnsupportedUnknown
+            SemanticInstructionState::LiveObligation
         );
         assert!(next_iteration_argument.obligations.iter().any(|id| {
-            id.kind == SemanticObligationKind::VolatileOrUnknownEffect
+            id.kind == SemanticObligationKind::LiveValueProducer
                 && id.component == SemanticObligationComponent::Whole
         }));
+        assert!(
+            !next_iteration_argument
+                .obligations
+                .iter()
+                .any(|id| { id.kind == SemanticObligationKind::VolatileOrUnknownEffect })
+        );
         assert!(artifact.obligations().is_complete());
     }
 

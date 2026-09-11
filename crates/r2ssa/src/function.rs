@@ -11883,7 +11883,6 @@ mod tests {
                 target: make_reg(16, 8),
             },
         ];
-        let call_index = 4;
         let mut op_metadata = std::collections::BTreeMap::new();
         for (index, instruction_addr) in [0x1000u64, 0x1000, 0x1008, 0x1008, 0x1008, 0x100d]
             .into_iter()

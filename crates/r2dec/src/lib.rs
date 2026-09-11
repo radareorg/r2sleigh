@@ -5126,8 +5126,12 @@ mod tests {
             !output.contains("native render refusal"),
             "a restored carrier must not refuse the function: {output}"
         );
+        // The count is written only when it is not zero, so its absence is
+        // the assertion. It used to be read off a residual line that existed
+        // only because the incomplete call boundary refused everything
+        // reaching it; now the call is a gap and nothing else is in doubt.
         assert!(
-            output.contains("0 unaccounted"),
+            !output.contains("unaccounted"),
             "the restore accounts for both of its sides: {output}"
         );
     }
@@ -5239,7 +5243,7 @@ mod tests {
             "an unused restored carrier must not refuse the function: {output}"
         );
         assert!(
-            output.contains("0 unaccounted"),
+            !output.contains("unaccounted"),
             "the structural elision accounts for the restore operand: {output}"
         );
     }
