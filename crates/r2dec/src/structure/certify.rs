@@ -462,6 +462,9 @@ impl Walker<'_> {
                 cond: None, body, ..
             } => self.walk_infinite_loop(body, open),
             CStmt::While { body, .. } | CStmt::For { body, .. } => {
+                if self.body_owns_no_block(body) {
+                    return self.walk(body, open);
+                }
                 self.walk_pre_test_loop(body, open)
             }
             // A do-while nobody observed cannot say which block its test is.
@@ -482,6 +485,60 @@ impl Walker<'_> {
             | CStmt::Empty
             | CStmt::Gap(_) => open,
         }
+    }
+
+    /// Whether a loop statement is one the control flow has, or one a lowering
+    /// wrote.
+    ///
+    /// The certificate is about blocks: where each one is placed and which
+    /// edges the text expresses. A construct that places no block and makes no
+    /// transfer says nothing it could be wrong about. One machine operation
+    /// whose meaning is a loop is rendered as a loop, and its body is a few
+    /// statements of one block rather than blocks of its own, so reading it as
+    /// a pre-test loop invents a back edge to the block it sits in --
+    /// `fill_window` certified `[false->0x577c, true->0x57cd]` against an
+    /// expected `[0x577c]` for exactly that.
+    fn body_owns_no_block(&self, body: &CStmt) -> bool {
+        let mut stack = vec![body];
+        while let Some(stmt) = stack.pop() {
+            match stmt {
+                CStmt::Observed { id, stmt } => {
+                    if (self.block_of)(*id).is_some() {
+                        return false;
+                    }
+                    stack.push(stmt);
+                }
+                CStmt::StructuredRegion { stmt, .. } => stack.push(stmt),
+                CStmt::Block(statements) => stack.extend(statements.iter()),
+                CStmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    stack.push(then_body);
+                    if let Some(else_body) = else_body.as_deref() {
+                        stack.push(else_body);
+                    }
+                }
+                CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => stack.push(body),
+                CStmt::For { init, body, .. } => {
+                    if let Some(init) = init.as_deref() {
+                        stack.push(init);
+                    }
+                    stack.push(body);
+                }
+                CStmt::Switch { cases, default, .. } => {
+                    for case in cases {
+                        stack.extend(case.body.iter());
+                    }
+                    if let Some(default) = default.as_deref() {
+                        stack.extend(default.iter());
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
     }
 
     /// A control statement is placed at the block its observations name; a
@@ -505,6 +562,13 @@ impl Walker<'_> {
                 cond: None, body, ..
             } => self.walk_infinite_loop(body, open),
             CStmt::While { body, .. } | CStmt::For { body, .. } => {
+                if self.body_owns_no_block(body) {
+                    let open = match self.choose_header(&blocks) {
+                        Some(header) => self.enter_block(open, header),
+                        None => open,
+                    };
+                    return self.walk(body, open);
+                }
                 let open = match self.choose_header(&blocks) {
                     Some(header) => self.enter_block(open, header),
                     None => open,
