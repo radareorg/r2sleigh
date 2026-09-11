@@ -1047,6 +1047,20 @@ impl BindingPlan {
                     || source_slot.offset() != *offset
                     || size_bytes != source_slot.size_bytes() && !recovered_array_size_matches
                 {
+                    // Three fields can disagree and the refusal names none of
+                    // them, which is the difference between a trace and a
+                    // search: a slot the source declared one byte wide under
+                    // an object the body reads four bytes of is a different
+                    // repair from one at another offset.
+                    r2il::refusal_evidence!(
+                        "stack-object-identity",
+                        "{object:?}: body says {base:?}{offset:+} size {size_bytes}, \
+                         source slot says {:?}{:+} size {}, recovered array {}",
+                        source_slot.base(),
+                        source_slot.offset(),
+                        source_slot.size_bytes(),
+                        recovered_array_size_matches
+                    );
                     stack_objects.insert(
                         *object,
                         StackObjectDisposition::Refused {

@@ -20330,3 +20330,50 @@ for the phase split and `capture=`/`root_lift=`/`cache_hits=` line, and
     R2DEC_TRACE_REFUSAL=1 ... | grep 'collect-phase'
 
 for the per-collection table and the number of collections.
+
+### The rest of the census, traced: what each refusal is waiting for
+
+Twenty-one of 720 census functions do not render. Three are radare2 telling us
+the address is a cold partition of another function, which is not ours. The
+rest divide into classes, and each has now been traced to the fact it is
+missing rather than to the layer that reports it.
+
+**Five over the complexity limit** — measured above: the lift dominates and the
+type phase spends the request budget.
+
+**Four at the return boundary** — the ABI model is incoherent because one
+stack slot's role is unproven; the two underlying facts are radare2's, and the
+engine's own part is that it conjoins the frame's exactness with the
+carriers'.
+
+**Two at a stack access** (`bzip2` -O2 `0xf7a0`, `minigzip` -O2 `0x4d00`) —
+the binding plan refuses an object with `MissingSourceIdentity`, and the
+existing `stack-object-identity` evidence says why: no declared slot, no
+callee allocation, and no width its own accesses agree on. For `0xf7a0`'s
+`ObjectId(6)` at `StackPointer-1096` the `stack-object-width` line is exact:
+
+    object=ObjectId(6) widths disagree: 4 and 16; accesses=[(ValueId(144), 4,
+      Some(0), true), (ValueId(259), 4, Some(0), false), ...]
+
+Four-byte and sixteen-byte accesses at offset zero of one object is a
+vectorised initialisation of a local table beside its scalar uses. The extent
+is knowable -- it is the array's -- and the layer that should know it is the
+stack array layout proof, which answers `NotIndexed` here. Taking the widest
+access instead would be a claim about where the object ends, which is the
+guess this code deliberately declines to make, and the next object's offset
+bounds it from above but does not establish it.
+
+A refusal on that path now also names the field that disagreed when a slot
+*does* exist and the object contradicts it, which was the one branch of the
+three with no evidence of its own.
+
+**The rest are one function each**: a switch dispatch outside its own block, a
+declaration with no definition, a call the memory renderer cannot project.
+
+The pattern across the traced classes is worth stating, because it decides
+where the next effort goes: three of the four are waiting on a fact about the
+*frame* -- a slot's role, a slot's extent, an object's width -- and in two of
+them radare2 has no opinion to offer. The engine already derives stack
+addressing for itself; what it declines to do is name an extent nobody
+declared. That is the boundary to move, and moving it is analysis work rather
+than a repair.
