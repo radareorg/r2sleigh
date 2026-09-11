@@ -3641,8 +3641,11 @@ impl Decompiler {
             .filter(|fact| {
                 fact.variadic_argument_count_evidence
                     .is_some_and(|evidence| {
-                        evidence.source
-                            == r2ssa::VariadicCallsiteArgumentCountSource::Radare2FormatString
+                        matches!(
+                            evidence.source,
+                            r2ssa::VariadicCallsiteArgumentCountSource::Radare2FormatString
+                                | r2ssa::VariadicCallsiteArgumentCountSource::Radare2MergedFormatStrings
+                        )
                     })
             })
             .count();

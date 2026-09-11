@@ -7540,6 +7540,168 @@ mod tests {
         SsaArtifact::new_with_context(function, FunctionPrepareMode::Decompile, machine_context)
     }
 
+    /// A call whose format argument is a merge of two literals.
+    ///
+    /// The compiler that folded two `fprintf` calls into one left exactly this
+    /// shape, and the count is a property of the format rather than of the
+    /// path that chose it.
+    fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        for (index, name) in ["rdi", "rsi", "rdx", "rcx"].iter().enumerate() {
+            arch.add_register(RegisterDef::new(*name, (index as u64) * 8, 8));
+        }
+        let slot = |index: usize| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: (index as u64) * 8,
+            size: 8,
+        };
+        let mut join = R2ILBlock {
+            addr: 0x1014,
+            size: 4,
+            ops: vec![
+                R2ILOp::Call {
+                    target: make_const(0x2000, 8),
+                },
+                R2ILOp::Return {
+                    target: make_const(0, 8),
+                },
+            ],
+            switch_info: None,
+            op_metadata: Default::default(),
+        };
+        join.stamp_instruction(0, 0x1014);
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(0, 8),
+                        src: make_const(0x10, 8),
+                    },
+                    R2ILOp::CBranch {
+                        target: make_const(0x1010, 8),
+                        cond: make_reg(24, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(8, 8),
+                        src: make_const(0x3000, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x1014, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1010,
+                size: 4,
+                ops: vec![
+                    R2ILOp::Copy {
+                        dst: make_reg(8, 8),
+                        src: make_const(0x3010, 8),
+                    },
+                    R2ILOp::Branch {
+                        target: make_const(0x1014, 8),
+                    },
+                ],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            join,
+        ];
+
+        let interface = SourceCallSiteInterface::new(
+            b"merged-format".to_vec(),
+            SourceCallSiteIdentity::new(
+                0x1014,
+                CanonicalStorageId {
+                    space: CanonicalStorageSpace::Constant,
+                    offset: 0x2000,
+                    size: 8,
+                },
+            ),
+            true,
+            "amd64",
+            [
+                SourceCallArgumentSpec::new(0, slot(0)),
+                SourceCallArgumentSpec::new(1, slot(1)),
+            ],
+            true,
+            false,
+            SourceCallResult::Void,
+        )
+        .expect("exact callsite interface")
+        .with_radare2_format_parameter(1)
+        .expect("format parameter belongs to the fixed prefix");
+        let convention =
+            SourceConventionSlots::new("amd64", (0..4).map(slot).collect::<Vec<_>>(), None)
+                .expect("convention slots");
+        let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
+            &blocks,
+            Some(&arch),
+            None,
+            SourceMachineRoles::default(),
+            Some(convention),
+            vec![interface],
+        );
+        machine_context.bind_source_string_literals(&[
+            (0x3000, first.to_string()),
+            (0x3010, second.to_string()),
+        ]);
+        let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+            &blocks,
+            Some(&arch),
+            coherent_function_interface(&machine_context),
+            machine_context.machine_roles().call_preserved_carriers(),
+            machine_context.stack_pointer_carrier(),
+            &CalleePreservedCarriers::new(),
+            None,
+            &UncheckedSsaWorkControl,
+        )
+        .expect("decompile SSA");
+        SsaArtifact::new_with_context(function, FunctionPrepareMode::Decompile, machine_context)
+            .callsite_certificate_for_op(0x1014, 0)
+            .expect("callsite certificate")
+            .clone()
+    }
+
+    #[test]
+    fn merged_formats_that_agree_prove_the_variadic_count() {
+        let call = merged_format_call("opened %d", "closed %d");
+        let evidence = call
+            .variadic_argument_count_evidence
+            .expect("merged literal count");
+        assert_eq!(
+            evidence.source,
+            crate::VariadicCallsiteArgumentCountSource::Radare2MergedFormatStrings
+        );
+        assert_eq!(evidence.format_argument_index, 1);
+        assert_eq!(evidence.format_consumed_argument_count, 1);
+        assert_eq!(evidence.total_argument_count, 3);
+        assert!(call.variadic_argument_count_refusal.is_none());
+    }
+
+    #[test]
+    fn merged_formats_that_disagree_prove_nothing() {
+        let call = merged_format_call("opened %d", "closed %d as %s");
+        assert!(call.variadic_argument_count_evidence.is_none());
+        assert_eq!(
+            call.variadic_argument_count_refusal,
+            Some(crate::VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral)
+        );
+    }
+
     fn variadic_format_call(
         defined: usize,
         variadic: bool,

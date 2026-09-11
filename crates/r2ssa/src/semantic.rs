@@ -621,6 +621,10 @@ pub enum VariadicCallsiteArgumentCountSource {
     /// The exact radare2 prototype identified the format parameter and the
     /// exact source snapshot supplied the literal stored at its address.
     Radare2FormatString,
+    /// The format argument is a merge, and every literal that can reach it
+    /// consumes the same number of arguments. A count is a property of the
+    /// format, so formats that agree prove the count the same way one does.
+    Radare2MergedFormatStrings,
 }
 
 /// Per-callsite proof of a variadic argument count.
@@ -3485,6 +3489,19 @@ fn variadic_callsite_argument_count(
         .value(format_value)
         .map(|value| &value.var)
         .ok_or(VariadicCallsiteArgumentCountRefusal::FormatArgumentUnavailable)?;
+    // A compiler that merges two `fprintf` calls leaves one call site whose
+    // format argument is a phi of two literals. The count is a property of the
+    // format, so formats that agree prove it exactly as a single one does.
+    if resolve_const_value(function.decompile_prep_facts(), format_var).is_none() {
+        return merged_format_literal_argument_count(
+            function,
+            graph,
+            machine_context,
+            interface,
+            format_value,
+            format_argument_index,
+        );
+    }
     let format_literal_address = resolve_const_value(function.decompile_prep_facts(), format_var)
         .ok_or_else(|| {
         r2il::refusal_evidence!(
@@ -3527,6 +3544,111 @@ fn variadic_callsite_argument_count(
         .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
     Ok(VariadicCallsiteArgumentCountEvidence {
         source: VariadicCallsiteArgumentCountSource::Radare2FormatString,
+        format_argument_index,
+        format_literal_address,
+        format_consumed_argument_count,
+        total_argument_count,
+    })
+}
+
+/// Every format literal that can reach one merged format argument.
+///
+/// `None` as soon as a reaching definition is something other than a merge, a
+/// copy, or a constant: a count proved from some of the formats would be a
+/// count proved from none of them.
+fn reaching_format_literals(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    value: ValueId,
+    seen: &mut BTreeSet<ValueId>,
+    found: &mut BTreeSet<u64>,
+) -> bool {
+    if !seen.insert(value) {
+        return true;
+    }
+    let Some(var) = graph.value(value).map(|value| &value.var) else {
+        return false;
+    };
+    if let Some(address) = resolve_const_value(function.decompile_prep_facts(), var) {
+        found.insert(address);
+        return true;
+    }
+    let Some(definition) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+        return false;
+    };
+    match &definition.payload {
+        InstPayload::Phi { .. } | InstPayload::Op(SSAOp::Copy { .. }) => definition
+            .inputs
+            .iter()
+            .all(|input| reaching_format_literals(function, graph, *input, seen, found)),
+        _ => false,
+    }
+}
+
+/// Prove a merged variadic count from formats that agree.
+fn merged_format_literal_argument_count(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    machine_context: &SourceMachineContext,
+    interface: &r2source::SourceCallSiteInterface,
+    format_value: ValueId,
+    format_argument_index: usize,
+) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
+    let mut addresses = BTreeSet::new();
+    if !reaching_format_literals(
+        function,
+        graph,
+        format_value,
+        &mut BTreeSet::new(),
+        &mut addresses,
+    ) || addresses.len() < 2
+    {
+        r2il::refusal_evidence!(
+            "variadic-format-literal",
+            "format argument {format_argument_index} is a merge of {} reaching values, not all of them literals",
+            addresses.len()
+        );
+        return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
+    }
+    let mut agreed: Option<usize> = None;
+    for address in &addresses {
+        let Some(format) = machine_context.source_string_literal(*address) else {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "merged format argument {format_argument_index} reaches {address:#x}, where the source carries no string literal"
+            );
+            return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
+        };
+        let count = crate::printf::printf_consumed_argument_count(format)
+            .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
+        match agreed {
+            None => agreed = Some(count),
+            Some(existing) if existing == count => {}
+            Some(existing) => {
+                r2il::refusal_evidence!(
+                    "variadic-format-literal",
+                    "merged format argument {format_argument_index} reaches formats consuming {existing} and {count} arguments; addresses={addresses:?}"
+                );
+                return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
+            }
+        }
+    }
+    let format_consumed_argument_count =
+        agreed.ok_or(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral)?;
+    let total_argument_count = interface
+        .arguments()
+        .len()
+        .checked_add(format_consumed_argument_count)
+        .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+    let format_literal_address = *addresses
+        .first()
+        .ok_or(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral)?;
+    r2il::refusal_evidence!(
+        "variadic-format-literal",
+        "merged format argument {format_argument_index} agrees on {format_consumed_argument_count} arguments across {addresses:?}"
+    );
+    Ok(VariadicCallsiteArgumentCountEvidence {
+        source: VariadicCallsiteArgumentCountSource::Radare2MergedFormatStrings,
         format_argument_index,
         format_literal_address,
         format_consumed_argument_count,
