@@ -84,6 +84,15 @@ pub enum ElisionReason {
     /// function allocated, and every access to it is a write, nothing can read
     /// what was stored and no C statement has to carry it.
     DeadFrameSlotStore,
+    /// A store that puts back into its object exactly what the object held.
+    ///
+    /// A stack probe is the case: `or qword [rsp], 0` reads the slot, leaves
+    /// the value alone and writes it back, so the page is touched and memory
+    /// ends as it began. The write is an assignment only when it changes what
+    /// the variable holds; this one does not, and spelling `x = x` for an
+    /// object nothing ever assigned would read an uninitialised variable. The
+    /// read it puts back goes with it, since nothing else consumes it.
+    MemoryRoundTrip,
     /// An immutable phi whose inputs and output are one certified renderer
     /// binding has no runtime C operation. Its graph cells remain accounted,
     /// but no assignment or read is fabricated for the SSA merge itself.
@@ -190,6 +199,7 @@ impl std::fmt::Display for ElisionReason {
             Self::DirectCallTarget => "direct-call-target",
             Self::CallReturnAddress => "call-return-address",
             Self::DeadFrameSlotStore => "dead-frame-slot-store",
+            Self::MemoryRoundTrip => "memory-round-trip",
             Self::CoalescedImmutablePhi => "coalesced-immutable-phi",
             Self::CoalescedCopy => "coalesced-copy",
             Self::CoalescedIdentityPhi => "coalesced-identity-phi",

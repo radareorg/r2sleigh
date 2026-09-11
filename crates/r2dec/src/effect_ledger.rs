@@ -127,6 +127,29 @@ fn upstream_zero_occurrence_outcome(
     {
         return Some(Outcome::Elided(ElisionReason::DeadFrameSlotStore));
     }
+    // A store that puts back what it read, and the read it puts back. The
+    // certificate says the object ends holding what it held, so neither is a
+    // statement about a program variable.
+    if matches!(
+        id.kind,
+        SemanticObligationKind::ObservableMemoryWrite
+            | SemanticObligationKind::ObservableMemoryRead
+            | SemanticObligationKind::LiveValueProducer
+    ) && let CanonicalInstructionSite::Op(op_index) = id.instruction.site
+        && let Ok(op_index) = usize::try_from(op_index)
+        && prepared
+            .certificates()
+            .memory_round_trips
+            .values()
+            .any(|certificate| {
+                certificate.block_addr == id.instruction.block_addr
+                    && (certificate.write_op_index == op_index
+                        || certificate.read_op_index == op_index
+                        || certificate.redundant_read_op_indexes.contains(&op_index))
+            })
+    {
+        return Some(Outcome::Elided(ElisionReason::MemoryRoundTrip));
+    }
     // The lane of an entry register a formal was minted from: its definition
     // is the declaration, so the minting operation owes no statement.
     if source_inst.is_some_and(|inst| {

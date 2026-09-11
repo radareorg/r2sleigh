@@ -882,6 +882,40 @@ pub(super) fn certified_elided_read_instructions(
         // `DeadFrameSlotStore`, and the statement is not emitted; a value
         // folded into it goes with it. This certificate is keyed by site
         // rather than by instruction, so the sites are resolved back here.
+        // A store that puts back what it read, and the read it puts back. The
+        // certificate says the object ends holding what it held, so neither
+        // renders and a value folded into either goes with it.
+        .chain({
+            let round_trips = source
+                .certificates()
+                .memory_round_trips
+                .values()
+                .flat_map(|certificate| {
+                    [
+                        (certificate.block_addr, certificate.write_op_index),
+                        (certificate.block_addr, certificate.read_op_index),
+                    ]
+                    .into_iter()
+                    .chain(
+                        certificate
+                            .redundant_read_op_indexes
+                            .iter()
+                            .map(|op_index| (certificate.block_addr, *op_index)),
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            source
+                .graph()
+                .insts
+                .iter()
+                .filter(|inst| {
+                    source
+                        .inst_op_site(inst.id)
+                        .is_some_and(|site| round_trips.contains(&site))
+                })
+                .map(|inst| inst.id)
+                .collect::<Vec<_>>()
+        })
         .chain({
             let dead_slots = certified_dead_frame_slot_accesses(source);
             source

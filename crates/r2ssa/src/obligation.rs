@@ -412,6 +412,10 @@ impl SemanticObligationInventory {
         boundaries: &SourceBoundaryFacts,
         machine_context: Option<&crate::SourceMachineContext>,
         private_stack_objects: &BTreeSet<crate::ObjectId>,
+        memory_round_trips: &BTreeMap<
+            crate::semantic::StructuredAccessId,
+            crate::semantic::MemoryRoundTripCertificate,
+        >,
     ) -> Self {
         let (canonical_ids, mut construction_failures) = collect_canonical_instruction_ids(graph);
         let mut required = BTreeMap::<
@@ -464,10 +468,25 @@ impl SemanticObligationInventory {
             let private_read = !access.is_write
                 && access.provenance_complete
                 && private_stack_objects.contains(&access.object);
-            let kind = if access.is_write {
-                SemanticObligationKind::ObservableMemoryWrite
-            } else if private_read {
+            // A round trip leaves the object holding what it held, so neither
+            // the write nor the reads it answers for owes anything of its own.
+            // Seeding a dependency annotation instead would be wrong twice: it
+            // makes the access a root of the backward walk below, and it makes
+            // its instruction live whether or not anything reads the value. If
+            // something does read the value, that walk reaches the load and
+            // annotates it then, which is the whole of what it owes.
+            let round_trip = memory_round_trips.values().any(|certificate| {
+                certificate.write == access.id
+                    || certificate.read == access.id
+                    || certificate.redundant_reads.contains(&access.id)
+            });
+            if round_trip {
+                continue;
+            }
+            let kind = if private_read {
                 SemanticObligationKind::LiveValueProducer
+            } else if access.is_write {
+                SemanticObligationKind::ObservableMemoryWrite
             } else {
                 SemanticObligationKind::ObservableMemoryRead
             };
@@ -2435,6 +2454,7 @@ mod tests {
             &boundaries,
             None,
             &BTreeSet::new(),
+            &BTreeMap::new(),
         );
 
         assert!(!inventory.is_complete());
@@ -2551,6 +2571,7 @@ mod tests {
             &artifact.facts().boundaries,
             None,
             &BTreeSet::new(),
+            &BTreeMap::new(),
         );
         assert!(!inventory.is_complete());
         assert!(inventory.construction_failures.iter().any(|failure| {
@@ -2589,6 +2610,7 @@ mod tests {
             &artifact.facts().boundaries,
             None,
             &BTreeSet::new(),
+            &BTreeMap::new(),
         );
         assert_eq!(inventory.source_instruction_count(), 0);
         assert!(!inventory.unstructured_cycle_blocks().is_empty());
@@ -2670,6 +2692,7 @@ mod tests {
             &artifact.facts().boundaries,
             None,
             &BTreeSet::new(),
+            &BTreeMap::new(),
         );
         assert!(
             inventory

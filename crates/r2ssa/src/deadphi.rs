@@ -315,9 +315,21 @@ impl DeadPhis {
             ..Self::default()
         };
         for inst in &graph.insts {
-            if !inst
-                .output
-                .is_some_and(|output| dead.unobserved_values.contains(&output))
+            // An operation the inventory proved dead and that produces no value
+            // is unobserved too. Only outputs were asked about, so a store that
+            // owes nothing -- the write half of a memory round trip is the
+            // case -- was never marked, and the renderer went on to lower it
+            // and ask for an operand the plan had already elided.
+            let proven_dead_effect = inst.output.is_none()
+                && obligations
+                    .instruction_for_inst(inst.id)
+                    .is_some_and(|instruction| {
+                        instruction.state == SemanticInstructionState::ProvenDead
+                    });
+            if !proven_dead_effect
+                && !inst
+                    .output
+                    .is_some_and(|output| dead.unobserved_values.contains(&output))
             {
                 continue;
             }

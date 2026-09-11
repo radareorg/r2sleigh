@@ -1287,6 +1287,37 @@ pub struct MemoryAccessCertificate {
     pub object_offset: Option<i64>,
 }
 
+/// A store that puts back into its object exactly what the object held.
+///
+/// A stack probe is the case. `or qword [rsp], 0` lifts to a load of the slot,
+/// a copy of the loaded value, and a store of that copy back to the same
+/// address: the page is touched, which is the instruction's whole purpose, and
+/// memory ends as it began. So the store is not an assignment -- rendering it
+/// would spell `x = x` for an object nothing ever assigned, which reads an
+/// uninitialised variable -- and the load it puts back is not a program read.
+///
+/// The proof is local and exact: the stored value resolves through copies to a
+/// load of the same object at the same offset and width, earlier in the same
+/// block, with no other write to that object between the two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRoundTripCertificate {
+    pub write: StructuredAccessId,
+    pub read: StructuredAccessId,
+    pub object: ObjectId,
+    pub block_addr: u64,
+    pub write_op_index: usize,
+    pub read_op_index: usize,
+    /// Later loads of the same location, in the same block, with no write to
+    /// the object between the certified read and them beyond the round trip's
+    /// own. The location holds what it held, so each of these reads the value
+    /// the certified read already produced and is the same read said again.
+    /// The machine spells the flags of a read-modify-write this way: Sleigh
+    /// re-loads the address once per flag it sets.
+    pub redundant_reads: Vec<StructuredAccessId>,
+    /// The op indexes of those reads, for the ledgers that ask per site.
+    pub redundant_read_op_indexes: Vec<usize>,
+}
+
 /// One store of a proven constant whose bytes tile a run of declared members.
 ///
 /// C has no spelling for a value wider than its widest scalar, so the store is
@@ -1636,6 +1667,8 @@ pub struct PreparedFunctionCertificates {
     pub stack_slots: BTreeMap<ObjectId, StackSlotCertificate>,
     pub stack_frame_round_trips: BTreeMap<ObjectId, StackFrameRoundTripCertificate>,
     pub stack_frame_round_trip_by_inst: BTreeMap<InstId, ObjectId>,
+    /// Accesses that together leave the object exactly as they found it.
+    pub memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
     pub stack_geometry: StackGeometryCertificate,
     pub machine_return_controls: BTreeMap<InstId, MachineReturnControlCertificate>,
     pub machine_return_control_by_inst: BTreeMap<InstId, InstId>,
@@ -1837,12 +1870,17 @@ impl PreparedFunctionFacts {
         let control_domains = collect_control_domain_facts(function, &predicates, &structured);
         phase("control_domains", 0);
         let private_stack_objects = private_stack_objects(function, graph, &objects, &structured);
+        // Before the obligations, because whether an access is a statement at
+        // all depends on it: a round trip leaves the object as it found it, so
+        // neither half is an observable effect.
+        let memory_round_trips = collect_memory_round_trips(graph, &structured);
         let obligations = SemanticObligationInventory::collect(
             graph,
             &structured,
             &boundaries,
             machine_context,
             &private_stack_objects,
+            &memory_round_trips,
         );
         phase("obligations", obligations.obligations().len());
         // A lifted body merges every storage live across a join, so the graph
@@ -1865,6 +1903,7 @@ impl PreparedFunctionFacts {
             &unobserved,
             &private_stack_objects,
             &declared_slots,
+            memory_round_trips,
         );
         phase("certificates", certificates.stack_slots.len());
         let (applied_assumption_bindings, assumption_usage) = collect_prepared_assumption_usage(
@@ -7141,6 +7180,127 @@ fn collect_declared_stack_slots(
     }
 }
 
+/// Every store that puts back into its object exactly what the object held.
+///
+/// Privacy is not required and would be wrong to require. The claim is that
+/// memory ends holding what it held, which is true of the location whoever
+/// else can name it; the probe's own slot is part of a frame whose address
+/// reaches a callee, so a private-object test would decline exactly the case
+/// this exists for. What is required is that both accesses are exactly
+/// modelled -- an access the memory facts do not state completely carries an
+/// unknown effect of its own and is never certified here.
+fn collect_memory_round_trips(
+    graph: &SsaGraph,
+    structured: &StructuredDataflowFacts,
+) -> BTreeMap<StructuredAccessId, MemoryRoundTripCertificate> {
+    let mut certificates = BTreeMap::new();
+    for write in structured.memory_accesses.values() {
+        if !write.is_write || !write.provenance_complete {
+            continue;
+        }
+        let Some(stored) = write.value else {
+            continue;
+        };
+        // Through copies, because the operation that leaves memory unchanged is
+        // spelled as one: Sleigh lowers `or x, 0` to a copy of the loaded value.
+        let mut value = stored;
+        while let Some(source) = graph
+            .def_inst(value)
+            .and_then(|inst| graph.inst(inst))
+            .and_then(|inst| match &inst.payload {
+                crate::graph::InstPayload::Op(crate::SSAOp::Copy { .. }) => {
+                    inst.inputs.first().copied()
+                }
+                _ => None,
+            })
+        {
+            value = source;
+        }
+        // The same address, not merely the same object. Two accesses to one
+        // object at offsets nothing states exactly are not the same location:
+        // `movzx eax, byte [rcx + r13]; mov byte [rdi + r13], al` is a byte
+        // copy between two places in one region, and matching on the object
+        // alone certified it as a round trip and deleted the copy.
+        let Some(read) = structured.memory_accesses.values().find(|access| {
+            !access.is_write
+                && access.provenance_complete
+                && access.value == Some(value)
+                && access.address == write.address
+                && access.object == write.object
+                && access.object_offset == write.object_offset
+                && access.width == write.width
+                && access.block_addr == write.block_addr
+                && access.op_index < write.op_index
+        }) else {
+            continue;
+        };
+        let overwritten = structured.memory_accesses.values().any(|access| {
+            access.is_write
+                && access.object == write.object
+                && access.block_addr == write.block_addr
+                && access.op_index > read.op_index
+                && access.op_index < write.op_index
+        });
+        if overwritten {
+            continue;
+        }
+        // Every later load of the same location the round trip left alone.
+        // The search stops at the next write to the object, because after that
+        // the location no longer holds what the certified read produced.
+        let next_write = structured
+            .memory_accesses
+            .values()
+            .filter(|access| {
+                access.is_write
+                    && access.object == write.object
+                    && access.block_addr == write.block_addr
+                    && access.op_index > write.op_index
+            })
+            .map(|access| access.op_index)
+            .min()
+            .unwrap_or(usize::MAX);
+        let redundant = structured
+            .memory_accesses
+            .values()
+            .filter(|access| {
+                !access.is_write
+                    && access.provenance_complete
+                    && access.address == write.address
+                    && access.object == write.object
+                    && access.object_offset == write.object_offset
+                    && access.width == write.width
+                    && access.block_addr == write.block_addr
+                    && access.op_index > write.op_index
+                    && access.op_index < next_write
+            })
+            .collect::<Vec<_>>();
+        r2il::refusal_evidence!(
+            "memory-round-trip",
+            "{:?} at {:#x}:{} stores back what {:?} read, so {:?} is unchanged; {} later reads say the same",
+            write.id,
+            write.block_addr,
+            write.op_index,
+            read.id,
+            write.object,
+            redundant.len()
+        );
+        certificates.insert(
+            write.id,
+            MemoryRoundTripCertificate {
+                write: write.id,
+                read: read.id,
+                object: write.object,
+                block_addr: write.block_addr,
+                write_op_index: write.op_index,
+                read_op_index: read.op_index,
+                redundant_reads: redundant.iter().map(|access| access.id).collect(),
+                redundant_read_op_indexes: redundant.iter().map(|access| access.op_index).collect(),
+            },
+        );
+    }
+    certificates
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "this single canonical certificate pass explicitly joins each upstream fact owner without a parallel wrapper"
@@ -7158,6 +7318,7 @@ fn collect_prepared_function_certificates(
     unobserved: &crate::deadphi::DeadPhis,
     private_objects: &BTreeSet<ObjectId>,
     declared_slots: &DeclaredStackSlots,
+    memory_round_trips: BTreeMap<StructuredAccessId, MemoryRoundTripCertificate>,
 ) -> PreparedFunctionCertificates {
     let DeclaredStackSlots {
         by_key: exact_stack_slots,
@@ -7603,6 +7764,7 @@ fn collect_prepared_function_certificates(
         expressions,
         memory_accesses,
         memory_accesses_by_op,
+        memory_round_trips,
         stack_slots,
         stack_frame_round_trips,
         stack_frame_round_trip_by_inst,
@@ -12385,6 +12547,7 @@ mod tests {
             artifact.unobserved_merges(),
             &BTreeSet::new(),
             &super::DeclaredStackSlots::default(),
+            BTreeMap::new(),
         );
         assert_eq!(
             certificates
@@ -12432,6 +12595,7 @@ mod tests {
             artifact.unobserved_merges(),
             &BTreeSet::new(),
             &super::DeclaredStackSlots::default(),
+            BTreeMap::new(),
         );
         assert!(!certificates.stack_slots.contains_key(&access.object));
 
@@ -13043,6 +13207,7 @@ mod tests {
             allocated.unobserved_merges(),
             &BTreeSet::new(),
             &super::DeclaredStackSlots::default(),
+            BTreeMap::new(),
         );
         assert!(
             incomplete
@@ -13078,6 +13243,7 @@ mod tests {
             allocated.unobserved_merges(),
             &BTreeSet::new(),
             &super::DeclaredStackSlots::default(),
+            BTreeMap::new(),
         );
         assert!(
             overlapping

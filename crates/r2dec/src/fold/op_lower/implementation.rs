@@ -1294,6 +1294,27 @@ impl<'a> FoldingContext<'a> {
                                 .certificates()
                                 .call_return_address_stores
                                 .contains(&inst)
+                            // The halves of a memory round trip. The object
+                            // ends holding what it held, so the store assigns
+                            // nothing and the read it puts back produces a
+                            // value no statement names.
+                            || prepared
+                                .graph()
+                                .op_site_for_inst(inst)
+                                .is_some_and(|(block_addr, op_index)| {
+                                    prepared
+                                        .certificates()
+                                        .memory_round_trips
+                                        .values()
+                                        .any(|certificate| {
+                                            certificate.block_addr == block_addr
+                                                && (certificate.write_op_index == op_index
+                                                    || certificate.read_op_index == op_index
+                                                    || certificate
+                                                        .redundant_read_op_indexes
+                                                        .contains(&op_index))
+                                        })
+                                })
                             // The lane of an entry register a formal was
                             // minted from: the declaration is its definition.
                             || prepared
