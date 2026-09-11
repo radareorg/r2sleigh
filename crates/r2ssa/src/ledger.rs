@@ -173,6 +173,16 @@ pub enum ElisionReason {
     /// certificate claims it, so no statement here assigns it; where every read
     /// of it is itself elided there is no occurrence to render.
     UnclaimedCallClobber,
+    /// The register content a call left changed, that the program then reads.
+    ///
+    /// The convention lets the call clobber the carrier and no result
+    /// certificate claims it, so the object holds whatever the callee happened
+    /// to leave and no statement in this function assigns it -- there is
+    /// nothing to assign it from. It is declared and not assigned, exactly as a
+    /// value the caller supplied is, and the declaration is where a reader sees
+    /// that the read is indeterminate. This differs from `UnclaimedCallClobber`
+    /// in that something does read it, so the object is real and visible.
+    CallClobberedDeclaration,
     /// A removed merge input already names the merge result, so its edge copy
     /// would be the identity assignment `x = x`.
     RedundantPhiEdge,
@@ -216,6 +226,7 @@ impl std::fmt::Display for ElisionReason {
             Self::UnusedStructuralValue => "unused-structural-value",
             Self::CallerSuppliedEntryValue => "caller-supplied-entry-value",
             Self::UnclaimedCallClobber => "unclaimed-call-clobber",
+            Self::CallClobberedDeclaration => "call-clobbered-declaration",
             Self::RedundantPhiEdge => "redundant-phi-edge",
             Self::MaterializedPhiEdges => "materialized-phi-edges",
             Self::DecomposedWideConstantStore => "decomposed-wide-constant-store",

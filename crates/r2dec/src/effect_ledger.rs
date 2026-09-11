@@ -160,6 +160,21 @@ fn upstream_zero_occurrence_outcome(
     }) {
         return Some(Outcome::Elided(ElisionReason::CallerSuppliedEntryValue));
     }
+    // A register a call clobbered that no result certificate claims: the
+    // declaration is its definition, because there is nothing in this function
+    // to assign it from, so the operation that mints it owes no statement.
+    if source_inst.is_some_and(|inst| {
+        graph.inst(inst).is_some_and(|inst| {
+            matches!(
+                inst.payload,
+                r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })
+            ) && inst
+                .output
+                .is_some_and(|output| !prepared.certificates().call_results.contains_key(&output))
+        })
+    }) {
+        return Some(Outcome::Elided(ElisionReason::CallClobberedDeclaration));
+    }
     // The push that records a call's return address. The call statement is the
     // transfer, and no C statement writes the machine's return address.
     if source_inst.is_some_and(|inst| {
