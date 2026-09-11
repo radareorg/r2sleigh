@@ -2793,7 +2793,8 @@ fn apply_decisions_once(
                 if mentions.discarding_clears(&targets, symbol) {
                     let mut removed_observations = BTreeSet::new();
                     for target in &targets {
-                        discard_observed_statement(
+                        discard_marked_statement(
+                            &mentions,
                             &mut candidate.body,
                             *target,
                             &mut removed_observations,
@@ -2835,7 +2836,8 @@ fn apply_decisions_once(
                         PlacementApplicationError::DuplicateInlineWrite { inst: write }
                     });
                 };
-                let replacements = inline_exact_write(
+                let replacements = inline_marked_write(
+                    &mentions,
                     &mut candidate.body,
                     occurrence.observation,
                     symbol,
@@ -2927,7 +2929,12 @@ fn apply_decisions_once(
             }
             let mut removed_observations = BTreeSet::new();
             for target in &targets {
-                discard_observed_statement(&mut candidate.body, *target, &mut removed_observations);
+                discard_marked_statement(
+                    &mentions,
+                    &mut candidate.body,
+                    *target,
+                    &mut removed_observations,
+                );
                 mentions.forget_target(*target);
             }
             candidate.locals.retain(|local| local.name != symbol);
@@ -3173,6 +3180,50 @@ fn statement_visit_children(statement: &CStmt, visit: &mut impl FnMut(&CStmt)) {
     }
 }
 
+/// The nested statement at this ordinal, in the order the index numbered them.
+///
+/// One enumeration, so a route recorded by the indexing walk addresses the same
+/// statement when the tree is reached for writing: the directly nested
+/// statements first, then the statements of each nested body in turn.
+fn statement_child_mut(statement: &mut CStmt, ordinal: usize) -> Option<&mut CStmt> {
+    let mut core = statement;
+    while let CStmt::Observed { stmt, .. } = core {
+        core = stmt;
+    }
+    let mut children: Vec<&mut CStmt> = Vec::new();
+    match core {
+        CStmt::StructuredRegion { stmt, .. } => children.push(stmt),
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            children.push(then_body);
+            if let Some(body) = else_body.as_deref_mut() {
+                children.push(body);
+            }
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => children.push(body),
+        CStmt::For { init, body, .. } => {
+            if let Some(init) = init.as_deref_mut() {
+                children.push(init);
+            }
+            children.push(body);
+        }
+        CStmt::Block(statements) => children.extend(statements.iter_mut()),
+        CStmt::Switch { cases, default, .. } => {
+            for case in cases.iter_mut() {
+                children.extend(case.body.iter_mut());
+            }
+            if let Some(body) = default.as_mut() {
+                children.extend(body.iter_mut());
+            }
+        }
+        _ => {}
+    }
+    children.into_iter().nth(ordinal)
+}
+
 /// The statement lists nested directly inside this one.
 fn statement_visit_child_bodies(statement: &CStmt, visit: &mut impl FnMut(&[CStmt])) {
     match statement_core(statement) {
@@ -3216,32 +3267,53 @@ struct SymbolMentions {
     discards: std::collections::HashMap<RenderObservationId, (u32, u32)>,
     /// The spans already emptied, which hold nothing any more.
     removed: Vec<(u32, u32)>,
+    /// For each of those observations, every statement it marks: the route to
+    /// it and which of the two ways it is marked. An observation marks one
+    /// statement in a well-formed body, and the list is what lets a body that
+    /// repeats one be answered exactly rather than by picking a route.
+    routes: std::collections::HashMap<RenderObservationId, Vec<(Vec<u32>, ObservationMark)>>,
+}
+
+/// How an observation marks the statement it is recorded against.
+///
+/// A marker wrapping the statement stands for the statement; a marker on an
+/// assignment's target stands for the write. Discarding treats them alike --
+/// both mean "this statement performs it" -- while inlining a write into a
+/// declaration needs the wrapping form, because it is the wrapped assignment
+/// that becomes the declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservationMark {
+    Statement,
+    AssignmentTarget,
 }
 
 impl SymbolMentions {
     fn of_body(statements: &[CStmt]) -> Self {
         let mut index = Self::default();
         let mut next = 0u32;
-        index.index_body(statements, &mut next);
+        let mut route = Vec::new();
+        index.index_body(statements, &mut next, &mut route);
         index
     }
 
-    fn index_body(&mut self, statements: &[CStmt], next: &mut u32) {
-        for statement in statements {
-            self.index_statement(statement, next);
+    fn index_body(&mut self, statements: &[CStmt], next: &mut u32, route: &mut Vec<u32>) {
+        for (ordinal, statement) in statements.iter().enumerate() {
+            route.push(ordinal as u32);
+            self.index_statement(statement, next, route);
+            route.pop();
         }
     }
 
-    fn index_statement(&mut self, statement: &CStmt, next: &mut u32) {
+    fn index_statement(&mut self, statement: &CStmt, next: &mut u32, route: &mut Vec<u32>) {
         let enter = *next;
         *next += 1;
         // The observations that would empty this statement, which is exactly
         // what `statement_is_discarded` answers: a marker on any layer wrapping
         // the statement, or a marker on an assignment's target.
-        let mut own_discards: Vec<RenderObservationId> = Vec::new();
+        let mut own_discards: Vec<(RenderObservationId, ObservationMark)> = Vec::new();
         let mut current = statement;
         while let CStmt::Observed { id, stmt } = current {
-            own_discards.push(*id);
+            own_discards.push((*id, ObservationMark::Statement));
             current = stmt;
         }
         if let CStmt::Expr(CExpr::Binary {
@@ -3252,7 +3324,7 @@ impl SymbolMentions {
         {
             let mut target = left.as_ref();
             while let CExpr::Observed { id, expr } = target {
-                own_discards.push(*id);
+                own_discards.push((*id, ObservationMark::AssignmentTarget));
                 target = expr;
             }
         }
@@ -3260,15 +3332,43 @@ impl SymbolMentions {
         statement_visit_own_symbols(statement, &mut |symbol| {
             self.sites.entry(symbol).or_default().push(enter);
         });
-        statement_visit_children(statement, &mut |child| self.index_statement(child, next));
-        statement_visit_child_bodies(statement, &mut |body| self.index_body(body, next));
+        let mut ordinal = 0u32;
+        statement_visit_children(statement, &mut |child| {
+            route.push(ordinal);
+            ordinal += 1;
+            self.index_statement(child, next, route);
+            route.pop();
+        });
+        statement_visit_child_bodies(statement, &mut |body| {
+            for child in body {
+                route.push(ordinal);
+                ordinal += 1;
+                self.index_statement(child, next, route);
+                route.pop();
+            }
+        });
         // The span is closed on the markers this statement owns. Scanning the
         // whole map for open spans instead would be a second quadratic in place
         // of the one this index removes.
         let exit = *next;
-        for id in own_discards {
+        for (id, mark) in own_discards {
             self.discards.insert(id, (enter, exit));
+            self.routes
+                .entry(id)
+                .or_default()
+                .push((route.clone(), mark));
         }
+    }
+
+    /// The statement this observation marks, reached by its recorded route.
+    ///
+    /// The route is exact for as long as the tree keeps its shape, which is the
+    /// whole of the decision loop: a discard empties a statement in place and
+    /// the declarations that grow the tree are inserted after every query. A
+    /// route whose statement was already emptied no longer leads anywhere, and
+    /// answering `None` there is the same answer the walk it replaces gave.
+    fn marked_statements(&self, target: RenderObservationId) -> &[(Vec<u32>, ObservationMark)] {
+        self.routes.get(&target).map_or(&[], Vec::as_slice)
     }
 
     fn mentions(&self, symbol: crate::symbol::SymbolId) -> bool {
@@ -3340,184 +3440,96 @@ fn binding_write_observations(
         .collect()
 }
 
-/// Discard the statement carrying `target`, recording every observation that
-/// went with it.
-///
-/// A statement is removed whole, so the markers nested inside it are removed
-/// too. Their cells would otherwise stay empty and the seal would refuse the
-/// function for a value nothing rendered. Naming them here is what lets the
-/// journal close out exactly what placement dropped, rather than closing out
-/// whatever happens to be unaccounted -- which would answer the check instead
-/// of answering to it.
-fn discard_observed_statement(
-    statements: &mut [CStmt],
+fn discard_marked_statement(
+    mentions: &SymbolMentions,
+    body: &mut [CStmt],
     target: RenderObservationId,
     discarded: &mut BTreeSet<RenderObservationId>,
 ) -> usize {
     let mut removed = 0;
-    for statement in statements.iter_mut() {
-        removed += discard_observed_statement_in_stmt(statement, target, discarded);
+    for (route, mark) in mentions.marked_statements(target) {
+        let Some(statement) = follow_route(body, route) else {
+            continue;
+        };
+        // A marker wrapping the statement empties everything from its own layer
+        // down and leaves the layers above it standing. Those outer markers are
+        // observations of this statement in their own right -- an effect one of
+        // them carries is still performed by whatever the layer below renders --
+        // and emptying them here would retract a claim this discard was never
+        // about.
+        let emptied = match mark {
+            ObservationMark::Statement => marked_layer(statement, target),
+            ObservationMark::AssignmentTarget => statement,
+        };
+        collect_statement_observations(emptied, discarded);
+        *emptied = CStmt::Empty;
+        removed += 1;
     }
     removed
 }
 
-/// Whether this expression is marked with an observation, at any of the layers
-/// wrapping the expression itself.
-fn expr_carries_observation(expr: &CExpr, target: RenderObservationId) -> bool {
-    let mut current = expr;
-    loop {
-        match current {
-            CExpr::Observed { id, expr } => {
-                if *id == target {
-                    return true;
-                }
-                current = expr;
-            }
-            _ => return false,
-        }
-    }
-}
-
-fn discard_observed_statement_in_stmt(
-    statement: &mut CStmt,
-    target: RenderObservationId,
-    discarded: &mut BTreeSet<RenderObservationId>,
-) -> usize {
-    if let CStmt::Observed { id, .. } = statement
-        && *id == target
-    {
-        collect_statement_observations(statement, discarded);
-        *statement = CStmt::Empty;
-        return 1;
-    }
-    // A write is not always marked on the statement. A store into a stack
-    // object is marked on the object expression the assignment writes to, so
-    // the statement performing the write is the one whose assignment target
-    // carries the mark. Looking only at statement markers found nothing to
-    // discard for those, and a frame slot the function writes and never reads
-    // survived as a variable that is set and not used.
-    //
-    // Only the assignment target. A mark anywhere else belongs to something the
-    // statement reads, and removing the statement for it would discard a write
-    // on the strength of a read.
-    let assigns_target = matches!(
-        statement.unobserved(),
-        CStmt::Expr(CExpr::Binary {
-            op: BinaryOp::Assign,
-            left,
-            ..
-        }) if expr_carries_observation(left, target)
-    );
-    if assigns_target {
-        collect_statement_observations(statement, discarded);
-        *statement = CStmt::Empty;
-        return 1;
-    }
-    match statement {
-        CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => {
-            discard_observed_statement_in_stmt(stmt, target, discarded)
-        }
-        CStmt::Block(statements) => discard_observed_statement(statements, target, discarded),
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            discard_observed_statement_in_stmt(then_body, target, discarded)
-                + else_body.as_mut().map_or(0, |body| {
-                    discard_observed_statement_in_stmt(body, target, discarded)
-                })
-        }
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            discard_observed_statement_in_stmt(body, target, discarded)
-        }
-        CStmt::For { init, body, .. } => {
-            init.as_mut().map_or(0, |init| {
-                discard_observed_statement_in_stmt(init, target, discarded)
-            }) + discard_observed_statement_in_stmt(body, target, discarded)
-        }
-        CStmt::Switch { cases, default, .. } => {
-            cases
-                .iter_mut()
-                .map(|case| discard_observed_statement(&mut case.body, target, discarded))
-                .sum::<usize>()
-                + default.as_mut().map_or(0, |body| {
-                    discard_observed_statement(body, target, discarded)
-                })
-        }
-        _ => 0,
-    }
-}
-
-fn inline_exact_write(
-    statements: &mut [CStmt],
-    target: RenderObservationId,
-    symbol: crate::symbol::SymbolId,
-    ty: &crate::ast::CType,
-) -> usize {
-    statements
-        .iter_mut()
-        .map(|statement| inline_exact_write_in_stmt(statement, target, symbol, ty))
-        .sum()
-}
-
-fn inline_exact_write_in_stmt(
-    statement: &mut CStmt,
-    target: RenderObservationId,
-    symbol: crate::symbol::SymbolId,
-    ty: &crate::ast::CType,
-) -> usize {
-    if let CStmt::Observed { id, stmt } = statement {
+/// The layer of an observation chain this observation is the marker of.
+///
+/// Counted first and descended after, because the layer wanted is the one whose
+/// own marker matches and a borrow cannot be handed back from inside the walk
+/// that found it.
+fn marked_layer(statement: &mut CStmt, target: RenderObservationId) -> &mut CStmt {
+    let mut depth = 0usize;
+    let mut probe: &CStmt = statement;
+    while let CStmt::Observed { id, stmt } = probe {
         if *id == target {
-            return usize::from(replace_assignment_with_declaration(stmt, symbol, ty));
+            break;
         }
-        return inline_exact_write_in_stmt(stmt, target, symbol, ty);
+        depth += 1;
+        probe = stmt;
     }
-    match statement {
-        CStmt::StructuredRegion { stmt, .. } => {
-            inline_exact_write_in_stmt(stmt, target, symbol, ty)
-        }
-        CStmt::Block(statements) => inline_exact_write(statements, target, symbol, ty),
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            inline_exact_write_in_stmt(then_body, target, symbol, ty)
-                + else_body.as_deref_mut().map_or(0, |body| {
-                    inline_exact_write_in_stmt(body, target, symbol, ty)
-                })
-        }
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            inline_exact_write_in_stmt(body, target, symbol, ty)
-        }
-        CStmt::For { init, body, .. } => {
-            init.as_deref_mut().map_or(0, |init| {
-                inline_exact_write_in_stmt(init, target, symbol, ty)
-            }) + inline_exact_write_in_stmt(body, target, symbol, ty)
-        }
-        CStmt::Switch { cases, default, .. } => {
-            let cases = cases
-                .iter_mut()
-                .map(|case| inline_exact_write(&mut case.body, target, symbol, ty))
-                .sum::<usize>();
-            cases
-                + default
-                    .as_mut()
-                    .map_or(0, |body| inline_exact_write(body, target, symbol, ty))
-        }
-        CStmt::Observed { .. } => unreachable!("leading observation handled above"),
-        CStmt::Empty
-        | CStmt::Expr(_)
-        | CStmt::Decl { .. }
-        | CStmt::Return(_)
-        | CStmt::Break
-        | CStmt::Continue
-        | CStmt::Goto(_)
-        | CStmt::Label(_)
-        | CStmt::Comment(_)
-        | CStmt::Gap(_) => 0,
+    let mut current = statement;
+    for _ in 0..depth {
+        let CStmt::Observed { stmt, .. } = current else {
+            break;
+        };
+        current = stmt;
     }
+    current
+}
+
+/// The statement a recorded route leads to, or nothing when it leads nowhere.
+///
+/// A route stops leading anywhere once a statement above it was emptied, which
+/// is the same answer the whole-body walk this replaces gave: it found nothing
+/// under an emptied statement either.
+fn follow_route<'a>(body: &'a mut [CStmt], route: &[u32]) -> Option<&'a mut CStmt> {
+    let (&first, rest) = route.split_first()?;
+    let mut statement = body.get_mut(first as usize)?;
+    for step in rest {
+        statement = statement_child_mut(statement, *step as usize)?;
+    }
+    Some(statement)
+}
+
+/// Turn the assignment this observation marks into a declaration of `symbol`.
+///
+/// Answers whether it happened: the marker may name a statement that another
+/// decision already emptied, or may sit on an assignment's target rather than
+/// wrapping the statement, and neither is a write this can inline.
+fn inline_marked_write(
+    mentions: &SymbolMentions,
+    body: &mut [CStmt],
+    target: RenderObservationId,
+    symbol: crate::symbol::SymbolId,
+    ty: &crate::ast::CType,
+) -> usize {
+    let mut replaced = 0;
+    for (route, mark) in mentions.marked_statements(target) {
+        if *mark != ObservationMark::Statement {
+            continue;
+        }
+        let Some(statement) = follow_route(body, route) else {
+            continue;
+        };
+        replaced += usize::from(replace_assignment_with_declaration(statement, symbol, ty));
+    }
+    replaced
 }
 
 fn replace_assignment_with_declaration(
@@ -4927,8 +4939,10 @@ mod tests {
         );
         let mut statements = vec![assignment, CStmt::comment("untouched")];
 
+        let mentions = SymbolMentions::of_body(&statements);
         assert_eq!(
-            inline_exact_write(
+            inline_marked_write(
+                &mentions,
                 &mut statements,
                 marker,
                 symbol,
