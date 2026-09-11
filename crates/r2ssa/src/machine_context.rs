@@ -28,7 +28,7 @@ pub use r2source::{
     SourceVariadicArgumentCountRule, StackAddressBase,
 };
 
-pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 23;
+pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 24;
 
 /// Canonical architecture family captured from the exact lifting profile.
 ///
@@ -145,7 +145,14 @@ impl MachineAbiRegisterSlot {
 pub struct MachineAbiModel {
     schema_version: u32,
     available: bool,
-    coherent: bool,
+    /// Whether the return carrier is a real register no other role aliases.
+    return_boundary_coherent: bool,
+    /// Whether every declared parameter register is real and unaliased.
+    argument_placement_coherent: bool,
+    /// Whether the frame slots are attributed and their bases resolved.
+    frame_geometry_coherent: bool,
+    /// Whether the return-address, stack- and frame-pointer carriers hold.
+    machine_carriers_coherent: bool,
     argument_registers: Box<[MachineAbiRegisterSlot]>,
     return_registers: Box<[MachineAbiRegisterSlot]>,
     frame_pointer_storage: Option<CanonicalStorageId>,
@@ -156,7 +163,10 @@ impl MachineAbiModel {
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
             available: false,
-            coherent: false,
+            return_boundary_coherent: false,
+            argument_placement_coherent: false,
+            frame_geometry_coherent: false,
+            machine_carriers_coherent: false,
             argument_registers: Box::new([]),
             return_registers: Box::new([]),
             frame_pointer_storage: None,
@@ -193,7 +203,10 @@ impl MachineAbiModel {
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
             available: true,
-            coherent: true,
+            return_boundary_coherent: true,
+            argument_placement_coherent: true,
+            frame_geometry_coherent: true,
+            machine_carriers_coherent: true,
             argument_registers: argument_registers.into_boxed_slice(),
             return_registers: return_registers.into_boxed_slice(),
             frame_pointer_storage,
@@ -208,8 +221,28 @@ impl MachineAbiModel {
         self.available
     }
 
-    pub const fn is_coherent(&self) -> bool {
-        self.coherent
+    /// Whether the values a `Return` carries can be read off this model.
+    ///
+    /// Asks only about the return register: that the architecture has it and
+    /// that no machine carrier aliases it. Frame attribution is a different
+    /// question and cannot invalidate this one.
+    pub const fn return_boundary_is_coherent(&self) -> bool {
+        self.return_boundary_coherent
+    }
+
+    /// Whether a declared parameter's register placement can be trusted.
+    pub const fn argument_placement_is_coherent(&self) -> bool {
+        self.argument_placement_coherent
+    }
+
+    /// Whether every frame slot is attributed and its base register resolved.
+    pub const fn frame_geometry_is_coherent(&self) -> bool {
+        self.frame_geometry_coherent
+    }
+
+    /// Whether the return-address, stack- and frame-pointer carriers hold.
+    pub const fn machine_carriers_are_coherent(&self) -> bool {
+        self.machine_carriers_coherent
     }
 
     pub const fn argument_registers(&self) -> &[MachineAbiRegisterSlot] {
@@ -1051,38 +1084,48 @@ impl SourceMachineContext {
                 .stack_slots()
                 .iter()
                 .any(|slot| slot.base() == StackAddressBase::FramePointer);
-            let exact_interface_roles_exist = interface.stack_slot_roles_complete()
-                && interface.return_address_storage().is_some()
-                && interface.stack_pointer_storage().is_some()
+            let machine_carrier_roles_exist = interface.return_address_storage().is_some()
+                && interface.stack_pointer_storage().is_some();
+            let frame_roles_exist = interface.stack_slot_roles_complete()
                 && (!has_frame_pointer_slots || frame_pointer_storage.is_some());
+            // Every machine carrier, the frame pointer included: a frame
+            // pointer that aliases a parameter makes that parameter's
+            // placement wrong, not just the frame's geometry.
             let carrier_storages_are_disjoint = interface
                 .return_address_storage()
                 .is_none_or(|storage| interface.return_address_storage_is_valid(storage))
                 && interface
                     .stack_pointer_storage()
-                    .is_none_or(|storage| interface.stack_pointer_storage_is_valid(storage));
-            let declared_storages_exist = interface
+                    .is_none_or(|storage| interface.stack_pointer_storage_is_valid(storage))
+                && frame_pointer_storage
+                    .is_none_or(|storage| interface.frame_pointer_storage_is_valid(storage));
+            // Asked per role rather than over the whole chain: a slot base the
+            // architecture does not have says nothing about the return register.
+            let storage_exists = |storage: CanonicalStorageId| {
+                register_storages_by_name
+                    .values()
+                    .any(|actual| *actual == storage)
+            };
+            let parameter_storages_exist = interface
                 .parameters()
                 .iter()
                 .filter_map(SourceAbiParameterSpec::register_storage)
-                .chain(match interface.return_kind() {
-                    SourceFunctionReturn::Void => None,
-                    SourceFunctionReturn::Register { storage } => Some(storage),
-                })
-                .chain(
-                    interface
-                        .stack_slots()
-                        .iter()
-                        .map(SourceStackSlotSpec::base_storage),
-                )
-                .chain(interface.return_address_storage())
+                .all(storage_exists);
+            let return_storage_exists = match interface.return_kind() {
+                SourceFunctionReturn::Void => true,
+                SourceFunctionReturn::Register { storage } => storage_exists(storage),
+            };
+            let slot_base_storages_exist = interface
+                .stack_slots()
+                .iter()
+                .map(SourceStackSlotSpec::base_storage)
+                .all(storage_exists);
+            let machine_carrier_storages_exist = interface
+                .return_address_storage()
+                .into_iter()
                 .chain(interface.stack_pointer_storage())
                 .chain(frame_pointer_storage)
-                .all(|storage| {
-                    register_storages_by_name
-                        .values()
-                        .any(|actual| *actual == storage)
-                });
+                .all(storage_exists);
             let is_exact_address_register = |storage: CanonicalStorageId| {
                 arch.is_some_and(|arch| {
                     is_exact_top_level_address_register(
@@ -1103,27 +1146,42 @@ impl SourceMachineContext {
                 frame_pointer_storage_matches_machine(interface, frame_pointer_storage, arch);
             let return_mechanism_matches =
                 return_mechanism_matches_machine(interface, arch, &memory_model);
-            let coherent = exact_interface_roles_exist
+            // Four questions, each conjoining only the terms that bear on it.
+            // Whole-model coherence made a frame-attribution gap silence the
+            // return boundary, which asks nothing about frames.
+            let return_boundary_coherent = return_storage_exists && carrier_storages_are_disjoint;
+            let argument_placement_coherent =
+                parameter_storages_exist && carrier_storages_are_disjoint;
+            let frame_geometry_coherent =
+                frame_roles_exist && slot_base_storages_exist && frame_pointer_matches;
+            let machine_carriers_coherent = machine_carrier_roles_exist
+                && machine_carrier_storages_exist
                 && carrier_storages_are_disjoint
-                && declared_storages_exist
                 && machine_carriers_are_exact_address_registers
-                && frame_pointer_matches
                 && return_mechanism_matches;
-            if !coherent {
-                // An incoherent model leaves every return boundary incomplete
-                // and the function refused, and six terms decide it. Naming
-                // the one that failed is the difference between a trace and
-                // a search: an interface that now carries the frame-pointer
-                // homes DWARF declared fails `exact_interface_roles_exist`
-                // for want of a frame-pointer storage, which is a different
-                // repair from a carrier that is not an address register.
+            if !(return_boundary_coherent
+                && argument_placement_coherent
+                && frame_geometry_coherent
+                && machine_carriers_coherent)
+            {
+                // Which question failed, and on which term. An interface that
+                // carries the frame-pointer homes DWARF declared but no
+                // frame-pointer storage fails frame geometry alone, which is a
+                // different repair from a carrier that is not an address
+                // register -- and neither touches the return boundary.
                 r2il::refusal_evidence!(
                     "abi-model-incoherent",
-                    "roles_exist={exact_interface_roles_exist} \
+                    "return_boundary={return_boundary_coherent} \
+                     argument_placement={argument_placement_coherent} \
+                     frame_geometry={frame_geometry_coherent} \
+                     machine_carriers={machine_carriers_coherent} \
                      slot_roles_complete={} return_address={} stack_pointer={} \
                      frame_pointer_slots={has_frame_pointer_slots} \
                      frame_pointer_storage={} carriers_disjoint={carrier_storages_are_disjoint} \
-                     declared_exist={declared_storages_exist} \
+                     parameter_storages={parameter_storages_exist} \
+                     return_storage={return_storage_exists} \
+                     slot_base_storages={slot_base_storages_exist} \
+                     carrier_storages={machine_carrier_storages_exist} \
                      carriers_are_addresses={machine_carriers_are_exact_address_registers} \
                      frame_pointer_matches={frame_pointer_matches} \
                      return_mechanism_matches={return_mechanism_matches} \
@@ -1143,7 +1201,10 @@ impl SourceMachineContext {
                     interface.parameters().len()
                 );
             }
-            abi_model.coherent &= coherent;
+            abi_model.return_boundary_coherent &= return_boundary_coherent;
+            abi_model.argument_placement_coherent &= argument_placement_coherent;
+            abi_model.frame_geometry_coherent &= frame_geometry_coherent;
+            abi_model.machine_carriers_coherent &= machine_carriers_coherent;
         }
         let (raw_call_sites, tail_call_sites) =
             collect_raw_call_site_identities(blocks, &tail_call_identities, terminal_blocks);
@@ -1549,7 +1610,10 @@ impl SourceMachineContext {
         let abi = &self.abi_model;
         writer.u32(abi.schema_version());
         writer.bool(abi.is_available());
-        writer.bool(abi.is_coherent());
+        writer.bool(abi.return_boundary_is_coherent());
+        writer.bool(abi.argument_placement_is_coherent());
+        writer.bool(abi.frame_geometry_is_coherent());
+        writer.bool(abi.machine_carriers_are_coherent());
         write_abi_class(&mut writer, self.effective_abi_class());
         writer.usize(abi.argument_registers().len());
         for slot in abi.argument_registers() {
@@ -2004,6 +2068,15 @@ fn space_sort_key(space: SpaceId) -> (u8, u32) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every ABI question answered, for the cases that used to assert the
+    /// single whole-model boolean.
+    fn all_abi_questions_coherent(abi: &MachineAbiModel) -> bool {
+        abi.return_boundary_is_coherent()
+            && abi.argument_placement_is_coherent()
+            && abi.frame_geometry_is_coherent()
+            && abi.machine_carriers_are_coherent()
+    }
     use super::*;
     use r2il::{AddressSpace, RegisterDef, Varnode};
 
@@ -2280,8 +2353,8 @@ mod tests {
         let x86_context = SourceMachineContext::from_blocks(&[], Some(&x86));
         let arm_context = SourceMachineContext::from_blocks(&[], Some(&arm));
 
-        assert_eq!(MACHINE_CONTEXT_SCHEMA_VERSION, 23);
-        assert_eq!(x86_context.schema_version(), 23);
+        assert_eq!(MACHINE_CONTEXT_SCHEMA_VERSION, 24);
+        assert_eq!(x86_context.schema_version(), 24);
         assert_eq!(
             x86_context.architecture_family(),
             MachineArchitectureFamily::X86_64
@@ -2641,7 +2714,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!without_roles.abi_model().is_coherent());
+        assert!(!without_roles.abi_model().machine_carriers_are_coherent());
 
         let return_only = SourceMachineContext::from_blocks_with_interfaces(
             &[],
@@ -2655,7 +2728,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!return_only.abi_model().is_coherent());
+        assert!(!return_only.abi_model().machine_carriers_are_coherent());
 
         let complete = SourceMachineContext::from_blocks_with_interfaces(
             &[],
@@ -2670,7 +2743,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(complete.abi_model().is_coherent());
+        assert!(all_abi_questions_coherent(complete.abi_model()));
 
         let compatibility = SourceMachineContext::from_blocks_with_interfaces(
             &[],
@@ -2691,10 +2764,13 @@ mod tests {
             None,
             Vec::new(),
         );
+        // A plain interface still names its return-address and stack-pointer
+        // carriers truthfully; what it does not claim is frame attribution.
         assert!(
-            !compatibility.abi_model().is_coherent(),
-            "legacy incomplete-role interfaces must never supply usable ABI authority"
+            !compatibility.abi_model().frame_geometry_is_coherent(),
+            "an interface without exact slot roles claims no frame attribution"
         );
+        assert!(compatibility.abi_model().machine_carriers_are_coherent());
 
         let narrow_stack_pointer = register_storage(96, 4);
         arch.add_register(RegisterDef::new("narrow_sp", 96, 4));
@@ -2713,7 +2789,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!narrow.abi_model().is_coherent());
+        assert!(!narrow.abi_model().machine_carriers_are_coherent());
 
         let subregister_stack_pointer = register_storage(104, 8);
         arch.add_register(RegisterDef::sub("sp_alias", 104, 8, "missing_sp_parent"));
@@ -2732,7 +2808,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!subregister_sp.abi_model().is_coherent());
+        assert!(!subregister_sp.abi_model().machine_carriers_are_coherent());
 
         let subregister_return_address = register_storage(112, 8);
         arch.add_register(RegisterDef::sub("lr_alias", 112, 8, "missing_lr_parent"));
@@ -2749,7 +2825,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!subregister_ra.abi_model().is_coherent());
+        assert!(!subregister_ra.abi_model().machine_carriers_are_coherent());
     }
 
     #[test]
@@ -2785,7 +2861,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(coherent.abi_model().is_coherent());
+        assert!(all_abi_questions_coherent(coherent.abi_model()));
         assert_eq!(coherent.return_mechanism(), exact.return_mechanism());
 
         let absent = SourceMachineContext::from_blocks_with_interfaces(
@@ -2796,7 +2872,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(absent.abi_model().is_coherent());
+        assert!(all_abi_questions_coherent(absent.abi_model()));
         assert_eq!(absent.return_mechanism(), None);
 
         let mut subregister = arch.clone();
@@ -2816,7 +2892,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!context.abi_model().is_coherent());
+        assert!(!context.abi_model().machine_carriers_are_coherent());
 
         let mut wrong_machine_width = arch.clone();
         wrong_machine_width.addr_size = 4;
@@ -2830,7 +2906,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!context.abi_model().is_coherent());
+        assert!(!context.abi_model().machine_carriers_are_coherent());
 
         let mut word_addressed = arch.clone();
         word_addressed.spaces[0].word_size = 2;
@@ -2842,7 +2918,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!context.abi_model().is_coherent());
+        assert!(!context.abi_model().machine_carriers_are_coherent());
 
         let mut wrong_ram_width = arch;
         wrong_ram_width.spaces[0].addr_size = 4;
@@ -2854,7 +2930,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!context.abi_model().is_coherent());
+        assert!(!context.abi_model().machine_carriers_are_coherent());
     }
 
     #[test]
@@ -2906,7 +2982,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(coherent.abi_model().is_coherent());
+        assert!(all_abi_questions_coherent(coherent.abi_model()));
         assert_eq!(
             coherent.abi_model().frame_pointer_storage(),
             Some(frame_pointer)
@@ -2924,7 +3000,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(slot_derived.abi_model().is_coherent());
+        assert!(all_abi_questions_coherent(slot_derived.abi_model()));
         assert_eq!(
             slot_derived.abi_model().frame_pointer_storage(),
             Some(frame_pointer)
@@ -2948,7 +3024,7 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(absent.abi_model().is_coherent());
+        assert!(all_abi_questions_coherent(absent.abi_model()));
         assert_eq!(absent.abi_model().frame_pointer_storage(), None);
 
         let narrow_stack_pointer = register_storage(88, 4);
@@ -2992,7 +3068,8 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!narrow.abi_model().is_coherent());
+        assert!(!narrow.abi_model().machine_carriers_are_coherent());
+        assert!(!narrow.abi_model().frame_geometry_is_coherent());
 
         let subregister_frame_pointer = register_storage(104, 8);
         arch.add_register(RegisterDef::sub(
@@ -3013,7 +3090,8 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!subregister.abi_model().is_coherent());
+        assert!(!subregister.abi_model().machine_carriers_are_coherent());
+        assert!(!subregister.abi_model().frame_geometry_is_coherent());
 
         assert!(!is_exact_top_level_address_register(
             &arch,
@@ -3048,7 +3126,10 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(!overlapping.abi_model().is_coherent());
+        // The frame-pointer slots name a base the interface cannot resolve to
+        // a carrier, so the frame's geometry is unknown. Parameter 0 still
+        // arrives in a real register, which is a different question.
+        assert!(!overlapping.abi_model().frame_geometry_is_coherent());
     }
 
     #[test]
@@ -3574,7 +3655,7 @@ mod tests {
             Vec::new(),
         );
         assert!(context.abi_model().is_available());
-        assert!(!context.abi_model().is_coherent());
+        assert!(!all_abi_questions_coherent(context.abi_model()));
     }
 
     #[test]
@@ -3605,7 +3686,7 @@ mod tests {
         );
 
         assert!(context.abi_model().is_available());
-        assert!(!context.abi_model().is_coherent());
+        assert!(!context.abi_model().frame_geometry_is_coherent());
     }
 
     #[test]

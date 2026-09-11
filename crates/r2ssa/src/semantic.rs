@@ -4423,8 +4423,10 @@ fn collect_source_boundary_facts(
             // coherent ABI. Gating both on the ABI is what previously left a
             // function without debug information with no exit facts at all.
             if let Some(machine_context) = machine_context {
+                // The return carrier only. Frame attribution and the machine
+                // carriers are separate questions and cannot invalidate it.
                 let abi_is_coherent = machine_context.abi_model().is_available()
-                    && machine_context.abi_model().is_coherent();
+                    && machine_context.abi_model().return_boundary_is_coherent();
                 let stack_pointer_storage = machine_context.stack_pointer_carrier();
                 let return_address_storage = machine_context.return_address_carrier();
                 let return_slots = machine_context.abi_model().return_registers();
@@ -16528,9 +16530,11 @@ mod tests {
     }
 
     #[test]
-    fn return_boundary_without_typed_machine_roles_is_incomplete() {
-        // The lane writes define the root, so the return's value is found; the
-        // boundary still lacks the exit machine state the interface never named.
+    fn return_boundary_without_typed_machine_roles_carries_values_but_no_exit_state() {
+        // The lane writes define the root, so the return's value is found and
+        // reported. The exit machine state the interface never named stays
+        // absent: the values a return carries and the state it leaves behind
+        // are separate questions, and the second cannot suppress the first.
         let artifact = composed_return_artifact(0x5000, "whole", "slice", "pc");
         let boundary = artifact
             .facts()
@@ -16539,11 +16543,13 @@ mod tests {
             .values()
             .next()
             .expect("return boundary");
-        assert!(!boundary.complete);
+        assert!(boundary.complete);
         assert!(boundary.exit_stack_pointer.is_none());
-        assert!(
-            boundary.values.is_empty(),
-            "no coherent convention names a value"
+        assert!(!boundary.machine_state_complete);
+        assert_eq!(
+            boundary.values.len(),
+            1,
+            "the declared return register names one value"
         );
         let walked = super::reaching_abi_value_in_block(
             artifact.function(),
@@ -16613,7 +16619,7 @@ mod tests {
             boundary(&relocated),
         ] {
             assert_eq!(refused, first);
-            assert!(!refused.complete);
+            assert!(!refused.machine_state_complete);
             assert!(refused.exit_stack_pointer.is_none());
         }
     }

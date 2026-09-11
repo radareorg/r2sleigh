@@ -1874,7 +1874,10 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
     let context = source.machine_context();
     let abi = context.abi_model();
     let memory = context.memory_model();
-    if !abi.is_available() || !abi.is_coherent() || !memory.is_available() || !memory.is_coherent()
+    if !abi.is_available()
+        || !abi.return_boundary_is_coherent()
+        || !memory.is_available()
+        || !memory.is_coherent()
     {
         return None;
     }

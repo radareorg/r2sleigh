@@ -165,14 +165,58 @@ impl std::hash::Hash for SsaArtifactAuthority {
     }
 }
 
-fn coherent_function_interface(
-    machine_context: &SourceMachineContext,
-) -> Option<&SourceFunctionInterface> {
-    machine_context
-        .abi_model()
-        .is_coherent()
-        .then(|| machine_context.function_interface())
-        .flatten()
+/// The interface, offered per question rather than all-or-nothing.
+///
+/// Whole-model coherence hid the interface from SSA construction entirely, so
+/// one unattributed frame slot cost the argument carriers and the return
+/// projection too. Each use below asks only the question it depends on.
+#[derive(Clone, Copy)]
+struct InterfaceQuestions<'a> {
+    interface: Option<&'a SourceFunctionInterface>,
+    return_boundary: bool,
+    argument_placement: bool,
+    frame_geometry: bool,
+    machine_carriers: bool,
+}
+
+impl<'a> InterfaceQuestions<'a> {
+    fn new(machine_context: &'a SourceMachineContext) -> Self {
+        let abi = machine_context.abi_model();
+        Self {
+            interface: machine_context.function_interface(),
+            return_boundary: abi.return_boundary_is_coherent(),
+            argument_placement: abi.argument_placement_is_coherent(),
+            frame_geometry: abi.frame_geometry_is_coherent(),
+            machine_carriers: abi.machine_carriers_are_coherent(),
+        }
+    }
+
+    /// No interface at all: no question about it can be answered.
+    fn none() -> Self {
+        Self {
+            interface: None,
+            return_boundary: false,
+            argument_placement: false,
+            frame_geometry: false,
+            machine_carriers: false,
+        }
+    }
+
+    fn for_return_boundary(self) -> Option<&'a SourceFunctionInterface> {
+        self.interface.filter(|_| self.return_boundary)
+    }
+
+    fn for_argument_placement(self) -> Option<&'a SourceFunctionInterface> {
+        self.interface.filter(|_| self.argument_placement)
+    }
+
+    fn for_frame_geometry(self) -> Option<&'a SourceFunctionInterface> {
+        self.interface.filter(|_| self.frame_geometry)
+    }
+
+    fn for_machine_carriers(self) -> Option<&'a SourceFunctionInterface> {
+        self.interface.filter(|_| self.machine_carriers)
+    }
 }
 
 /// Canonical SSA artifact consumed by downstream analysis layers.
@@ -579,7 +623,7 @@ impl SsaArtifact {
             SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                 blocks,
                 arch,
-                coherent_function_interface(&machine_context),
+                InterfaceQuestions::new(&machine_context),
                 machine_context.machine_roles().call_preserved_carriers(),
                 machine_context.stack_pointer_carrier(),
                 &CalleePreservedCarriers::new(),
@@ -638,7 +682,7 @@ impl SsaArtifact {
             SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                 blocks,
                 arch,
-                coherent_function_interface(&machine_context),
+                InterfaceQuestions::new(&machine_context),
                 machine_context.machine_roles().call_preserved_carriers(),
                 machine_context.stack_pointer_carrier(),
                 callee_preserved_carriers,
@@ -690,7 +734,7 @@ impl SsaArtifact {
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             blocks,
             arch,
-            coherent_function_interface(&machine_context),
+            InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
@@ -744,7 +788,7 @@ impl SsaArtifact {
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             blocks.as_slice(),
             Some(arch),
-            coherent_function_interface(&machine_context),
+            InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
@@ -1642,7 +1686,7 @@ impl TrustedSsaArtifact {
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
                         Some(&arch),
-                        None,
+                        InterfaceQuestions::none(),
                         provisional_machine_context
                             .machine_roles()
                             .call_preserved_carriers(),
@@ -1709,7 +1753,7 @@ impl TrustedSsaArtifact {
         let mut function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             blocks.as_slice(),
             Some(&arch),
-            coherent_function_interface(&machine_context),
+            InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             callee_preserved_carriers,
@@ -2611,7 +2655,7 @@ impl SSAFunction {
         Self::from_blocks_for_decompile_with_interface_and_control(
             blocks,
             arch,
-            None,
+            InterfaceQuestions::none(),
             None,
             None,
             &CalleePreservedCarriers::new(),
@@ -2624,7 +2668,7 @@ impl SSAFunction {
     fn from_blocks_for_decompile_with_interface_and_control<C: SsaWorkControl + ?Sized>(
         blocks: &[R2ILBlock],
         arch: Option<&ArchSpec>,
-        function_interface: Option<&SourceFunctionInterface>,
+        questions: InterfaceQuestions<'_>,
         call_preserved_carriers: Option<SourceCallPreservedCarriers>,
         stack_pointer_carrier: Option<CanonicalStorageId>,
         callee_preserved_carriers: &CalleePreservedCarriers,
@@ -2638,23 +2682,31 @@ impl SSAFunction {
         // construction that decides which value each later read of the carrier
         // sees.
         let stack_pointer_restored_by_callee = stack_pointer_carrier.filter(|_| {
-            stack_pointer_restored_across_calls(call_preserved_carriers, function_interface)
+            stack_pointer_restored_across_calls(
+                call_preserved_carriers,
+                questions.for_machine_carriers(),
+            )
         });
         // The carriers the convention names at this function's own boundary:
         // every caller reads the result register and writes the argument
         // registers, so the whole of each is used even where the body's own
         // operations name only a lane of one.
-        let abi_carriers = function_interface.map_or_else(Vec::new, |interface| {
-            interface
-                .parameters()
-                .iter()
-                .filter_map(crate::SourceAbiParameterSpec::register_storage)
-                .chain(match interface.return_kind() {
+        let abi_carriers = questions
+            .for_argument_placement()
+            .into_iter()
+            .flat_map(|interface| {
+                interface
+                    .parameters()
+                    .iter()
+                    .filter_map(crate::SourceAbiParameterSpec::register_storage)
+            })
+            .chain(questions.for_return_boundary().and_then(|interface| {
+                match interface.return_kind() {
                     crate::SourceFunctionReturn::Register { storage } => Some(storage),
-                    _ => None,
-                })
-                .collect()
-        });
+                    crate::SourceFunctionReturn::Void => None,
+                }
+            }))
+            .collect::<Vec<_>>();
         let mut func = Self::from_blocks_raw_for_decompile_with_carriers_and_control(
             blocks,
             arch,
@@ -2666,12 +2718,17 @@ impl SSAFunction {
         )?;
         func.call_preserved_carriers = call_preserved_carriers;
         func.stack_pointer_carrier = stack_pointer_carrier;
+        // Preparation reads the interface for the return projection only.
         func.prepare_for_decompile_with_interface_and_control(
             &crate::optimize::DecompilePrepConfig::default(),
-            function_interface,
+            questions.for_return_boundary(),
             control,
         )?;
-        func.refresh_decompile_prep_facts_with_interface_and_control(function_interface, control)?;
+        // The prep facts read it for the declared stack bases.
+        func.refresh_decompile_prep_facts_with_interface_and_control(
+            questions.for_frame_geometry(),
+            control,
+        )?;
         validate_ssa_function(&func).map_err(|_| malformed_ssa_input())?;
         control.poll()?;
         Ok(func)
@@ -7608,7 +7665,7 @@ mod tests {
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             &blocks,
             Some(&arch),
-            coherent_function_interface(&machine_context),
+            InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
@@ -7741,7 +7798,7 @@ mod tests {
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             &blocks,
             Some(&arch),
-            coherent_function_interface(&machine_context),
+            InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
@@ -7934,7 +7991,7 @@ mod tests {
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             &blocks,
             Some(&arch),
-            coherent_function_interface(&machine_context),
+            InterfaceQuestions::new(&machine_context),
             machine_context.machine_roles().call_preserved_carriers(),
             machine_context.stack_pointer_carrier(),
             &CalleePreservedCarriers::new(),
@@ -8072,7 +8129,11 @@ mod tests {
             vec![call_interface],
         )
         .expect("prepared SSA");
-        assert!(prepared.machine_context().abi_model().is_coherent());
+        let abi = prepared.machine_context().abi_model();
+        assert!(abi.return_boundary_is_coherent());
+        assert!(abi.argument_placement_is_coherent());
+        assert!(abi.frame_geometry_is_coherent());
+        assert!(abi.machine_carriers_are_coherent());
         let parameter = prepared
             .facts()
             .boundaries
@@ -11716,7 +11777,7 @@ mod tests {
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
             std::slice::from_ref(&block),
             Some(&arch),
-            None,
+            InterfaceQuestions::none(),
             None,
             None,
             &CalleePreservedCarriers::new(),

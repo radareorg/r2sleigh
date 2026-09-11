@@ -1270,7 +1270,7 @@ fn exact_source_argument_slot_for_register(source: &SsaArtifact, register: &str)
     }
     let interface = context.function_interface()?;
     let abi = context.abi_model();
-    if !abi.is_available() || !abi.is_coherent() {
+    if !abi.is_available() || !abi.argument_placement_is_coherent() {
         return None;
     }
     let mut matches = interface.parameters().iter().filter(|parameter| {
@@ -3788,7 +3788,7 @@ fn collect_pointer_arg_slot_map(
 fn collect_prepared_pointer_arg_slot_map(prepared: &SsaArtifact) -> HashMap<String, usize> {
     let context = prepared.machine_context();
     let abi = context.abi_model();
-    if !abi.is_available() || !abi.is_coherent() {
+    if !abi.is_available() || !abi.argument_placement_is_coherent() {
         return HashMap::new();
     }
 

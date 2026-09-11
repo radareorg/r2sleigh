@@ -32,7 +32,8 @@ impl AbiProfile {
         if !memory.is_available()
             || !memory.is_coherent()
             || !abi.is_available()
-            || !abi.is_coherent()
+            || !abi.argument_placement_is_coherent()
+            || !abi.return_boundary_is_coherent()
         {
             return None;
         }
@@ -346,7 +347,8 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(context.abi_model().is_coherent());
+        assert!(context.abi_model().argument_placement_is_coherent());
+        assert!(context.abi_model().return_boundary_is_coherent());
         context
     }
 

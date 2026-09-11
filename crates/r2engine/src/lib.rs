@@ -4502,8 +4502,12 @@ mod tests {
                 .revision_identity(),
             revision
         );
+        let abi = context.abi_model();
         assert!(
-            context.abi_model().is_coherent(),
+            abi.return_boundary_is_coherent()
+                && abi.argument_placement_is_coherent()
+                && abi.frame_geometry_is_coherent()
+                && abi.machine_carriers_are_coherent(),
             "authoritative source context must remain coherent: {context:#?}"
         );
         assert_eq!(context.call_site_interfaces().len(), 1);

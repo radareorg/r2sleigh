@@ -2350,8 +2350,16 @@ mod tests {
         assert_eq!(parameter.abi_storage, parameter_storage);
         assert_eq!(parameter.graph_storage, parameter_storage);
         assert_eq!(parameter.logical_value, None);
-        assert!(!returned.complete);
-        assert!(returned.values.is_empty());
+        // A plain interface makes no frame-attribution claim, which is not a
+        // reason to disbelieve the return register it does name.
+        assert!(
+            !artifact
+                .machine_context()
+                .abi_model()
+                .frame_geometry_is_coherent()
+        );
+        assert!(returned.complete);
+        assert_eq!(returned.values.len(), 1);
         let producer = artifact
             .obligations()
             .instructions()
@@ -2359,9 +2367,11 @@ mod tests {
                 block_addr: 0x3140,
                 site: CanonicalInstructionSite::Op(1),
             })
-            .expect("untrusted return producer");
-        assert_eq!(producer.state, SemanticInstructionState::UnsupportedUnknown);
-        assert!(producer.obligations.iter().any(|obligation| {
+            .expect("return producer");
+        // The boundary is complete, so nothing taints the value that reaches
+        // it. An unattributed frame used to make this an unknown effect.
+        assert_ne!(producer.state, SemanticInstructionState::UnsupportedUnknown);
+        assert!(!producer.obligations.iter().any(|obligation| {
             obligation.kind == SemanticObligationKind::VolatileOrUnknownEffect
         }));
     }
