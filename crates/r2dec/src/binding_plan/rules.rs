@@ -1314,16 +1314,24 @@ fn inlinable_core(
                 .filter_map(|v| v.canonical_storage)
                 .map(r2ssa::CanonicalStorageId::location),
         );
-        let rewritten = graph.insts.iter().any(|inst| {
-            inst.block == def_inst.block
-                && inst.ordinal > def_inst.ordinal
-                && inst.ordinal < use_inst.ordinal
-                && inst
-                    .output
-                    .and_then(|o| graph.value(o))
-                    .and_then(|v| v.canonical_storage)
-                    .is_some_and(|s| read_locations.contains(&s.location()))
-        });
+        // Only this block's operations can sit between the definition and the
+        // reader, so only this block's are read. Asking every operation in the
+        // function was the same answer at the cost of the whole graph, once per
+        // candidate value.
+        let rewritten = graph
+            .block(def_inst.block)
+            .into_iter()
+            .flat_map(|block| block.insts.iter())
+            .filter_map(|inst| graph.inst(*inst))
+            .any(|inst| {
+                inst.ordinal > def_inst.ordinal
+                    && inst.ordinal < use_inst.ordinal
+                    && inst
+                        .output
+                        .and_then(|o| graph.value(o))
+                        .and_then(|v| v.canonical_storage)
+                        .is_some_and(|s| read_locations.contains(&s.location()))
+            });
         if rewritten {
             rejected("a location the expression reads is written between definition and reader");
         } else {

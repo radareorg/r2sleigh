@@ -2750,6 +2750,7 @@ fn apply_decisions_once(
     // question below is a lookup. The body only shrinks while those questions
     // are asked, and each discard subtracts what it removed.
     let mut mentions = SymbolMentions::of_body(&candidate.body);
+    let writes_by_binding = WritesByBinding::of(writes);
     let mut discarded_bindings = BTreeSet::new();
     let mut discarded_observations = BTreeSet::<RenderObservationId>::new();
     let mut declarations =
@@ -2789,7 +2790,7 @@ fn apply_decisions_once(
                 // Dropping the declaration then emits an undeclared identifier,
                 // which is the one thing this must never do, so the tree itself
                 // is asked before anything is removed.
-                let targets = binding_write_observations(writes, binding);
+                let targets = writes_by_binding.observations(binding);
                 if mentions.discarding_clears(&targets, symbol) {
                     let mut removed_observations = BTreeSet::new();
                     for target in &targets {
@@ -2825,9 +2826,10 @@ fn apply_decisions_once(
             }
             Some(PlacementDecision::Inline { write, .. }) => {
                 candidate.locals.retain(|local| local.name != symbol);
-                let matching = writes
+                let matching = writes_by_binding
+                    .of_binding(binding)
                     .iter()
-                    .filter(|occurrence| occurrence.binding == binding && occurrence.inst == write)
+                    .filter(|occurrence| occurrence.inst == write)
                     .collect::<Vec<_>>();
                 let [occurrence] = matching.as_slice() else {
                     return Err(if matching.is_empty() {
@@ -2917,13 +2919,14 @@ fn apply_decisions_once(
             // The same bar the dead-store decision keeps: a statement whose
             // effect nothing else answers for is not removable, however unread
             // the object it writes.
-            if writes
+            if writes_by_binding
+                .of_binding(binding)
                 .iter()
-                .any(|write| write.binding == binding && write.effectful)
+                .any(|write| write.effectful)
             {
                 continue;
             }
-            let targets = binding_write_observations(writes, binding);
+            let targets = writes_by_binding.observations(binding);
             if !mentions.discarding_clears(&targets, symbol) {
                 continue;
             }
@@ -3428,16 +3431,38 @@ impl SymbolMentions {
     }
 }
 
-/// Every observation one binding's writes are marked on.
-fn binding_write_observations(
-    writes: &[FinalBindingWrite],
-    binding: BindingId,
-) -> BTreeSet<RenderObservationId> {
-    writes
-        .iter()
-        .filter(|write| write.binding == binding)
-        .map(|write| write.observation)
-        .collect()
+/// One binding's writes, read rather than searched for.
+///
+/// The decision loop and the reconsideration loop after it each ask twice per
+/// binding which writes belong to it, and each answer used to read every write
+/// in the function. Grouped once, the answers cost what the binding has.
+struct WritesByBinding<'a> {
+    by_binding: std::collections::HashMap<BindingId, Vec<&'a FinalBindingWrite>>,
+}
+
+impl<'a> WritesByBinding<'a> {
+    fn of(writes: &'a [FinalBindingWrite]) -> Self {
+        let mut by_binding =
+            std::collections::HashMap::<BindingId, Vec<&'a FinalBindingWrite>>::new();
+        for write in writes {
+            by_binding.entry(write.binding).or_default().push(write);
+        }
+        Self { by_binding }
+    }
+
+    fn of_binding(&self, binding: BindingId) -> &[&'a FinalBindingWrite] {
+        self.by_binding
+            .get(&binding)
+            .map_or(&[], |writes| writes.as_slice())
+    }
+
+    /// Every observation this binding's writes are marked on.
+    fn observations(&self, binding: BindingId) -> BTreeSet<RenderObservationId> {
+        self.of_binding(binding)
+            .iter()
+            .map(|write| write.observation)
+            .collect()
+    }
 }
 
 fn discard_marked_statement(
