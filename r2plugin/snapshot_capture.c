@@ -104,7 +104,8 @@ static RAnalVar *fcn_context_find_register_home_source(RVecAnalVarPtr *rvars, RA
 static int fcn_context_raw_register_arg_index(RAnal *anal, RAnalFunction *fcn, const RAnalVar *var);
 static int fcn_context_register_arg_index(RAnal *anal, RAnalFunction *fcn, RVecAnalVarPtr *rvars, RAnalVar *target);
 static RAnalFcnSlotRole fcn_context_classify_slot(const RAnalVar *var, RAnalVar *home_source);
-static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext *ctx, RAnalFunction *fcn, RAnalVar *var, RAnalVar *home_source, int arg_index);
+typedef struct SlotDwarfRecords SlotDwarfRecords;
+static RAnalFcnSlot *fcn_context_collect_slot(const SlotDwarfRecords *records, RAnal *anal, const RAnalFcnContext *ctx, RAnalFunction *fcn, RAnalVar *var, RAnalVar *home_source, int arg_index);
 static RAnalFunctionSignature *fcn_context_collect_signature(RAnalFunction *fcn);
 static bool fcn_context_callee_symbol_is_imported(RAnal *anal, ut64 addr);
 static char *fcn_context_callee_symbol_name(RAnal *anal, ut64 addr);
@@ -456,25 +457,6 @@ static bool slot_dwarf_record_matches(const SlotDwarfProvenance *probe, const ch
 	return matches;
 }
 
-static bool slot_dwarf_provenance_cb(void *user, const char *key, const char *value) {
-	SlotDwarfProvenance *probe = user;
-	if (probe->declared || !r_str_startswith (key, "fcn.")) {
-		return true;
-	}
-	const char *rest = key + strlen ("fcn.");
-	const size_t name_len = strlen (probe->sname);
-	if (strncmp (rest, probe->sname, name_len) || rest[name_len] != '.') {
-		return true;
-	}
-	const char *field = rest + name_len + 1;
-	if (r_str_startswith (field, "var.")) {
-		probe->declared = slot_dwarf_record_matches (probe, value, false);
-	} else if (r_str_startswith (field, "arg.")) {
-		probe->declared = slot_dwarf_record_matches (probe, value, true);
-	}
-	return true;
-}
-
 static bool slot_dwarf_sname_cb(void *user, const char *key, const char *value) {
 	SlotDwarfProvenance *probe = user;
 	if (probe->sname || !r_str_startswith (key, "fcn.") || !r_str_endswith (key, ".addr")) {
@@ -488,23 +470,100 @@ static bool slot_dwarf_sname_cb(void *user, const char *key, const char *value) 
 	return true;
 }
 
-static bool fcn_context_slot_declared_by_dwarf(RAnal *anal, RAnalFunction *fcn, const RAnalVar *var) {
-	if (!anal || !anal->sdb || !fcn || !var
-		|| (var->kind != R_ANAL_VAR_KIND_BPV && var->kind != R_ANAL_VAR_KIND_SPV)) {
-		return false;
+/* The DWARF records belonging to one function, read once.
+ *
+ * Asking whether a slot was declared used to scan the whole "dwarf" namespace
+ * twice per stack variable -- once to find the function's own name and once to
+ * look for a record matching that variable -- and the question is asked twice
+ * per variable, so a function with thirty slots walked the namespace up to a
+ * hundred and twenty times. What the scan finds does not depend on the
+ * variable at all: it is this function's record list. So it is read once and
+ * every slot is answered from it. */
+struct SlotDwarfRecords {
+	char *sname;
+	RList *var_values;
+	RList *arg_values;
+};
+
+static bool slot_dwarf_collect_cb(void *user, const char *key, const char *value) {
+	SlotDwarfRecords *records = user;
+	if (!r_str_startswith (key, "fcn.")) {
+		return true;
+	}
+	const char *rest = key + strlen ("fcn.");
+	const size_t name_len = strlen (records->sname);
+	if (strncmp (rest, records->sname, name_len) || rest[name_len] != '.') {
+		return true;
+	}
+	const char *field = rest + name_len + 1;
+	RList *into = r_str_startswith (field, "var.")? records->var_values
+		: r_str_startswith (field, "arg.")? records->arg_values: NULL;
+	if (into) {
+		char *copy = strdup (r_str_get (value));
+		if (copy && !r_list_append (into, copy)) {
+			free (copy);
+		}
+	}
+	return true;
+}
+
+static void slot_dwarf_records_fini(SlotDwarfRecords *records) {
+	if (!records) {
+		return;
+	}
+	R_FREE (records->sname);
+	r_list_free (records->var_values);
+	r_list_free (records->arg_values);
+	records->var_values = NULL;
+	records->arg_values = NULL;
+}
+
+static void slot_dwarf_records_init(SlotDwarfRecords *records, RAnal *anal, RAnalFunction *fcn) {
+	memset (records, 0, sizeof (*records));
+	if (!anal || !anal->sdb || !fcn) {
+		return;
 	}
 	Sdb *dwarf = sdb_ns (anal->sdb, "dwarf", 0);
 	if (!dwarf) {
-		return false;
+		return;
 	}
-	SlotDwarfProvenance probe = { .anal = anal, .fcn = fcn, .var = var };
+	SlotDwarfProvenance probe = { .anal = anal, .fcn = fcn, .var = NULL };
 	sdb_foreach (dwarf, slot_dwarf_sname_cb, &probe);
 	if (!probe.sname) {
+		return;
+	}
+	records->sname = (char *)probe.sname;
+	records->var_values = r_list_newf (free);
+	records->arg_values = r_list_newf (free);
+	if (!records->var_values || !records->arg_values) {
+		slot_dwarf_records_fini (records);
+		return;
+	}
+	sdb_foreach (dwarf, slot_dwarf_collect_cb, records);
+}
+
+static bool fcn_context_slot_declared_by_dwarf(const SlotDwarfRecords *records,
+		RAnal *anal, RAnalFunction *fcn, const RAnalVar *var) {
+	if (!records || !records->sname || !anal || !fcn || !var
+		|| (var->kind != R_ANAL_VAR_KIND_BPV && var->kind != R_ANAL_VAR_KIND_SPV)) {
 		return false;
 	}
-	sdb_foreach (dwarf, slot_dwarf_provenance_cb, &probe);
-	free ((char *)probe.sname);
-	return probe.declared;
+	SlotDwarfProvenance probe = {
+		.anal = anal, .fcn = fcn, .var = var, .sname = records->sname
+	};
+	RListIter *iter;
+	const char *value;
+	r_list_foreach (records->var_values, iter, value) {
+		if (slot_dwarf_record_matches (&probe, value, false)) {
+			return true;
+		}
+	}
+	r_list_foreach (records->arg_values, iter, value) {
+		if (slot_dwarf_record_matches (&probe, value, true)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /* The ABI position of a stack-homed formal, certified against the live
@@ -518,7 +577,8 @@ static bool fcn_context_slot_declared_by_dwarf(RAnal *anal, RAnalFunction *fcn, 
  * the fork kept inside `RAnal`; the evidence is read from the entries
  * themselves now.
  */
-static bool fcn_context_dwarf_formal_ordinal(RAnal *anal, RAnalFunction *fcn,
+static bool fcn_context_dwarf_formal_ordinal(const SlotDwarfRecords *records,
+		RAnal *anal, RAnalFunction *fcn,
 		const RAnalVar *var, R_OUT int *ordinal) {
 	R_RETURN_VAL_IF_FAIL (ordinal, false);
 	*ordinal = -1;
@@ -529,7 +589,7 @@ static bool fcn_context_dwarf_formal_ordinal(RAnal *anal, RAnalFunction *fcn,
 	}
 	// The variable has to still sit where the debug information put it, which
 	// is the same question the slot's provenance asks.
-	if (!fcn_context_slot_declared_by_dwarf (anal, fcn, var)) {
+	if (!fcn_context_slot_declared_by_dwarf (records, anal, fcn, var)) {
 		return false;
 	}
 	int position = -1;
@@ -597,7 +657,7 @@ static ut32 fcn_context_slot_measured_extent(RAnal *anal, RAnalFunction *fcn, RA
 	return measured;
 }
 
-static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext *ctx, RAnalFunction *fcn, RAnalVar *var, RAnalVar *home_source, int arg_index) {
+static RAnalFcnSlot *fcn_context_collect_slot(const SlotDwarfRecords *records, RAnal *anal, const RAnalFcnContext *ctx, RAnalFunction *fcn, RAnalVar *var, RAnalVar *home_source, int arg_index) {
 	const RAnalFunctionParam *signature_param = NULL;
 
 	R_RETURN_VAL_IF_FAIL (anal && ctx && fcn && var, NULL);
@@ -642,7 +702,7 @@ static RAnalFcnSlot *fcn_context_collect_slot(RAnal *anal, const RAnalFcnContext
 	}
 	slot->offset_valid = fcn_context_stack_offset (fcn, var, &slot->offset);
 	slot->role = fcn_context_classify_slot (var, home_source);
-	slot->dwarf_declared = fcn_context_slot_declared_by_dwarf (anal, fcn, var);
+	slot->dwarf_declared = fcn_context_slot_declared_by_dwarf (records, anal, fcn, var);
 
 	if (home_source) {
 		signature_param = (ctx->signature && arg_index >= 0)? r_list_get_n (ctx->signature->params, arg_index): NULL;
@@ -5526,6 +5586,8 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 	}
 
 	r_anal_function_vars_cache_init_readonly (anal, &cache, fcn);
+	SlotDwarfRecords dwarf_records;
+	slot_dwarf_records_init (&dwarf_records, anal, fcn);
 	RAnalVar **it;
 	R_VEC_FOREACH (cache.bvars, it) {
 		RAnalVar *var = *it;
@@ -5536,10 +5598,10 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 		int exact_formal_ordinal = -1;
 		const int arg_index = home_source
 			? fcn_context_register_arg_index (anal, fcn, cache.rvars, home_source)
-			: fcn_context_dwarf_formal_ordinal (anal, fcn, var, &exact_formal_ordinal)
+			: fcn_context_dwarf_formal_ordinal (&dwarf_records, anal, fcn, var, &exact_formal_ordinal)
 				? exact_formal_ordinal: -1;
 		RAnalFcnSlot *slot = fcn_context_collect_slot (
-			anal, ctx, fcn, var, home_source, arg_index);
+			&dwarf_records, anal, ctx, fcn, var, home_source, arg_index);
 		if (!slot || !r_list_append (ctx->fcn_slots, slot)) {
 			fcn_context_slot_free (slot);
 			SNAPSHOT_REFUSE ("out of memory collecting function variables");
@@ -5554,15 +5616,16 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 		int exact_formal_ordinal = -1;
 		const int arg_index = home_source
 			? fcn_context_register_arg_index (anal, fcn, cache.rvars, home_source)
-			: fcn_context_dwarf_formal_ordinal (anal, fcn, var, &exact_formal_ordinal)
+			: fcn_context_dwarf_formal_ordinal (&dwarf_records, anal, fcn, var, &exact_formal_ordinal)
 				? exact_formal_ordinal: -1;
 		RAnalFcnSlot *slot = fcn_context_collect_slot (
-			anal, ctx, fcn, var, home_source, arg_index);
+			&dwarf_records, anal, ctx, fcn, var, home_source, arg_index);
 		if (!slot || !r_list_append (ctx->fcn_slots, slot)) {
 			fcn_context_slot_free (slot);
 			SNAPSHOT_REFUSE ("out of memory collecting function variables");
 		}
 	}
+	slot_dwarf_records_fini (&dwarf_records);
 	r_anal_function_vars_cache_fini (&cache);
 	if (!snapshot_context_within_limits (snapshot, limits)) {
 		SNAPSHOT_REFUSE ("the function context exceeds its limits");
