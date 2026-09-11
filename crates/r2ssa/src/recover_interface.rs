@@ -613,7 +613,23 @@ fn recover_interface_inner(
             r2il::refusal_evidence!(
                 "interface-recovery",
                 "a tail transfer to a target without a complete prototype owns the result \
-                 boundary, so no interface is recovered"
+                 boundary, so no interface is recovered; tails {:?}",
+                facts
+                    .call_sites
+                    .by_id
+                    .values()
+                    .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
+                    .map(|call| {
+                        let boundary = facts.boundaries.calls.get(&call.id);
+                        (
+                            call.id,
+                            call.at,
+                            call.direct_target,
+                            boundary.map(|boundary| boundary.complete),
+                            boundary.and_then(|boundary| boundary.result_kind),
+                        )
+                    })
+                    .collect::<Vec<_>>()
             );
             return None;
         }

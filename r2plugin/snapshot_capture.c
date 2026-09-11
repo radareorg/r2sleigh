@@ -169,6 +169,7 @@ static bool snapshot_return_address_storage_overlaps_interface( const RAnalFunct
 static bool snapshot_stack_pointer_storage_conflicts_interface( const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx);
 static bool snapshot_stack_resources_complete(const RAnalFcnContext *ctx);
 static bool snapshot_stack_slot_roles_complete( const RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface);
+static void snapshot_drop_variadic_tail_slots(RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface);
 static bool snapshot_convention_slots_collect( RAnal *anal, RAnalFunction *fcn, RAnalFunctionInterfaceSnapshot *interface);
 static bool function_interface_snapshot_collect( RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx, RAnalFunctionInterfaceSnapshot *interface, const RAnalFunctionSnapshotLimits *limits);
 static void snapshot_return_mechanism_collect(RAnal *anal, const RAnalFunction *fcn, const RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotReturnMechanismView *view);
@@ -2837,6 +2838,22 @@ static void snapshot_relink_register_homes(RAnalFcnContext *ctx, const RAnalFunc
 			found = (int)i;
 		}
 		if (found < 0) {
+			/* A variadic prologue homes the argument registers so the tail can
+			 * be walked, and those homes name no declared parameter by
+			 * construction. The slot is the function's own frame storage and
+			 * nothing else -- what it holds came from a register, but so does
+			 * every spilled value, and no parameter claims it. Saying so is
+			 * what lets the interface state its roles exactly; leaving it
+			 * unclassified made the ABI model incoherent, which left every
+			 * return boundary incomplete and refused the function. */
+			if (interface->variadic) {
+				slot->role = R_ANAL_FCN_SLOT_LOCAL;
+				slot->arg_index = -1;
+				slot->home_reg_offset = 0;
+				slot->home_reg_size = 0;
+				R_FREE (slot->home_reg);
+				continue;
+			}
 			slot->role = R_ANAL_FCN_SLOT_UNKNOWN;
 			slot->arg_index = -1;
 			continue;
@@ -2864,6 +2881,34 @@ static void snapshot_drop_stack_parameter_slots(RAnalFcnContext *ctx, const RAna
 				r_list_push (doomed, slot);
 				break;
 			}
+		}
+	}
+	r_list_foreach (doomed, iter, slot) {
+		r_list_delete_data (ctx->fcn_slots, slot);
+	}
+	r_list_free (doomed);
+}
+/* The argument-area storage a variadic tail occupies. The ellipsis is what
+ * describes it -- that is the whole content of a variadic declaration -- and a
+ * slot restating part of it declares an object the prototype does not have, so
+ * it is not carried twice any more than a stack parameter's slot is. Leaving it
+ * as an argument slot no parameter names left the interface unable to state its
+ * roles exactly, which made the ABI model incoherent and refused every variadic
+ * function with a stack tail. The reads themselves are untouched: they are
+ * caller-area memory, which is what a tail read is. */
+static void snapshot_drop_variadic_tail_slots(RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface) {
+	if (!interface->variadic) {
+		return;
+	}
+	RList *doomed = r_list_new ();
+	if (!doomed) {
+		return;
+	}
+	RListIter *iter;
+	RAnalFcnSlot *slot;
+	r_list_foreach (ctx->fcn_slots, iter, slot) {
+		if (slot && slot->role == R_ANAL_FCN_SLOT_ARG && slot->arg_index < 0) {
+			r_list_push (doomed, slot);
 		}
 	}
 	r_list_foreach (doomed, iter, slot) {
@@ -3431,6 +3476,7 @@ static bool function_interface_snapshot_collect(
 		parameters_complete = false;
 	}
 	snapshot_drop_stack_parameter_slots (ctx, interface);
+	snapshot_drop_variadic_tail_slots (ctx, interface);
 	snapshot_relink_register_homes (ctx, interface);
 	if (!snapshot_promote_exact_dwarf_stack_homes (
 			anal, fcn, ctx, interface, calling_convention)) {
