@@ -20739,3 +20739,35 @@ and is dropped as a stack parameter's slot is. The first attempt made both pass
 the capture's completeness test while leaving them unclassified on the wire, and
 the r2source contract refused the interface for exactly that contradiction --
 which is why these are classifications rather than exceptions.
+
+## DecBench, five projects, against angr
+
+The scoped sweep finished. **It witnesses `200d23239249`, which is the tree
+before this session's fifteen commits**, so it measures the engine as it was
+with the caps already out but none of the coverage or cost work that followed.
+Recorded here because the angr reference legs for four of the five projects
+took most of the run's twelve hours and are not in `tests/decbench/baseline.json`
+-- that file covers `bzip2` and `zlib` only, so re-running recomputes them.
+
+Perfect-score rates, r2sleigh against angr:
+
+| metric | bash | bzip2 | cronie | diffutils | dpkg |
+|---|---|---|---|---|---|
+| byte match | 2.3 / 4.9 | 3.7 / – | 6.4 / 11.6 | 9.0 / 11.5 | 11.7 / 12.8 |
+| type match | **22.3** / 19.6 | 27.9 / – | **19.1** / 10.9 | **33.5** / 18.9 | **17.7** / 7.2 |
+| graph edit distance | 20.6 / **31.2** | 31.7 / – | 21.1 / **31.6** | 22.8 / **29.9** | 0.0 / 0.0 |
+| union | 22.8 / **24.3** | 31.7 / – | **21.4** / 20.9 | **36.6** / 25.5 | **24.7** / 17.7 |
+
+angr's `bzip2` leg did not run; the repo baseline holds that project.
+
+Two things the shape says. Type recovery is where this engine leads and it is
+not close -- nearly two to one on `diffutils` and `dpkg`. Structural similarity
+is where it trails, by about ten points of perfect-GED on every project where
+both ran, and byte match trails everywhere. Coverage is a multiplier on all of
+them, so the session's `743 -> 752` and the four refusal classes closed are not
+in these numbers at all.
+
+The next sweep should be deliberate rather than habitual: it costs about twelve
+hours on a shared host, the angr legs dominate that, and a sweep that outlives
+the commits it witnesses describes history. Accepting the finished reference
+into the baseline first would leave only r2sleigh's own leg to run.
