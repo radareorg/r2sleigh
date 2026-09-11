@@ -20632,7 +20632,7 @@ rewrite of about seventy-five references in thirteen files.
 
 ## Coverage after the caps came out
 
-The local census over the twelve binaries in the scratchpad set: **753 of 790
+The local census over the twelve binaries in the scratchpad set: **756 of 790
 functions render**. The denominator is not the 720 this document quoted before,
 because the set is larger and because radare2 finds more functions once the
 engine's proof pass finishes within its budget.
@@ -20830,3 +20830,85 @@ The next sweep should be deliberate rather than habitual: it costs about twelve
 hours on a shared host, the angr legs dominate that, and a sweep that outlives
 the commits it witnesses describes history. Accepting the finished reference
 into the baseline first would leave only r2sleigh's own leg to run.
+
+## The block operation, derived
+
+Four repeated string instructions exist in the whole twelve-binary corpus, all
+in `minigzip` at -O2: three `rep movsq` in `inflateCopy` and `deflateCopy`, one
+`rep stosq` in `fill_window`. All three functions refused for them, which was
+half the `volatile-or-unknown` class. All three render now.
+
+### What the machine does, and what C can say about it
+
+`rep movs` is `while n≠0 { [d]=[s]; d+=w·dir; s+=w·dir; n-=1 }` with
+`dir = DF ? −1 : +1`; `rep stos` the same with `[d]=v` and `s` untouched. Net:
+memory over `n` elements, plus `d += w·n·dir`, `s += w·n·dir`, `n = 0`.
+
+Two conclusions were forced rather than chosen.
+
+**The direction.** No compiled function in the corpus executes `cld` or `std`,
+so `DF` where the instruction reads it is the function's entry value and the
+body cannot prove it. Both x86 ABIs require the caller to leave it clear. Every
+C spelling depends on the direction, so without that fact the feature is inert.
+
+**`memcpy` and `memmove` are both ruled out**, and not by taste. An ascending
+element copy into an overlapping destination replicates; that is the hardware's
+behaviour and neither function's contract. Proving the regions disjoint is not
+available -- the destinations are freshly allocated and the sources are
+parameters -- so the element loop is the only exact spelling, and it is exact
+whether they overlap or not because C evaluates it element by element exactly
+as the machine does.
+
+The user chose the inline loop over a static helper call and over a marked gap.
+
+### Where each fact lives
+
+The direction is three facts in three places, which is what keeps any one of
+them honest. The machine says which register the flag is, and the capture
+carries the *name* because the offset beside it is in radare2's numbering. The
+convention says the value, and the engine classifies that from the ABI class it
+already derives from the convention's spelling -- `SourceAbiClass::clears_direction_flag_on_entry`.
+The SSA substitutes the constant, which is what lets the pointer arithmetic
+beside the transfer fold from `d += n*w*(1-2*df)` to `d += n*w` and render as
+ordinary assignments.
+
+### The cursor, and the three cells
+
+The loop cannot step the machine's own registers: the instruction's arithmetic
+beside the transfer already computes their final values, and stepping them would
+write the objects that arithmetic reads. So the rendering declares one, in the
+scope of the loop it drives, under `SymbolRole::RenderCursor` -- an object no
+binding answers for, because it holds no value the program computed. The
+placement audit admits it by that role rather than by looking for an owner it
+deliberately has none of.
+
+Three cells had to be answered before the statement would stand, and each took a
+separate pass to find:
+
+- the **direction operand** has no C expression to sit on, because the rendering
+  writes one walk and an ascending loop is ascending in its own text, so it is
+  elided with that as its reason;
+- the **memory** the operation performs is one obligation over a whole extent
+  rather than a structured access, so it is taken by kind rather than looked up
+  through an access description that does not exist;
+- the **control certificate** read the synthesised `while` as a CFG loop and
+  invented a back edge -- `fill_window` certified `[false->0x577c, true->0x57cd]`
+  against an expected `[0x577c]`. A construct that places no block and makes no
+  transfer says nothing the certificate could find wrong, so its body is walked
+  plainly. The test is whether any observation inside the body names a block,
+  not a mark the lowering sets, so a structurer-built loop can never take that
+  path by accident.
+
+### Left open
+
+A `memset` for a fill whose value is a proven byte-uniform constant reads better
+than the loop and is exact where it applies -- `fill_window`'s value is
+`xor eax, eax`, so every byte is zero. It needs a declaration the rendering does
+not yet make. The loop is exact everywhere, so it is the base and that is a
+refinement.
+
+The census cannot see the difference between a function that renders with a
+marked gap and one that renders the statement, so the gain here showed up only
+once the certificate rule landed: the recognition alone moved all three off
+`volatile-or-unknown`, and the loop plus the certificate rule is what made them
+count.
