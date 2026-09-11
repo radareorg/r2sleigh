@@ -193,6 +193,23 @@ fn convert_op(
             addr: read_var(addr, disasm, ctx),
             val: read_var(val, disasm, ctx),
         },
+        BlockTransfer {
+            space,
+            kind,
+            destination,
+            source,
+            count,
+            direction,
+            element_size,
+        } => SSAOp::BlockTransfer {
+            space: *space,
+            kind: *kind,
+            destination: read_var(destination, disasm, ctx),
+            source: read_var(source, disasm, ctx),
+            count: read_var(count, disasm, ctx),
+            direction: read_var(direction, disasm, ctx),
+            element_size: *element_size,
+        },
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,
         },

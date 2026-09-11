@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 12;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 13;
 const SNAPSHOT_WIRE_MIN_FORMAT_VERSION: u32 = 1;
 
 /// Bytes of fixed header preceding the string table.
@@ -893,6 +893,18 @@ fn write_machine_roles_for_format(
     // travels with the roles rather than with the interface because the source
     // publishes it for functions whose interface it withholds -- which are the
     // functions that need it.
+    // The direction flag, by the name the machine gives it. A role register
+    // like the two above, and carried as a name for the same reason: the
+    // offset beside it is in the source's numbering.
+    if format_version >= 13 {
+        match names.direction_flag() {
+            Some(name) => {
+                writer.bool(true);
+                writer.string(name)?;
+            }
+            None => writer.bool(false),
+        }
+    }
     if format_version >= 4 {
         match roles.call_preserved_carriers() {
             Some(carriers) => {
@@ -927,6 +939,11 @@ fn read_machine_roles_with_legacy_contract(
     } else {
         legacy_contract
     };
+    let direction_flag_name = if reader.format_version() >= 13 && reader.bool()? {
+        Some(reader.string()?.to_string())
+    } else {
+        None
+    };
     let carriers = if reader.format_version() >= 4 && reader.bool()? {
         Some(SourceCallPreservedCarriers::new(
             reader.bool()?,
@@ -953,11 +970,14 @@ fn read_machine_roles_with_legacy_contract(
     if let Some(carriers) = carriers {
         roles = roles.with_call_preserved_carriers(carriers);
     }
-    Ok(roles.with_role_register_names(SourceRoleRegisterNames::new(
-        return_address_name.as_ref().map(SourceRegisterName::as_str),
-        stack_pointer_name.as_ref().map(SourceRegisterName::as_str),
-        None,
-    )))
+    Ok(roles.with_role_register_names(
+        SourceRoleRegisterNames::new(
+            return_address_name.as_ref().map(SourceRegisterName::as_str),
+            stack_pointer_name.as_ref().map(SourceRegisterName::as_str),
+            None,
+        )
+        .with_direction_flag(direction_flag_name.as_deref()),
+    ))
 }
 
 pub fn write_convention_slots(

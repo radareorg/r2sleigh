@@ -210,6 +210,20 @@ fn hash_op(writer: &mut FingerprintWriter, op: &SSAOp) {
             writer.tag(4);
             hash_space(writer, *space);
         }
+        BlockTransfer {
+            space,
+            kind,
+            element_size,
+            ..
+        } => {
+            writer.tag(74);
+            hash_space(writer, *space);
+            writer.tag(match kind {
+                r2il::BlockTransferKind::Move => 0,
+                r2il::BlockTransferKind::Fill => 1,
+            });
+            writer.tag(u16::try_from(*element_size).unwrap_or(u16::MAX));
+        }
         Fence { ordering } => {
             writer.tag(5);
             hash_ordering(writer, *ordering);

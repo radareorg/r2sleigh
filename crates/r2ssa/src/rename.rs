@@ -948,6 +948,23 @@ fn rename_op(
                 space: *space,
             }
         }
+        BlockTransfer {
+            space,
+            kind,
+            destination,
+            source,
+            count,
+            direction,
+            element_size,
+        } => SSAOp::BlockTransfer {
+            space: *space,
+            kind: *kind,
+            destination: read_varnode(destination, ctx, reg_names),
+            source: read_varnode(source, ctx, reg_names),
+            count: read_varnode(count, ctx, reg_names),
+            direction: read_varnode(direction, ctx, reg_names),
+            element_size: *element_size,
+        },
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,
         },

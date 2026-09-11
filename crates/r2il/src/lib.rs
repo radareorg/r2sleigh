@@ -45,7 +45,7 @@ pub use metadata::{
     FloatEncodingHint, MemoryClass, OpMetadata, PointerHint, ScalarKind, StorageClass,
     VarnodeMetadata,
 };
-pub use opcode::{R2ILBlock, R2ILOp, SwitchCase, SwitchInfo};
+pub use opcode::{BlockTransferKind, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo};
 pub use regname::select_register_name;
 pub use serialize::{
     ArchSpec, RegisterBitSlice, RegisterDef, RegisterProjection, RegisterProjectionDisposition,

@@ -101,10 +101,15 @@ impl ControlFlowStructurer<'_, '_> {
                 body,
             } => {
                 let body = Self::strip_trailing_continue(Self::cleanup_recurse(symbols, *body));
-                let body = update
-                    .as_ref()
-                    .map(|update| Self::strip_trailing_for_update(symbols, body.clone(), update))
-                    .unwrap_or(body);
+                // The strip consumes the body and hands one back either way, so
+                // matching moves it. Written as `map(...).unwrap_or(body)` the
+                // closure could not move it and every loop body in the function
+                // was deep-copied to be passed, which nests: an outer loop
+                // copied every inner loop that had just copied itself.
+                let body = match update.as_ref() {
+                    Some(update) => Self::strip_trailing_for_update(symbols, body, update),
+                    None => body,
+                };
                 CStmt::For {
                     init,
                     cond,

@@ -306,6 +306,7 @@ fn arch_resolved_source(
     let role_names = source.machine_roles().role_register_names();
     let roles = source
         .machine_roles()
+        .with_direction_flag_storage(resolve(role_names.direction_flag()))
         .with_arch_resolved_carriers(
             resolve(role_names.return_address()),
             resolve(role_names.stack_pointer()),

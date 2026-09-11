@@ -859,6 +859,12 @@ struct r_anal_function_snapshot_t {
 	RAnalFunctionInterfaceSnapshot function_interface;
 	RAnalSnapshotReturnMechanismView return_mechanism;
 	RAnalSnapshotRegisterStorage frame_pointer_storage;
+	// What the machine calls the flag that decides which way a repeated string
+	// instruction walks. The name, because the offset beside it is in
+	// radare2's register numbering and means nothing to the lifted
+	// architecture; the consumer places it the way it places the other role
+	// registers.
+	char *direction_flag_name;
 	RAnalSnapshotStackAllocationContractView stack_allocation_contract;
 	RAnalCallSiteInterfaceSnapshot *call_site_interfaces;
 	size_t num_call_site_interfaces;

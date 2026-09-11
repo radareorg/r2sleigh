@@ -112,6 +112,7 @@ pub enum ExecutionOpcode {
     Copy,
     Load,
     Store,
+    BlockTransfer,
     Fence,
     LoadLinked,
     StoreConditional,
@@ -375,6 +376,7 @@ fn opcode_for_op(op: &SSAOp) -> ExecutionOpcode {
         SSAOp::Copy { .. } => ExecutionOpcode::Copy,
         SSAOp::Load { .. } => ExecutionOpcode::Load,
         SSAOp::Store { .. } => ExecutionOpcode::Store,
+        SSAOp::BlockTransfer { .. } => ExecutionOpcode::BlockTransfer,
         SSAOp::Fence { .. } => ExecutionOpcode::Fence,
         SSAOp::LoadLinked { .. } => ExecutionOpcode::LoadLinked,
         SSAOp::StoreConditional { .. } => ExecutionOpcode::StoreConditional,
@@ -461,7 +463,9 @@ fn opcode_for_op(op: &SSAOp) -> ExecutionOpcode {
 fn effect_for_op(inst: InstId, op: &SSAOp) -> Result<ExecutionEffect, ExecutionViewError> {
     match op {
         SSAOp::Phi { .. } => Err(ExecutionViewError::UnexpectedPhiOp(inst)),
-        SSAOp::Load { space, .. } | SSAOp::Store { space, .. } => Ok(ExecutionEffect::Memory {
+        SSAOp::Load { space, .. }
+        | SSAOp::Store { space, .. }
+        | SSAOp::BlockTransfer { space, .. } => Ok(ExecutionEffect::Memory {
             space: *space,
             ordering: None,
         }),

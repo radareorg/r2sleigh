@@ -37,6 +37,19 @@ pub enum SSAOp {
         val: SSAVar,
     },
 
+    /// One repeated string operation, as the block it is
+    /// (`r2il::R2ILOp::BlockTransfer`). It writes only memory; the register
+    /// updates the instruction also performs are ordinary operations beside it.
+    BlockTransfer {
+        space: SpaceId,
+        kind: r2il::BlockTransferKind,
+        destination: SSAVar,
+        source: SSAVar,
+        count: SSAVar,
+        direction: SSAVar,
+        element_size: u32,
+    },
+
     /// Memory fence/barrier.
     Fence { ordering: MemoryOrdering },
 
@@ -401,6 +414,7 @@ impl SSAOp {
         match self {
             Self::Load { space, .. }
             | Self::Store { space, .. }
+            | Self::BlockTransfer { space, .. }
             | Self::LoadLinked { space, .. }
             | Self::StoreConditional { space, .. }
             | Self::AtomicCAS { space, .. }
@@ -488,6 +502,7 @@ impl SSAOp {
             CallOther { output, .. } | StoreConditional { result: output, .. } => output.as_ref(),
 
             Store { .. }
+            | BlockTransfer { .. }
             | Fence { .. }
             | StoreGuarded { .. }
             | Branch { .. }
@@ -540,6 +555,19 @@ impl SSAOp {
             Store { addr, val, .. } | StoreConditional { addr, val, .. } => {
                 f(addr);
                 f(val);
+            }
+
+            BlockTransfer {
+                destination,
+                source,
+                count,
+                direction,
+                ..
+            } => {
+                f(destination);
+                f(source);
+                f(count);
+                f(direction);
             }
 
             AtomicCAS {
@@ -706,6 +734,7 @@ impl SSAOp {
         matches!(
             self,
             SSAOp::Store { .. }
+                | SSAOp::BlockTransfer { .. }
                 | SSAOp::StoreConditional { .. }
                 | SSAOp::StoreGuarded { .. }
                 | SSAOp::AtomicCAS { .. }
@@ -762,6 +791,22 @@ impl std::fmt::Display for SSAOp {
             SSAOp::Copy { dst, src } => write!(f, "{} = COPY {}", dst, src),
             SSAOp::Load { dst, space, addr } => write!(f, "{} = LOAD [{}]{}", dst, space, addr),
             SSAOp::Store { space, addr, val } => write!(f, "STORE [{}]{} = {}", space, addr, val),
+            SSAOp::BlockTransfer {
+                space,
+                kind,
+                destination,
+                source,
+                count,
+                element_size,
+                direction,
+            } => write!(
+                f,
+                "BLOCK{} [{space}]{destination} <- {source} x {count} ({element_size} bytes each, direction {direction})",
+                match kind {
+                    r2il::BlockTransferKind::Move => "MOVE",
+                    r2il::BlockTransferKind::Fill => "FILL",
+                }
+            ),
             SSAOp::Fence { ordering } => write!(f, "FENCE({:?})", ordering),
             SSAOp::LoadLinked {
                 dst,

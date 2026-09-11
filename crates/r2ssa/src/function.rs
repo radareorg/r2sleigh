@@ -346,6 +346,7 @@ impl SsaArtifact {
             r2il::refusal_evidence!("ssa-integrity", "{error:?}");
             malformed_ssa_input()
         })?;
+        function.apply_convention_cleared_direction_flag(&machine_context);
         function.mint_entry_lane_projections(&machine_context);
         machine_context.remap_memory_sites_to_prepared(&function);
         let mut graph = SsaGraph::from_function_with_storage(&function);
@@ -3545,6 +3546,69 @@ impl SSAFunction {
         }
         if let Some(entry) = self.blocks.get_mut(&self.entry) {
             entry.ops.splice(0..0, minted);
+        }
+        self.invalidate_query_index();
+    }
+
+    /// Replace the direction flag's entry value with the zero the convention
+    /// requires of it.
+    ///
+    /// A repeated string instruction reads the flag to decide which way it
+    /// walks, and no compiled function sets it -- the corpus contains no `cld`
+    /// or `std` at all -- so what it holds where the instruction reads it is
+    /// whatever the caller left. Both x86 ABIs require the caller to leave it
+    /// clear, on entry and at every call, and that is the whole of what makes
+    /// the direction knowable. Substituting the constant here rather than
+    /// reading the fact at the rendering is what lets the arithmetic beside the
+    /// transfer fold: the instruction's own pointer updates are written over
+    /// the flag, and with it a constant they collapse to the extent.
+    ///
+    /// Nothing is substituted for a convention that states no such thing, or a
+    /// machine with no such flag, and a function that writes the flag itself
+    /// has a later version the entry value does not reach.
+    pub(crate) fn apply_convention_cleared_direction_flag(
+        &mut self,
+        machine_context: &SourceMachineContext,
+    ) {
+        let clears = machine_context
+            .convention_slots()
+            .is_some_and(|slots| slots.abi_class().clears_direction_flag_on_entry());
+        let Some(storage) = machine_context.machine_roles().direction_flag_storage() else {
+            return;
+        };
+        if !clears {
+            return;
+        }
+        let entry_values = self
+            .canonical_storage_by_var
+            .iter()
+            .filter(|(var, var_storage)| var.version == 0 && **var_storage == storage)
+            .map(|(var, _)| var.clone())
+            .collect::<BTreeSet<_>>();
+        if entry_values.is_empty() {
+            return;
+        }
+        r2il::refusal_evidence!(
+            "direction-flag-cleared",
+            "the convention clears {storage:?} on entry; {} entry reads become zero",
+            entry_values.len()
+        );
+        let substitute = |var: &SSAVar| {
+            if entry_values.contains(var) {
+                SSAVar::constant(0, var.size)
+            } else {
+                var.clone()
+            }
+        };
+        for block in self.blocks.values_mut() {
+            for phi in &mut block.phis {
+                for (_, src) in &mut phi.sources {
+                    *src = substitute(src);
+                }
+            }
+            for op in &mut block.ops {
+                *op = crate::optimize::map_sources_in_op(op, &substitute);
+            }
         }
         self.invalidate_query_index();
     }

@@ -1046,6 +1046,16 @@ bool r2sleigh_wire_write_snapshot(R2SleighWireWriter *writer, const void *snapsh
 		r2sleigh_wire_bool (writer, false);
 	}
 
+	/* The direction flag, by the name the machine gives it. A role register
+	 * like the two above: what its value is on entry is the convention's to
+	 * say, and which register it is, is the machine's. */
+	const char *direction_flag = walk_bounded (source->direction_flag_name);
+	if (direction_flag && *direction_flag) {
+		r2sleigh_wire_bool (writer, true);
+		r2sleigh_wire_string (writer, direction_flag);
+	} else {
+		r2sleigh_wire_bool (writer, false);
+	}
 	/* Whether a call leaves those carriers alone. radare2 determines this from
 	 * the calling convention and records it even when it never linked a
 	 * signature -- its own comment says so -- and the interface block above is

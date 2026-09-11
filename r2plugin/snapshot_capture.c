@@ -2274,6 +2274,7 @@ static void r_anal_function_snapshot_free(RAnalFunctionSnapshot *snapshot) {
 	function_context_fini (&snapshot->context);
 	function_interface_snapshot_fini (&snapshot->function_interface);
 	snapshot_register_storage_fini (&snapshot->frame_pointer_storage);
+	R_FREE (snapshot->direction_flag_name);
 	size_t i;
 	for (i = 0; i < snapshot->num_call_site_interfaces; i++) {
 		call_site_interface_snapshot_fini (&snapshot->call_site_interfaces[i]);
@@ -5747,6 +5748,18 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 	if (!snapshot_frame_pointer_storage_collect (anal, fcn, ctx,
 			&snapshot->function_interface, &snapshot->frame_pointer_storage)) {
 		SNAPSHOT_REFUSE ("the frame pointer storage could not be resolved");
+	}
+	/* What the machine calls the direction flag. Only the name: what its value
+	 * is on entry is the convention's to say, and the consumer classifies that
+	 * from the convention it already carries. A machine without the flag
+	 * simply has no register by that role. */
+	RRegItem *direction_flag = anal->reg? r_reg_get (anal->reg, "df", -1): NULL;
+	if (direction_flag) {
+		snapshot->direction_flag_name = strdup ("df");
+		r_unref (direction_flag);
+		if (!snapshot->direction_flag_name) {
+			SNAPSHOT_REFUSE ("the direction flag name could not be recorded");
+		}
 	}
 	snapshot_return_mechanism_collect (anal, fcn,
 		ctx, &snapshot->function_interface, &snapshot->return_mechanism);

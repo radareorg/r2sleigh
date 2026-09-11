@@ -1263,6 +1263,25 @@ fn seed_direct_obligations(
 
     match op {
         SSAOp::Load { .. } | SSAOp::Store { .. } => {}
+        // A block operation is not a structured access, so nothing else
+        // answers for its memory: it owns the write over its whole extent
+        // here, and a move owns the read it copies from as well.
+        SSAOp::BlockTransfer { kind, .. } => {
+            seed_instruction(
+                inst.id,
+                Kind::ObservableMemoryWrite,
+                Component::Whole,
+                required,
+            );
+            if *kind == r2il::BlockTransferKind::Move {
+                seed_instruction(
+                    inst.id,
+                    Kind::ObservableMemoryRead,
+                    Component::Whole,
+                    required,
+                );
+            }
+        }
         SSAOp::Fence { ordering } => seed_instruction(
             inst.id,
             Kind::MemoryOrdering,

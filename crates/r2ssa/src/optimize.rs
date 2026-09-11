@@ -1380,6 +1380,23 @@ where
             addr: map(addr),
             val: map(val),
         },
+        BlockTransfer {
+            space,
+            kind,
+            destination,
+            source,
+            count,
+            direction,
+            element_size,
+        } => BlockTransfer {
+            space: *space,
+            kind: *kind,
+            destination: map(destination),
+            source: map(source),
+            count: map(count),
+            direction: map(direction),
+            element_size: *element_size,
+        },
         Fence { ordering } => Fence {
             ordering: *ordering,
         },

@@ -269,6 +269,7 @@ fn operation_kind(op: &crate::SSAOp) -> &'static str {
         Copy,
         Load,
         Store,
+        BlockTransfer,
         Fence,
         LoadLinked,
         StoreConditional,

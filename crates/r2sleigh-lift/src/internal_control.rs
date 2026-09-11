@@ -10,9 +10,18 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use r2il::{OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode};
+use r2il::{BlockTransferKind, OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode};
 
 pub(crate) fn normalize_instruction_local_control(block: &mut R2ILBlock) {
+    // A repeated string instruction's p-code is a loop, and the loop is how the
+    // specification writes a block operation. Recognising it first is what
+    // keeps the guard below from turning the whole instruction into
+    // `Unimplemented`, which is all it could otherwise do with a backward edge.
+    if let Some(rewritten) = block_transfer_from_repeat(block) {
+        block.ops = rewritten;
+        block.op_metadata = BTreeMap::new();
+        return;
+    }
     loop {
         let Some((branch_index, branch, target_index)) = block
             .ops
@@ -44,6 +53,248 @@ pub(crate) fn normalize_instruction_local_control(block: &mut R2ILBlock) {
             }
         }
     }
+}
+
+/// One pointer step of a string instruction, and the saved pointer it wrote.
+///
+/// Sleigh writes `p += width` or `p -= width` as a single expression over the
+/// direction flag: the old pointer is saved, the ascending result computed, and
+/// twice the width subtracted when the flag is set.
+struct PointerStep {
+    pointer: Varnode,
+    saved: Varnode,
+    direction: Varnode,
+    width: u64,
+}
+
+fn constant_value(varnode: &Varnode) -> Option<u64> {
+    (varnode.space == SpaceId::Const).then_some(varnode.offset)
+}
+
+fn same(a: &Varnode, b: &Varnode) -> bool {
+    a.space == b.space && a.offset == b.offset && a.size == b.size
+}
+
+/// Match `saved = p; t1 = p + w; t2 = zext(df); t3 = 2w * t2; p = t1 - t3`.
+fn pointer_step(ops: &[R2ILOp], at: usize) -> Option<(PointerStep, usize)> {
+    let [
+        R2ILOp::Copy {
+            dst: saved,
+            src: base,
+        },
+        R2ILOp::IntAdd {
+            dst: ascending,
+            a: add_base,
+            b: width,
+        },
+        R2ILOp::IntZExt {
+            dst: widened,
+            src: direction,
+        },
+        R2ILOp::IntMult {
+            dst: scaled,
+            a: twice,
+            b: scale_source,
+        },
+        R2ILOp::IntSub {
+            dst: stepped,
+            a: sub_base,
+            b: subtrahend,
+        },
+    ] = ops.get(at..at.checked_add(5)?)?
+    else {
+        return None;
+    };
+    let width = constant_value(width)?;
+    if width == 0
+        || !same(base, add_base)
+        || !same(base, stepped)
+        || !same(ascending, sub_base)
+        || !same(widened, scale_source)
+        || !same(scaled, subtrahend)
+        || constant_value(twice)? != width.checked_mul(2)?
+    {
+        return None;
+    }
+    Some((
+        PointerStep {
+            pointer: base.clone(),
+            saved: saved.clone(),
+            direction: direction.clone(),
+            width,
+        },
+        at + 5,
+    ))
+}
+
+/// The block operation a repeated string instruction performs, with the
+/// register updates it also performs written beside it.
+///
+/// The shape proved here is the whole of it: a guard leaving the instruction
+/// when the counter is zero, a decrement of that counter by one, one or two
+/// pointer steps of the same width in the same direction, the transfer itself,
+/// and a backward branch to this instruction. Anything else is not this
+/// operation and is left to the general normalization.
+fn block_transfer_from_repeat(block: &R2ILBlock) -> Option<Vec<R2ILOp>> {
+    let ops = &block.ops;
+    let last = ops.len().checked_sub(1)?;
+    let R2ILOp::Branch { target } = &ops[last] else {
+        return None;
+    };
+    if target.space != SpaceId::Ram || target.offset != block.addr {
+        return None;
+    }
+    let [
+        R2ILOp::IntEqual {
+            dst: guard,
+            a: counter,
+            b: zero,
+        },
+        R2ILOp::CBranch { target: exit, cond },
+    ] = ops.get(0..2)?
+    else {
+        return None;
+    };
+    let fallthrough = block.addr.checked_add(u64::from(block.size))?;
+    if constant_value(zero)? != 0
+        || !same(guard, cond)
+        || exit.space != SpaceId::Ram
+        || exit.offset != fallthrough
+    {
+        return None;
+    }
+    let R2ILOp::IntSub {
+        dst: decremented,
+        a: decrement_base,
+        b: one,
+    } = &ops[2]
+    else {
+        return None;
+    };
+    if !same(counter, decremented) || !same(counter, decrement_base) || constant_value(one)? != 1 {
+        return None;
+    }
+
+    let (destination, mut cursor) = pointer_step(ops, 3)?;
+    let source = match pointer_step(ops, cursor) {
+        Some((step, next)) => {
+            cursor = next;
+            Some(step)
+        }
+        None => None,
+    };
+    if let Some(source) = &source
+        && (source.width != destination.width || !same(&source.direction, &destination.direction))
+    {
+        return None;
+    }
+
+    // The transfer. A move loads through the saved source pointer and stores
+    // through the saved destination; a fill stores a register's value.
+    let (kind, transferred) = match ops.get(cursor..last)? {
+        [
+            R2ILOp::Load {
+                dst: loaded,
+                space: SpaceId::Ram,
+                addr,
+            },
+            R2ILOp::Copy {
+                dst: staged,
+                src: staging_source,
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: store_addr,
+                val,
+            },
+        ] => {
+            let source = source.as_ref()?;
+            if !same(addr, &source.saved)
+                || !same(loaded, staging_source)
+                || !same(staged, val)
+                || !same(store_addr, &destination.saved)
+                || u64::from(loaded.size) != destination.width
+            {
+                return None;
+            }
+            (BlockTransferKind::Move, source.pointer.clone())
+        }
+        [
+            R2ILOp::Copy {
+                dst: staged,
+                src: filled,
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: store_addr,
+                val,
+            },
+        ] => {
+            if source.is_some()
+                || !same(staged, val)
+                || !same(store_addr, &destination.saved)
+                || u64::from(filled.size) != destination.width
+            {
+                return None;
+            }
+            (BlockTransferKind::Fill, filled.clone())
+        }
+        _ => return None,
+    };
+
+    let element_size = u32::try_from(destination.width).ok()?;
+    let mut rewritten = vec![R2ILOp::BlockTransfer {
+        space: SpaceId::Ram,
+        kind,
+        destination: destination.pointer.clone(),
+        source: transferred,
+        count: counter.clone(),
+        direction: destination.direction.clone(),
+        element_size,
+    }];
+    // The instruction advances both pointers by the whole extent and leaves the
+    // counter at zero. Those are its writes, and they are ordinary operations.
+    let mut allocator = InstructionTempAllocator::for_ops(ops);
+    let extent = allocator.allocate(counter.size)?;
+    let widened_direction = allocator.allocate(counter.size)?;
+    let signed_extent = allocator.allocate(counter.size)?;
+    let twice_extent = allocator.allocate(counter.size)?;
+    rewritten.push(R2ILOp::IntMult {
+        dst: extent.clone(),
+        a: counter.clone(),
+        b: Varnode::constant(destination.width, counter.size),
+    });
+    rewritten.push(R2ILOp::IntZExt {
+        dst: widened_direction.clone(),
+        src: destination.direction.clone(),
+    });
+    rewritten.push(R2ILOp::IntMult {
+        dst: twice_extent.clone(),
+        a: extent.clone(),
+        b: widened_direction.clone(),
+    });
+    rewritten.push(R2ILOp::IntMult {
+        dst: twice_extent.clone(),
+        a: twice_extent.clone(),
+        b: Varnode::constant(2, counter.size),
+    });
+    rewritten.push(R2ILOp::IntSub {
+        dst: signed_extent.clone(),
+        a: extent.clone(),
+        b: twice_extent,
+    });
+    for pointer in [Some(&destination), source.as_ref()].into_iter().flatten() {
+        rewritten.push(R2ILOp::IntAdd {
+            dst: pointer.pointer.clone(),
+            a: pointer.pointer.clone(),
+            b: signed_extent.clone(),
+        });
+    }
+    rewritten.push(R2ILOp::Copy {
+        dst: counter.clone(),
+        src: Varnode::constant(0, counter.size),
+    });
+    Some(rewritten)
 }
 
 #[derive(Debug)]
