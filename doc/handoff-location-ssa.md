@@ -20445,3 +20445,81 @@ Also read this session: 26682 has both remaining review points applied and
 waits on re-review; 26629 has every point of the seven addressed on its head
 (cache on `RAnal`, `r_anal_cc_merge`, generation bumped in `cc.c`) but is 22
 commits behind master and needs a rebase and a one-line ping.
+
+## Two refusal classes closed, and the bound phi chain traced to its contradiction
+
+The census stands at 673 of 720 on the nine binaries, up from 663, with the
+corpus gate at 54 of 54 on raw, differential, snapshot and all four audits.
+Three fixes account for the ten, and each of them is a model statement rather
+than a repair at the symptom.
+
+**A signed division was outside the machine vocabulary.** `IntSDiv` and
+`IntSRem` had no machine expression, so every operand read of one was refused
+as an unsupported operation and the function died on a rendered use the plan
+had denied, even though the renderer had always spelled the operation
+correctly. Rather than a third and fourth variant beside `UnsignedDivide` and
+`UnsignedRemainder`, division now carries its interpretation the way `Compare`
+does and an arithmetic right shift already did. The well-formedness check
+loses a statement in the process: it used to require the operands' types to
+equal the node's, which was only sayable while every division was unsigned.
+
+**A PLT stub for a variadic import is declared, not defined.** A stub is a
+jump, so for a variadic callee it forwards the caller's variadic tail, and C
+has no syntax for that. The spelling this document recorded earlier,
+`__builtin_va_arg_pack()`, is GCC-only, needs an always-inline definition, and
+clang rejects it outright -- and clang is what the corpus verifier compiles
+with, so that entry was wrong and is now retracted. The user chose the
+declaration: a comment naming the address and the import, then an `extern`
+declaration of it. Nine functions. The first version of the detector asked
+only for a single variadic tail call and swallowed three of bzip2's own
+one-line wrappers, so forwarding is now checked rather than inferred -- a stub
+defines nothing observable, no store, no call, and no definition landing in a
+register or in memory.
+
+**Formats that agree prove a variadic count.** A compiler that folds two
+`fprintf` calls into one leaves a call site whose format pointer is a phi of
+two string literals, and the count reader gave up at the merge. The count is a
+property of the format rather than of the path that chose it, so the walk now
+collects every literal that can reach the format argument through merges and
+copies and proves the count when all of them agree. `testf` renders;
+`bzip2recover`'s `main` moves off `RenderedValueRequired` onto a
+terminal-fallthrough control certificate, which is its next missing fact.
+
+### The nine bound phi chains, and why they are a contradiction
+
+`RenderedValueRequired` is now the largest class, nine functions, and every one
+of them has the same shape. The refused value is a phi. Its disposition is
+`Bound`, so the seal demands a rendered occurrence for it. Its only readers in
+the graph are a second phi, and that second phi is `Elided` with reason
+`UnobservedMerge`. Nothing renders the first phi, and the function refuses.
+Two traced examples, both from the same run:
+
+    unaccounted value ValueId(470) disposition Some(Bound { binding:
+      BindingId(195) }) def Some("Phi { predecessors: [BlockId(13),
+      BlockId(18)] }") uses=2 storage=Some((Unique, 258176, 8))
+      readers=["Phi { ... }", "Phi { ... }"] targets=[]
+
+    unaccounted value ValueId(362) disposition Some(Bound { binding:
+      BindingId(59) }) def Some("Phi { ... }") uses=3
+      storage=Some((Register, 128, 8)) readers=["Phi { ... }" x3] targets=[]
+
+The contradiction is worth stating precisely, because it says where the fix
+is. `DeadPhis::find` is a proper transitive closure: a value is unobserved when
+no observation reaches it and its defining instruction is proven dead. If the
+reader phi is unobserved, then walking back from the observation roots cannot
+have reached the value through it. So the value is in the observed set for
+another reason, and since one of the two is a `Unique` temporary it is neither
+live out nor an ABI carrier. It must therefore be named directly as an
+obligation input. That is the contradiction: an obligation claims to depend on
+a value whose every graph occurrence is inside a merge the same analysis proved
+nothing observes.
+
+Two candidate resolutions, and they are not equivalent. Either the obligation's
+input set is wrong, in which case eliding the merge should retract the
+dependence and `DeadPhis` will then prove the value dead on its own; or the
+obligation is right and the merge is not unobserved, in which case the elision
+is the defect. Deciding it needs the obligation that names `ValueId(470)`,
+which nothing currently prints. The next step is an evidence line at the point
+where `DeadPhis::find` extends its roots from `obligation.inputs`, naming the
+obligation and the value, so the trace reaches the owner instead of the
+symptom.
