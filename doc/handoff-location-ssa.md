@@ -20632,7 +20632,7 @@ rewrite of about seventy-five references in thirteen files.
 
 ## Coverage after the caps came out
 
-The local census over the twelve binaries in the scratchpad set: **752 of 790
+The local census over the twelve binaries in the scratchpad set: **753 of 790
 functions render**. The denominator is not the 720 this document quoted before,
 because the set is larger and because radare2 finds more functions once the
 engine's proof pass finishes within its budget.
@@ -20717,6 +20717,32 @@ it resolves any store to a known address before a call.
 The other five do not share it. `bzip2` at -O2 `0x88a0` refuses over `RSP_2`
 from the prologue's own `sub rsp`, whose cell is unaccounted while it has three
 observation targets -- a different shape that needs its own trace.
+
+### Outgoing stack arguments, built; and the link it exposed
+
+The capability is in. `SourceConventionSlots` now carries where the convention
+puts an argument its registers cannot -- the first offset past the register
+slots, from the stack pointer at the call, and the stride to the next. Two
+numbers rather than a list, because how many stack arguments a call has is a
+fact about the call site and a list would have to guess its length. The capture
+asks `r_anal_cc_argslot` for three consecutive slots past the registers and
+records the placement only when all three are stack slots and the two gaps
+agree, so the stride is measured. Wire format is version 12.
+
+The engine needed nothing new to read the values: `reaching_stack_argument_before_call`
+already resolves a stack argument from a caller-view offset, which is how a
+declared stack parameter has always been read.
+
+`cleanUpAndFail` renders. The other two, `0x49d0` and `0x5130`, moved one link
+along and now say:
+
+    call-argument-stack-store: callsite (0x4fe4, 49) has no entry-relative
+      stack pointer entering the call
+
+`call_entering_stack_pointer_offset` cannot express the stack pointer at that
+call in entry-relative terms, so no stack argument at any offset can be
+resolved there. That is the next link, and it is a different fact from the one
+just built -- the placement is known, the coordinate it is measured in is not.
 
 ### Open, with the evidence in hand
 
