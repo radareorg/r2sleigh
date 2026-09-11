@@ -20396,3 +20396,52 @@ their object's name. The defect is that extent and element type are welded into
 one proof. How many bytes the program touches is not a statement about what the
 elements are, and an access wider than the element is an access to a run of
 consecutive elements rather than a contradiction.
+
+## The provider API is withdrawn and the fork is five small pull requests
+
+The maintainer closed the door on 26701 in one line: providing decompilers from
+anal is a design topic, not a pull request, and the PR carried more than that.
+Both points were already ours: the plugin answers `pd:s` and never registers a
+provider, so the callback, `r_anal_decompile`, `pdd` routing and their test had
+no user. Withdrawn, and the user's ruling was "withdraw the provider, split
+into small PRs, drop the hardening".
+
+What the plugin reads from the fork, by grep of `r2plugin/*.c`, is exactly:
+`plugin_analysis_depth`, the function and type dirty epochs,
+`r_anal_function_get_signature_current`,
+`r_anal_function_has_address_linked_signature_current`,
+`r_anal_cc_location_uses`, `RBinBind.get_reloc_at` and `get_sym`, and the cc
+keys `stackalloc`/`redzone`/`retmech`. Each is now its own pull request from
+upstream master, built and tested alone (`$CLAUDE_JOB_DIR/tmp/split.py` applies
+each by exact text, `split-run.sh` builds, links the unit tests against the
+build's own dylibs, and runs the r2r subset):
+
+- 26704 `pr/cc-stack-keys`: the three keys, cleared with the layout on
+  redefinition, and `r_anal_cc_location_uses` exported and case-insensitive.
+- 26705 `pr/bin-bind-reloc-sym`: the two `RBinBind` lookups.
+- 26706 `pr/anal-dirty-epochs`: epochs on function and types, the bump sites,
+  the `r_anal_types_set_link`/`unlink` wrappers, `r_anal_function_set_callconv`
+  behind `afc`, and the relocate/rename test.
+- 26707 `pr/signature-current`: `function_get_signature (function, load_types)`
+  split, the two `_current` queries, `r_anal_function_type_link_at`.
+- 26708 `pr/post-analysis-depth`: the enum, the field, hooks at the end of `aa`
+  and `aaa`. Flagged in its description as the one that may belong in an issue.
+
+26702 (surface removal) stays open and green. The hardening that rode on 26701
+(cc and canal locks, recover_vars batch rollback, delete ownership refusal,
+`o--` check, `on_fcn_delete` user pointer, type.c NULL checks, log level) is
+dropped from the PRs and from the fork; all of it dated from the snapshot API
+and the handoff had already judged it not a radare2 need.
+
+The integration branch `anal/subregister-argument-spills` is rebuilt as upstream
+master plus those six commits (05b8d1e77b, pushed; the previous head is tagged
+`backup/integration-hardening-20260911`). Reconfigured, so the source version is
+6.2.3 and the share dir moved; built, installed, plugin rebuilt and installed;
+r2r on nine dirs 0 XX, anal unit tests all OK, plugin gates 54 on every
+requested column. The peer session re-baselines its census against this
+install.
+
+Also read this session: 26682 has both remaining review points applied and
+waits on re-review; 26629 has every point of the seven addressed on its head
+(cache on `RAnal`, `r_anal_cc_merge`, generation bumped in `cc.c`) but is 22
+commits behind master and needs a rebase and a one-line ping.
