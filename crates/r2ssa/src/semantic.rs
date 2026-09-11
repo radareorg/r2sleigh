@@ -1545,6 +1545,15 @@ pub struct CallsiteCertificate {
     /// pointer just before the transfer, where the convention pushes one.
     pub return_address_store: Option<InstId>,
     pub argument_certificates: Vec<CallArgumentCertificate>,
+    /// Whether the ABI boundary proved a reaching value for every argument the
+    /// callee's interface declares.
+    ///
+    /// False leaves `argument_values` empty, which is not the same fact as a
+    /// callee that takes none. A rendering that cannot tell them apart spells
+    /// `callee()` for both.
+    pub arguments_complete: bool,
+    /// Whether every result value the caller observes was proved.
+    pub results_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7704,6 +7713,13 @@ fn collect_prepared_function_certificates(
                         boundary.variadic_argument_count_refusal,
                     )
                 });
+            // Which half of the boundary was proved, kept apart. A call whose
+            // results are known and whose argument mapping is not is a
+            // different thing from one that takes no arguments.
+            let (arguments_complete, results_complete) =
+                boundary.map_or((false, false), |boundary| {
+                    (boundary.arguments_complete, boundary.results_complete)
+                });
             callsites_by_inst.insert(fact.at, *id);
             (
                 *id,
@@ -7724,6 +7740,8 @@ fn collect_prepared_function_certificates(
                     stack_argument_values,
                     return_address_store: return_address_store_before(fact.at),
                     argument_certificates,
+                    arguments_complete,
+                    results_complete,
                 },
             )
         })

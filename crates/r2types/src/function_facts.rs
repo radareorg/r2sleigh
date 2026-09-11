@@ -1338,6 +1338,12 @@ pub struct CallsiteArgumentFacts {
     pub variadic_argument_count_refusal: Option<r2ssa::VariadicCallsiteArgumentCountRefusal>,
     pub register_argument_locations: Vec<RegisterCallArgumentLocationFact>,
     pub stack_argument_locations: Vec<StackCallArgumentLocationFact>,
+    /// Whether the ABI boundary proved a reaching value for every argument the
+    /// callee's interface declares. False empties `argument_values`, which
+    /// reads identically to a callee that takes none.
+    pub arguments_complete: bool,
+    /// Whether every result value the caller observes was proved.
+    pub results_complete: bool,
 }
 
 impl CallsiteArgumentFacts {
@@ -3854,6 +3860,8 @@ fn prepared_callsite_argument_facts(prepared: &r2ssa::SsaArtifact) -> FunctionCa
                     variadic_argument_count_refusal: cert.variadic_argument_count_refusal,
                     register_argument_locations,
                     stack_argument_locations,
+                    arguments_complete: cert.arguments_complete,
+                    results_complete: cert.results_complete,
                 },
             ))
         })
@@ -5603,6 +5611,8 @@ mod tests {
             stack_argument_values: Vec::new(),
             return_address_store: None,
             argument_certificates: Vec::new(),
+            arguments_complete: true,
+            results_complete: true,
         };
         let mut boundary = r2ssa::SourceCallBoundaryFact {
             call_site: call_site_id,
@@ -5866,6 +5876,8 @@ mod tests {
                         source_inst: Some(r2ssa::InstId(4)),
                     }],
                     stack_argument_locations: Vec::new(),
+                    arguments_complete: true,
+                    results_complete: true,
                 },
             )]),
         };
@@ -6034,6 +6046,8 @@ mod tests {
                     variadic_argument_count_refusal: None,
                     register_argument_locations: Vec::new(),
                     stack_argument_locations: Vec::new(),
+                    arguments_complete: true,
+                    results_complete: true,
                 },
             )]),
         };
@@ -6185,6 +6199,8 @@ mod tests {
                     source_inst: Some(r2ssa::InstId(4)),
                 },
             ],
+            arguments_complete: true,
+            results_complete: true,
         };
 
         assert_eq!(
@@ -6599,6 +6615,8 @@ mod tests {
             variadic_argument_count_refusal: None,
             register_argument_locations: Vec::new(),
             stack_argument_locations: Vec::new(),
+            arguments_complete: true,
+            results_complete: true,
         };
         let sentinel_render = CallsiteRenderFact {
             callsite,

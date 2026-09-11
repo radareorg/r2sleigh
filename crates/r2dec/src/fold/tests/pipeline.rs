@@ -846,6 +846,8 @@ mod tests {
                         variadic_argument_count_refusal: cert.variadic_argument_count_refusal,
                         register_argument_locations,
                         stack_argument_locations,
+                        arguments_complete: true,
+                        results_complete: true,
                     },
                 ))
             })

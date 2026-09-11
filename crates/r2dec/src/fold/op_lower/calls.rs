@@ -440,6 +440,21 @@ impl<'a> FoldingContext<'a> {
                     .unwrap_or(r2ssa::VariadicCallsiteArgumentCountRefusal::MissingFormatParameter),
             ));
         }
+        // An incomplete argument boundary leaves `argument_values` empty, and
+        // an empty list is indistinguishable from a callee that takes nothing.
+        // Rendering `callee()` for the first would drop arguments the call
+        // really passes, so the call refuses here and a gap covers it.
+        if !cert.arguments_complete {
+            r2il::refusal_evidence!(
+                "callsite-arguments-incomplete",
+                "callsite=({block_addr:#x}, {op_idx}) target={:?} variadic={}                  fixed_argument_count={:?} results_complete={}",
+                cert.direct_target,
+                cert.variadic,
+                cert.fixed_argument_count,
+                cert.results_complete
+            );
+            return Err(OpLoweringRefusal::missing_machine_projection());
+        }
         if cert.callsite != expected_site
             || render_fact.callsite != expected_site
             || render_fact.target != Some(cert.target)
@@ -659,6 +674,8 @@ mod indexed_argument_tests {
                 variadic_argument_count_refusal: None,
                 register_argument_locations: Vec::new(),
                 stack_argument_locations: Vec::new(),
+                arguments_complete: true,
+                results_complete: true,
             },
             r2types::CallsiteRenderFact {
                 callsite,
