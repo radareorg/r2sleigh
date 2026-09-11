@@ -265,7 +265,10 @@ impl BindingNameResolution {
                     .and_then(|object| source_stack_slot_presentation(source_owned, object))
                     .inspect(|_| source_named_locals += 1)
                     .or_else(|| binding.presentation_name_hint()),
-                SymbolRole::Carrier => binding.presentation_name_hint(),
+                // A binding is never a render cursor: the cursor exists only
+                // where a lowering needs something to step, and no binding
+                // answers for it.
+                SymbolRole::Carrier | SymbolRole::RenderCursor => binding.presentation_name_hint(),
             }
             .map(c_identifier_for_presentation)
             .unwrap_or_else(|| format!("binding_{}", binding_id.index()));
@@ -298,6 +301,13 @@ impl BindingNameResolution {
     /// to the statement that caused it.
     pub(crate) fn spelling(&self, symbol: SymbolId) -> Rc<str> {
         crate::symbol::spelling(&self.symbols, symbol)
+    }
+
+    /// Whether this name is a cursor a lowering introduced rather than an
+    /// object the program holds. No binding answers for one, and none should:
+    /// it is declared in the scope of the loop it drives and read nowhere else.
+    pub(crate) fn symbol_is_render_cursor(&self, symbol: SymbolId) -> bool {
+        self.symbols.borrow().get(symbol).role == crate::symbol::SymbolRole::RenderCursor
     }
 
     pub(crate) fn symbol_for_binding(&self, binding: BindingId) -> Option<SymbolId> {

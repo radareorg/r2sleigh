@@ -1407,6 +1407,40 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// The memory a block operation performs, which no structured access
+    /// states.
+    ///
+    /// A `Store` names one access the facts describe exactly, and its
+    /// obligation is found through that description. A block operation writes
+    /// a whole extent and owns it as one obligation on the instruction, so
+    /// there is no access to look up and the obligation is taken by kind.
+    pub(crate) fn block_transfer_effect_obligations(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> BTreeSet<SemanticObligationId> {
+        use r2ssa::{SemanticObligationComponent, SemanticObligationKind};
+
+        let Some(prepared) = self.inputs.prepared_ssa else {
+            return BTreeSet::new();
+        };
+        let Some(source_inst) = self.source_inst_for_normalized_op(block_addr, op_idx) else {
+            return BTreeSet::new();
+        };
+        prepared
+            .obligations()
+            .obligations_for_inst(source_inst)
+            .filter(|obligation| {
+                matches!(
+                    obligation.id.kind,
+                    SemanticObligationKind::ObservableMemoryWrite
+                        | SemanticObligationKind::ObservableMemoryRead
+                ) && obligation.id.component == SemanticObligationComponent::Whole
+            })
+            .map(|obligation| obligation.id)
+            .collect()
+    }
+
     fn exact_effect_obligations_for_inst_memory(
         &self,
         kind: EffectOccurrenceKind,

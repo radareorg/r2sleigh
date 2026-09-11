@@ -2106,6 +2106,11 @@ fn audit_program_symbol(
     targets: &[Option<PlacementObservationTarget>],
     by_symbol: &BTreeMap<crate::symbol::SymbolId, BindingId>,
 ) -> Result<(), PlacementAnalysisError> {
+    // A cursor a lowering introduced answers for itself: it holds no value the
+    // program computed, so no binding owns it and none is asked for.
+    if names.symbol_is_render_cursor(symbol) {
+        return Ok(());
+    }
     let binding = by_symbol
         .get(&symbol)
         .copied()

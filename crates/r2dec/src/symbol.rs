@@ -66,6 +66,16 @@ pub enum SymbolRole {
     StackLocal(i64),
     /// A value the function computes and more than one place reads.
     Carrier,
+    /// A cursor the rendering introduced, which no program object answers for.
+    ///
+    /// One machine operation whose meaning is a loop needs a loop to spell it,
+    /// and a loop in C needs something to step. The machine steps registers
+    /// whose final values the instruction's own arithmetic already computes, so
+    /// the step cannot use them, and the count is the only other thing in
+    /// sight. This names the object the rendering adds for that and nothing
+    /// else: it is declared in the scope of the loop it drives, it holds no
+    /// value the program computed, and no binding answers for it.
+    RenderCursor,
 }
 
 /// One declared name.

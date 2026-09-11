@@ -277,6 +277,10 @@ impl<'a> FoldingContext<'a> {
             }
             return obligations;
         }
+        if matches!(op, SSAOp::BlockTransfer { .. }) {
+            obligations.extend(self.block_transfer_effect_obligations(block_addr, op_idx));
+            return obligations;
+        }
         let memory = match op {
             SSAOp::Load { .. } => self
                 .certified_memory_access_for_current_op(false)

@@ -1537,6 +1537,109 @@ impl<'a> FoldingContext<'a> {
         Some(CStmt::Expr(call))
     }
 
+    /// One repeated string instruction, as the loop it is.
+    ///
+    /// There is no exact one-call spelling. `memcpy` and `memmove` each promise
+    /// something the hardware does not do when the regions overlap -- an
+    /// ascending element copy into an overlapping destination replicates, which
+    /// is the machine's behaviour and neither function's contract -- and
+    /// nothing here proves the regions disjoint. The element loop is exact
+    /// whether they overlap or not, because C evaluates it element by element
+    /// exactly as the machine does, so it is what this renders.
+    ///
+    /// The cursor is declared in the loop's own scope. It cannot be one of the
+    /// machine's own registers: the instruction's arithmetic beside this one
+    /// already computes their final values, and stepping them here would write
+    /// the objects that arithmetic reads.
+    ///
+    /// A direction the convention did not settle has no spelling at all --
+    /// `for` cannot walk both ways at once -- so an unproven direction declines
+    /// and the operation stands as a marked gap.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the operation's own fields, passed through rather than re-matched"
+    )]
+    fn block_transfer_stmt(
+        &self,
+        frame: &LowerFrame,
+        space: r2il::SpaceId,
+        kind: r2il::BlockTransferKind,
+        destination: &SSAVar,
+        source: &SSAVar,
+        count: &SSAVar,
+        direction: &SSAVar,
+        element_size: u32,
+    ) -> OpLoweringResult<Option<CStmt>> {
+        if space != r2il::SpaceId::Ram {
+            return Ok(Some(self.certified_residual_comment(format!(
+                "unsupported block transfer space {space}"
+            ))));
+        }
+        if direction.constant_bits() != Some(0) {
+            r2il::refusal_evidence!(
+                "block-transfer",
+                "the direction of the transfer at {:#x}:{} is not a settled zero, so neither                  walk can be spelled",
+                self.current_block_addr.get().unwrap_or_default(),
+                self.current_op_idx.get().unwrap_or_default()
+            );
+            return Err(OpLoweringRefusal::missing_machine_projection());
+        }
+        let element = uint_type_from_size(element_size);
+        let pointer = crate::ast::CType::Pointer(Box::new(element.clone()));
+        let cursor_type = uint_type_from_size(count.size);
+        let cursor = self.symbols.borrow_mut().declare(
+            "transferred",
+            cursor_type.clone(),
+            crate::symbol::SymbolRole::RenderCursor,
+        );
+        let destination = CExpr::cast(
+            pointer.clone(),
+            self.observed_input(frame, 0, self.get_expr(destination)?),
+        );
+        let written = CExpr::Subscript {
+            base: Box::new(destination),
+            index: Box::new(CExpr::Var(cursor)),
+        };
+        let read = match kind {
+            r2il::BlockTransferKind::Move => CExpr::Subscript {
+                base: Box::new(CExpr::cast(
+                    pointer,
+                    self.observed_input(frame, 1, self.get_expr(source)?),
+                )),
+                index: Box::new(CExpr::Var(cursor)),
+            },
+            r2il::BlockTransferKind::Fill => {
+                self.observed_input(frame, 1, self.get_expr(source)?)
+            }
+        };
+        let step = CStmt::expr(CExpr::assign(
+            CExpr::Var(cursor),
+            CExpr::binary(
+                crate::ast::BinaryOp::Add,
+                CExpr::Var(cursor),
+                CExpr::UIntLit(1),
+            ),
+        ));
+        Ok(Some(CStmt::Block(vec![
+            CStmt::Decl {
+                ty: cursor_type,
+                name: cursor,
+                init: Some(CExpr::UIntLit(0)),
+            },
+            CStmt::While {
+                cond: CExpr::binary(
+                    crate::ast::BinaryOp::Ne,
+                    CExpr::Var(cursor),
+                    self.observed_input(frame, 2, self.get_expr(count)?),
+                ),
+                body: Box::new(CStmt::Block(vec![
+                    CStmt::expr(CExpr::assign(written, read)),
+                    step,
+                ])),
+            },
+        ])))
+    }
+
     fn op_to_stmt_impl(&self, op: &SSAOp, frame: &LowerFrame) -> OpLoweringResult<Option<CStmt>> {
         let input = |input_idx: usize, var: &SSAVar| -> OpLoweringResult<CExpr> {
             Ok(self.observed_input(frame, input_idx, self.get_expr(var)?))
@@ -1590,6 +1693,24 @@ impl<'a> FoldingContext<'a> {
                 let rhs = self.observed_memory_input(frame, 0, rhs);
                 self.assign_typed(lhs, rhs, Some(CValue::Typed(elem_ty)))
             }
+            SSAOp::BlockTransfer {
+                space,
+                kind,
+                destination,
+                source,
+                count,
+                direction,
+                element_size,
+            } => self.block_transfer_stmt(
+                frame,
+                *space,
+                *kind,
+                destination,
+                source,
+                count,
+                direction,
+                *element_size,
+            )?,
             SSAOp::Store { addr, val, space } => {
                 if *space != r2il::SpaceId::Ram {
                     return Ok(Some(self.certified_residual_comment(format!(

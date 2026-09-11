@@ -1559,6 +1559,29 @@ pub(crate) fn certificate_elided_cells(
             ElisionReason::DecomposedWideConstantStore,
         )?;
     }
+    // Which way a block operation walks. The rendering writes one walk, so the
+    // operand that selected it has no C expression to sit on.
+    for inst in &graph.insts {
+        let r2ssa::InstPayload::Op(r2ssa::SSAOp::BlockTransfer { direction, .. }) = &inst.payload
+        else {
+            continue;
+        };
+        let Some(direction) = graph.value_id_for_var(direction) else {
+            continue;
+        };
+        for (input_idx, input) in inst.inputs.iter().enumerate() {
+            if *input == direction {
+                insert_elided_use(
+                    &mut uses,
+                    r2ssa::UseSite {
+                        inst: inst.id,
+                        input_idx,
+                    },
+                    ElisionReason::BlockTransferDirection,
+                )?;
+            }
+        }
+    }
     // A register a call clobbered and no result certificate claims is declared
     // and not assigned: the object holds whatever the callee left, and there is
     // nothing in this function to assign it from. The `CallDefine` that mints

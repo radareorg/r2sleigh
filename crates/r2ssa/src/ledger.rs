@@ -183,6 +183,14 @@ pub enum ElisionReason {
     /// that the read is indeterminate. This differs from `UnclaimedCallClobber`
     /// in that something does read it, so the object is real and visible.
     CallClobberedDeclaration,
+    /// Which way a block operation walks, which its loop's form already says.
+    ///
+    /// A repeated string instruction reads the direction flag to choose
+    /// between an ascending and a descending walk. The rendering picks one and
+    /// writes it -- an ascending loop is ascending in its own text -- so the
+    /// operand that chose it is not a C expression, in the same way a branch's
+    /// target is not one where the structure already expresses the transfer.
+    BlockTransferDirection,
     /// A removed merge input already names the merge result, so its edge copy
     /// would be the identity assignment `x = x`.
     RedundantPhiEdge,
@@ -227,6 +235,7 @@ impl std::fmt::Display for ElisionReason {
             Self::CallerSuppliedEntryValue => "caller-supplied-entry-value",
             Self::UnclaimedCallClobber => "unclaimed-call-clobber",
             Self::CallClobberedDeclaration => "call-clobbered-declaration",
+            Self::BlockTransferDirection => "block-transfer-direction",
             Self::RedundantPhiEdge => "redundant-phi-edge",
             Self::MaterializedPhiEdges => "materialized-phi-edges",
             Self::DecomposedWideConstantStore => "decomposed-wide-constant-store",
