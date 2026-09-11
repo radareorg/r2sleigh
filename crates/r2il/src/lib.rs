@@ -26,6 +26,7 @@
 //! block.push(R2ILOp::Copy { dst: eax, src: imm });
 //! ```
 
+pub mod allocation;
 pub mod endianness;
 pub mod memory;
 pub mod metadata;

@@ -10,6 +10,12 @@
 // `unsafe` calling convention.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(feature = "alloc-probe")]
+mod counting_alloc;
+#[cfg(feature = "alloc-probe")]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
+
 mod analysis;
 mod blocks;
 mod context;

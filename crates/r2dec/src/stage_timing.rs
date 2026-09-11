@@ -25,6 +25,8 @@ fn enabled() -> bool {
 thread_local! {
     static STAGES: RefCell<Vec<(&'static str, Duration)>> = const { RefCell::new(Vec::new()) };
     static LAST: RefCell<Option<Instant>> = const { RefCell::new(None) };
+    /// The high-water mark each stage reached, when something is counting.
+    static PEAKS: RefCell<Vec<(&'static str, usize)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Begin a render. Any marks left by an earlier render are discarded, because
@@ -34,6 +36,8 @@ pub(crate) fn begin() {
         return;
     }
     STAGES.with_borrow_mut(Vec::clear);
+    PEAKS.with_borrow_mut(Vec::clear);
+    r2il::allocation::reset_peak();
     LAST.with_borrow_mut(|last| *last = Some(Instant::now()));
 }
 
@@ -47,6 +51,15 @@ pub(crate) fn mark(stage: &'static str) {
         let elapsed = last.map(|start| now.duration_since(start));
         *last = Some(now);
         elapsed
+    });
+    let peak = r2il::allocation::peak_bytes();
+    r2il::allocation::reset_peak();
+    PEAKS.with_borrow_mut(|peaks| {
+        if let Some(row) = peaks.iter_mut().find(|(name, _)| *name == stage) {
+            row.1 = row.1.max(peak);
+        } else {
+            peaks.push((stage, peak));
+        }
     });
     if let Some(elapsed) = elapsed {
         STAGES.with_borrow_mut(|stages| {
@@ -68,6 +81,7 @@ pub(crate) fn report(function: &str) {
         return;
     }
     let stages = STAGES.with_borrow_mut(std::mem::take);
+    let peaks = PEAKS.with_borrow_mut(std::mem::take);
     LAST.with_borrow_mut(|last| *last = None);
     if stages.is_empty() {
         return;
@@ -79,6 +93,16 @@ pub(crate) fn report(function: &str) {
     );
     for (stage, elapsed) in &stages {
         line.push_str(&format!(" {stage}={}us", elapsed.as_micros()));
+    }
+    // Bytes only when an allocator is actually counting: a zero here would
+    // otherwise read as "this stage allocated nothing", which is a different
+    // claim from "nobody measured".
+    if r2il::allocation::is_counting() {
+        let high = peaks.iter().map(|(_, peak)| *peak).max().unwrap_or(0);
+        line.push_str(&format!(" peak_bytes={high}"));
+        for (stage, peak) in &peaks {
+            line.push_str(&format!(" {stage}_bytes={peak}"));
+        }
     }
     eprintln!("{line}");
 }

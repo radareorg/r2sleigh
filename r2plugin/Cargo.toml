@@ -33,6 +33,8 @@ workspace = true
 optional = true
 
 [features]
+# Install a counting global allocator so a render can report its bytes.
+alloc-probe = []
 default = ["x86"]
 x86 = ["sleigh-config/x86", "r2sleigh-lift/x86"]
 arm = ["sleigh-config/ARM", "sleigh-config/AARCH64", "r2sleigh-lift/arm"]
