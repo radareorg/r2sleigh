@@ -648,6 +648,9 @@ pub enum VariadicCallsiteArgumentCountRefusal {
     CallingConventionMismatch,
     InsufficientRegisterArgumentCarriers,
     UnresolvedArgumentCarrier,
+    /// The format consumes a floating operand, which the convention carries in
+    /// its floating sequence rather than the integer one this recovery walks.
+    FloatingVariadicArgument,
 }
 
 impl VariadicCallsiteArgumentCountRefusal {
@@ -661,6 +664,7 @@ impl VariadicCallsiteArgumentCountRefusal {
             Self::CallingConventionMismatch => "calling_convention_mismatch",
             Self::InsufficientRegisterArgumentCarriers => "insufficient_register_argument_carriers",
             Self::UnresolvedArgumentCarrier => "unresolved_argument_carrier",
+            Self::FloatingVariadicArgument => "floating_variadic_argument",
         }
     }
 }
@@ -3535,8 +3539,16 @@ fn variadic_callsite_argument_count(
             );
             VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral
         })?;
-    let format_consumed_argument_count = crate::printf::printf_consumed_argument_count(format)
+    let consumed = crate::printf::printf_consumed_arguments(format)
         .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
+    if consumed.any_floating {
+        r2il::refusal_evidence!(
+            "variadic-format-literal",
+            "format argument {format_argument_index} at {format_literal_address:#x} consumes a floating operand, which this recovery cannot place"
+        );
+        return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
+    }
+    let format_consumed_argument_count = consumed.count;
     let total_argument_count = interface
         .arguments()
         .len()
@@ -3574,6 +3586,11 @@ fn reaching_format_literals(
         return true;
     }
     let Some(definition) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+        r2il::refusal_evidence!(
+            "variadic-format-literal",
+            "reaching format walk stops at {value:?} ({}), which nothing in this function defines",
+            var.display_name()
+        );
         return false;
     };
     match &definition.payload {
@@ -3581,7 +3598,25 @@ fn reaching_format_literals(
             .inputs
             .iter()
             .all(|input| reaching_format_literals(function, graph, *input, seen, found)),
-        _ => false,
+        // A conditional move selects the format the same way a merge does, and
+        // `cmov` is how a compiler spells the choice when it does not branch.
+        // Only the two results can be the format; the condition is not one.
+        InstPayload::Op(SSAOp::Select { .. }) => definition
+            .inputs
+            .iter()
+            .skip(1)
+            .all(|input| reaching_format_literals(function, graph, *input, seen, found)),
+        InstPayload::Op(op) => {
+            // Which operation the walk cannot see through is the fact that
+            // decides whether the count is unprovable or merely unproven here.
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "reaching format walk stops at {value:?} ({}), defined by {}",
+                var.display_name(),
+                format!("{op:?}").chars().take(60).collect::<String>()
+            );
+            false
+        }
     }
 }
 
@@ -3601,11 +3636,11 @@ fn merged_format_literal_argument_count(
         format_value,
         &mut BTreeSet::new(),
         &mut addresses,
-    ) || addresses.len() < 2
+    ) || addresses.is_empty()
     {
         r2il::refusal_evidence!(
             "variadic-format-literal",
-            "format argument {format_argument_index} is a merge of {} reaching values, not all of them literals",
+            "format argument {format_argument_index} reaches {} literals and at least one value that is not one",
             addresses.len()
         );
         return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
@@ -3619,8 +3654,16 @@ fn merged_format_literal_argument_count(
             );
             return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
         };
-        let count = crate::printf::printf_consumed_argument_count(format)
+        let consumed = crate::printf::printf_consumed_arguments(format)
             .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
+        if consumed.any_floating {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "merged format argument {format_argument_index} reaches {address:#x}, which consumes a floating operand"
+            );
+            return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
+        }
+        let count = consumed.count;
         match agreed {
             None => agreed = Some(count),
             Some(existing) if existing == count => {}
@@ -3647,8 +3690,15 @@ fn merged_format_literal_argument_count(
         "variadic-format-literal",
         "merged format argument {format_argument_index} agrees on {format_consumed_argument_count} arguments across {addresses:?}"
     );
+    // One literal reached through copies is one literal, and saying it was a
+    // merge would claim a proof this call did not need.
+    let source = if addresses.len() == 1 {
+        VariadicCallsiteArgumentCountSource::Radare2FormatString
+    } else {
+        VariadicCallsiteArgumentCountSource::Radare2MergedFormatStrings
+    };
     Ok(VariadicCallsiteArgumentCountEvidence {
-        source: VariadicCallsiteArgumentCountSource::Radare2MergedFormatStrings,
+        source,
         format_argument_index,
         format_literal_address,
         format_consumed_argument_count,
@@ -4162,12 +4212,24 @@ fn collect_source_boundary_facts(
                                     true
                                 }
                                 Err(refusal) => {
+                                    // The count was proved and the carriers
+                                    // were not, which is a different failure
+                                    // from not knowing how many there are.
+                                    r2il::refusal_evidence!(
+                                        "variadic-callsite-arguments",
+                                        "callsite ({block_addr:#x}, {op_index}) proved {} arguments and refused their carriers: {refusal:?}",
+                                        evidence.total_argument_count
+                                    );
                                     boundary.variadic_argument_count_refusal = Some(refusal);
                                     false
                                 }
                             }
                         }
                         Err(refusal) => {
+                            r2il::refusal_evidence!(
+                                "variadic-callsite-arguments",
+                                "callsite ({block_addr:#x}, {op_index}) could not prove its argument count: {refusal:?}"
+                            );
                             boundary.variadic_argument_count_refusal = Some(refusal);
                             false
                         }

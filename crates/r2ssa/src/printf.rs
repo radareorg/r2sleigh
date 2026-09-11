@@ -81,12 +81,27 @@ fn consume_argument(
 /// flags, widths, precisions, and length modifiers remain part of one
 /// conversion. POSIX positional operands are accepted only when every
 /// consuming operand is positional.
-pub(crate) fn printf_consumed_argument_count(format: &str) -> Result<usize, PrintfFormatRefusal> {
+/// What a printf-family format says about the arguments it consumes.
+///
+/// The count alone is not enough to place the arguments: a floating
+/// conversion's operand travels in the convention's floating sequence rather
+/// than its integer one, so a consumer that assigns carriers in order needs to
+/// know whether any operand is floating before it does so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrintfConsumedArguments {
+    pub count: usize,
+    pub any_floating: bool,
+}
+
+pub(crate) fn printf_consumed_arguments(
+    format: &str,
+) -> Result<PrintfConsumedArguments, PrintfFormatRefusal> {
     let bytes = format.as_bytes();
     let mut cursor = 0usize;
     let mut mode = ArgumentMode::Unknown;
     let mut sequential_count = 0usize;
     let mut largest_position = None;
+    let mut any_floating = false;
 
     while cursor < bytes.len() {
         if bytes[cursor] != b'%' {
@@ -156,6 +171,10 @@ pub(crate) fn printf_consumed_argument_count(format: &str) -> Result<usize, Prin
         match conversion {
             b'd' | b'i' | b'o' | b'u' | b'x' | b'X' | b'f' | b'F' | b'e' | b'E' | b'g' | b'G'
             | b'a' | b'A' | b'c' | b'C' | b's' | b'S' | b'p' | b'n' | b'b' | b'B' => {
+                any_floating |= matches!(
+                    conversion,
+                    b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A'
+                );
                 consume_argument(
                     conversion_position,
                     &mut mode,
@@ -169,17 +188,45 @@ pub(crate) fn printf_consumed_argument_count(format: &str) -> Result<usize, Prin
         }
     }
 
-    match mode {
-        ArgumentMode::Unknown | ArgumentMode::Sequential => Ok(sequential_count),
+    let count = match mode {
+        ArgumentMode::Unknown | ArgumentMode::Sequential => sequential_count,
         ArgumentMode::Positional => largest_position
             .and_then(|position| position.checked_add(1))
-            .ok_or(PrintfFormatRefusal::InvalidPosition),
-    }
+            .ok_or(PrintfFormatRefusal::InvalidPosition)?,
+    };
+    Ok(PrintfConsumedArguments {
+        count,
+        any_floating,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PrintfFormatRefusal, printf_consumed_argument_count};
+    use super::{PrintfFormatRefusal, printf_consumed_arguments};
+
+    fn printf_consumed_argument_count(format: &str) -> Result<usize, PrintfFormatRefusal> {
+        printf_consumed_arguments(format).map(|consumed| consumed.count)
+    }
+
+    /// A floating conversion is reported, because its operand does not travel
+    /// where an integer one does.
+    #[test]
+    fn floating_conversions_are_named_and_others_are_not() {
+        for (format, count, floating) in [
+            ("%d items", 1, false),
+            ("%s took %6.3f seconds", 2, true),
+            ("%5.2f%% saved", 1, true),
+            ("%-12.4e", 1, true),
+            ("%a", 1, true),
+            ("100%% done", 0, false),
+            ("%*d", 2, false),
+            ("%.*f", 2, true),
+        ] {
+            let consumed = printf_consumed_arguments(format).expect("format parses");
+            assert_eq!(consumed.count, count, "count for {format:?}");
+            assert_eq!(consumed.any_floating, floating, "floating for {format:?}");
+        }
+    }
 
     #[test]
     fn counts_conversion_operands_instead_of_percent_bytes() {

@@ -337,7 +337,65 @@ impl DeadPhis {
                 dead.values.insert(inst.output.expect("checked phi output"));
             }
         }
+        dead.report_values_observed_only_through_dead_merges(
+            graph,
+            live_out,
+            obligations,
+            &observed,
+        );
         dead
+    }
+
+    /// Name a value this analysis calls observed and also renders unreachable.
+    ///
+    /// A value whose every graph use sits inside an instruction the same walk
+    /// proved unobserved has no occurrence any rendering can own, so the plan
+    /// binds a cell the seal then demands and nothing can fill. It is reached
+    /// from a root rather than through its uses, and which root decides whether
+    /// the obligation's inputs are wrong or the merge is not dead.
+    fn report_values_observed_only_through_dead_merges(
+        &self,
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        obligations: &SemanticObligationInventory,
+        observed: &BTreeSet<ValueId>,
+    ) {
+        if !r2il::refusal_evidence::tracing() {
+            return;
+        }
+        for value in &graph.values {
+            if self.unobserved_values.contains(&value.id) {
+                continue;
+            }
+            let uses = graph.use_sites(value.id);
+            if uses.is_empty()
+                || !uses
+                    .iter()
+                    .all(|site| self.unobserved_insts.contains(&site.inst))
+            {
+                continue;
+            }
+            let rooted_by = obligations
+                .obligations()
+                .values()
+                .filter(|obligation| obligation.inputs.contains(&value.id))
+                .map(|obligation| {
+                    format!("{:?}/{:?}", obligation.id.kind, obligation.id.instruction)
+                })
+                .collect::<Vec<_>>();
+            let definition_state = graph
+                .def_inst(value.id)
+                .and_then(|inst| obligations.instruction_for_inst(inst))
+                .map(|instruction| format!("{:?}", instruction.state));
+            r2il::refusal_evidence!(
+                "observed-through-dead-merge",
+                "{:?} keeps a cell while every one of its {} uses is inside an unobserved merge; in_observed_closure={} live_out={} definition_state={definition_state:?} obligations={rooted_by:?}",
+                value.id,
+                uses.len(),
+                observed.contains(&value.id),
+                live_out.contains(value.id)
+            );
+        }
     }
 
     pub fn contains(&self, value: ValueId) -> bool {
