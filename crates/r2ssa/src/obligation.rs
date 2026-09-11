@@ -1431,6 +1431,7 @@ fn seed_direct_obligations(
         | SSAOp::Trunc { .. }
         | SSAOp::CallDefine { .. }
         | SSAOp::CallRestore { .. }
+        | SSAOp::CallUse { .. }
         | SSAOp::Nop
         | SSAOp::PtrAdd { .. }
         | SSAOp::PtrSub { .. }
@@ -1537,7 +1538,12 @@ fn propagate_live_dependencies(graph: &SsaGraph, required: &mut ObligationSeeds)
 fn instruction_is_structural(payload: &InstPayload) -> bool {
     matches!(
         payload,
-        InstPayload::Op(SSAOp::Nop | SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. })
+        InstPayload::Op(
+            SSAOp::Nop
+                | SSAOp::CallDefine { .. }
+                | SSAOp::CallRestore { .. }
+                | SSAOp::CallUse { .. }
+        )
     )
 }
 

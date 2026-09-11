@@ -2437,7 +2437,7 @@ impl<'a> FoldingContext<'a> {
             // rather than against a name this would assign. Rendering an
             // assignment here would state the frame's own plumbing as a
             // statement, which is what the frame certificates elide.
-            SSAOp::CallRestore { .. } => None,
+            SSAOp::CallRestore { .. } | SSAOp::CallUse { .. } => None,
             SSAOp::Nop => None,
             // A trap. `__builtin_trap` is a real compiler builtin, so the
             // emitted C still compiles standalone with nothing declared, and it

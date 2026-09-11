@@ -1661,6 +1661,7 @@ where
             instruction: *instruction,
         },
         CallDefine { dst } => CallDefine { dst: dst.clone() },
+        CallUse { src } => CallUse { src: map(src) },
         CallRestore { dst, src } => CallRestore {
             dst: dst.clone(),
             src: map(src),

@@ -271,6 +271,21 @@ pub enum SSAOp {
     /// drifts by one return-address slot at every call it makes.
     CallRestore { dst: SSAVar, src: SSAVar },
 
+    /// A carrier a call boundary may read, as the convention names it.
+    ///
+    /// The third of the same family as `CallDefine` and `CallRestore`, and the
+    /// one that was missing. A call instruction's own p-code names only the
+    /// callee, so nothing downstream could see that a call consumes its
+    /// arguments: liveness could not keep their producers, and the obligation
+    /// inventory had to keep every definition reaching an incomplete boundary
+    /// out of `ProvenDead` by declaring it an unknown effect instead.
+    ///
+    /// This says the true thing in the graph. The carriers are the
+    /// convention's argument registers, so the set is bounded by the
+    /// architecture rather than by the function's size, and a carrier the
+    /// callee does not actually take is a read of a value that is live anyway.
+    CallUse { src: SSAVar },
+
     /// Return from subroutine
     Return { target: SSAVar },
 
@@ -505,6 +520,7 @@ impl SSAOp {
             | BlockTransfer { .. }
             | Fence { .. }
             | StoreGuarded { .. }
+            | CallUse { .. }
             | Branch { .. }
             | CBranch { .. }
             | BranchInd { .. }
@@ -692,7 +708,7 @@ impl SSAOp {
                 }
             }
 
-            CallRestore { src, .. } => f(src),
+            CallRestore { src, .. } | CallUse { src } => f(src),
 
             Fence { .. } | Nop | Unimplemented | Breakpoint | CpuId { .. } | CallDefine { .. } => {}
         }
@@ -766,6 +782,9 @@ impl SSAOp {
                 | SSAOp::Unimplemented
                 | SSAOp::CpuId { .. }
                 | SSAOp::New { .. }
+                // The read a call boundary makes. Removing it would delete
+                // the only statement that keeps an argument's producer live.
+                | SSAOp::CallUse { .. }
         )
     }
 
@@ -911,6 +930,7 @@ impl std::fmt::Display for SSAOp {
             SSAOp::CallInd { target, .. } => write!(f, "CALLIND {}", target),
             SSAOp::CallDefine { dst } => write!(f, "{} = CALLDEF", dst),
             SSAOp::CallRestore { dst, src } => write!(f, "{} = CALLRESTORE {}", dst, src),
+            SSAOp::CallUse { src } => write!(f, "CALLUSE {}", src),
             SSAOp::Return { target } => write!(f, "RETURN {}", target),
             SSAOp::FloatAdd { dst, a, b } => write!(f, "{} = {} f+ {}", dst, a, b),
             SSAOp::FloatSub { dst, a, b } => write!(f, "{} = {} f- {}", dst, a, b),
