@@ -1126,11 +1126,21 @@ impl SourceMachineContext {
                      declared_exist={declared_storages_exist} \
                      carriers_are_addresses={machine_carriers_are_exact_address_registers} \
                      frame_pointer_matches={frame_pointer_matches} \
-                     return_mechanism_matches={return_mechanism_matches}",
+                     return_mechanism_matches={return_mechanism_matches} \
+                     stack_slots={} unclassified_slots={} parameters={}",
                     interface.stack_slot_roles_complete(),
                     interface.return_address_storage().is_some(),
                     interface.stack_pointer_storage().is_some(),
-                    frame_pointer_storage.is_some()
+                    frame_pointer_storage.is_some(),
+                    interface.stack_slots().len(),
+                    interface
+                        .stack_slots()
+                        .iter()
+                        .filter(|slot| {
+                            slot.role() == r2source::SourceStackSlotRole::UnclassifiedResource
+                        })
+                        .count(),
+                    interface.parameters().len()
                 );
             }
             abi_model.coherent &= coherent;

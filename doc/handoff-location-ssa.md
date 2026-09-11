@@ -20222,3 +20222,59 @@ checkout of `HEAD` as well, because they read strings from `r_anal_sleigh.c`
 that the fork-side work changed; the stack-clash probe loop at -O0 is still not
 stack geometry; and a copy of a stack address into a program pointer still asks
 for the elided base by name.
+
+### One unprovable stack slot costs the whole register ABI
+
+Four census functions refuse at `OpLowering(implementation.rs:1334)`, the
+return boundary, and the trace runs the same way in each: the ABI model is
+incoherent, so `abi_is_coherent` is false, so the return-value branch never
+runs, so the boundary is incomplete and the return cannot be lowered. The
+evidence line now names the interface's shape as well as the failing term, so
+the first step of the trace is one command:
+
+    R2DEC_TRACE_REFUSAL=1 r2 -q -c 'a:sla; aaa; ?e ==MARK; s <addr>; pd:s' <bin>
+
+`minigzip` at -O2 `0x4f20` (`gzprintf`) reports `slot_roles_complete=false
+stack_slots=19 unclassified_slots=13`, and the capture's own channel names the
+slot:
+
+    R2SLEIGH_DEBUG_INTERFACE=1 r2 -q -c 'a:sla; aaa; s 0x4f20; pd:s' minigzip-O2
+    r2sleigh: stack resources incomplete: no base, position or extent:
+      slot=va type=va_list base=0 offset_valid=1 offset=-208 size=0
+
+The `va_list` has no size because radare2's type database has
+`__va_list_tag` but not the `__gnuc_va_list` typedef that `va_list` resolves
+through, so `r_anal_type_bitsize` answers zero; nothing in `gzprintf`
+dereferences the slot either, because it only hands its address to
+`vsnprintf`, so the measured extent is zero as well. A slot with no extent
+cannot be proven disjoint from its neighbours, so `stack_resources_complete`
+is false, and with it `stack_slot_roles_complete`. That is a missing typedef
+in radare2's DWARF type import: an upstream fix in its own pull request.
+
+`bzip2` at -O0 `0xa95f` fails a different term for the same flag:
+
+    r2sleigh: stack slot roles incomplete: argument slot names no stack
+      parameter: slot=workFactor role=1 base=0 offset=16 arg_index=-1
+
+radare2 recovered a stack argument and the capture could not bind it to a
+formal, because the formal ordinal is matched by name against the DWARF
+function at the entry and this entry -- `fcn_a95f`, unnamed -- is not one
+DWARF describes. Also upstream, or at least not the engine's to invent.
+
+What *is* the engine's: `SourceAbiModel`'s coherence conjoins
+`stack_slot_roles_complete` with the carrier terms
+(`machine_context.rs:1054`), so an interface that is exact about every carrier
+loses all ABI authority over one unprovable local. The three consumers of that
+authority -- the parameter register lookup, the argument register map, and the
+exact return type -- ask only about registers, and every consumer that needs
+slot roles (the frame-pointer inference, the declared stack bases, the
+parameter homes) already asks `stack_slot_roles_complete` for itself.
+
+The capture already computes the two claims separately: `interface->complete`
+is the carriers and `interface->stack_slot_roles_complete` is the frame, and
+only the second crosses the wire. Carrying both, and reading the first where
+the ABI model asks about carriers, is the shape of the fix. It was not made
+here because it spans the capture, the wire, the source contract and the
+engine, and `snapshot_capture.c` is where the fork-side session works; the
+test `exact_machine_interface_requires_declared_full_width_ra_and_sp` records
+the current all-or-nothing choice deliberately and would be restated by it.
