@@ -14,7 +14,7 @@ use crate::graph::{
     BlockId, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
 };
 use crate::machine_context::{MachineMemoryEndianness, MachineRegisterGeometryState};
-use crate::obligation::{CanonicalInstructionId, SemanticObligationId};
+use crate::obligation::CanonicalInstructionId;
 use crate::op::SSAOp;
 use crate::semantic::{
     ObjectId, ObjectKind, ObjectModel, StructuredAccessId, StructuredMemoryAccessFact,
@@ -981,7 +981,7 @@ pub struct MachineEntity {
     output: MachineValueBinding,
     root: MachineExprId,
     producer: CanonicalInstructionId,
-    source_obligations: BTreeSet<SemanticObligationId>,
+    source_obligations: crate::obligation::InstructionObligations,
 }
 
 impl MachineEntity {
@@ -997,7 +997,7 @@ impl MachineEntity {
         self.producer
     }
 
-    pub const fn source_obligations(&self) -> &BTreeSet<SemanticObligationId> {
+    pub const fn source_obligations(&self) -> &crate::obligation::InstructionObligations {
         &self.source_obligations
     }
 }

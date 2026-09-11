@@ -250,7 +250,66 @@ pub struct SemanticInstructionDisposition {
     pub id: CanonicalInstructionId,
     pub source: SemanticSourceSite,
     pub state: SemanticInstructionState,
-    pub obligations: BTreeSet<SemanticObligationId>,
+    pub obligations: InstructionObligations,
+}
+
+/// The obligations one instruction owns, in identity order.
+///
+/// Held as a sorted run rather than as a tree. Every use is iteration,
+/// membership, emptiness or equality, and an ordered-set node costs 896 bytes
+/// whether it holds one identity or eleven -- one per instruction is 24 MB of
+/// `BZ2_decompress`'s inventory for about two identities each.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InstructionObligations(Vec<SemanticObligationId>);
+
+impl InstructionObligations {
+    /// Add one identity, keeping the run sorted and free of repeats, which is
+    /// what makes membership a search and equality a comparison of content.
+    pub fn insert(&mut self, id: SemanticObligationId) -> bool {
+        match self.0.binary_search(&id) {
+            Ok(_) => false,
+            Err(at) => {
+                self.0.insert(at, id);
+                true
+            }
+        }
+    }
+
+    pub fn contains(&self, id: &SemanticObligationId) -> bool {
+        self.0.binary_search(id).is_ok()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, SemanticObligationId> {
+        self.0.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl FromIterator<SemanticObligationId> for InstructionObligations {
+    fn from_iter<I: IntoIterator<Item = SemanticObligationId>>(ids: I) -> Self {
+        let mut run = Self::default();
+        for id in ids {
+            run.insert(id);
+        }
+        run
+    }
+}
+
+impl<'a> IntoIterator for &'a InstructionObligations {
+    type Item = &'a SemanticObligationId;
+    type IntoIter = std::slice::Iter<'a, SemanticObligationId>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -664,7 +723,7 @@ impl SemanticObligationInventory {
             } else {
                 SemanticInstructionState::ProvenDead
             };
-            let mut obligation_ids = BTreeSet::new();
+            let mut obligation_ids = InstructionObligations::default();
             for (kind, component) in kinds {
                 let obligation_id = SemanticObligationId {
                     instruction: id,
@@ -724,7 +783,7 @@ impl SemanticObligationInventory {
                 kind: SemanticObligationKind::NoNativeSemantics,
                 component: SemanticObligationComponent::Whole,
             };
-            let mut obligations = BTreeSet::new();
+            let mut obligations = InstructionObligations::default();
             obligations.insert(obligation_id);
             if self
                 .instructions
