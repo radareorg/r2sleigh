@@ -2908,6 +2908,9 @@ impl Decompiler {
         let prepared = input.prepared_ssa();
         debug_log_slice(prepared);
         let func = prepared.function();
+        if let Some(declaration) = self.variadic_forwarding_stub(prepared) {
+            return Ok(InternalBuildProduct::Residual(declaration));
+        }
         if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
             let graph = prepared.graph();
             let live = prepared.live_out();
@@ -3517,6 +3520,7 @@ impl Decompiler {
         let mut c_function = CFunction {
             symbols: std::rc::Rc::clone(&symbol_table),
             name: crate::ast::c_identifier(&func_name),
+            declaration_only: None,
             extern_objects: Vec::new(),
             externs: fold_ctx
                 .callee_declarations
@@ -3648,6 +3652,97 @@ impl Decompiler {
             binding_names.source_named_locals(),
         );
         Ok(InternalBuildProduct::Native(native))
+    }
+
+    /// The declaration a variadic forwarding stub renders as, when it is one.
+    ///
+    /// A PLT stub is a jump: it tail-transfers to the import with every
+    /// argument register untouched, so for a variadic callee it forwards the
+    /// caller's variadic tail. C has no syntax for that forwarding, and the
+    /// only spelling that does (`__builtin_va_arg_pack`) is GCC-only and
+    /// requires an always-inline definition. So the rendering states what is
+    /// true and spellable: the address resolves to this import, here is its
+    /// declaration, and there is no body to write.
+    fn variadic_forwarding_stub(
+        &self,
+        prepared: &r2ssa::SsaArtifact,
+    ) -> Option<EmissionReadyFunction> {
+        let certificates = prepared.certificates();
+        let [callsite] = certificates.callsites.values().collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        if callsite.transfer != r2ssa::CallSiteTransfer::TailCall
+            || !callsite.variadic
+            || !certificates.returns.is_empty()
+        {
+            return None;
+        }
+        // Forwarding is the whole claim, so it has to be checked rather than
+        // assumed from the shape of the transfer. A stub hands the callee the
+        // machine state it was entered with: it writes no register and no
+        // memory, and only computes the target it jumps to. A one-line wrapper
+        // that loads a format string and tail-jumps to the same import looks
+        // identical at the transfer and is an ordinary function with a body.
+        let graph = prepared.graph();
+        let defines_observable_state = graph.insts.iter().any(|inst| {
+            if matches!(
+                inst.payload,
+                r2ssa::InstPayload::Op(r2ssa::SSAOp::Store { .. } | r2ssa::SSAOp::Call { .. })
+            ) {
+                return true;
+            }
+            inst.output
+                .and_then(|output| graph.value(output))
+                .and_then(|value| value.canonical_storage)
+                .is_some_and(|storage| {
+                    matches!(
+                        storage.space,
+                        r2ssa::CanonicalStorageSpace::Ram | r2ssa::CanonicalStorageSpace::Register
+                    )
+                })
+        });
+        if defines_observable_state {
+            return None;
+        }
+        let identity = self
+            .context
+            .function_facts
+            .callee_resolution()?
+            .identity_for_callsite(r2types::CallsiteKey {
+                block_addr: callsite.block_addr,
+                op_index: callsite.op_index,
+            })?;
+        let name = identity
+            .display_name
+            .as_deref()
+            .or(identity.normalized_name.as_deref())
+            .or(identity.raw_name.as_deref())?;
+        let signature = identity.signature.as_ref()?;
+        if !signature.variadic {
+            return None;
+        }
+        let name = crate::ast::c_identifier(name);
+        r2il::refusal_evidence!(
+            "variadic-forwarding-stub",
+            "tail transfer at {:#x}:{} resolves to {name}, declared rather than defined",
+            callsite.block_addr,
+            callsite.op_index
+        );
+        let reason = format!(
+            "r2sleigh: PLT stub at {:#x}; this symbol resolves to the import `{name}`. \
+             The tail forwards this function's own variadic arguments, which C cannot spell.",
+            prepared.function().entry
+        );
+        let mut function = CFunction::new(name.clone(), signature.return_type.clone())
+            .as_declaration_only(sanitize_comment_text(&reason));
+        function.externs = vec![crate::ast::CExternDecl {
+            name,
+            ret_type: signature.return_type.clone(),
+            params: Some(signature.params.clone()),
+            variadic: true,
+            noreturn: false,
+        }];
+        Some(prepare_function_for_emission(&function))
     }
 
     /// Convert a CStmt to a Vec<CStmt>.

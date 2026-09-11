@@ -125,6 +125,7 @@ pub(crate) fn prepare_function_for_emission(func: &CFunction) -> EmissionReadyFu
             params_known: func.params_known,
             externs: func.externs.clone(),
             extern_objects: func.extern_objects.clone(),
+            declaration_only: func.declaration_only.clone(),
         },
     }
 }
@@ -154,6 +155,16 @@ impl CodeGenerator {
         let func = ready.function();
         self.symbols = func.symbols.borrow().clone();
         self.output.clear();
+
+        // A declared address defines nothing: the reason stands where the body
+        // would, and the declarations say what the address resolves to.
+        if let Some(reason) = &func.declaration_only {
+            self.output.push_str("/* ");
+            self.output.push_str(reason);
+            self.output.push_str(" */\n");
+            self.emit_extern_declarations(func, true);
+            return self.output.clone();
+        }
 
         // Function signature
         self.emit_type(&func.ret_type);
@@ -187,8 +198,40 @@ impl CodeGenerator {
         // it keeps the rendering self-contained: the text of one function is
         // the whole translation unit anything needs to compile it, which is not
         // true of a prototype the reader has to be handed separately.
+        self.emit_extern_declarations(func, false);
+
+        // Local variable declarations
+        for local in &func.locals {
+            self.emit_indent();
+            self.emit_type(&local.ty);
+            self.output.push(' ');
+            self.output.push_str(self.symbols.name(local.name));
+            self.output.push_str(";\n");
+        }
+
+        if !func.locals.is_empty() {
+            self.output.push('\n');
+        }
+
+        // Function body
+        self.emit_stmt_sequence(&func.body);
+
+        self.indent_level -= 1;
+        self.output.push_str("}\n");
+
+        self.output.clone()
+    }
+
+    /// The prototypes and data objects this rendering needs to stand alone.
+    ///
+    /// At file scope the storage class is spelled, because there is no
+    /// definition beside it to say what the name is.
+    fn emit_extern_declarations(&mut self, func: &CFunction, file_scope: bool) {
         for declaration in &func.externs {
             self.emit_indent();
+            if file_scope {
+                self.output.push_str("extern ");
+            }
             if declaration.noreturn {
                 self.output.push_str("__attribute__((noreturn)) ");
             }
@@ -250,27 +293,6 @@ impl CodeGenerator {
         if !func.externs.is_empty() || !func.extern_objects.is_empty() {
             self.output.push('\n');
         }
-
-        // Local variable declarations
-        for local in &func.locals {
-            self.emit_indent();
-            self.emit_type(&local.ty);
-            self.output.push(' ');
-            self.output.push_str(self.symbols.name(local.name));
-            self.output.push_str(";\n");
-        }
-
-        if !func.locals.is_empty() {
-            self.output.push('\n');
-        }
-
-        // Function body
-        self.emit_stmt_sequence(&func.body);
-
-        self.indent_level -= 1;
-        self.output.push_str("}\n");
-
-        self.output.clone()
     }
 
     /// Generate code for a statement.
@@ -1172,10 +1194,51 @@ mod tests {
         std::cell::RefCell::new(crate::symbol::SymbolTable::new())
     }
 
+    /// A declared address defines nothing, and its declaration stands alone.
+    ///
+    /// The storage class is spelled because there is no definition beside it,
+    /// and the body, its braces and the return type of the stub itself are all
+    /// absent: none of them is a thing this rendering knows.
+    #[test]
+    fn declaration_only_function_emits_no_definition() {
+        let symbols = test_table();
+        let func = CFunction {
+            declaration_only: Some(
+                "r2sleigh: PLT stub at 0x22c0; this symbol resolves to the import `snprintf`"
+                    .to_string(),
+            ),
+            externs: vec![crate::ast::CExternDecl {
+                name: "snprintf".to_string(),
+                ret_type: CType::i32(),
+                params: Some(vec![CType::ptr(CType::u8()), CType::u64()]),
+                variadic: true,
+                noreturn: false,
+            }],
+            extern_objects: Vec::new(),
+            name: "snprintf".to_string(),
+            ret_type: CType::i32(),
+            params: Vec::new(),
+            locals: Vec::new(),
+            body: Vec::new(),
+            params_known: false,
+            symbols: std::rc::Rc::new(symbols),
+        };
+
+        let code = generate(&func);
+        assert!(code.contains("/* r2sleigh: PLT stub at 0x22c0"), "{code}");
+        assert!(
+            code.contains("extern int32_t snprintf(uint8_t*, uint64_t, ...);"),
+            "{code}"
+        );
+        assert!(!code.contains('{'), "{code}");
+        assert!(!code.contains('}'), "{code}");
+    }
+
     #[test]
     fn test_generate_simple_function() {
         let symbols = test_table();
         let func = CFunction {
+            declaration_only: None,
             externs: Vec::new(),
             extern_objects: Vec::new(),
             name: "add".to_string(),
@@ -1210,6 +1273,7 @@ mod tests {
         let symbols = test_table();
         let buffer = crate::symbol::declare(&symbols, "stack_m32");
         let func = CFunction {
+            declaration_only: None,
             externs: Vec::new(),
             extern_objects: Vec::new(),
             name: "uses_stack_buffer".to_string(),
@@ -1239,6 +1303,7 @@ mod tests {
         let symbols = test_table();
         let declaration = |params: Option<Vec<CType>>, variadic: bool| {
             let func = CFunction {
+                declaration_only: None,
                 externs: vec![crate::ast::CExternDecl {
                     name: "sym_imp_fprintf".to_string(),
                     ret_type: CType::uint(64),
@@ -1293,6 +1358,7 @@ mod tests {
         let symbols = test_table();
         let value = crate::symbol::declare(&symbols, "value");
         let plain = CFunction {
+            declaration_only: None,
             externs: Vec::new(),
             extern_objects: Vec::new(),
             name: "observed".to_string(),
@@ -1580,6 +1646,7 @@ mod tests {
         let symbols = test_table();
         let x = crate::symbol::declare(&symbols, "x");
         let func = CFunction {
+            declaration_only: None,
             externs: Vec::new(),
             extern_objects: Vec::new(),
             name: "test".to_string(),

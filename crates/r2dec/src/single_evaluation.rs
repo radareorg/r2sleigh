@@ -217,6 +217,7 @@ mod tests {
         body: Vec<CStmt>,
     ) -> CFunction {
         CFunction {
+            declaration_only: None,
             externs: Vec::new(),
             extern_objects: Vec::new(),
             name: "f".to_string(),

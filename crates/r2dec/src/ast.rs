@@ -1200,6 +1200,12 @@ pub struct CFunction {
     /// calls another is not readable, compilable or checkable without one.
     /// These are emitted above the definition.
     pub externs: Vec<CExternDecl>,
+    /// Why this function is declared rather than defined, when it is.
+    ///
+    /// A PLT stub for a variadic import forwards the caller's variadic tail,
+    /// and C has no syntax for that, so the honest rendering names what the
+    /// address resolves to and defines nothing.
+    pub declaration_only: Option<String>,
     /// Named data objects the body refers to, declared so the rendering stays a
     /// self-contained translation unit.
     ///
@@ -1302,7 +1308,14 @@ impl CFunction {
             locals: Vec::new(),
             body: Vec::new(),
             params_known: true,
+            declaration_only: None,
         }
+    }
+
+    /// Declare what this address resolves to instead of defining it.
+    pub fn as_declaration_only(mut self, reason: impl Into<String>) -> Self {
+        self.declaration_only = Some(reason.into());
+        self
     }
 
     /// Mark the parameter list as unrecovered, so it is not rendered as a
