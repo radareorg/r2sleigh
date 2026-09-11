@@ -533,8 +533,8 @@ impl Importer<'_> {
             MachineExprKind::Phi { .. }
             | MachineExprKind::InsertLane { .. }
             | MachineExprKind::PopulationCount { .. }
-            | MachineExprKind::UnsignedDivide { .. }
-            | MachineExprKind::UnsignedRemainder { .. } => None,
+            | MachineExprKind::Divide { .. }
+            | MachineExprKind::Remainder { .. } => None,
             MachineExprKind::Arithmetic {
                 op,
                 mode,

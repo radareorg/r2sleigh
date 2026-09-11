@@ -801,12 +801,19 @@ pub enum MachineExprKind {
         left: MachineExprId,
         right: MachineExprId,
     },
-    UnsignedDivide {
+    /// Quotient of two bit patterns read at the stated interpretation.
+    ///
+    /// Division is the arithmetic that has to know how its operands are read:
+    /// the same bits divide to different quotients signed and unsigned. The
+    /// interpretation is therefore the operation's, as it is for a comparison.
+    Divide {
+        interpretation: MachineSignedness,
         zero_divisor: MachineZeroDivisorBehavior,
         dividend: MachineExprId,
         divisor: MachineExprId,
     },
-    UnsignedRemainder {
+    Remainder {
+        interpretation: MachineSignedness,
         zero_divisor: MachineZeroDivisorBehavior,
         dividend: MachineExprId,
         divisor: MachineExprId,
@@ -896,10 +903,10 @@ impl MachineExprKind {
             | Self::Bitwise { left, right, .. }
             | Self::Boolean { left, right, .. }
             | Self::Compare { left, right, .. } => vec![*left, *right],
-            Self::UnsignedDivide {
+            Self::Divide {
                 dividend, divisor, ..
             }
-            | Self::UnsignedRemainder {
+            | Self::Remainder {
                 dividend, divisor, ..
             } => vec![*dividend, *divisor],
             Self::Concat { high, low } => vec![*high, *low],
@@ -2411,26 +2418,25 @@ impl MachineFunction {
             | MachineExprKind::Bitwise { left, right, .. } => {
                 same_width(child(*left)?) && same_width(child(*right)?)
             }
-            MachineExprKind::UnsignedDivide {
+            MachineExprKind::Divide {
+                interpretation,
                 zero_divisor,
                 dividend,
                 divisor,
             }
-            | MachineExprKind::UnsignedRemainder {
+            | MachineExprKind::Remainder {
+                interpretation,
                 zero_divisor,
                 dividend,
                 divisor,
             } => {
+                // The operands are bit patterns at the carrier width; how they
+                // are read is the operation's own statement, and the result
+                // carries that reading in its type.
                 *zero_divisor == MachineZeroDivisorBehavior::Undefined
-                    && matches!(
-                        expr.ty,
-                        MachineType::Integer {
-                            signedness: MachineSignedness::Unsigned,
-                            ..
-                        }
-                    )
-                    && child(*dividend)?.ty == expr.ty
-                    && child(*divisor)?.ty == expr.ty
+                    && expr.ty == integer_type(expr.ty.width_bits(), *interpretation)
+                    && same_width(child(*dividend)?)
+                    && same_width(child(*divisor)?)
             }
             MachineExprKind::Negate { mode, input } => {
                 *mode == MachineArithmeticMode::Wrapping
@@ -3333,22 +3339,32 @@ impl MachineBuilder {
                     },
                 ))
             }
-            SSAOp::IntDiv { .. } => {
+            SSAOp::IntDiv { .. } | SSAOp::IntSDiv { .. } => {
                 let inputs = self.exact_width_operand_nodes(graph, inst, 2, output.width_bits)?;
+                let (interpretation, ty) = match op {
+                    SSAOp::IntDiv { .. } => (MachineSignedness::Unsigned, unsigned),
+                    _ => (MachineSignedness::Signed, signed),
+                };
                 Ok((
-                    unsigned,
-                    MachineExprKind::UnsignedDivide {
+                    ty,
+                    MachineExprKind::Divide {
+                        interpretation,
                         zero_divisor: MachineZeroDivisorBehavior::Undefined,
                         dividend: inputs[0],
                         divisor: inputs[1],
                     },
                 ))
             }
-            SSAOp::IntRem { .. } => {
+            SSAOp::IntRem { .. } | SSAOp::IntSRem { .. } => {
                 let inputs = self.exact_width_operand_nodes(graph, inst, 2, output.width_bits)?;
+                let (interpretation, ty) = match op {
+                    SSAOp::IntRem { .. } => (MachineSignedness::Unsigned, unsigned),
+                    _ => (MachineSignedness::Signed, signed),
+                };
                 Ok((
-                    unsigned,
-                    MachineExprKind::UnsignedRemainder {
+                    ty,
+                    MachineExprKind::Remainder {
+                        interpretation,
                         zero_divisor: MachineZeroDivisorBehavior::Undefined,
                         dividend: inputs[0],
                         divisor: inputs[1],
@@ -3971,14 +3987,32 @@ fn machine_kind_matches_op(op: &SSAOp, kind: &MachineExprKind) -> bool {
             )
             | (
                 SSAOp::IntDiv { .. },
-                MachineExprKind::UnsignedDivide {
+                MachineExprKind::Divide {
+                    interpretation: MachineSignedness::Unsigned,
+                    zero_divisor: MachineZeroDivisorBehavior::Undefined,
+                    ..
+                }
+            )
+            | (
+                SSAOp::IntSDiv { .. },
+                MachineExprKind::Divide {
+                    interpretation: MachineSignedness::Signed,
                     zero_divisor: MachineZeroDivisorBehavior::Undefined,
                     ..
                 }
             )
             | (
                 SSAOp::IntRem { .. },
-                MachineExprKind::UnsignedRemainder {
+                MachineExprKind::Remainder {
+                    interpretation: MachineSignedness::Unsigned,
+                    zero_divisor: MachineZeroDivisorBehavior::Undefined,
+                    ..
+                }
+            )
+            | (
+                SSAOp::IntSRem { .. },
+                MachineExprKind::Remainder {
+                    interpretation: MachineSignedness::Signed,
                     zero_divisor: MachineZeroDivisorBehavior::Undefined,
                     ..
                 }
@@ -4170,7 +4204,10 @@ fn machine_type_matches_op(op: &SSAOp, ty: &MachineType, output_bits: u32) -> bo
     let signed = integer_type(output_bits, MachineSignedness::Signed);
     match op {
         SSAOp::CallDefine { .. } => *ty == unsigned,
-        SSAOp::IntSRight { .. } | SSAOp::IntSExt { .. } => *ty == signed,
+        SSAOp::IntSRight { .. }
+        | SSAOp::IntSExt { .. }
+        | SSAOp::IntSDiv { .. }
+        | SSAOp::IntSRem { .. } => *ty == signed,
         SSAOp::IntEqual { .. }
         | SSAOp::IntNotEqual { .. }
         | SSAOp::IntLess { .. }
@@ -5144,7 +5181,8 @@ mod tests {
             .expect("divide root");
         assert!(matches!(
             divide.kind(),
-            MachineExprKind::UnsignedDivide {
+            MachineExprKind::Divide {
+                interpretation: MachineSignedness::Unsigned,
                 zero_divisor: MachineZeroDivisorBehavior::Undefined,
                 ..
             }
@@ -5261,7 +5299,8 @@ mod tests {
             .expect("remainder entity");
         let root = projection.expr(entity.root()).expect("remainder root");
         assert_eq!(root.ty(), &integer_type(64, MachineSignedness::Unsigned));
-        let MachineExprKind::UnsignedRemainder {
+        let MachineExprKind::Remainder {
+            interpretation: MachineSignedness::Unsigned,
             zero_divisor,
             dividend,
             divisor,
@@ -5301,6 +5340,97 @@ mod tests {
         projection
             .validate_against(&artifact)
             .expect("remainder remains source-bound");
+    }
+
+    /// A signed division is a machine operation, not an unmodelled one.
+    ///
+    /// It reads its operands signed and says so at the node, which is what the
+    /// rendered `/` on signed operands implements.
+    #[test]
+    fn signed_division_and_remainder_read_their_operands_signed() {
+        for (op, signed_expr) in [
+            (
+                R2ILOp::IntSDiv {
+                    dst: Varnode::unique(0x10, 8),
+                    a: Varnode::unique(0x100, 8),
+                    b: Varnode::constant(32, 8),
+                },
+                true,
+            ),
+            (
+                R2ILOp::IntSRem {
+                    dst: Varnode::unique(0x10, 8),
+                    a: Varnode::unique(0x100, 8),
+                    b: Varnode::constant(32, 8),
+                },
+                false,
+            ),
+        ] {
+            let artifact = artifact_with_ops([op]);
+            let projection = MachineProjection::from_artifact(&artifact).expect("exact signed op");
+            assert!(projection.failures().is_empty());
+
+            let inst = artifact
+                .graph()
+                .inst_id_for_op_site(0x1000, 0)
+                .expect("signed instruction");
+            let graph_inst = artifact.graph().inst(inst).expect("signed graph node");
+            let entity = projection
+                .entity_for_output(graph_inst.output.expect("signed output"))
+                .expect("signed entity");
+            let root = projection.expr(entity.root()).expect("signed root");
+            assert_eq!(root.ty(), &integer_type(64, MachineSignedness::Signed));
+            let (interpretation, zero_divisor, dividend, divisor) = match root.kind() {
+                MachineExprKind::Divide {
+                    interpretation,
+                    zero_divisor,
+                    dividend,
+                    divisor,
+                } if signed_expr => (interpretation, zero_divisor, dividend, divisor),
+                MachineExprKind::Remainder {
+                    interpretation,
+                    zero_divisor,
+                    dividend,
+                    divisor,
+                } if !signed_expr => (interpretation, zero_divisor, dividend, divisor),
+                other => panic!("signed division root expected, got {other:?}"),
+            };
+            assert_eq!(*interpretation, MachineSignedness::Signed);
+            assert_eq!(*zero_divisor, MachineZeroDivisorBehavior::Undefined);
+            assert_eq!(
+                operand_leaf_binding(projection.arena(), *dividend).map(|binding| binding.value()),
+                Some(graph_inst.inputs[0])
+            );
+            assert_eq!(
+                operand_leaf_binding(projection.arena(), *divisor).map(|binding| binding.value()),
+                Some(graph_inst.inputs[1])
+            );
+            // The operands the renderer spells are the ones the projection
+            // certified, which is what a refused use used to deny.
+            for input_idx in 0..2 {
+                assert_eq!(
+                    exact_use(&projection, &artifact, 0, input_idx),
+                    whole_machine_use(
+                        binding_for_value(
+                            artifact
+                                .graph()
+                                .value(graph_inst.inputs[input_idx])
+                                .expect("signed input"),
+                        )
+                        .expect("signed input binding"),
+                    )
+                );
+            }
+            assert_eq!(
+                projection.write_disposition(inst),
+                Some(&MachineWriteDisposition::Exact(
+                    MachineWriteProjection::Full
+                ))
+            );
+            projection
+                .validate_against(&artifact)
+                .expect("signed division remains source-bound");
+        }
     }
 
     #[test]

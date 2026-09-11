@@ -431,22 +431,34 @@ impl Builder<'_> {
             // Wrapping arithmetic is unsigned arithmetic at the width, and
             // C performs it in the promoted type.
             MachineExprKind::Arithmetic { left, right, .. }
-            | MachineExprKind::Bitwise { left, right, .. }
-            | MachineExprKind::UnsignedDivide {
-                dividend: left,
-                divisor: right,
-                ..
-            }
-            | MachineExprKind::UnsignedRemainder {
-                dividend: left,
-                divisor: right,
-                ..
-            } => {
+            | MachineExprKind::Bitwise { left, right, .. } => {
                 self.produced(*left);
                 self.produced(*right);
                 self.require(id, 0, own.clone());
                 self.require(id, 1, own.clone());
                 CValue::Typed(promoted(&own))
+            }
+            // Division is the arithmetic whose operands have to be read the
+            // way the operation says, because the same bits divide to
+            // different quotients signed and unsigned.
+            MachineExprKind::Divide {
+                interpretation,
+                dividend,
+                divisor,
+                ..
+            }
+            | MachineExprKind::Remainder {
+                interpretation,
+                dividend,
+                divisor,
+                ..
+            } => {
+                self.produced(*dividend);
+                self.produced(*divisor);
+                let operand = integer(ty.width_bits(), *interpretation);
+                self.require(id, 0, operand.clone());
+                self.require(id, 1, operand.clone());
+                CValue::Typed(promoted(&operand))
             }
             MachineExprKind::Negate { input, .. } | MachineExprKind::BitwiseNot { input } => {
                 self.produced(*input);
