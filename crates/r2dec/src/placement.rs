@@ -2790,15 +2790,15 @@ fn apply_decisions_once(
                 // which is the one thing this must never do, so the tree itself
                 // is asked before anything is removed.
                 let targets = binding_write_observations(writes, binding);
-                if discarding_clears_symbol(&candidate.body, &targets, symbol) {
+                if mentions.discarding_clears(&targets, symbol) {
                     let mut removed_observations = BTreeSet::new();
                     for target in &targets {
                         discard_observed_statement(
                             &mut candidate.body,
                             *target,
                             &mut removed_observations,
-                            &mut mentions,
                         );
+                        mentions.forget_target(*target);
                     }
                     candidate.locals.retain(|local| local.name != symbol);
                     discarded_bindings.insert(binding);
@@ -2922,17 +2922,13 @@ fn apply_decisions_once(
                 continue;
             }
             let targets = binding_write_observations(writes, binding);
-            if !discarding_clears_symbol(&candidate.body, &targets, symbol) {
+            if !mentions.discarding_clears(&targets, symbol) {
                 continue;
             }
             let mut removed_observations = BTreeSet::new();
             for target in &targets {
-                discard_observed_statement(
-                    &mut candidate.body,
-                    *target,
-                    &mut removed_observations,
-                    &mut mentions,
-                );
+                discard_observed_statement(&mut candidate.body, *target, &mut removed_observations);
+                mentions.forget_target(*target);
             }
             candidate.locals.retain(|local| local.name != symbol);
             discarded_observations.append(&mut removed_observations);
@@ -3107,20 +3103,21 @@ fn insert_region_declarations_in_stmt(
     }
 }
 
-/// Replace one observed statement with nothing.
+/// The statement under any observation markers wrapping it.
 ///
-/// The markers go with it: the obligations they carried are filled in as elided
-/// when the journal seals, which is the only point at which what the renderer
-/// actually emitted is known.
-/// Whether any statement still names this symbol.
-/// Every symbol one statement names, in one traversal.
-///
-/// The predicate below and the running count both read this, so they cannot
-/// drift apart. That matters more than it usually would: the count decides
-/// whether a declaration may be dropped, and dropping one for a symbol the body
-/// still names emits an undeclared identifier, which is the one thing this pass
-/// must never do.
-fn statement_visit_symbols(statement: &CStmt, visit: &mut impl FnMut(crate::symbol::SymbolId)) {
+/// Markers are layers on a statement, not statements of their own, which is how
+/// the discard path reads them: it looks for a marker on any wrapping layer and
+/// empties the statement underneath.
+fn statement_core(statement: &CStmt) -> &CStmt {
+    let mut current = statement;
+    while let CStmt::Observed { stmt, .. } = current {
+        current = stmt;
+    }
+    current
+}
+
+/// The symbols this statement names itself, not counting nested statements.
+fn statement_visit_own_symbols(statement: &CStmt, visit: &mut impl FnMut(crate::symbol::SymbolId)) {
     let expr_symbols = |expr: &CExpr, visit: &mut dyn FnMut(crate::symbol::SymbolId)| {
         expr.visit(&mut |node| {
             if let CExpr::Var(name) = node {
@@ -3128,11 +3125,7 @@ fn statement_visit_symbols(statement: &CStmt, visit: &mut impl FnMut(crate::symb
             }
         });
     };
-    match statement {
-        CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => {
-            statement_visit_symbols(stmt, visit);
-        }
-        CStmt::Block(statements) => body_visit_symbols(statements, visit),
+    match statement_core(statement) {
         CStmt::Expr(expr) | CStmt::Return(Some(expr)) => expr_symbols(expr, visit),
         CStmt::Decl { name, init, .. } => {
             visit(*name);
@@ -3140,116 +3133,197 @@ fn statement_visit_symbols(statement: &CStmt, visit: &mut impl FnMut(crate::symb
                 expr_symbols(init, visit);
             }
         }
-        CStmt::If {
-            cond,
-            then_body,
-            else_body,
-        } => {
-            expr_symbols(cond, visit);
-            statement_visit_symbols(then_body, visit);
-            if let Some(body) = else_body.as_ref() {
-                statement_visit_symbols(body, visit);
-            }
-        }
-        CStmt::While { cond, body } | CStmt::DoWhile { body, cond } => {
-            expr_symbols(cond, visit);
-            statement_visit_symbols(body, visit);
-        }
-        CStmt::For {
-            init,
-            cond,
-            update,
-            body,
-        } => {
-            if let Some(init) = init.as_ref() {
-                statement_visit_symbols(init, visit);
-            }
+        CStmt::If { cond, .. } => expr_symbols(cond, visit),
+        CStmt::While { cond, .. } | CStmt::DoWhile { cond, .. } => expr_symbols(cond, visit),
+        CStmt::For { cond, update, .. } => {
             if let Some(cond) = cond.as_ref() {
                 expr_symbols(cond, visit);
             }
             if let Some(update) = update.as_ref() {
                 expr_symbols(update, visit);
             }
-            statement_visit_symbols(body, visit);
         }
-        CStmt::Switch {
-            expr,
-            cases,
-            default,
+        CStmt::Switch { expr, .. } => expr_symbols(expr, visit),
+        _ => {}
+    }
+}
+
+/// The statements nested directly inside this one.
+fn statement_visit_children(statement: &CStmt, visit: &mut impl FnMut(&CStmt)) {
+    match statement_core(statement) {
+        CStmt::StructuredRegion { stmt, .. } => visit(stmt),
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
         } => {
-            expr_symbols(expr, visit);
+            visit(then_body);
+            if let Some(body) = else_body.as_ref() {
+                visit(body);
+            }
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => visit(body),
+        CStmt::For { init, body, .. } => {
+            if let Some(init) = init.as_ref() {
+                visit(init);
+            }
+            visit(body);
+        }
+        _ => {}
+    }
+}
+
+/// The statement lists nested directly inside this one.
+fn statement_visit_child_bodies(statement: &CStmt, visit: &mut impl FnMut(&[CStmt])) {
+    match statement_core(statement) {
+        CStmt::Block(statements) => visit(statements),
+        CStmt::Switch { cases, default, .. } => {
             for case in cases {
-                body_visit_symbols(&case.body, visit);
+                visit(&case.body);
             }
             if let Some(body) = default.as_ref() {
-                body_visit_symbols(body, visit);
+                visit(body);
             }
         }
         _ => {}
     }
 }
 
-fn body_visit_symbols(statements: &[CStmt], visit: &mut impl FnMut(crate::symbol::SymbolId)) {
-    for statement in statements {
-        statement_visit_symbols(statement, visit);
-    }
-}
-
-/// How many times the body names each symbol.
+/// What the body says about each symbol, read once.
 ///
-/// Every decision loop asks, once per binding, whether the body still names one
-/// symbol, and each answer used to walk the whole tree: on a large function
-/// that is the pass's only superlinear term. The body only shrinks while those
-/// questions are being asked -- the single mutation in those phases is
-/// discarding a statement -- so one pass builds the counts and each discard
-/// subtracts exactly what it took away. Declarations are inserted afterwards,
-/// when nothing asks any more.
+/// Every decision loop asks two questions per binding, and each answer used to
+/// walk the whole tree: whether anything still names one symbol, and whether
+/// discarding a given set of statements would leave nothing naming it. Those
+/// two walks are the pass's cost on a large function.
+///
+/// Both are answered here from one depth-first pass. Statements are numbered in
+/// entry order, so a statement owns the half-open span from its own number to
+/// the next number after its subtree, and "this mention is inside that
+/// statement" is a comparison. Each mention records the number of the statement
+/// it sits in; each observation that would discard a statement records that
+/// statement's span.
+///
+/// The body only shrinks while those questions are asked -- the single mutation
+/// in those phases is discarding a statement -- so the counts stay exact by
+/// subtracting what each discard removes, and a span that no longer holds
+/// anything simply stops matching. Declarations are inserted afterwards, when
+/// nothing asks any more.
 #[derive(Debug, Default)]
 struct SymbolMentions {
-    counts: std::collections::HashMap<crate::symbol::SymbolId, usize>,
+    /// For each symbol, the statement number of every place it is named.
+    sites: std::collections::HashMap<crate::symbol::SymbolId, Vec<u32>>,
+    /// For each observation that would empty a statement, that statement's span.
+    discards: std::collections::HashMap<RenderObservationId, (u32, u32)>,
+    /// The spans already emptied, which hold nothing any more.
+    removed: Vec<(u32, u32)>,
 }
 
 impl SymbolMentions {
     fn of_body(statements: &[CStmt]) -> Self {
-        let mut counts = std::collections::HashMap::new();
-        body_visit_symbols(statements, &mut |symbol| {
-            *counts.entry(symbol).or_insert(0usize) += 1;
+        let mut index = Self::default();
+        let mut next = 0u32;
+        index.index_body(statements, &mut next);
+        index
+    }
+
+    fn index_body(&mut self, statements: &[CStmt], next: &mut u32) {
+        for statement in statements {
+            self.index_statement(statement, next);
+        }
+    }
+
+    fn index_statement(&mut self, statement: &CStmt, next: &mut u32) {
+        let enter = *next;
+        *next += 1;
+        // The observations that would empty this statement, which is exactly
+        // what `statement_is_discarded` answers: a marker on any layer wrapping
+        // the statement, or a marker on an assignment's target.
+        let mut current = statement;
+        while let CStmt::Observed { id, stmt } = current {
+            self.discards.insert(*id, (enter, u32::MAX));
+            current = stmt;
+        }
+        if let CStmt::Expr(CExpr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            ..
+        }) = current
+        {
+            let mut target = left.as_ref();
+            while let CExpr::Observed { id, expr } = target {
+                self.discards.insert(*id, (enter, u32::MAX));
+                target = expr;
+            }
+        }
+        // This statement's own mentions, then its children's.
+        statement_visit_own_symbols(statement, &mut |symbol| {
+            self.sites.entry(symbol).or_default().push(enter);
         });
-        Self { counts }
+        statement_visit_children(statement, &mut |child| self.index_statement(child, next));
+        statement_visit_child_bodies(statement, &mut |body| self.index_body(body, next));
+        let exit = *next;
+        for span in self.discards.values_mut() {
+            if span.0 == enter && span.1 == u32::MAX {
+                span.1 = exit;
+            }
+        }
     }
 
     fn mentions(&self, symbol: crate::symbol::SymbolId) -> bool {
-        self.counts.get(&symbol).is_some_and(|count| *count > 0)
+        self.sites
+            .get(&symbol)
+            .is_some_and(|sites| sites.iter().any(|site| !self.is_removed(*site)))
     }
 
-    /// Subtract everything one discarded statement named.
-    fn forget(&mut self, statement: &CStmt) {
-        statement_visit_symbols(statement, &mut |symbol| {
-            if let Some(count) = self.counts.get_mut(&symbol) {
-                *count = count.saturating_sub(1);
-            }
-        });
+    fn is_removed(&self, site: u32) -> bool {
+        self.removed
+            .iter()
+            .any(|(enter, exit)| *enter <= site && site < *exit)
     }
-}
 
-fn statement_mentions_symbol(statement: &CStmt, symbol: crate::symbol::SymbolId) -> bool {
-    let mut found = false;
-    statement_visit_symbols(statement, &mut |name| {
-        if name == symbol {
-            found = true;
+    /// Record that the statement this observation marks has been emptied.
+    ///
+    /// Its span stops holding anything, so every mention inside it is gone from
+    /// both questions at once. Doing it by span rather than by re-counting is
+    /// what keeps the index exact after a discard: a count subtracted per
+    /// symbol cannot say *where* the mention was, and the second question needs
+    /// to know.
+    fn forget_target(&mut self, target: RenderObservationId) {
+        if let Some(span) = self.discards.get(&target).copied() {
+            self.removed.push(span);
         }
-    });
-    found
-}
+    }
 
-fn expr_mentions_symbol(expr: &CExpr, symbol: crate::symbol::SymbolId) -> bool {
-    let mut found = false;
-    expr.visit(&mut |node| {
-        if matches!(node, CExpr::Var(name) if *name == symbol) {
-            found = true;
+    /// Whether emptying the statements these observations mark would leave
+    /// nothing naming the symbol.
+    ///
+    /// The old form walked the whole body and stopped descending at a statement
+    /// a discard would remove, counting every mention it passed. This asks the
+    /// same thing of the numbering: a mention survives when it sits outside
+    /// every span that is going, and nesting needs no special case because a
+    /// mention inside a nested discard is inside the outer span too.
+    fn discarding_clears(
+        &self,
+        targets: &BTreeSet<RenderObservationId>,
+        symbol: crate::symbol::SymbolId,
+    ) -> bool {
+        let spans = targets
+            .iter()
+            .filter_map(|target| self.discards.get(target).copied())
+            .collect::<Vec<_>>();
+        if spans.is_empty() {
+            return false;
         }
-    });
-    found
+        let Some(sites) = self.sites.get(&symbol) else {
+            return true;
+        };
+        !sites.iter().any(|site| {
+            !self.is_removed(*site)
+                && !spans
+                    .iter()
+                    .any(|(enter, exit)| *enter <= *site && *site < *exit)
+        })
+    }
 }
 
 /// Every observation one binding's writes are marked on.
@@ -3262,164 +3336,6 @@ fn binding_write_observations(
         .filter(|write| write.binding == binding)
         .map(|write| write.observation)
         .collect()
-}
-
-/// Whether discarding every statement `targets` names would leave the body
-/// with no mention of `symbol`, and name at least one statement to discard.
-///
-/// This is the question a trial copy used to answer by cloning the whole
-/// function, discarding into the copy and looking at the result -- once per
-/// binding, so a render copied its entire AST as many times as it had
-/// candidate dead stores. No copy is needed. `discard_observed_statement`
-/// replaces a whole statement with `CStmt::Empty` and touches nothing else, so
-/// the mentions that disappear are exactly those inside the statements
-/// carrying a target, and a mention survives precisely when it lies outside
-/// all of them.
-///
-/// Order does not enter into it, which is why one traversal can answer what a
-/// sequence of discards would produce. Where one target's statement contains
-/// another's, the outer takes the inner with it, so the union of removed
-/// content is the same whichever is discarded first -- and the union is what
-/// this asks about. The count differs by order, but the count is only ever
-/// compared against zero, and at least one statement is emptied whenever any
-/// carries a target.
-fn discarding_clears_symbol(
-    statements: &[CStmt],
-    targets: &BTreeSet<RenderObservationId>,
-    symbol: crate::symbol::SymbolId,
-) -> bool {
-    let mut probe = DiscardProbe::default();
-    probe_discarded_body(statements, targets, symbol, &mut probe);
-    probe.discards && !probe.survives
-}
-
-#[derive(Default)]
-struct DiscardProbe {
-    /// A statement carrying one of the targets was found, so discarding would
-    /// remove something.
-    discards: bool,
-    /// A mention of the symbol lies outside every statement that would go.
-    survives: bool,
-}
-
-/// Whether this statement is one `discard_observed_statement` would empty.
-///
-/// It mirrors that function's two reasons exactly: a marker on any of the
-/// observation layers wrapping the statement, or a marker on the target of an
-/// assignment, which is how a store into a stack object is marked.
-fn statement_is_discarded(statement: &CStmt, targets: &BTreeSet<RenderObservationId>) -> bool {
-    let mut current = statement;
-    while let CStmt::Observed { id, stmt } = current {
-        if targets.contains(id) {
-            return true;
-        }
-        current = stmt;
-    }
-    matches!(
-        current,
-        CStmt::Expr(CExpr::Binary {
-            op: BinaryOp::Assign,
-            left,
-            ..
-        }) if expr_carries_any_observation(left, targets)
-    )
-}
-
-/// Whether this expression is marked with any of the observations, at any of
-/// the layers wrapping the expression itself.
-fn expr_carries_any_observation(expr: &CExpr, targets: &BTreeSet<RenderObservationId>) -> bool {
-    let mut current = expr;
-    loop {
-        match current {
-            CExpr::Observed { id, expr } => {
-                if targets.contains(id) {
-                    return true;
-                }
-                current = expr;
-            }
-            _ => return false,
-        }
-    }
-}
-
-fn probe_discarded_body(
-    statements: &[CStmt],
-    targets: &BTreeSet<RenderObservationId>,
-    symbol: crate::symbol::SymbolId,
-    probe: &mut DiscardProbe,
-) {
-    for statement in statements {
-        probe_discarded_statement(statement, targets, symbol, probe);
-    }
-}
-
-/// Descends exactly the statement positions `discard_observed_statement`
-/// descends, so the two agree about what a discard reaches.
-fn probe_discarded_statement(
-    statement: &CStmt,
-    targets: &BTreeSet<RenderObservationId>,
-    symbol: crate::symbol::SymbolId,
-    probe: &mut DiscardProbe,
-) {
-    if statement_is_discarded(statement, targets) {
-        probe.discards = true;
-        return;
-    }
-    match statement.unobserved() {
-        CStmt::StructuredRegion { stmt, .. } => {
-            probe_discarded_statement(stmt, targets, symbol, probe);
-        }
-        CStmt::Block(statements) => probe_discarded_body(statements, targets, symbol, probe),
-        CStmt::If {
-            cond,
-            then_body,
-            else_body,
-        } => {
-            probe.survives |= expr_mentions_symbol(cond, symbol);
-            probe_discarded_statement(then_body, targets, symbol, probe);
-            if let Some(body) = else_body {
-                probe_discarded_statement(body, targets, symbol, probe);
-            }
-        }
-        CStmt::While { cond, body } | CStmt::DoWhile { body, cond } => {
-            probe.survives |= expr_mentions_symbol(cond, symbol);
-            probe_discarded_statement(body, targets, symbol, probe);
-        }
-        CStmt::For {
-            init,
-            cond,
-            update,
-            body,
-        } => {
-            if let Some(init) = init {
-                probe_discarded_statement(init, targets, symbol, probe);
-            }
-            if let Some(cond) = cond {
-                probe.survives |= expr_mentions_symbol(cond, symbol);
-            }
-            if let Some(update) = update {
-                probe.survives |= expr_mentions_symbol(update, symbol);
-            }
-            probe_discarded_statement(body, targets, symbol, probe);
-        }
-        CStmt::Switch {
-            expr,
-            cases,
-            default,
-        } => {
-            probe.survives |= expr_mentions_symbol(expr, symbol);
-            for case in cases {
-                probe_discarded_body(&case.body, targets, symbol, probe);
-            }
-            if let Some(body) = default {
-                probe_discarded_body(body, targets, symbol, probe);
-            }
-        }
-        // Every remaining variant is a leaf as far as discarding is concerned:
-        // it holds no statement a discard could reach, so its own mentions
-        // survive.
-        leaf => probe.survives |= statement_mentions_symbol(leaf, symbol),
-    }
 }
 
 /// Discard the statement carrying `target`, recording every observation that
@@ -3435,11 +3351,10 @@ fn discard_observed_statement(
     statements: &mut [CStmt],
     target: RenderObservationId,
     discarded: &mut BTreeSet<RenderObservationId>,
-    mentions: &mut SymbolMentions,
 ) -> usize {
     let mut removed = 0;
     for statement in statements.iter_mut() {
-        removed += discard_observed_statement_in_stmt(statement, target, discarded, mentions);
+        removed += discard_observed_statement_in_stmt(statement, target, discarded);
     }
     removed
 }
@@ -3465,13 +3380,11 @@ fn discard_observed_statement_in_stmt(
     statement: &mut CStmt,
     target: RenderObservationId,
     discarded: &mut BTreeSet<RenderObservationId>,
-    mentions: &mut SymbolMentions,
 ) -> usize {
     if let CStmt::Observed { id, .. } = statement
         && *id == target
     {
         collect_statement_observations(statement, discarded);
-        mentions.forget(statement);
         *statement = CStmt::Empty;
         return 1;
     }
@@ -3495,42 +3408,39 @@ fn discard_observed_statement_in_stmt(
     );
     if assigns_target {
         collect_statement_observations(statement, discarded);
-        mentions.forget(statement);
         *statement = CStmt::Empty;
         return 1;
     }
     match statement {
         CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => {
-            discard_observed_statement_in_stmt(stmt, target, discarded, mentions)
+            discard_observed_statement_in_stmt(stmt, target, discarded)
         }
-        CStmt::Block(statements) => {
-            discard_observed_statement(statements, target, discarded, mentions)
-        }
+        CStmt::Block(statements) => discard_observed_statement(statements, target, discarded),
         CStmt::If {
             then_body,
             else_body,
             ..
         } => {
-            discard_observed_statement_in_stmt(then_body, target, discarded, mentions)
+            discard_observed_statement_in_stmt(then_body, target, discarded)
                 + else_body.as_mut().map_or(0, |body| {
-                    discard_observed_statement_in_stmt(body, target, discarded, mentions)
+                    discard_observed_statement_in_stmt(body, target, discarded)
                 })
         }
         CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            discard_observed_statement_in_stmt(body, target, discarded, mentions)
+            discard_observed_statement_in_stmt(body, target, discarded)
         }
         CStmt::For { init, body, .. } => {
             init.as_mut().map_or(0, |init| {
-                discard_observed_statement_in_stmt(init, target, discarded, mentions)
-            }) + discard_observed_statement_in_stmt(body, target, discarded, mentions)
+                discard_observed_statement_in_stmt(init, target, discarded)
+            }) + discard_observed_statement_in_stmt(body, target, discarded)
         }
         CStmt::Switch { cases, default, .. } => {
             cases
                 .iter_mut()
-                .map(|case| discard_observed_statement(&mut case.body, target, discarded, mentions))
+                .map(|case| discard_observed_statement(&mut case.body, target, discarded))
                 .sum::<usize>()
                 + default.as_mut().map_or(0, |body| {
-                    discard_observed_statement(body, target, discarded, mentions)
+                    discard_observed_statement(body, target, discarded)
                 })
         }
         _ => 0,
