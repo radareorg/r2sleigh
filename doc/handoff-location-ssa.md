@@ -20629,3 +20629,77 @@ rather than a structural spelling of eighty -- which would shrink every set and
 map keyed by it in the journal, the effect ledger and the machine projection,
 and turn every comparison into an integer compare. That is a cross-crate
 rewrite of about seventy-five references in thirteen files.
+
+## Coverage after the caps came out
+
+The local census over the twelve binaries in the scratchpad set: **748 of 790
+functions render**. The denominator is not the 720 this document quoted before,
+because the set is larger and because radare2 finds more functions once the
+engine's proof pass finishes within its budget.
+
+The number that matters most is the one that is zero. **No function in any of
+the twelve is refused for cost**: no complexity limit, no engine deadline, and
+`budget_exhausted=0` on every binary. The six functions the caps used to refuse
+now render or refuse for something unproven, which is what removing the caps was
+for.
+
+What remains, by class:
+
+| count | class |
+|---|---|
+| 8 | `RenderedValueRequired` |
+| 6 | `missing_definition` |
+| 6 | missing machine projection authorization (`OpLowering`) |
+| 6 | volatile-or-unknown effects |
+| 3 | the address is a cold partition of another function |
+| 2 | `stack_access_read_before_assignment` |
+| 2 | missing program-variable authorization |
+| 2 | `PlannedElidedValueRendered` |
+| 1 each | `read_before_assignment`, `ExactWriteRequiresRenderedOccurrence`, a terminal-fallthrough certificate, a successor into the middle of a block, a switch dispatch outside its own block |
+
+Three things this session closed, with what they cost to find:
+
+**AArch64 import thunks.** `sym.imp.printf` is `adrp x16, slot; ldr x16, [x16];
+br x16`. Three separate facts were missing. radare2 records the slot as an
+indirect-code reference on the `adrp`, and the capture's slot filter took only
+data references and a code reference on the transfer itself. The forwarding
+test asked whether the thunk writes any register at all, which is right for
+x86's one-instruction `jmp [slot]` and wrong for a thunk that has to
+materialise its target -- the convention's own clobber set answers it properly,
+since a register a call may clobber and that passes no argument is not state
+the callee can observe. And at -O2 the last thunk in the stub section is padded,
+radare2 counts the padding as a trailing instruction of the block, so the
+transfer walk found the padding rather than the branch.
+
+**The stack probe.** Four of the five `stack_access_read_before_assignment`
+functions were refusing over `or qword [rsp], 0`, which reads a slot, leaves
+the value alone, writes it back, and re-reads it three times for the flags.
+`MemoryRoundTripCertificate` states that memory ends holding what it held, and
+the accesses it names owe nothing.
+
+**The one that got away.** The certificate's first version matched on the object
+rather than the address, and two accesses to one region at offsets nothing
+states exactly are not the same location: it certified `movzx eax, byte [rcx +
+r13]; mov byte [rdi + r13], al` as a round trip and deleted `inflate_fast`'s
+copy loop. The corpus gate stayed green through that; the census caught it.
+A census over the whole set is worth running before any certificate that deletes
+a statement is believed.
+
+### Open, with the evidence in hand
+
+**The AArch64 -O2 thunk still refuses**, and the remaining defect is radare2's:
+the block for `sym.imp.printf` runs from the `adrp` to four bytes past the `br`,
+and a basic block cannot continue past an unconditional branch. The lift emits
+an operation for the padding, so the indirect branch is not the block's last
+operation and the call-site correlation, which requires it to be, declines. That
+belongs upstream.
+
+**`missing_definition` is two different shapes.** One is a stack access read
+once and never written (`minigzip` at -O2, `BindingId(133)`, one
+`StackAccess` read at `InstId(597)` and nothing else). The other is a lane
+temporary whose member value has a definition the placement pass never saw a
+write for: `tmp_lane_b210_9_9d_1` in `minigzip`'s `0xafb0`, `members=[(ValueId(1944),
+Some(InstId(1853)))]` with `writes=[]`, its only read a `CertifiedValue` boundary
+read at `InstId(1870)`. The second is the one to trace first: a value with a
+defining instruction and no write occurrence is a contradiction, and the
+definition's only observation is a read.
