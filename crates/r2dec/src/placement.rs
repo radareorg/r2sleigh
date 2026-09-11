@@ -2746,6 +2746,10 @@ fn apply_decisions_once(
     // an early `return Err` leaves the emitted function untouched -- is the
     // caller's, not this function's.
     let candidate = &mut *function;
+    // One pass over the body, then every "does anything still name this?"
+    // question below is a lookup. The body only shrinks while those questions
+    // are asked, and each discard subtracts what it removed.
+    let mut mentions = SymbolMentions::of_body(&candidate.body);
     let mut discarded_bindings = BTreeSet::new();
     let mut discarded_observations = BTreeSet::<RenderObservationId>::new();
     let mut declarations =
@@ -2793,12 +2797,13 @@ fn apply_decisions_once(
                             &mut candidate.body,
                             *target,
                             &mut removed_observations,
+                            &mut mentions,
                         );
                     }
                     candidate.locals.retain(|local| local.name != symbol);
                     discarded_bindings.insert(binding);
                     discarded_observations.append(&mut removed_observations);
-                } else if function_body_mentions_symbol(&candidate.body, symbol)
+                } else if mentions.mentions(symbol)
                     && let Some(region) = region
                 {
                     // The name survived the removal, so something reads the
@@ -2886,7 +2891,7 @@ fn apply_decisions_once(
             let Some(symbol) = names.symbol_for_binding(binding) else {
                 continue;
             };
-            if !function_body_mentions_symbol(&candidate.body, symbol) {
+            if !mentions.mentions(symbol) {
                 // Nothing names it any more. Something this pass already
                 // removed took its last mention with it -- a frame slot's
                 // store, say, whose address was the only thing that read the
@@ -2922,7 +2927,12 @@ fn apply_decisions_once(
             }
             let mut removed_observations = BTreeSet::new();
             for target in &targets {
-                discard_observed_statement(&mut candidate.body, *target, &mut removed_observations);
+                discard_observed_statement(
+                    &mut candidate.body,
+                    *target,
+                    &mut removed_observations,
+                    &mut mentions,
+                );
             }
             candidate.locals.retain(|local| local.name != symbol);
             discarded_observations.append(&mut removed_observations);
@@ -2949,7 +2959,7 @@ fn apply_decisions_once(
     // Only from the end. Dropping a parameter from the middle would renumber
     // every slot after it, and the caller passes arguments by position.
     while let Some(last) = candidate.params.last() {
-        if function_body_mentions_symbol(&candidate.body, last.name) {
+        if mentions.mentions(last.name) {
             break;
         }
         candidate.params.pop();
@@ -3103,38 +3113,47 @@ fn insert_region_declarations_in_stmt(
 /// when the journal seals, which is the only point at which what the renderer
 /// actually emitted is known.
 /// Whether any statement still names this symbol.
-fn function_body_mentions_symbol(statements: &[CStmt], symbol: crate::symbol::SymbolId) -> bool {
-    statements
-        .iter()
-        .any(|statement| statement_mentions_symbol(statement, symbol))
-}
-
-fn statement_mentions_symbol(statement: &CStmt, symbol: crate::symbol::SymbolId) -> bool {
+/// Every symbol one statement names, in one traversal.
+///
+/// The predicate below and the running count both read this, so they cannot
+/// drift apart. That matters more than it usually would: the count decides
+/// whether a declaration may be dropped, and dropping one for a symbol the body
+/// still names emits an undeclared identifier, which is the one thing this pass
+/// must never do.
+fn statement_visit_symbols(statement: &CStmt, visit: &mut impl FnMut(crate::symbol::SymbolId)) {
+    let expr_symbols = |expr: &CExpr, visit: &mut dyn FnMut(crate::symbol::SymbolId)| {
+        expr.visit(&mut |node| {
+            if let CExpr::Var(name) = node {
+                visit(*name);
+            }
+        });
+    };
     match statement {
         CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => {
-            statement_mentions_symbol(stmt, symbol)
+            statement_visit_symbols(stmt, visit);
         }
-        CStmt::Block(statements) => function_body_mentions_symbol(statements, symbol),
-        CStmt::Expr(expr) | CStmt::Return(Some(expr)) => expr_mentions_symbol(expr, symbol),
+        CStmt::Block(statements) => body_visit_symbols(statements, visit),
+        CStmt::Expr(expr) | CStmt::Return(Some(expr)) => expr_symbols(expr, visit),
         CStmt::Decl { name, init, .. } => {
-            *name == symbol
-                || init
-                    .as_ref()
-                    .is_some_and(|init| expr_mentions_symbol(init, symbol))
+            visit(*name);
+            if let Some(init) = init.as_ref() {
+                expr_symbols(init, visit);
+            }
         }
         CStmt::If {
             cond,
             then_body,
             else_body,
         } => {
-            expr_mentions_symbol(cond, symbol)
-                || statement_mentions_symbol(then_body, symbol)
-                || else_body
-                    .as_ref()
-                    .is_some_and(|body| statement_mentions_symbol(body, symbol))
+            expr_symbols(cond, visit);
+            statement_visit_symbols(then_body, visit);
+            if let Some(body) = else_body.as_ref() {
+                statement_visit_symbols(body, visit);
+            }
         }
         CStmt::While { cond, body } | CStmt::DoWhile { body, cond } => {
-            expr_mentions_symbol(cond, symbol) || statement_mentions_symbol(body, symbol)
+            expr_symbols(cond, visit);
+            statement_visit_symbols(body, visit);
         }
         CStmt::For {
             init,
@@ -3142,31 +3161,85 @@ fn statement_mentions_symbol(statement: &CStmt, symbol: crate::symbol::SymbolId)
             update,
             body,
         } => {
-            init.as_ref()
-                .is_some_and(|init| statement_mentions_symbol(init, symbol))
-                || cond
-                    .as_ref()
-                    .is_some_and(|c| expr_mentions_symbol(c, symbol))
-                || update
-                    .as_ref()
-                    .is_some_and(|s| expr_mentions_symbol(s, symbol))
-                || statement_mentions_symbol(body, symbol)
+            if let Some(init) = init.as_ref() {
+                statement_visit_symbols(init, visit);
+            }
+            if let Some(cond) = cond.as_ref() {
+                expr_symbols(cond, visit);
+            }
+            if let Some(update) = update.as_ref() {
+                expr_symbols(update, visit);
+            }
+            statement_visit_symbols(body, visit);
         }
         CStmt::Switch {
             expr,
             cases,
             default,
         } => {
-            expr_mentions_symbol(expr, symbol)
-                || cases
-                    .iter()
-                    .any(|case| function_body_mentions_symbol(&case.body, symbol))
-                || default
-                    .as_ref()
-                    .is_some_and(|body| function_body_mentions_symbol(body, symbol))
+            expr_symbols(expr, visit);
+            for case in cases {
+                body_visit_symbols(&case.body, visit);
+            }
+            if let Some(body) = default.as_ref() {
+                body_visit_symbols(body, visit);
+            }
         }
-        _ => false,
+        _ => {}
     }
+}
+
+fn body_visit_symbols(statements: &[CStmt], visit: &mut impl FnMut(crate::symbol::SymbolId)) {
+    for statement in statements {
+        statement_visit_symbols(statement, visit);
+    }
+}
+
+/// How many times the body names each symbol.
+///
+/// Every decision loop asks, once per binding, whether the body still names one
+/// symbol, and each answer used to walk the whole tree: on a large function
+/// that is the pass's only superlinear term. The body only shrinks while those
+/// questions are being asked -- the single mutation in those phases is
+/// discarding a statement -- so one pass builds the counts and each discard
+/// subtracts exactly what it took away. Declarations are inserted afterwards,
+/// when nothing asks any more.
+#[derive(Debug, Default)]
+struct SymbolMentions {
+    counts: std::collections::HashMap<crate::symbol::SymbolId, usize>,
+}
+
+impl SymbolMentions {
+    fn of_body(statements: &[CStmt]) -> Self {
+        let mut counts = std::collections::HashMap::new();
+        body_visit_symbols(statements, &mut |symbol| {
+            *counts.entry(symbol).or_insert(0usize) += 1;
+        });
+        Self { counts }
+    }
+
+    fn mentions(&self, symbol: crate::symbol::SymbolId) -> bool {
+        self.counts.get(&symbol).is_some_and(|count| *count > 0)
+    }
+
+    /// Subtract everything one discarded statement named.
+    fn forget(&mut self, statement: &CStmt) {
+        statement_visit_symbols(statement, &mut |symbol| {
+            if let Some(count) = self.counts.get_mut(&symbol) {
+                *count = count.saturating_sub(1);
+            }
+        });
+    }
+}
+
+fn statement_mentions_symbol(statement: &CStmt, symbol: crate::symbol::SymbolId) -> bool {
+    let mut found = false;
+    statement_visit_symbols(statement, &mut |name| {
+        if name == symbol {
+            found = true;
+        }
+    });
+    found
 }
 
 fn expr_mentions_symbol(expr: &CExpr, symbol: crate::symbol::SymbolId) -> bool {
@@ -3362,10 +3435,11 @@ fn discard_observed_statement(
     statements: &mut [CStmt],
     target: RenderObservationId,
     discarded: &mut BTreeSet<RenderObservationId>,
+    mentions: &mut SymbolMentions,
 ) -> usize {
     let mut removed = 0;
     for statement in statements.iter_mut() {
-        removed += discard_observed_statement_in_stmt(statement, target, discarded);
+        removed += discard_observed_statement_in_stmt(statement, target, discarded, mentions);
     }
     removed
 }
@@ -3391,11 +3465,13 @@ fn discard_observed_statement_in_stmt(
     statement: &mut CStmt,
     target: RenderObservationId,
     discarded: &mut BTreeSet<RenderObservationId>,
+    mentions: &mut SymbolMentions,
 ) -> usize {
     if let CStmt::Observed { id, .. } = statement
         && *id == target
     {
         collect_statement_observations(statement, discarded);
+        mentions.forget(statement);
         *statement = CStmt::Empty;
         return 1;
     }
@@ -3419,39 +3495,42 @@ fn discard_observed_statement_in_stmt(
     );
     if assigns_target {
         collect_statement_observations(statement, discarded);
+        mentions.forget(statement);
         *statement = CStmt::Empty;
         return 1;
     }
     match statement {
         CStmt::Observed { stmt, .. } | CStmt::StructuredRegion { stmt, .. } => {
-            discard_observed_statement_in_stmt(stmt, target, discarded)
+            discard_observed_statement_in_stmt(stmt, target, discarded, mentions)
         }
-        CStmt::Block(statements) => discard_observed_statement(statements, target, discarded),
+        CStmt::Block(statements) => {
+            discard_observed_statement(statements, target, discarded, mentions)
+        }
         CStmt::If {
             then_body,
             else_body,
             ..
         } => {
-            discard_observed_statement_in_stmt(then_body, target, discarded)
+            discard_observed_statement_in_stmt(then_body, target, discarded, mentions)
                 + else_body.as_mut().map_or(0, |body| {
-                    discard_observed_statement_in_stmt(body, target, discarded)
+                    discard_observed_statement_in_stmt(body, target, discarded, mentions)
                 })
         }
         CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            discard_observed_statement_in_stmt(body, target, discarded)
+            discard_observed_statement_in_stmt(body, target, discarded, mentions)
         }
         CStmt::For { init, body, .. } => {
             init.as_mut().map_or(0, |init| {
-                discard_observed_statement_in_stmt(init, target, discarded)
-            }) + discard_observed_statement_in_stmt(body, target, discarded)
+                discard_observed_statement_in_stmt(init, target, discarded, mentions)
+            }) + discard_observed_statement_in_stmt(body, target, discarded, mentions)
         }
         CStmt::Switch { cases, default, .. } => {
             cases
                 .iter_mut()
-                .map(|case| discard_observed_statement(&mut case.body, target, discarded))
+                .map(|case| discard_observed_statement(&mut case.body, target, discarded, mentions))
                 .sum::<usize>()
                 + default.as_mut().map_or(0, |body| {
-                    discard_observed_statement(body, target, discarded)
+                    discard_observed_statement(body, target, discarded, mentions)
                 })
         }
         _ => 0,
