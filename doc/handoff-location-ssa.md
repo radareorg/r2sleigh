@@ -20953,3 +20953,95 @@ engine enough that the deadline expires on large functions, so a traced run
 shows cost refusals a plain run does not. Trace with
 `R2SLEIGH_PER_FUNCTION_BUDGET_USEC` raised, or the trace reports its own
 overhead as a finding.
+
+## The three modelling defects, and what closing two of them did
+
+The 34 refusals that stood after the performance work were not 34 problems. They
+were three modelling defects with one shape: a fact missing about one cell was
+widened into a claim about the whole function. Two are now closed; the local
+census went from 756 of 790 to 765 of 787, with the corpus gate at 54 of 54
+throughout.
+
+### Coherence is four questions, not one
+
+`MachineAbiModel.coherent` conjoined six independent terms, so a reader that
+needed one had to accept all six. The model now answers `return_boundary`,
+`argument_placement`, `frame_geometry` and `machine_carriers` separately, and
+`coherent_function_interface` -- which hid the interface from SSA construction
+entirely -- is replaced by a view that offers it per question.
+
+The precedent was already in the tree, written into the comments on
+`source_formal_parameter_projections` and `exact_source_param_slot_resolver`:
+both gate on availability alone and re-verify per slot. This finished that
+split.
+
+One behaviour changed on purpose. A return boundary without any declared machine
+roles now reports the values it carries and leaves `machine_state_complete`
+false, where it used to report nothing. The values a return carries and the
+state it leaves behind are separate questions.
+
+### A call reads its arguments
+
+`SSAOp::Call` named only its callee, so nothing downstream could see that a call
+consumes anything. Four layers carried a version of that missing fact: the
+boundary side table, the `CallArgument` seeding, the liveness gap, and
+`taint_incomplete_boundary_inputs`, which marked every definition reaching an
+incomplete boundary as an unknown effect and refused the function.
+
+`SSAOp::CallUse { src }` is the third member of the family `CallDefine` and
+`CallRestore` already form, emitted immediately before the call for every
+argument carrier the convention names. Before it, because the run of
+`CallDefine` that follows a call is how a result is found and five scans
+`take_while` over it. The register list already existed as
+`CallBoundaryConfig::argument_regs`, which phi placement had been using to
+extend a call's live-in, so no new phi appears.
+
+Two things fell out that were not predicted.
+
+`run_is_read_after` in the storage-span builder decides whether a run can absorb
+another definition by looking for a reader in `graph.use_sites`. With a call's
+reads absent it concluded an argument carrier was never read after its
+definition and coalesced two live values into one C object. Two corpus cells
+changed, both improving, and the baseline was updated for them.
+
+Seeding liveness from the graph reads unconditionally was too strong: it
+resurrected argument registers a complete boundary had proven the callee does
+not take, and cost two corpus cells. The rule is that the graph says what the
+convention permits -- the same claim `CallDefine` makes on the other side -- and
+the boundary narrows it when it can. Only an incomplete boundary seeds from the
+reads.
+
+### What a cold partition renders as
+
+`sym.gz_compress.cold` is a label inside a function the capture already walks
+into its owner's image, so refusing it as "not a function" was false about code
+we have. It now emits a comment naming the owner, and the census stops counting
+it as a function: rendering the owner's body again would duplicate the output
+and double-count coverage.
+
+## Open items
+
+**A self-looping entry block gets no phi.** Found while rewriting the taint's own
+test. A single block that is its own only predecessor and defines a register
+gets no phi for it, so a read at the top of the block sees the entry version on
+every iteration rather than the back edge's definition. The fixture was changed
+to a two-block loop to keep the test about what it tests; the construction
+question is untouched and unverified against a real binary. A synthetic
+pre-entry block is the usual answer.
+
+**A tail call cannot be gapped.** `fcn_7af0` in bzip2 `-O2` refuses because a
+tail call at `(0x7b20, 3)` declares seven arguments and the boundary proved
+fewer, and `gap_closure_from_seed` correctly refuses to put a marker where a
+transfer belongs. Two questions are open and the first is the real one: why the
+seventh argument is unprovable at that site -- the callsite logs no
+`call-boundary-incomplete` evidence, so it is not taking the path that would
+explain itself. Only if that turns out to be unknowable in principle does the
+rendering question arise, and the PLT-stub precedent says the answer would be a
+declaration rather than a body.
+
+**The remaining 22.** Thirteen are the plan/journal duality: four
+`missing_definition`, four `RenderedValueRequired`, two
+`PlannedElidedValueRendered`, two `stack_access_read_before_assignment` and one
+`read_before_assignment`. Four are machine-projection refusals at three lowering
+sites. Three are radare2 analysis producing a partition inconsistent with its
+own edges, and one is a control certificate edge mismatch in `BZ2_decompress`.
