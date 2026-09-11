@@ -139,7 +139,6 @@ static bool function_image_code_pointer_tables_collect(RAnal *anal, RAnalFunctio
 static bool function_image_string_literals_collect(RAnal *anal, RAnalFunctionImageSnapshot *image, const RAnalFunctionSnapshotLimits *limits);
 static bool function_image_data_symbols_collect(RAnal *anal, RAnalFunctionImageSnapshot *image, const RAnalFunctionSnapshotLimits *limits);
 static bool function_image_snapshot_collect(RAnal *anal, const RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits, RAnalFunctionImageSnapshot *image, const char **reason);
-static bool function_image_snapshot_equal(const RAnalFunctionImageSnapshot *left, const RAnalFunctionImageSnapshot *right);
 static void snapshot_register_storage_fini(RAnalSnapshotRegisterStorage *storage);
 static void function_interface_snapshot_fini(RAnalFunctionInterfaceSnapshot *interface);
 static void snapshot_type_graph_fini(RAnalSnapshotTypeGraph *graph);
@@ -165,7 +164,6 @@ static bool snapshot_cc_maps_register_interface(RAnal *anal, const RAnalFunction
 static bool snapshot_promote_exact_dwarf_stack_homes( RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx, RAnalFunctionInterfaceSnapshot *interface, const char *calling_convention);
 static bool snapshot_parameter_storages_overlap( const RAnalSnapshotParameter *parameters, size_t count);
 static bool snapshot_register_storages_overlap( const RAnalSnapshotRegisterStorage *left, const RAnalSnapshotRegisterStorage *right);
-static bool snapshot_register_storages_equal( const RAnalSnapshotRegisterStorage *left, const RAnalSnapshotRegisterStorage *right);
 static bool snapshot_return_address_storage_overlaps_interface( const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx);
 static bool snapshot_stack_pointer_storage_conflicts_interface( const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx);
 static bool snapshot_stack_resources_complete(const RAnalFcnContext *ctx);
@@ -173,9 +171,7 @@ static bool snapshot_stack_slot_roles_complete( const RAnalFcnContext *ctx, cons
 static bool snapshot_convention_slots_collect( RAnal *anal, RAnalFunction *fcn, RAnalFunctionInterfaceSnapshot *interface);
 static bool function_interface_snapshot_collect( RAnal *anal, RAnalFunction *fcn, RAnalFcnContext *ctx, RAnalFunctionInterfaceSnapshot *interface, const RAnalFunctionSnapshotLimits *limits);
 static void snapshot_return_mechanism_collect(RAnal *anal, const RAnalFunction *fcn, const RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotReturnMechanismView *view);
-static bool snapshot_return_mechanism_equal(const RAnalSnapshotReturnMechanismView *a, const RAnalSnapshotReturnMechanismView *b);
 static void snapshot_stack_allocation_contract_collect(RAnal *anal, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotStackAllocationContractView *view);
-static bool snapshot_stack_allocation_contract_equal( const RAnalSnapshotStackAllocationContractView *a, const RAnalSnapshotStackAllocationContractView *b);
 static bool snapshot_frame_pointer_storage_conflicts_interface( const RAnalSnapshotRegisterStorage *storage, const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx);
 // The base-pointer register every frame-pointer slot agrees on.
 //
@@ -225,11 +221,7 @@ static bool snapshot_frame_pointer_storage_from_slots(RAnal *anal,
 }
 
 static bool snapshot_frame_pointer_storage_collect(RAnal *anal, const RAnalFunction *fcn, const RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotRegisterStorage *storage);
-static bool snapshot_frame_pointer_storage_equal( const RAnalSnapshotRegisterStorage *a, const RAnalSnapshotRegisterStorage *b);
 static int snapshot_base_type_compare(const void *left, const void *right);
-static bool snapshot_nullable_string_equal(const char *left, const char *right);
-static bool snapshot_base_type_equal(const RAnalBaseType *left, const RAnalBaseType *right);
-static bool snapshot_base_types_equal(const RList *left, const RList *right);
 static bool snapshot_base_type_string_add(size_t *total, const char *string);
 static bool snapshot_base_type_string_bytes(const RList *base_types, size_t *result);
 static void snapshot_type_resolver_select_current_roots(Sdb *type_db, RList *base_types);
@@ -2119,41 +2111,6 @@ fail:
 	}
 	return false;
 }
-static bool function_image_snapshot_equal(const RAnalFunctionImageSnapshot *left, const RAnalFunctionImageSnapshot *right) {
-	if (left->entry_addr != right->entry_addr
-		|| left->num_blocks != right->num_blocks
-		|| left->num_external_exits != right->num_external_exits
-		|| left->total_source_bytes != right->total_source_bytes) {
-		return false;
-	}
-	if (left->num_external_exits && memcmp (left->external_exits,
-			right->external_exits,
-			left->num_external_exits * sizeof (ut64))) {
-		return false;
-	}
-	size_t i;
-	for (i = 0; i < left->num_blocks; i++) {
-		const RAnalSnapshotBlock *a = &left->blocks[i];
-		const RAnalSnapshotBlock *b = &right->blocks[i];
-		if (a->addr != b->addr || a->size != b->size
-			|| a->switch_addr != b->switch_addr
-			|| a->num_successors != b->num_successors
-			|| memcmp (a->bytes, b->bytes, (size_t)a->size)) {
-			return false;
-		}
-		size_t j;
-		for (j = 0; j < a->num_successors; j++) {
-			const RAnalSnapshotSuccessor *as = &a->successors[j];
-			const RAnalSnapshotSuccessor *bs = &b->successors[j];
-			if (as->kind != bs->kind || as->target_addr != bs->target_addr
-				|| as->case_value != bs->case_value
-				|| as->external != bs->external) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
 static void snapshot_register_storage_fini(RAnalSnapshotRegisterStorage *storage) {
 	free (storage->name);
 	memset (storage, 0, sizeof (*storage));
@@ -2839,12 +2796,6 @@ static bool snapshot_register_storages_overlap(
 		|| r_add_overflow (right->offset, (ut64)right->size, &right_end)
 		|| (left->offset < right_end && right->offset < left_end);
 }
-static bool snapshot_register_storages_equal(
-	const RAnalSnapshotRegisterStorage *left,
-	const RAnalSnapshotRegisterStorage *right) {
-	return left->size && right->size
-		&& left->offset == right->offset && left->size == right->size;
-}
 static bool snapshot_return_address_storage_overlaps_interface(
 	const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx) {
 	if (interface->stack_pointer_storage.name
@@ -2896,6 +2847,13 @@ static bool snapshot_return_address_storage_overlaps_interface(
 	}
 	return false;
 }
+static bool snapshot_register_storages_equal(
+	const RAnalSnapshotRegisterStorage *left,
+	const RAnalSnapshotRegisterStorage *right) {
+	return left->size && right->size
+		&& left->offset == right->offset && left->size == right->size;
+}
+
 static bool snapshot_stack_pointer_storage_conflicts_interface(
 	const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx) {
 	if (interface->return_address_storage.name
@@ -3488,13 +3446,6 @@ static void snapshot_return_mechanism_collect(RAnal *anal, const RAnalFunction *
 		.exit_sp_delta = mechanism.exit_sp_delta,
 	};
 }
-static bool snapshot_return_mechanism_equal(const RAnalSnapshotReturnMechanismView *a,
-		const RAnalSnapshotReturnMechanismView *b) {
-	return a->kind == b->kind
-		&& a->entry_sp_offset == b->entry_sp_offset
-		&& a->slot_size == b->slot_size
-		&& a->exit_sp_delta == b->exit_sp_delta;
-}
 static void snapshot_stack_allocation_contract_collect(RAnal *anal,
 		const RAnalFunctionInterfaceSnapshot *interface,
 		RAnalSnapshotStackAllocationContractView *view) {
@@ -3521,12 +3472,6 @@ static void snapshot_stack_allocation_contract_collect(RAnal *anal,
 	default:
 		break;
 	}
-}
-static bool snapshot_stack_allocation_contract_equal(
-		const RAnalSnapshotStackAllocationContractView *a,
-		const RAnalSnapshotStackAllocationContractView *b) {
-	return a->growth == b->growth
-		&& a->implicit_active_sp_bytes == b->implicit_active_sp_bytes;
 }
 static bool snapshot_frame_pointer_storage_conflicts_interface(
 		const RAnalSnapshotRegisterStorage *storage,
@@ -3617,12 +3562,6 @@ static bool snapshot_frame_pointer_storage_collect(RAnal *anal,
 	*storage = candidate;
 	return true;
 }
-static bool snapshot_frame_pointer_storage_equal(
-		const RAnalSnapshotRegisterStorage *a,
-		const RAnalSnapshotRegisterStorage *b) {
-	return !strcmp (r_str_get (a->name), r_str_get (b->name))
-		&& a->offset == b->offset && a->size == b->size;
-}
 static int snapshot_base_type_compare(const void *left, const void *right) {
 	const RAnalBaseType *a = left;
 	const RAnalBaseType *b = right;
@@ -3632,69 +3571,6 @@ static int snapshot_base_type_compare(const void *left, const void *right) {
 		return name_cmp;
 	}
 	return a->kind < b->kind? -1: 1;
-}
-static bool snapshot_nullable_string_equal(const char *left, const char *right) {
-	return (!left && !right) || (left && right && !strcmp (left, right));
-}
-static bool snapshot_base_type_equal(const RAnalBaseType *left, const RAnalBaseType *right) {
-	if (!left || !right) {
-		return left == right;
-	}
-	if (left->kind != right->kind || left->size != right->size
-		|| !snapshot_nullable_string_equal (left->name, right->name)
-		|| !snapshot_nullable_string_equal (left->type, right->type)) {
-		return false;
-	}
-	if (left->kind == R_ANAL_BASE_TYPE_KIND_STRUCT
-		|| left->kind == R_ANAL_BASE_TYPE_KIND_UNION) {
-		const RVecAnalTypeMember *left_members = r_anal_base_type_members (left);
-		const RVecAnalTypeMember *right_members = r_anal_base_type_members (right);
-		const size_t count = RVecAnalTypeMember_length (left_members);
-		if (count != RVecAnalTypeMember_length (right_members)) {
-			return false;
-		}
-		size_t i;
-		for (i = 0; i < count; i++) {
-			const RAnalTypeMember *a = RVecAnalTypeMember_at (left_members, i);
-			const RAnalTypeMember *b = RVecAnalTypeMember_at (right_members, i);
-			if (a->offset != b->offset || a->bitsize != b->bitsize
-				|| a->count != b->count
-				|| !snapshot_nullable_string_equal (a->name, b->name)
-				|| !snapshot_nullable_string_equal (a->type, b->type)) {
-				return false;
-			}
-		}
-	} else if (left->kind == R_ANAL_BASE_TYPE_KIND_ENUM) {
-		const size_t count = RVecAnalEnumCase_length (&left->enum_data.cases);
-		if (count != RVecAnalEnumCase_length (&right->enum_data.cases)) {
-			return false;
-		}
-		size_t i;
-		for (i = 0; i < count; i++) {
-			const RAnalEnumCase *a = RVecAnalEnumCase_at (&left->enum_data.cases, i);
-			const RAnalEnumCase *b = RVecAnalEnumCase_at (&right->enum_data.cases, i);
-			if (a->val != b->val
-				|| !snapshot_nullable_string_equal (a->name, b->name)) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
-static bool snapshot_base_types_equal(const RList *left, const RList *right) {
-	if (!left || !right || r_list_length (left) != r_list_length (right)) {
-		return false;
-	}
-	RListIter *left_iter = r_list_iterator (left);
-	RListIter *right_iter = r_list_iterator (right);
-	while (left_iter && right_iter) {
-		if (!snapshot_base_type_equal (left_iter->data, right_iter->data)) {
-			return false;
-		}
-		left_iter = left_iter->n;
-		right_iter = right_iter->n;
-	}
-	return !left_iter && !right_iter;
 }
 static bool snapshot_base_type_string_add(size_t *total, const char *string) {
 	if (!string) {
@@ -5714,38 +5590,23 @@ static RAnalFunctionSnapshot *function_snapshot_collect_with_limits_unlocked(RAn
 	if (!snapshot_interface_within_limits (snapshot, limits)) {
 		SNAPSHOT_REFUSE ("the function interface exceeds its limits");
 	}
-	RAnalFunctionImageSnapshot current_image = {0};
-	const bool image_current = function_image_snapshot_collect (
-		anal, fcn, limits, &current_image, NULL)
-		&& function_image_snapshot_equal (&snapshot->image, &current_image);
-	function_image_snapshot_fini (&current_image);
-	RList *current_base_types = snapshot_type_resolver_capture (anal, limits);
-	const bool base_types_current = snapshot_base_types_equal (
-		snapshot->base_types, current_base_types);
-	r_list_free (current_base_types);
-	RAnalSnapshotReturnMechanismView current_return_mechanism = {0};
-	snapshot_return_mechanism_collect (anal, fcn,
-		ctx, &snapshot->function_interface, &current_return_mechanism);
-	RAnalSnapshotStackAllocationContractView current_stack_allocation_contract = {0};
-	snapshot_stack_allocation_contract_collect (anal,
-		&snapshot->function_interface, &current_stack_allocation_contract);
-	RAnalSnapshotRegisterStorage current_frame_pointer_storage = {0};
-	const bool frame_pointer_current = snapshot_frame_pointer_storage_collect (
-		anal, fcn, ctx, &snapshot->function_interface,
-		&current_frame_pointer_storage)
-		&& snapshot_frame_pointer_storage_equal (
-			&snapshot->frame_pointer_storage, &current_frame_pointer_storage);
-	snapshot_register_storage_fini (&current_frame_pointer_storage);
+	/* Whether anything moved under the collection is the epochs' question.
+	 *
+	 * This used to collect the whole function image a second time, capture the
+	 * whole type database a second time, and recompute the return mechanism,
+	 * the stack allocation contract and the frame pointer storage, then compare
+	 * each pair. That is the question the two epochs already answer, asked
+	 * again at the price of reading every byte of the function twice, decoding
+	 * it twice, probing every byte for cross-references six times, and walking
+	 * the program-global type database three more times.
+	 *
+	 * The epochs are load-bearing on their own elsewhere: the held capture in
+	 * r_anal_sleigh.c keys entirely on (address, function epoch, type epoch)
+	 * and hands back a snapshot without re-reading anything. Verifying them
+	 * here was a second answer to a question another layer already owns. */
 	if (function_dirty_epoch != r_anal_function_dirty_epoch (fcn)
 		|| type_dirty_epoch != r_anal_types_dirty_epoch (anal)
-		|| !function_snapshot_machine_tuple_is_current (snapshot, anal)
-		|| !image_current || !base_types_current
-		|| !snapshot_return_mechanism_equal (
-			&snapshot->return_mechanism, &current_return_mechanism)
-		|| !snapshot_stack_allocation_contract_equal (
-			&snapshot->stack_allocation_contract,
-			&current_stack_allocation_contract)
-		|| !frame_pointer_current) {
+		|| !function_snapshot_machine_tuple_is_current (snapshot, anal)) {
 		SNAPSHOT_REFUSE ("the function or type state changed during capture");
 	}
 	snapshot->capabilities = R_ANAL_FUNCTION_SNAPSHOT_CAP_STACK_SLOTS
