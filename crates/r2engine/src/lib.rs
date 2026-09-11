@@ -3017,23 +3017,6 @@ impl EngineSession {
             analysis_request.arch.as_ref(),
             analysis_request.ptr_bits,
         );
-        let op_count = analysis_request
-            .blocks
-            .iter()
-            .map(|block| block.ops.len())
-            .sum::<usize>();
-        if decompile_complexity_limit_exceeded(actual_lifted_blocks, op_count) {
-            let reason = format!(
-                "decompile complexity limit exceeded: blocks={actual_lifted_blocks}/{} ops={op_count}/{}",
-                ENGINE_DECOMPILE_MAX_BLOCKS, ENGINE_DECOMPILE_MAX_OPS
-            );
-            return refused_decompile_response(
-                &display_name,
-                &reason,
-                started.elapsed(),
-                input_quality_facts,
-            );
-        }
         let analyze_response = match self.analyze_checked(analysis_request) {
             Ok(response) => response,
             Err(refusal) => {
@@ -6374,65 +6357,6 @@ mod tests {
             assert!(comment.contains("sym.* /  int forged(void)"));
         }
         assert!(hostile_comments[1].contains("budget * / return 7"));
-    }
-
-    #[test]
-    fn decompile_complexity_caps_refuse_before_analysis_construction() {
-        let over_blocks = (0..=ENGINE_DECOMPILE_MAX_BLOCKS)
-            .map(|index| {
-                R2ILBlock::new(0xb000 + u64::try_from(index).expect("small block index"), 1)
-            })
-            .collect::<Vec<_>>();
-        let mut over_ops = R2ILBlock::new(0xc000, 1);
-        for index in 0..=ENGINE_DECOMPILE_MAX_OPS {
-            over_ops.push(r2il::R2ILOp::Copy {
-                dst: r2il::Varnode::unique(
-                    0x100 + u64::try_from(index).expect("small operation index"),
-                    8,
-                ),
-                src: r2il::Varnode::constant(
-                    u64::try_from(index).expect("small operation index"),
-                    8,
-                ),
-            });
-        }
-
-        for (name, addr, blocks) in [
-            ("sym.over_blocks", 0xb000, over_blocks),
-            ("sym.over_ops", 0xc000, vec![over_ops]),
-        ] {
-            let session = EngineSession::new();
-            let response = session.decompile_function_from_input(
-                EngineFunctionDecompileRequestInput::single_function(
-                    EngineFunctionInput {
-                        function_name: name.to_string(),
-                        function_addr: addr,
-                        blocks,
-                        arch: None,
-                        source_snapshot: Some(test_source_snapshot(&format!(
-                            "{name}/decompile/rev1"
-                        ))),
-                        semantic_metadata_enabled: false,
-                    },
-                    Some(64),
-                    r2types::ParsedExternalContext::default(),
-                ),
-            );
-            assert!(
-                response
-                    .output
-                    .contains("decompile complexity limit exceeded"),
-                "{}",
-                response.output
-            );
-            assert_eq!(
-                response
-                    .function_facts
-                    .decompile_route()
-                    .map(|route| route.kind),
-                Some(r2types::DecompileRouteKind::FallbackComment)
-            );
-        }
     }
 
     #[test]

@@ -720,40 +720,6 @@ static void sleigh_function_capture_release(void) {
 	memset (&sleigh_held_capture, 0, sizeof (sleigh_held_capture));
 }
 
-/* Whether the engine will decline this function on size, asked before anything
- * is collected.
- *
- * The engine has always declined a function past its block and operation caps,
- * but only after the whole snapshot had been built, serialized to the wire and
- * decoded again -- so the memory was spent regardless of the answer. On zlib
- * built at -O2 that reached three to six gigabytes resident and the kernel
- * killed r2, which costs every function in the binary rather than the one that
- * was too big: five of zlib's seven binaries reported no functions at all.
- *
- * radare2's own basic blocks and instruction total are a floor for what lifting
- * produces -- lifting splits blocks and expands one instruction into several
- * operations, never the reverse -- so nothing refused here would have been
- * accepted after the walk. */
-static bool sleigh_function_exceeds_engine_limits(RAnalFunction *fcn) {
-	if (!fcn) {
-		return false;
-	}
-	size_t blocks = 0;
-	size_t ops = 0;
-	RListIter *iter;
-	RAnalBlock *bb;
-	r_list_foreach (fcn->bbs, iter, bb) {
-		if (!bb) {
-			continue;
-		}
-		blocks++;
-		if (bb->ninstr > 0) {
-			ops += (size_t)bb->ninstr;
-		}
-	}
-	return r2sleigh_engine_complexity_limit_exceeded_v2 (blocks, ops) != 0;
-}
-
 /* The snapshot for this function, walking for it only when what is held is not
  * already exactly it. Returns NULL when the walk refused or when the analysis
  * changed underneath it, which is the same fail-closed answer the three
@@ -768,20 +734,6 @@ static const SleighFunctionCapture *sleigh_function_capture_with_reason(RAnal *a
 	RCore *core = anal->coreb.core;
 	if (!core) {
 		cause = "radare2 offered no core to capture from";
-		goto refused;
-	}
-	/* Ask radare2 how big this is before collecting anything. The engine
-	 * declines a function past its block and operation caps, and until now it
-	 * did so only after the whole snapshot had been built, serialized and
-	 * decoded -- so the memory was spent regardless. On zlib built at -O2 that
-	 * reached three to six gigabytes resident and the kernel killed r2, which
-	 * costs every function in the binary instead of the one that was too big;
-	 * five of zlib's seven binaries reported no functions at all for that
-	 * reason. radare2's own block count and instruction total are a floor for
-	 * what lifting produces, so nothing refused here would have been accepted. */
-	if (sleigh_function_exceeds_engine_limits (fcn)) {
-		cause = "the function exceeds the engine complexity limit";
-		R_LOG_ERROR ("r2sleigh: capture refused '%s': %s", r_str_get (fcn->name), cause);
 		goto refused;
 	}
 	const ut64 function_epoch = r_anal_function_dirty_epoch (fcn);
@@ -3612,12 +3564,6 @@ static RCodeMeta *sleigh_decline(const RAnalFunction *fcn, const char *reason) {
 static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 	R_RETURN_VAL_IF_FAIL (anal && fcn, NULL);
 	const ut64 decompile_start_us = r_time_now_mono ();
-	if (sleigh_function_exceeds_engine_limits (fcn)) {
-		sleigh_profile_add (anal, fcn, SLEIGH_PROFILE_STAGE_DECOMPILE,
-			r_time_now_mono () - decompile_start_us);
-		return sleigh_decline (fcn,
-			"engine refusal: function exceeds the engine complexity limit");
-	}
 	const char *capture_refusal = "the function could not be captured";
 	const SleighFunctionCapture *held = sleigh_function_capture_with_reason (
 		anal, fcn, &capture_refusal);
