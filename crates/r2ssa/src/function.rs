@@ -338,6 +338,7 @@ impl SsaArtifact {
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         control.poll()?;
+        let prepare_entry_bytes = r2il::allocation::live_bytes();
         // The validator answers with a typed integrity error naming the block
         // and the edge it disagreed about; discarding it left the reader with
         // "malformed SSA source input" and nothing to look at.
@@ -353,6 +354,7 @@ impl SsaArtifact {
             crate::semantic::collect_source_formal_parameter_facts(&graph, &machine_context);
         function.install_exact_formal_parameters(&graph, &formal_parameters);
         let storage_spans = StorageSpans::compute(&function, &graph);
+        let graph_built_bytes = r2il::allocation::live_bytes();
         let return_storages = machine_context
             .abi_model()
             .return_registers()
@@ -367,6 +369,18 @@ impl SsaArtifact {
             &storage_spans,
             &AssumptionSet::default(),
             &machine_context,
+            "prepare",
+        );
+        // What one prepared function holds is the space every later stage has
+        // to work above, so it is reported beside the phases that built it.
+        r2il::refusal_evidence!(
+            "prepare-held",
+            "{:#x}/{} holds {} bytes after preparation: function+graph {} facts {}",
+            function.entry,
+            function.num_blocks(),
+            r2il::allocation::live_bytes().saturating_sub(prepare_entry_bytes),
+            graph_built_bytes.saturating_sub(prepare_entry_bytes),
+            r2il::allocation::live_bytes().saturating_sub(graph_built_bytes)
         );
         let unobserved_merges = crate::deadphi::DeadPhis::find(&graph, &live_out, &facts);
         let aggregate_accesses = collect_aggregate_access_projections(
@@ -1004,6 +1018,7 @@ impl SsaArtifact {
             &self.storage_spans,
             assumptions,
             &self.machine_context,
+            "assume",
         );
         let aggregate_accesses = collect_aggregate_access_projections(
             &self.graph,

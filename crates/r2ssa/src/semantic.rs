@@ -1725,6 +1725,7 @@ impl PreparedFunctionFacts {
             &storage_spans,
             &AssumptionSet::default(),
             None,
+            "collect",
         )
     }
 
@@ -1734,7 +1735,7 @@ impl PreparedFunctionFacts {
         assumptions: &AssumptionSet,
     ) -> Self {
         let storage_spans = StorageSpans::compute(function, graph);
-        Self::collect_inner(function, graph, &storage_spans, assumptions, None)
+        Self::collect_inner(function, graph, &storage_spans, assumptions, None, "assume")
     }
 
     pub(crate) fn collect_with_context(
@@ -1743,6 +1744,7 @@ impl PreparedFunctionFacts {
         storage_spans: &StorageSpans,
         assumptions: &AssumptionSet,
         machine_context: &SourceMachineContext,
+        site: &'static str,
     ) -> Self {
         Self::collect_inner(
             function,
@@ -1750,6 +1752,7 @@ impl PreparedFunctionFacts {
             storage_spans,
             assumptions,
             Some(machine_context),
+            site,
         )
     }
 
@@ -1759,22 +1762,35 @@ impl PreparedFunctionFacts {
         storage_spans: &StorageSpans,
         assumptions: &AssumptionSet,
         machine_context: Option<&SourceMachineContext>,
+        site: &'static str,
     ) -> Self {
         // Each phase reports how long it took and how much it produced. One
         // function in a binary built at -O2 grew past the harness's memory
         // limit inside this collector while the same function alone took two
         // seconds; the phase that grows is the one to trace, and nothing
         // downstream can tell which it was.
+        // The bytes matter as much as the milliseconds, and for the same
+        // reason: a collection that grows is the one to trace, and a count of
+        // entries says nothing about what each entry holds.
         let phase_started = std::time::Instant::now();
+        let phase_bytes = std::cell::Cell::new(r2il::allocation::live_bytes());
+        let who = format!(
+            "{site}@{:#x}/{}",
+            function.entry_block().map_or(0, |block| block.addr),
+            function.num_blocks()
+        );
         let phase = |name: &str, size: usize| {
+            let live = r2il::allocation::live_bytes();
+            let grew = live.saturating_sub(phase_bytes.get());
+            phase_bytes.set(live);
             r2il::refusal_evidence!(
                 "collect-phase",
-                "{name} {} ms size {size}",
+                "{who} {name} {} ms size {size} bytes {grew}",
                 phase_started.elapsed().as_millis()
             );
         };
         let addresses = collect_address_provenance(function, graph, machine_context);
-        phase("addresses", 0);
+        phase("addresses", graph.insts.len());
         let call_sites = collect_call_sites(
             function,
             graph,
@@ -1828,7 +1844,7 @@ impl PreparedFunctionFacts {
             machine_context,
             &private_stack_objects,
         );
-        phase("obligations", 0);
+        phase("obligations", obligations.obligations().len());
         // A lifted body merges every storage live across a join, so the graph
         // records uses that carry no program observation. `DeadPhis` names
         // exactly those, and the merges stay in the function by design, so a

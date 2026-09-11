@@ -53,11 +53,30 @@ pub const POST_ANALYSIS_PER_FUNCTION_BUDGET_USEC: u64 = 100_000;
 /// has time to establish that rather than refusing on a zero budget.
 pub const POST_ANALYSIS_MINIMUM_BUDGET_USEC: u64 = POST_ANALYSIS_PER_FUNCTION_BUDGET_USEC;
 
+/// Per-function budget an operator asked for instead of the derived one.
+///
+/// A deadline that fires is a measurement of how slow the engine is, and the
+/// measurement cannot be taken when the deadline stops the thing being
+/// measured. `R2SLEIGH_PER_FUNCTION_BUDGET_USEC` lets a profiling run watch a
+/// function run to completion; it is read once, so a sweep cannot change
+/// budget underneath itself.
+fn per_function_budget_usec() -> u64 {
+    static BUDGET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        std::env::var("R2SLEIGH_PER_FUNCTION_BUDGET_USEC")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(POST_ANALYSIS_PER_FUNCTION_BUDGET_USEC)
+    })
+}
+
 /// The post-analysis budget for a program of this size.
-pub const fn post_analysis_budget_usec(function_count: usize) -> u64 {
-    let derived = (function_count as u64).saturating_mul(POST_ANALYSIS_PER_FUNCTION_BUDGET_USEC);
-    if derived < POST_ANALYSIS_MINIMUM_BUDGET_USEC {
-        POST_ANALYSIS_MINIMUM_BUDGET_USEC
+pub fn post_analysis_budget_usec(function_count: usize) -> u64 {
+    let per_function = per_function_budget_usec();
+    let derived = (function_count as u64).saturating_mul(per_function);
+    if derived < per_function {
+        per_function
     } else {
         derived
     }

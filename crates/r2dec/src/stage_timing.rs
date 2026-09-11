@@ -27,14 +27,19 @@ thread_local! {
     static LAST: RefCell<Option<Instant>> = const { RefCell::new(None) };
     /// The high-water mark each stage reached, when something is counting.
     static PEAKS: RefCell<Vec<(&'static str, usize)>> = const { RefCell::new(Vec::new()) };
+    /// How many graph instructions this render was asked about. Every stage
+    /// scales in the body it is given, so a time without it cannot say whether
+    /// a stage grew with the function or grew faster than it.
+    static SIZE: RefCell<usize> = const { RefCell::new(0) };
 }
 
 /// Begin a render. Any marks left by an earlier render are discarded, because
 /// a render that stopped early owes nothing to the next one.
-pub(crate) fn begin() {
+pub(crate) fn begin(instructions: usize) {
     if !enabled() {
         return;
     }
+    SIZE.with_borrow_mut(|size| *size = instructions);
     STAGES.with_borrow_mut(Vec::clear);
     PEAKS.with_borrow_mut(Vec::clear);
     r2il::allocation::reset_peak();
@@ -88,7 +93,8 @@ pub(crate) fn report(function: &str) {
     }
     let total: Duration = stages.iter().map(|(_, elapsed)| *elapsed).sum();
     let mut line = format!(
-        "r2dec stage timing {function}: total={}us",
+        "r2dec stage timing {function}: instructions={} total={}us",
+        SIZE.with_borrow(|size| *size),
         total.as_micros()
     );
     for (stage, elapsed) in &stages {

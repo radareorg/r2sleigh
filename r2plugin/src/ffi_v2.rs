@@ -1280,6 +1280,12 @@ unsafe fn capture_trusted_ssa_from_buffer(
     // from the function and everything it calls: two requests that agree on it
     // agree on every input the root's preparation reads.
     let root_address = source.function().address();
+    r2il::refusal_evidence!(
+        "trusted-ingress",
+        "root {root_address:#x} with {} callees from {} bytes",
+        callee_count,
+        bytes.len()
+    );
     let (root, root_hit) = match r2engine::cached_root_artifact(root_address, bytes) {
         Some(root) => (root, true),
         None => {

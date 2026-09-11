@@ -15,6 +15,9 @@
 # usage: tests/corpus/locked_probe.sh <binary> <r2 command> [env=value ...]
 #   tests/corpus/locked_probe.sh /bin/ls 'a:sla; aaa; pd:s @@F'
 #   tests/corpus/locked_probe.sh ./h_x64_O2 'a:sla; aaa; s sym._djb2; pd:s' R2SLEIGH_TIMING=1
+#
+# RUST_FEATURES from the caller's environment selects the plugin's features, so
+# a measuring run can ask for `all-archs alloc-probe` without editing this file.
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
@@ -36,6 +39,6 @@ exec "$root/tests/locked_run.sh" bash -c '
     binary=$2
     command=$3
     shift 3
-    make -C "$root/r2plugin" RUST_FEATURES=all-archs install >&2
+    make -C "$root/r2plugin" RUST_FEATURES="${RUST_FEATURES:-all-archs}" install >&2
     env "$@" r2 -e scr.color=0 -q -c "$command" "$binary"
 ' locked-probe "$root" "$binary" "$command" "$@"

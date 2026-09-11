@@ -2827,7 +2827,7 @@ impl Decompiler {
         work: DecompileWorkControl<'a>,
         seed_gaps: &std::collections::BTreeMap<r2ssa::InstId, String>,
     ) -> Result<InternalBuildProduct, DecompileExecutionStop> {
-        crate::stage_timing::begin();
+        crate::stage_timing::begin(input.prepared_ssa().graph().insts.len());
         // The names this rendering declares, from the first pass that mints one.
         let symbol_table =
             std::rc::Rc::new(std::cell::RefCell::new(crate::symbol::SymbolTable::new()));

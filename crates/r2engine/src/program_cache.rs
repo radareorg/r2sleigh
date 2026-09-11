@@ -187,6 +187,20 @@ impl LastRoot {
                 Some(Arc::clone(&held.artifact))
             }
             Some(held) if held.address == address => {
+                // A replacement says the same function was captured twice from
+                // different bytes in one session, which is a defect in what
+                // perturbs a snapshot rather than a cold cache. Name where.
+                let differs = held
+                    .input
+                    .iter()
+                    .zip(input)
+                    .position(|(held, fresh)| held != fresh);
+                r2il::refusal_evidence!(
+                    "root-capture-replaced",
+                    "{address:#x} was prepared from {} bytes and asked for again with {} bytes, first differing at {differs:?}",
+                    held.input.len(),
+                    input.len()
+                );
                 self.replacements += 1;
                 self.misses += 1;
                 None

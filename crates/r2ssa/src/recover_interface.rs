@@ -575,6 +575,7 @@ fn recover_interface_inner(
             &storage_spans,
             &crate::AssumptionSet::default(),
             machine_context,
+            "recover",
         )
     } else {
         crate::semantic::PreparedFunctionFacts::collect(func, &graph)

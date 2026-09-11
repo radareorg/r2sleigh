@@ -10,6 +10,9 @@
 #
 # usage: tests/corpus/locked_sample.sh <binary> <r2 command> [seconds] [env=value ...]
 #   tests/corpus/locked_sample.sh ./minigzip_O2 'aaa; s 0x7120; pd:s' 60
+#
+# SAMPLE_DELAY waits that many seconds before sampling, so a run that analyses
+# first can be sampled over the render rather than over the analysis.
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
@@ -25,12 +28,16 @@ shift 2
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 out=${SAMPLE_OUT:-${CLAUDE_JOB_DIR:-/tmp}/tmp/sample-$$}
+# Seconds to wait before sampling starts. A command that analyses first spends
+# most of its wall clock before the part worth sampling, and a sample taken from
+# the start reports the analysis instead of the render.
+delay=${SAMPLE_DELAY:-0.5}
 mkdir -p "$out"
 
 exec "$root/tests/locked_run.sh" bash -c '
     set -euo pipefail
-    root=$1; binary=$2; command=$3; seconds=$4; out=$5
-    shift 5
+    root=$1; binary=$2; command=$3; seconds=$4; out=$5; delay=$6
+    shift 6
     make -C "$root/r2plugin" RUST_FEATURES=all-archs install >&2
     (cd "$root" && cargo build --profile probe --features all-archs -p r2sleigh-plugin >&2)
     dylib="$root/target/probe/libr2sleigh_plugin.dylib"
@@ -45,7 +52,7 @@ exec "$root/tests/locked_run.sh" bash -c '
 
     env "$@" r2 -e scr.color=0 -q -c "$command" "$binary" > "$out/render.txt" 2> "$out/render.err" &
     pid=$!
-    sleep 0.5
+    sleep "$delay"
     sample "$pid" "$seconds" -mayDie -file "$out/sample.txt" >/dev/null 2>&1 || true
     wait "$pid" || true
 
@@ -111,4 +118,4 @@ if start is not None:
             print(f"{count:6d} {rest[:170]}")
 PY
     echo "sample: $out/sample.sym.txt" >&2
-' locked-sample "$root" "$binary" "$command" "$seconds" "$out" "$@"
+' locked-sample "$root" "$binary" "$command" "$seconds" "$out" "$delay" "$@"
