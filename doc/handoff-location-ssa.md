@@ -20685,6 +20685,39 @@ copy loop. The corpus gate stayed green through that; the census caught it.
 A census over the whole set is worth running before any certificate that deletes
 a statement is believed.
 
+### `RenderedValueRequired` has at least two causes, and one is a named gap
+
+Three of the eight -- `bzip2` at -O2, `0x3220`, `0x49d0` and `0x5130` -- refuse
+for the same missing capability, and the code says so itself:
+
+    variadic-callsite-arguments: callsite (0x330a, 41) proved 7 arguments and
+    refused their carriers: InsufficientRegisterArgumentCarriers
+
+    // The current typed convention contract describes register carriers,
+    // not outgoing stack argument slots. Refuse instead of pretending the
+    // register prefix is the complete call.
+
+A variadic call whose format proves more arguments than the convention has
+argument registers cannot be projected, so its boundary is incomplete, so
+`taint_incomplete_boundary_inputs` marks every definition that can reach it
+unsupported, so a merge among them is never provably dead, so it keeps a cell,
+is bound, and the seal demands a rendering nothing makes. Five layers from the
+missing fact, which is why the trace is worth writing down.
+
+What it needs is the convention's outgoing stack argument placement. radare2
+answers it -- `r_anal_cc_argslot` with the caller view gives the offset from the
+stack pointer at the call -- and the snapshot does not carry it. Capturing a
+list is not possible, because the count is per call site rather than per
+function; capturing the first offset and the stride, both read from
+`r_anal_cc_argslot` for two consecutive indices past the registers, is derived
+from the convention rather than chosen. The engine then places argument *i* at
+`sp_at_call + first + stride * (i - registers)` and resolves its value the way
+it resolves any store to a known address before a call.
+
+The other five do not share it. `bzip2` at -O2 `0x88a0` refuses over `RSP_2`
+from the prologue's own `sub rsp`, whose cell is unaccounted while it has three
+observation targets -- a different shape that needs its own trace.
+
 ### Open, with the evidence in hand
 
 **The AArch64 -O2 thunk still refuses**, and the remaining defect is radare2's:
