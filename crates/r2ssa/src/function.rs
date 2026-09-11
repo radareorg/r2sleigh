@@ -4036,9 +4036,13 @@ impl SSAFunction {
                 entry_stack_address_size = Some(storage.size);
             }
         }
+        // A slot's base register is a per-slot fact. Requiring every slot's
+        // role to be attributed before believing any slot's base installed no
+        // stack bases at all when one local went unclassified, which left
+        // every stack address in the function without a root -- and with it
+        // every frame object a call takes the address of.
         if let Some(interface) = function_interface.filter(|interface| {
-            interface.stack_slot_roles_complete()
-                && interface.stack_pointer_storage().is_some()
+            interface.stack_pointer_storage().is_some()
                 && interface.return_address_storage().is_some()
         }) {
             for slot in interface.stack_slots() {

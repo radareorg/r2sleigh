@@ -2409,13 +2409,21 @@ mod tests {
         assert_eq!(parameter.abi_storage, parameter_storage);
         assert_eq!(parameter.graph_storage, parameter_storage);
         assert_eq!(parameter.logical_value, None);
-        // A plain interface makes no frame-attribution claim, which is not a
-        // reason to disbelieve the return register it does name.
+        // A plain interface's slot roles are not exact, which used to make the
+        // whole model incoherent and empty the return boundary. The return
+        // register it names is a different question.
         assert!(
             !artifact
                 .machine_context()
+                .function_interface()
+                .expect("interface")
+                .stack_slot_roles_complete()
+        );
+        assert!(
+            artifact
+                .machine_context()
                 .abi_model()
-                .frame_geometry_is_coherent()
+                .return_boundary_is_coherent()
         );
         assert!(returned.complete);
         assert_eq!(returned.values.len(), 1);

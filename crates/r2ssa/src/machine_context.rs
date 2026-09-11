@@ -1086,8 +1086,11 @@ impl SourceMachineContext {
                 .any(|slot| slot.base() == StackAddressBase::FramePointer);
             let machine_carrier_roles_exist = interface.return_address_storage().is_some()
                 && interface.stack_pointer_storage().is_some();
-            let frame_roles_exist = interface.stack_slot_roles_complete()
-                && (!has_frame_pointer_slots || frame_pointer_storage.is_some());
+            // Where the frame's slots are, not what they hold. A slot whose
+            // role the analysis could not attribute still has a base register
+            // and an offset, and one such slot used to switch off the stack
+            // address analysis for every other slot in the frame.
+            let frame_roles_exist = !has_frame_pointer_slots || frame_pointer_storage.is_some();
             // Every machine carrier, the frame pointer included: a frame
             // pointer that aliases a parameter makes that parameter's
             // placement wrong, not just the frame's geometry.
@@ -2764,13 +2767,10 @@ mod tests {
             None,
             Vec::new(),
         );
-        // A plain interface still names its return-address and stack-pointer
-        // carriers truthfully; what it does not claim is frame attribution.
-        assert!(
-            !compatibility.abi_model().frame_geometry_is_coherent(),
-            "an interface without exact slot roles claims no frame attribution"
-        );
-        assert!(compatibility.abi_model().machine_carriers_are_coherent());
+        // A plain interface names its return-address and stack-pointer
+        // carriers truthfully, and it declares no stack slots at all, so there
+        // is no frame geometry for it to be wrong about either.
+        assert!(all_abi_questions_coherent(compatibility.abi_model()));
 
         let narrow_stack_pointer = register_storage(96, 4);
         arch.add_register(RegisterDef::new("narrow_sp", 96, 4));
