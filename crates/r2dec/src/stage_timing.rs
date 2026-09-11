@@ -27,6 +27,10 @@ thread_local! {
     static LAST: RefCell<Option<Instant>> = const { RefCell::new(None) };
     /// The high-water mark each stage reached, when something is counting.
     static PEAKS: RefCell<Vec<(&'static str, usize)>> = const { RefCell::new(Vec::new()) };
+    /// What was already held when this render began, so a stage's high-water
+    /// mark can be read as what the render added rather than as what the
+    /// process holds.
+    static ENTRY: RefCell<usize> = const { RefCell::new(0) };
     /// How many graph instructions this render was asked about. Every stage
     /// scales in the body it is given, so a time without it cannot say whether
     /// a stage grew with the function or grew faster than it.
@@ -40,6 +44,7 @@ pub(crate) fn begin(instructions: usize) {
         return;
     }
     SIZE.with_borrow_mut(|size| *size = instructions);
+    ENTRY.with_borrow_mut(|entry| *entry = r2il::allocation::live_bytes());
     STAGES.with_borrow_mut(Vec::clear);
     PEAKS.with_borrow_mut(Vec::clear);
     r2il::allocation::reset_peak();
@@ -105,7 +110,10 @@ pub(crate) fn report(function: &str) {
     // claim from "nobody measured".
     if r2il::allocation::is_counting() {
         let high = peaks.iter().map(|(_, peak)| *peak).max().unwrap_or(0);
-        line.push_str(&format!(" peak_bytes={high}"));
+        line.push_str(&format!(
+            " entry_bytes={} peak_bytes={high}",
+            ENTRY.with_borrow(|entry| *entry)
+        ));
         for (stage, peak) in &peaks {
             line.push_str(&format!(" {stage}_bytes={peak}"));
         }

@@ -180,10 +180,9 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // observed occurrence, or it is not applied.
         let placed = self.certificate(&stmt);
         let fold_ctx = self.fold_ctx;
-        let shaped =
-            self.rewrite_stage("shape", &placed, &stmt, |tree| Self::shape(fold_ctx, tree));
+        let shaped = self.rewrite_stage("shape", &placed, stmt, |tree| Self::shape(fold_ctx, tree));
         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);
-        let stmt = self.rewrite_stage("cleanup", &placed, &shaped, |tree| {
+        let stmt = self.rewrite_stage("cleanup", &placed, shaped, |tree| {
             Self::cleanup(&symbols, tree)
         });
         crate::stage_timing::mark("structure_cleanup");
@@ -199,7 +198,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         &mut self,
         name: &str,
         placed: &certify::ControlCertificate,
-        before: &CStmt,
+        before: CStmt,
         rewrite: impl FnOnce(CStmt) -> CStmt,
     ) -> CStmt {
         let after = rewrite(before.clone());
@@ -207,7 +206,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         let kept: BTreeSet<_> = crate::ast::stmt_render_observation_ids(&after)
             .into_iter()
             .collect();
-        let lost: Vec<_> = crate::ast::stmt_render_observation_ids(before)
+        let lost: Vec<_> = crate::ast::stmt_render_observation_ids(&before)
             .into_iter()
             .filter(|id| !kept.contains(id))
             .collect();
@@ -217,7 +216,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 "control-shape",
                 "{name}: {certificate}; lost observations {}; before: {}; after: {}",
                 lost.len(),
-                Self::tree_digest(before),
+                Self::tree_digest(&before),
                 Self::tree_digest(&after)
             );
         }
@@ -236,7 +235,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
                 "{name} not applied: certificate {certificate}; {} observations lost",
                 lost.len()
             );
-            before.clone()
+            before
         }
     }
 

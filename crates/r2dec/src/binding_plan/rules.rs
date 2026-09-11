@@ -819,6 +819,11 @@ pub(super) fn rewrite_inlining_partition(
     } else {
         inlinable_core(source_owned, projection, &seed_canonical, &admitted)
     };
+    // The seed's term arena interns every term in the function, and the pass
+    // below builds a second one. Nothing reads the seed after this point, so
+    // holding it across the second canonicalisation doubles the arena's share
+    // of the peak for nothing.
+    drop(seed_canonical);
     let component_eligible = component_eligible_with(source_owned, projection, &inlinable)?;
     let canonical =
         r2rewrite::canonicalize_with(source, projection, &|query: &r2rewrite::ExpansionQuery<
