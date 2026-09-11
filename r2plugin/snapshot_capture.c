@@ -2035,6 +2035,10 @@ static RAnalFunction *cold_partition_owner(RAnal *anal, const RAnalFunction *fcn
 	return NULL;
 }
 
+RAnalFunction *r2sleigh_cold_partition_owner(RAnal *anal, const RAnalFunction *fcn) {
+	return (anal && fcn)? cold_partition_owner (anal, fcn): NULL;
+}
+
 // A function's blocks together with the cold-partition blocks it branches to,
 // so that an edge out of the function does not cost the proof its guard.
 static RList *function_image_block_walk(RAnal *anal, const RAnalFunction *fcn, const RAnalFunctionSnapshotLimits *limits) {

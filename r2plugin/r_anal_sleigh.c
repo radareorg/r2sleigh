@@ -3561,9 +3561,30 @@ static RCodeMeta *sleigh_decline(const RAnalFunction *fcn, const char *reason) {
 	return declined;
 }
 
+/* A cold partition is a label inside a function this decompiler already
+ * renders, not a function of its own. Refusing it said "not a function" about
+ * code we have; naming the owner says where the code is, and rendering the
+ * owner's body a second time here would only duplicate it. */
+static RCodeMeta *sleigh_cold_partition_note(const RAnalFunction *fcn, const RAnalFunction *owner) {
+	char *note = r_str_newf (
+		"/* r2sleigh: %s at 0x%" PFMT64x " is a cold partition of %s;\n"
+		"   its blocks are decompiled as part of that function. */\n",
+		r_str_get (fcn->name), fcn->addr, r_str_get (owner->name));
+	if (!note) {
+		return NULL;
+	}
+	RCodeMeta *rendered = r_codemeta_new (note);
+	free (note);
+	return rendered;
+}
+
 static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn) {
 	R_RETURN_VAL_IF_FAIL (anal && fcn, NULL);
 	const ut64 decompile_start_us = r_time_now_mono ();
+	RAnalFunction *cold_owner = r2sleigh_cold_partition_owner (anal, fcn);
+	if (cold_owner) {
+		return sleigh_cold_partition_note (fcn, cold_owner);
+	}
 	const char *capture_refusal = "the function could not be captured";
 	const SleighFunctionCapture *held = sleigh_function_capture_with_reason (
 		anal, fcn, &capture_refusal);

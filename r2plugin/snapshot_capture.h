@@ -904,4 +904,11 @@ RAnalFunctionSnapshot *r2sleigh_function_snapshot_take(RCore *core, ut64 functio
 /* Release a snapshot and everything it owns. Safe on NULL. */
 void r2sleigh_function_snapshot_free(RAnalFunctionSnapshot *snapshot);
 
+/* The function this one is a cold partition of, or NULL.
+ * A compiler that moves a function's unlikely paths into their own section
+ * leaves a symbol radare2 attributes to the hot function; the blocks are part
+ * of the owner and are decompiled with it. Named so the caller can say where
+ * the code went instead of refusing an address whose code it already has. */
+RAnalFunction *r2sleigh_cold_partition_owner(RAnal *anal, const RAnalFunction *fcn);
+
 #endif
