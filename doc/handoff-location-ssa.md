@@ -20523,3 +20523,109 @@ which nothing currently prints. The next step is an evidence line at the point
 where `DeadPhis::find` extends its roots from `obligation.inputs`, naming the
 obligation and the value, so the trace reaches the owner instead of the
 symptom.
+
+## Making the cost proportionate
+
+The complexity caps came out first, as the user directed, and the functions
+they refused now run to completion instead. What they reveal is that the engine
+was never algorithmically hopeless: it was doing a handful of whole-function
+walks once per candidate, and each of those is a quadratic term hiding behind a
+constant.
+
+### What the instruments say now
+
+Three of this session's conclusions were wrong because a number did not say
+what it was a number about, so the instruments were fixed first.
+
+`collect-phase` names the call site, the entry address and the block count. The
+hundred and twenty-one fact collections in one `pd:s` are sixty-two different
+functions, not one function collected a hundred and twenty-one times: the
+analysis sweep asks the engine for proven facts on every function whose control
+it could not resolve, and each of those is a whole preparation. `BZ2_decompress`
+is prepared twice in that sequence -- once for its proofs during `aaa`, once for
+`pd:s` -- because the engine holds the most recent root and fifty others pass
+through in between.
+
+`prepare-held` says what one preparation costs: `BZ2_decompress` holds 100.5 MB,
+of which the graph is 23.8 MB and the facts 76.6 MB. The obligation inventory is
+50.7 MB of that, for 41,132 obligations against 31,416 instructions -- 1,233
+bytes an obligation. A `SemanticObligationId` is 80 bytes, a `SemanticObligation`
+176, and a `BTreeSet<SemanticObligationId>` node 896, one per instruction.
+
+The render stage line names the instruction count and the bytes already held
+when the render began. `tests/corpus/growth_fit.py` fits each stage's log-log
+slope against the instruction count, over all renders and over the tail above
+the median size; the tail column is the one to read, because a corpus is mostly
+small functions whose time is fixed overhead.
+
+`R2SLEIGH_PER_FUNCTION_BUDGET_USEC` overrides the derived deadline, so a
+profiling run can watch a function finish. A deadline that fires is a
+measurement, and it cannot be taken while it stops the thing being measured.
+`SAMPLE_DELAY` lets `locked_sample.sh` sample the render rather than the
+analysis before it.
+
+### The five walks that were once per candidate
+
+Each of these asked a question about the whole function and asked it again for
+every candidate. All five are now asked once.
+
+- Placement searched the whole rendered body for the one observation an inline
+  decision meant to rewrite, and again for each write of a dead store. The
+  index that already numbers every statement now records the route to it. The
+  subtlety that cost a corpus cell: a marker wrapping a statement empties from
+  its own layer down and leaves the layers above standing, because those are
+  observations in their own right -- `adler32` refused its two modulo traps
+  when the first version emptied them too.
+- The co-read relation was a set of pairs, and the interference test read every
+  pair to find the two that might be in the candidate. It is now one neighbour
+  list per value.
+- Collecting a candidate's members scanned every value for a matching
+  union-find root. The union-find now carries each component's members at its
+  root.
+- `materialized_phi_edges` walked every row of the normalized body to answer
+  for one merge, and the observation journal asks it for every removed merge.
+  One pass now answers for all of them.
+- `inlinable_core` scanned every operation in the function to find the ones in
+  the defining block between two ordinals. Only that block's can be there.
+- Applying the placement decisions read every write in the function four times
+  per binding. The writes are grouped by binding once.
+
+### Where it stands
+
+`BZ2_decompress`, the largest function in `bzip2` at -O0, 31,416 instructions
+in 480 blocks:
+
+| | before | after |
+|---|---|---|
+| render stages | 4.13s | 1.44s |
+| binding plan | 1.96s | 0.72s |
+| placement | 1.61s | 0.14s |
+| peak | 461.7 MB | 447.3 MB |
+
+Across the whole binary the binding plan falls from 5.62s to 3.14s and
+placement from 1.88s to 0.28s. Tail growth exponents: binding plan 1.15 to
+1.08, placement 1.33 to 1.10. The worst remaining is `structure_cleanup` at
+1.30, and it is 0.48s across the binary.
+
+### What memory still costs, and what would move it
+
+Time responded to indexing; memory has not, because it is not one structure.
+The render begins with 218.7 MB already held and adds 229 MB of its own, spread
+roughly evenly across preparation, the binding plan, the fold and the
+structurer -- whole-function copies, not one oversized table. Two that were
+plainly unnecessary are gone: the control rewrite stages now hand the body on
+by value, and the inlining partition's seed term arena is released before the
+second canonicalisation builds its own.
+
+The largest single identified item is the obligation inventory's 50.7 MB, and
+it is indefensible on its own terms: about thirty bytes of content per
+obligation stored in 1,233. Two contained changes would take most of it --
+dropping `SemanticObligation`'s `id` and `source`, which duplicate the map key
+and the instruction's own source, and replacing the per-instruction
+`BTreeSet<SemanticObligationId>` with a sorted run, whose uses are only
+iteration, `contains`, `is_empty` and equality. The wider change behind it is
+to make the identity itself dense -- an inventory-tagged index of eight bytes
+rather than a structural spelling of eighty -- which would shrink every set and
+map keyed by it in the journal, the effect ledger and the machine projection,
+and turn every comparison into an integer compare. That is a cross-crate
+rewrite of about seventy-five references in thirteen files.
