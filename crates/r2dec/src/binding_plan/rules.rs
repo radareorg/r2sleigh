@@ -703,7 +703,8 @@ pub(super) fn set_outlives_a_redefinition(graph: &SsaGraph, members: &BTreeSet<V
 /// That was seventy-two per cent of a render on `xxhash32`. The projection is
 /// derived from the artifact and is the same object either way; deriving it
 /// again is not a second opinion, only the same answer at a cost.
-pub(super) struct RewriteInliningPartition {
+#[derive(Debug, Clone)]
+pub(crate) struct RewriteInliningPartition {
     pub(super) canonical: r2rewrite::CanonicalRoots,
     pub(super) inlinable: BTreeSet<ValueId>,
     pub(super) component_eligible: Vec<bool>,

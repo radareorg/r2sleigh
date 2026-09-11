@@ -3238,9 +3238,10 @@ impl SymbolMentions {
         // The observations that would empty this statement, which is exactly
         // what `statement_is_discarded` answers: a marker on any layer wrapping
         // the statement, or a marker on an assignment's target.
+        let mut own_discards: Vec<RenderObservationId> = Vec::new();
         let mut current = statement;
         while let CStmt::Observed { id, stmt } = current {
-            self.discards.insert(*id, (enter, u32::MAX));
+            own_discards.push(*id);
             current = stmt;
         }
         if let CStmt::Expr(CExpr::Binary {
@@ -3251,7 +3252,7 @@ impl SymbolMentions {
         {
             let mut target = left.as_ref();
             while let CExpr::Observed { id, expr } = target {
-                self.discards.insert(*id, (enter, u32::MAX));
+                own_discards.push(*id);
                 target = expr;
             }
         }
@@ -3261,11 +3262,12 @@ impl SymbolMentions {
         });
         statement_visit_children(statement, &mut |child| self.index_statement(child, next));
         statement_visit_child_bodies(statement, &mut |body| self.index_body(body, next));
+        // The span is closed on the markers this statement owns. Scanning the
+        // whole map for open spans instead would be a second quadratic in place
+        // of the one this index removes.
         let exit = *next;
-        for span in self.discards.values_mut() {
-            if span.0 == enter && span.1 == u32::MAX {
-                span.1 = exit;
-            }
+        for id in own_discards {
+            self.discards.insert(id, (enter, exit));
         }
     }
 

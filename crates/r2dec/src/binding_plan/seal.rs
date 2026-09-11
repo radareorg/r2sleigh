@@ -268,6 +268,7 @@ fn seal_width_evidence(
 pub(crate) fn build_upstream_shadow_oracle<'a>(
     source_owned: &SourceOwnedFunctionFacts,
     machine_projection: &'a MachineProjection,
+    partition: &super::rules::RewriteInliningPartition,
 ) -> Result<UpstreamShadowOracle<'a>, BindingPlanBuildError> {
     let source = source_owned.source();
     let graph = source.graph();
@@ -285,7 +286,6 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
             BindingPlanSourceMismatch::Authority,
         ))?;
     let unread = super::rules::unread_defined_values(source, machine_projection);
-    let partition = super::rules::rewrite_inlining_partition(source_owned, machine_projection)?;
     let resolved = seal_binding_components_with(
         source_owned,
         machine_projection,
@@ -309,7 +309,7 @@ pub(crate) fn build_upstream_shadow_oracle<'a>(
             _ => None,
         })
         .collect::<BTreeSet<_>>();
-    let inlinable = partition.inlinable;
+    let inlinable = &partition.inlinable;
     let mut values = vec![None; graph.values.len()];
     for graph_value in &graph.values {
         if return_controls.contains(&graph_value.id) {
@@ -479,14 +479,14 @@ impl BindingPlan {
         self.validate_source(source)
             .map_err(BindingPlanBuildError::Seal)?;
         let graph = source.graph();
-        // The rewriter and partition must be a function of the projection, so
-        // the seal derives their fixed point again without consulting the
-        // candidate plan.
-        let sealed_partition =
-            super::rules::rewrite_inlining_partition(source_owned, &self.machine_projection)?;
-        let sealed_canonical = &sealed_partition.canonical;
+        // The rewriter and partition are a function of the source and the
+        // projection, and the seal cannot influence either, so the derivation
+        // the plan already holds is the one a fresh derivation would produce.
+        // This used to re-derive it, which cost a whole term arena to arrive at
+        // the same answer.
+        let sealed_canonical = &self.partition.canonical;
         for graph_value in &graph.values {
-            let planned = self.canonical.value(graph_value.id);
+            let planned = self.partition.canonical.value(graph_value.id);
             let sealed = sealed_canonical.value(graph_value.id);
             let agrees = match (planned, sealed) {
                 (Some(planned), Some(sealed)) => {
@@ -505,7 +505,7 @@ impl BindingPlan {
         }
         // Once per seal, not once per inlined value: this walks the whole
         // machine arena.
-        let inlinable = &sealed_partition.inlinable;
+        let inlinable = &self.partition.inlinable;
         let ptr_bits = source
             .machine_context()
             .memory_model()
@@ -522,7 +522,7 @@ impl BindingPlan {
         let expected = seal_binding_components_with(
             source_owned,
             &self.machine_projection,
-            &sealed_partition.component_eligible,
+            &self.partition.component_eligible,
         )?;
         let unobserved_merges = source.unobserved_merges();
         let unobserved_values = source.unobserved_values();
@@ -577,6 +577,7 @@ impl BindingPlan {
                 ValueDisposition::Inline { term, proof } => {
                     let owned = proof.authority == *source.authority() && proof.term == *term;
                     let exact_canonical = self
+                        .partition
                         .canonical
                         .value(value)
                         .is_some_and(|canonical| canonical.canonical == *term);
@@ -586,7 +587,7 @@ impl BindingPlan {
                     let exact_literal = graph_value.var.constant_bits().is_some()
                         && exact_canonical
                         && matches!(
-                            self.canonical.arena().term(*term).kind,
+                            self.partition.canonical.arena().term(*term).kind,
                             r2rewrite::TermKind::Literal(_)
                         );
                     if !owned || !(exact_literal || exact_expression) {

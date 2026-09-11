@@ -522,11 +522,16 @@ impl BindingPlan {
                 BindingPlanSourceMismatch::Authority,
             ))?;
         let unread = super::rules::unread_defined_values(source, &machine_projection);
-        let super::rules::RewriteInliningPartition {
-            canonical,
-            inlinable,
-            component_eligible,
-        } = super::rules::rewrite_inlining_partition(source_owned, &machine_projection)?;
+        // One derivation, three readers. The partition is a pure function of the
+        // source facts and the projection, and neither the seal nor the shadow
+        // oracle can influence either, so deriving it again for each of them
+        // could only ever produce this same answer -- at the price of a whole
+        // term arena per derivation, six per function before this.
+        let partition =
+            super::rules::rewrite_inlining_partition(source_owned, &machine_projection)?;
+        let canonical = &partition.canonical;
+        let inlinable = &partition.inlinable;
+        let component_eligible = &partition.component_eligible;
         let mut dispositions = graph
             .values
             .iter()
@@ -707,7 +712,7 @@ impl BindingPlan {
             }
         }
 
-        let components = binding_components_with(source_owned, &component_eligible)?;
+        let components = binding_components_with(source_owned, component_eligible)?;
         if u32::try_from(components.len()).is_err() {
             return Err(BindingPlanBuildError::TooManyBindings {
                 count: components.len(),
@@ -1190,7 +1195,7 @@ impl BindingPlan {
         let plan = Self {
             authority: source.authority().clone(),
             machine_projection,
-            canonical,
+            partition,
             bindings: bindings.into_boxed_slice(),
             dispositions: dispositions.into_boxed_slice(),
             parameters: parameters.into_boxed_slice(),

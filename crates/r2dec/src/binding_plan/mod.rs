@@ -1254,7 +1254,12 @@ pub(crate) struct BindingPlan {
     /// so it is the same answer for one function however many times it is
     /// built. The seal builds its own and requires the two to agree, which is
     /// the independence the seal already has about every other decision here.
-    canonical: r2rewrite::CanonicalRoots,
+    /// The rewriter's partition for this source and projection, derived once.
+    ///
+    /// The seal and the shadow oracle read it rather than deriving it again:
+    /// it is a pure function of two inputs neither of them can influence, so a
+    /// second derivation is the same answer at the price of a term arena.
+    partition: rules::RewriteInliningPartition,
     bindings: Box<[Binding]>,
     dispositions: Box<[ValueDisposition]>,
     parameters: Box<[Option<ParameterDisposition>]>,
@@ -1296,7 +1301,11 @@ impl BindingPlan {
     /// of its operands, from the projection and this plan's declarations.
     pub(crate) fn typed_boundaries(&self) -> &r2rewrite::TypedBoundaries {
         self.typed.get_or_init(|| {
-            r2rewrite::typed_boundaries(&self.machine_projection, self.canonical.arena(), self)
+            r2rewrite::typed_boundaries(
+                &self.machine_projection,
+                self.partition.canonical.arena(),
+                self,
+            )
         })
     }
 }
@@ -1340,7 +1349,11 @@ impl BindingPlan {
     /// The canonical term of every value and every structured memory
     /// access, as the rewriter proved them equal to what the machine wrote.
     pub(crate) const fn canonical(&self) -> &r2rewrite::CanonicalRoots {
-        &self.canonical
+        &self.partition.canonical
+    }
+
+    pub(crate) const fn partition(&self) -> &rules::RewriteInliningPartition {
+        &self.partition
     }
 
     pub(crate) fn binding(&self, id: BindingId) -> Option<&Binding> {

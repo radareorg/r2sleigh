@@ -109,23 +109,25 @@ impl EmissionReadyFunction {
 }
 
 /// Run all AST rewrites required solely by textual C emission.
-pub(crate) fn prepare_function_for_emission(func: &CFunction) -> EmissionReadyFunction {
-    // Not `..func.clone()`: struct-update evaluates the whole clone first,
-    // including `body`, and then throws that cloned tree away because `body` is
-    // overridden -- two full AST traversals where one is needed, six times per
-    // function.
+/// Prepare one function for emission, consuming it.
+///
+/// The preparation rebuilds every statement it touches, so taking the tree by
+/// reference meant cloning all of it and throwing the original away. Every
+/// caller owns the function it hands over, so the tree is moved through instead
+/// and the expressions inside it are never copied.
+pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFunction {
     EmissionReadyFunction {
         function: CFunction {
-            body: prepare_stmt_sequence_for_emission(&func.body),
-            symbols: std::rc::Rc::clone(&func.symbols),
-            name: func.name.clone(),
-            ret_type: func.ret_type.clone(),
-            params: func.params.clone(),
-            locals: func.locals.clone(),
+            body: prepare_stmt_sequence_for_emission(func.body),
+            symbols: func.symbols,
+            name: func.name,
+            ret_type: func.ret_type,
+            params: func.params,
+            locals: func.locals,
             params_known: func.params_known,
-            externs: func.externs.clone(),
-            extern_objects: func.extern_objects.clone(),
-            declaration_only: func.declaration_only.clone(),
+            externs: func.externs,
+            extern_objects: func.extern_objects,
+            declaration_only: func.declaration_only,
         },
     }
 }
@@ -844,13 +846,13 @@ impl CodeGenerator {
 #[cfg(test)]
 fn generate(func: &CFunction) -> String {
     let mut codegen = CodeGenerator::new(CodeGenConfig::default());
-    let ready = prepare_function_for_emission(func);
+    let ready = prepare_function_for_emission(func.clone());
     codegen.generate_function(&ready)
 }
 
-fn prepare_stmt_sequence_for_emission(stmts: &[CStmt]) -> Vec<CStmt> {
-    let nested = stmts
-        .iter()
+fn prepare_stmt_sequence_for_emission(stmts: Vec<CStmt>) -> Vec<CStmt> {
+    let mut nested = stmts
+        .into_iter()
         .map(prepare_stmt_for_emission)
         .collect::<Vec<_>>();
     let mut prepared = Vec::with_capacity(nested.len());
@@ -860,41 +862,36 @@ fn prepare_stmt_sequence_for_emission(stmts: &[CStmt]) -> Vec<CStmt> {
             prepared.push(stmt);
             index += run_len;
         } else {
-            prepared.push(nested[index].clone());
+            prepared.push(std::mem::replace(&mut nested[index], CStmt::Empty));
             index += 1;
         }
     }
     prepared
 }
 
-fn prepare_stmt_for_emission(stmt: &CStmt) -> CStmt {
+fn prepare_stmt_for_emission(stmt: CStmt) -> CStmt {
     match stmt {
         CStmt::StructuredRegion { marker, stmt } => {
-            CStmt::structured_region(marker.clone(), prepare_stmt_for_emission(stmt.as_ref()))
+            CStmt::structured_region(marker, prepare_stmt_for_emission(*stmt))
         }
-        CStmt::Observed { id, stmt } => {
-            CStmt::observed(*id, prepare_stmt_for_emission(stmt.as_ref()))
-        }
+        CStmt::Observed { id, stmt } => CStmt::observed(id, prepare_stmt_for_emission(*stmt)),
         CStmt::Block(stmts) => CStmt::Block(prepare_stmt_sequence_for_emission(stmts)),
         CStmt::If {
             cond,
             then_body,
             else_body,
         } => CStmt::If {
-            cond: cond.clone(),
-            then_body: Box::new(prepare_stmt_for_emission(then_body)),
-            else_body: else_body
-                .as_deref()
-                .map(prepare_stmt_for_emission)
-                .map(Box::new),
+            cond,
+            then_body: Box::new(prepare_stmt_for_emission(*then_body)),
+            else_body: else_body.map(|body| Box::new(prepare_stmt_for_emission(*body))),
         },
         CStmt::While { cond, body } => CStmt::While {
-            cond: cond.clone(),
-            body: Box::new(prepare_stmt_for_emission(body)),
+            cond,
+            body: Box::new(prepare_stmt_for_emission(*body)),
         },
         CStmt::DoWhile { body, cond } => CStmt::DoWhile {
-            body: Box::new(prepare_stmt_for_emission(body)),
-            cond: cond.clone(),
+            body: Box::new(prepare_stmt_for_emission(*body)),
+            cond,
         },
         CStmt::For {
             init,
@@ -902,38 +899,27 @@ fn prepare_stmt_for_emission(stmt: &CStmt) -> CStmt {
             update,
             body,
         } => CStmt::For {
-            init: init.as_deref().map(prepare_stmt_for_emission).map(Box::new),
-            cond: cond.clone(),
-            update: update.clone(),
-            body: Box::new(prepare_stmt_for_emission(body)),
+            init: init.map(|init| Box::new(prepare_stmt_for_emission(*init))),
+            cond,
+            update,
+            body: Box::new(prepare_stmt_for_emission(*body)),
         },
         CStmt::Switch {
             expr,
             cases,
             default,
         } => CStmt::Switch {
-            expr: expr.clone(),
+            expr,
             cases: cases
-                .iter()
+                .into_iter()
                 .map(|case| crate::ast::SwitchCase {
-                    value: case.value.clone(),
-                    body: prepare_stmt_sequence_for_emission(&case.body),
+                    value: case.value,
+                    body: prepare_stmt_sequence_for_emission(case.body),
                 })
                 .collect(),
-            default: default
-                .as_ref()
-                .map(|stmts| prepare_stmt_sequence_for_emission(stmts)),
+            default: default.map(prepare_stmt_sequence_for_emission),
         },
-        CStmt::Decl { .. }
-        | CStmt::Expr(_)
-        | CStmt::Return(_)
-        | CStmt::Empty
-        | CStmt::Break
-        | CStmt::Continue
-        | CStmt::Goto(_)
-        | CStmt::Label(_)
-        | CStmt::Comment(_)
-        | CStmt::Gap(_) => stmt.clone(),
+        other => other,
     }
 }
 
@@ -1409,7 +1395,7 @@ mod tests {
             statement_refused.is_err(),
             "marked statement bypassed journal sealing"
         );
-        let ready = prepare_function_for_emission(&observed);
+        let ready = prepare_function_for_emission(observed.clone());
         let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             CodeGenerator::new(CodeGenConfig::default()).generate_function(&ready)
         }));

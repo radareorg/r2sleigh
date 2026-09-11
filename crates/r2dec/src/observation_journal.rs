@@ -1350,10 +1350,13 @@ impl MarkedNativeDraft {
 
     #[cfg(test)]
     pub(crate) fn seal(
-        self,
+        mut self,
         source: &SourceOwnedFunctionFacts,
     ) -> Result<SealedNativeFunction, LegacyObservationJournalError> {
-        let mut ready = prepare_function_for_emission(&self.function);
+        let mut ready = prepare_function_for_emission(std::mem::replace(
+            &mut self.function,
+            CFunction::new(String::new(), crate::ast::CType::Void),
+        ));
         let plan = Rc::clone(&self.journal.plan);
         let observations = self.journal.seal(source, &mut ready)?;
         Ok(SealedNativeFunction {
@@ -1386,7 +1389,10 @@ impl MarkedNativeDraft {
             .err()
             .map(crate::PlacementAuditRefusal::from);
         crate::stage_timing::mark("placement");
-        let mut ready = prepare_function_for_emission(&self.function);
+        let mut ready = prepare_function_for_emission(std::mem::replace(
+            &mut self.function,
+            CFunction::new(String::new(), crate::ast::CType::Void),
+        ));
         let plan = Rc::clone(&self.journal.plan);
         if let Some(error) = recording_failure {
             return Err(BindingShadowAuditFailure::JournalRecording(
@@ -1527,7 +1533,7 @@ impl SealedNativeFunction {
                 self.effect_audit.conflicts,
             );
             self.ready = prepare_function_for_emission(
-                &crate::residual_function_for_render_boundary(&function_name, &reason),
+                crate::residual_function_for_render_boundary(&function_name, &reason),
             );
         }
         let mut function = self.ready.function().clone();
@@ -1537,7 +1543,7 @@ impl SealedNativeFunction {
             radare2_variadic_format_counts,
             radare2_local_names,
         );
-        self.ready = prepare_function_for_emission(&function);
+        self.ready = prepare_function_for_emission(function);
     }
 
     pub(crate) const fn effect_obligation_audit(&self) -> crate::EffectObligationAudit {
@@ -5946,7 +5952,7 @@ mod tests {
         function.body.push(surviving);
         drop(deleted);
 
-        let mut ready = crate::codegen::prepare_function_for_emission(&function);
+        let mut ready = crate::codegen::prepare_function_for_emission(function);
         let effects = journal
             .seal_effects_only(&source, &mut ready)
             .expect("final effect occurrences seal independently of V/U/W");
@@ -5995,7 +6001,7 @@ mod tests {
                 .observe_effect_stmt(&obligations, CStmt::Return(None))
                 .expect("one surviving effect occurrence"),
         );
-        let mut ready = crate::codegen::prepare_function_for_emission(&function);
+        let mut ready = crate::codegen::prepare_function_for_emission(function);
         let effects = journal
             .seal_effects_only(&source, &mut ready)
             .expect("effect observations seal independently of V/U/W");
@@ -6047,7 +6053,7 @@ mod tests {
         assert_eq!(empty, CStmt::Empty);
         function.body = vec![residual, empty];
 
-        let mut ready = crate::codegen::prepare_function_for_emission(&function);
+        let mut ready = crate::codegen::prepare_function_for_emission(function);
         let effects = journal
             .seal_effects_only(&source, &mut ready)
             .expect("effect observations seal independently of V/U/W");
@@ -6084,7 +6090,7 @@ mod tests {
                 .expect("second concrete effect occurrence"),
         ];
 
-        let mut ready = crate::codegen::prepare_function_for_emission(&function);
+        let mut ready = crate::codegen::prepare_function_for_emission(function);
         let effects = journal
             .seal_effects_only(&source, &mut ready)
             .expect("final effect occurrences seal independently of V/U/W");
@@ -6833,7 +6839,7 @@ mod tests {
             .expect("inline output expression");
         function.body = vec![CStmt::Expr(bound), CStmt::Expr(inline)];
 
-        let mut ready = crate::codegen::prepare_function_for_emission(&function);
+        let mut ready = crate::codegen::prepare_function_for_emission(function);
         let unchanged = ready.function_for_marker_test().clone();
         assert_eq!(
             journal.seal(&source, &mut ready),
@@ -6884,7 +6890,7 @@ mod tests {
             .expect("value marker");
         duplicate_function.body = vec![CStmt::Expr(marked.clone()), CStmt::Expr(marked)];
         let mut duplicate_ready =
-            crate::codegen::prepare_function_for_emission(&duplicate_function);
+            crate::codegen::prepare_function_for_emission(duplicate_function.clone());
         let unchanged = duplicate_ready.function_for_marker_test().clone();
         assert!(matches!(
             duplicate_journal.seal(&source, &mut duplicate_ready),
@@ -6905,7 +6911,7 @@ mod tests {
         };
         *id = test_render_observation_id(2);
         range_function.body = vec![CStmt::Expr(marked)];
-        let mut range_ready = crate::codegen::prepare_function_for_emission(&range_function);
+        let mut range_ready = crate::codegen::prepare_function_for_emission(range_function.clone());
         let unchanged = range_ready.function_for_marker_test().clone();
         assert!(matches!(
             range_journal.seal(&source, &mut range_ready),
@@ -7028,7 +7034,7 @@ mod tests {
             CStmt::Expr(bare),
             CStmt::Expr(converted),
         ];
-        let mut ready = crate::codegen::prepare_function_for_emission(&function);
+        let mut ready = crate::codegen::prepare_function_for_emission(function);
         // The property is that the two reads agree, not that this minimal
         // fixture seals: the seal also requires every other value of the
         // function to have a cell, and this one marks two. Before the fix the
@@ -7051,7 +7057,7 @@ mod tests {
                 .observe_normalized_input_expr(site, input_idx, CExpr::Var(symbol))
                 .expect("value marker"),
         )];
-        let mut ready = crate::codegen::prepare_function_for_emission(&function);
+        let mut ready = crate::codegen::prepare_function_for_emission(function);
         let unchanged = ready.function_for_marker_test().clone();
         assert_eq!(
             journal.seal(&source, &mut ready),
@@ -7209,7 +7215,7 @@ mod tests {
             "a pure definition carries a live-value obligation"
         );
         function.body = vec![CStmt::Expr(marked)];
-        let mut ready = crate::codegen::prepare_function_for_emission(&function);
+        let mut ready = crate::codegen::prepare_function_for_emission(function);
         let effects = journal
             .seal_effects_only(&source, &mut ready)
             .expect("effect-only seal");

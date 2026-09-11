@@ -555,9 +555,17 @@ fn unread_defined_value_is_elided_before_it_can_become_a_binding() {
             .all(|component| !component.members.contains(&dead))
     );
     assert_eq!(
-        build_upstream_shadow_oracle(&source_owned, &test_projection(&source_owned))
-            .expect("upstream oracle")
-            .value_disposition(dead),
+        build_upstream_shadow_oracle(
+            &source_owned,
+            &test_projection(&source_owned),
+            &super::rules::rewrite_inlining_partition(
+                &source_owned,
+                &test_projection(&source_owned),
+            )
+            .expect("partition"),
+        )
+        .expect("upstream oracle")
+        .value_disposition(dead),
         Some(UpstreamValueDisposition::Elided(
             r2ssa::ledger::ElisionReason::DeadUnusedTemporary
         ))
@@ -610,9 +618,17 @@ fn exact_source_return_address_fact_alone_authorizes_control_target_elision() {
             .all(|component| !component.members.contains(&return_control))
     );
     assert_eq!(
-        build_upstream_shadow_oracle(&source_owned, &test_projection(&source_owned))
-            .expect("upstream oracle")
-            .value_disposition(return_control),
+        build_upstream_shadow_oracle(
+            &source_owned,
+            &test_projection(&source_owned),
+            &super::rules::rewrite_inlining_partition(
+                &source_owned,
+                &test_projection(&source_owned),
+            )
+            .expect("partition"),
+        )
+        .expect("upstream oracle")
+        .value_disposition(return_control),
         Some(UpstreamValueDisposition::Elided(
             r2ssa::ledger::ElisionReason::ReturnControl
         ))
@@ -705,9 +721,17 @@ fn direct_cfg_target_is_elided_only_when_every_use_is_control_topology() {
         }) if proof.authority == *source.authority() && proof.value == target_value
     ));
     assert_eq!(
-        build_upstream_shadow_oracle(&source_owned, &test_projection(&source_owned))
-            .expect("independent direct-control oracle")
-            .value_disposition(target_value),
+        build_upstream_shadow_oracle(
+            &source_owned,
+            &test_projection(&source_owned),
+            &super::rules::rewrite_inlining_partition(
+                &source_owned,
+                &test_projection(&source_owned),
+            )
+            .expect("partition"),
+        )
+        .expect("independent direct-control oracle")
+        .value_disposition(target_value),
         Some(UpstreamValueDisposition::Elided(
             r2ssa::ledger::ElisionReason::DirectControlTarget
         ))
@@ -860,7 +884,10 @@ fn unobserved_merge_is_elided_by_its_source_certificate_not_bound() {
             .all(|component| !component.members.contains(&dead))
     );
     let projection = test_projection(&source_owned);
-    let oracle = build_upstream_shadow_oracle(&source_owned, &projection).expect("upstream oracle");
+    let partition =
+        super::rules::rewrite_inlining_partition(&source_owned, &projection).expect("partition");
+    let oracle = build_upstream_shadow_oracle(&source_owned, &projection, &partition)
+        .expect("upstream oracle");
     assert_eq!(
         oracle.value_disposition(dead),
         Some(UpstreamValueDisposition::Elided(

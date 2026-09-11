@@ -2447,7 +2447,7 @@ enum InternalBuildProduct {
 impl InternalBuildProduct {
     fn refused(function: CFunction, refusal: DecompileRenderRefusal) -> Self {
         Self::Refused {
-            emission: prepare_function_for_emission(&function),
+            emission: prepare_function_for_emission(function),
             refusal,
             binding_shadow: BindingShadowAuditOutcome::NotRun,
             placement_audit: PlacementAudit::NotRun,
@@ -2465,7 +2465,7 @@ impl InternalBuildProduct {
             _ => PlacementAudit::NotRun,
         };
         Self::Refused {
-            emission: prepare_function_for_emission(&function),
+            emission: prepare_function_for_emission(function),
             refusal,
             binding_shadow: BindingShadowAuditOutcome::Failed(failure),
             placement_audit,
@@ -2730,6 +2730,7 @@ impl Decompiler {
                 )),
             ));
         }
+        crate::stage_timing::mark("audit");
         let output =
             CodeGenerator::new(self.config.codegen.clone()).generate_function(product.emission());
         crate::stage_timing::mark("codegen");
@@ -3579,6 +3580,7 @@ impl Decompiler {
                     })
             })
             .count();
+        crate::stage_timing::mark("effect_ledger");
         native.finalize_effect_ledger(
             &ledger,
             radare2_variadic_format_counts,
@@ -3675,7 +3677,7 @@ impl Decompiler {
             variadic: true,
             noreturn: false,
         }];
-        Some(prepare_function_for_emission(&function))
+        Some(prepare_function_for_emission(function))
     }
 
     /// Convert a CStmt to a Vec<CStmt>.
@@ -5413,7 +5415,7 @@ mod tests {
         );
         function.extern_objects = used.into_inner().into_values().collect();
         note_unproven_constructs(&mut function, None, 0, 0);
-        let ready = crate::codegen::prepare_function_for_emission(&function);
+        let ready = crate::codegen::prepare_function_for_emission(function);
         let rendered =
             crate::codegen::CodeGenerator::new(Default::default()).generate_function(&ready);
 
@@ -5457,7 +5459,7 @@ mod tests {
         );
         function.extern_objects = used.into_inner().into_values().collect();
         note_unproven_constructs(&mut function, None, 0, 0);
-        let ready = crate::codegen::prepare_function_for_emission(&function);
+        let ready = crate::codegen::prepare_function_for_emission(function);
         let rendered =
             crate::codegen::CodeGenerator::new(Default::default()).generate_function(&ready);
 
@@ -5813,6 +5815,14 @@ mod tests {
                 "comment payload must stay on one line: {output:?}"
             );
         };
+
+        // The refusal comment is the one fallback text that still reaches a
+        // reader, and it carries both a function name and a reason, so both
+        // are what must not be able to close the comment early.
+        assert_one_safe_comment(&artifact_guard_fallback_comment(
+            "bad */\nint injected",
+            "reason */\nreturn 7;",
+        ));
 
         // A hostile name reaches the rendered declaration, not only a comment,
         // so the identifier it spells is what has to be safe. Native lowering

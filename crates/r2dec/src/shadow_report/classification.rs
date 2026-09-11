@@ -128,8 +128,9 @@ fn derive_report(
     // The plan's projection, not a second one: `validate_source` above has
     // already proven it is what this source produces, and the oracle's
     // independence is from the plan's decisions rather than from its arena.
-    let canonical = build_upstream_shadow_oracle(source_owned, plan.machine_projection())
-        .map_err(ShadowReportError::UpstreamOracle)?;
+    let canonical =
+        build_upstream_shadow_oracle(source_owned, plan.machine_projection(), plan.partition())
+            .map_err(ShadowReportError::UpstreamOracle)?;
     let graph = source.graph();
     let classes = value_class_indexes(plan, graph, legacy, &canonical)?;
 
