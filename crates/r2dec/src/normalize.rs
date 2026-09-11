@@ -443,6 +443,47 @@ impl NormalizationOrigins {
     /// written by a copy on that edge: the state it carried is carried by those
     /// copies. This reports which of its inputs are covered, so a consumer can
     /// prove that rather than assume it.
+    /// Every merge's materialised edges, from one pass over the normalized body.
+    ///
+    /// Asked one merge at a time, the answer costs a walk of the whole function
+    /// each time, and the journal asks it for every merge normalization removed:
+    /// on `bzip2` at -O0 that was the largest single cost in the render. The
+    /// question is the same shape for every merge, so it is answered for all of
+    /// them at once and the caller indexes what it wanted.
+    pub(crate) fn materialized_phi_edges_by_definition(
+        &self,
+    ) -> BTreeMap<InstId, BTreeSet<UseSite>> {
+        let mut edges = BTreeMap::<InstId, BTreeSet<UseSite>>::new();
+        for origin in self.blocks.iter().flat_map(|block| block.rows.iter()) {
+            match origin {
+                // The edge's own copy.
+                NormalizedOpOrigin::PhiEdgeCopy(edge) => {
+                    edges
+                        .entry(edge.definition.inst)
+                        .or_default()
+                        .insert(edge.incoming);
+                }
+                // One relocated initializer stands for a whole sorted set of
+                // header inputs, so those edges are written too.
+                NormalizedOpOrigin::RelocatedInitializer(origin) => {
+                    edges
+                        .entry(origin.definition.inst)
+                        .or_default()
+                        .extend(origin.replaced_sites.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        // Edge operations a relocated initializer superseded.
+        for edge in &self.replaced_phi_edges {
+            edges
+                .entry(edge.definition.inst)
+                .or_default()
+                .insert(edge.incoming);
+        }
+        edges
+    }
+
     pub(crate) fn materialized_phi_edges(&self, definition: InstId) -> BTreeSet<UseSite> {
         self.blocks
             .iter()

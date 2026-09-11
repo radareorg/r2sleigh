@@ -584,7 +584,7 @@ pub(super) fn declaration_type_describes_width(
 ///
 /// A value defined by a merge is carried by definition, so a pair with one of
 /// those in it stays exempt; a pair of ordinary definitions does not.
-pub(super) fn values_read_together(graph: &SsaGraph) -> BTreeSet<(ValueId, ValueId)> {
+pub(super) fn values_read_together(graph: &SsaGraph) -> CoreadValues {
     let location_of = |value: ValueId| {
         graph
             .value(value)
@@ -597,7 +597,7 @@ pub(super) fn values_read_together(graph: &SsaGraph) -> BTreeSet<(ValueId, Value
             .and_then(|inst| graph.inst(inst))
             .is_none_or(|inst| matches!(inst.payload, r2ssa::InstPayload::Phi { .. }))
     };
-    let mut read_together = BTreeSet::new();
+    let mut read_together = CoreadValues::over(graph.values.len());
     for inst in &graph.insts {
         // A merge does not read its operands together. Each one reaches it on
         // its own edge, and only one of them is live at a time, which is the
@@ -616,7 +616,7 @@ pub(super) fn values_read_together(graph: &SsaGraph) -> BTreeSet<(ValueId, Value
                     continue;
                 };
                 if left_location != right_location || (!is_merged(*left) && !is_merged(*right)) {
-                    read_together.insert((*left.min(right), *left.max(right)));
+                    read_together.record(*left, *right);
                 }
             }
         }
@@ -631,13 +631,63 @@ pub(super) fn values_read_together(graph: &SsaGraph) -> BTreeSet<(ValueId, Value
 /// union-find state, the other from storage-span membership -- and that
 /// difference is the independence worth keeping. The question asked of the
 /// resulting set is the same one, so it is asked here.
-pub(super) fn set_interferes(
-    read_together: &BTreeSet<(ValueId, ValueId)>,
-    members: &BTreeSet<ValueId>,
-) -> bool {
-    read_together
-        .iter()
-        .any(|(left, right)| members.contains(left) && members.contains(right))
+pub(super) fn set_interferes(read_together: &CoreadValues, members: &BTreeSet<ValueId>) -> bool {
+    read_together.any_pair_within(members)
+}
+
+/// The pairs of values some instruction reads at once, indexed by value.
+///
+/// Held as one neighbour list per value rather than as a set of pairs. The
+/// question asked of it is always "do two members of *this* candidate object
+/// read together", and a set of pairs can only answer that by reading every
+/// pair in the function: on `bzip2` at -O0 that is the whole of the binding
+/// plan's cost, because the number of candidate merges and the number of pairs
+/// both grow with the function. Asked of the neighbours of the candidate's own
+/// members, the same answer costs what the candidate is big, not what the
+/// function is.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct CoreadValues {
+    neighbours: Vec<Vec<ValueId>>,
+}
+
+impl CoreadValues {
+    fn over(value_count: usize) -> Self {
+        Self {
+            neighbours: vec![Vec::new(); value_count],
+        }
+    }
+
+    fn record(&mut self, left: ValueId, right: ValueId) {
+        let (Some(left_index), Some(right_index)) = (
+            self.neighbours
+                .get(left.0 as usize)
+                .map(|_| left.0 as usize),
+            self.neighbours
+                .get(right.0 as usize)
+                .map(|_| right.0 as usize),
+        ) else {
+            return;
+        };
+        if !self.neighbours[left_index].contains(&right) {
+            self.neighbours[left_index].push(right);
+        }
+        if !self.neighbours[right_index].contains(&left) {
+            self.neighbours[right_index].push(left);
+        }
+    }
+
+    /// Whether any two of these values read together.
+    fn any_pair_within(&self, members: &BTreeSet<ValueId>) -> bool {
+        members.iter().any(|member| {
+            self.neighbours
+                .get(member.0 as usize)
+                .is_some_and(|neighbours| {
+                    neighbours
+                        .iter()
+                        .any(|neighbour| neighbour != member && members.contains(neighbour))
+                })
+        })
+    }
 }
 
 /// Whether any member of a candidate set is still needed where another member

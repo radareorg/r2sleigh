@@ -218,6 +218,9 @@ pub(super) fn binding_components_with(
     let value_count = graph.values.len();
     let mut parent = (0..value_count).collect::<Vec<_>>();
     let mut rank = vec![0_u8; value_count];
+    let mut component_members = (0..value_count)
+        .map(|index| vec![ValueId(index as u32)])
+        .collect::<Vec<_>>();
 
     fn find(parent: &mut [usize], mut value: usize) -> usize {
         while parent[value] != value {
@@ -228,7 +231,16 @@ pub(super) fn binding_components_with(
         value
     }
 
-    fn union(parent: &mut [usize], rank: &mut [u8], left: ValueId, right: ValueId) {
+    // Each root carries the values in its component. Asking which values a set
+    // of roots holds by scanning every value in the function is what made the
+    // interference question cost the function rather than the candidate.
+    fn union(
+        parent: &mut [usize],
+        rank: &mut [u8],
+        members: &mut [Vec<ValueId>],
+        left: ValueId,
+        right: ValueId,
+    ) {
         let left = find(parent, left.0 as usize);
         let right = find(parent, right.0 as usize);
         if left == right {
@@ -247,6 +259,8 @@ pub(super) fn binding_components_with(
             }
         };
         parent[child] = root;
+        let moved = std::mem::take(&mut members[child]);
+        members[root].extend(moved);
     }
 
     let mut certificate_sets = Vec::<(BindingCertificateSource, BTreeSet<ValueId>)>::new();
@@ -272,17 +286,17 @@ pub(super) fn binding_components_with(
     let read_together = super::rules::values_read_together(source.graph());
     // Whether merging every one of these values into one object would put two
     // values that some instruction reads together into that object.
-    let merge_would_interfere = |parent: &mut Vec<usize>, values: &BTreeSet<ValueId>| {
+    let merge_would_interfere = |parent: &mut Vec<usize>,
+                                 component_members: &[Vec<ValueId>],
+                                 values: &BTreeSet<ValueId>| {
         let roots = values
             .iter()
             .map(|value| find(parent, value.0 as usize))
             .collect::<BTreeSet<_>>();
-        let mut members = BTreeSet::new();
-        for index in 0..parent.len() {
-            if roots.contains(&find(parent, index)) {
-                members.insert(ValueId(index as u32));
-            }
-        }
+        let members = roots
+            .iter()
+            .flat_map(|root| component_members[*root].iter().copied())
+            .collect::<BTreeSet<_>>();
         super::rules::set_interferes(&read_together, &members)
     };
 
@@ -295,13 +309,13 @@ pub(super) fn binding_components_with(
             // impossible whichever derivation proposed the merge. `crc32_bitwise`
             // at arm64 -O2 is the case -- one p-code temporary carries both
             // `w10` and `w11`, and `eor w10, w10, w11` reads two of its versions.
-            if merge_would_interfere(&mut parent, &values) {
+            if merge_would_interfere(&mut parent, &component_members, &values) {
                 r2il::refusal_evidence!("span-declined", "{span:?} members {values:?}");
                 continue;
             }
             let first = values.first().copied().expect("multi-member span");
             for value in values.iter().copied().skip(1) {
-                union(&mut parent, &mut rank, first, value);
+                union(&mut parent, &mut rank, &mut component_members, first, value);
             }
             certificate_sets.push((BindingCertificateSource::StorageSpan(span), values));
         }
@@ -335,7 +349,7 @@ pub(super) fn binding_components_with(
             // declined and the values keep their own objects, which costs an
             // assignment in the output and nothing in correctness.
             if let Some(first) = values.first().copied() {
-                let interferes = merge_would_interfere(&mut parent, &values);
+                let interferes = merge_would_interfere(&mut parent, &component_members, &values);
                 let outlives = super::rules::set_outlives_a_redefinition(graph, &values);
                 if interferes || outlives {
                     // Which of the two declined it decides the repair, and the
@@ -348,7 +362,7 @@ pub(super) fn binding_components_with(
                     continue;
                 }
                 for value in values.iter().copied().skip(1) {
-                    union(&mut parent, &mut rank, first, value);
+                    union(&mut parent, &mut rank, &mut component_members, first, value);
                 }
             }
             certificate_sets.push((

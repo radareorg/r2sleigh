@@ -2080,15 +2080,16 @@ impl LegacyObservationJournal {
             .copied()
             .map(|id| (id, 0))
             .collect();
+        let materialized_edges = origins.materialized_phi_edges_by_definition();
         let materialized_removed_phis = origins
             .removed_phis()
             .iter()
             .filter(|removed| {
-                let materialized = origins.materialized_phi_edges(removed.definition.inst);
-                removed
-                    .incoming_sites
-                    .iter()
-                    .all(|site| removed.noop_sites().contains(site) || materialized.contains(site))
+                let materialized = materialized_edges.get(&removed.definition.inst);
+                removed.incoming_sites.iter().all(|site| {
+                    removed.noop_sites().contains(site)
+                        || materialized.is_some_and(|edges| edges.contains(site))
+                })
             })
             .map(|removed| removed.definition.inst)
             .collect::<BTreeSet<_>>();
