@@ -1110,11 +1110,18 @@ static bool fcn_context_collect_slot_callees(RAnal *anal, RList *callees, const 
 		if (!ref || ref->at < block->addr || ref->at >= block_end) {
 			continue;
 		}
-		// A data reference anywhere in the block may name the slot. A code
-		// reference names it only from the transfer itself, which is how
-		// the analysis records `jmp [slot]`.
+		// A data or indirect-code reference anywhere in the block may name
+		// the slot; a plain code reference names it only from the transfer
+		// itself, which is how the analysis records `jmp [slot]`.
+		//
+		// The indirect spelling is what AArch64 needs. A stub there is
+		// `adrp x16, slot; ldr x16, [x16]; br x16`, so the slot is named by
+		// the first instruction and the branch carries no operand at all.
+		// Admitting only the transfer's own reference left every AArch64
+		// import thunk without a callee, and the variadic ones refused.
 		const ut32 ref_type = R_ANAL_REF_TYPE_MASK (ref->type);
 		if (ref_type != R_ANAL_REF_TYPE_DATA
+			&& ref_type != R_ANAL_REF_TYPE_ICOD
 			&& !(ref_type == R_ANAL_REF_TYPE_CODE && ref->at == transfer_addr)) {
 			continue;
 		}
