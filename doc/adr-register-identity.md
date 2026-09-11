@@ -290,6 +290,14 @@ a fold reduced to a copy of another value is that value, and its readers take
 it directly; a merge keeps its copy, because a merge's edge assignment is a
 statement about an object rather than an expression read.
 
+Measured over the 661 census functions that render both before and after, the
+result is 76,533 rendered lines against 77,170, so the model costs 0.8% *less*
+than the one it replaces. An intermediate measurement, taken before the folds
+landed, was 8% larger; that is what the fold is worth. Lane temporaries appear
+on 11.5% of rendered lines, and the shapes they take are the honest ones: a
+lane read of a root, the root's redefinition by the lift's own extension, and
+the lift's own temporary taking a lane's value.
+
 Two consequences reached the interface. A recovered parameter's width is now
 the bytes the body observes of the entry value rather than the register's
 (`deadphi.rs::observed_low_bytes`), which is what recovers `murmur3_32`'s and
