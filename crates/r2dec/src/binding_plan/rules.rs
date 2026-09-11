@@ -369,6 +369,19 @@ pub(super) fn unread_defined_values(
         .collect()
 }
 
+/// How many program readers a value has, counting each one once.
+///
+/// A graph use site and a certified boundary read can name the same
+/// instruction, and that is one reader, not two. Two use sites on one
+/// instruction remain two readers: `a + a` spells the value twice.
+fn distinct_reader_count(use_sites: &[r2ssa::UseSite], boundary_readers: &[InstId]) -> usize {
+    use_sites.len()
+        + boundary_readers
+            .iter()
+            .filter(|reader| !use_sites.iter().any(|site| site.inst == **reader))
+            .count()
+}
+
 fn certified_value_readers(source: &r2ssa::SsaArtifact) -> BTreeMap<ValueId, Vec<InstId>> {
     let mut readers = BTreeMap::<ValueId, Vec<InstId>>::new();
     for inst in &source.graph().insts {
@@ -1070,7 +1083,7 @@ fn inlinable_core(
             .get(&value.id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let reader_count = use_sites.len() + boundary_readers.len();
+        let reader_count = distinct_reader_count(&use_sites, boundary_readers);
         if reader_count == 0 {
             rejected("no readers");
             continue;
@@ -1846,4 +1859,39 @@ pub(super) fn identity_merge_values(
         }
     }
     merges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::distinct_reader_count;
+    use r2ssa::{InstId, UseSite};
+
+    #[test]
+    fn a_boundary_read_on_an_instruction_that_already_reads_the_value_counts_once() {
+        let call = InstId(7);
+        let graph_read = UseSite {
+            inst: call,
+            input_idx: 0,
+        };
+        assert_eq!(distinct_reader_count(&[graph_read], &[call]), 1);
+    }
+
+    #[test]
+    fn a_boundary_read_elsewhere_is_its_own_reader() {
+        let read = UseSite {
+            inst: InstId(3),
+            input_idx: 0,
+        };
+        assert_eq!(distinct_reader_count(&[read], &[InstId(7)]), 2);
+    }
+
+    #[test]
+    fn two_reads_in_one_instruction_are_two_readers() {
+        let inst = InstId(3);
+        let sites = [
+            UseSite { inst, input_idx: 0 },
+            UseSite { inst, input_idx: 1 },
+        ];
+        assert_eq!(distinct_reader_count(&sites, &[]), 2);
+    }
 }
