@@ -20632,7 +20632,7 @@ rewrite of about seventy-five references in thirteen files.
 
 ## Coverage after the caps came out
 
-The local census over the twelve binaries in the scratchpad set: **748 of 790
+The local census over the twelve binaries in the scratchpad set: **752 of 790
 functions render**. The denominator is not the 720 this document quoted before,
 because the set is larger and because radare2 finds more functions once the
 engine's proof pass finishes within its budget.
@@ -20694,6 +20694,19 @@ an operation for the padding, so the indirect branch is not the block's last
 operation and the call-site correlation, which requires it to be, declines. That
 belongs upstream.
 
+**The return boundary's remaining three.** `deflateInit2_` in `minigzip` at -O0
+is the shape: two terms of the ABI model's coherence fail at once. radare2
+places its two stack parameters frame-pointer relative -- `version @ rbp+0x10`,
+`stream_size @ rbp+0x18` -- while `r_anal_cc_argslot`'s callee view names them
+from the stack pointer at entry, so `snapshot_drop_stack_parameter_slots`
+matches on an offset that differs by the saved frame pointer and the return
+address, and `stream_size` survives as an argument slot no parameter names.
+Separately `frame_pointer_slots=true` with `frame_pointer_storage=false`: the
+interface has frame-pointer-based slots and no frame-pointer storage, so
+`exact_interface_roles_exist` fails on its own account. Both need fixing before
+those three render, and the offsets are the place to start, because the second
+may be a consequence of the first.
+
 **`missing_definition` is two different shapes.** One is a stack access read
 once and never written (`minigzip` at -O2, `BindingId(133)`, one
 `StackAccess` read at `InstId(597)` and nothing else). The other is a lane
@@ -20703,3 +20716,26 @@ Some(InstId(1853)))]` with `writes=[]`, its only read a `CertifiedValue` boundar
 read at `InstId(1870)`. The second is the one to trace first: a value with a
 defining instruction and no write occurrence is a contradiction, and the
 definition's only observation is a read.
+
+### Two more classes closed
+
+**A register a call left changed is declared, not assigned.** The decision was
+already the user's -- a clobbered post-call register the program reads renders
+as a visible indeterminate local -- and `BindingRole::CallClobbered` with the
+entry-declared rule was built. What was missing was the cells. A `CallDefine`
+mints a value, so it has a write cell, and nothing renders a statement for it
+because there is nothing to assign it from; the cell was unaccounted, the seal
+demanded a rendered occurrence, and the renderer answered with a marked gap.
+In `minigzip`'s `inflateReset2` that gap ran over six operations and swallowed
+the definition of the value the function's own return certificate names, so the
+binding refused as `missing_definition` three layers from the missing fact.
+
+**A variadic function's tail is not an incomplete interface.** `gzprintf` at -O0
+had thirteen of nineteen slots unclassified, and both kinds belong to the tail:
+the register save area a variadic prologue writes so the tail can be walked, and
+the argument-area storage the tail occupies. The first is the function's own
+frame storage and is classified local; the second is described by the ellipsis
+and is dropped as a stack parameter's slot is. The first attempt made both pass
+the capture's completeness test while leaving them unclassified on the wire, and
+the r2source contract refused the interface for exactly that contradiction --
+which is why these are classifications rather than exceptions.
