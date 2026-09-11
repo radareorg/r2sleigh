@@ -20912,3 +20912,44 @@ marked gap and one that renders the statement, so the gain here showed up only
 once the certificate rule landed: the recognition alone moved all three off
 `volatile-or-unknown`, and the loop plus the certificate rule is what made them
 count.
+
+## What is actually left, measured rather than listed
+
+Thirty-four refusals remain. Traced with `R2DEC_TRACE_REFUSAL` across the three
+binaries that hold twenty-six of them, they are not thirty-four problems. Six
+refusal *classes* share two upstream facts.
+
+| binary | refusals | carry `call-boundary-incomplete` | carry `abi-model-incoherent` |
+|---|---|---|---|
+| bzip2 -O0 | 7 | 6 | 5 |
+| bzip2 -O2 | 12 | 8 | 3 |
+| minigzip -O2 | 7 | 0 | 1 |
+
+The classes those functions refuse under are `missing_definition`,
+`RenderedValueRequired`, `PlannedElidedValueRendered`, `volatile-or-unknown`,
+`missing program-variable authorization`, `stack_access_read_before_assignment`
+and `read_before_assignment` -- seven different names for two causes.
+
+**Why the boundaries are incomplete.** Thirty-two of the forty-one variadic
+refusals are `FormatArgumentNotLiteral`, five are `FloatingVariadicArgument`,
+four are `UnresolvedArgumentCarrier`. And the format in these cases is the
+*function's own parameter*: `format argument 1 is the entry carrier, not a value
+this function defines`. No walk recovers that -- a `fprintf`-style wrapper's
+count is knowable only to its callers, or not at all. So this is not a
+prove-harder problem.
+
+**Why the ABI models are incoherent.** In all twelve observed cases the failing
+term is `slot_roles_complete=false` and the other five terms are all true. One
+unclassified stack slot -- usually a local -- makes the whole model incoherent,
+which makes every return boundary incomplete, which refuses the function.
+
+**The amplifier.** `taint_incomplete_boundary_inputs` marks every definition
+that can reach an incomplete boundary as unsupported, so one call's unprovable
+argument list poisons the function. That predates the rule that an unprovable
+cell is rendered as a marked gap rather than refusing the whole function.
+
+The measurement hazard worth remembering: `R2DEC_TRACE_REFUSAL=1` slows the
+engine enough that the deadline expires on large functions, so a traced run
+shows cost refusals a plain run does not. Trace with
+`R2SLEIGH_PER_FUNCTION_BUDGET_USEC` raised, or the trace reports its own
+overhead as a finding.
