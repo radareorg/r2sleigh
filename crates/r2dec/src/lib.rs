@@ -3614,11 +3614,39 @@ impl Decompiler {
         }
         // Forwarding is the whole claim, so it has to be checked rather than
         // assumed from the shape of the transfer. A stub hands the callee the
-        // machine state it was entered with: it writes no register and no
-        // memory, and only computes the target it jumps to. A one-line wrapper
-        // that loads a format string and tail-jumps to the same import looks
-        // identical at the transfer and is an ordinary function with a body.
+        // machine state it was entered with: it writes no memory, leaves every
+        // carrier the callee can see alone, and only computes the target it
+        // jumps to. A one-line wrapper that loads a format string and
+        // tail-jumps to the same import looks identical at the transfer and is
+        // an ordinary function with a body.
+        //
+        // "Leaves alone" is the convention's own statement rather than "writes
+        // no register at all". An AArch64 thunk is `adrp x16, slot; ldr x16,
+        // [x16]; br x16`: it has to materialise the target somewhere, and it
+        // uses the register the convention names as clobbered across a call
+        // for exactly that reason. A carrier a call may clobber and that
+        // passes no argument is not state the callee can observe, so writing
+        // it forwards nothing away.
         let graph = prepared.graph();
+        let machine = prepared.machine_context();
+        let clobbered = machine
+            .call_clobbered_carriers()
+            .iter()
+            .map(|storage| storage.location())
+            .collect::<std::collections::BTreeSet<_>>();
+        let arguments = machine
+            .abi_model()
+            .argument_registers()
+            .iter()
+            .map(|slot| slot.storage().location())
+            .collect::<std::collections::BTreeSet<_>>();
+        // The value the transfer reads is the target, which is the transfer
+        // rather than state it leaves behind.
+        let transfer_inputs = graph
+            .inst_id_for_op_site(callsite.block_addr, callsite.op_index)
+            .and_then(|inst| graph.inst(inst))
+            .map(|inst| inst.inputs.to_vec())
+            .unwrap_or_default();
         let defines_observable_state = graph.insts.iter().any(|inst| {
             if matches!(
                 inst.payload,
@@ -3626,14 +3654,22 @@ impl Decompiler {
             ) {
                 return true;
             }
-            inst.output
-                .and_then(|output| graph.value(output))
+            let Some(output) = inst.output else {
+                return false;
+            };
+            if transfer_inputs.contains(&output) {
+                return false;
+            }
+            graph
+                .value(output)
                 .and_then(|value| value.canonical_storage)
-                .is_some_and(|storage| {
-                    matches!(
-                        storage.space,
-                        r2ssa::CanonicalStorageSpace::Ram | r2ssa::CanonicalStorageSpace::Register
-                    )
+                .is_some_and(|storage| match storage.space {
+                    r2ssa::CanonicalStorageSpace::Ram => true,
+                    r2ssa::CanonicalStorageSpace::Register => {
+                        let location = storage.location();
+                        arguments.contains(&location) || !clobbered.contains(&location)
+                    }
+                    _ => false,
                 })
         });
         if defines_observable_state {
