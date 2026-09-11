@@ -20278,3 +20278,44 @@ here because it spans the capture, the wire, the source contract and the
 engine, and `snapshot_capture.c` is where the fork-side session works; the
 test `exact_machine_interface_requires_declared_full_width_ra_and_sp` records
 the current all-or-nothing choice deliberately and would be restated by it.
+
+### What the five over-limit functions actually cost, measured
+
+`BZ2_decompress`, `BZ2_compressBlock`, `inflate` and `fcn_b9a6` are refused
+before anything runs, by the capture-side guard that reads radare2's own block
+and instruction counts against `ENGINE_DECOMPILE_MAX_BLOCKS` (200) and
+`ENGINE_DECOMPILE_MAX_OPS` (16384). `policy.rs` says what to do with that: the
+per-function bar is 100 milliseconds net, "a function that exceeds it is a
+defect to fix rather than a budget to widen". So the budget was raised locally
+-- 4000 blocks, 400000 ops -- to find out what the defect is. The numbers, for
+`bzip2` at -O0 `fcn_b9a6`, 187 blocks and 34,928 operations:
+
+| measurement | value |
+| --- | --- |
+| capture, of which the root lift | 828 ms / 756 ms |
+| decompile before it refused | 257 ms, all in the type phase |
+| peak resident set of the whole `r2` run | 766 MB |
+| fact collections for the one function | 6 |
+
+It then refuses `engine request deadline exceeded during normalization phase`:
+the type phase spends the whole request budget and normalization gets none.
+
+Two things follow. The dominant cost is the *lift*, at 756 ms for 34,928
+operations, about 21 microseconds an operation, and no decompiler work has
+begun at that point. And fact collection runs once per function plus once per
+callee interface recovered -- eight times for `bzip2`'s `0xa16c`, which
+renders fine -- so the cost of a function grows with its callees as well as
+its size. The capture's own timing line reports `cache_hits=0
+cache_misses=74` for that run, so whatever the lift cache is keyed on, it
+never hits inside a single `pd:s`; that is the cheapest thread to pull first.
+
+The measurement recipe, since it cost an hour to assemble: raise the two
+constants in `crates/r2engine/src/policy.rs`, rebuild and install, then
+
+    R2SLEIGH_TIMING=1 r2 -q -c 'a:sla; aaa; s <addr>; pd:s' <bin>
+
+for the phase split and `capture=`/`root_lift=`/`cache_hits=` line, and
+
+    R2DEC_TRACE_REFUSAL=1 ... | grep 'collect-phase'
+
+for the per-collection table and the number of collections.
