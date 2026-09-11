@@ -3285,6 +3285,28 @@ static bool snapshot_convention_slots_collect(
 		return false;
 	}
 	interface->convention_slots_known = true;
+	/* Where the convention puts the arguments its registers cannot carry.
+	 * Asked of the convention rather than assumed: the first slot past the
+	 * registers, the next one, and a third to check that the distance between
+	 * them is a stride rather than a coincidence. `incall` false is the
+	 * caller's view, which is the coordinate an outgoing store uses. */
+	RAnalCCArgSlot first = {0};
+	RAnalCCArgSlot second = {0};
+	RAnalCCArgSlot third = {0};
+	const int probe_count = (int)count + 3;
+	if (count < R_ANAL_CC_MAXARG
+		&& r_anal_cc_argslot (anal, convention, (int)count, probe_count, false, &first)
+		&& r_anal_cc_argslot (anal, convention, (int)count + 1, probe_count, false, &second)
+		&& r_anal_cc_argslot (anal, convention, (int)count + 2, probe_count, false, &third)
+		&& R_STR_ISEMPTY (first.reg) && R_STR_ISEMPTY (second.reg)
+		&& R_STR_ISEMPTY (third.reg)
+		&& second.off > first.off && third.off > second.off
+		&& (second.off - first.off) == (third.off - second.off)
+		&& (second.off - first.off) <= UT32_MAX) {
+		interface->convention_stack_argument_offset = first.off;
+		interface->convention_stack_argument_stride = (ut32)(second.off - first.off);
+		interface->convention_stack_arguments_known = true;
+	}
 	return true;
 }
 static bool function_interface_snapshot_collect(

@@ -327,6 +327,13 @@ typedef struct r_anal_function_interface_snapshot_t {
 	size_t num_convention_argument_slots;
 	RAnalSnapshotRegisterStorage convention_result_slot;
 	bool convention_slots_known;
+	// Where the convention puts an argument its registers cannot carry: the
+	// first one's offset from the stack pointer at the call, and the distance
+	// to the next. Two numbers rather than a list, because how many a call has
+	// is a fact about the call site.
+	st64 convention_stack_argument_offset;
+	ut32 convention_stack_argument_stride;
+	bool convention_stack_arguments_known;
 } RAnalFunctionInterfaceSnapshot;
 
 typedef struct r_anal_call_site_interface_snapshot_t {

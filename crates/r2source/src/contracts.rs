@@ -3296,9 +3296,67 @@ pub struct SourceConventionSlots {
     abi_class: SourceAbiClass,
     argument_slots: Box<[CanonicalStorageId]>,
     result_slot: Option<CanonicalStorageId>,
+    stack_arguments: Option<SourceStackArgumentPlacement>,
+}
+
+/// Where the convention puts an argument its registers cannot carry.
+///
+/// A call with more arguments than the convention has argument registers puts
+/// the rest in the outgoing argument area, and the offsets are the
+/// convention's to state: the first one, from the stack pointer at the call,
+/// and the distance from each to the next. Two numbers rather than a list,
+/// because how many there are is a fact about a call site and not about the
+/// convention, and a list would have to guess how long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceStackArgumentPlacement {
+    first_offset: i64,
+    stride_bytes: u32,
+}
+
+impl SourceStackArgumentPlacement {
+    pub const fn new(first_offset: i64, stride_bytes: u32) -> Option<Self> {
+        if stride_bytes == 0 {
+            return None;
+        }
+        Some(Self {
+            first_offset,
+            stride_bytes,
+        })
+    }
+
+    /// The offset of the argument at `position` past the register slots, from
+    /// the stack pointer entering the call.
+    pub fn offset_of(self, position_past_registers: usize) -> Option<i64> {
+        let steps = i64::try_from(position_past_registers).ok()?;
+        let stride = i64::from(self.stride_bytes);
+        self.first_offset.checked_add(steps.checked_mul(stride)?)
+    }
+
+    pub const fn first_offset(self) -> i64 {
+        self.first_offset
+    }
+
+    pub const fn stride_bytes(self) -> u32 {
+        self.stride_bytes
+    }
 }
 
 impl SourceConventionSlots {
+    /// Where the convention puts arguments past its register slots, when the
+    /// source stated it.
+    pub const fn stack_arguments(&self) -> Option<SourceStackArgumentPlacement> {
+        self.stack_arguments
+    }
+
+    /// Record that placement. Separate from `new` because every existing caller
+    /// states only the register slots, and because a convention that never
+    /// spills to the stack legitimately has none.
+    #[must_use]
+    pub fn with_stack_arguments(mut self, placement: Option<SourceStackArgumentPlacement>) -> Self {
+        self.stack_arguments = placement;
+        self
+    }
+
     /// Build the candidate slots, rejecting anything that is not a well-formed
     /// register location or that names the same register twice.
     pub fn new(
@@ -3328,6 +3386,7 @@ impl SourceConventionSlots {
             abi_class,
             argument_slots: argument_slots.into_boxed_slice(),
             result_slot,
+            stack_arguments: None,
         })
     }
 

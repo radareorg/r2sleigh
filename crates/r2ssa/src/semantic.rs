@@ -3792,14 +3792,37 @@ fn variadic_callsite_arguments(
     {
         return Err(VariadicCallsiteArgumentCountRefusal::CallingConventionMismatch);
     }
-    if evidence.total_argument_count > slots.len() {
-        // The current typed convention contract describes register carriers,
-        // not outgoing stack argument slots. Refuse instead of pretending the
-        // register prefix is the complete call.
+    // Arguments past the register carriers go in the outgoing argument area,
+    // and the convention says where. Without that placement the register
+    // prefix is all there is, and calling it the complete call would be a
+    // false claim about a call that passes more.
+    let stack_placement = convention.stack_arguments();
+    if evidence.total_argument_count > slots.len() && stack_placement.is_none() {
         return Err(VariadicCallsiteArgumentCountRefusal::InsufficientRegisterArgumentCarriers);
     }
 
     let mut arguments = Vec::with_capacity(evidence.total_argument_count);
+    for position in slots.len()..evidence.total_argument_count {
+        let placement = stack_placement
+            .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
+        let offset = placement
+            .offset_of(position - slots.len())
+            .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+        let (value, entry_offset) = reaching_stack_argument_before_call(
+            recovery.function,
+            recovery.graph,
+            recovery.block_addr,
+            recovery.op_index,
+            offset,
+            placement.stride_bytes(),
+        )
+        .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
+        arguments.push(SourceCallArgumentFact {
+            slot: CallBoundarySlot::Stack(entry_offset),
+            value: SourceCallArgumentValue::Value(value),
+        });
+    }
+    let stack_arguments = std::mem::take(&mut arguments);
     for (position, slot) in slots
         .iter()
         .copied()
@@ -3830,6 +3853,8 @@ fn variadic_callsite_arguments(
             value,
         });
     }
+    // The register prefix first, in convention order, then the stack tail.
+    arguments.extend(stack_arguments);
     Ok(arguments)
 }
 

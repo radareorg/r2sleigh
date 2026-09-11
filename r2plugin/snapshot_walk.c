@@ -1081,6 +1081,14 @@ bool r2sleigh_wire_write_snapshot(R2SleighWireWriter *writer, const void *snapsh
 	walk_optional_storage (writer,
 		slots_known && interface->convention_result_slot.size != 0,
 		&interface->convention_result_slot);
+	/* Where the convention puts an argument its registers cannot carry. */
+	const bool stack_arguments_known = slots_known
+		&& interface->convention_stack_arguments_known;
+	r2sleigh_wire_bool (writer, stack_arguments_known);
+	if (stack_arguments_known) {
+		r2sleigh_wire_i64 (writer, interface->convention_stack_argument_offset);
+		r2sleigh_wire_u32 (writer, interface->convention_stack_argument_stride);
+	}
 
 	uint16_t captured = 0;
 	if (source->capabilities & R_ANAL_FUNCTION_SNAPSHOT_CAP_OWNED_BOUNDED_FUNCTION_IMAGE) {

@@ -22,7 +22,7 @@ pub const SNAPSHOT_WIRE_MAGIC: u32 = 0x5232_5357; // "R2SW"
 
 /// Format revision. Owned by this crate, and bumped only when the encoding
 /// changes; it is not radare2's ABI version, which moves for unrelated reasons.
-pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 11;
+pub const SNAPSHOT_WIRE_FORMAT_VERSION: u32 = 12;
 const SNAPSHOT_WIRE_MIN_FORMAT_VERSION: u32 = 1;
 
 /// Bytes of fixed header preceding the string table.
@@ -352,8 +352,9 @@ use crate::contracts::{
     SourceCallPreservedCarriers, SourceCallResult, SourceCarrierKind, SourceCarrierProjection,
     SourceConventionSlots, SourceFunctionInterface, SourceFunctionReturn, SourceLogicalValue,
     SourceMachineRoles, SourceParameterLocation, SourceRegisterName, SourceReturnMechanism,
-    SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceType, SourceTypeGraph, SourceTypeKind, StackAddressBase,
+    SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackArgumentPlacement,
+    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceType, SourceTypeGraph,
+    SourceTypeKind, StackAddressBase,
 };
 use crate::{
     AdvisoryCallPrototype, AdvisoryCallSite, AdvisoryCallTransfer, AdvisorySuccessor,
@@ -982,6 +983,16 @@ fn write_convention_slots_for_format(
         write_storage(writer, *storage);
     }
     write_optional_storage(writer, slots.result_slot());
+    if format_version >= 12 {
+        match slots.stack_arguments() {
+            Some(placement) => {
+                writer.bool(true);
+                writer.i64(placement.first_offset());
+                writer.u32(placement.stride_bytes());
+            }
+            None => writer.bool(false),
+        }
+    }
     Ok(())
 }
 
@@ -996,6 +1007,23 @@ pub fn read_convention_slots(
         argument_slots.push(read_storage(reader)?);
     }
     let result_slot = read_optional_storage(reader)?;
+    // Where the convention puts arguments past its registers. Absent before
+    // version 12, and absent in a convention that never spills to the stack.
+    let stack_arguments = if reader.format_version() >= 12 && reader.bool()? {
+        let first_offset = reader.i64()?;
+        let stride_bytes = reader.u32()?;
+        Some(
+            SourceStackArgumentPlacement::new(first_offset, stride_bytes).ok_or(
+                SnapshotWireError::RejectedContract {
+                    contract: "SourceStackArgumentPlacement::new",
+                    reason: "a stack argument stride of zero places every argument at one offset"
+                        .to_string(),
+                },
+            )?,
+        )
+    } else {
+        None
+    };
     // new() revalidates, so a buffer cannot mint candidate slots the in-crate
     // constructor would have rejected.
     let slots = SourceConventionSlots::new(calling_convention, argument_slots, result_slot)
@@ -1003,6 +1031,7 @@ pub fn read_convention_slots(
             contract: "SourceConventionSlots::new",
             reason: format!("{error:?}"),
         })?;
+    let slots = slots.with_stack_arguments(stack_arguments);
     verify_recorded_abi_class(
         recorded_abi_class,
         slots.abi_class(),
