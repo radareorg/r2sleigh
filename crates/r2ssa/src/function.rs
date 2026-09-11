@@ -1150,6 +1150,26 @@ impl SsaArtifact {
         self.facts.certificates.callsites.get(callsite)
     }
 
+    /// The one call this block makes, found rather than indexed.
+    ///
+    /// A call's operation index moves whenever construction emits another
+    /// boundary fact beside it, and a test that hard-codes the index is
+    /// asserting about the lowering's bookkeeping rather than about the call.
+    #[cfg(test)]
+    pub(crate) fn sole_callsite_certificate_in_block(
+        &self,
+        block_addr: u64,
+    ) -> Option<&CallsiteCertificate> {
+        let mut found = self
+            .facts
+            .certificates
+            .callsites
+            .values()
+            .filter(|certificate| certificate.block_addr == block_addr);
+        let certificate = found.next()?;
+        found.next().is_none().then_some(certificate)
+    }
+
     pub fn memory_certificates_for_op_site(
         &self,
         block_addr: u64,
@@ -7807,7 +7827,7 @@ mod tests {
         )
         .expect("decompile SSA");
         SsaArtifact::new_with_context(function, FunctionPrepareMode::Decompile, machine_context)
-            .callsite_certificate_for_op(0x1014, 0)
+            .sole_callsite_certificate_in_block(0x1014)
             .expect("callsite certificate")
             .clone()
     }
@@ -7845,7 +7865,7 @@ mod tests {
         format: Option<&str>,
     ) -> CallsiteCertificate {
         variadic_format_call_artifact(defined, variadic, format_parameter, format)
-            .callsite_certificate_for_op(0x1600, defined)
+            .sole_callsite_certificate_in_block(0x1600)
             .expect("callsite certificate")
             .clone()
     }
@@ -8173,7 +8193,7 @@ mod tests {
             }]
         );
         let certificate = prepared
-            .callsite_certificate_for_op(0x1600, 0)
+            .sole_callsite_certificate_in_block(0x1600)
             .expect("prepared callsite certificate");
         assert_eq!(certificate.argument_values, [parameter.value]);
         assert_eq!(certificate.argument_certificates.len(), 1);
@@ -8251,10 +8271,9 @@ mod tests {
         )
         .expect("prepared SSA");
         let call = prepared
-            .callsite_certificate_for_op(0x1600, 2)
+            .sole_callsite_certificate_in_block(0x1600)
             .expect("callsite certificate");
         assert_eq!(call.block_addr, 0x1600);
-        assert_eq!(call.op_index, 2);
         assert_eq!(call.argument_values.len(), 1);
         let arg_value = call.argument_values[0];
         let arg = prepared.graph().value(arg_value).expect("arg value");
@@ -8425,7 +8444,7 @@ mod tests {
         )
         .expect("prepared SSA with convention boundary");
         let call = prepared
-            .callsite_certificate_for_op(0x16c0, 0)
+            .sole_callsite_certificate_in_block(0x16c0)
             .expect("convention-certified call");
         // The call defines the root once; the lane the program reads is a
         // `Subpiece` of it, certified as that result sliced.
@@ -8640,7 +8659,7 @@ mod tests {
         let prepared =
             SsaArtifact::for_decompile(&blocks, Some(&arch)).expect("prepared SSA should build");
         let call = prepared
-            .callsite_certificate_for_op(0x1740, 2)
+            .sole_callsite_certificate_in_block(0x1740)
             .expect("callsite certificate");
 
         assert!(call.stack_argument_values.is_empty());
@@ -11948,7 +11967,7 @@ mod tests {
             "the argument is what the first store put in the slot"
         );
         let certificate = artifact
-            .callsite_certificate_for_op(0x1000, call_index)
+            .sole_callsite_certificate_in_block(0x1000)
             .expect("callsite certificate");
         assert!(
             matches!(

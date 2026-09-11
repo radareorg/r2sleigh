@@ -183,6 +183,14 @@ pub enum ElisionReason {
     /// that the read is indeterminate. This differs from `UnclaimedCallClobber`
     /// in that something does read it, so the object is real and visible.
     CallClobberedDeclaration,
+    /// A carrier read by a call boundary rather than by a statement.
+    ///
+    /// `SSAOp::CallUse` states what a call consumes so that liveness can see
+    /// it. It is a fact about the boundary and renders nothing of its own: an
+    /// argument the call really passes is spelled inside the call expression,
+    /// and a convention carrier the callee does not take is spelled nowhere.
+    /// Either way the read has no statement, and this is where it is answered.
+    CallBoundaryCarrier,
     /// Which way a block operation walks, which its loop's form already says.
     ///
     /// A repeated string instruction reads the direction flag to choose
@@ -226,6 +234,7 @@ impl std::fmt::Display for ElisionReason {
             Self::DeadUnusedTemporary => "dead-unused-temp",
             Self::DeadCallerSaved => "dead-caller-saved",
             Self::DeadCallArgument => "dead-call-arg",
+            Self::CallBoundaryCarrier => "call-boundary-carrier",
             Self::NoNativeSemantics => "no-native-semantics",
             Self::DeadUnreadBinding => "dead-unread-binding",
             Self::DeadStackBase => "dead-stack-base",

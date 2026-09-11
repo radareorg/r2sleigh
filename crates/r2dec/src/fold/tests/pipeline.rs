@@ -2991,12 +2991,23 @@ mod tests {
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         install_certified_function_facts(&mut ctx);
         ctx.set_function_names(HashMap::from([(0x401050, "sym.helper".to_string())]));
-        install_callsite_resolution(&mut ctx, (0x1000, 2), 0x401050, "sym.helper", None);
-
         let block = prepared.function().get_block(0x1000).expect("entry");
-        enter_exact_test_site(&ctx, block.addr, 2);
+        let call_idx = block
+            .ops
+            .iter()
+            .position(|op| matches!(op, SSAOp::Call { .. }))
+            .expect("call operation");
+        install_callsite_resolution(
+            &mut ctx,
+            (0x1000, call_idx),
+            0x401050,
+            "sym.helper",
+            None,
+        );
+
+        enter_exact_test_site(&ctx, block.addr, call_idx);
         assert_eq!(
-            ctx.op_to_stmt_with_args(&block.ops[2], block.addr, 2),
+            ctx.op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx),
             Err(OpLoweringRefusal::missing_machine_projection()),
             "a certified position without binding-plan spelling authority must refuse the call"
         );
@@ -3027,10 +3038,24 @@ mod tests {
         let mut ctx = make_x86_64_ctx_with_prepared(&prepared);
         install_certified_function_facts(&mut ctx);
         ctx.set_function_names(HashMap::from([(0x401050, "sym.helper".to_string())]));
-        install_callsite_resolution(&mut ctx, (0x1000, 3), 0x401050, "sym.helper", None);
+        let call_idx = prepared
+            .function()
+            .get_block(0x1000)
+            .expect("entry")
+            .ops
+            .iter()
+            .position(|op| matches!(op, SSAOp::Call { .. }))
+            .expect("call operation");
+        install_callsite_resolution(
+            &mut ctx,
+            (0x1000, call_idx),
+            0x401050,
+            "sym.helper",
+            None,
+        );
 
         let argument_values = prepared
-            .callsite_certificate_for_op(0x1000, 3)
+            .callsite_certificate_for_op(0x1000, call_idx)
             .expect("prepared callsite certificate")
             .argument_values
             .clone();
@@ -3070,16 +3095,16 @@ mod tests {
         .expect("prepared semantic view");
         let call_view = prepared_view
             .call_view_by_site
-            .get_mut(&(0x1000, 3))
+            .get_mut(&(0x1000, call_idx))
             .expect("prepared call view");
         assert_eq!(call_view.authoritative_arg_values, argument_values);
         call_view.authoritative_args.truncate(1);
         call_view.authoritative_arg_values.truncate(1);
         ctx.inputs.prepared_semantic_view = Some(Box::leak(Box::new(prepared_view)));
 
-        enter_exact_test_site(&ctx, block.addr, 3);
+        enter_exact_test_site(&ctx, block.addr, call_idx);
         let stmt = ctx
-            .op_to_stmt_with_args(&block.ops[3], block.addr, 3)
+            .op_to_stmt_with_args(&block.ops[call_idx], block.addr, call_idx)
             .expect("supported call lowering")
             .expect("call stmt");
 

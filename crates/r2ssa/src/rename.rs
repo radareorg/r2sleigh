@@ -309,6 +309,11 @@ impl RenameContext {
         identity.as_var(self.new_version(identity), disambiguator)
     }
 
+    /// Whether this identity has a version stack, meaning the body defines it.
+    pub fn knows_identity(&self, identity: &RenameIdentity) -> bool {
+        self.stacks.contains_key(identity)
+    }
+
     /// Find initialized identities with this register spelling and exact width.
     pub fn matching_identities_ci(&self, name: &str, size: u32) -> Vec<RenameIdentity> {
         let needle = name.to_ascii_lowercase();
@@ -568,7 +573,23 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                 let renamed_op = rename_op(op, op_addr, ctx, &mut defined_vars, reg_names);
                 let block_ops = result.blocks.get_mut(&block_addr).unwrap();
                 block_ops.append(&mut ctx.lanes.prefix);
+                let boundary_reads =
+                    if matches!(op, r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. })
+                        && let Some(boundary) = call_boundaries
+                    {
+                        append_call_boundary_reads(block_ops, ctx, boundary, reg_names)
+                    } else {
+                        Vec::new()
+                    };
                 record_renamed_op_storage(op, &renamed_op, result);
+                for (var, storage) in boundary_reads {
+                    record_canonical_storage(
+                        &mut result.canonical_storage_by_var,
+                        &mut result.ambiguous_storage_vars,
+                        &var,
+                        storage,
+                    );
+                }
                 let block_ops = result.blocks.get_mut(&block_addr).unwrap();
                 block_ops.push(renamed_op);
                 block_ops.append(&mut ctx.lanes.suffix);
@@ -833,6 +854,52 @@ fn append_call_boundary_defs(
             retained.push((dst.clone(), storage));
         }
         block_ops.push(SSAOp::CallDefine { dst });
+    }
+    retained
+}
+
+/// Emit the reads a call boundary makes, before the call itself.
+///
+/// Before, because the reaching definition of an argument carrier is the one
+/// standing at the call, and because the run of `CallDefine` that follows a
+/// call is how a result is found -- anything inserted into that run ends it
+/// early for the five scans that read it.
+///
+/// Only carriers the body already defines are read. A call in a function that
+/// never writes the carrier would otherwise read an entry value with no
+/// producer, which is one step from a parameter the function does not have.
+fn append_call_boundary_reads(
+    block_ops: &mut Vec<SSAOp>,
+    ctx: &RenameContext,
+    call_boundaries: &CallBoundaryConfig,
+    reg_names: Option<&RegisterNameMap>,
+) -> Vec<(SSAVar, CanonicalStorageId)> {
+    let mut read: BTreeSet<RenameIdentity> = BTreeSet::new();
+    for reg in &call_boundaries.argument_regs {
+        match ctx
+            .families
+            .as_deref()
+            .and_then(|families| families.widest_slot_for_name(&reg.name))
+        {
+            Some(root) => {
+                let identity = RenameIdentity::for_root_slot(root, reg_names);
+                if ctx.knows_identity(&identity) {
+                    read.insert(identity);
+                }
+            }
+            None => read.extend(ctx.matching_identities_ci(&reg.name, reg.size)),
+        }
+    }
+    let mut retained = Vec::new();
+    for identity in read {
+        let src = ctx.read_var(&identity);
+        if matches!(
+            identity.storage.space,
+            crate::CanonicalStorageSpace::Register
+        ) {
+            retained.push((src.clone(), identity.storage));
+        }
+        block_ops.push(SSAOp::CallUse { src });
     }
     retained
 }

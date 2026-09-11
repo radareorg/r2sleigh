@@ -965,6 +965,15 @@ fn frame_object_address_replacement(
     let object = object?;
     use_sites
         .iter()
+        // A call boundary's read of the carrier is the argument pass itself,
+        // already accounted above. It is not a memory access and says nothing
+        // about whether the value is this object's address.
+        .filter(|site| {
+            !matches!(
+                source.graph().inst(site.inst).map(|inst| &inst.payload),
+                Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallUse { .. }))
+            )
+        })
         .all(|site| {
             let Some(r2ssa::MachineUseDisposition::MemoryAddress(address)) =
                 projection.use_disposition(*site)
@@ -1069,6 +1078,16 @@ fn inlinable_core(
             .use_sites(value.id)
             .iter()
             .copied()
+            // A call boundary's read is counted once, as a certified boundary
+            // read below. `SSAOp::CallUse` states the same read in the graph so
+            // liveness can see it, and counting both would make every inlined
+            // call argument look like a two-reader value.
+            .filter(|site| {
+                !matches!(
+                    graph.inst(site.inst).map(|inst| &inst.payload),
+                    Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallUse { .. }))
+                )
+            })
             .filter(|site| {
                 value
                     .canonical_storage
@@ -1593,6 +1612,28 @@ pub(crate) fn certificate_elided_cells(
                     ElisionReason::BlockTransferDirection,
                 )?;
             }
+        }
+    }
+    // The reads a call boundary makes. `SSAOp::CallUse` says what the call
+    // consumes so liveness can keep the producers; it renders nothing itself,
+    // because an argument the call passes is spelled inside the call
+    // expression and a carrier the callee does not take is spelled nowhere.
+    for inst in &graph.insts {
+        if !matches!(
+            inst.payload,
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::CallUse { .. })
+        ) {
+            continue;
+        }
+        for input_idx in 0..inst.inputs.len() {
+            insert_elided_use(
+                &mut uses,
+                UseSite {
+                    inst: inst.id,
+                    input_idx,
+                },
+                ElisionReason::CallBoundaryCarrier,
+            )?;
         }
     }
     // A register a call clobbered and no result certificate claims is declared

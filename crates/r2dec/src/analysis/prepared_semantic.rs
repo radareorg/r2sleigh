@@ -3686,6 +3686,27 @@ mod tests {
             .expect("prepared stack-owned call result SSA artifact")
     }
 
+    /// The one call the fixture makes, found rather than indexed: construction
+    /// emits a boundary read before every call, so the call's operation index
+    /// is not a property of the fixture's own operations.
+    fn sole_callsite_key(prepared: &SsaArtifact) -> CallsiteKey {
+        let mut sites = prepared
+            .certificates()
+            .callsites
+            .values()
+            .filter_map(|cert| {
+                prepared
+                    .inst_op_site(cert.at)
+                    .map(|(block_addr, op_index)| CallsiteKey {
+                        block_addr,
+                        op_index,
+                    })
+            });
+        let site = sites.next().expect("fixture makes one call");
+        assert!(sites.next().is_none(), "fixture makes one call");
+        site
+    }
+
     fn test_callsite_facts(prepared: &SsaArtifact) -> r2types::FunctionCallsiteFacts {
         let by_callsite = prepared
             .certificates()
@@ -4085,13 +4106,7 @@ mod tests {
             known_function_signatures: &known_function_signatures,
         };
         let callee_resolution = CalleeResolutionFacts::from_direct_call_targets(
-            [(
-                CallsiteKey {
-                    block_addr: 0x1000,
-                    op_index: 2,
-                },
-                0x401000,
-            )],
+            [(sole_callsite_key(&prepared), 0x401000)],
             &resolution_ctx,
         );
         let mut summaries = InterprocSummarySet::default();
@@ -4119,7 +4134,10 @@ mod tests {
         );
 
         let call_view = view
-            .call_view_for_site((0x1000, 2))
+            .call_view_for_site({
+                let site = sole_callsite_key(&prepared);
+                (site.block_addr, site.op_index)
+            })
             .expect("direct callsite should have prepared call view");
         assert_eq!(
             call_view
@@ -4159,7 +4177,10 @@ mod tests {
         );
 
         let call_view = view
-            .call_view_for_site((0x1000, 2))
+            .call_view_for_site({
+                let site = sole_callsite_key(&prepared);
+                (site.block_addr, site.op_index)
+            })
             .expect("direct callsite should have prepared call view");
         assert_eq!(
             call_view.authoritative_args,
@@ -4175,10 +4196,7 @@ mod tests {
         let mut callsite_facts = test_callsite_facts(&prepared);
         let call_facts = callsite_facts
             .by_callsite
-            .get_mut(&CallsiteKey {
-                block_addr: 0x1000,
-                op_index: 2,
-            })
+            .get_mut(&sole_callsite_key(&prepared))
             .expect("fixture callsite facts");
         call_facts.register_argument_locations.clear();
         call_facts.stack_argument_locations.clear();
@@ -4198,7 +4216,10 @@ mod tests {
         );
 
         let call_view = view
-            .call_view_for_site((0x1000, 2))
+            .call_view_for_site({
+                let site = sole_callsite_key(&prepared);
+                (site.block_addr, site.op_index)
+            })
             .expect("direct callsite should have prepared call view");
         assert_eq!(
             call_view.authoritative_args,
@@ -4228,7 +4249,10 @@ mod tests {
         );
 
         let call_view = view
-            .call_view_for_site((0x1000, 2))
+            .call_view_for_site({
+                let site = sole_callsite_key(&prepared);
+                (site.block_addr, site.op_index)
+            })
             .expect("direct callsite should have prepared call view");
         assert_eq!(
             call_view.authoritative_args,
@@ -4265,7 +4289,10 @@ mod tests {
         );
 
         let call_view = view
-            .call_view_for_site((0x1780, 1))
+            .call_view_for_site({
+                let site = sole_callsite_key(&prepared);
+                (site.block_addr, site.op_index)
+            })
             .expect("direct callsite should have prepared call view");
         assert_eq!(
             call_view.result_owner, None,
