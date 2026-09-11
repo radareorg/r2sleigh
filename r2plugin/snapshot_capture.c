@@ -1131,6 +1131,31 @@ static bool fcn_context_collect_slot_callees(RAnal *anal, RList *callees, const 
 	}
 	return true;
 }
+/* The address of the block's last instruction that decodes to something. */
+static ut64 fcn_context_block_transfer_addr(RAnal *anal, RAnalBlock *bb, const RAnalSnapshotBlock *block) {
+	int index;
+	for (index = bb->ninstr - 1; index >= 0; index--) {
+		const ut64 addr = r_anal_bb_opaddr_i (bb, index);
+		if (addr < block->addr || addr >= block->addr + block->size || !block->bytes) {
+			continue;
+		}
+		const ut64 offset = addr - block->addr;
+		if (block->size - offset > INT_MAX) {
+			continue;
+		}
+		RAnalOp op;
+		r_anal_op_init (&op);
+		const int decoded = r_anal_op (anal, &op, addr, block->bytes + offset,
+			(int)(block->size - offset), R_ARCH_OP_MASK_BASIC);
+		const bool understood = decoded > 0 && (op.type & 0xffff) != R_ANAL_OP_TYPE_ILL
+			&& (op.type & 0xffff) != R_ANAL_OP_TYPE_UNK;
+		r_anal_op_fini (&op);
+		if (understood) {
+			return addr;
+		}
+	}
+	return UT64_MAX;
+}
 static bool fcn_context_collect_tail_callees(RAnal *anal, RList *callees, const RAnalFunctionImageSnapshot *image, const RVecAnalRef *refs) {
 	size_t block_index;
 	for (block_index = 0; block_index < image->num_blocks; block_index++) {
@@ -1139,8 +1164,18 @@ static bool fcn_context_collect_tail_callees(RAnal *anal, RList *callees, const 
 		if (!bb || bb->size != block->size || bb->ninstr < 1) {
 			continue;
 		}
-		const ut64 transfer_addr = r_anal_bb_opaddr_i (bb, bb->ninstr - 1);
-		if (transfer_addr < block->addr || transfer_addr >= block->addr + block->size) {
+		// The block's transfer is its last instruction that decodes. A stub
+		// section pads its last entry, and radare2 counts those bytes as a
+		// trailing instruction of the block: AArch64's `sym.imp.printf` at -O2
+		// is `adrp; ldr; br; <four zero bytes>`, so the last instruction is the
+		// padding and the branch below it was never classified. Undecodable
+		// trailing bytes are not what leaves a block, so they are stepped over;
+		// the first instruction that decodes is where the walk stops, whether
+		// or not it transfers.
+		ut64 transfer_addr = fcn_context_block_transfer_addr (anal, bb, block);
+		if (transfer_addr == UT64_MAX
+			|| transfer_addr < block->addr
+			|| transfer_addr >= block->addr + block->size) {
 			continue;
 		}
 		size_t successor_index;
