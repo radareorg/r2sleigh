@@ -21087,3 +21087,21 @@ Adding "an object whose address escaped needs no assignment" to
 `binding_is_entry_declared` was tried and is inert: the escaped set is empty
 here for the reason above, and the census did not move. It was reverted rather
 than left in the tree. The fix belongs in the object model, not in placement.
+
+The root cause of the empty set was one level further down and is now fixed:
+`collect_decompile_prep_facts_with_control` installed a declared stack base only
+when `stack_slot_roles_complete` held, so one unclassified local switched off the
+whole stack-address root analysis. A slot's base register is a per-slot fact and
+is now believed without attributing its role; 29 of that function's 116
+unresolvable call arguments now name their object.
+
+The four bindings still refuse, and the next step is small and well-posed. The
+escape mechanism demonstrably works: the same binary renders `(&bzerr`,
+`(&inName` and `(&outName` as call arguments, and `bzerr` is a local of this very
+function whose address is `lea`d into an argument register at the same call as
+`nbytes_in_lo32`. So find what differs between the two. `call-argument-frame-address`
+at `calls.rs:545` logs only the case where the object resolves and the spelling
+does not, and it is silent for both, which means either the object still does not
+resolve for these four or the spelling succeeds and the observation is lost after
+it. Printing `occurrences.escaped_stack_bindings()` beside the four binding ids at
+`observation_journal.rs:1247` separates those two cases in one run.
