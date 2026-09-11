@@ -21045,3 +21045,45 @@ declaration rather than a body.
 `read_before_assignment`. Four are machine-projection refusals at three lowering
 sites. Three are radare2 analysis producing a partition inconsistent with its
 own edges, and one is a control certificate edge mismatch in `BZ2_decompress`.
+
+### What `missing_definition` actually is, traced
+
+`fcn_28c4` in bzip2 `-O0` refuses on four bindings named `nbytes_in_lo32`,
+`nbytes_in_hi32`, `nbytes_out_lo32` and `nbytes_out_hi32`. Each is read and
+never written, and placement calls that a missing definition.
+
+They are not missing anything. They are C locals whose address is passed to
+`BZ2_bzWriteClose64`, which writes through the pointer:
+
+    unsigned int nbytes_in_lo32;
+    BZ2_bzWriteClose64 (&bzerr, bzf, 0, &nbytes_in_lo32, ...);
+    /* then read them */
+
+The declaration is the definition. Demanding an assignment in this function asks
+for one the program deliberately left to the callee, and the concept is already
+in the tree twice: `binding_is_entry_declared` exempts an array stack object
+because no element write assigns the whole object, and
+`PlacementObservationTarget::EscapedStackAddress` exists precisely to mark a
+binding whose address left the function.
+
+So the escape is not being seen. `certified_frame_object_call_argument` logs
+every failure and is silent on success; in this function it logs 116 failures,
+and all 116 carry `object=None` and `stack_root=None`. The call argument values
+-- `lea rdx, [nbytes_in_lo32]` among them -- have no entry in
+`ObjectModel::value_objects`, so no argument of any call in this function names
+a frame object, so no `EscapedStackAddress` observation is ever recorded.
+
+`ObjectModelBuilder::build` attributes objects for the keys of
+`facts.stack_address_roots` and for every load and store address. A `lea` whose
+result is only ever passed to a call is in neither set unless the root analysis
+gave it a root, and the direct lookup says it did not -- while the loads and
+stores of the same slots resolve, since objects 5 through 8 exist and carry
+their DWARF names. The next step is to find why the root analysis stops at a
+`lea` that feeds an argument register; the likely candidates are the seeding in
+`SSAOp::IntAdd` at `function.rs:4169` and whether the frame pointer carries a
+root at all in a function whose `frame_geometry_coherent` is false.
+
+Adding "an object whose address escaped needs no assignment" to
+`binding_is_entry_declared` was tried and is inert: the escaped set is empty
+here for the reason above, and the census did not move. It was reverted rather
+than left in the tree. The fix belongs in the object model, not in placement.
