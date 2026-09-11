@@ -20207,10 +20207,17 @@ binaries; corpus gate green at 54 of 54 on raw, differential, snapshot and the
 four audits, with the snapshot baseline re-accepted because every rendering
 changed. DecBench has not been re-run since; that is the next measurement.
 
-What the tree still says here, in order of size: eight corpus cells compute a
-wrong digest through the *diagnostic* rewriting while their raw rendering is
-correct, so the differential gate passes on the raw basis and the type-rewrite
-path owes an explanation; the four `c_plugin_*` source tests fail on a clean
+One number in the gate output invites a wrong reading, so it is worth stating
+plainly: eight cells are `wrong` on the *diagnostic* leg while their raw
+rendering is correct, and that is the diagnostic pass working as written. It
+widens every local and parameter to `long` on purpose -- `verify_rendering.py`
+calls itself "the historical type/dereference repair... not emitted-C proof" --
+so any function whose result depends on thirty-two bit truncation computes a
+different value once the widths are erased. All eight are `murmur3_32` and
+`xxhash32`, the two seeded thirty-two bit hashes. The count was thirteen before
+this work. Nothing is owed here; the raw leg is the proof and it passes.
+
+What the tree still says: the four `c_plugin_*` source tests fail on a clean
 checkout of `HEAD` as well, because they read strings from `r_anal_sleigh.c`
 that the fork-side work changed; the stack-clash probe loop at -O0 is still not
 stack geometry; and a copy of a stack address into a program pointer still asks
