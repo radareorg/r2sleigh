@@ -20305,9 +20305,20 @@ operations, about 21 microseconds an operation, and no decompiler work has
 begun at that point. And fact collection runs once per function plus once per
 callee interface recovered -- eight times for `bzip2`'s `0xa16c`, which
 renders fine -- so the cost of a function grows with its callees as well as
-its size. The capture's own timing line reports `cache_hits=0
-cache_misses=74` for that run, so whatever the lift cache is keyed on, it
-never hits inside a single `pd:s`; that is the cheapest thread to pull first.
+its size.
+
+The `cache_hits=0 cache_misses=74` on that line is not a third thing, though
+it reads like one: those are the counters of a process-wide cache reported at
+the end of a request that was the first to ask about this function. Asking
+three times in one session says what it is worth:
+
+    capture=37403us callees=4 cached_callees=0 root_lift=17248us cached_root=0 hits=0
+    capture=124us   callees=4 cached_callees=4 root_lift=1us     cached_root=1 hits=5
+    capture=114us   callees=4 cached_callees=4 root_lift=0us     cached_root=1 hits=10
+
+A repeat costs 124 microseconds against 37 milliseconds, so the cache is
+working and the cold lift is the cost that remains. A census or gate run pays
+it once per function by construction.
 
 The measurement recipe, since it cost an hour to assemble: raise the two
 constants in `crates/r2engine/src/policy.rs`, rebuild and install, then
