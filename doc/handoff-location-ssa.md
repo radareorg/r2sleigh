@@ -20201,9 +20201,8 @@ formal but the body reads the whole register, the root is rebuilt from the
 declared lanes with zero above them, because the declaration is the source's
 own statement of what the caller passed.
 
-Numbers: local census 699 of 720 rendered, up from 697, gaining `bzip2-O2`
-`0x7d70` and `0x8350` and losing nothing; `split_entries` zero on all nine
-binaries; corpus gate green at 54 of 54 on raw, differential, snapshot and the
+Numbers: local census 663 of 720 rendered, unchanged across the rewrite,
+gaining and losing nothing; `split_entries` zero on all nine binaries; corpus gate green at 54 of 54 on raw, differential, snapshot and the
 four audits, with the snapshot baseline re-accepted because every rendering
 changed. DecBench has not been re-run since; that is the next measurement.
 
@@ -20333,47 +20332,67 @@ for the per-collection table and the number of collections.
 
 ### The rest of the census, traced: what each refusal is waiting for
 
-Twenty-one of 720 census functions do not render. Three are radare2 telling us
-the address is a cold partition of another function, which is not ours. The
-rest divide into classes, and each has now been traced to the fact it is
-missing rather than to the layer that reports it.
+Fifty-seven of 720 census functions do not render, and the first thing to say
+about that sentence is that an earlier version of it said twenty-one. The
+difference is not the tree; it is how the census was read. `control_census.sh`
+tallies the *control* certificate, and a function can pass the control proof and
+still emit a rendering refusal underneath it. Counting the `ok` lines therefore
+counts control proofs. The corrected rule is an `ok` certificate and no refusal
+comment, and `$SP/census_summary.py` now applies it. Every coverage figure in
+the entries above this one that reads near 700 is a control-proof count; the
+rendering count on the same trees is 663.
 
-**Five over the complexity limit** — measured above: the lift dominates and the
-type phase spends the request budget.
+Three of the fifty-seven are radare2 telling us the address is a cold partition
+of another function, which is not ours. The rest divide into classes, largest
+first.
 
-**Four at the return boundary** — the ABI model is incoherent because one
-stack slot's role is unproven; the two underlying facts are radare2's, and the
-engine's own part is that it conjoins the frame's exactness with the
-carriers'.
+**Sixteen at an effect obligation.** Every one of them refuses with the same
+head -- some number of effects refused as `volatile-or-unknown` at a named op
+site -- and then a second count that varies between unaccounted calls,
+unaccounted live-value producers and unaccounted control transfers. Sixteen
+functions behind one fact is by a wide margin the largest remaining mass in the
+census, four times the next-largest thing anyone has worked on, and it is
+spread across every binary and both optimisation levels, which says it is a
+property of the model rather than of one program.
 
-**Two at a stack access** (`bzip2` -O2 `0xf7a0`, `minigzip` -O2 `0x4d00`) —
-the binding plan refuses an object with `MissingSourceIdentity`, and the
-existing `stack-object-identity` evidence says why: no declared slot, no
-callee allocation, and no width its own accesses agree on. For `0xf7a0`'s
-`ObjectId(6)` at `StackPointer-1096` the `stack-object-width` line is exact:
+**Ten wanting a rendered value.** `RenderedValueRequired` from the observation
+journal.
+
+**Seven at a machine projection.** Four of them at `implementation.rs:1334`,
+which is the return boundary: the ABI model is incoherent because one stack
+slot's role is unproven, and the two underlying facts are radare2's. The
+engine's own part is that it conjoins the frame's exactness with the carriers'.
+The other three are one site each.
+
+**Five over the complexity limit**, measured above: the lift dominates and the
+type phase spends the request budget. A sixth exceeds the decompile limit.
+
+**Five at a declaration with no definition**, four at a stack access read
+before assignment, one at a plain read before assignment.
+
+**Two at a stack object.** `bzip2` -O0 `0x196b8` and `0x1a161`, refused
+`MissingSourceIdentity`: no declared slot, no callee allocation, and no width
+their own accesses agree on.
+
+**The rest are one function each**, including a switch dispatch outside its own
+block.
+
+One of the singletons is worth its own paragraph because it is the clearest
+statement of a defect the frame model carries. `bzip2` -O2 `fallbackSort` at
+`0xf7a0` refuses `PlannedElidedValueRendered`, and the evidence names
+`ObjectId(6)` at `StackPointer-1096`:
 
     object=ObjectId(6) widths disagree: 4 and 16; accesses=[(ValueId(144), 4,
       Some(0), true), (ValueId(259), 4, Some(0), false), ...]
 
-Four-byte and sixteen-byte accesses at offset zero of one object is a
-vectorised initialisation of a local table beside its scalar uses. The extent
-is knowable -- it is the array's -- and the layer that should know it is the
-stack array layout proof, which answers `NotIndexed` here. Taking the widest
-access instead would be a claim about where the object ends, which is the
-guess this code deliberately declines to make, and the next object's offset
-bounds it from above but does not establish it.
-
-A refusal on that path now also names the field that disagreed when a slot
-*does* exist and the object contradicts it, which was the one branch of the
-three with no evidence of its own.
-
-**The rest are one function each**: a switch dispatch outside its own block, a
-declaration with no definition, a call the memory renderer cannot project.
-
-The pattern across the traced classes is worth stating, because it decides
-where the next effort goes: three of the four are waiting on a fact about the
-*frame* -- a slot's role, a slot's extent, an object's width -- and in two of
-them radare2 has no opinion to offer. The engine already derives stack
-addressing for itself; what it declines to do is name an extent nobody
-declared. That is the boundary to move, and moving it is analysis work rather
-than a repair.
+The sixteen-byte access is `movdqa (%r8,%rax), %xmm1` -- a vectorised copy loop
+reading four elements of a four-byte array at a time. `stack_array_layout`
+requires one element width across every access, so the vector access destroys
+the array's layout proof; with no layout the object has no extent, with no
+extent no slot certificate, with no certificate no symbol, and the access falls
+through to spelling its raw address, which the binding plan had already elided
+as dead stack geometry because stack addresses are supposed to render through
+their object's name. The defect is that extent and element type are welded into
+one proof. How many bytes the program touches is not a statement about what the
+elements are, and an access wider than the element is an access to a run of
+consecutive elements rather than a contradiction.

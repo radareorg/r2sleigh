@@ -239,9 +239,19 @@ assertion, listed at `function.rs:6725`, `:6756`, `:10903-11795`.
 
 S1 and S2 landed together on 2026-09-11. The gate the ADR set -- every
 function that rendered before renders after -- is met: the local census over
-nine binaries rendered 699 of 720 against 697 before, gaining `bzip2-O2`
-`0x7d70` and `0x8350` and losing nothing, and the corpus gate passes 54 of 54
-on raw, differential, snapshot and all four audits. `split_entries` is zero on
+nine binaries rendered 663 of 720 before and after, gaining nothing and losing
+nothing, and the corpus gate passes 54 of 54 on raw, differential, snapshot and
+all four audits.
+
+That number was first written here as 699 of 720 against 697, which was wrong,
+and the error is worth keeping because it is easy to repeat. `control_census.sh`
+tallies the *control* certificate, and a function can pass the control proof and
+still emit a rendering refusal underneath it; counting the `ok` lines therefore
+counts control proofs, not renderings. The corrected rule -- an `ok` certificate
+and no refusal comment -- puts the tree at 663, and puts this rewrite's coverage
+delta at zero. The rewrite is still what the rest of this document argues for:
+its result is that no register family is entered through more than one value
+anywhere in the census, which is a property of the model rather than a count. `split_entries` is zero on
 every binary, which is the S0 instrument's whole point: no register family is
 entered through more than one value anywhere in the census.
 
