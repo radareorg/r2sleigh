@@ -211,7 +211,7 @@ pub enum ElisionReason {
     /// C cannot spell a value wider than its widest scalar, so the store is
     /// rendered as one assignment per member and each carries its own slice of
     /// the constant. The operand itself therefore has no occurrence.
-    DecomposedWideConstantStore,
+    DecomposedWideStore,
     /// Proven dead, with no rule yet naming which kind of dead it is.
     DeadUnclassified,
 }
@@ -247,7 +247,7 @@ impl std::fmt::Display for ElisionReason {
             Self::BlockTransferDirection => "block-transfer-direction",
             Self::RedundantPhiEdge => "redundant-phi-edge",
             Self::MaterializedPhiEdges => "materialized-phi-edges",
-            Self::DecomposedWideConstantStore => "decomposed-wide-constant-store",
+            Self::DecomposedWideStore => "decomposed-wide-store",
             Self::DeadUnclassified => "dead-unclassified",
         })
     }

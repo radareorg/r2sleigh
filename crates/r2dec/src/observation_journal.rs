@@ -3002,6 +3002,21 @@ impl LegacyObservationJournal {
         )
     }
 
+    pub(crate) fn observe_certified_lane_read_expr(
+        &mut self,
+        value: ValueId,
+        access: r2ssa::StructuredAccessId,
+        symbol: SymbolId,
+        expr: CExpr,
+    ) -> Result<CExpr, LegacyObservationJournalError> {
+        self.observe_certified_read_expr(
+            value,
+            crate::binding_plan::CertifiedValueReadSource::Lane(access),
+            symbol,
+            expr,
+        )
+    }
+
     fn observe_certified_read_expr(
         &mut self,
         value: ValueId,

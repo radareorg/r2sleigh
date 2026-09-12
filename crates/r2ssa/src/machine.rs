@@ -61,8 +61,12 @@ fn memory_access_authorities_match(
             let addressed = fact.is_write && graph.value_id_for_var(addr) == Some(fact.address);
             match member {
                 Some(member) => {
+                    let lane = match member.source {
+                        crate::MemberRunSource::Constant(_) => None,
+                        crate::MemberRunSource::Lane(value) => Some(value),
+                    };
                     addressed
-                        && fact.value.is_none()
+                        && fact.value == lane
                         && fact.width == member.width
                         && fact.object_offset == i64::try_from(member.offset).ok()
                         && member_run.is_some_and(|run| {

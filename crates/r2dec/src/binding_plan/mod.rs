@@ -189,13 +189,15 @@ pub(crate) enum ValueDisposition {
 pub(crate) enum CertifiedValueReadSource {
     Boundary(InstId),
     Address(r2ssa::StructuredAccessId),
+    /// The lane a decomposed wide store assigns to one member.
+    Lane(r2ssa::StructuredAccessId),
 }
 
 impl CertifiedValueReadSource {
     pub(crate) const fn inst(self) -> InstId {
         match self {
             Self::Boundary(inst) => inst,
-            Self::Address(access) => access.inst,
+            Self::Address(access) | Self::Lane(access) => access.inst,
         }
     }
 }
@@ -402,7 +404,30 @@ pub(crate) fn certified_value_read(
     match read {
         CertifiedValueReadSource::Boundary(at) => certified_boundary_read(source, value, at),
         CertifiedValueReadSource::Address(access) => certified_address_read(source, value, access),
+        CertifiedValueReadSource::Lane(access) => certified_lane_read(source, value, access),
     }
+}
+
+/// Whether `value` is the lane a decomposed wide store assigns at `access`.
+pub(crate) fn certified_lane_read(
+    source: &r2ssa::SsaArtifact,
+    value: ValueId,
+    access: r2ssa::StructuredAccessId,
+) -> bool {
+    source
+        .structured()
+        .memory_accesses
+        .get(&access)
+        .is_some_and(|fact| fact.id == access && fact.is_write && fact.value == Some(value))
+        && source
+            .structured()
+            .member_run_stores
+            .get(&access.inst)
+            .is_some_and(|run| {
+                run.members.iter().any(|member| {
+                    member.access == access && member.source == r2ssa::MemberRunSource::Lane(value)
+                })
+            })
 }
 
 /// Exact graph uses that consume a source-certified machine return target.

@@ -1343,7 +1343,88 @@ pub struct MemberRunStoreMember {
     /// Byte offset in the object, which is where the member's name resolves.
     pub offset: u64,
     pub width: u32,
-    pub bits: u64,
+    pub source: MemberRunSource,
+}
+
+/// What one member of a decomposed wide store receives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberRunSource {
+    /// The member's slice of a proven constant.
+    Constant(u64),
+    /// A value exactly as wide as the member, composed into the stored value
+    /// at the member's bytes.
+    Lane(ValueId),
+}
+
+/// Where one byte of a value comes from, through the operations that only
+/// move bytes: copies, zero extension, lane insertion and concatenation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ByteSource {
+    Constant(u8),
+    Lane { value: ValueId, byte: u32 },
+}
+
+/// The bytes of `value`, least significant first, as constants and slices of
+/// the values that only byte-moving operations composed it from.
+fn value_byte_sources(graph: &SsaGraph, value: ValueId) -> Option<Vec<ByteSource>> {
+    let mut current = value;
+    loop {
+        let graph_value = graph.value(current)?;
+        let size = graph_value.var.size;
+        let constant = graph_value.var.constant_bits().or_else(|| {
+            graph_value
+                .canonical_storage
+                .filter(|storage| storage.space == crate::CanonicalStorageSpace::Constant)
+                .map(|storage| storage.offset)
+        });
+        if let Some(bits) = constant {
+            return Some(
+                (0..size)
+                    .map(|byte| ByteSource::Constant(bits.checked_shr(byte * 8).unwrap_or(0) as u8))
+                    .collect(),
+            );
+        }
+        let leaf = || {
+            Some(
+                (0..size)
+                    .map(|byte| ByteSource::Lane {
+                        value: current,
+                        byte,
+                    })
+                    .collect(),
+            )
+        };
+        let Some(inst) = graph.def_inst(current).and_then(|inst| graph.inst(inst)) else {
+            return leaf();
+        };
+        match &inst.payload {
+            InstPayload::Op(SSAOp::Copy { .. }) => current = *inst.inputs.first()?,
+            InstPayload::Op(SSAOp::IntZExt { .. }) => {
+                let mut bytes = value_byte_sources(graph, *inst.inputs.first()?)?;
+                bytes.resize(size as usize, ByteSource::Constant(0));
+                return Some(bytes);
+            }
+            InstPayload::Op(SSAOp::Piece { .. }) => {
+                let mut bytes = value_byte_sources(graph, *inst.inputs.get(1)?)?;
+                bytes.extend(value_byte_sources(graph, *inst.inputs.first()?)?);
+                (bytes.len() == size as usize).then_some(())?;
+                return Some(bytes);
+            }
+            InstPayload::Op(SSAOp::Insert { .. }) => {
+                let mut bytes = value_byte_sources(graph, *inst.inputs.first()?)?;
+                let lane = value_byte_sources(graph, *inst.inputs.get(1)?)?;
+                let position = constant_bits_through_copies(graph, *inst.inputs.get(2)?)?;
+                if position % 8 != 0 {
+                    return None;
+                }
+                let start = usize::try_from(position / 8).ok()?;
+                (start.checked_add(lane.len())? <= bytes.len()).then_some(())?;
+                bytes[start..start + lane.len()].copy_from_slice(&lane);
+                return Some(bytes);
+            }
+            _ => return leaf(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7937,15 +8018,20 @@ fn constant_bits_through_copies(graph: &SsaGraph, value: ValueId) -> Option<u64>
     None
 }
 
-/// The members an access of `width_bits` at `offset_bits` covers exactly.
+/// The members an access of `width_bits` at `offset_bits` covers exactly,
+/// each with the bytes of the stored value that land on it.
 fn member_run_slices(
     aggregate: &crate::SourceAggregateLayout,
     inst: InstId,
     offset_bits: u64,
     width_bits: u64,
-    constant: u64,
+    bytes: &[ByteSource],
+    endianness: crate::machine_context::MachineMemoryEndianness,
 ) -> Option<Vec<MemberRunStoreMember>> {
+    use crate::machine_context::MachineMemoryEndianness as Endianness;
     let end_bits = offset_bits.checked_add(width_bits)?;
+    let store_bytes = usize::try_from(width_bits / 8).ok()?;
+    (bytes.len() == store_bytes).then_some(())?;
     let mut members = Vec::new();
     let mut cursor = offset_bits;
     while cursor < end_bits {
@@ -7961,8 +8047,18 @@ fn member_run_slices(
         if next > end_bits || member.size_bits() % 8 != 0 || member.size_bits() > 64 {
             return None;
         }
-        let shift = u32::try_from(cursor.checked_sub(offset_bits)?).ok()?;
-        let width = u32::try_from(member.size_bits() / 8).ok()?;
+        let width = usize::try_from(member.size_bits() / 8).ok()?;
+        let memory_offset = usize::try_from(cursor.checked_sub(offset_bits)? / 8).ok()?;
+        // The value's bytes that land on the member, least significant first:
+        // the lowest addresses hold the lowest bytes on a little-endian
+        // machine and the highest on a big-endian one.
+        let first = match endianness {
+            Endianness::Little => memory_offset,
+            Endianness::Big => store_bytes.checked_sub(memory_offset)?.checked_sub(width)?,
+            Endianness::Mixed | Endianness::Custom | Endianness::Unknown => return None,
+        };
+        let slice = bytes.get(first..first.checked_add(width)?)?;
+        let source = member_run_source(slice)?;
         members.push(MemberRunStoreMember {
             access: StructuredAccessId {
                 inst,
@@ -7970,25 +8066,39 @@ fn member_run_slices(
             },
             name: member.name().to_string(),
             offset: cursor / 8,
-            width,
-            bits: constant_slice(constant, shift, member.size_bits()),
+            width: u32::try_from(width).ok()?,
+            source,
         });
         cursor = next;
     }
     (members.len() > 1).then_some(members)
 }
 
-/// The `bits` of `constant` that start `shift` bits into it.
-fn constant_slice(constant: u64, shift: u32, bits: u64) -> u64 {
-    if shift >= 64 {
-        return 0;
+/// One member's source: a constant assembled from its bytes, or one value
+/// whose whole width lands on it in order.
+fn member_run_source(slice: &[ByteSource]) -> Option<MemberRunSource> {
+    if let Some(bits) = slice
+        .iter()
+        .enumerate()
+        .try_fold(0_u64, |bits, (index, byte)| match byte {
+            ByteSource::Constant(value) => {
+                Some(bits | (u64::from(*value)).checked_shl(u32::try_from(index).ok()? * 8)?)
+            }
+            ByteSource::Lane { .. } => None,
+        })
+    {
+        return Some(MemberRunSource::Constant(bits));
     }
-    let shifted = constant >> shift;
-    if bits >= 64 {
-        shifted
-    } else {
-        shifted & ((1_u64 << bits) - 1)
-    }
+    let ByteSource::Lane { value, byte: 0 } = *slice.first()? else {
+        return None;
+    };
+    slice
+        .iter()
+        .enumerate()
+        .all(|(index, byte)| {
+            matches!(byte, ByteSource::Lane { value: lane, byte } if *lane == value && *byte as usize == index)
+        })
+        .then_some(MemberRunSource::Lane(value))
 }
 
 fn collect_renderable_expression_values(
@@ -10631,14 +10741,25 @@ fn member_run_store(
         .get(&(base, slot_offset))
         .and_then(SourceStackSlotSpec::logical_type)
         .and_then(|type_id| source_aggregate_layout(type_graph, type_id))?;
-    let constant = constant_bits_through_copies(graph, value)?;
+    let bytes = value_byte_sources(graph, value)?;
     let members = member_run_slices(
         aggregate,
         inst,
         offset_bits,
         u64::from(width).saturating_mul(8),
-        constant,
+        &bytes,
+        machine_context
+            .map(|context| context.memory_model().default_endianness())
+            .unwrap_or(crate::machine_context::MachineMemoryEndianness::Unknown),
     )?;
+    // A lane is the member's whole value only when it is exactly as wide.
+    for member in &members {
+        if let MemberRunSource::Lane(lane) = member.source
+            && graph.value(lane).map(|value| value.var.size) != Some(member.width)
+        {
+            return None;
+        }
+    }
     // The lifted store reads its address then its value, and the ledger needs
     // the exact operand it is about to call unrendered.
     let input_idx = graph
@@ -10783,7 +10904,10 @@ fn insert_raw_member_subeffect(
         space,
         object,
         address,
-        None,
+        match member.source {
+            MemberRunSource::Constant(_) => None,
+            MemberRunSource::Lane(value) => Some(value),
+        },
         true,
         member.width,
         provenance.complete,
@@ -16751,5 +16875,101 @@ mod tests {
             .expect("merge domain");
         assert!(merge.complete);
         assert!(merge.guards.is_empty());
+    }
+
+    #[test]
+    fn byte_sources_follow_zero_extension_insertion_and_copies() {
+        use super::{ByteSource, MemberRunSource, member_run_source, value_byte_sources};
+        let ops = vec![
+            R2ILOp::Load {
+                dst: Varnode::unique(0x100, 8),
+                space: SpaceId::Ram,
+                addr: Varnode::constant(0x18da8, 8),
+            },
+            R2ILOp::IntZExt {
+                dst: Varnode::unique(0x200, 16),
+                src: Varnode::unique(0x100, 8),
+            },
+            R2ILOp::Load {
+                dst: Varnode::unique(0x108, 8),
+                space: SpaceId::Ram,
+                addr: Varnode::constant(0x18db8, 8),
+            },
+            R2ILOp::Insert {
+                dst: Varnode::unique(0x210, 16),
+                src: Varnode::unique(0x200, 16),
+                value: Varnode::unique(0x108, 8),
+                position: Varnode::constant(64, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::unique(0x220, 16),
+                src: Varnode::unique(0x210, 16),
+            },
+            R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: Varnode::register(0, 8),
+                val: Varnode::unique(0x220, 16),
+            },
+        ];
+        let artifact = SsaArtifact::for_symbolic(
+            &[R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops,
+                switch_info: None,
+                op_metadata: Default::default(),
+            }],
+            None,
+        )
+        .expect("lane composite artifact");
+        let graph = artifact.graph();
+        let store = graph
+            .insts
+            .iter()
+            .find(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::Store { .. })))
+            .expect("the store");
+        let bytes = value_byte_sources(graph, store.inputs[1]).expect("byte sources");
+        assert_eq!(bytes.len(), 16);
+        let first = graph
+            .insts
+            .iter()
+            .find(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::Load { .. })))
+            .and_then(|inst| inst.output)
+            .expect("first lane");
+        let second = graph
+            .insts
+            .iter()
+            .filter(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::Load { .. })))
+            .nth(1)
+            .and_then(|inst| inst.output)
+            .expect("second lane");
+        for (byte, source) in bytes.iter().enumerate() {
+            let expected = if byte < 8 {
+                ByteSource::Lane {
+                    value: first,
+                    byte: byte as u32,
+                }
+            } else {
+                ByteSource::Lane {
+                    value: second,
+                    byte: byte as u32 - 8,
+                }
+            };
+            assert_eq!(*source, expected, "byte {byte}");
+        }
+        assert_eq!(
+            member_run_source(&bytes[..8]),
+            Some(MemberRunSource::Lane(first))
+        );
+        assert_eq!(
+            member_run_source(&bytes[8..]),
+            Some(MemberRunSource::Lane(second))
+        );
+        // A slice that starts inside a value is nobody's whole value.
+        assert_eq!(member_run_source(&bytes[4..12]), None);
+        assert_eq!(
+            member_run_source(&[ByteSource::Constant(0x34), ByteSource::Constant(0x12)]),
+            Some(MemberRunSource::Constant(0x1234))
+        );
     }
 }

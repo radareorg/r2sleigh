@@ -884,6 +884,45 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// A bound lane a decomposed wide store assigns to one member, read there.
+    pub(crate) fn observe_certified_lane_read_expr(
+        &self,
+        value: r2ssa::ValueId,
+        access: r2ssa::StructuredAccessId,
+        expr: CExpr,
+    ) -> CExpr {
+        let Some(journal) = self.inputs.observation_journal else {
+            return expr;
+        };
+        let fallback = expr.clone();
+        let Some(symbol) = self
+            .inputs
+            .binding_names
+            .and_then(|names| names.symbol_for_value(value))
+        else {
+            self.retain_first_observation_error(
+                crate::observation_journal::LegacyObservationJournalError::rendered_value_required(
+                    value,
+                    crate::observation_journal::RenderedValueRequirementCause::CertifiedValueReadMissingSymbol,
+                    self.inputs
+                        .binding_names
+                        .and_then(|names| names.disposition_for_value(value)),
+                ),
+            );
+            return fallback;
+        };
+        match journal
+            .borrow_mut()
+            .observe_certified_lane_read_expr(value, access, symbol, expr)
+        {
+            Ok(marked) => marked,
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                fallback
+            }
+        }
+    }
+
     pub(crate) fn observe_certified_address_read_expr(
         &self,
         value: r2ssa::ValueId,
@@ -1503,6 +1542,7 @@ impl<'a> FoldingContext<'a> {
         source_inst: InstId,
         access: r2ssa::StructuredAccessId,
         address: ValueId,
+        value: Option<ValueId>,
     ) -> BTreeSet<SemanticObligationId> {
         use r2ssa::{SemanticObligationComponent, SemanticObligationKind};
 
@@ -1519,12 +1559,13 @@ impl<'a> FoldingContext<'a> {
             .filter(|fact| {
                 fact.access.inst == source_inst
                     && fact.address == address
-                    && fact.value.is_none()
+                    && fact.value == value
                     && fact.is_write
             })
         else {
             return BTreeSet::new();
         };
+        let inputs = std::iter::once(address).chain(value).collect::<Vec<_>>();
         prepared
             .obligations()
             .obligations_for_inst(source_inst)
@@ -1532,7 +1573,7 @@ impl<'a> FoldingContext<'a> {
                 obligation.id.kind == SemanticObligationKind::ObservableMemoryWrite
                     && obligation.id.component
                         == SemanticObligationComponent::MemoryAccess(fact.access.ordinal)
-                    && obligation.inputs == [address]
+                    && obligation.inputs == inputs
             })
             .map(|obligation| obligation.id)
             .collect::<BTreeSet<_>>()

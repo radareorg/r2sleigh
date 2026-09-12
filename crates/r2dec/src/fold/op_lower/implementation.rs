@@ -796,10 +796,12 @@ impl<'a> FoldingContext<'a> {
 
     /// An assignment whose right-hand side has what the operation's root
     /// produces, as the typed boundaries state it.
-    /// One assignment per member a wide constant store covers.
+    /// One assignment per member a wide store covers.
     ///
     /// The address use is observed once, on the first member; the stored
     /// value's own use is elided, because C cannot spell a value this wide.
+    /// A member takes its slice of a constant, or the lane value the machine
+    /// composed onto its bytes, rendered as the value it is.
     fn lower_member_run_store(
         &self,
         frame: &LowerFrame,
@@ -807,16 +809,50 @@ impl<'a> FoldingContext<'a> {
     ) -> Option<CStmt> {
         let CertifiedMemberRunStore {
             first,
-            first_slice,
+            first_source,
             rest,
         } = run;
+        let first_access = first.access();
         let lhs = self.observed_memory_input(frame, 0, first);
-        let mut stmts = vec![CStmt::Expr(CExpr::assign(lhs, CExpr::UIntLit(first_slice)))];
-        for (access, lvalue, slice) in rest {
+        let rhs = self.member_run_source_expr(first_access, first_source)?;
+        let mut stmts = vec![CStmt::Expr(CExpr::assign(lhs, rhs))];
+        for (access, lvalue, source) in rest {
             let lhs = self.observe_member_access_expr(access, lvalue);
-            stmts.push(CStmt::Expr(CExpr::assign(lhs, CExpr::UIntLit(slice))));
+            let rhs = self.member_run_source_expr(access, source)?;
+            stmts.push(CStmt::Expr(CExpr::assign(lhs, rhs)));
         }
         Some(CStmt::Block(stmts))
+    }
+
+    /// A member's right-hand side: its constant slice, or the lane value,
+    /// whose read of a program variable is certified at the member's access.
+    fn member_run_source_expr(
+        &self,
+        access: r2ssa::StructuredAccessId,
+        source: r2ssa::MemberRunSource,
+    ) -> Option<CExpr> {
+        let value = match source {
+            r2ssa::MemberRunSource::Constant(bits) => return Some(CExpr::UIntLit(bits)),
+            r2ssa::MemberRunSource::Lane(value) => value,
+        };
+        let expr = match self.planned_value_expr(value) {
+            Ok(expr) => expr,
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                return None;
+            }
+        };
+        let bound = matches!(
+            self.inputs
+                .binding_names
+                .and_then(|names| names.disposition_for_value(value)),
+            Some(crate::binding_plan::ValueDisposition::Bound { .. })
+        );
+        Some(if bound {
+            self.observe_certified_lane_read_expr(value, access, expr)
+        } else {
+            expr
+        })
     }
 
     fn assign_stmt(&self, lhs: CExpr, rhs: CExpr) -> Option<CStmt> {

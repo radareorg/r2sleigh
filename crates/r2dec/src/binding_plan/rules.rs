@@ -1731,7 +1731,7 @@ pub(crate) fn certificate_elided_cells(
         insert_elided_use(
             &mut uses,
             certificate.value_use,
-            ElisionReason::DecomposedWideConstantStore,
+            ElisionReason::DecomposedWideStore,
         )?;
     }
     // Which way a block operation walks. The rendering writes one walk, so the

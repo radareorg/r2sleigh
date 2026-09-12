@@ -931,12 +931,13 @@ impl<'a> FoldingContext<'a> {
 /// own observation and the object's write is accounted once per member.
 pub(super) struct CertifiedMemberRunStore {
     pub(super) first: CertifiedMemoryAccessExpr,
-    pub(super) first_slice: u64,
-    pub(super) rest: Vec<(r2ssa::StructuredAccessId, CExpr, u64)>,
+    pub(super) first_source: r2ssa::MemberRunSource,
+    pub(super) rest: Vec<(r2ssa::StructuredAccessId, CExpr, r2ssa::MemberRunSource)>,
 }
 
 impl<'a> FoldingContext<'a> {
-    /// A store of a proven constant across a run of declared members.
+    /// A store of a constant or a lane composite across a run of declared
+    /// members.
     pub(super) fn render_certified_member_run_store(
         &self,
         addr: &SSAVar,
@@ -965,9 +966,9 @@ impl<'a> FoldingContext<'a> {
                 is_write: true,
                 expr: member_expr(head),
             },
-            first_slice: head.bits,
+            first_source: head.source,
             rest: members
-                .map(|member| (member.access, member_expr(member), member.bits))
+                .map(|member| (member.access, member_expr(member), member.source))
                 .collect(),
         })
     }

@@ -273,6 +273,10 @@ impl<'a> FoldingContext<'a> {
                     run.inst,
                     member.access,
                     run.address,
+                    match member.source {
+                        r2ssa::MemberRunSource::Constant(_) => None,
+                        r2ssa::MemberRunSource::Lane(value) => Some(value),
+                    },
                 ));
             }
             return obligations;

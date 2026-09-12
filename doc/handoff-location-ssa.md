@@ -21296,14 +21296,21 @@ exercised, because no corpus function had a private slot before:
   never names is absorbed, `DeadStackBase`.
 - **A struct slot cannot be assigned the integer the machine moved.** The
   `slot-name` rung applied to a 16-byte `movaps` into `struct utimbuf`, and
-  `uTimBuf = tmp_6c00_2` is not C. The rung is for scalars now; the store spells
-  through `slot-bytes`. The right spelling is one assignment per member, and
-  the constant member-run certificate already does that for a constant; the
-  generalisation is the next piece: a member's source is a constant slice or a
-  lane value whose bytes land exactly on it (through `Copy`, `IntZExt`,
-  `Insert` and `Piece`), the member access carries that value, the composing
-  chain dies by the obligations alone, and the renderer spells each lane at the
-  composing operation's use site.
+  `uTimBuf = tmp_6c00_2` is not C. The rung is for scalars now, and the
+  member-run certificate that already split a constant store across a run of
+  members takes lane composites as well: `value_byte_sources` follows `Copy`,
+  `IntZExt`, `Insert` and `Piece` down to the bytes of the values they moved,
+  and a member whose bytes are exactly one value as wide as itself carries
+  that value (`MemberRunSource::Lane`) on its own access. The composing chain
+  then has no obligation input and dies by the liveness alone; the renderer
+  spells each lane as the value it is, and a bound lane's read is certified at
+  the member's access (`CertifiedValueReadSource::Lane`), the same authority
+  the placement audit consults. `compress` now reads
+  `uTimBuf.actime = tmp_0_2; uTimBuf.modtime = ...;` before `utime`. Big-endian
+  members take the mirrored byte slice; mixed or unknown endianness declines.
+  Two loose ends: the lanes here are loads of `0x18da8` and `0x18db8`, which
+  are members of the global `fileMetaInfo` and should spell as such, and a
+  lane that is a slice of a wider value (`Subpiece`) is not admitted yet.
 
 Running the census on that state lost two functions, and both were the
 adoption rule again, from the other side: a slot's reloads must be reads of
