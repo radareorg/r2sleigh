@@ -2069,13 +2069,16 @@ impl Disassembler {
         // instruction, so that is the whole extent an expansion has to stay
         // clear of, and taking it from the instruction itself means there is no
         // offset to guess and nothing to collide with.
-        let temp_base = ops
+        let mut temp_base = ops
             .iter()
             .flat_map(|op| op.output().into_iter().chain(op.inputs()))
             .filter(|varnode| varnode.space == SpaceId::Unique)
             .filter_map(|varnode| varnode.offset.checked_add(u64::from(varnode.size)))
             .max()
             .unwrap_or(0);
+        let address_size = u32::try_from(self.default_code_space().address_size)
+            .map_err(|_| LiftError::Parse("default code space address size".into()))?;
+        let ops = translate::canonicalize_memory_operands(ops, address_size, &mut temp_base);
 
         // A trap ends the instruction. Sleigh writes `brk` as a user operation
         // that produces `pc` followed by a branch through it, so the branch's
@@ -2407,28 +2410,6 @@ impl Disassembler {
             OpCode::Copy => {
                 let dst = translate::require_output(&source, "COPY").map_err(translate_err)?;
                 let src = translate::require_input(&source, 0, "COPY").map_err(translate_err)?;
-                // A Sleigh direct-address form writes memory through a
-                // RAM-space destination varnode rather than through STORE.
-                // Canonicalize it so an observable memory write stays a memory
-                // write instead of becoming an SSA value of a register-like RAM
-                // location, which would leave the effect uninventoried and turn
-                // a later read of the same address into a value phi.
-                if dst.space == SpaceId::Ram || src.space == SpaceId::Ram {
-                    let address_size = u32::try_from(self.default_code_space().address_size)
-                        .map_err(|_| LiftError::Parse("default code space address size".into()))?;
-                    if dst.space == SpaceId::Ram {
-                        return Ok(Some(R2ILOp::Store {
-                            space: SpaceId::Ram,
-                            addr: Varnode::constant(dst.offset, address_size),
-                            val: src,
-                        }));
-                    }
-                    return Ok(Some(R2ILOp::Load {
-                        dst,
-                        space: SpaceId::Ram,
-                        addr: Varnode::constant(src.offset, address_size),
-                    }));
-                }
                 Ok(Some(R2ILOp::Copy { dst, src }))
             }
 
@@ -4793,26 +4774,32 @@ mod tests {
             output: Some(VarnodeData::new(Address::new(register_space, 0), 4)),
         };
 
-        assert_eq!(
-            disassembler
-                .translate_pcode_op(&write)
-                .expect("fixed RAM write translation"),
-            Some(R2ILOp::Store {
-                space: SpaceId::Ram,
-                addr: Varnode::constant(0x4000, address_size),
-                val: Varnode::register(0, 4),
+        let ops = [write, read]
+            .iter()
+            .map(|op| {
+                disassembler
+                    .translate_pcode_op(op)
+                    .expect("fixed RAM copy translation")
+                    .expect("a copy translates to one operation")
             })
-        );
+            .collect::<Vec<_>>();
+        let mut next_temp = 0;
         assert_eq!(
-            disassembler
-                .translate_pcode_op(&read)
-                .expect("fixed RAM read translation"),
-            Some(R2ILOp::Load {
-                dst: Varnode::register(0, 4),
-                space: SpaceId::Ram,
-                addr: Varnode::constant(0x4000, address_size),
-            })
+            translate::canonicalize_memory_operands(ops, address_size, &mut next_temp),
+            vec![
+                R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x4000, address_size),
+                    val: Varnode::register(0, 4),
+                },
+                R2ILOp::Load {
+                    dst: Varnode::register(0, 4),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x4000, address_size),
+                },
+            ]
         );
+        assert_eq!(next_temp, 0);
     }
 
     #[test]

@@ -162,6 +162,84 @@ pub fn translate_ptrsub<S: PcodeSource>(source: &S) -> Result<R2ILOp> {
     })
 }
 
+/// Rewrite every direct-address memory operand into an explicit access.
+///
+/// Sleigh spells a memory operand with a constant address as a varnode in the
+/// ram space, and SSA construction would rename that like a register: a read
+/// became an undefined variable, and a write a local nothing else could see.
+/// A read becomes a load into a fresh temporary, a written output becomes a
+/// temporary the operation writes and a store carries out; a copy needs no
+/// temporary at all. A code address a transfer names is not a memory operand.
+pub fn canonicalize_memory_operands(
+    ops: Vec<R2ILOp>,
+    address_size: u32,
+    next_temp: &mut u64,
+) -> Vec<R2ILOp> {
+    let mut out = Vec::with_capacity(ops.len());
+    let mut temp = |size: u32| {
+        let node = Varnode::unique(*next_temp, size);
+        *next_temp += u64::from(size).max(1);
+        node
+    };
+    for mut op in ops {
+        match &op {
+            R2ILOp::Copy { dst, src } if src.space == SpaceId::Ram && dst.space != SpaceId::Ram => {
+                out.push(R2ILOp::Load {
+                    dst: dst.clone(),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(src.offset, address_size),
+                });
+                continue;
+            }
+            R2ILOp::Copy { dst, src } if dst.space == SpaceId::Ram && src.space != SpaceId::Ram => {
+                out.push(R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(dst.offset, address_size),
+                    val: src.clone(),
+                });
+                continue;
+            }
+            _ => {}
+        }
+        let code_target = match &op {
+            R2ILOp::Branch { target }
+            | R2ILOp::CBranch { target, .. }
+            | R2ILOp::Call { target } => Some(target.clone()),
+            _ => None,
+        };
+        for input in op.inputs_mut() {
+            if input.space != SpaceId::Ram || code_target.as_ref() == Some(&*input) {
+                continue;
+            }
+            let loaded = temp(input.size);
+            out.push(R2ILOp::Load {
+                dst: loaded.clone(),
+                space: SpaceId::Ram,
+                addr: Varnode::constant(input.offset, address_size),
+            });
+            *input = loaded;
+        }
+        let written = op
+            .output_mut()
+            .filter(|output| output.space == SpaceId::Ram)
+            .map(|output| {
+                let address = output.offset;
+                let value = temp(output.size);
+                *output = value.clone();
+                (address, value)
+            });
+        out.push(op);
+        if let Some((address, val)) = written {
+            out.push(R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: Varnode::constant(address, address_size),
+                val,
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +347,76 @@ mod tests {
             }
             _ => panic!("Expected PtrAdd"),
         }
+    }
+
+    #[test]
+    fn memory_operands_become_loads_and_stores() {
+        let mut next = 0x100;
+        let ops = vec![
+            R2ILOp::IntZExt {
+                dst: Varnode::register(0, 8),
+                src: Varnode::ram(0x18da8, 1),
+            },
+            R2ILOp::IntAdd {
+                dst: Varnode::ram(0x2000, 4),
+                a: Varnode::ram(0x2000, 4),
+                b: Varnode::constant(1, 4),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::register(8, 8),
+                src: Varnode::ram(0x3000, 8),
+            },
+            R2ILOp::Copy {
+                dst: Varnode::ram(0x3008, 8),
+                src: Varnode::register(8, 8),
+            },
+            R2ILOp::Branch {
+                target: Varnode::ram(0x4000, 8),
+            },
+        ];
+        let out = canonicalize_memory_operands(ops, 8, &mut next);
+        assert_eq!(
+            out,
+            vec![
+                R2ILOp::Load {
+                    dst: Varnode::unique(0x100, 1),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x18da8, 8),
+                },
+                R2ILOp::IntZExt {
+                    dst: Varnode::register(0, 8),
+                    src: Varnode::unique(0x100, 1),
+                },
+                R2ILOp::Load {
+                    dst: Varnode::unique(0x101, 4),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x2000, 8),
+                },
+                R2ILOp::IntAdd {
+                    dst: Varnode::unique(0x105, 4),
+                    a: Varnode::unique(0x101, 4),
+                    b: Varnode::constant(1, 4),
+                },
+                R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x2000, 8),
+                    val: Varnode::unique(0x105, 4),
+                },
+                R2ILOp::Load {
+                    dst: Varnode::register(8, 8),
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x3000, 8),
+                },
+                R2ILOp::Store {
+                    space: SpaceId::Ram,
+                    addr: Varnode::constant(0x3008, 8),
+                    val: Varnode::register(8, 8),
+                },
+                R2ILOp::Branch {
+                    target: Varnode::ram(0x4000, 8),
+                },
+            ]
+        );
+        assert_eq!(next, 0x109);
     }
 }
