@@ -7135,6 +7135,78 @@ impl DeclaredStackSlots {
     }
 }
 
+/// Record a declaration at one frame coordinate, keeping the widest.
+///
+/// Two slots that start at the same address are not two declarations of
+/// different things: the wider one contains the narrower, which is a member of
+/// it. radare2 routinely produces both -- a DWARF aggregate and the
+/// access-inferred fragment it saw first -- and dropping the pair on collision
+/// deleted the only declaration that carried an extent and a type, which is
+/// what an access has to be found inside. A genuine disagreement is two
+/// declarations of the same width that are not the same declaration, and only
+/// that is ambiguous.
+fn slot_is_declared_aggregate(
+    types: Option<&crate::SourceTypeGraph>,
+    slot: &SourceStackSlotSpec,
+) -> bool {
+    let Some((types, id)) = types.zip(slot.logical_type()) else {
+        return false;
+    };
+    types.types().get(id as usize).is_some_and(|source_type| {
+        matches!(
+            source_type.kind(),
+            crate::SourceTypeKind::Struct { .. }
+                | crate::SourceTypeKind::Union { .. }
+                | crate::SourceTypeKind::Array { .. }
+        )
+    })
+}
+
+fn declare_stack_slot(
+    types: Option<&crate::SourceTypeGraph>,
+    exact_stack_slots: &mut BTreeMap<(StackAddressBase, i64), SourceStackSlotSpec>,
+    ambiguous_stack_slots: &mut BTreeSet<(StackAddressBase, i64)>,
+    key: (StackAddressBase, i64),
+    slot: SourceStackSlotSpec,
+) {
+    match exact_stack_slots.get(&key) {
+        None => {
+            exact_stack_slots.insert(key, slot);
+        }
+        Some(existing) if *existing == slot => {}
+        // Only an aggregate can name what starts inside it. Two scalars of
+        // different widths at one address are the ambiguity this always
+        // refused, and rendering a narrow read of the wider one would spell
+        // the whole object -- the width question, which is answered elsewhere.
+        Some(existing)
+            if existing.size_bytes() > slot.size_bytes()
+                && slot_is_declared_aggregate(types, existing) =>
+        {
+            r2il::refusal_evidence!(
+                "declared-stack-slot",
+                "{key:?} keeps its {}-byte aggregate over a {}-byte declaration at the same address",
+                existing.size_bytes(),
+                slot.size_bytes()
+            );
+        }
+        Some(existing)
+            if slot.size_bytes() > existing.size_bytes()
+                && slot_is_declared_aggregate(types, &slot) =>
+        {
+            r2il::refusal_evidence!(
+                "declared-stack-slot",
+                "{key:?} takes a {}-byte aggregate over the {}-byte declaration at the same address",
+                slot.size_bytes(),
+                existing.size_bytes()
+            );
+            exact_stack_slots.insert(key, slot);
+        }
+        Some(_) => {
+            ambiguous_stack_slots.insert(key);
+        }
+    }
+}
+
 fn collect_declared_stack_slots(
     function: &SSAFunction,
     machine_context: Option<&SourceMachineContext>,
@@ -7145,9 +7217,13 @@ fn collect_declared_stack_slots(
     if let Some(interface) = machine_context.and_then(SourceMachineContext::function_interface) {
         for slot in interface.stack_slots() {
             let key = (slot.base(), slot.offset());
-            if exact_stack_slots.insert(key, *slot).is_some() {
-                ambiguous_stack_slots.insert(key);
-            }
+            declare_stack_slot(
+                interface.type_graph(),
+                &mut exact_stack_slots,
+                &mut ambiguous_stack_slots,
+                key,
+                *slot,
+            );
             declared_stack_slot_keys.insert(key, key);
             // A slot declared against the frame pointer, restated in the one
             // coordinate objects are identified in.
@@ -7184,16 +7260,13 @@ fn collect_declared_stack_slots(
                             entry_offset,
                         );
                         declared_stack_slot_keys.insert(translated, key);
-                        if exact_stack_slots.insert(translated, restated).is_some() {
-                            r2il::refusal_evidence!(
-                                "stack-slot-translation",
-                                "slot {:?} at frame offset {} translates to entry offset {} already declared",
-                                slot.base_storage(),
-                                slot.offset(),
-                                entry_offset
-                            );
-                            ambiguous_stack_slots.insert(translated);
-                        }
+                        declare_stack_slot(
+                            interface.type_graph(),
+                            &mut exact_stack_slots,
+                            &mut ambiguous_stack_slots,
+                            translated,
+                            restated,
+                        );
                     }
                     None => {
                         // A frame base the body never establishes as a register
@@ -7215,9 +7288,13 @@ fn collect_declared_stack_slots(
                                     entry_offset,
                                 );
                                 declared_stack_slot_keys.insert(translated, key);
-                                if exact_stack_slots.insert(translated, restated).is_some() {
-                                    ambiguous_stack_slots.insert(translated);
-                                }
+                                declare_stack_slot(
+                                    interface.type_graph(),
+                                    &mut exact_stack_slots,
+                                    &mut ambiguous_stack_slots,
+                                    translated,
+                                    restated,
+                                );
                             }
                             None => {
                                 r2il::refusal_evidence!(
@@ -7235,8 +7312,28 @@ fn collect_declared_stack_slots(
         }
     }
     for key in ambiguous_stack_slots {
+        r2il::refusal_evidence!(
+            "declared-stack-slot",
+            "key {key:?} was claimed twice and both declarations are dropped"
+        );
         exact_stack_slots.remove(&key);
         declared_stack_slot_keys.remove(&key);
+    }
+    // What the frame ended up looking like, in the one coordinate objects are
+    // identified in. A declared aggregate that never contains the accesses
+    // reading its members is invisible, and the extent is what says whether it
+    // should have.
+    for (key, slot) in &exact_stack_slots {
+        r2il::refusal_evidence!(
+            "declared-stack-slot",
+            "declared {:?} at {} extent {} role {:?} type {:?} restated to {key:?} from {:?}",
+            slot.base(),
+            slot.offset(),
+            slot.size_bytes(),
+            slot.role(),
+            slot.logical_type(),
+            declared_stack_slot_keys.get(key)
+        );
     }
     // A parameter the convention passes on the stack declares its own slot:
     // the interface places it at an entry offset, whatever the source named.
