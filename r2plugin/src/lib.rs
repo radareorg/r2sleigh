@@ -8192,7 +8192,7 @@ mod integration_tests {
 
     #[test]
     #[cfg(feature = "x86")]
-    fn lifted_x86_sum_array_retains_certified_parameter_home_and_residual() {
+    fn lifted_x86_sum_array_retains_certified_parameter_home_and_projects_the_load() {
         fn decode_hex(bytes: &str) -> Vec<u8> {
             let bytes = bytes.as_bytes();
             bytes
@@ -8314,10 +8314,9 @@ mod integration_tests {
                 )
             });
         assert_eq!(len_home.name, "arg1");
-        // The SIMD worker contains machine operations whose exact C projection
-        // is unavailable. Those are marked as gaps and the rest renders; the
-        // saved frame-pointer object must not be reached through a fabricated
-        // local, which is what the output assertions check.
+        // The saved frame-pointer object must not be reached through a
+        // fabricated local, and the indexed load must render as the element it
+        // was certified to be rather than as a gap.
         assert!(
             matches!(response.placement_audit, r2engine::PlacementAudit::Applied),
             "placement applies around the gapped worker: {:?}\n{}",
@@ -8326,12 +8325,18 @@ mod integration_tests {
         );
         assert_eq!(response.render_refusal, None, "{}", response.output);
         assert!(
-            response.output.contains("r2dec gap:")
-                && !response.output.contains("for (int32_t var_14h = 0;")
+            !response.output.contains("for (int32_t var_14h = 0;")
                 && !response.output.contains("return var_10h;"),
-            "certified facts must remain inspectable while the unprojected machine operation leaves a gap; output={} render_facts={:?}",
+            "certified facts must not be reached through a fabricated local; output={} render_facts={:?}",
             response.output,
             response.function_facts.render_facts()
+        );
+        // The array certificate names this load's element, so the access is
+        // spelled `base[index]` and no operation is left unprojected.
+        assert!(
+            response.output.contains("stack_m16[") && !response.output.contains("r2dec gap:"),
+            "the certified element access should render as a subscript with no gap; output={}",
+            response.output
         );
     }
 
