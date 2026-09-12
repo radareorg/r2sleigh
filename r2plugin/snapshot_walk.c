@@ -722,8 +722,15 @@ static bool walk_stack_slot(R2SleighWireWriter *writer, const RAnalFcnSlot *slot
 			r2sleigh_wire_u32 (writer, (uint32_t)slot->arg_index);
 			break;
 		}
-		/* Any other ARG, and UNKNOWN, carry no home authority, so both stay
-		 * unclassified rather than being promoted to a parameter home. */
+		/* An ARG slot that is no parameter's own location is the frame's
+		 * storage: at -O0 a body copies a stack-passed parameter into a local
+		 * DWARF still names after it. It carries no home authority, so it is a
+		 * local rather than a parameter home; only a non-stack kind stays
+		 * unclassified. */
+		if (slot->role == R_ANAL_FCN_SLOT_ARG) {
+			r2sleigh_wire_u8 (writer, WALK_ROLE_LOCAL);
+			break;
+		}
 		r2sleigh_wire_u8 (writer, WALK_ROLE_UNCLASSIFIED);
 		break;
 	}

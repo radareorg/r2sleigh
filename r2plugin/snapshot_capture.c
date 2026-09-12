@@ -2773,24 +2773,18 @@ static void snapshot_relink_register_homes(RAnalFcnContext *ctx, const RAnalFunc
 			found = (int)i;
 		}
 		if (found < 0) {
-			/* A variadic prologue homes the argument registers so the tail can
-			 * be walked, and those homes name no declared parameter by
-			 * construction. The slot is the function's own frame storage and
-			 * nothing else -- what it holds came from a register, but so does
-			 * every spilled value, and no parameter claims it. Saying so is
-			 * what lets the interface state its roles exactly; leaving it
-			 * unclassified made the ABI model incoherent, which left every
-			 * return boundary incomplete and refused the function. */
-			if (interface->variadic) {
-				slot->role = R_ANAL_FCN_SLOT_LOCAL;
-				slot->arg_index = -1;
-				slot->home_reg_offset = 0;
-				slot->home_reg_size = 0;
-				R_FREE (slot->home_reg);
-				continue;
-			}
-			slot->role = R_ANAL_FCN_SLOT_UNKNOWN;
+			/* A home whose register is no parameter's is the function's own
+			 * frame storage and nothing else: a variadic prologue homes every
+			 * argument register, and a -O0 body copies a stack-passed parameter
+			 * into a local DWARF still names after it. What the slot holds came
+			 * from a register, but so does every spilled value, and no parameter
+			 * claims it. Saying so is what lets the interface state its roles
+			 * exactly; leaving it unclassified refused every access to it. */
+			slot->role = R_ANAL_FCN_SLOT_LOCAL;
 			slot->arg_index = -1;
+			slot->home_reg_offset = 0;
+			slot->home_reg_size = 0;
+			R_FREE (slot->home_reg);
 			continue;
 		}
 		slot->arg_index = found;
