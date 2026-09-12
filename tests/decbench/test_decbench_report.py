@@ -67,6 +67,7 @@ class ReportTests(unittest.TestCase):
                 "functions": 1,
                 "rendered": 1,
                 "reference_rendered": 0,
+                "reference": "none",
             },
         )
 
@@ -183,6 +184,142 @@ class ReportTests(unittest.TestCase):
             {"fresh/O0"},
         )
         self.assertEqual(fill["absent"], ["cached/same-name/O0::old_only"])
+
+    def test_reference_coverage_counts_only_cells_the_reference_ran_in(self) -> None:
+        # The cached fill exists so a function we refuse still counts against
+        # us. It must not also make the reference look like it ran.
+        fresh = payload("fresh", 0.5)
+        fresh["decompilers"].append("angr")
+        fresh["decompiler_versions"] = {"angr": "9.3.3"}
+        fresh["groups"][0]["functions"][0]["values"]["angr"] = {"byte_match": 0.4}
+        fresh["groups"][0]["functions"][0]["decompiled"]["angr"] = True
+        cached = payload("cached", 0.5)
+        current = report.collect(merger.merge([fresh, cached]))
+        baseline = {
+            "functions": {
+                "cached/same-name/O0::same_function": {
+                    "decompiled": True,
+                    "scores": {"byte_match": 0.5},
+                    "reference_decompiled": True,
+                    "reference": {"byte_match": 0.9},
+                }
+            }
+        }
+        rows, _ = report.reference_universe(current, baseline)
+        measured = report.measured_record(current, rows)
+        population = measured["summary"]["population"]
+        self.assertEqual(population["functions"], 2)
+        self.assertEqual(population["reference_functions"], 1)
+        self.assertEqual(population["reference_rendered"], 1)
+        self.assertEqual(population["reference_coverage"], 1.0)
+        self.assertEqual(population["reference_cells"], ["fresh/O0"])
+        self.assertEqual(
+            population["cells"]["cached/O0"]["reference"], "cached"
+        )
+        self.assertEqual(population["cells"]["cached/O0"]["reference_rendered"], 1)
+        self.assertEqual(
+            population["cells"]["fresh/O0"]["reference"], "measured"
+        )
+        # The cached 0.9 must not enter the reference mean either.
+        reference_mean = measured["summary"]["metrics"]["byte_match"][
+            "reference_rendered"
+        ]
+        self.assertEqual(reference_mean["n"], 1)
+        self.assertAlmostEqual(reference_mean["mean"], 0.4)
+
+    def test_compare_limits_itself_to_cells_the_baseline_covers(self) -> None:
+        current = report.collect(merger.merge([payload("shared", 0.5), payload("new", 0.5)]))
+        measured = report.measured_record(current, current.rows)
+        baseline = {
+            "selection": {"cells": ["shared/O0", "absent/O0"]},
+            "functions": {
+                "shared/same-name/O0::same_function": {
+                    "decompiled": True,
+                    "scores": {"byte_match": 0.5},
+                    "reference_decompiled": False,
+                    "reference": {},
+                },
+                "absent/same-name/O0::same_function": {
+                    "decompiled": True,
+                    "scores": {"byte_match": 0.9},
+                    "reference_decompiled": False,
+                    "reference": {},
+                },
+            },
+        }
+        status = report.compare(measured, baseline)
+        # `new/O0` has no baseline and `absent/O0` was not run; neither is a
+        # regression, and the one shared function is unchanged.
+        self.assertEqual(status, 0)
+
+    def test_a_function_declining_while_the_population_rises_is_not_a_regression(
+        self,
+    ) -> None:
+        current = report.collect(
+            merger.merge(
+                [
+                    {
+                        **payload("one", None),
+                        "groups": [
+                            {
+                                "project": "one",
+                                "binary": "same-name",
+                                "opt_level": "O0",
+                                "functions": [
+                                    {
+                                        "function": "down",
+                                        "values": {"r2sleigh": {"byte_match": 0.40}},
+                                        "decompiled": {"r2sleigh": True},
+                                    },
+                                    {
+                                        "function": "up",
+                                        "values": {"r2sleigh": {"byte_match": 0.90}},
+                                        "decompiled": {"r2sleigh": True},
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            )
+        )
+        measured = report.measured_record(current, current.rows)
+        baseline = {
+            "selection": {"cells": ["one/O0"]},
+            "functions": {
+                "one/same-name/O0::down": {
+                    "decompiled": True,
+                    "scores": {"byte_match": 0.50},
+                    "reference_decompiled": False,
+                    "reference": {},
+                },
+                "one/same-name/O0::up": {
+                    "decompiled": True,
+                    "scores": {"byte_match": 0.50},
+                    "reference_decompiled": False,
+                    "reference": {},
+                },
+            },
+        }
+        # 0.50 -> 0.40 on one function, 0.50 -> 0.90 on the other: the paired
+        # mean rose, so the tree did not regress.
+        self.assertEqual(report.compare(measured, baseline), 0)
+
+    def test_a_declining_paired_mean_is_a_regression(self) -> None:
+        current = report.collect(merger.merge([payload("one", 0.40)]))
+        measured = report.measured_record(current, current.rows)
+        baseline = {
+            "selection": {"cells": ["one/O0"]},
+            "functions": {
+                "one/same-name/O0::same_function": {
+                    "decompiled": True,
+                    "scores": {"byte_match": 0.50},
+                    "reference_decompiled": False,
+                    "reference": {},
+                }
+            },
+        }
+        self.assertEqual(report.compare(measured, baseline), 1)
 
     def test_merge_rejects_silent_missing_cell(self) -> None:
         with self.assertRaisesRegex(ValueError, "missing project/opt cells: one/O1"):

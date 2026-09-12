@@ -138,8 +138,22 @@ def _mean(values: list[float]) -> dict:
 
 
 def summarise(
-    rows: dict[str, dict], expected_metrics: set[str] | None = None
+    rows: dict[str, dict],
+    expected_metrics: set[str] | None = None,
+    reference_cells: set[str] | None = None,
 ) -> dict:
+    """Summarise one population.
+
+    `reference_cells` names the cells whose reference numbers were actually
+    measured. Every reference figure is computed over those cells alone, so a
+    cell the reference never ran in cannot read as reference success. Pass
+    `None` only when every cell in `rows` has real reference numbers.
+    """
+    reference_rows = (
+        rows
+        if reference_cells is None
+        else rows_for_cells(rows, reference_cells)
+    )
     metrics = sorted(
         set(expected_metrics or ())
         | {
@@ -156,7 +170,7 @@ def summarise(
         ]
         reference_rendered = [
             row["reference"][metric]
-            for row in rows.values()
+            for row in reference_rows.values()
             if metric in row["reference"]
         ]
         all_functions = [
@@ -167,7 +181,7 @@ def summarise(
             quality(metric, row["reference"][metric])
             if metric in row["reference"]
             else 0.0
-            for row in rows.values()
+            for row in reference_rows.values()
         ]
         metric_summary[metric] = {
             "direction": "lower_is_better" if metric in LOWER_IS_BETTER else "higher_is_better",
@@ -194,29 +208,55 @@ def summarise(
         }
     total = len(rows)
     rendered = sum(1 for row in rows.values() if row["decompiled"])
-    reference_rendered = sum(1 for row in rows.values() if row["reference_decompiled"])
+    reference_total = len(reference_rows)
+    reference_rendered = sum(
+        1 for row in reference_rows.values() if row["reference_decompiled"]
+    )
     return {
         "population": {
             "functions": total,
             "rendered": rendered,
             "coverage": rendered / total if total else 0.0,
+            # Denominated in the reference's own population, never in ours: a
+            # cell the reference never ran in is absent from both terms.
+            "reference_functions": reference_total,
             "reference_rendered": reference_rendered,
-            "reference_coverage": reference_rendered / total if total else 0.0,
+            "reference_coverage": (
+                reference_rendered / reference_total if reference_total else 0.0
+            ),
+            "reference_cells": (
+                None if reference_cells is None else sorted(reference_cells)
+            ),
         },
         "metrics": metric_summary,
     }
 
 
 def cell_populations(
-    cells: set[str], groups: set[str], rows: dict[str, dict]
+    cells: set[str],
+    groups: set[str],
+    rows: dict[str, dict],
+    reference_cells: set[str] | None = None,
 ) -> dict[str, dict]:
-    """Count each selected cell in one deterministic pass over groups and rows."""
+    """Count each selected cell in one deterministic pass over groups and rows.
+
+    Each cell records whether its reference numbers were measured in this run
+    or carried from the baseline, so a reference-rendered count is never read
+    as this run's evidence.
+    """
     counts = {
         cell: {
             "binaries": 0,
             "functions": 0,
             "rendered": 0,
             "reference_rendered": 0,
+            # Where this cell's reference numbers came from: measured in this
+            # run, carried from the baseline, or nowhere.
+            "reference": (
+                "measured"
+                if reference_cells is None or cell in reference_cells
+                else "none"
+            ),
         }
         for cell in sorted(cells)
     }
@@ -231,6 +271,10 @@ def cell_populations(
         counts[cell]["functions"] += 1
         counts[cell]["rendered"] += int(row["decompiled"])
         counts[cell]["reference_rendered"] += int(row["reference_decompiled"])
+        if counts[cell]["reference"] == "none" and (
+            row["reference"] or row["reference_decompiled"]
+        ):
+            counts[cell]["reference"] = "cached"
     return counts
 
 
@@ -271,9 +315,9 @@ def reference_universe(
 
 
 def measured_record(current: Collected, rows: dict[str, dict]) -> dict:
-    summary = summarise(rows, current.metrics)
+    summary = summarise(rows, current.metrics, current.reference_cells)
     summary["population"]["cells"] = cell_populations(
-        current.cells, current.groups, rows
+        current.cells, current.groups, rows, current.reference_cells
     )
     return {
         "schema_version": 2,
@@ -350,9 +394,12 @@ def merge_baseline(old: dict | None, measured: dict) -> dict:
         for metric, cells_for_metric in metric_cells.items()
         if cells_for_metric & all_cells
     }
-    summary = summarise(functions, set(metric_cells))
+    reference_cells = {
+        cell for cells_for_metric in metric_cells.values() for cell in cells_for_metric
+    }
+    summary = summarise(functions, set(metric_cells), reference_cells)
     summary["population"]["cells"] = cell_populations(
-        all_cells, groups, functions
+        all_cells, groups, functions, reference_cells
     )
     return {
         "schema_version": 2,
@@ -396,15 +443,36 @@ def print_summary(measured: dict, raw_count: int, reference_fill: dict) -> None:
     print(
         f"coverage: {US} {population['rendered']}/{population['functions']} "
         f"({population['coverage']:.1%}); {REFERENCE} "
-        f"{population['reference_rendered']}/{population['functions']} "
+        f"{population['reference_rendered']}/{population['reference_functions']} "
         f"({population['reference_coverage']:.1%})"
     )
+    measured_cells = population.get("reference_cells")
+    if measured_cells is not None:
+        cached = [
+            cell
+            for cell, counts in population["cells"].items()
+            if counts.get("reference") in ("cached", "none")
+        ]
+        print(
+            f"{REFERENCE} ran in {len(measured_cells)} of "
+            f"{len(population['cells'])} cells: {', '.join(measured_cells) or 'none'}"
+        )
+        if cached:
+            print(
+                f"  no {REFERENCE} run in {', '.join(cached)} -- excluded from every "
+                f"{REFERENCE} figure above"
+            )
     print("cell populations: binaries, functions, rendered, reference-rendered")
     for cell, counts in population["cells"].items():
+        reference = (
+            f"{counts['reference_rendered']:5} reference-rendered"
+            if counts.get("reference") == "measured"
+            else "    - no reference run"
+        )
         print(
             f"  {cell:20} {counts['binaries']:3} binaries, "
             f"{counts['functions']:5} functions, {counts['rendered']:5} rendered, "
-            f"{counts['reference_rendered']:5} reference-rendered"
+            f"{reference}"
         )
     print("metrics: rendered mean | all-function quality mean (refusal=0)")
     for metric, data in measured["summary"]["metrics"].items():
@@ -422,18 +490,44 @@ def print_summary(measured: dict, raw_count: int, reference_fill: dict) -> None:
 
 
 def compare(measured: dict, baseline: dict) -> int:
-    before = rows_for_cells(
-        baseline.get("functions") or {}, set(measured["selection"]["cells"])
-    )
-    rows = measured["functions"]
-    before_summary = summarise(before, set(measured["summary"]["metrics"]))
-    now_summary = measured["summary"]
-    bp = before_summary["population"]
-    np = now_summary["population"]
+    """Compare this run with the baseline over the population they share.
+
+    Our own metrics are deterministic -- the same tree and the same binary give
+    the same output -- so a per-function decline is real rather than noise. It
+    is not on its own a regression of the tree: the question the gate has to
+    answer is whether the population moved. So the gate fires on a metric whose
+    paired mean declined, on a function that rendered and now refuses, and on a
+    baseline function that left the population; individual declines are printed
+    as the detail behind those.
+    """
+    measured_cells = set(measured["selection"]["cells"])
+    baseline_cells = set((baseline.get("selection") or {}).get("cells") or [])
+    shared_cells = measured_cells & baseline_cells if baseline_cells else measured_cells
+    if baseline_cells and measured_cells != baseline_cells:
+        only_measured = sorted(measured_cells - baseline_cells)
+        only_baseline = sorted(baseline_cells - measured_cells)
+        print(
+            "cells differ from the baseline, so the comparison is the overlap only: "
+            f"{len(shared_cells)} shared"
+        )
+        if only_measured:
+            print(f"  new in this run, uncompared: {', '.join(only_measured)}")
+        if only_baseline:
+            print(f"  in the baseline, not run: {', '.join(only_baseline)}")
+        if not shared_cells:
+            print(
+                "the baseline shares no cell with this run; nothing to compare",
+                file=sys.stderr,
+            )
+            return 70
+
+    before = rows_for_cells(baseline.get("functions") or {}, shared_cells)
+    rows = rows_for_cells(measured["functions"], shared_cells)
     print(
         "comparison populations: "
-        f"baseline {bp['rendered']}/{bp['functions']} rendered; "
-        f"current {np['rendered']}/{np['functions']} rendered"
+        f"baseline {sum(1 for r in before.values() if r['decompiled'])}/{len(before)} "
+        f"rendered; current "
+        f"{sum(1 for r in rows.values() if r['decompiled'])}/{len(rows)} rendered"
     )
 
     worse: list[str] = []
@@ -448,8 +542,9 @@ def compare(measured: dict, baseline: dict) -> int:
             print(f"  missing function: {key}", file=sys.stderr)
         worse.extend(missing)
     if added:
-        print(f"new population: {len(added)} functions")
+        print(f"new population in shared cells: {len(added)} functions")
 
+    paired: dict[str, list[tuple[float, float]]] = {}
     for key, row in sorted(rows.items()):
         was = before.get(key)
         if was is None:
@@ -461,16 +556,40 @@ def compare(measured: dict, baseline: dict) -> int:
             old = was.get("scores", {}).get(metric)
             if old is None:
                 continue
+            paired.setdefault(metric, []).append((old, value))
             improved = value < old if metric in LOWER_IS_BETTER else value > old
             declined = value > old if metric in LOWER_IS_BETTER else value < old
             if improved:
                 print(f"gained: {key} {metric} {old:.3f} -> {value:.3f}")
             elif declined:
-                print(
-                    f"REGRESSION: {key} {metric} {old:.3f} -> {value:.3f}",
-                    file=sys.stderr,
-                )
-                worse.append(f"{key} {metric}")
+                print(f"declined: {key} {metric} {old:.3f} -> {value:.3f}")
+
+    print("paired means over the shared population: metric, baseline, current")
+    for metric, pairs in sorted(paired.items()):
+        was_mean = sum(pair[0] for pair in pairs) / len(pairs)
+        now_mean = sum(pair[1] for pair in pairs) / len(pairs)
+        better = sum(
+            1
+            for old, new in pairs
+            if (new < old if metric in LOWER_IS_BETTER else new > old)
+        )
+        declined = sum(
+            1
+            for old, new in pairs
+            if (new > old if metric in LOWER_IS_BETTER else new < old)
+        )
+        regressed = (
+            now_mean > was_mean if metric in LOWER_IS_BETTER else now_mean < was_mean
+        )
+        line = (
+            f"  {metric:11} n={len(pairs):5} {was_mean:.4f} -> {now_mean:.4f} "
+            f"({better} better, {declined} worse)"
+        )
+        print(line)
+        if regressed:
+            print(f"REGRESSION: {metric} paired mean{line[13:]}", file=sys.stderr)
+            worse.append(f"{metric} paired mean")
+
     if worse:
         print(f"{len(worse)} regressions", file=sys.stderr)
         return 1
