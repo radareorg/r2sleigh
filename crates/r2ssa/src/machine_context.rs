@@ -913,6 +913,15 @@ fn write_call_site_interface(
         }
         None => writer.u8(0),
     }
+    // A target that returns a translation of its own argument changes what a
+    // caller can count, so it is part of this context's identity.
+    match interface.format_forwarding() {
+        Some(rule) => {
+            writer.u8(1);
+            writer.u32(rule.msgid_argument_index());
+        }
+        None => writer.u8(0),
+    }
     writer.bool(interface.is_noreturn());
     match interface.result() {
         SourceCallResult::Void => writer.u8(0),

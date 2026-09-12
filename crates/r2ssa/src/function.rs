@@ -1573,6 +1573,18 @@ fn correlate_call_site_interfaces(
                 }
             }
         }
+        // A call to the gettext family hands back a translation of one of its
+        // own arguments, so a caller whose format came from here counts from
+        // the msgid it passed. radare2 has no prototype for the family and
+        // could not express this if it did -- the format is the return value,
+        // not a parameter -- so the name is matched where names are known and
+        // the fact travels on the interface.
+        if let Some(target_name) = call.target_name()
+            && let Some(rule) = r2source::SourceFormatForwardingRule::for_target_name(target_name)
+            && let Ok(bound) = interface.clone().with_format_forwarding(rule)
+        {
+            interface = bound;
+        }
         // radare2 has a prototype for the printf family and almost never for a
         // wrapper defined in this binary, so the name above finds nothing for
         // the wrapper. Its own body proved which parameter it forwards as a

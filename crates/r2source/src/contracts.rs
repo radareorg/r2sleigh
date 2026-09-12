@@ -2274,6 +2274,59 @@ pub enum SourceCallResult {
     Register { storage: CanonicalStorageId },
 }
 
+/// A callee that hands back one of its own arguments as a format string.
+///
+/// `printf(_("%s: %d"), ...)` is `printf(gettext("..."), ...)`, so the format
+/// the callee receives is a translation chosen at run time and no literal
+/// reaches the call. The msgid is in the binary, and gettext's contract is
+/// that a translation carries the same conversion specifiers in the same
+/// order -- `msgfmt -c` enforces it and a mismatch is a bug in the catalogue.
+/// So the msgid settles how many arguments the call passed, which is the only
+/// claim made here; it is not a claim that the program prints the msgid.
+///
+/// radare2 has no prototype for the gettext family at all, and could not
+/// express this one if it did: the format is what the callee returns, not a
+/// parameter it takes, and a type database has no key for that. The family is
+/// therefore named where the source names are known, and travels as a fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceFormatForwardingRule {
+    msgid_argument_index: u32,
+}
+
+impl SourceFormatForwardingRule {
+    /// The gettext family, by the argument each one takes its msgid in.
+    ///
+    /// A closed list of one standardised API, not a guess: every entry returns
+    /// a translation of the named argument, and nothing else in libc does.
+    pub const FAMILY: &'static [(&'static str, u32)] = &[
+        ("gettext", 0),
+        ("dgettext", 1),
+        ("dcgettext", 1),
+        ("ngettext", 0),
+        ("dngettext", 1),
+        ("dcngettext", 1),
+    ];
+
+    /// The rule for a call target, by the name the call renders with.
+    ///
+    /// radare2 spells an import's name with a prefix, so the last path
+    /// component is what is matched.
+    pub fn for_target_name(name: &str) -> Option<Self> {
+        let bare = name.rsplit(['.', ':']).next().unwrap_or(name);
+        let bare = bare.strip_prefix("__").unwrap_or(bare);
+        Self::FAMILY
+            .iter()
+            .find(|(known, _)| *known == bare)
+            .map(|(_, index)| Self {
+                msgid_argument_index: *index,
+            })
+    }
+
+    pub const fn msgid_argument_index(self) -> u32 {
+        self.msgid_argument_index
+    }
+}
+
 /// Source-owned rule that can prove how many arguments one variadic callsite
 /// passes.
 ///
@@ -2314,6 +2367,9 @@ pub struct SourceCallSiteInterface {
     arguments: Box<[SourceCallArgumentSpec]>,
     variadic: bool,
     variadic_argument_count_rule: Option<SourceVariadicArgumentCountRule>,
+    /// Set when this call's target hands back one of its own arguments as a
+    /// format string, so a caller can count from the msgid it passed.
+    format_forwarding: Option<SourceFormatForwardingRule>,
     noreturn: bool,
     result: SourceCallResult,
     /// Exact callee-owned interface recovered from a body in the same capture.
@@ -2410,6 +2466,7 @@ impl SourceCallSiteInterface {
             arguments: arguments.into_boxed_slice(),
             variadic,
             variadic_argument_count_rule: None,
+            format_forwarding: None,
             noreturn,
             result,
             exact_callee_interface: None,
@@ -2526,6 +2583,27 @@ impl SourceCallSiteInterface {
             return Err(SourceCallSiteInterfaceError::InvalidFormatParameterIndex);
         }
         Ok(())
+    }
+
+    /// Record that this call's target returns a translation of one of its own
+    /// arguments. Checked against the arguments the call actually carries, so
+    /// a name match cannot name an argument that is not there.
+    pub fn with_format_forwarding(
+        mut self,
+        rule: SourceFormatForwardingRule,
+    ) -> Result<Self, SourceCallSiteInterfaceError> {
+        if usize::try_from(rule.msgid_argument_index())
+            .ok()
+            .is_none_or(|index| index >= self.arguments.len())
+        {
+            return Err(SourceCallSiteInterfaceError::InvalidFormatParameterIndex);
+        }
+        self.format_forwarding = Some(rule);
+        Ok(self)
+    }
+
+    pub const fn format_forwarding(&self) -> Option<SourceFormatForwardingRule> {
+        self.format_forwarding
     }
 
     pub const fn variadic_argument_count_rule(&self) -> Option<SourceVariadicArgumentCountRule> {
