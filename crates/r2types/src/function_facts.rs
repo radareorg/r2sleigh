@@ -1225,6 +1225,10 @@ pub struct MemberAccessRenderFact {
     pub field_name: String,
     pub field_type: Option<CTypeLike>,
     pub access_width: u32,
+    /// What the member is taken from, when the producer knows it. A parameter
+    /// for a member reached through a pointer; `None` when the member is the
+    /// object's own declared slot and the slot's name is the base.
+    pub base: Option<r2ssa::SemanticId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2591,6 +2595,7 @@ impl FunctionFacts {
                     &mut BTreeSet::new(),
                 ),
                 access_width: memory.width,
+                base: None,
             });
         }
         for fact in member_facts {
@@ -2731,6 +2736,9 @@ impl FunctionFacts {
                     .as_deref()
                     .and_then(|ty| parse_c_type_like(ty, ptr_bits)),
                 access_width: memory.width,
+                base: u32::try_from(cert.slot)
+                    .ok()
+                    .map(r2ssa::SemanticId::Parameter),
             })
             .collect()
     }
@@ -6640,6 +6648,7 @@ mod tests {
             field_name: "len".to_string(),
             field_type: None,
             access_width: 32,
+            base: None,
         };
         let existing_render = FunctionRenderFacts {
             string_literals_by_value: BTreeMap::from([(
@@ -7872,6 +7881,7 @@ mod tests {
                     field_name: "value".to_string(),
                     field_type: None,
                     access_width: 8,
+                    base: None,
                 }],
             )]),
             array_accesses_by_op: BTreeMap::from([(

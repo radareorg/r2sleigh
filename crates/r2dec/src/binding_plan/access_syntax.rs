@@ -47,8 +47,9 @@ pub(super) struct AccessSyntaxInputs<'a> {
     pub ptr_bits: u32,
 }
 
-/// Every RAM access the render facts know, with its spelling. An access the
-/// ladder would refuse outright has no entry.
+/// Every RAM access the render facts know, with its spelling. The spelling is
+/// total: an access no structured shape fits is spelled by its address, so a
+/// renderer can never meet a RAM access the plan did not answer for.
 pub(super) fn derive(
     inputs: &AccessSyntaxInputs<'_>,
 ) -> BTreeMap<StructuredAccessId, AccessSyntax> {
@@ -57,29 +58,27 @@ pub(super) fn derive(
         if fact.space != r2il::SpaceId::Ram {
             continue;
         }
-        if let Some(syntax) = syntax_for(inputs, fact) {
-            out.insert(fact.access, syntax);
-        }
+        out.insert(fact.access, syntax_for(inputs, fact));
     }
     out
 }
 
-fn syntax_for(
-    inputs: &AccessSyntaxInputs<'_>,
-    fact: &MemoryAccessRenderFact,
-) -> Option<AccessSyntax> {
+fn syntax_for(inputs: &AccessSyntaxInputs<'_>, fact: &MemoryAccessRenderFact) -> AccessSyntax {
     let member = member_fact(inputs.render, fact);
     let array = array_fact(inputs.render, fact);
     if let Some(array) = array
         && (array.base.is_some() || array.index.is_some())
+        && let Some(syntax) = param_array(inputs, fact, array, member)
     {
-        // Terminal: an array fact with a shape either spells the access or refuses it.
-        return param_array(inputs, fact, array, member);
+        // An array certificate whose shape is spellable spells the access.
+        // Where it is not, the address stands: claiming no shape is always
+        // true, and the alternative is refusing a function over a spelling.
+        return syntax;
     }
     if member.is_none()
         && let Some(term) = subscript(inputs, fact)
     {
-        return Some(AccessSyntax::Subscript { term });
+        return AccessSyntax::Subscript { term };
     }
     let indexed = inputs.objects.address_is_indexed(fact.address);
     let declared = inputs.render.stack_slot_offset(fact.object).is_some();
@@ -92,10 +91,10 @@ fn syntax_for(
         && declared
         && let Some(binding) = bound
     {
-        return Some(AccessSyntax::SlotMember {
+        return AccessSyntax::SlotMember {
             binding,
             field: member.field_name.clone().into_boxed_str(),
-        });
+        };
     }
     if fact.width > 0
         && !indexed
@@ -121,15 +120,15 @@ fn syntax_for(
                     .is_none_or(|bits| bits == fact.width * 8)
             });
         if whole {
-            return Some(AccessSyntax::SlotName { binding });
+            return AccessSyntax::SlotName { binding };
         }
         if let Some(offset) = fact.object_offset.filter(|offset| *offset >= 0) {
-            return Some(AccessSyntax::SlotBytes { binding, offset });
+            return AccessSyntax::SlotBytes { binding, offset };
         }
     }
-    Some(AccessSyntax::Address {
+    AccessSyntax::Address {
         address: fact.address,
-    })
+    }
 }
 
 fn param_array(
