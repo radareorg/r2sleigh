@@ -108,7 +108,7 @@ Run a radare2 command on a binary. Returns R2Result.
 Seek to a function then run a command:
 
 ```rust
-let result = r2_at_func(vuln_test_binary(), "main", "a:sla.dec");
+let result = r2_at_func(vuln_test_binary(), "main", "pd:s");
 result.assert_ok();
 assert!(result.contains("int"));
 ```
@@ -177,7 +177,7 @@ case N:
 ```rust
 #[test]
 fn test_my_pattern() {
-    let result = r2_at_func(vuln_test_binary(), "test_my_pattern", "a:sla.dec");
+    let result = r2_at_func(vuln_test_binary(), "test_my_pattern", "pd:s");
     result.assert_ok();
     assert!(result.contains("expected_output"));
 }
@@ -188,7 +188,7 @@ What to Test for Each Feature
 
 New opcode:
   - Unit test in crate
-  - r2r test via a:sla.json when output is deterministic
+  - r2r test via a:sla.debug.json when output is deterministic
   - e2e semantic assertion if structure/churn requires richer parsing
 
 New plugin command:
@@ -197,13 +197,13 @@ New plugin command:
 
 New optimization pass:
   - Unit test in r2ssa with before/after SSA
-  - e2e test via a:sla.ssa.func.opt
+  - e2e test via a:sla.debug.ssa.func.opt
 
 Bug fix:
   - Regression test reproducing the original bug
 
 Decompiler change:
-  - r2r exact normalized full snapshot via `a:sla.dec` when output is deterministic
+  - r2r exact normalized full snapshot via `pd:s` only for an exact source-backed fixture
   - e2e only when decompiler behavior needs semantic parsing instead of snapshot diffs
 
 Test Coverage Checklist

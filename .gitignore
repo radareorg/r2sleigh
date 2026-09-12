@@ -14,20 +14,51 @@ Cargo.lock
 # OS
 .DS_Store
 Thumbs.db
+com.apple.kernel
 
 # Generated files
 *.r2il
+*.dSYM/
+!tests/r2r/bins/r2sleigh_vuln_test_x86_64_macho_O2_v1.dSYM/
+!tests/r2r/bins/r2sleigh_vuln_test_x86_64_macho_O2_v1.dSYM/**
+!tests/r2r/bins/check_secret_phase5_o0_v1/vuln_test_x86.dSYM/
+!tests/r2r/bins/check_secret_phase5_o0_v1/vuln_test_x86.dSYM/**
+mutants.out/
+mutants.out.old/
+**/mutants.out/
+**/mutants.out.old/
+r2sleigh-kernel-smoke*.json
+r2sleigh-reversing-benchmark*.json
+r2sleigh-corpora*/
 
 # Plugin build artifacts
+r2plugin/*.o
 r2plugin/*.so
 r2plugin/*.dylib
+r2plugin/r2sleigh/*.so
+r2plugin/r2sleigh/*.dylib
 
 # Debug
 *.log
 
 # Test binaries (compiled from .c files)
+tests/e2e/stress_test
+tests/e2e/stress_test_opt
 tests/e2e/test_func
 tests/e2e/sym_test
+tests/e2e/vuln_test
+tests/e2e/*_x86
 tests/e2e/target/
 r2plugin/arch_sleigh.o
 r2plugin/r_anal_sleigh_arch.o
+r2plugin/snapshot_wire.o
+r2plugin/snapshot_walk.o
+
+# Whole-binary coverage sweep artifacts (binaries, dumps, measured report)
+tests/coverage/artifacts/
+
+# Benchmark run output. Only tests/decbench/baseline.json is a record; the
+# artifacts a run leaves behind are regenerated every time and differ per
+# machine, so tracking them made every worktree's merge collide on a file
+# nobody reads.
+tests/decbench/artifacts/

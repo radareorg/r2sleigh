@@ -150,12 +150,13 @@ Memory Model
 Plugin Commands
 ---------------
 
-`a:sla.sym` -- symbolic execution summary for current function.
+The `a:sym.*` command namespace is gone with the subsystem it named, and so
+are `a:sla.sym` and `a:sla.sym.paths`. The plugin does not answer for that
+prefix; a detached symbolic scope could never establish source authority from
+live plugin state, so the commands are deleted rather than kept as refusals.
 
-`a:sla.sym.paths` -- explore paths and return solutions as JSON.
-
-Example:
-
-```bash
-r2 -qc 'aaa; s main; a:sla.sym.paths' ./target
-```
+Symbolic execution requires a borrowed ABI-139/snapshot-schema-12 function
+snapshot through accessor-schema 5 from radare2's locked snapshot transaction.
+The snapshot is deep-copied synchronously into source-interface-schema 10 and
+then treated as immutable. Missing, stale, or incomplete source authority is
+refused; there is no detached fallback or replacement plugin API.

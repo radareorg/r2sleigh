@@ -1,14 +1,18 @@
 //! Unified instruction export pipeline for r2sleigh.
 
-use std::collections::HashSet;
-use std::fmt;
-
-use r2dec::{CStmt, CodeGenConfig, CodeGenerator, lower_ssa_ops_to_stmts};
 use r2il::{ArchSpec, R2ILBlock, R2ILOp, SpaceId, Varnode, validate_block_full};
-use r2sleigh_lift::{Disassembler, format_op, op_to_esil_named};
+use r2sleigh_lift::{Disassembler, block_to_esil, format_op, op_to_esil};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
+use std::fmt;
 use thiserror::Error;
+
+/// Current JSON schema for exported SSA documents.
+///
+/// This is one exact schema, not a compatibility selector. Consumers must
+/// reject any value other than this constant.
+pub const SSA_JSON_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstructionAction {
@@ -102,7 +106,7 @@ pub fn export_instruction(
         InstructionAction::Lift => export_lift(input, format),
         InstructionAction::Ssa => export_ssa(input, format),
         InstructionAction::Defuse => export_defuse(input, format),
-        InstructionAction::Dec => export_dec(input, format),
+        InstructionAction::Dec => export_dec_action(input, format),
     }
 }
 
@@ -110,7 +114,6 @@ pub fn op_json_named(disasm: &Disassembler, op: &R2ILOp) -> Result<String, Expor
     let mut value =
         serde_json::to_value(op).map_err(|e| ExportError::SerializeError(e.to_string()))?;
     annotate_register_names(&mut value, disasm);
-    annotate_userop_names(&mut value, disasm);
     serde_json::to_string(&value).map_err(|e| ExportError::SerializeError(e.to_string()))
 }
 
@@ -137,7 +140,16 @@ fn supported_formats(action: InstructionAction) -> &'static [ExportFormat] {
         InstructionAction::Lift => &[Json, Text, Esil, R2Cmd],
         InstructionAction::Ssa => &[Json, Text],
         InstructionAction::Defuse => &[Json, Text],
-        InstructionAction::Dec => &[CLike, Json, Text],
+        InstructionAction::Dec => {
+            #[cfg(feature = "dec")]
+            {
+                &[CLike, Json, Text]
+            }
+            #[cfg(not(feature = "dec"))]
+            {
+                &[]
+            }
+        }
     }
 }
 
@@ -164,15 +176,7 @@ fn export_lift(
             }
             Ok(out)
         }
-        ExportFormat::Esil => {
-            let lines = input
-                .block
-                .ops
-                .iter()
-                .map(|op| op_to_esil_named(input.disasm, op))
-                .collect::<Vec<_>>();
-            Ok(lines.join("\n"))
-        }
+        ExportFormat::Esil => Ok(block_to_esil(input.disasm, input.block)),
         ExportFormat::R2Cmd => {
             let mut out = Vec::new();
             for (idx, op) in input.block.ops.iter().enumerate() {
@@ -194,7 +198,7 @@ fn export_lift(
                     );
                 }
                 out.push(format!("# {}", Value::Object(sidecar)));
-                out.push(format!("ae {}", op_to_esil_named(input.disasm, op)));
+                out.push(format!("ae {}", op_to_esil(input.disasm, op)));
             }
             Ok(out.join("\n"))
         }
@@ -236,8 +240,11 @@ fn export_ssa(
     let ops_info: Vec<SSAOpInfo> = ssa_block.ops.iter().map(ssa_op_to_info).collect();
 
     match format {
-        ExportFormat::Json => serde_json::to_string_pretty(&ops_info)
-            .map_err(|e| ExportError::SerializeError(e.to_string())),
+        ExportFormat::Json => serde_json::to_string_pretty(&SSAJsonDocument {
+            schema_version: SSA_JSON_SCHEMA_VERSION,
+            operations: ops_info,
+        })
+        .map_err(|e| ExportError::SerializeError(e.to_string())),
         ExportFormat::Text => {
             let mut lines = Vec::new();
             for (idx, info) in ops_info.iter().enumerate() {
@@ -291,26 +298,52 @@ fn export_defuse(
     }
 }
 
+fn export_dec_action(
+    input: &InstructionExportInput<'_>,
+    format: ExportFormat,
+) -> Result<String, ExportError> {
+    #[cfg(feature = "dec")]
+    {
+        export_dec(input, format)
+    }
+    #[cfg(not(feature = "dec"))]
+    {
+        let _ = input;
+        Err(ExportError::UnsupportedCombination {
+            action: InstructionAction::Dec,
+            format,
+            supported: String::new(),
+        })
+    }
+}
+
+#[cfg(feature = "dec")]
 fn export_dec(
     input: &InstructionExportInput<'_>,
     format: ExportFormat,
 ) -> Result<String, ExportError> {
     let ssa_block = r2ssa::block::to_ssa(input.block, input.disasm);
-    let ptr_size = input.arch.addr_size.saturating_mul(8);
-    let stmts: Vec<CStmt> = lower_ssa_ops_to_stmts(ptr_size, &ssa_block.ops);
+    let residuals = ssa_block
+        .ops
+        .iter()
+        .enumerate()
+        .map(|(op_index, op)| DecResidualJson {
+            kind: "residual",
+            op_index,
+            comment: format!(
+                "r2sleigh-export residual: instruction-level dec requires r2engine FunctionFacts render proof; executable C suppressed: {op:?}"
+            ),
+        })
+        .collect::<Vec<_>>();
 
     match format {
-        ExportFormat::Json => serde_json::to_string_pretty(&stmts)
+        ExportFormat::Json => serde_json::to_string_pretty(&residuals)
             .map_err(|e| ExportError::SerializeError(e.to_string())),
-        ExportFormat::Text | ExportFormat::CLike => {
-            let mut codegen = CodeGenerator::new(CodeGenConfig::default());
-            let mut output = String::new();
-            for stmt in &stmts {
-                output.push_str(&codegen.generate_stmt(stmt));
-                output.push('\n');
-            }
-            Ok(output.trim_end_matches('\n').to_string())
-        }
+        ExportFormat::Text | ExportFormat::CLike => Ok(residuals
+            .iter()
+            .map(|residual| format!("/* {} */", residual.comment))
+            .collect::<Vec<_>>()
+            .join("\n")),
         _ => Err(ExportError::UnsupportedCombination {
             action: InstructionAction::Dec,
             format,
@@ -366,48 +399,50 @@ fn annotate_register_names(value: &mut Value, disasm: &Disassembler) {
     }
 }
 
-fn annotate_userop_names(value: &mut Value, disasm: &Disassembler) {
-    match value {
-        Value::Object(map) => {
-            if let Some(callother) = map.get_mut("CallOther")
-                && let Value::Object(call_map) = callother
-            {
-                let userop = call_map.get("userop").and_then(Value::as_u64);
-                if let Some(userop) = userop
-                    && let Some(name) = disasm.userop_name(userop as u32)
-                {
-                    call_map.insert("userop_name".to_string(), Value::String(name.to_string()));
-                }
-            }
-
-            for value in map.values_mut() {
-                annotate_userop_names(value, disasm);
-            }
-        }
-        Value::Array(items) => {
-            for item in items.iter_mut() {
-                annotate_userop_names(item, disasm);
-            }
-        }
-        _ => {}
-    }
-}
-
 fn op_name_from_value(value: &Value) -> Option<String> {
     let map = value.as_object()?;
     map.keys().next().cloned()
 }
 
 #[derive(Serialize)]
-struct SSAOpInfo {
-    op: String,
+pub struct SSAOpInfo {
+    pub op: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    dst: Option<String>,
+    pub dst: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    sources: Vec<String>,
+    pub sources: Vec<String>,
+    pub operation: r2ssa::SSAOp,
 }
 
-fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
+/// Exact exported identity for one predecessor input of an SSA phi.
+///
+/// The value stays typed all the way through serialization.  A presentation
+/// string such as `tmp:100_2` cannot distinguish values that share a display
+/// name and version while differing in width or rename discriminator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SSAPhiSourceInfo {
+    pub predecessor: u64,
+    pub value: r2ssa::SSAVar,
+}
+
+/// Exact exported SSA phi identity.
+///
+/// `r2ssa::PhiNode` owns the facts.  This type only fixes their public JSON
+/// shape without rebuilding identity from display names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SSAPhiInfo {
+    pub dst: r2ssa::SSAVar,
+    pub sources: Vec<SSAPhiSourceInfo>,
+    pub canonical_storage: Option<r2ssa::CanonicalStorageId>,
+}
+
+#[derive(Serialize)]
+struct SSAJsonDocument {
+    schema_version: u32,
+    operations: Vec<SSAOpInfo>,
+}
+
+pub fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
     let op_name = serde_json::to_value(op)
         .ok()
         .and_then(|v| op_name_from_value(&v))
@@ -416,6 +451,22 @@ fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
         op: op_name,
         dst: op.dst().map(|v| v.display_name()),
         sources: op.sources().iter().map(|v| v.display_name()).collect(),
+        operation: op.clone(),
+    }
+}
+
+pub fn ssa_phi_to_info(phi: &r2ssa::PhiNode) -> SSAPhiInfo {
+    SSAPhiInfo {
+        dst: phi.dst.clone(),
+        sources: phi
+            .sources
+            .iter()
+            .map(|(predecessor, value)| SSAPhiSourceInfo {
+                predecessor: *predecessor,
+                value: value.clone(),
+            })
+            .collect(),
+        canonical_storage: phi.canonical_storage,
     }
 }
 
@@ -426,14 +477,66 @@ struct DefUseInfoJson {
     live: Vec<String>,
 }
 
+#[cfg(test)]
+mod phi_export_contract_tests {
+    use super::*;
+    use r2ssa::{CanonicalStorageId, CanonicalStorageSpace, PhiNode, SSAVar};
+
+    fn phi(size: u32) -> PhiNode {
+        let storage = CanonicalStorageId {
+            space: CanonicalStorageSpace::Unique,
+            offset: 0x2cb00,
+            size,
+        };
+        PhiNode {
+            dst: SSAVar::new("tmp:2cb00", 2, size),
+            sources: vec![
+                (0x1000, SSAVar::new("tmp:2cb00", 0, size)),
+                (0x2000, SSAVar::new("tmp:2cb00", 1, size)),
+            ],
+            canonical_storage: Some(storage),
+        }
+    }
+
+    #[test]
+    fn phi_export_keeps_same_name_and_version_widths_distinct() {
+        let narrow = phi(4);
+        let wide = phi(8);
+        assert_eq!(narrow.dst.display_name(), wide.dst.display_name());
+
+        let value = serde_json::to_value([ssa_phi_to_info(&narrow), ssa_phi_to_info(&wide)])
+            .expect("typed phi export JSON");
+
+        assert_eq!(value[0]["dst"]["name"], "tmp:2cb00");
+        assert_eq!(value[0]["dst"]["version"], 2);
+        assert_eq!(value[0]["dst"]["size"], 4);
+        assert_eq!(value[1]["dst"]["size"], 8);
+        assert_eq!(value[0]["sources"][0]["predecessor"], 0x1000);
+        assert_eq!(value[0]["sources"][0]["value"]["size"], 4);
+        assert_eq!(value[1]["sources"][0]["value"]["size"], 8);
+        assert_eq!(value[0]["canonical_storage"]["size"], 4);
+        assert_eq!(value[1]["canonical_storage"]["size"], 8);
+        assert_ne!(value[0], value[1]);
+    }
+}
+
+#[cfg(feature = "dec")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DecResidualJson {
+    kind: &'static str,
+    op_index: usize,
+    comment: String,
+}
+
 #[cfg(all(test, feature = "x86"))]
 mod tests {
     use super::*;
     use r2il::{MemoryClass, OpMetadata, ScalarKind, VarnodeMetadata};
-    use r2sleigh_lift::{build_arch_spec, userop_map_for_arch};
+    use r2sleigh_lift::build_arch_spec;
     use std::collections::BTreeMap;
 
     const X86_BYTES_MINIMAL: &str = "4889c000000000000000000000000000";
+    #[cfg(feature = "dec")]
     const X86_BYTES_DEC: &str = "48ffc000000000000000000000000000";
 
     fn x86_disasm_and_spec() -> (Disassembler, ArchSpec) {
@@ -443,13 +546,12 @@ mod tests {
             "x86-64",
         )
         .expect("arch spec");
-        let mut disasm = Disassembler::from_sla(
+        let disasm = Disassembler::from_sla(
             sleigh_config::processor_x86::SLA_X86_64,
             sleigh_config::processor_x86::PSPEC_X86_64,
             "x86-64",
         )
         .expect("disasm");
-        disasm.set_userop_map(userop_map_for_arch("x86-64"));
         (disasm, spec)
     }
 
@@ -506,6 +608,7 @@ mod tests {
         lines.join("\n")
     }
 
+    #[cfg(feature = "dec")]
     fn normalize_c_like_output(output: &str) -> String {
         let text = output.replace("\r\n", "\n");
         let mut lines = Vec::new();
@@ -532,11 +635,14 @@ mod tests {
         let text = output.replace("\r\n", "\n");
         let lines: Vec<&str> = text.lines().collect();
         assert!(!lines.is_empty(), "r2cmd output must not be empty");
-        assert_eq!(lines.len() % 2, 0, "r2cmd output must be line-paired");
+        assert!(
+            lines.len().is_multiple_of(2),
+            "r2cmd output must be line-paired"
+        );
         let mut normalized = Vec::new();
         for (idx, line) in lines.iter().enumerate() {
             let line = line.trim_end();
-            if idx % 2 == 0 {
+            if idx.is_multiple_of(2) {
                 assert!(line.starts_with("# "), "expected sidecar at index {}", idx);
                 let sidecar: Value =
                     serde_json::from_str(line.trim_start_matches("# ")).expect("sidecar json");
@@ -638,8 +744,40 @@ mod tests {
         let out = export_instruction(&input, InstructionAction::Ssa, ExportFormat::Json)
             .expect("ssa json");
         let parsed: Value = serde_json::from_str(&out).expect("json");
-        let arr = parsed.as_array().expect("array");
-        assert!(!arr.is_empty(), "expected non-empty ssa ops");
+        assert_eq!(parsed["schema_version"], SSA_JSON_SCHEMA_VERSION);
+        let operations = parsed["operations"].as_array().expect("operations");
+        assert!(!operations.is_empty(), "expected non-empty ssa operations");
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation.get("schema_version").is_none()),
+            "operation entries must not duplicate the document schema"
+        );
+    }
+
+    #[test]
+    fn empty_ssa_json_still_carries_document_schema() {
+        let (disasm, spec) = x86_disasm_and_spec();
+        let block = R2ILBlock::new(0x1000, 1);
+        let input = InstructionExportInput {
+            disasm: &disasm,
+            arch: &spec,
+            block: &block,
+            addr: block.addr,
+            mnemonic: "nop",
+            native_size: block.size as usize,
+        };
+
+        let out = export_instruction(&input, InstructionAction::Ssa, ExportFormat::Json)
+            .expect("empty SSA document");
+        let parsed: Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "schema_version": SSA_JSON_SCHEMA_VERSION,
+                "operations": [],
+            })
+        );
     }
 
     #[test]
@@ -654,11 +792,22 @@ mod tests {
     }
 
     #[test]
-    fn dec_c_like_nonempty_for_simple_block() {
+    #[cfg(feature = "dec")]
+    fn dec_c_like_residualizes_without_function_facts() {
         let input = lift_input(X86_BYTES_DEC, 0x1000);
         let out = export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike)
-            .expect("dec c-like");
-        assert!(!out.trim().is_empty(), "expected non-empty c-like output");
+            .expect("dec residual");
+        assert!(
+            out.contains("r2sleigh-export residual")
+                && out.contains("FunctionFacts render proof")
+                && out.contains("executable C suppressed"),
+            "expected explicit residual, got: {out}"
+        );
+        assert!(
+            out.lines()
+                .all(|line| line.starts_with("/* ") && line.ends_with(" */")),
+            "instruction-level dec must stay comment-only: {out}"
+        );
     }
 
     #[test]
@@ -670,6 +819,90 @@ mod tests {
             matches!(err, ExportError::UnsupportedCombination { .. }),
             "unexpected error kind: {}",
             err
+        );
+    }
+
+    #[test]
+    fn ensure_supported_enforces_action_format_matrix() {
+        ensure_supported(InstructionAction::Lift, ExportFormat::Json)
+            .expect("lift json should be supported");
+        ensure_supported(InstructionAction::Defuse, ExportFormat::Text)
+            .expect("defuse text should be supported");
+
+        let err = ensure_supported(InstructionAction::Lift, ExportFormat::CLike)
+            .expect_err("lift must not accept c_like format");
+        assert!(
+            matches!(
+                err,
+                ExportError::UnsupportedCombination {
+                    action: InstructionAction::Lift,
+                    format: ExportFormat::CLike,
+                    ..
+                }
+            ),
+            "unexpected support error kind: {}",
+            err
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "dec"))]
+    fn dec_action_is_typed_but_unsupported_without_dec_feature() {
+        let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
+        let err = export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike)
+            .expect_err("dec export must be feature-gated");
+        assert!(
+            matches!(
+                err,
+                ExportError::UnsupportedCombination {
+                    action: InstructionAction::Dec,
+                    format: ExportFormat::CLike,
+                    ..
+                }
+            ),
+            "unexpected error kind: {}",
+            err
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "dec"))]
+    fn dec_feature_gate_rejects_at_support_and_execution_layers() {
+        let input = lift_input(X86_BYTES_MINIMAL, 0x1000);
+
+        assert!(
+            supported_formats(InstructionAction::Dec).is_empty(),
+            "dec must advertise no supported formats without the dec feature"
+        );
+
+        let support_err = ensure_supported(InstructionAction::Dec, ExportFormat::CLike)
+            .expect_err("dec support must be disabled without the dec feature");
+        assert!(
+            matches!(
+                support_err,
+                ExportError::UnsupportedCombination {
+                    action: InstructionAction::Dec,
+                    format: ExportFormat::CLike,
+                    ..
+                }
+            ),
+            "unexpected support error kind: {}",
+            support_err
+        );
+
+        let execution_err = export_dec_action(&input, ExportFormat::CLike)
+            .expect_err("dec execution must be disabled without the dec feature");
+        assert!(
+            matches!(
+                execution_err,
+                ExportError::UnsupportedCombination {
+                    action: InstructionAction::Dec,
+                    format: ExportFormat::CLike,
+                    ..
+                }
+            ),
+            "unexpected execution error kind: {}",
+            execution_err
         );
     }
 
@@ -759,22 +992,25 @@ mod tests {
             );
         }
 
-        for format in [ExportFormat::CLike, ExportFormat::Json, ExportFormat::Text] {
-            let normalized = assert_export_deterministic(
-                X86_BYTES_DEC,
-                InstructionAction::Dec,
-                format,
-                match format {
-                    ExportFormat::CLike => normalize_c_like_output,
-                    ExportFormat::Json => normalize_json_output,
-                    ExportFormat::Text => normalize_text_output,
-                    _ => unreachable!("dec supports c_like/json/text"),
-                },
-            );
-            assert!(
-                !normalized.trim().is_empty(),
-                "dec output should be non-empty"
-            );
+        #[cfg(feature = "dec")]
+        {
+            for format in [ExportFormat::CLike, ExportFormat::Json, ExportFormat::Text] {
+                let normalized = assert_export_deterministic(
+                    X86_BYTES_DEC,
+                    InstructionAction::Dec,
+                    format,
+                    match format {
+                        ExportFormat::CLike => normalize_c_like_output,
+                        ExportFormat::Json => normalize_json_output,
+                        ExportFormat::Text => normalize_text_output,
+                        _ => unreachable!("dec supports c_like/json/text"),
+                    },
+                );
+                assert!(
+                    !normalized.trim().is_empty(),
+                    "dec output should be non-empty"
+                );
+            }
         }
     }
 
@@ -807,7 +1043,7 @@ mod tests {
         );
         assert_eq!(
             lift_r2cmd,
-            "# {\"op\":\"Copy\",\"op_index\":0,\"op_json\":{\"Copy\":{\"dst\":{\"meta\":{\"storage_class\":\"register\"},\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"},\"src\":{\"meta\":{\"storage_class\":\"register\"},\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"}}}}\nae rax,rax,="
+            "# {\"op\":\"Copy\",\"op_index\":0,\"op_json\":{\"Copy\":{\"dst\":{\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"},\"src\":{\"name\":\"RAX\",\"offset\":0,\"size\":8,\"space\":\"Register\"}}}}\nae rax,rax,="
         );
 
         let ssa_text = assert_export_deterministic(
@@ -816,7 +1052,7 @@ mod tests {
             ExportFormat::Text,
             normalize_text_output,
         );
-        assert_eq!(ssa_text, "0: Copy dst=RAX_1 src=[RAX_1]");
+        assert_eq!(ssa_text, "0: Copy dst=RAX_1 src=[RAX_0]");
 
         let defuse_json = assert_export_deterministic(
             X86_BYTES_MINIMAL,
@@ -826,15 +1062,76 @@ mod tests {
         );
         assert_eq!(
             defuse_json,
-            "{\"inputs\":[],\"live\":[\"RAX_1\"],\"outputs\":[]}"
+            "{\"inputs\":[\"RAX_0\"],\"live\":[],\"outputs\":[\"RAX_1\"]}"
         );
 
-        let dec_json = assert_export_deterministic(
-            X86_BYTES_MINIMAL,
-            InstructionAction::Dec,
-            ExportFormat::Json,
-            normalize_json_output,
-        );
-        assert_eq!(dec_json, "[]");
+        #[cfg(feature = "dec")]
+        {
+            let dec_json = assert_export_deterministic(
+                X86_BYTES_MINIMAL,
+                InstructionAction::Dec,
+                ExportFormat::Json,
+                normalize_json_output,
+            );
+            assert!(
+                dec_json.contains("\"kind\":\"residual\"")
+                    && dec_json.contains("FunctionFacts render proof")
+                    && dec_json.contains("executable C suppressed"),
+                "dec json must be explicit residual-only output: {dec_json}"
+            );
+        }
+    }
+
+    #[test]
+    fn callother_exports_exact_numeric_id_and_operands() {
+        let (disasm, arch) = x86_disasm_and_spec();
+        let mut block = R2ILBlock::new(0x1000, 1);
+        block.push(R2ILOp::CallOther {
+            output: Some(Varnode::register(0, 8)),
+            userop: 73,
+            inputs: vec![Varnode::constant(1, 8), Varnode::constant(2, 8)],
+        });
+
+        let input = InstructionExportInput {
+            disasm: &disasm,
+            arch: &arch,
+            block: &block,
+            addr: 0x1000,
+            mnemonic: "callother",
+            native_size: 1,
+        };
+        let json_output = export_instruction(&input, InstructionAction::Lift, ExportFormat::Json)
+            .expect("CallOther JSON");
+        let json: Value = serde_json::from_str(&json_output).expect("JSON value");
+        let callother = &json["ops"][0]["CallOther"];
+        assert_eq!(callother["userop"], 73);
+        assert_eq!(callother["inputs"].as_array().map(Vec::len), Some(2));
+        assert!(callother.get("userop_name").is_none());
+
+        let esil = export_instruction(&input, InstructionAction::Lift, ExportFormat::Esil)
+            .expect("CallOther ESIL");
+        assert_eq!(esil, "0x1,0x2,CALLOTHER(73),rax,=");
+    }
+
+    #[test]
+    fn ssa_json_preserves_exact_memory_space() {
+        let ram = ssa_op_to_info(&r2ssa::SSAOp::Load {
+            dst: r2ssa::SSAVar::new("dst", 1, 4),
+            space: SpaceId::Ram,
+            addr: r2ssa::SSAVar::new("addr", 1, 8),
+        });
+        let custom = ssa_op_to_info(&r2ssa::SSAOp::Load {
+            dst: r2ssa::SSAVar::new("dst", 1, 4),
+            space: SpaceId::Custom(7),
+            addr: r2ssa::SSAVar::new("addr", 1, 8),
+        });
+        let ram = serde_json::to_value(ram).expect("RAM SSA info");
+        let custom = serde_json::to_value(custom).expect("Custom SSA info");
+
+        assert!(ram.get("schema_version").is_none());
+        assert!(custom.get("schema_version").is_none());
+        assert_eq!(ram["operation"]["Load"]["space"], "Ram");
+        assert_eq!(custom["operation"]["Load"]["space"]["Custom"], 7);
+        assert_ne!(ram["operation"], custom["operation"]);
     }
 }

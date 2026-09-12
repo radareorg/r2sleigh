@@ -1,0 +1,1598 @@
+//! Typed boundary between canonical SSA facts and C lowering.
+//!
+//! Use and write geometry remain owned by the validated upstream
+//! [`MachineProjection`]; this module delegates to that table instead of
+//! copying a second answer into renderer-owned storage.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::ast::CType;
+use r2ssa::span::SpanId;
+use r2ssa::{
+    InstId, MachineExprKind, MachineProjection, MachineUseDisposition, MachineWriteDisposition,
+    MachineWriteProjection, SemanticId, SsaArtifactAuthority, UseSite, ValueId,
+};
+use r2types::SourceOwnedFunctionFacts;
+
+/// Dense identity of one C object in a [`BindingPlan`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct BindingId(u32);
+
+impl BindingId {
+    /// Resolve an index in the sealed plan's dense binding domain.
+    ///
+    /// Callers must still validate the result against `BindingPlan::binding` or
+    /// `BindingPlan::binding_count`; this conversion only prevents truncation.
+    pub(crate) fn from_dense_index(index: usize) -> Option<Self> {
+        u32::try_from(index).ok().map(Self)
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Opaque token minted only by this module's sealing pass after it has checked
+/// the exact bound member set against the sorted upstream certificate sources.
+/// It never repeats a machine location or stores a parallel member list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BindingCertificate {
+    sources: Box<[BindingCertificateSource]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum BindingCertificateSource {
+    Singleton,
+    StorageSpan(SpanId),
+    CertifiedEntity(SemanticId),
+}
+
+/// Declaration role proved by the same sealed facts that own the binding.
+///
+/// This is deliberately typed and name-free. In particular, a parameter is
+/// externally declared because an exact source ABI slot owns it, never because
+/// its presentation spelling resembles an argument register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingRole {
+    Local,
+    Parameter {
+        slot: u32,
+    },
+    StackObject {
+        object: r2ssa::ObjectId,
+    },
+    /// A caller-supplied value that no convention argument slot claims.
+    ///
+    /// SSA renaming gives version 0 to a read with no prior definition in this
+    /// function, so such a value is supplied from outside by construction. The
+    /// scratch registers a compiler reads before writing land here -- `xor ecx,
+    /// ecx` reads `ecx` even though its result does not depend on it -- and so
+    /// does any incoming register outside the convention's argument slots.
+    ///
+    /// The object therefore exists from function entry holding an indeterminate
+    /// value, exactly as the machine does. Treating it as a local and demanding
+    /// an assignment before its first read asks for a definition that cannot
+    /// exist, which refused the whole function for saying what the program
+    /// actually does.
+    EntryValue,
+    /// A convention-clobbered register a call left changed, that no result
+    /// certificate claims and no callee body proves preserved.
+    ///
+    /// The program reads whatever the callee happened to leave there. That is
+    /// indeterminate for the same reason an entry value is, and it is spelled
+    /// apart from one because it becomes indeterminate at a call rather than at
+    /// entry, which is what a reader needs to know to judge the read.
+    CallClobbered,
+}
+
+/// One rendered C object. The name hint is presentation only, never identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Binding {
+    declaration_type: CType,
+    certificate: BindingCertificate,
+    presentation_name_hint: Option<String>,
+    /// Whether some member of this binding is supplied by the caller.
+    ///
+    /// Derived from the graph -- a value with no defining instruction -- and
+    /// re-derived independently by the sealing oracle, never from a name or a
+    /// register spelling.
+    caller_supplied: bool,
+    /// Whether some member is a call clobber no result certificate claims.
+    call_clobbered: bool,
+}
+
+impl Binding {
+    pub(crate) const fn declaration_type(&self) -> &CType {
+        &self.declaration_type
+    }
+
+    pub(crate) fn presentation_name_hint(&self) -> Option<&str> {
+        self.presentation_name_hint.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InlineProof {
+    authority: SsaArtifactAuthority,
+    term: r2rewrite::TermId,
+}
+
+/// Proof that an exact upstream fact authorizes a value to have no rendered C
+/// occurrence. The seal re-derives the reason-specific fact from the same SSA
+/// authority; this token is not itself a second semantic answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ValueElisionProof {
+    authority: SsaArtifactAuthority,
+    value: ValueId,
+}
+
+/// Typed reason that a value cannot be represented honestly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ValueRefusal {
+    MissingBindingCertificate {
+        value: ValueId,
+    },
+    MissingLiteralProjection {
+        value: ValueId,
+    },
+    /// A value read only by a Sleigh user-operation this renderer does not
+    /// model.
+    ///
+    /// Separate from `MissingLiteralProjection` because it is not the same
+    /// finding. A missing literal projection says the machine arena lost a
+    /// constant it should hold; this says the constant is an operand of a
+    /// `callother` -- an `brk` immediate, an arm64e pointer-authentication
+    /// operand -- that nothing downstream can render. Refusing is right in both
+    /// cases, and reporting them as one made six functions on `/bin/ls` look
+    /// like a projection defect when what they need is `callother` support.
+    UnmodelledUserOperation {
+        value: ValueId,
+        userop: u32,
+    },
+    IncoherentUseProjection {
+        site: UseSite,
+    },
+    IncoherentWriteProjection {
+        value: ValueId,
+    },
+    UnsupportedDeclarationWidth {
+        value: ValueId,
+        width_bits: u32,
+    },
+}
+
+const fn declaration_width_is_supported(width_bits: u32) -> bool {
+    matches!(width_bits, 8 | 16 | 32 | 64 | 128 | 256 | 512)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ValueDisposition {
+    Bound {
+        binding: BindingId,
+    },
+    Inline {
+        term: r2rewrite::TermId,
+        proof: InlineProof,
+    },
+    Elided {
+        reason: r2ssa::ledger::ElisionReason,
+        proof: ValueElisionProof,
+    },
+    Refused {
+        reason: ValueRefusal,
+    },
+}
+
+/// Exact source fact that authorises a rendered value read without a matching
+/// graph operand at the rendered site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CertifiedValueReadSource {
+    Boundary(InstId),
+    Address(r2ssa::StructuredAccessId),
+    /// The lane a decomposed wide store assigns to one member.
+    Lane(r2ssa::StructuredAccessId),
+}
+
+impl CertifiedValueReadSource {
+    pub(crate) const fn inst(self) -> InstId {
+        match self {
+            Self::Boundary(inst) => inst,
+            Self::Address(access) | Self::Lane(access) => access.inst,
+        }
+    }
+}
+
+/// Values read at one exact certified boundary despite having no graph use.
+///
+/// `SSAOp::Return` carries only its control target and `SSAOp::Call` only its
+/// callee. A switch dispatch likewise carries the computed branch target rather
+/// than the selector rendered in its heading, and a derived-width call result
+/// reads the identity carrier named by its result certificate. These
+/// certificates are therefore the source's complete record of boundary reads
+/// that cannot appear in `SsaGraph::use_sites`.
+///
+/// Keeping the four kinds in one predicate matters to dead-value planning: a
+/// graph-only zero count is not proof that a value is unread. The per-site
+/// query is `O(log n + k)`, where `k` is the number of values carried at the
+/// boundary, and a whole-function inventory remains a linear graph pass.
+pub(crate) fn certified_boundary_read_values(
+    source: &r2ssa::SsaArtifact,
+    at: InstId,
+) -> BTreeSet<ValueId> {
+    let graph = source.graph();
+    let Some(site) = graph.op_site_for_inst(at) else {
+        return BTreeSet::new();
+    };
+    let Some(inst) = graph.inst(at) else {
+        return BTreeSet::new();
+    };
+    let payload = &inst.payload;
+    let certificates = source.certificates();
+    let mut values = BTreeSet::new();
+
+    if let Some(certificate) = certificates
+        .returns_by_inst
+        .get(&at)
+        .and_then(|index| certificates.returns.get(*index))
+        .filter(|certificate| {
+            certificate.at == at
+                && (certificate.block_addr, certificate.op_index) == site
+                && matches!(payload, r2ssa::InstPayload::Op(r2ssa::SSAOp::Return { .. }))
+        })
+    {
+        values.insert(certificate.value);
+    }
+
+    // A derived-width result is defined by this instruction from the identity
+    // result of the same callsite. Its certificate, rather than an SSA
+    // operand, is the proof that the carrier is read here.
+    if let Some(slice) = inst
+        .output
+        .and_then(|defined| source.call_result_certificate_for_value(defined))
+        .filter(|slice| !slice.relation.is_identity())
+        && let Some(carriers) = certificates.call_results_by_callsite.get(&slice.call_site)
+    {
+        values.extend(carriers.iter().copied().filter(|value| {
+            certificates
+                .call_results
+                .get(value)
+                .is_some_and(|carrier| carrier.relation.is_identity())
+        }));
+    }
+
+    // A certified switch renders the selector at the indirect dispatch even
+    // though the dispatch operand is the computed target address.
+    if matches!(
+        payload,
+        r2ssa::InstPayload::Op(r2ssa::SSAOp::BranchInd { .. })
+    ) && let Some(selector) = graph
+        .block(inst.block)
+        .and_then(|block| certificates.switches.get(&block.addr))
+        .and_then(|certificate| certificate.selector)
+    {
+        values.insert(selector);
+    }
+
+    if let Some(certificate) = certified_call_site(source, at)
+        .filter(|certificate| (certificate.block_addr, certificate.op_index) == site)
+    {
+        values.extend(
+            certificate
+                .argument_certificates
+                .iter()
+                .map(|argument| argument.value),
+        );
+    }
+
+    values
+}
+
+/// Whether one exact source boundary certifies a graphless read of `value`.
+pub(crate) fn certified_boundary_read(
+    source: &r2ssa::SsaArtifact,
+    value: ValueId,
+    at: InstId,
+) -> bool {
+    certified_boundary_read_values(source, at).contains(&value)
+}
+
+/// The exact frame object whose base address one certified call argument passes.
+///
+/// Call arguments are boundary reads rather than graph uses, while object
+/// identity belongs to the source-owned object model. Joining those two facts
+/// here keeps the renderer and final placement audit on one predicate. An
+/// indexed address names storage inside the object, not the object's base, and
+/// therefore cannot license the `&object`/array-decay spelling.
+pub(crate) fn certified_frame_object_call_argument(
+    source: &r2ssa::SsaArtifact,
+    at: InstId,
+    argument_index: usize,
+    value: ValueId,
+) -> Option<r2ssa::ObjectId> {
+    let Some(certificate) = certified_call_site(source, at) else {
+        // Without a call certificate no argument of this site can name a frame
+        // object, and an out-parameter's escape becomes invisible.
+        r2il::refusal_evidence!(
+            "call-argument-frame-object",
+            "call {at:?} argument {argument_index} value {value:?}: the site has no call certificate"
+        );
+        return None;
+    };
+    let listed = certificate.argument_values.get(argument_index).copied() == Some(value);
+    let certified = certificate
+        .argument_certificates
+        .iter()
+        .any(|argument| argument.index == argument_index && argument.value == value);
+    let indexed = source.objects().address_is_indexed(value);
+    let object = source.objects().object_for_value(value, r2il::SpaceId::Ram);
+    let kind = object.and_then(|object| {
+        source
+            .objects()
+            .object(object)
+            .map(|object| object.kind.clone())
+    });
+    let frame = matches!(
+        kind,
+        Some(r2ssa::ObjectKind::StackSlot { .. } | r2ssa::ObjectKind::FrameObject { .. })
+    );
+    if !(listed && certified && !indexed && frame) {
+        r2il::refusal_evidence!(
+            "call-argument-frame-object",
+            "call {at:?} argument {argument_index} value {value:?}: listed={listed} certified={certified} indexed={indexed} object={object:?} kind={kind:?} stack_root={:?} def={:?}",
+            source.graph().value(value).and_then(|value| source
+                .function()
+                .decompile_prep_facts()
+                .and_then(|facts| facts.stack_address_roots.get(&value.var))),
+            source
+                .graph()
+                .def_inst(value)
+                .and_then(|inst| source.graph().inst(inst))
+                .map(|inst| format!("{:?}", inst.payload)
+                    .chars()
+                    .take(220)
+                    .collect::<String>())
+        );
+        return None;
+    }
+    object
+}
+
+/// Whether affine address provenance certifies that one structured memory
+/// occurrence reads `value` as its parameter base or scalar index.
+///
+/// The typed array renderer replaces the machine's spill/reload and address
+/// arithmetic with `parameter[index]`. Those two names are real reads, but
+/// neither is necessarily an operand of the final load/store. Re-deriving the
+/// identity from the exact prepared access prevents the renderer's spelling
+/// from becoming a second authority.
+pub(crate) fn certified_address_read(
+    source: &r2ssa::SsaArtifact,
+    value: ValueId,
+    access: r2ssa::StructuredAccessId,
+) -> bool {
+    let Some(memory) = source.certificates().memory_accesses.get(&access) else {
+        return false;
+    };
+    if memory.access != access
+        || !source
+            .structured()
+            .memory_accesses
+            .get(&access)
+            .is_some_and(|fact| fact.provenance_complete)
+    {
+        return false;
+    }
+    let Some(address) = source.addresses().parameter_expression(memory.address) else {
+        return false;
+    };
+    let parameter_value = u32::try_from(address.parameter)
+        .ok()
+        .and_then(|slot| source.facts().boundaries.parameters.get(&slot))
+        .filter(|parameter| {
+            address.parameter_storage == Some(parameter.graph_storage)
+                && parameter.index as usize == address.parameter
+        })
+        .map(|parameter| parameter.value);
+    parameter_value == Some(value) || address.terms.iter().any(|term| term.value == value)
+}
+
+pub(crate) fn certified_value_read(
+    source: &r2ssa::SsaArtifact,
+    value: ValueId,
+    read: CertifiedValueReadSource,
+) -> bool {
+    match read {
+        CertifiedValueReadSource::Boundary(at) => certified_boundary_read(source, value, at),
+        CertifiedValueReadSource::Address(access) => certified_address_read(source, value, access),
+        CertifiedValueReadSource::Lane(access) => certified_lane_read(source, value, access),
+    }
+}
+
+/// Whether `value` is the lane a decomposed wide store assigns at `access`.
+pub(crate) fn certified_lane_read(
+    source: &r2ssa::SsaArtifact,
+    value: ValueId,
+    access: r2ssa::StructuredAccessId,
+) -> bool {
+    source
+        .structured()
+        .memory_accesses
+        .get(&access)
+        .is_some_and(|fact| fact.id == access && fact.is_write && fact.value == Some(value))
+        && source
+            .structured()
+            .member_run_stores
+            .get(&access.inst)
+            .is_some_and(|run| {
+                run.members.iter().any(|member| {
+                    member.access == access && member.source == r2ssa::MemberRunSource::Lane(value)
+                })
+            })
+}
+
+/// Exact graph uses that consume a source-certified machine return target.
+///
+/// This is a per-use answer. A return-address value may also have an ordinary
+/// program use, which must remain renderable even though the `Return` operand
+/// itself is machine control and has no C occurrence.
+/// The exact `Return` uses of a certified return address.
+fn certified_return_transfer_sites(source: &r2ssa::SsaArtifact) -> BTreeSet<UseSite> {
+    let graph = source.graph();
+    source
+        .facts()
+        .boundaries
+        .returns
+        .iter()
+        .filter_map(|(at, boundary)| {
+            let fact = boundary.return_address?;
+            let site = UseSite {
+                inst: *at,
+                input_idx: 0,
+            };
+            (boundary.at == *at
+                && graph.inst(*at).is_some_and(|inst| {
+                    matches!(
+                        inst.payload,
+                        r2ssa::InstPayload::Op(r2ssa::SSAOp::Return { .. })
+                    ) && inst.inputs.as_slice() == [fact.value]
+                })
+                && graph.use_sites(fact.value).contains(&site))
+            .then_some(site)
+        })
+        .collect()
+}
+
+/// Return-target values whose complete use domain is machine return control.
+///
+/// Only these values may be globally elided from the binding domain. The
+/// per-use accounting above remains independent so a mixed-use value stays
+/// bound while its exact `Return` use is still justified as non-rendered.
+/// Every use that only ever carries a return address to its return.
+///
+/// The transfer itself, and the copies a return address reaches it through.
+/// AArch64's `ret` lifts to a copy of the link register into the program
+/// counter and a return on that, so the copy's read of the link register is
+/// as much return control as the return's own read, and neither is rendered:
+/// the structured form says `return`.
+pub(super) fn certified_return_control_sites(source: &r2ssa::SsaArtifact) -> BTreeSet<UseSite> {
+    let graph = source.graph();
+    let mut sites = certified_return_transfer_sites(source);
+    for value in certified_return_control_values(source) {
+        sites.extend(graph.use_sites(value).iter().copied());
+    }
+    sites
+}
+
+/// The instructions a return-control certificate answers for.
+///
+/// Two kinds. The copy that moves a link register into the program counter
+/// defines a value the structured form never emits, so its write is accounted
+/// here rather than being left for a rendering that will not happen. And the
+/// store that saved the return address in the first place, where the
+/// certificate absorbed it: that write has no reader once the reload is
+/// elided, and leaving it out of this set is what rendered it as an assignment
+/// to a variable no one reads.
+pub(super) fn certified_return_control_insts(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
+    let graph = source.graph();
+    let mut insts = certified_return_control_values(source)
+        .into_iter()
+        .filter_map(|value| graph.def_inst(value))
+        .collect::<BTreeSet<_>>();
+    insts.extend(
+        source
+            .certificates()
+            .machine_return_controls
+            .values()
+            .flat_map(|certificate| certificate.insts.iter().copied()),
+    );
+    insts
+}
+
+/// The instructions a return-control certificate took over from the prologue.
+///
+/// A save is shared -- with the frame certificate, when one `stp` does both
+/// jobs, and with every other return in the function. So where an account of
+/// these instructions already exists, this certificate agrees with it rather
+/// than contradicting it, and the journal keeps the one that was there.
+pub(super) fn certified_return_control_absorbed_insts(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<InstId> {
+    source
+        .certificates()
+        .machine_return_controls
+        .values()
+        .flat_map(|certificate| certificate.absorbed_insts.iter().copied())
+        .collect()
+}
+
+/// The stack slots a return-control certificate claims.
+///
+/// A slot whose only write is the prologue's save of the return address and
+/// whose only read is the reload the certificate already answers for is not a
+/// local. Both binding derivations ask this the same way, so it is answered
+/// once.
+pub(super) fn certified_return_control_stack_objects(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<r2ssa::ObjectId> {
+    source
+        .certificates()
+        .machine_return_controls
+        .values()
+        .filter_map(r2ssa::MachineReturnControlCertificate::claimed_stack_object)
+        .collect()
+}
+
+/// Close a control-only value set over the copies that carry those values.
+///
+/// A value every one of whose uses is a copy producing something already in the
+/// set is itself in it. Re-scanning every value once per pass was quadratic in
+/// the value count; a value can only become eligible when one of the copies it
+/// feeds enters the set, so only those are re-examined.
+fn close_over_control_copies(graph: &r2ssa::SsaGraph, values: &mut BTreeSet<ValueId>) {
+    let mut work = values.iter().copied().collect::<Vec<_>>();
+    while let Some(output) = work.pop() {
+        let Some(def) = graph.def_of.get(output.0 as usize).copied().flatten() else {
+            continue;
+        };
+        let Some(carrier) = graph.inst(def) else {
+            continue;
+        };
+        if !matches!(
+            carrier.payload,
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. })
+        ) {
+            continue;
+        }
+        for input in carrier.inputs.iter().copied() {
+            if values.contains(&input) {
+                continue;
+            }
+            let uses = graph.use_sites(input);
+            if uses.is_empty() {
+                continue;
+            }
+            let reaches_only_control = uses.iter().all(|site| {
+                graph.inst(site.inst).is_some_and(|inst| {
+                    matches!(
+                        inst.payload,
+                        r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. })
+                    ) && inst.output.is_some_and(|output| values.contains(&output))
+                })
+            });
+            if reaches_only_control {
+                values.insert(input);
+                work.push(input);
+            }
+        }
+    }
+}
+
+pub(super) fn certified_return_control_values(source: &r2ssa::SsaArtifact) -> BTreeSet<ValueId> {
+    let graph = source.graph();
+    let sites = certified_return_transfer_sites(source);
+    let mut values = sites
+        .iter()
+        .filter_map(|site| graph.inst(site.inst)?.inputs.get(site.input_idx).copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|value| {
+            let uses = graph.use_sites(*value);
+            !uses.is_empty() && uses.iter().all(|site| sites.contains(site))
+        })
+        .collect::<BTreeSet<_>>();
+    values.extend(
+        source
+            .certificates()
+            .machine_return_controls
+            .values()
+            .flat_map(|certificate| certificate.values.iter().copied()),
+    );
+
+    // Follow the copies a return address arrives through.
+    //
+    // AArch64's `ret` lifts to a copy of the link register into the program
+    // counter and then a return on that. The return's own input is certified,
+    // but the link register one copy upstream is not, so it was bound to an
+    // object no rendering ever emitted and the seal refused the function for a
+    // value nothing rendered.
+    //
+    // A value every one of whose uses is a copy producing something already
+    // control-only is itself control-only: it reaches nothing but the return.
+    close_over_control_copies(graph, &mut values);
+    values
+}
+
+/// Exact direct-branch target uses already represented by CFG topology.
+///
+/// `Branch` and `CBranch` target operand zero qualify, and so does a
+/// `BranchInd` whose switch is certified: the case topology is what expresses
+/// it. Unresolved indirect branches, call, predicate, and return operands have
+/// different rendering contracts.
+///
+/// A branch r2ssa certified as a call site is a call, whatever its shape: the
+/// callee's name is what expresses it, not the topology, and its operand is
+/// accounted as a call target. Deciding that from the op variant alone gave
+/// one use two owners.
+pub(super) fn certified_direct_control_target_sites(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<UseSite> {
+    let graph = source.graph();
+    graph
+        .insts
+        .iter()
+        .filter_map(|inst| {
+            if certified_call_site(source, inst.id).is_some() {
+                return None;
+            }
+            let target = match &inst.payload {
+                r2ssa::InstPayload::Op(
+                    r2ssa::SSAOp::Branch { target, .. } | r2ssa::SSAOp::CBranch { target, .. },
+                ) => target,
+                // A resolved jump table is control too. The structured form
+                // prints `switch` on the selector and puts each case where its
+                // block sits, so the computed target it dispatches through is
+                // expressed by the topology exactly as a direct branch's is.
+                // Only where the switch is certified: an indirect branch nobody
+                // resolved keeps its ordinary rendering contract.
+                r2ssa::InstPayload::Op(r2ssa::SSAOp::BranchInd { target, .. }) => {
+                    let block_addr = graph.block(inst.block).map(|block| block.addr);
+                    if !block_addr
+                        .is_some_and(|addr| source.certificates().switches.contains_key(&addr))
+                    {
+                        return None;
+                    }
+                    target
+                }
+                _ => return None,
+            };
+            let value = graph.value_id_for_var(target)?;
+            let site = UseSite {
+                inst: inst.id,
+                input_idx: 0,
+            };
+            (inst.inputs.first().copied() == Some(value) && graph.use_sites(value).contains(&site))
+                .then_some(site)
+        })
+        .collect()
+}
+
+/// The call site r2ssa certified `at` as, if any.
+///
+/// Membership is the certificate's, not the operation's shape. r2ssa
+/// certifies an ordinary call as `Call` or `CallInd` and a tail call as
+/// `Branch` or `BranchInd` carrying `TailCall`, and it owns the map from
+/// instruction to call site. Re-deciding membership here from the op variant
+/// admitted a strict subset of what was proven: an import thunk is
+/// `jmp [reloc.X]`, a `BranchInd` through a relocated slot, and every one of
+/// them was refused for that alone.
+pub(crate) fn certified_call_site(
+    source: &r2ssa::SsaArtifact,
+    at: InstId,
+) -> Option<&r2ssa::CallsiteCertificate> {
+    let certificates = source.certificates();
+    let certificate = certificates
+        .callsites
+        .get(certificates.callsites_by_inst.get(&at)?)?;
+    (certificate.at == at).then_some(certificate)
+}
+
+/// Exact direct-call target uses the call expression renders as the callee.
+///
+/// Only a site whose certificate names a direct target qualifies: the call
+/// spells the callee's name and the operand is elided beside it. A site with
+/// no direct target reads a value the program computed, and that value keeps
+/// its ordinary rendering contract.
+pub(super) fn certified_direct_call_target_sites(source: &r2ssa::SsaArtifact) -> BTreeSet<UseSite> {
+    let graph = source.graph();
+    source
+        .certificates()
+        .callsites
+        .values()
+        .filter_map(|certificate| {
+            certificate.direct_target?;
+            let inst = graph.inst(certificate.at)?;
+            let value = certificate.target;
+            let site = UseSite {
+                inst: certificate.at,
+                input_idx: 0,
+            };
+            (inst.inputs.first().copied() == Some(value) && graph.use_sites(value).contains(&site))
+                .then_some(site)
+        })
+        .collect()
+}
+
+/// Direct-call target values whose complete use domain is the callee's name.
+pub(super) fn certified_direct_call_target_values(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<ValueId> {
+    let graph = source.graph();
+    let sites = certified_direct_call_target_sites(source);
+    let mut values = sites
+        .iter()
+        .filter_map(|site| graph.inst(site.inst)?.inputs.get(site.input_idx).copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|value| {
+            let uses = graph.use_sites(*value);
+            !uses.is_empty() && uses.iter().all(|site| sites.contains(site))
+        })
+        .collect::<BTreeSet<_>>();
+
+    // Follow the copies a callee's address arrives through, for the same
+    // reason the return-address closure above does. A lift that materializes
+    // the target into a temporary first leaves the call's own operand
+    // certified and the copy one step upstream not, and that copy then lowered
+    // to an assignment of an object the plan had already elided.
+    close_over_control_copies(graph, &mut values);
+    values
+}
+
+/// Definitions whose whole result is a callee's address on its way to the call.
+///
+/// The copy that materializes a call target renders nothing -- the call spells
+/// the callee's name -- so its write and its operands are accounted here rather
+/// than left for a statement that will not be emitted.
+pub(super) fn certified_direct_call_target_insts(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
+    let graph = source.graph();
+    certified_direct_call_target_values(source)
+        .into_iter()
+        .filter_map(|value| graph.def_inst(value))
+        .collect()
+}
+
+/// The stores that push a call's return address, and the values they consume.
+///
+/// A `call` on amd64 subtracts from the stack pointer and writes the address of
+/// the instruction after it, and Sleigh lifts both. The structured form says
+/// `f(...)`, which is the transfer; rendering the push beside it emits the
+/// machine's bookkeeping as if it were program text, through a stack pointer
+/// the function never assigned. That is where `murmur3_32`'s
+/// `RSP_0 = RSP_0 - 8; *(int64_t*)RSP_0 = 0x1000009ce;` comes from.
+///
+/// A store qualifies only when the value it writes is the constant address the
+/// call site falls through to, and it precedes that call in its own block.
+/// Nothing else in a function stores its own continuation address.
+pub(super) fn certified_call_return_address_insts(source: &r2ssa::SsaArtifact) -> BTreeSet<InstId> {
+    source.certificates().call_return_address_stores.clone()
+}
+
+/// The return addresses those pushes write.
+///
+/// The constant is the machine's continuation address. Nothing in the C names
+/// it, because the call statement is the transfer, so once the push is elided
+/// the literal has no occurrence and no other answerer.
+pub(super) fn certified_call_return_address_values(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<ValueId> {
+    let graph = source.graph();
+    let pushes = certified_call_return_address_insts(source);
+    pushes
+        .iter()
+        .filter_map(|inst| graph.inst(*inst)?.inputs.get(1).copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|value| {
+            let uses = graph.use_sites(*value);
+            !uses.is_empty() && uses.iter().all(|site| pushes.contains(&site.inst))
+        })
+        .collect()
+}
+
+/// Accesses to a frame slot this function writes and never reads.
+///
+/// A store into memory is an effect, and the ledger holds the rendering to it,
+/// which is why a dead frame slot cannot simply be dropped: the obligation
+/// would go unanswered. But observable means observable from outside, and a
+/// `CalleeStackAllocationCertificate` is the proof that the object lies wholly
+/// inside storage this function owns at every access. Where every one of those
+/// accesses is a write, nothing here or anywhere else can read what was stored,
+/// and the store has no meaning the C has to carry.
+///
+/// This is what left `stack_m48` and its neighbours declared, assigned and
+/// unused in `murmur3_32` and `xxhash32` at -O0: the slots an argument is
+/// spilled into and then read back out of through the object rather than the
+/// slot.
+pub(super) fn certified_dead_frame_slot_accesses(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<(u64, usize)> {
+    let certificates = source.certificates();
+    let mut accesses = BTreeSet::new();
+    for slot in certificates.stack_slots.values() {
+        let Some(allocation) = slot.callee_allocation.as_ref() else {
+            continue;
+        };
+        let Some(owned) = allocation
+            .accesses
+            .iter()
+            .map(|access| certificates.memory_accesses.get(access))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        if owned.is_empty() || owned.iter().any(|access| !access.is_write) {
+            continue;
+        }
+        accesses.extend(
+            owned
+                .iter()
+                .map(|access| (access.block_addr, access.op_index)),
+        );
+    }
+    accesses
+}
+
+/// Direct-control target values whose complete use domain is CFG topology.
+pub(super) fn certified_direct_control_target_values(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<ValueId> {
+    let graph = source.graph();
+    let sites = certified_direct_control_target_sites(source);
+    sites
+        .iter()
+        .filter_map(|site| graph.inst(site.inst)?.inputs.get(site.input_idx).copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|value| {
+            let uses = graph.use_sites(*value);
+            !uses.is_empty() && uses.iter().all(|site| sites.contains(site))
+        })
+        .collect()
+}
+
+/// Values whose complete use domain belongs to an exact upstream frame
+/// save/reload certificate. The certificate collector already proved the
+/// closure; this is only its renderer-facing projection.
+pub(super) fn certified_stack_frame_values(source: &r2ssa::SsaArtifact) -> BTreeSet<ValueId> {
+    source
+        .certificates()
+        .stack_frame_round_trips
+        .values()
+        .flat_map(|certificate| certificate.values.iter().copied())
+        .collect()
+}
+
+/// The instructions whose operand reads a certificate already answers for.
+///
+/// These are read from the same certificates the observation journal reads, so
+/// this is the same fact asked a different way rather than a second opinion:
+/// the journal needs the elision reason per use, and the binding plan needs
+/// only to know that the instruction's reads are not rendered.
+///
+/// It matters because folding a value into a read that never appears loses the
+/// definition: `push rbp` is a certified frame round trip, so the store that
+/// carries the frame pointer is elided, and the copy feeding it then had no
+/// rendered occurrence anywhere. The ledger scored the effect refused and the
+/// whole function fell back to no decompilation at all.
+pub(super) fn certified_elided_read_instructions(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<r2ssa::InstId> {
+    let certificates = source.certificates();
+    certificates
+        .stack_frame_round_trips
+        .values()
+        .flat_map(|certificate| certificate.insts.iter().copied())
+        .chain(
+            certificates
+                .machine_return_controls
+                .values()
+                .flat_map(|certificate| certificate.insts.iter().copied()),
+        )
+        .chain(certificates.stack_geometry.insts.iter().copied())
+        .chain(certified_return_control_insts(source))
+        .chain(certified_call_return_address_insts(source))
+        .chain(certified_direct_call_target_insts(source))
+        // A store into a frame slot the function owns and never reads. The
+        // effect ledger already answers for the store itself with
+        // `DeadFrameSlotStore`, and the statement is not emitted; a value
+        // folded into it goes with it. This certificate is keyed by site
+        // rather than by instruction, so the sites are resolved back here.
+        // A store that puts back what it read, and the read it puts back. The
+        // certificate says the object ends holding what it held, so neither
+        // renders and a value folded into either goes with it.
+        .chain({
+            let round_trips = source
+                .certificates()
+                .memory_round_trips
+                .values()
+                .flat_map(|certificate| {
+                    [
+                        (certificate.block_addr, certificate.write_op_index),
+                        (certificate.block_addr, certificate.read_op_index),
+                    ]
+                    .into_iter()
+                    .chain(
+                        certificate
+                            .redundant_read_op_indexes
+                            .iter()
+                            .map(|op_index| (certificate.block_addr, *op_index)),
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            source
+                .graph()
+                .insts
+                .iter()
+                .filter(|inst| {
+                    source
+                        .inst_op_site(inst.id)
+                        .is_some_and(|site| round_trips.contains(&site))
+                })
+                .map(|inst| inst.id)
+                .collect::<Vec<_>>()
+        })
+        .chain({
+            let dead_slots = certified_dead_frame_slot_accesses(source);
+            source
+                .graph()
+                .insts
+                .iter()
+                .filter(|inst| {
+                    source
+                        .inst_op_site(inst.id)
+                        .is_some_and(|site| dead_slots.contains(&site))
+                })
+                .map(|inst| inst.id)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+pub(super) fn certified_stack_geometry_values(source: &r2ssa::SsaArtifact) -> &BTreeSet<ValueId> {
+    &source.certificates().stack_geometry.values
+}
+
+/// Failure of declaration placement or reaching-definition validation.
+///
+/// Placement itself is deliberately absent: it is derived from the sealed
+/// structured-region artifact immediately before AST emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PlacementRead {
+    Use(UseSite),
+    CertifiedValue {
+        value: ValueId,
+        at: InstId,
+    },
+    ArrayIndex {
+        access: r2ssa::StructuredAccessId,
+        value: ValueId,
+    },
+    StackAccess(r2ssa::StructuredAccessId),
+    /// A read of stack storage at an offset the machine computes.
+    ///
+    /// Kept apart from `StackAccess` because the must-assignment proof does not
+    /// apply to it. A scalar slot read before anything writes it is a read of
+    /// something the decompiler invented; an array element read before any
+    /// write is an ordinary uninitialised local, which the storage's own
+    /// declaration defines and which no per-element proof can be built for --
+    /// the write that would answer for it is at an offset nobody knows.
+    IndexedStackAccess(r2ssa::StructuredAccessId),
+    /// The base address of this frame object is passed through a certified
+    /// call boundary. It is a placement occurrence, because the declaration
+    /// must dominate the call, but it does not read the object's contents.
+    EscapedStackAddress {
+        call: InstId,
+        value: ValueId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlacementRefusal {
+    NoDominatingRegion {
+        binding: BindingId,
+    },
+    MissingDefinition {
+        binding: BindingId,
+    },
+    ReadBeforeAssignment {
+        binding: BindingId,
+        read: PlacementRead,
+    },
+    UnprovableExecutionOrder {
+        binding: BindingId,
+    },
+}
+
+/// Typed disposition of an addressable stack object. Stack objects do not have
+/// SSA-value membership, so they occupy their own plan domain instead of being
+/// reconstructed from an offset or a rendered local name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StackObjectDisposition {
+    Bound {
+        binding: BindingId,
+    },
+    Elided {
+        reason: r2ssa::ledger::ElisionReason,
+    },
+    Refused {
+        reason: StackObjectRefusal,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StackObjectRefusal {
+    MissingSourceIdentity {
+        object: r2ssa::ObjectId,
+    },
+    UnclassifiedSourceRole {
+        object: r2ssa::ObjectId,
+    },
+    MissingWidth {
+        object: r2ssa::ObjectId,
+    },
+    InvalidWidth {
+        object: r2ssa::ObjectId,
+        size_bytes: u32,
+    },
+    ParameterHomeUnavailable {
+        object: r2ssa::ObjectId,
+        parameter_index: u32,
+    },
+    ParameterHomeWidthMismatch {
+        object: r2ssa::ObjectId,
+        parameter_index: u32,
+        slot_width_bits: u32,
+        parameter_width_bits: u32,
+    },
+    /// The slot is a stack-passed parameter's own storage, but the parameter
+    /// it names has no binding.
+    StackParameterUnavailable {
+        object: r2ssa::ObjectId,
+        parameter_index: u32,
+    },
+    /// The slot is a stack-passed parameter's own storage, but its width is
+    /// not the parameter's declared width.
+    StackParameterWidthMismatch {
+        object: r2ssa::ObjectId,
+        parameter_index: u32,
+        slot_width_bits: u32,
+        parameter_width_bits: u32,
+    },
+}
+
+/// Exact disposition of one source-certified ABI parameter slot.
+///
+/// The width is the formal carrier width in bits. It is kept separate from a
+/// reused binding's machine-carrier declaration width because an exact use may
+/// project a narrow formal from a wider canonical register carrier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParameterDisposition {
+    Bound { binding: BindingId, width_bits: u32 },
+    Refused { reason: ParameterRefusal },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParameterRefusal {
+    MissingWidth {
+        entity: SemanticId,
+        slot: u32,
+    },
+    InvalidWidth {
+        entity: SemanticId,
+        slot: u32,
+        size_bytes: u32,
+    },
+    UnsupportedWidth {
+        entity: SemanticId,
+        slot: u32,
+        width_bits: u32,
+    },
+    ConflictingSlotOwnership {
+        slot: u32,
+        first: SemanticId,
+        second: SemanticId,
+    },
+    ConflictingEntityOwnership {
+        entity: SemanticId,
+        expected_slot: u32,
+        claimed_slot: u32,
+    },
+    MissingValueBinding {
+        entity: SemanticId,
+        slot: u32,
+        value: ValueId,
+    },
+    ConflictingBindingOwnership {
+        binding: BindingId,
+        first_slot: u32,
+        second_slot: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BindingPlanSourceMismatch {
+    Authority,
+    MachineProjection(r2ssa::MachineBuildError),
+    ValueTopology {
+        index: usize,
+        value: ValueId,
+    },
+    DispositionCount {
+        expected: usize,
+        actual: usize,
+    },
+    BindingCount {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidBindingReference {
+        value: ValueId,
+        binding: BindingId,
+    },
+    CertificateMembership {
+        binding: BindingId,
+    },
+    DeclarationWidth {
+        binding: BindingId,
+    },
+    InvalidLiteralInline {
+        value: ValueId,
+    },
+    InvalidElisionProof {
+        value: ValueId,
+    },
+    UnexpectedValueDisposition {
+        value: ValueId,
+    },
+    StackObjectCount {
+        expected: usize,
+        actual: usize,
+    },
+    UnexpectedStackObjectDisposition {
+        object: r2ssa::ObjectId,
+    },
+    StackObjectCertificate {
+        object: r2ssa::ObjectId,
+        binding: BindingId,
+    },
+    StackObjectDeclarationWidth {
+        object: r2ssa::ObjectId,
+        binding: BindingId,
+    },
+    ParameterCount {
+        expected: usize,
+        actual: usize,
+    },
+    UnexpectedParameterDisposition {
+        slot: u32,
+    },
+    ParameterCertificate {
+        slot: u32,
+        binding: BindingId,
+    },
+    ParameterDeclarationWidth {
+        slot: u32,
+        binding: BindingId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BindingPlanBuildError {
+    MachineProjection(r2ssa::MachineBuildError),
+    MissingStorageSpan {
+        value: ValueId,
+    },
+    InvalidValueWidth {
+        value: ValueId,
+        size_bytes: u32,
+    },
+    TooManyBindings {
+        count: usize,
+    },
+    InvalidCertifiedEntityValue {
+        entity: SemanticId,
+        value: ValueId,
+    },
+    Seal(BindingPlanSourceMismatch),
+    /// Canonicalisation refused outright.
+    Canonicalisation(r2rewrite::RewriteError),
+    /// The seal canonicalised the same projection and got a different term for
+    /// a value, which means the rewriter is not a function of its input.
+    CanonicalDisagreement {
+        value: ValueId,
+    },
+}
+
+#[derive(Debug)]
+struct BindingComponent {
+    members: BTreeSet<ValueId>,
+    sources: BTreeSet<BindingCertificateSource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindingWidth {
+    Exact(u32),
+    Refused(ValueRefusal),
+}
+
+#[derive(Debug)]
+struct SealBindingComponent {
+    members: BTreeSet<ValueId>,
+    sources: BTreeSet<BindingCertificateSource>,
+}
+
+#[derive(Debug)]
+enum SealWidthEvidence {
+    Exact { lower_bounds: Vec<u32> },
+    Refused(ValueRefusal),
+}
+
+/// Dense identity of one component resolved directly from upstream storage and
+/// semantic certificates by the independent sealing oracle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct CanonicalComponentId(u32);
+
+impl CanonicalComponentId {
+    pub(crate) const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Canonical value answer recomputed for diagnostics without consulting the
+/// candidate plan's stored disposition or binding membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpstreamValueDisposition {
+    Bound { component: CanonicalComponentId },
+    InlineConstant,
+    InlineExpression,
+    Elided(r2ssa::ledger::ElisionReason),
+    Refused(ValueRefusal),
+}
+
+/// Transient Stage 4 validation oracle.
+///
+/// Every judgment here is deliberately re-derived from the exact source and no
+/// plan decision reaches it, so a wrong plan disposition is observable instead
+/// of validating itself. It is never retained by a [`BindingPlan`] or consumed
+/// by lowering; component membership is resolved by the sealing module's
+/// independent certificate walk.
+///
+/// The machine projection it reads is borrowed from the plan rather than built
+/// again. It is derived from the source alone and `BindingPlan::validate_source`
+/// has proven the borrowed one is what this source produces, so re-lowering the
+/// arena would be the same answer at the price of a whole render.
+#[derive(Debug)]
+pub(crate) struct UpstreamShadowOracle<'a> {
+    machine_projection: &'a MachineProjection,
+    components: Box<[Box<[ValueId]>]>,
+    values: Box<[UpstreamValueDisposition]>,
+}
+
+impl UpstreamShadowOracle<'_> {
+    pub(crate) fn component(&self, id: CanonicalComponentId) -> Option<&[ValueId]> {
+        self.components.get(id.index()).map(Box::as_ref)
+    }
+
+    pub(crate) fn value_disposition(&self, value: ValueId) -> Option<UpstreamValueDisposition> {
+        self.values.get(value.0 as usize).copied()
+    }
+
+    pub(crate) fn use_disposition(&self, site: UseSite) -> Option<&MachineUseDisposition> {
+        self.machine_projection.use_disposition(site)
+    }
+
+    pub(crate) fn write_disposition(&self, inst: InstId) -> Option<&MachineWriteDisposition> {
+        self.machine_projection.write_disposition(inst)
+    }
+}
+
+/// Complete renderer-side projection of one exact source-owned SSA artifact.
+///
+/// Dense vectors make value and binding lookup O(1). Exact/refused use and
+/// write lookup delegates to the plan-owned [`MachineProjection`] in O(1), so
+/// the source geometry has one owner. Observable-effect outcomes are absent:
+/// they are only knowable after rendering and ledger reconciliation.
+#[derive(Debug, Clone)]
+pub(crate) struct BindingPlan {
+    authority: SsaArtifactAuthority,
+    machine_projection: MachineProjection,
+    /// One canonical term per value, with the rewrites that produced it and
+    /// the instructions rendering it would discharge.
+    ///
+    /// Derived from `machine_projection`, which is derived from the artifact,
+    /// so it is the same answer for one function however many times it is
+    /// built. The seal builds its own and requires the two to agree, which is
+    /// the independence the seal already has about every other decision here.
+    /// The rewriter's partition for this source and projection, derived once.
+    ///
+    /// The seal and the shadow oracle read it rather than deriving it again:
+    /// it is a pure function of two inputs neither of them can influence, so a
+    /// second derivation is the same answer at the price of a term arena.
+    partition: rules::RewriteInliningPartition,
+    bindings: Box<[Binding]>,
+    dispositions: Box<[ValueDisposition]>,
+    parameters: Box<[Option<ParameterDisposition>]>,
+    stack_objects: BTreeMap<r2ssa::ObjectId, StackObjectDisposition>,
+    /// The values a call left indeterminate and no result certificate claims.
+    ///
+    /// Derived once here from the graph and the boundary certificates, so no
+    /// consumer re-derives "supplied from outside this function" for itself.
+    call_clobbers: BTreeSet<ValueId>,
+    /// The frame objects whose address this function hands to a call.
+    ///
+    /// Whatever the callee does through that pointer is a write this function
+    /// has no statement for, so such an object is written from outside exactly
+    /// as an entry value is. Derived once here from the callsite certificates,
+    /// so it does not depend on how the address is spelled: an argument passed
+    /// on the stack is bound to a temporary rather than inlined, and the escape
+    /// is the same fact either way.
+    escaped_frame_objects: BTreeSet<r2ssa::ObjectId>,
+    /// How each memory access is spelled, decided from the facts; absent when refused.
+    access_syntax: BTreeMap<r2ssa::StructuredAccessId, access_syntax::AccessSyntax>,
+    /// The C type at every boundary of the projection, under these
+    /// dispositions and declarations.
+    ///
+    /// Derived from the projection and the dispositions, so it is one answer
+    /// for one plan; built on first use because it is a function of fields
+    /// the constructor settles first.
+    typed: std::cell::OnceCell<r2rewrite::TypedBoundaries>,
+}
+
+impl r2rewrite::RenderTypes for BindingPlan {
+    fn declaration_type(&self, value: ValueId) -> Option<r2types::CTypeLike> {
+        match self.disposition(value)? {
+            ValueDisposition::Bound { binding } => {
+                Some(self.binding(*binding)?.declaration_type().clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn inline_root(&self, value: ValueId) -> Option<r2rewrite::TermId> {
+        match self.disposition(value)? {
+            ValueDisposition::Inline { term, .. } => Some(*term),
+            _ => None,
+        }
+    }
+}
+
+impl BindingPlan {
+    /// What every rendered expression has and what every operator requires
+    /// of its operands, from the projection and this plan's declarations.
+    pub(crate) fn typed_boundaries(&self) -> &r2rewrite::TypedBoundaries {
+        self.typed.get_or_init(|| {
+            r2rewrite::typed_boundaries(
+                &self.machine_projection,
+                self.partition.canonical.arena(),
+                self,
+            )
+        })
+    }
+}
+
+pub(crate) mod access_syntax;
+mod construction;
+mod name_resolution;
+mod rules;
+pub(crate) use rules::admit_declaration;
+mod seal;
+
+pub(crate) use name_resolution::{
+    BindingNameResolution, BindingNameResolutionError, PlannedParameterSymbol, PlannedStackSymbol,
+    PlannedValueSymbol, RenderedIdentityRefusal,
+};
+pub(crate) use rules::{
+    CertificateElidedCells, CertificateElidedCellsError, certificate_elided_cells,
+};
+
+impl BindingPlan {
+    /// Merges that perform nothing because every edge carries their own
+    /// binding. Named by the plan, because a merge's identity is a plan fact,
+    /// and re-derived by the seal from its own components.
+    pub(crate) fn identity_merges(&self, graph: &r2ssa::SsaGraph) -> BTreeSet<ValueId> {
+        rules::identity_merge_values(graph, |value| match self.disposition(value) {
+            Some(ValueDisposition::Bound { binding }) => Some(binding.0),
+            _ => None,
+        })
+    }
+}
+pub(crate) use seal::build_upstream_shadow_oracle;
+
+#[cfg(test)]
+use construction::binding_components;
+#[cfg(test)]
+use seal::seal_binding_components;
+impl BindingPlan {
+    pub(crate) const fn machine_projection(&self) -> &MachineProjection {
+        &self.machine_projection
+    }
+
+    /// The canonical term of every value and every structured memory
+    /// access, as the rewriter proved them equal to what the machine wrote.
+    pub(crate) const fn canonical(&self) -> &r2rewrite::CanonicalRoots {
+        &self.partition.canonical
+    }
+
+    pub(crate) const fn partition(&self) -> &rules::RewriteInliningPartition {
+        &self.partition
+    }
+
+    pub(crate) fn binding(&self, id: BindingId) -> Option<&Binding> {
+        self.bindings.get(id.index())
+    }
+
+    /// Number of sealed bindings in the dense `BindingId` domain.
+    pub(crate) const fn binding_count(&self) -> usize {
+        self.bindings.len()
+    }
+
+    /// Iterate sealed bindings in ascending, deterministic `BindingId` order.
+    pub(crate) fn bindings(&self) -> impl ExactSizeIterator<Item = (BindingId, &Binding)> {
+        self.bindings.iter().enumerate().map(|(index, binding)| {
+            let id = u32::try_from(index)
+                .map(BindingId)
+                .expect("sealed binding count fits the BindingId domain");
+            (id, binding)
+        })
+    }
+
+    /// How the plan spells a memory access; absent when the access is refused.
+    pub(crate) fn access_syntax(
+        &self,
+        access: r2ssa::StructuredAccessId,
+    ) -> Option<&access_syntax::AccessSyntax> {
+        self.access_syntax.get(&access)
+    }
+
+    pub(crate) fn disposition(&self, value: ValueId) -> Option<&ValueDisposition> {
+        self.dispositions.get(value.0 as usize)
+    }
+
+    /// Whether a call put this value there and nothing says what it holds.
+    pub(crate) fn value_is_call_clobber(&self, value: ValueId) -> bool {
+        self.call_clobbers.contains(&value)
+    }
+
+    /// Resolve one exact ABI slot in O(1). The table is dense-indexed but may
+    /// contain empty cells when the certified slot domain is sparse.
+    pub(crate) fn parameter_disposition(&self, slot: u32) -> Option<ParameterDisposition> {
+        self.parameters.get(slot as usize).copied().flatten()
+    }
+
+    pub(crate) fn binding_role(&self, binding: BindingId) -> Option<BindingRole> {
+        let binding = self.binding(binding)?;
+        let mut roles = binding.certificate.sources.iter().filter_map(|source| {
+            let BindingCertificateSource::CertifiedEntity(entity) = source else {
+                return None;
+            };
+            match *entity {
+                SemanticId::Parameter(slot) => Some(BindingRole::Parameter { slot }),
+                SemanticId::StackSlot(object) => Some(BindingRole::StackObject { object }),
+                _ => None,
+            }
+        });
+        // A certified entity is the stronger claim and decides on its own. An
+        // argument slot is a caller-supplied value too, so the entity role has
+        // to be consulted first or every parameter would answer `EntryValue`.
+        let Some(role) = roles.next() else {
+            return Some(if binding.caller_supplied {
+                BindingRole::EntryValue
+            } else if binding.call_clobbered {
+                BindingRole::CallClobbered
+            } else {
+                BindingRole::Local
+            });
+        };
+        roles.all(|other| other == role).then_some(role)
+    }
+
+    /// Whether the function signature declares this object, so the body must
+    /// not declare it again.
+    pub(crate) fn binding_is_externally_declared(&self, binding: BindingId) -> Option<bool> {
+        self.binding_role(binding)
+            .map(|role| matches!(role, BindingRole::Parameter { .. }))
+    }
+
+    /// Whether the caller supplies this object's value without the signature
+    /// naming it.
+    ///
+    /// The body still declares it, because no parameter does, but it holds a
+    /// value on entry and therefore cannot be required to be assigned before
+    /// its first read.
+    pub(crate) fn binding_is_entry_declared(&self, binding: BindingId) -> Option<bool> {
+        let role = self.binding_role(binding)?;
+        // Neither can be required to be assigned before its first read: one
+        // holds a value from entry, the other from whatever a call left.
+        if matches!(role, BindingRole::EntryValue | BindingRole::CallClobbered) {
+            return Some(true);
+        }
+        // An aggregate's declaration is its definition. C requires no
+        // assignment of a whole array before an element of it is read, and no
+        // single element write ever assigns the object, so demanding one
+        // refuses every buffer a function fills and then reads.
+        if matches!(role, BindingRole::StackObject { .. })
+            && self.binding(binding).is_some_and(|binding| {
+                matches!(
+                    binding.declaration_type(),
+                    r2types::CTypeLike::Array(_, Some(_))
+                )
+            })
+        {
+            return Some(true);
+        }
+        // An object whose address this function passed to a call is written
+        // through that pointer, by a statement this function does not contain.
+        // `unsigned int n; f(&n); use(n);` is ordinary C, and demanding an
+        // assignment here asks for one the program left to the callee.
+        if let BindingRole::StackObject { object } = role
+            && self.escaped_frame_objects.contains(&object)
+        {
+            return Some(true);
+        }
+        // Storage above the entry stack pointer holds a value on entry for the
+        // same reason a version-0 register does: this function never wrote it.
+        Some(
+            matches!(role, BindingRole::StackObject { .. })
+                && self
+                    .binding(binding)
+                    .is_some_and(|bound| bound.caller_supplied),
+        )
+    }
+
+    pub(crate) fn stack_object_disposition(
+        &self,
+        object: r2ssa::ObjectId,
+    ) -> Option<StackObjectDisposition> {
+        self.stack_objects.get(&object).copied()
+    }
+
+    pub(crate) fn use_disposition(&self, site: UseSite) -> Option<&r2ssa::MachineUseDisposition> {
+        self.machine_projection.use_disposition(site)
+    }
+
+    pub(crate) fn write_disposition(
+        &self,
+        inst: InstId,
+    ) -> Option<&r2ssa::MachineWriteDisposition> {
+        self.machine_projection.write_disposition(inst)
+    }
+
+    /// Validate the two upstream identities that must agree before any target
+    /// module may pair this plan with source-owned facts.
+    pub(crate) fn validate_source(
+        &self,
+        source: &r2ssa::SsaArtifact,
+    ) -> Result<(), BindingPlanSourceMismatch> {
+        if self.authority != *source.authority() {
+            return Err(BindingPlanSourceMismatch::Authority);
+        }
+        self.machine_projection
+            .validate_against(source)
+            .map_err(BindingPlanSourceMismatch::MachineProjection)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_value_disposition_for_shadow_test(
+        &mut self,
+        value: ValueId,
+        disposition: ValueDisposition,
+    ) {
+        self.dispositions[value.0 as usize] = disposition;
+        // The boundaries were derived from the dispositions this replaces.
+        self.typed.take();
+    }
+}
+
+#[cfg(test)]
+mod tests;

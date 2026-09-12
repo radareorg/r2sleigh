@@ -6,13 +6,14 @@ license.workspace = true
 description = "Constraint-based type inference primitives for r2sleigh"
 
 [dependencies]
+r2il = { path = "../r2il" }
+r2source = { path = "../r2source" }
 r2ssa = { path = "../r2ssa" }
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 
 [features]
 default = []
 
-[dev-dependencies]
-r2il = { path = "../r2il" }
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

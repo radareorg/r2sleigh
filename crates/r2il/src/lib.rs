@@ -26,10 +26,12 @@
 //! block.push(R2ILOp::Copy { dst: eax, src: imm });
 //! ```
 
+pub mod allocation;
 pub mod endianness;
 pub mod memory;
 pub mod metadata;
 pub mod opcode;
+pub mod refusal_evidence;
 pub mod regname;
 pub mod serialize;
 pub mod space;
@@ -43,21 +45,19 @@ pub use metadata::{
     FloatEncodingHint, MemoryClass, OpMetadata, PointerHint, ScalarKind, StorageClass,
     VarnodeMetadata,
 };
-pub use opcode::{R2ILBlock, R2ILOp, SwitchCase, SwitchInfo};
+pub use opcode::{BlockTransferKind, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo};
 pub use regname::select_register_name;
-pub use serialize::{ArchSpec, RegisterDef};
+pub use serialize::{
+    ArchSpec, RegisterBitSlice, RegisterDef, RegisterProjection, RegisterProjectionDisposition,
+    RegisterProjectionQuery, RegisterProjectionRefusal, RegisterStorage,
+};
 pub use space::{AddressSpace, SpaceId};
 pub use validate::{
-    ValidationError, ValidationIssue, validate_archspec, validate_block, validate_block_full,
-    validate_block_semantic, validate_op, validate_op_semantic,
+    ValidationError, ValidationIssue, effective_arch_address_size, validate_archspec,
+    validate_block, validate_block_full, validate_block_semantic, validate_op,
+    validate_op_semantic, validate_register_geometry,
 };
 pub use varnode::Varnode;
 
-/// Crate version for binary format compatibility checks.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Magic bytes for r2il binary files.
-pub const MAGIC: &[u8; 4] = b"R2IL";
-
-/// Current binary format version.
-pub const FORMAT_VERSION: u32 = 4;
+/// Exact discriminator for the sole supported postcard representation.
+pub const MAGIC: &[u8; 8] = b"R2PSTC07";

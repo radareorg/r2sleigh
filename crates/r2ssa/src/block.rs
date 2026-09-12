@@ -25,6 +25,8 @@ pub struct SSABlock {
 pub struct SSAContext {
     /// Current version for each variable name.
     versions: HashMap<String, u32>,
+    /// Versions allocated by the current operation but not yet visible to reads.
+    pending_versions: HashMap<String, u32>,
 }
 
 impl SSAContext {
@@ -45,6 +47,23 @@ impl SSAContext {
         let entry = self.versions.entry(name.to_string()).or_insert(0);
         *entry += 1;
         *entry
+    }
+
+    fn defer_version(&mut self, name: &str) -> u32 {
+        let current = self
+            .pending_versions
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| self.current_version(name));
+        let version = current + 1;
+        self.pending_versions.insert(name.to_string(), version);
+        version
+    }
+
+    fn commit_deferred_versions(&mut self) {
+        for (name, version) in self.pending_versions.drain() {
+            self.versions.insert(name, version);
+        }
     }
 
     /// Get all variables that have been defined (version > 0).
@@ -101,8 +120,12 @@ pub fn to_ssa(block: &R2ILBlock, disasm: &Disassembler) -> SSABlock {
     let mut ctx = SSAContext::new();
     let mut ssa_block = SSABlock::new(block.addr, block.size);
 
-    for op in &block.ops {
-        let ssa_op = convert_op(op, disasm, &mut ctx);
+    for (op_index, op) in block.ops.iter().enumerate() {
+        let instruction = block
+            .op_metadata(op_index)
+            .and_then(|metadata| metadata.instruction_addr);
+        let ssa_op = convert_op(op, instruction, disasm, &mut ctx);
+        ctx.commit_deferred_versions();
         ssa_block.push(ssa_op);
     }
 
@@ -134,26 +157,23 @@ fn read_var(vn: &Varnode, disasm: &Disassembler, ctx: &SSAContext) -> SSAVar {
     SSAVar::new(name, version, vn.size)
 }
 
-/// Convert a varnode to an SSA variable for writing (allocates new version).
+/// Convert a varnode to an SSA variable for writing.
+///
+/// The new version remains invisible to reads until the current operation is
+/// fully converted.
 fn write_var(vn: &Varnode, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAVar {
     let name = varnode_to_name(vn, disasm);
-    let version = ctx.new_version(&name);
+    let version = ctx.defer_version(&name);
     SSAVar::new(name, version, vn.size)
 }
 
-/// Convert a space ID to a string name.
-fn space_name(space: &SpaceId) -> String {
-    match space {
-        SpaceId::Ram => "ram".to_string(),
-        SpaceId::Register => "register".to_string(),
-        SpaceId::Const => "const".to_string(),
-        SpaceId::Unique => "unique".to_string(),
-        SpaceId::Custom(id) => format!("space_{}", id),
-    }
-}
-
 /// Convert an R2ILOp to an SSAOp.
-fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp {
+fn convert_op(
+    op: &R2ILOp,
+    instruction: Option<u64>,
+    disasm: &Disassembler,
+    ctx: &mut SSAContext,
+) -> SSAOp {
     use R2ILOp::*;
 
     match op {
@@ -164,14 +184,31 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
 
         Load { dst, space, addr } => SSAOp::Load {
             dst: write_var(dst, disasm, ctx),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
         },
 
         Store { space, addr, val } => SSAOp::Store {
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             val: read_var(val, disasm, ctx),
+        },
+        BlockTransfer {
+            space,
+            kind,
+            destination,
+            source,
+            count,
+            direction,
+            element_size,
+        } => SSAOp::BlockTransfer {
+            space: *space,
+            kind: *kind,
+            destination: read_var(destination, disasm, ctx),
+            source: read_var(source, disasm, ctx),
+            count: read_var(count, disasm, ctx),
+            direction: read_var(direction, disasm, ctx),
+            element_size: *element_size,
         },
         Fence { ordering } => SSAOp::Fence {
             ordering: *ordering,
@@ -183,7 +220,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             ordering,
         } => SSAOp::LoadLinked {
             dst: write_var(dst, disasm, ctx),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             ordering: *ordering,
         },
@@ -195,7 +232,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             ordering,
         } => SSAOp::StoreConditional {
             result: result.as_ref().map(|v| write_var(v, disasm, ctx)),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             val: read_var(val, disasm, ctx),
             ordering: *ordering,
@@ -209,7 +246,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             ordering,
         } => SSAOp::AtomicCAS {
             dst: write_var(dst, disasm, ctx),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             expected: read_var(expected, disasm, ctx),
             replacement: read_var(replacement, disasm, ctx),
@@ -223,7 +260,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             ordering,
         } => SSAOp::LoadGuarded {
             dst: write_var(dst, disasm, ctx),
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             guard: read_var(guard, disasm, ctx),
             ordering: *ordering,
@@ -235,7 +272,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             guard,
             ordering,
         } => SSAOp::StoreGuarded {
-            space: space_name(space),
+            space: *space,
             addr: read_var(addr, disasm, ctx),
             val: read_var(val, disasm, ctx),
             guard: read_var(guard, disasm, ctx),
@@ -441,6 +478,7 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
 
         Branch { target } => SSAOp::Branch {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         CBranch { target, cond } => SSAOp::CBranch {
@@ -450,14 +488,17 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
 
         BranchInd { target } => SSAOp::BranchInd {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         Call { target } => SSAOp::Call {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         CallInd { target } => SSAOp::CallInd {
             target: read_var(target, disasm, ctx),
+            instruction,
         },
 
         Return { target } => SSAOp::Return {
@@ -664,6 +705,23 @@ fn convert_op(op: &R2ILOp, disasm: &Disassembler, ctx: &mut SSAContext) -> SSAOp
             value: read_var(value, disasm, ctx),
             position: read_var(position, disasm, ctx),
         },
+
+        Select {
+            dst,
+            cond,
+            if_true,
+            if_false,
+        } => {
+            let cond = read_var(cond, disasm, ctx);
+            let if_true = read_var(if_true, disasm, ctx);
+            let if_false = read_var(if_false, disasm, ctx);
+            SSAOp::Select {
+                dst: write_var(dst, disasm, ctx),
+                cond,
+                if_true,
+                if_false,
+            }
+        }
     }
 }
 
@@ -689,6 +747,16 @@ mod tests {
 
         // Different variable starts at 0
         assert_eq!(ctx.current_version("RBX"), 0);
+    }
+
+    #[test]
+    fn test_deferred_write_is_not_visible_to_same_op_reads() {
+        let mut ctx = SSAContext::new();
+
+        assert_eq!(ctx.defer_version("RAX"), 1);
+        assert_eq!(ctx.current_version("RAX"), 0);
+        ctx.commit_deferred_versions();
+        assert_eq!(ctx.current_version("RAX"), 1);
     }
 
     #[test]

@@ -1,0 +1,116 @@
+{
+  "schema": 1,
+  "id": "fnv-fold-o2-darwin-arm64-v3",
+  "description": "Fixed-runner performance contract for the bounded O2 fnv_fold semantic-preservation fixture.",
+  "runner": {
+    "id": "r2sleigh-darwin-arm64-perf-v1",
+    "environment_variable": "R2SLEIGH_FIXED_PERF_RUNNER",
+    "platform": "darwin",
+    "machine": "arm64"
+  },
+  "contract": {
+    "binary": "tests/r2r/bins/r2sleigh_manual_limits_O2",
+    "binary_sha256": "e15adf9d8916bdbc1a45a07741734279cc815b87a5b2762cfb24cd78d33503c1",
+    "fixture_source": "tests/gold/manual_limits.c",
+    "fixture_source_sha256": "6524278ba4cd32a72dcf9cbcc385275999a50c3449d0e97035736891bcddff09",
+    "target": "fnv_fold",
+    "analysis": "aaa",
+    "commands": [
+      "decompile_sla",
+      "ssa_function_report"
+    ],
+    "cold_samples": 20,
+    "warm_sessions": 4,
+    "warm_samples_per_session": 5,
+    "percentile": 95
+  },
+  "baseline": {
+    "source": "reviewed 2026-08-16 fnv_fold O2 request-local fixed-runner recapture",
+    "capture": "in-process-r2-profiler-v1",
+    "note": "The atomic ssa_function_report command replaces the producerless profile query. References are the per-metric maximum from two complete admitted captures using radare2's in-process timer. Each command-temperature p95 is the 19th of 20 samples, so one extreme sample cannot define the gate."
+  },
+  "validation_observation": {
+    "date": "2026-08-16",
+    "authority": "reviewed non-authoritative dirty-worktree performance observation",
+    "reference_policy": "per-metric maximum p95 from two complete valid captures; release targets retain explicit measured headroom",
+    "runner_fingerprint": {
+      "id": "r2sleigh-darwin-arm64-perf-v1",
+      "platform": "darwin",
+      "machine": "arm64",
+      "radare2_version": "6.2.0 +36888",
+      "radare2_commit": "83024042a6ae123dc1a512541971a5792f96170b",
+      "radare2_abi": 138,
+      "plugin_fingerprint": "f7feaf1f4c0202d30556891a0c38ba822f997b9c65d2fe97de347691737b3e0f",
+      "plugin_artifacts": {
+        "anal_sleigh.dylib": "33bd28182da521784b1188f4d821a5d5f2e14d6ec2bb86c5aa8ae891f5dde49d",
+        "arch_sleigh.dylib": "77ac0143b086d5eed0eeaecb5886df002204062176aaffcc37afec5ce72b55b6",
+        "r2sleigh/libr2sleigh_plugin.dylib": "70b79eb81a164677ec1aba4c843d9c8f8d651d773e7aa3ac9f984ceb82ae300e"
+      }
+    },
+    "sample_counts": {
+      "cold_per_command": 20,
+      "warm_per_command": 20,
+      "cold_rss": 40,
+      "warm_rss": 4
+    },
+    "p95": {
+      "decompile_sla": {
+          "cold_s": 0.056993,
+          "warm_s": 0.054206
+      },
+      "ssa_function_report": {
+          "cold_s": 0.002276,
+          "warm_s": 0.001769
+      },
+      "rss": {
+          "cold_bytes": 83640320,
+          "warm_bytes": 84606976
+      }
+    },
+    "result": "all output-admission and sample-count checks passed in both captures; versioned release and regression limits were set from the reviewed maxima"
+  },
+  "gates": {
+    "commands": {
+      "decompile_sla": {
+        "cold": {
+          "reference_p95_s": 0.056993,
+          "release_target_p95_s": 0.07,
+          "max_regression_ratio": 1.5
+        },
+        "warm": {
+          "reference_p95_s": 0.054206,
+          "release_target_p95_s": 0.067,
+          "max_regression_ratio": 1.5
+        }
+      },
+      "ssa_function_report": {
+        "cold": {
+          "reference_p95_s": 0.002276,
+          "release_target_p95_s": 0.003,
+          "max_regression_ratio": 1.5,
+          "regression_jitter_slack_s": 0.0001
+        },
+        "warm": {
+          "reference_p95_s": 0.001769,
+          "release_target_p95_s": 0.0025,
+          "max_regression_ratio": 1.5,
+          "regression_jitter_slack_s": 0.0001
+        }
+      }
+    },
+    "rss": {
+      "cold": {
+        "reference_p95_bytes": 83640320,
+        "release_target_p95_bytes": 100663296,
+        "max_regression_ratio": 1.5,
+        "regression_jitter_slack_bytes": 16777216
+      },
+      "warm": {
+        "reference_p95_bytes": 84606976,
+        "release_target_p95_bytes": 100663296,
+        "max_regression_ratio": 1.5,
+        "regression_jitter_slack_bytes": 16777216
+      }
+    }
+  }
+}

@@ -315,12 +315,11 @@ Plugin Commands
 
 | Command | Output | Description |
 |---------|--------|-------------|
-| `a:sla.ssa` | JSON | SSA form for current instruction |
-| `a:sla.ssa.func` | JSON | Function SSA with phi nodes |
-| `a:sla.ssa.func.opt` | JSON | Optimized function SSA |
-| `a:sla.defuse` | JSON | Def-use analysis for current instruction |
-| `a:sla.defuse.func` | JSON | Function-wide def-use analysis |
-| `a:sla.dom` | JSON | Dominator tree |
-| `a:sla.cfg` | text | ASCII CFG |
-| `a:sla.cfg.json` | JSON | CFG as JSON |
-| `a:sla.slice [var]` | JSON | Backward slice from variable |
+| `a:sla.debug.ssa` | JSON | SSA form for current instruction |
+| `a:sla.debug.ssa.func` | JSON | Function SSA with phi nodes |
+| `a:sla.debug.ssa.func.opt` | JSON | Optimized function SSA |
+| `a:sla.debug.defuse.func` | JSON | Function-wide def-use analysis |
+| `a:sla.debug.dom` | JSON | Dominator tree |
+| `a:sla.debug.cfg` | text | ASCII CFG |
+| `a:sla.debug.cfg.json` | JSON | CFG as JSON |
+| `a:sla.debug.slice [var]` | JSON | Backward slice from variable |

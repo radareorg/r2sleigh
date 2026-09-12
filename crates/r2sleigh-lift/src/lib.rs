@@ -26,21 +26,24 @@
 pub mod context;
 pub mod disasm;
 pub mod esil;
-pub mod pcode;
+mod internal_control;
 pub mod sleigh;
 pub mod translate;
-pub mod userops;
 
 use thiserror::Error;
 
 pub use context::LiftContext;
-pub use disasm::{Disassembler, SemanticMetadataOptions, SemanticMetadataPrecision};
-pub use esil::{format_op, op_to_esil, op_to_esil_named};
-pub use pcode::{PcodeTranslator, RawPcodeOp, RawVarnode};
+pub use disasm::embedded_arch_and_disassembler;
+pub use disasm::{
+    Disassembler, GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineInstructionSpan,
+    GenuineLiftAuthority, GenuineLiftedBlock, GenuineLiftedFunction,
+    GenuineLiftedFunctionAuthority, SemanticMetadataOptions, SemanticMetadataPrecision,
+    TrustedLiftedFunction, TrustedSleighProfile,
+};
+pub use esil::{OpEsil, block_to_esil, format_op, op_esil, op_to_esil};
 use r2il::ArchSpec;
 use r2il::Endianness;
 pub use sleigh::{SleighInfo, build_arch_spec, extract_arch_spec, get_sleigh_info};
-pub use userops::userop_map_for_arch;
 
 /// Errors that can occur during lifting.
 #[derive(Debug, Error)]
@@ -50,9 +53,6 @@ pub enum LiftError {
 
     #[error("Parse error: {0}")]
     Parse(String),
-
-    #[error("P-code translation error: {0}")]
-    Pcode(#[from] pcode::PcodeError),
 
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
@@ -118,12 +118,6 @@ impl Lifter {
         &self.ctx
     }
 
-    /// Set the endianness.
-    pub fn set_big_endian(&mut self, big_endian: bool) -> &mut Self {
-        self.ctx.set_big_endian(big_endian);
-        self
-    }
-
     /// Set instruction endianness.
     pub fn set_instruction_endianness(&mut self, endianness: Endianness) -> &mut Self {
         self.ctx.set_instruction_endianness(endianness);
@@ -159,7 +153,8 @@ impl Lifter {
 /// This provides a minimal x86-64 spec with common registers.
 pub fn create_x86_64_spec() -> ArchSpec {
     let mut ctx = LiftContext::new("x86-64");
-    ctx.set_big_endian(false);
+    ctx.set_instruction_endianness(Endianness::Little);
+    ctx.set_memory_endianness(Endianness::Little);
     ctx.set_addr_size(8);
 
     // Add standard address spaces
@@ -217,7 +212,8 @@ pub fn create_x86_64_spec() -> ArchSpec {
 /// Create a basic ARM architecture specification for testing.
 pub fn create_arm_spec() -> ArchSpec {
     let mut ctx = LiftContext::new("ARM");
-    ctx.set_big_endian(false);
+    ctx.set_instruction_endianness(Endianness::Little);
+    ctx.set_memory_endianness(Endianness::Little);
     ctx.set_addr_size(4);
 
     // Add standard address spaces
@@ -249,7 +245,8 @@ pub fn create_arm_spec() -> ArchSpec {
 
 fn create_riscv_spec(name: &str, addr_size: u32) -> ArchSpec {
     let mut ctx = LiftContext::new(name);
-    ctx.set_big_endian(false);
+    ctx.set_instruction_endianness(Endianness::Little);
+    ctx.set_memory_endianness(Endianness::Little);
     ctx.set_addr_size(addr_size);
 
     // Add standard address spaces
@@ -300,7 +297,6 @@ mod tests {
     fn test_x86_64_spec() {
         let spec = create_x86_64_spec();
         assert_eq!(spec.name, "x86-64");
-        assert!(!spec.big_endian);
         assert_eq!(spec.instruction_endianness, Endianness::Little);
         assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 8);
@@ -311,11 +307,75 @@ mod tests {
         assert!(spec.get_register("RIP").is_some());
     }
 
+    /// The processor specification's own program-counter role reaches the
+    /// architecture, in the specification's own spelling.
+    ///
+    /// AArch64 writes it `pc` and x86-64 writes it `RIP`, which is exactly why
+    /// it is read rather than guessed: a list of spellings has to know both, and
+    /// every architecture nobody thought of gets no answer or a wrong one.
+    #[test]
+    fn processor_specifications_name_their_own_program_counter() {
+        for (sla, pspec, arch, expected) in [
+            (
+                sleigh_config::processor_aarch64::SLA_AARCH64,
+                sleigh_config::processor_aarch64::PSPEC_AARCH64,
+                "aarch64",
+                "pc",
+            ),
+            (
+                sleigh_config::processor_x86::SLA_X86_64,
+                sleigh_config::processor_x86::PSPEC_X86_64,
+                "x86-64",
+                "RIP",
+            ),
+        ] {
+            let spec = build_arch_spec(sla, pspec, arch).expect("sleigh specification");
+            assert_eq!(
+                spec.program_counter.as_deref(),
+                Some(expected),
+                "{arch} states its program counter"
+            );
+            assert!(
+                spec.get_register(expected).is_some(),
+                "the named register must exist in {arch}"
+            );
+        }
+    }
+
+    /// The specification's own user-operation table reaches the architecture.
+    ///
+    /// A `CallOther` states only an index, and the index is assigned by the
+    /// compiled specification, so this table is the only thing that can say
+    /// which operation an instruction invoked. `NEON_ext` and `NEON_ushl` are
+    /// the two the corpus needs; asserting a name resolves back through its own
+    /// index is the property a consumer depends on.
+    #[test]
+    fn aarch64_user_operation_names_reach_the_arch_spec() {
+        let spec = build_arch_spec(
+            sleigh_config::processor_aarch64::SLA_AARCH64,
+            sleigh_config::processor_aarch64::PSPEC_AARCH64,
+            "aarch64",
+        )
+        .expect("aarch64 sleigh specification");
+
+        assert!(
+            !spec.user_ops.is_empty(),
+            "AARCH64 declares user-defined operations"
+        );
+        for name in ["NEON_ext", "NEON_ushl"] {
+            let index = spec
+                .user_ops
+                .iter()
+                .position(|declared| declared == name)
+                .unwrap_or_else(|| panic!("AARCH64 declares {name}"));
+            assert_eq!(spec.user_ops[index], name);
+        }
+    }
+
     #[test]
     fn test_arm_spec() {
         let spec = create_arm_spec();
         assert_eq!(spec.name, "ARM");
-        assert!(!spec.big_endian);
         assert_eq!(spec.instruction_endianness, Endianness::Little);
         assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 4);
@@ -330,7 +390,6 @@ mod tests {
     fn test_riscv64_spec() {
         let spec = create_riscv64_spec();
         assert_eq!(spec.name, "riscv64");
-        assert!(!spec.big_endian);
         assert_eq!(spec.instruction_endianness, Endianness::Little);
         assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 8);
@@ -343,7 +402,6 @@ mod tests {
     fn test_riscv32_spec() {
         let spec = create_riscv32_spec();
         assert_eq!(spec.name, "riscv32");
-        assert!(!spec.big_endian);
         assert_eq!(spec.instruction_endianness, Endianness::Little);
         assert_eq!(spec.memory_endianness, Endianness::Little);
         assert_eq!(spec.addr_size, 4);

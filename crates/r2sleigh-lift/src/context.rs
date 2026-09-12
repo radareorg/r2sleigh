@@ -85,11 +85,6 @@ impl LiftContext {
         self.space_map.insert("constant".into(), SpaceId::Const);
     }
 
-    /// Set the endianness.
-    pub fn set_big_endian(&mut self, big_endian: bool) {
-        self.arch.set_legacy_big_endian(big_endian);
-    }
-
     /// Set instruction endianness.
     pub fn set_instruction_endianness(&mut self, endianness: Endianness) {
         self.arch.set_instruction_endianness(endianness);
@@ -123,6 +118,19 @@ impl LiftContext {
         is_default: bool,
         endianness: Option<Endianness>,
     ) -> SpaceId {
+        self.add_space_with_layout(name, addr_size, 1, is_default, endianness)
+    }
+
+    /// Add an address space while preserving both the encoded address width
+    /// and the number of bytes addressed by one offset unit.
+    pub fn add_space_with_layout(
+        &mut self,
+        name: &str,
+        addr_size: u32,
+        word_size: u32,
+        is_default: bool,
+        endianness: Option<Endianness>,
+    ) -> SpaceId {
         // Check if it's a standard space
         if let Some(&space_id) = self.space_map.get(name) {
             // Update the existing space definition
@@ -130,7 +138,7 @@ impl LiftContext {
                 id: space_id,
                 name: name.into(),
                 addr_size,
-                word_size: 1,
+                word_size,
                 is_default,
                 endianness,
                 memory_class: None,
@@ -151,7 +159,7 @@ impl LiftContext {
             id: space_id,
             name: name.into(),
             addr_size,
-            word_size: 1,
+            word_size,
             is_default,
             endianness,
             memory_class: None,
@@ -181,19 +189,6 @@ impl LiftContext {
     pub fn add_sub_register(&mut self, name: &str, offset: u64, size: u32, parent: &str) {
         let reg = RegisterDef::sub(name, offset, size, parent);
         self.arch.add_register(reg);
-    }
-
-    /// Add a user-defined operation (CALLOTHER).
-    pub fn add_userop(&mut self, index: u32, name: &str) {
-        self.arch.userops.push(r2il::serialize::UserOpDef {
-            index,
-            name: name.into(),
-        });
-    }
-
-    /// Add a source file path.
-    pub fn add_source_file(&mut self, path: &str) {
-        self.arch.source_files.push(path.into());
     }
 
     /// Allocate a unique temporary offset.
@@ -243,16 +238,7 @@ mod tests {
 
         let arch = ctx.finish();
         assert_eq!(arch.registers.len(), 2);
-        assert_eq!(arch.get_register_offset("RAX"), Some(0));
-        assert_eq!(arch.get_register_offset("EAX"), Some(0));
-    }
-
-    #[test]
-    fn legacy_set_big_endian_sets_both_v2_fields() {
-        let mut ctx = LiftContext::new("test");
-        ctx.set_big_endian(true);
-        assert_eq!(ctx.arch.instruction_endianness, Endianness::Big);
-        assert_eq!(ctx.arch.memory_endianness, Endianness::Big);
-        assert!(ctx.arch.big_endian);
+        assert_eq!(arch.get_register("RAX").map(|reg| reg.offset), Some(0));
+        assert_eq!(arch.get_register("EAX").map(|reg| reg.offset), Some(0));
     }
 }

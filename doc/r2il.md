@@ -22,7 +22,7 @@ convertible back to ESIL for backward compatibility with radare2.
 |--------|------|-----------------|--------------|----------------|
 | Typing | Sized varnodes | Sized varnodes | Typed (bitvectors, booleans) | Untyped strings |
 | Address spaces | Yes (5 kinds) | Yes | Yes (variables + memory) | No |
-| Serializable | Yes (serde/bincode) | Binary format | In-memory only | String |
+| Serializable | Yes (serde/postcard) | Binary format | In-memory only | String |
 | SSA-ready | Yes | No | No | No |
 | Executable | Via r2sym | Via Ghidra emulator | Via RzIL VM | Via ESIL VM |
 | Source | Sleigh specifications | Sleigh specifications | Hand-written per arch | Hand-written per arch |
@@ -275,8 +275,11 @@ Structural checks include:
    - at least one address space and exactly one default space
    - unique space IDs and names
    - registers have non-zero size and unique names
-   - `register_map` entries match register definitions
-   - unique userop indices
+   - an empty `register_projections` table means source geometry is unavailable
+   - a non-empty projection table is strictly sorted and covers every unique declared register storage exactly once
+   - bound projections in one laminar overlap component share its unique declared maximal carrier and one byte orientation
+   - partial-overlap components refuse as a whole, and other unprovable geometry carries a typed refusal
+   - write effects are not register geometry; they remain instruction-owned P-code/SSA facts
 
 Validation is aggregated: all discovered issues are returned in one
 `ValidationError` instead of failing at the first problem.
@@ -418,10 +421,6 @@ r2il uses explicit endianness fields in `ArchSpec`:
 1. `instruction_endianness`
 2. `memory_endianness`
 
-and keeps a legacy compatibility shim:
-
-1. `big_endian` (deprecated compatibility field)
-
 `Endianness` enum:
 
 1. `little`
@@ -438,12 +437,11 @@ Optional overrides:
 Behavior notes:
 
 1. `mixed` and `custom` are metadata-level only for now; deep execution semantics are deferred.
-2. Validation checks legacy mismatch (`arch.endianness.legacy_mismatch`) when `big_endian` disagrees with derived v2 fields.
-3. The current `.r2il` writer target is v4:
-   - default loader accepts v4 (postcard encoding)
-   - optional legacy loader support for v1/v2/v3 requires `r2il/legacy-bincode`
-   - writer emits v4
-   - legacy v1/v2 loads auto-upgrade in memory when legacy support is enabled
+2. The sole `.r2il` representation is identified by `R2PSTC07`:
+   - the wire layout is `R2PSTC07 || payload_length_u64_le || postcard(ArchSpec)`
+   - the loader requires an exact payload length and no trailing bytes
+   - no independent version field or compatibility decoder exists
+   - older versions and alternate encodings are rejected
 
 Memory Semantics + Topology
 ---------------------------
@@ -474,11 +472,14 @@ Address-space topology fields (canonical, optional):
 4. `bank_id`
 5. `segment_id`
 
-Heuristic population baseline:
+Semantic source rule:
 
-1. `CALLOTHER` userops named like `fence` / `fence.i` / `sfence.*` / ARM barrier userops rewrite to `Fence`.
-2. RISC-V/ARM mnemonic patterns (`lr.*`/`ldrex*`, `sc.*`/`strex*`) rewrite matching RAM `Load`/`Store` to linked/conditional variants.
-3. RISC-V `amo*` mnemonics keep original load/store ops and attach `op_metadata.atomic_kind=read_modify_write` plus ordering.
+1. These operations are emitted only when the loaded Sleigh translator emits
+   the corresponding P-code semantics.
+2. Mnemonics and userop presentation names never rewrite canonical operations
+   or add memory-ordering metadata.
+3. A native instruction with no emitted P-code remains an exact native span and
+   residualizes as unsupported; it is never replaced with fabricated semantics.
 
 End-to-End Example
 ------------------
@@ -524,26 +525,24 @@ r2il types derive `serde::Serialize` and `serde::Deserialize`. The standard
 serialization formats are:
 
 - **JSON** (`serde_json`) -- for plugin output and debugging
-- **bincode** -- for compact binary storage
+- **postcard** -- for the sole compact `R2PSTC07` binary storage representation
 
-The plugin command `a:sla.json` outputs the R2ILBlock for the current
+The plugin command `a:sla.debug.json` outputs the R2ILBlock for the current
 instruction as JSON.
 
 Compatibility Guarantees
 ------------------------
 
-1. Reader compatibility is guaranteed for `.r2il` format versions `v1`, `v2`, and `v3`.
-2. Writer compatibility target is always `v3`.
-3. Legacy `v1`/`v2` artifacts are upgraded in memory on load.
-4. Instruction exporter action/format compatibility is strict:
+1. The reader accepts exactly the `R2PSTC07` postcard representation.
+2. The writer always emits that representation; older artifacts must be regenerated from their source authority.
+3. Instruction exporter action/format compatibility is strict:
    - `lift`: `json`, `text`, `esil`, `r2cmd`
    - `ssa`: `json`, `text`
    - `defuse`: `json`, `text`
    - `dec`: `c_like`, `json`, `text`
-5. Unsupported action/format pairs return explicit errors.
+4. Unsupported action/format pairs return explicit errors.
 
 Versioning policy:
 
-1. Current writer target is `FORMAT_VERSION = 3`.
-2. Loader accepts v1/v2/v3 and upgrades v1/v2 in memory.
-3. Re-saving loaded artifacts writes v3.
+1. The sole binary identity is `R2PSTC07` with a checked payload length.
+2. Any other discriminator or encoding is rejected.

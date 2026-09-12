@@ -8,8 +8,9 @@ The r2dec decompiler converts SSA-form functions into readable C code. It
 operates as a pipeline of transformations: expression folding, control flow
 structuring, symbol resolution, and code generation.
 
-The decompiler is invoked via the `a:sla.dec` plugin command or
-programmatically through the `r2dec` crate.
+The production decompiler is invoked through the `pd:s` command after
+`a:sla` loads the Sleigh architecture. Programmatic certified rendering accepts
+only an opaque trusted SSA artifact derived from the same source snapshot.
 
 Pipeline Overview
 -----------------
@@ -178,9 +179,12 @@ switch (x) {
 
 ### Safety Budget
 
-Complex CFGs can cause the structurer to recurse deeply. A configurable
-safety budget limits recursion depth. When exhausted, the structurer falls
-back to a simpler strategy.
+Each block's control-domain proof has its own budget. The proof first removes
+predicates from completed inner loops and takes the reverse CFG slice that can
+reach the block. For `p` remaining Boolean predicates and `f` source/rendered
+formula slots, its BDD may allocate at most `2^p * f` nodes: the size of the
+explicit assignment table the BDD replaces, saturated to the addressable node
+count. The proof refuses if that exact block-local bound is exhausted.
 
 C AST Types (ast.rs)
 --------------------
@@ -287,7 +291,7 @@ tiers:
 When fallback triggers, the output includes a diagnostic comment:
 
 ```c
-/* r2dec fallback: exceeded safety budget */
+/* r2sleigh refused fcn: exceeded safety budget */
 void function_name() {
     // ... simplified output ...
 }
@@ -330,10 +334,10 @@ Plugin Command
 
 | Command | Output | Description |
 |---------|--------|-------------|
-| `a:sla.dec` | C code | Decompile the function at the current seek address |
+| `pd:s` | C code or an explicit residual/refusal | Decompile the function from a bounded borrowed snapshot |
 
 Example:
 
 ```bash
-r2 -qc 'aaa; s main; a:sla.dec' /bin/ls
+r2 -qc 'a:sla; aaa; s main; pd:s' /bin/ls
 ```

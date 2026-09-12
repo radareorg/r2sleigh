@@ -3,13 +3,15 @@
 //! This module provides a CFG data structure built from r2il blocks,
 //! which is the foundation for inter-procedural SSA analysis.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
-use r2il::{R2ILBlock, R2ILOp};
+use r2il::{R2ILBlock, R2ILOp, SwitchInfo};
 use serde::{Deserialize, Serialize};
+
+use crate::function::CFGRiskSummary;
 
 /// A basic block in the control flow graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +24,25 @@ pub struct BasicBlock {
     pub ops: Vec<R2ILOp>,
     /// The type of terminator for this block.
     pub terminator: BlockTerminator,
+    /// Original switch metadata, retained so certification can validate every
+    /// source field instead of relying on the lossy CFG terminator projection.
+    pub switch_info: Option<SwitchInfo>,
+    /// Address attributed to the final operation by the source lifter. When
+    /// metadata is absent this falls back to the block address.
+    terminal_instruction_addr: Option<u64>,
+    /// Source instruction each operation was lifted from, parallel to `ops`.
+    ///
+    /// One machine instruction lifts to several operations, and the boundary
+    /// between two of them is not recoverable from the operations themselves.
+    /// Anything reasoning about what a whole instruction did -- as opposed to
+    /// what one operation did -- needs that boundary, and the lifter is the
+    /// only thing that ever saw it.
+    ///
+    /// Empty, or `None` at an index, where the lifter attached no metadata.
+    /// Nothing may then claim to know where an instruction begins, which is
+    /// the honest answer rather than assuming the block is one.
+    #[serde(default)]
+    op_instruction_addrs: Vec<Option<u64>>,
 }
 
 /// How a basic block terminates.
@@ -51,8 +72,75 @@ pub enum BlockTerminator {
     IndirectCall { fallthrough: Option<u64> },
     /// Return from function.
     Return,
-    /// No terminator (incomplete block).
+    /// No successor: the block leaves the function, or the source declared
+    /// it terminal.
     None,
+}
+
+/// The successors the source declares for each of its blocks.
+///
+/// The lift knows where an instruction transfers control; it cannot know
+/// whether a call comes back, because that is a fact about the callee. The
+/// source's block graph carries it: a block whose last instruction calls a
+/// function that never returns has no successor, and a block that ends in a
+/// trap has none either. Keyed by block address, each entry holds every
+/// address the source says control can continue to from that block.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredSuccessors {
+    by_block: BTreeMap<u64, BTreeSet<u64>>,
+    entry: Option<u64>,
+}
+
+impl DeclaredSuccessors {
+    pub fn from_source_image(image: &r2source::OwnedFunctionImage) -> Self {
+        let mut declared = Self {
+            entry: Some(image.entry_address()),
+            ..Self::default()
+        };
+        for block in image.blocks() {
+            declared.insert(
+                block.address(),
+                block
+                    .successors()
+                    .iter()
+                    .map(|successor| successor.target()),
+            );
+        }
+        declared
+    }
+
+    pub fn insert(&mut self, block: u64, successors: impl IntoIterator<Item = u64>) {
+        self.by_block.entry(block).or_default().extend(successors);
+    }
+
+    /// The block the source says control enters at.
+    ///
+    /// It is not always the lowest-addressed one: a function GCC split across a
+    /// hot and a cold range enters in the hot half, which is placed after.
+    pub const fn entry(&self) -> Option<u64> {
+        self.entry
+    }
+
+    /// Blocks the source declares to have no successor at all.
+    ///
+    /// Control leaves the function at the end of one of these, whatever the
+    /// last instruction is: a return, a call that does not come back, or a
+    /// jump through a register that is therefore a tail call.
+    pub fn terminal_blocks(&self) -> BTreeSet<u64> {
+        self.by_block
+            .iter()
+            .filter(|(_, successors)| successors.is_empty())
+            .map(|(block, _)| *block)
+            .collect()
+    }
+
+    /// Whether the source lets control run off the end of `block` into
+    /// `next`. `None` where the source said nothing about the block.
+    fn continues_to(&self, block: u64, next: u64) -> Option<bool> {
+        self.by_block
+            .get(&block)
+            .map(|successors| successors.contains(&next))
+    }
 }
 
 impl BasicBlock {
@@ -63,11 +151,22 @@ impl BasicBlock {
             size: 0,
             ops: Vec::new(),
             terminator: BlockTerminator::None,
+            switch_info: None,
+            terminal_instruction_addr: None,
+            op_instruction_addrs: Vec::new(),
         }
     }
 
     /// Create a basic block from an r2il block.
     pub fn from_r2il(block: &R2ILBlock) -> Self {
+        Self::from_r2il_continuing(block, true)
+    }
+
+    /// Create a basic block from an r2il block, where `continues` says whether
+    /// control may run off its end into the next address. That is a fact the
+    /// operations do not carry: a call's return depends on the callee, and a
+    /// trap has no successor at all.
+    fn from_r2il_continuing(block: &R2ILBlock, continues: bool) -> Self {
         // Check if this block has switch info
         let terminator = if let Some(ref switch_info) = block.switch_info {
             // Use switch terminator with cases from switch_info
@@ -81,7 +180,7 @@ impl BasicBlock {
                 default: switch_info.default_target,
             }
         } else {
-            Self::analyze_terminator(&block.ops, block.addr + block.size as u64)
+            Self::analyze_terminator(&block.ops, block.addr + block.size as u64, continues)
         };
 
         Self {
@@ -89,11 +188,51 @@ impl BasicBlock {
             size: block.size,
             ops: block.ops.clone(),
             terminator,
+            switch_info: block.switch_info.clone(),
+            terminal_instruction_addr: (!block.ops.is_empty()).then(|| {
+                block
+                    .op_metadata
+                    .get(&(block.ops.len() - 1))
+                    .and_then(|metadata| metadata.instruction_addr)
+                    .unwrap_or(block.addr)
+            }),
+            op_instruction_addrs: (0..block.ops.len())
+                .map(|index| {
+                    block
+                        .op_metadata
+                        .get(&index)
+                        .and_then(|metadata| metadata.instruction_addr)
+                })
+                .collect(),
         }
     }
 
+    /// Source address of the final operation, with the block address used when
+    /// the lifter did not attach per-operation instruction metadata.
+    pub const fn terminal_instruction_addr(&self) -> Option<u64> {
+        self.terminal_instruction_addr
+    }
+
+    /// Source instruction the operation at this index was lifted from.
+    ///
+    /// `None` where the lifter attached no metadata for it, and then no caller
+    /// may treat the operation as beginning or continuing an instruction.
+    pub fn op_instruction_addr(&self, index: usize) -> Option<u64> {
+        self.op_instruction_addrs.get(index).copied().flatten()
+    }
+
     /// Analyze the operations to determine the block terminator.
-    fn analyze_terminator(ops: &[R2ILOp], fallthrough_addr: u64) -> BlockTerminator {
+    ///
+    /// A conditional branch's false edge is the machine's own: the instruction
+    /// falls through when the condition fails. Continuation after a call, or
+    /// after an operation with no transfer at all, is not, and `continues`
+    /// decides it.
+    fn analyze_terminator(
+        ops: &[R2ILOp],
+        fallthrough_addr: u64,
+        continues: bool,
+    ) -> BlockTerminator {
+        let continuation = continues.then_some(fallthrough_addr);
         // Look for control flow operations at the end
         for op in ops.iter().rev() {
             match op {
@@ -120,16 +259,16 @@ impl BasicBlock {
                     if let Some(addr) = Self::extract_const_addr(target) {
                         return BlockTerminator::Call {
                             target: addr,
-                            fallthrough: Some(fallthrough_addr),
+                            fallthrough: continuation,
                         };
                     }
                     return BlockTerminator::IndirectCall {
-                        fallthrough: Some(fallthrough_addr),
+                        fallthrough: continuation,
                     };
                 }
                 R2ILOp::CallInd { .. } => {
                     return BlockTerminator::IndirectCall {
-                        fallthrough: Some(fallthrough_addr),
+                        fallthrough: continuation,
                     };
                 }
                 R2ILOp::Return { .. } => {
@@ -140,9 +279,11 @@ impl BasicBlock {
             }
         }
 
-        // No control flow op found - falls through
-        BlockTerminator::Fallthrough {
-            next: fallthrough_addr,
+        // No control flow op found: the block runs on to the next address,
+        // unless the source declared it terminal.
+        match continuation {
+            Some(next) => BlockTerminator::Fallthrough { next },
+            None => BlockTerminator::None,
         }
     }
 
@@ -203,6 +344,143 @@ impl BasicBlock {
     }
 }
 
+fn op_direct_control_target(op: &R2ILOp) -> Option<u64> {
+    match op {
+        R2ILOp::Branch { target } | R2ILOp::CBranch { target, .. } => {
+            BasicBlock::extract_const_addr(target)
+        }
+        _ => None,
+    }
+}
+
+fn op_terminates_basic_block(op: &R2ILOp) -> bool {
+    matches!(
+        op,
+        R2ILOp::Branch { .. }
+            | R2ILOp::CBranch { .. }
+            | R2ILOp::BranchInd { .. }
+            | R2ILOp::Return { .. }
+    )
+}
+
+fn op_instruction_addr(block: &R2ILBlock, op_idx: usize) -> Option<u64> {
+    block
+        .op_metadata
+        .get(&op_idx)
+        .and_then(|metadata| metadata.instruction_addr)
+}
+
+fn split_internal_control_flow_targets(block: &R2ILBlock) -> Vec<R2ILBlock> {
+    if block.switch_info.is_some() || block.ops.is_empty() {
+        return vec![block.clone()];
+    }
+
+    let block_end = block.addr.saturating_add(block.size as u64);
+    if block_end <= block.addr {
+        return vec![block.clone()];
+    }
+
+    let instruction_addrs = block
+        .op_metadata
+        .values()
+        .filter_map(|metadata| metadata.instruction_addr)
+        .collect::<BTreeSet<_>>();
+    if instruction_addrs.is_empty() {
+        return vec![block.clone()];
+    }
+
+    let mut op_instruction_addrs = Vec::with_capacity(block.ops.len());
+    let mut last_instruction_addr = block.addr;
+    for op_idx in 0..block.ops.len() {
+        if let Some(instruction_addr) = op_instruction_addr(block, op_idx) {
+            last_instruction_addr = instruction_addr;
+        }
+        op_instruction_addrs.push(last_instruction_addr);
+    }
+
+    let mut split_points = BTreeSet::new();
+    for (op_idx, op) in block.ops.iter().enumerate() {
+        // A repeating string instruction branches to its own start. That flow
+        // never leaves the instruction, so it is no boundary between blocks.
+        let own_instruction = op_instruction_addrs
+            .get(op_idx)
+            .copied()
+            .unwrap_or(block.addr);
+        if let Some(target) = op_direct_control_target(op)
+            && target > block.addr
+            && target < block_end
+            && instruction_addrs.contains(&target)
+            && target != own_instruction
+        {
+            split_points.insert(target);
+        }
+
+        if op_terminates_basic_block(op) && op_direct_control_target(op) != Some(own_instruction) {
+            let current_addr = op_instruction_addrs
+                .get(op_idx)
+                .copied()
+                .unwrap_or(block.addr);
+            let fallthrough = op_instruction_addrs
+                .iter()
+                .skip(op_idx + 1)
+                .copied()
+                .find(|addr| *addr > current_addr);
+            if let Some(fallthrough) = fallthrough
+                && fallthrough > block.addr
+                && fallthrough < block_end
+                && instruction_addrs.contains(&fallthrough)
+            {
+                split_points.insert(fallthrough);
+            }
+        }
+    }
+    if split_points.is_empty() {
+        return vec![block.clone()];
+    }
+
+    let mut starts = Vec::with_capacity(split_points.len() + 1);
+    starts.push(block.addr);
+    starts.extend(split_points);
+
+    let mut chunks = starts
+        .iter()
+        .enumerate()
+        .map(|(idx, &start)| {
+            let end = starts.get(idx + 1).copied().unwrap_or(block_end);
+            R2ILBlock {
+                addr: start,
+                size: end.saturating_sub(start).min(u32::MAX as u64) as u32,
+                ops: Vec::new(),
+                switch_info: None,
+                op_metadata: Default::default(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    for (op_idx, op) in block.ops.iter().cloned().enumerate() {
+        let instruction_addr = op_instruction_addrs
+            .get(op_idx)
+            .copied()
+            .unwrap_or(block.addr);
+        let chunk_idx = starts
+            .partition_point(|start| *start <= instruction_addr)
+            .saturating_sub(1)
+            .min(chunks.len().saturating_sub(1));
+        let next_op_idx = chunks[chunk_idx].ops.len();
+        chunks[chunk_idx].ops.push(op);
+        if let Some(metadata) = block.op_metadata.get(&op_idx) {
+            chunks[chunk_idx]
+                .op_metadata
+                .insert(next_op_idx, metadata.clone());
+        }
+    }
+
+    chunks
+        .into_iter()
+        .filter(|chunk| !chunk.ops.is_empty())
+        .collect()
+}
+
 /// A Control Flow Graph for a function.
 #[derive(Debug, Clone)]
 pub struct CFG {
@@ -250,26 +528,57 @@ impl CFG {
     ///
     /// The blocks should be in address order and represent a complete function.
     pub fn from_blocks(blocks: &[R2ILBlock]) -> Option<Self> {
+        Self::from_blocks_with_declared_successors(blocks, None)
+    }
+
+    /// Build the graph from lifted blocks, letting the source's declared
+    /// successors decide where a block continues past its last instruction.
+    ///
+    /// Only the chunk that ends where the source block ends consults the
+    /// declaration: a split inside a block is a target the lift found, and
+    /// control reaching it sequentially is the source block's own extent.
+    pub fn from_blocks_with_declared_successors(
+        blocks: &[R2ILBlock],
+        declared: Option<&DeclaredSuccessors>,
+    ) -> Option<Self> {
         if blocks.is_empty() {
             return None;
         }
 
-        let entry = blocks[0].addr;
+        let entry = declared
+            .and_then(DeclaredSuccessors::entry)
+            .unwrap_or(blocks[0].addr);
         let mut cfg = Self::new(entry);
 
-        // First pass: add all blocks as nodes
         for block in blocks {
-            let bb = BasicBlock::from_r2il(block);
-            cfg.add_block(bb);
+            let end = block.addr + block.size as u64;
+            let continues = declared.and_then(|declared| declared.continues_to(block.addr, end));
+            for chunk in split_internal_control_flow_targets(block) {
+                let chunk_end = chunk.addr + chunk.size as u64;
+                let chunk_continues = chunk_end != end || continues.unwrap_or(true);
+                let bb = BasicBlock::from_r2il_continuing(&chunk, chunk_continues);
+                if !chunk_continues
+                    && matches!(
+                        bb.terminator,
+                        BlockTerminator::Call {
+                            fallthrough: None,
+                            ..
+                        } | BlockTerminator::IndirectCall { fallthrough: None }
+                            | BlockTerminator::None
+                    )
+                {
+                    r2il::refusal_evidence!(
+                        "declared-successors",
+                        "block {:#x} does not continue to {:#x}: the source declares no successor there",
+                        chunk.addr,
+                        end
+                    );
+                }
+                cfg.add_block(bb);
+            }
         }
 
-        // Second pass: add edges based on terminators
-        let mut addrs: Vec<u64> = cfg.addr_to_node.keys().copied().collect();
-        addrs.sort_unstable();
-        for addr in addrs {
-            cfg.add_edges_for_block(addr);
-        }
-
+        cfg.rebuild_edges();
         Some(cfg)
     }
 
@@ -279,6 +588,19 @@ impl CFG {
         let idx = self.graph.add_node(block);
         self.addr_to_node.insert(addr, idx);
         idx
+    }
+
+    /// Recompute every edge from the terminators the blocks currently carry.
+    ///
+    /// Edges are a function of the terminators, so a caller that assembles
+    /// blocks itself gets the same graph the block reader builds rather than a
+    /// second way of connecting them.
+    pub fn rebuild_edges(&mut self) {
+        let mut addrs: Vec<u64> = self.addr_to_node.keys().copied().collect();
+        addrs.sort_unstable();
+        for addr in addrs {
+            self.add_edges_for_block(addr);
+        }
     }
 
     /// Add edges for a block based on its terminator.
@@ -301,11 +623,17 @@ impl CFG {
                 true_target,
                 false_target,
             } => {
-                if let Some(&true_idx) = self.addr_to_node.get(&true_target) {
-                    self.graph.add_edge(node_idx, true_idx, CFGEdge::True);
-                }
-                if let Some(&false_idx) = self.addr_to_node.get(&false_target) {
-                    self.graph.add_edge(node_idx, false_idx, CFGEdge::False);
+                if true_target == false_target {
+                    if let Some(&target_idx) = self.addr_to_node.get(&true_target) {
+                        self.graph.add_edge(node_idx, target_idx, CFGEdge::Normal);
+                    }
+                } else {
+                    if let Some(&true_idx) = self.addr_to_node.get(&true_target) {
+                        self.graph.add_edge(node_idx, true_idx, CFGEdge::True);
+                    }
+                    if let Some(&false_idx) = self.addr_to_node.get(&false_target) {
+                        self.graph.add_edge(node_idx, false_idx, CFGEdge::False);
+                    }
                 }
             }
             BlockTerminator::Call { fallthrough, .. }
@@ -317,15 +645,30 @@ impl CFG {
                 }
             }
             BlockTerminator::Switch { ref cases, default } => {
-                // Add edges for each switch case
+                // One edge per target, not one per case. `case 1:` and
+                // `case 2:` falling into the same body is one way the
+                // program can go, and the case values that reach it live on
+                // the terminator, which keeps all of them.
+                //
+                // Adding an edge per case put sixty-seven parallel edges
+                // between zlib's `gz_open` dispatch and its shared arm. The
+                // block then had that predecessor sixty-seven times, every
+                // phi built from the predecessor list repeated its source
+                // that many times, and the SSA integrity check refused the
+                // whole function -- so a switch with a shared arm could not
+                // be decompiled at all.
+                let mut linked = std::collections::HashSet::new();
                 for (_, target) in cases {
-                    if let Some(&target_idx) = self.addr_to_node.get(target) {
+                    if let Some(&target_idx) = self.addr_to_node.get(target)
+                        && linked.insert(*target)
+                    {
                         self.graph.add_edge(node_idx, target_idx, CFGEdge::Normal);
                     }
                 }
                 // Add edge for default case
                 if let Some(def) = default
                     && let Some(&def_idx) = self.addr_to_node.get(&def)
+                    && linked.insert(def)
                 {
                     self.graph.add_edge(node_idx, def_idx, CFGEdge::Normal);
                 }
@@ -447,17 +790,109 @@ impl CFG {
         visited: &mut HashSet<NodeIndex>,
         postorder: &mut Vec<u64>,
     ) {
-        if !visited.insert(node) {
-            return;
-        }
+        let mut stack = vec![(node, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if expanded {
+                postorder.push(self.graph[node].addr);
+                continue;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
 
-        for succ_addr in self.successors(self.graph[node].addr) {
-            if let Some(succ) = self.get_node(succ_addr) {
-                self.dfs_postorder(succ, visited, postorder);
+            stack.push((node, true));
+            for succ_addr in self.successors(self.graph[node].addr).into_iter().rev() {
+                if let Some(succ) = self.get_node(succ_addr) {
+                    stack.push((succ, false));
+                }
             }
         }
+    }
 
-        postorder.push(self.graph[node].addr);
+    /// Summarize the control-flow features a decompiler preflight consults.
+    ///
+    /// Every field here is a property of the graph alone, so a caller deciding
+    /// whether a function is worth preparing can ask before paying for the
+    /// preparation. Reading the same numbers off renamed SSA would make the
+    /// question cost more than the answer can save.
+    pub fn risk_summary(&self) -> CFGRiskSummary {
+        let back_edges = self.collect_back_edges();
+        let mut switch_block_count = 0usize;
+        let mut max_switch_cases = 0usize;
+
+        // Only blocks the entry can reach are counted, because that is the
+        // domain the back-edge walk above already reports over and the domain
+        // SSA preparation retains.
+        for addr in self.reverse_postorder() {
+            let Some(block) = self.get_block(addr) else {
+                continue;
+            };
+            let BlockTerminator::Switch { cases, default } = &block.terminator else {
+                continue;
+            };
+            switch_block_count += 1;
+            max_switch_cases = max_switch_cases.max(cases.len() + usize::from(default.is_some()));
+        }
+
+        CFGRiskSummary {
+            block_count: self.num_blocks(),
+            loop_count: back_edges.len(),
+            back_edge_count: back_edges.values().map(Vec::len).sum(),
+            switch_block_count,
+            max_switch_cases,
+        }
+    }
+
+    /// Group every back edge under the loop header it re-enters.
+    pub(crate) fn collect_back_edges(&self) -> HashMap<u64, Vec<u64>> {
+        let mut visited = HashSet::new();
+        let mut in_stack = HashSet::new();
+        let mut back_edges = HashMap::new();
+        self.dfs_back_edges(self.entry, &mut visited, &mut in_stack, &mut back_edges);
+        back_edges
+    }
+
+    fn dfs_back_edges(
+        &self,
+        block: u64,
+        visited: &mut HashSet<u64>,
+        in_stack: &mut HashSet<u64>,
+        back_edges: &mut HashMap<u64, Vec<u64>>,
+    ) {
+        enum DfsStep {
+            Enter(u64),
+            ExamineEdge { from: u64, to: u64 },
+            Exit(u64),
+        }
+
+        let mut stack = vec![DfsStep::Enter(block)];
+        while let Some(step) = stack.pop() {
+            match step {
+                DfsStep::Enter(block) => {
+                    if !visited.insert(block) {
+                        continue;
+                    }
+                    in_stack.insert(block);
+                    stack.push(DfsStep::Exit(block));
+                    for succ in self.successors(block).into_iter().rev() {
+                        stack.push(DfsStep::ExamineEdge {
+                            from: block,
+                            to: succ,
+                        });
+                    }
+                }
+                DfsStep::ExamineEdge { from, to } => {
+                    if in_stack.contains(&to) {
+                        back_edges.entry(to).or_default().push(from);
+                    } else {
+                        stack.push(DfsStep::Enter(to));
+                    }
+                }
+                DfsStep::Exit(block) => {
+                    in_stack.remove(&block);
+                }
+            }
+        }
     }
 
     /// Get the underlying petgraph for advanced algorithms.
@@ -526,7 +961,7 @@ impl CFG {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+    use r2il::{OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode};
 
     fn make_const(val: u64, size: u32) -> Varnode {
         Varnode {
@@ -560,6 +995,180 @@ mod tests {
         assert_eq!(bb.addr, 0x1000);
         assert_eq!(bb.terminator, BlockTerminator::Fallthrough { next: 0x1004 });
         assert_eq!(bb.successors(), vec![0x1004]);
+    }
+
+    /// `case 1:` and `case 2:` falling into one body is one edge.
+    ///
+    /// It used to be two, and the shared arm then listed the dispatch block
+    /// as a predecessor twice. Every phi built from that list repeated its
+    /// source, the SSA integrity check refused the duplicate, and zlib's
+    /// `gz_open` -- fifty-five blocks, sixty-seven cases into one arm --
+    /// could not be decompiled at all.
+    #[test]
+    fn a_switch_arm_shared_by_several_cases_is_one_edge() {
+        let cases = (0..8)
+            .map(|value| r2il::SwitchCase {
+                value,
+                target: 0x4010,
+            })
+            .collect::<Vec<_>>();
+        let mut blocks = vec![R2ILBlock {
+            addr: 0x4000,
+            size: 4,
+            ops: vec![R2ILOp::BranchInd {
+                target: make_ram(0x4010, 8),
+            }],
+            switch_info: Some(r2il::SwitchInfo {
+                switch_addr: 0x4000,
+                min_val: 0,
+                max_val: 7,
+                default_target: Some(0x4020),
+                cases,
+            }),
+            op_metadata: Default::default(),
+        }];
+        for addr in [0x4010, 0x4020] {
+            blocks.push(R2ILBlock {
+                addr,
+                size: 4,
+                ops: vec![R2ILOp::Return {
+                    target: make_const(0, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            });
+        }
+
+        let cfg = CFG::from_blocks(&blocks).expect("switch cfg");
+
+        assert_eq!(cfg.successors(0x4000), vec![0x4010, 0x4020]);
+        assert_eq!(cfg.predecessors(0x4010), vec![0x4000]);
+        // The case values are not lost by collapsing the edge: they live on
+        // the terminator, which still carries every one of them.
+        let dispatch = cfg.get_block(0x4000).expect("dispatch block");
+        let BlockTerminator::Switch { cases, default } = &dispatch.terminator else {
+            panic!("switch dispatch block");
+        };
+        assert_eq!(cases.len(), 8);
+        assert_eq!(*default, Some(0x4020u64));
+    }
+
+    #[test]
+    fn the_source_decides_the_entry_when_it_is_not_the_lowest_block() {
+        // GCC splits a function across a hot and a cold range and places the
+        // cold half first, so the lowest-addressed block is not the entry.
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 1,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0x1001, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x2000,
+                size: 1,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0x2001, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let guessed = CFG::from_blocks(&blocks).expect("cfg");
+        assert_eq!(guessed.entry, 0x1000);
+
+        let declared = DeclaredSuccessors {
+            entry: Some(0x2000),
+            ..DeclaredSuccessors::default()
+        };
+        let sourced =
+            CFG::from_blocks_with_declared_successors(&blocks, Some(&declared)).expect("cfg");
+        assert_eq!(sourced.entry, 0x2000);
+    }
+
+    #[test]
+    fn a_call_continues_only_where_the_source_declares_a_successor() {
+        // `call __stack_chk_fail; ret`: the machine falls through after any
+        // call, but the callee never returns, and the source's block graph
+        // says so by giving the call's block no successor.
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 5,
+                ops: vec![R2ILOp::Call {
+                    target: make_ram(0x5000, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1005,
+                size: 1,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0x1006, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+
+        let undeclared = CFG::from_blocks(&blocks).expect("cfg");
+        assert_eq!(undeclared.successors(0x1000), vec![0x1005]);
+
+        let mut returns = DeclaredSuccessors::default();
+        returns.insert(0x1000, [0x1005]);
+        let continuing =
+            CFG::from_blocks_with_declared_successors(&blocks, Some(&returns)).expect("cfg");
+        assert_eq!(continuing.successors(0x1000), vec![0x1005]);
+
+        let mut noreturn = DeclaredSuccessors::default();
+        noreturn.insert(0x1000, []);
+        let terminal =
+            CFG::from_blocks_with_declared_successors(&blocks, Some(&noreturn)).expect("cfg");
+        assert!(terminal.successors(0x1000).is_empty());
+        assert_eq!(
+            terminal.get_block(0x1000).expect("call block").terminator,
+            BlockTerminator::Call {
+                target: 0x5000,
+                fallthrough: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_block_with_no_transfer_is_terminal_when_the_source_says_so() {
+        // A trap ends its block without a control operation; the machine
+        // would run on, and the source says nothing follows.
+        let blocks = vec![
+            R2ILBlock {
+                addr: 0x1000,
+                size: 4,
+                ops: vec![R2ILOp::Nop],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+            R2ILBlock {
+                addr: 0x1004,
+                size: 1,
+                ops: vec![R2ILOp::Return {
+                    target: make_ram(0x1005, 8),
+                }],
+                switch_info: None,
+                op_metadata: Default::default(),
+            },
+        ];
+        let mut trap = DeclaredSuccessors::default();
+        trap.insert(0x1000, []);
+        let cfg = CFG::from_blocks_with_declared_successors(&blocks, Some(&trap)).expect("cfg");
+        assert!(cfg.successors(0x1000).is_empty());
+        assert_eq!(
+            cfg.get_block(0x1000).expect("trap block").terminator,
+            BlockTerminator::None
+        );
     }
 
     #[test]
@@ -709,6 +1318,13 @@ mod tests {
         // Exit has two predecessors
         let exit_preds = cfg.predecessors(0x100c);
         assert_eq!(exit_preds.len(), 2);
+
+        // Preserve DFS successor visitation (true before false) and the
+        // resulting deterministic reverse postorder.
+        assert_eq!(
+            cfg.reverse_postorder(),
+            vec![0x1000, 0x1004, 0x1008, 0x100c]
+        );
     }
 
     #[test]
@@ -735,6 +1351,33 @@ mod tests {
         let cfg = CFG::from_blocks(&blocks).unwrap();
         let rpo = cfg.reverse_postorder();
         assert_eq!(rpo, vec![0x1000, 0x1004]);
+    }
+
+    #[test]
+    fn reverse_postorder_handles_a_deep_linear_cfg() {
+        const BLOCK_COUNT: usize = 8_192;
+        const BASE: u64 = 0x1000;
+
+        let blocks = (0..BLOCK_COUNT)
+            .map(|index| R2ILBlock {
+                addr: BASE + index as u64 * 4,
+                size: 4,
+                ops: if index + 1 == BLOCK_COUNT {
+                    vec![R2ILOp::Return {
+                        target: make_ram(0, 8),
+                    }]
+                } else {
+                    vec![R2ILOp::Nop]
+                },
+                switch_info: None,
+                op_metadata: Default::default(),
+            })
+            .collect::<Vec<_>>();
+        let expected = blocks.iter().map(|block| block.addr).collect::<Vec<_>>();
+
+        let cfg = CFG::from_blocks(&blocks).expect("deep linear CFG");
+
+        assert_eq!(cfg.reverse_postorder(), expected);
     }
 
     #[test]
@@ -886,5 +1529,125 @@ mod tests {
             cfg.block_addrs().collect::<Vec<_>>(),
             vec![0x1000, 0x1004, 0x1008]
         );
+    }
+
+    #[test]
+    fn test_internal_pcode_branch_target_splits_block() {
+        let mut op_metadata = std::collections::BTreeMap::new();
+        for op_idx in 0..3 {
+            op_metadata.insert(
+                op_idx,
+                OpMetadata {
+                    instruction_addr: Some(0x1000),
+                    ..Default::default()
+                },
+            );
+        }
+        op_metadata.insert(
+            3,
+            OpMetadata {
+                instruction_addr: Some(0x1004),
+                ..Default::default()
+            },
+        );
+
+        let blocks = vec![R2ILBlock {
+            addr: 0x1000,
+            size: 8,
+            ops: vec![
+                R2ILOp::Copy {
+                    dst: make_ram(0x3000, 8),
+                    src: make_const(1, 8),
+                },
+                R2ILOp::CBranch {
+                    target: make_ram(0x1004, 8),
+                    cond: make_const(1, 1),
+                },
+                R2ILOp::Copy {
+                    dst: make_ram(0x3008, 8),
+                    src: make_const(2, 8),
+                },
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+            op_metadata,
+        }];
+
+        let cfg = CFG::from_blocks(&blocks).expect("cfg");
+        assert_eq!(cfg.block_addrs().collect::<Vec<_>>(), vec![0x1000, 0x1004]);
+        assert_eq!(cfg.get_block(0x1000).expect("entry").ops.len(), 3);
+        assert_eq!(cfg.get_block(0x1004).expect("target").ops.len(), 1);
+        assert_eq!(cfg.successors(0x1000), vec![0x1004]);
+        assert_eq!(cfg.predecessors(0x1004), vec![0x1000]);
+    }
+
+    #[test]
+    fn test_internal_conditional_fallthrough_splits_block() {
+        let mut op_metadata = std::collections::BTreeMap::new();
+        for (op_idx, instruction_addr) in [
+            (0, 0x1000),
+            (1, 0x1004),
+            (2, 0x1008),
+            (3, 0x100c),
+            (4, 0x1010),
+            (5, 0x1014),
+        ] {
+            op_metadata.insert(
+                op_idx,
+                OpMetadata {
+                    instruction_addr: Some(instruction_addr),
+                    ..Default::default()
+                },
+            );
+        }
+
+        let blocks = vec![R2ILBlock {
+            addr: 0x1000,
+            size: 0x18,
+            ops: vec![
+                R2ILOp::Copy {
+                    dst: make_ram(0x3000, 8),
+                    src: make_const(1, 8),
+                },
+                R2ILOp::CBranch {
+                    target: make_ram(0x1010, 8),
+                    cond: make_const(1, 1),
+                },
+                R2ILOp::Copy {
+                    dst: make_ram(0x3000, 8),
+                    src: make_const(0, 8),
+                },
+                R2ILOp::Branch {
+                    target: make_ram(0x1014, 8),
+                },
+                R2ILOp::Copy {
+                    dst: make_ram(0x3000, 8),
+                    src: make_const(2, 8),
+                },
+                R2ILOp::Return {
+                    target: make_ram(0, 8),
+                },
+            ],
+            switch_info: None,
+            op_metadata,
+        }];
+
+        let cfg = CFG::from_blocks(&blocks).expect("cfg");
+        assert_eq!(
+            cfg.block_addrs().collect::<Vec<_>>(),
+            vec![0x1000, 0x1008, 0x1010, 0x1014]
+        );
+        assert_eq!(
+            cfg.get_block(0x1000).expect("entry").terminator,
+            BlockTerminator::ConditionalBranch {
+                true_target: 0x1010,
+                false_target: 0x1008
+            }
+        );
+        assert_eq!(cfg.successors(0x1000), vec![0x1010, 0x1008]);
+        assert_eq!(cfg.successors(0x1008), vec![0x1014]);
+        assert_eq!(cfg.successors(0x1010), vec![0x1014]);
     }
 }

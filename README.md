@@ -47,6 +47,8 @@ make RUST_FEATURES=all-archs install
 ```
 
 For a smaller build, you can still choose one architecture (for example, `RUST_FEATURES=x86`).
+Use `RUST_TARGET=debug` for faster local iteration, or `RUST_TARGET=dist` when
+you need the old fat-LTO distributable build.
 
 ### First commands
 
@@ -57,14 +59,14 @@ r2sleigh disasm --arch x86-64 --bytes "4889e500000000000000000000000000"
 # CLI: one-liner instruction export (action + format)
 r2sleigh run --arch x86-64 --bytes "31c00000000000000000000000000000" --action lift --format r2cmd
 
-# Plugin: decompile a function
-r2 -qc 'aaa; s main; a:sla.dec' /bin/ls
+# Plugin: decompile through radare2's bounded snapshot provider
+r2 -qc 'a:sla; aaa; s main; pd:s' /bin/ls
 
 # Plugin: SSA form
-r2 -qc 'aaa; s main; a:sla.ssa' /bin/ls
+r2 -qc 'aaa; s main; a:sla.debug.ssa' /bin/ls
 
 # Plugin: taint analysis
-r2 -qc 'aaa; s main; a:sla.taint' /bin/ls
+r2 -qc 'aaa; s main; a:sla.debug.taint' /bin/ls
 ```
 
 Supported Architectures
@@ -110,6 +112,7 @@ Documentation
 | [doc/taint.md](doc/taint.md) | Taint analysis |
 | [doc/symex.md](doc/symex.md) | Symbolic execution |
 | [doc/plugin.md](doc/plugin.md) | radare2 plugin and commands |
+| [doc/plugin-rfe-2026.md](doc/plugin-rfe-2026.md) | plugin feature and integration RFE |
 | [doc/types.md](doc/types.md) | Type inference |
 | [doc/testing.md](doc/testing.md) | Testing strategy |
 
@@ -142,11 +145,11 @@ ae <esil_expression>
 R2IL Format / Endianness / Memory Semantics
 -------------------------------------------
 
-- `FORMAT_VERSION` is now `4`.
-- Saving emits v4 (`postcard` encoding).
-- Optional legacy loader support for v1/v2/v3 (`bincode` encoding) is available via the `r2il/legacy-bincode` feature.
-- Legacy v1/v2 files are auto-upgraded in memory on load when legacy support is enabled.
-- Legacy bool endianness remains as compatibility shim (`big_endian` / `r2il_is_big_endian`), while canonical fields are:
+- `R2PSTC07` is the sole format identity; there is no independent version field or compatibility branch.
+- Saving emits `R2PSTC07 || payload_length_u64_le || postcard(ArchSpec)` and the reader requires exact payload consumption.
+- Loading accepts only the current v7 representation; older encodings are rejected.
+- `ArchSpec::register_projections` is the source-owned, name-free register geometry table. Empty means unavailable; otherwise it is sorted, complete for unique declared storages, and validated as coherent overlap components.
+- Endianness has exactly two architecture-level authorities:
   - `instruction_endianness`
   - `memory_endianness`
 - Memory semantics baseline includes explicit ops and ordering:
@@ -158,10 +161,7 @@ R2IL Format / Endianness / Memory Semantics
 Compatibility Guarantees
 ------------------------
 
-- `.r2il` writer emits format version `v4`.
-- `.r2il` reader supports `v4` by default.
-- Reading legacy `v1`/`v2`/`v3` artifacts requires enabling `r2il/legacy-bincode`.
-- With legacy support enabled, loading v1/v2 artifacts upgrades fields in memory while preserving behavior.
+- `.r2il` writer and reader accept only the `R2PSTC07` representation; there is no parallel legacy decoder or migration path.
 - Instruction export action/format compatibility is strict and validated:
   - `lift`: `json`, `text`, `esil`, `r2cmd`
   - `ssa`: `json`, `text`

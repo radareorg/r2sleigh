@@ -10,30 +10,42 @@
 // `unsafe` calling convention.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(feature = "alloc-probe")]
+mod counting_alloc;
+#[cfg(feature = "alloc-probe")]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_alloc::CountingAllocator = counting_alloc::CountingAllocator;
+
 mod analysis;
 mod blocks;
 mod context;
 mod decompiler;
+mod ffi_v2;
 mod helpers;
+#[cfg(test)]
+mod plain_o2_lift_fixtures;
 mod types;
 
-use r2il::serialize::UserOpDef;
-use r2il::{ArchSpec, R2ILBlock, R2ILOp, Varnode, serialize, validate_block_full};
-use r2sleigh_export::{
-    ExportFormat, InstructionAction, InstructionExportInput, export_instruction, op_json_named,
-};
-use r2sleigh_lift::{Disassembler, SemanticMetadataOptions, build_arch_spec, userop_map_for_arch};
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-use std::path::Path;
-use std::ptr;
-use std::slice;
-use types::{recover_vars_arch_profile, size_to_type, ssa_var_block_key};
+use ffi_v2::R2SleighEngineRequestPayloadV2;
 
 #[cfg(test)]
 use analysis::ssa::{r2il_block_defuse_json, r2il_block_to_ssa_json};
+use r2il::{ArchSpec, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo, Varnode, validate_block_full};
+use r2sleigh_export::{
+    ExportFormat, InstructionAction, InstructionExportInput, SSA_JSON_SCHEMA_VERSION, SSAOpInfo,
+    export_instruction, op_json_named, ssa_op_to_info,
+};
+use r2sleigh_lift::{Disassembler, SemanticMetadataOptions, TrustedSleighProfile};
+#[cfg(test)]
+use r2types::recover_vars_arch_profile;
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+use std::ptr;
+use std::slice;
 #[cfg(test)]
 use types::parse_const_value;
+#[cfg(test)]
+use types::{size_to_type, ssa_var_block_key};
 
 /// Opaque context handle for C API.
 pub struct R2ILContext {
@@ -44,23 +56,14 @@ pub struct R2ILContext {
     error: Option<CString>,
 }
 
+type R2ILSwitchCaseFfi = ffi_v2::R2SleighSwitchCaseV2;
+
 impl R2ILContext {
     #[allow(dead_code)]
     fn new() -> Self {
         Self {
             arch: None,
             arch_name_cstr: None,
-            disasm: None,
-            semantic_metadata_enabled: true,
-            error: None,
-        }
-    }
-
-    fn with_arch(arch: ArchSpec) -> Self {
-        let name = CString::new(arch.name.clone()).ok();
-        Self {
-            arch: Some(arch),
-            arch_name_cstr: name,
             disasm: None,
             semantic_metadata_enabled: true,
             error: None,
@@ -111,33 +114,10 @@ fn validate_block_in_context(ctx: &mut R2ILContext, block: &R2ILBlock) -> Result
     })
 }
 
-/// Load an r2il file and return a context handle.
-///
-/// Returns NULL on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_load(path: *const c_char) -> *mut R2ILContext {
-    if path.is_null() {
-        return ptr::null_mut();
-    }
-
-    let path_str = unsafe {
-        match CStr::from_ptr(path).to_str() {
-            Ok(s) => s,
-            Err(_) => return ptr::null_mut(),
-        }
-    };
-
-    match serialize::load(Path::new(path_str)) {
-        Ok(arch) => Box::into_raw(Box::new(R2ILContext::with_arch(arch))),
-        Err(e) => Box::into_raw(Box::new(R2ILContext::with_error(&e.to_string()))),
-    }
-}
-
 /// Initialize a context from a built-in architecture (Sleigh via sleigh-config).
 ///
 /// Returns NULL on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_arch_init(arch: *const c_char) -> *mut R2ILContext {
+pub(crate) fn r2il_arch_init(arch: *const c_char) -> *mut R2ILContext {
     if arch.is_null() {
         return ptr::null_mut();
     }
@@ -155,21 +135,10 @@ pub extern "C" fn r2il_arch_init(arch: *const c_char) -> *mut R2ILContext {
     }
 }
 
-/// Free a context handle.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_free(ctx: *mut R2ILContext) {
-    if !ctx.is_null() {
-        unsafe {
-            drop(Box::from_raw(ctx));
-        }
-    }
-}
-
 /// Check if the context has a loaded architecture.
 ///
 /// Returns 1 if loaded, 0 otherwise.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_is_loaded(ctx: *const R2ILContext) -> i32 {
+pub(crate) fn r2il_is_loaded(ctx: *const R2ILContext) -> i32 {
     if ctx.is_null() {
         return 0;
     }
@@ -180,8 +149,7 @@ pub extern "C" fn r2il_is_loaded(ctx: *const R2ILContext) -> i32 {
 /// Get the architecture name.
 ///
 /// Returns NULL if not loaded.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_arch_name(ctx: *const R2ILContext) -> *const c_char {
+pub(crate) fn r2il_arch_name(ctx: *const R2ILContext) -> *const c_char {
     if ctx.is_null() {
         return ptr::null();
     }
@@ -197,8 +165,7 @@ pub extern "C" fn r2il_arch_name(ctx: *const R2ILContext) -> *const c_char {
 /// Get the last error message.
 ///
 /// Returns NULL if no error.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_error(ctx: *const R2ILContext) -> *const c_char {
+pub(crate) fn r2il_error(ctx: *const R2ILContext) -> *const c_char {
     if ctx.is_null() {
         return ptr::null();
     }
@@ -211,61 +178,8 @@ pub extern "C" fn r2il_error(ctx: *const R2ILContext) -> *const c_char {
     }
 }
 
-/// Get the address size in bytes.
-///
-/// Returns 0 if not loaded.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_addr_size(ctx: *const R2ILContext) -> u32 {
-    if ctx.is_null() {
-        return 0;
-    }
-
-    unsafe {
-        match &(*ctx).arch {
-            Some(arch) => helpers::effective_addr_size_bytes(arch),
-            None => 0,
-        }
-    }
-}
-
-/// Check if the architecture is big-endian.
-///
-/// Returns 1 for big-endian, 0 for little-endian or if not loaded.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_is_big_endian(ctx: *const R2ILContext) -> i32 {
-    if ctx.is_null() {
-        return 0;
-    }
-
-    unsafe {
-        match &(*ctx).arch {
-            Some(arch) => i32::from(arch.memory_endianness.to_legacy_big_endian()),
-            None => 0,
-        }
-    }
-}
-
-/// Get the number of registers.
-///
-/// Returns 0 if not loaded.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_register_count(ctx: *const R2ILContext) -> usize {
-    if ctx.is_null() {
-        return 0;
-    }
-
-    unsafe {
-        match &(*ctx).arch {
-            Some(arch) => arch.registers.len(),
-            None => 0,
-        }
-    }
-}
-
-/// Get the register profile string for radare2.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
+/// Build the register profile for the V2 ownership wrapper.
+pub(crate) fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
     if ctx.is_null() {
         return ptr::null_mut();
     }
@@ -280,29 +194,40 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
     let mut reg_meta: std::collections::HashMap<String, (u32, u64, String)> =
         std::collections::HashMap::new();
 
-    // Emit all original register names from Sleigh.
+    // Every register, named in lower case.
+    //
+    // radare2's convention is that an arch plugin's register profile names
+    // registers in lower case, because upper case is what `RReg` uses for the
+    // alias namespace -- `PC`, `SP`, `A0` and the rest. A Sleigh specification
+    // spells its registers whichever way it likes, and the x86 one spells them
+    // in upper case, so emitting them verbatim put names like `SP` into the
+    // namespace radare2 reserves for aliases and left every consumer comparing
+    // `RDX` against a convention that says `rdx`. Lowering here is the fix; the
+    // register the name denotes is unchanged, and this plugin resolves a
+    // spelling back to the specification's own when it needs to.
     for reg in &arch.registers {
+        let name = reg.name.to_ascii_lowercase();
         profile.push_str(&format!(
             "gpr\t{}\t.{}\t{}\t0\n",
-            reg.name,
+            name,
             reg.size * 8,
             reg.offset
         ));
-        reg_meta.insert(
-            reg.name.to_ascii_lowercase(),
-            (reg.size * 8, reg.offset, reg.name.clone()),
-        );
+        reg_meta.insert(name.clone(), (reg.size * 8, reg.offset, name));
     }
 
-    // Emit lowercase aliases for case-insensitive lookups.
-    let mut lowercase_aliases = Vec::new();
-    for (name_lower, (bits, offset, original)) in &reg_meta {
-        if original != name_lower {
-            lowercase_aliases.push((name_lower.clone(), *bits, *offset));
+    let mut stripped_aliases = Vec::new();
+    for (original, (bits, offset, _)) in &reg_meta {
+        if let Some(stripped) = original.strip_prefix('$')
+            && !stripped.is_empty()
+            && !reg_meta.contains_key(stripped)
+        {
+            stripped_aliases.push((stripped.to_string(), *bits, *offset));
         }
     }
-    for (name_lower, bits, offset) in lowercase_aliases {
-        profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", name_lower, bits, offset));
+    for (alias, bits, offset) in stripped_aliases {
+        profile.push_str(&format!("gpr\t{}\t.{}\t{}\t0\n", alias, bits, offset));
+        reg_meta.insert(alias.clone(), (bits, offset, alias));
     }
 
     // Synthesize missing aliases expected by radare2/ESIL for specific arches.
@@ -318,8 +243,8 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
         reg_meta.insert(alias_lower.clone(), (bits, offset, alias_lower));
     };
 
-    let arch_name = arch.name.to_ascii_lowercase();
-    let is_arm64 = arch_name.contains("aarch64") || arch_name.contains("arm64");
+    let architecture = r2ssa::MachineArchitectureFamily::from_arch_spec(Some(arch));
+    let is_arm64 = matches!(architecture, r2ssa::MachineArchitectureFamily::AArch64);
     if is_arm64 {
         // AArch64 Sleigh specs often expose CY/ZR/NG/OV instead of cf/zf/nf/vf.
         add_gpr_alias("cf", "cy");
@@ -336,19 +261,61 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
             .find_map(|name| reg_meta.get(*name).map(|(_, _, original)| original.clone()))
     };
 
-    let pc = first_existing(&["pc", "rip", "eip", "ip"]);
-    let sp = first_existing(&["sp", "rsp", "esp"]);
-    let bp = first_existing(&["bp", "rbp", "ebp", "fp", "x29"]);
+    let first_existing_at_width = |candidates: &[&str], bits: u32| -> Option<String> {
+        candidates.iter().find_map(|name| {
+            reg_meta
+                .get(*name)
+                .filter(|(candidate_bits, _, _)| *candidate_bits == bits)
+                .map(|(_, _, original)| original.clone())
+        })
+    };
+
+    let is_x86 = matches!(
+        architecture,
+        r2ssa::MachineArchitectureFamily::X86 | r2ssa::MachineArchitectureFamily::X86_64
+    );
+    let address_bits = arch.addr_size.checked_mul(8);
+    // The program counter is stated by the processor specification --
+    // `<programcounter register="pc"/>` -- so it is read, not guessed. Every
+    // specification this plugin ships declares it, and one that does not gets no
+    // `=PC` rather than a register picked because its name looked right.
+    //
+    // The spelling is the specification's own, and the profile names registers
+    // in lower case, so the two are reconciled here.
+    let declared_pc = arch
+        .program_counter
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .and_then(|name| reg_meta.get(&name).map(|(_, _, spelling)| spelling.clone()));
+    let (pc, sp, bp) = if is_x86 {
+        (
+            declared_pc,
+            address_bits.and_then(|bits| first_existing_at_width(&["rsp", "esp", "sp"], bits)),
+            address_bits.and_then(|bits| first_existing_at_width(&["rbp", "ebp", "bp"], bits)),
+        )
+    } else {
+        (
+            declared_pc,
+            first_existing(&["sp", "$sp", "rsp", "esp"]),
+            // `x29` before `s8`: `s8` is MIPS's frame pointer and AArch64's
+            // 32-bit SIMD register, and taking the collision made radare2
+            // resolve the frame-pointer alias to a floating-point register.
+            // Everything that asks whether a call preserves the frame pointer
+            // then asked about the wrong one and got no, which withholds every
+            // entry-relative fact from a function that calls.
+            first_existing(&["bp", "rbp", "ebp", "fp", "$fp", "x29", "s8", "$s8"]),
+        )
+    };
 
     let mut a_roles: [Option<String>; 8] = std::array::from_fn(|_| None);
-    a_roles[0] = first_existing(&["rdi", "a0", "x0", "w0", "r0"]);
-    a_roles[1] = first_existing(&["rsi", "a1", "x1", "w1", "r1"]);
-    a_roles[2] = first_existing(&["rdx", "a2", "x2", "w2", "r2"]);
-    a_roles[3] = first_existing(&["rcx", "a3", "x3", "w3", "r3"]);
+    a_roles[0] = first_existing(&["rdi", "a0", "$a0", "x0", "w0", "r0"]);
+    a_roles[1] = first_existing(&["rsi", "a1", "$a1", "x1", "w1", "r1"]);
+    a_roles[2] = first_existing(&["rdx", "a2", "$a2", "x2", "w2", "r2"]);
+    a_roles[3] = first_existing(&["rcx", "a3", "$a3", "x3", "w3", "r3"]);
 
     let mut r_roles: [Option<String>; 4] = std::array::from_fn(|_| None);
-    r_roles[0] = first_existing(&["r0", "rax", "eax", "v0", "x0", "w0"]);
-    r_roles[1] = first_existing(&["r1", "x1", "w1"]);
+    r_roles[0] = first_existing(&["r0", "rax", "eax", "v0", "$v0", "x0", "w0"]);
+    r_roles[1] = first_existing(&["r1", "v1", "$v1", "x1", "w1"]);
     r_roles[2] = first_existing(&["r2", "x2", "w2"]);
     r_roles[3] = first_existing(&["r3", "x3", "w3"]);
 
@@ -376,6 +343,27 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
     }
     if let Some(n) = bp.as_deref() {
         profile.push_str(&format!("=BP\t{}\n", n));
+    }
+    // The link register, where the architecture has one. Without this alias
+    // radare2's return-address lookup walks LR, RA, PC and settles on the
+    // program counter, so every consumer is told the return address lives in
+    // `pc`. On arm64 that named a register the prologue never saves, and the
+    // saved `x30` was left looking like an ordinary local: stored once, read by
+    // nothing, and declared from a value nothing wrote. An architecture with no
+    // link register names none of these and keeps no alias, which is the
+    // truthful answer for x86.
+    let lr = if is_arm64 {
+        first_existing(&["x30", "lr"])
+    } else {
+        // Only spellings that mean the link register wherever they appear.
+        // `r14` is ARM's, but x86-64 has a general register of that name, and
+        // claiming it as the return address made radare2 report R14 as the
+        // return-address carrier for every x86-64 function -- which refused all
+        // twenty-seven of them.
+        first_existing(&["lr", "ra", "$ra"])
+    };
+    if let Some(n) = lr.as_deref() {
+        profile.push_str(&format!("=LR\t{}\n", n));
     }
     for (idx, reg) in a_roles.iter().enumerate() {
         if let Some(n) = reg.as_deref() {
@@ -410,8 +398,7 @@ pub extern "C" fn r2il_get_reg_profile(ctx: *const R2ILContext) -> *mut c_char {
 /// Lift a single instruction into an r2il block.
 ///
 /// Returns NULL on failure or if the context lacks a disassembler.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_lift(
+pub(crate) fn r2il_lift(
     ctx: *mut R2ILContext,
     bytes: *const u8,
     len: usize,
@@ -458,8 +445,7 @@ pub extern "C" fn r2il_lift(
 /// * `block_size` - Size of the basic block in bytes (from radare2)
 ///
 /// Returns NULL on failure or if the context lacks a disassembler.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_lift_block(
+pub(crate) fn r2il_lift_block(
     ctx: *mut R2ILContext,
     bytes: *const u8,
     len: usize,
@@ -498,39 +484,8 @@ pub extern "C" fn r2il_lift_block(
     }
 }
 
-/// Rewrite the logical address and size of a lifted block without touching its lifted ops.
-///
-/// This is used by the C wrapper to keep CFG ownership stable when a block must be
-/// re-lifted from a recovered instruction boundary inside the original radare2 block.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_rewrite_layout(block: *mut R2ILBlock, addr: u64, size: u32) {
-    if block.is_null() {
-        return;
-    }
-
-    let block = unsafe { &mut *block };
-    block.addr = addr;
-    block.size = size;
-}
-
-/// Create a synthetic direct-branch block for CFG healing.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_new_branch(
-    addr: u64,
-    size: u32,
-    target: u64,
-    target_size: u32,
-) -> *mut R2ILBlock {
-    let mut block = R2ILBlock::new(addr, size);
-    block.push(R2ILOp::Branch {
-        target: Varnode::constant(target, target_size.max(1)),
-    });
-    Box::into_raw(Box::new(block))
-}
-
 /// Enable/disable semantic metadata auto-population during lifting.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_set_semantic_metadata_enabled(ctx: *mut R2ILContext, enabled: bool) {
+pub(crate) fn r2il_set_semantic_metadata_enabled(ctx: *mut R2ILContext, enabled: bool) {
     if ctx.is_null() {
         return;
     }
@@ -538,76 +493,11 @@ pub extern "C" fn r2il_set_semantic_metadata_enabled(ctx: *mut R2ILContext, enab
     ctx_ref.semantic_metadata_enabled = enabled;
 }
 
-/// Free a lifted block.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_free(block: *mut R2ILBlock) {
-    if !block.is_null() {
-        unsafe { drop(Box::from_raw(block)) }
-    }
-}
-
-/// Set switch table information for a block.
-/// This should be called after lifting if the block contains a switch statement.
-///
-/// # Arguments
-/// * `block` - The block to set switch info on
-/// * `switch_addr` - Address of the switch instruction
-/// * `min_val` - Minimum case value
-/// * `max_val` - Maximum case value  
-/// * `default_target` - Default case target address (0 if none)
-/// * `case_values` - Array of case values
-/// * `case_targets` - Array of case target addresses
-/// * `num_cases` - Number of cases
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_set_switch_info(
-    block: *mut R2ILBlock,
-    switch_addr: u64,
-    min_val: u64,
-    max_val: u64,
-    default_target: u64,
-    case_values: *const u64,
-    case_targets: *const u64,
-    num_cases: usize,
-) {
-    if block.is_null() || case_values.is_null() || case_targets.is_null() {
-        return;
-    }
-
-    let block = unsafe { &mut *block };
-
-    // Build cases from arrays
-    let mut cases = Vec::with_capacity(num_cases);
-    for i in 0..num_cases {
-        let value = unsafe { *case_values.add(i) };
-        let target = unsafe { *case_targets.add(i) };
-        cases.push(r2il::SwitchCase { value, target });
-    }
-
-    // Deduplicate cases (same target may appear multiple times)
-    cases.sort_by_key(|c| (c.value, c.target));
-    cases.dedup();
-
-    let switch_info = r2il::SwitchInfo {
-        switch_addr,
-        min_val,
-        max_val,
-        default_target: if default_target != 0 {
-            Some(default_target)
-        } else {
-            None
-        },
-        cases,
-    };
-
-    block.set_switch_info(switch_info);
-}
-
 /// Validate a lifted block against full (structural + semantic) r2il invariants.
 ///
 /// Returns 1 when valid, 0 on invalid input or validation failure.
 /// On validation failure, the context error string is updated.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_validate(ctx: *mut R2ILContext, block: *const R2ILBlock) -> i32 {
+pub(crate) fn r2il_block_validate(ctx: *mut R2ILContext, block: *const R2ILBlock) -> i32 {
     if ctx.is_null() || block.is_null() {
         return 0;
     }
@@ -632,21 +522,162 @@ pub extern "C" fn r2il_block_validate(ctx: *mut R2ILContext, block: *const R2ILB
     }
 }
 
+/// Attach radare2 switch/jump-table facts to a lifted block.
+///
+/// Returns 1 when switch metadata was accepted, 0 when the input is absent or
+/// cannot satisfy the r2il switch invariants.
+pub(crate) struct R2ILSwitchInfoInput {
+    pub(crate) block: *mut R2ILBlock,
+    pub(crate) switch_addr: u64,
+    pub(crate) min_val: u64,
+    pub(crate) max_val: u64,
+    pub(crate) default_target: u64,
+    pub(crate) has_default: i32,
+    pub(crate) cases: *const R2ILSwitchCaseFfi,
+    pub(crate) case_count: usize,
+}
+
+pub(crate) fn r2il_block_set_switch_info(input: R2ILSwitchInfoInput) -> i32 {
+    let R2ILSwitchInfoInput {
+        block,
+        switch_addr,
+        min_val,
+        max_val,
+        default_target,
+        has_default,
+        cases,
+        case_count,
+    } = input;
+    if block.is_null() || cases.is_null() || case_count == 0 {
+        return 0;
+    }
+
+    let case_slice = unsafe { slice::from_raw_parts(cases, case_count) };
+    let mut normalized = case_slice
+        .iter()
+        .filter_map(|case| {
+            if case.target == u64::MAX {
+                None
+            } else {
+                Some(SwitchCase {
+                    value: case.value,
+                    target: case.target,
+                })
+            }
+        })
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return 0;
+    }
+
+    normalized.sort_by_key(|case| (case.value, case.target));
+    normalized.dedup();
+    if normalized
+        .windows(2)
+        .any(|window| window[0].value == window[1].value)
+    {
+        return 0;
+    }
+
+    let actual_min = normalized.first().map(|case| case.value).unwrap_or(0);
+    let actual_max = normalized.last().map(|case| case.value).unwrap_or(0);
+    let supplied_range_valid = min_val <= max_val
+        && normalized
+            .iter()
+            .all(|case| case.value >= min_val && case.value <= max_val);
+    let (range_min, range_max) = if supplied_range_valid {
+        (min_val, max_val)
+    } else {
+        (actual_min, actual_max)
+    };
+
+    let default_target = if has_default != 0 && default_target != u64::MAX {
+        Some(default_target)
+    } else {
+        None
+    };
+
+    let info = SwitchInfo {
+        switch_addr,
+        min_val: range_min,
+        max_val: range_max,
+        default_target,
+        cases: normalized,
+    };
+    unsafe {
+        (*block).set_switch_info(info);
+    }
+    1
+}
+
 /// Get the number of operations in a block.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_op_count(block: *const R2ILBlock) -> usize {
+pub(crate) fn r2il_block_op_count(block: *const R2ILBlock) -> usize {
     if block.is_null() {
         return 0;
     }
     unsafe { (*block).ops.len() }
 }
 
-/// Get the ESIL string for a block (one line per op, joined with ';').
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_to_esil(
-    ctx: *const R2ILContext,
+type R2ILDirectCallIdentity = ffi_v2::R2SleighDirectCallIdentityV2;
+
+/// Resolve one raw call instruction to exactly one lifted direct call.
+/// Returns 1 on an exact match, 0 when absent, and -1 when ambiguous or when
+/// the raw target disagrees with the lifted constant target.
+pub(crate) fn r2il_block_direct_call_identity(
     block: *const R2ILBlock,
-) -> *mut c_char {
+    raw_instruction_addr: u64,
+    raw_target_addr: u64,
+    output: *mut R2ILDirectCallIdentity,
+) -> i32 {
+    if block.is_null() || output.is_null() {
+        return -1;
+    }
+    let block = unsafe { &*block };
+    let mut selected = None;
+    for (op_index, op) in block.ops.iter().enumerate() {
+        let R2ILOp::Call { target } = op else {
+            continue;
+        };
+        if block
+            .op_metadata(op_index)
+            .and_then(|metadata| metadata.instruction_addr)
+            != Some(raw_instruction_addr)
+        {
+            continue;
+        }
+        if selected.is_some()
+            || !matches!(target.space, r2il::SpaceId::Const)
+            || target.offset != raw_target_addr
+            || target.size == 0
+        {
+            return -1;
+        }
+        selected = Some((op_index, target));
+    }
+    let Some((op_index, target)) = selected else {
+        return 0;
+    };
+    let (target_space, target_custom_space) = match target.space {
+        r2il::SpaceId::Ram => (ffi_v2::R2SLEIGH_SOURCE_STORAGE_RAM_V2, 0),
+        r2il::SpaceId::Register => (ffi_v2::R2SLEIGH_SOURCE_STORAGE_REGISTER_V2, 0),
+        r2il::SpaceId::Unique => (ffi_v2::R2SLEIGH_SOURCE_STORAGE_UNIQUE_V2, 0),
+        r2il::SpaceId::Const => (ffi_v2::R2SLEIGH_SOURCE_STORAGE_CONSTANT_V2, 0),
+        r2il::SpaceId::Custom(id) => (ffi_v2::R2SLEIGH_SOURCE_STORAGE_CUSTOM_V2, id),
+    };
+    unsafe {
+        *output = R2ILDirectCallIdentity {
+            op_index,
+            target_space,
+            target_custom_space,
+            target_offset: target.offset,
+            target_size: target.size,
+        };
+    }
+    1
+}
+
+/// Get the ESIL string for a block (one line per op, joined with ';').
+pub(crate) fn r2il_block_to_esil(ctx: *const R2ILContext, block: *const R2ILBlock) -> *mut c_char {
     if ctx.is_null() || block.is_null() {
         return ptr::null_mut();
     }
@@ -670,39 +701,13 @@ pub extern "C" fn r2il_block_to_esil(
         native_size: blk.size as usize,
     };
     match export_instruction(&input, InstructionAction::Lift, ExportFormat::Esil) {
-        Ok(esil_lines) => {
-            let joined = esil_lines
-                .lines()
-                .filter(|line| !line.is_empty())
-                .collect::<Vec<_>>()
-                .join(";");
-            CString::new(joined).map_or(ptr::null_mut(), |s| s.into_raw())
-        }
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-/// Get a JSON representation of an operation in a block.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_op_json(block: *const R2ILBlock, index: usize) -> *mut c_char {
-    if block.is_null() {
-        return ptr::null_mut();
-    }
-
-    let blk = unsafe { &*block };
-    if index >= blk.ops.len() {
-        return ptr::null_mut();
-    }
-
-    match serde_json::to_string(&blk.ops[index]) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
+        Ok(esil) => CString::new(esil).map_or(ptr::null_mut(), |s| s.into_raw()),
         Err(_) => ptr::null_mut(),
     }
 }
 
 /// Get a JSON representation of an operation with register names resolved.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_op_json_named(
+pub(crate) fn r2il_block_op_json_named(
     ctx: *const R2ILContext,
     block: *const R2ILBlock,
     index: usize,
@@ -729,8 +734,7 @@ pub extern "C" fn r2il_block_op_json_named(
 }
 
 /// Get the instruction size in bytes.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_size(block: *const R2ILBlock) -> u32 {
+pub(crate) fn r2il_block_size(block: *const R2ILBlock) -> u32 {
     if block.is_null() {
         return 0;
     }
@@ -738,18 +742,15 @@ pub extern "C" fn r2il_block_size(block: *const R2ILBlock) -> u32 {
 }
 
 /// Get the block address.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_addr(block: *const R2ILBlock) -> u64 {
+pub(crate) fn r2il_block_addr(block: *const R2ILBlock) -> u64 {
     if block.is_null() {
         return 0;
     }
     unsafe { (*block).addr }
 }
 
-/// Get the disassembly mnemonic for the instruction.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_mnemonic(
+/// Build the disassembly mnemonic for the V2 ownership wrapper.
+pub(crate) fn r2il_block_mnemonic(
     ctx: *const R2ILContext,
     bytes: *const u8,
     len: usize,
@@ -811,8 +812,7 @@ impl R2AnalOpType {
 
 /// Infer the R_ANAL_OP_TYPE from the r2il operations in a block.
 /// Returns R_ANAL_OP_TYPE_* constant.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_type(block: *const R2ILBlock) -> u32 {
+pub(crate) fn r2il_block_type(block: *const R2ILBlock) -> u32 {
     if block.is_null() {
         return R2AnalOpType::NULL;
     }
@@ -882,8 +882,7 @@ pub extern "C" fn r2il_block_type(block: *const R2ILBlock) -> u32 {
 
 /// Get the jump target address from a block (for JMP/CALL instructions).
 /// Returns 0 if no jump target is found or if indirect.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_jump(block: *const R2ILBlock) -> u64 {
+pub(crate) fn r2il_block_jump(block: *const R2ILBlock) -> u64 {
     if block.is_null() {
         return 0;
     }
@@ -909,8 +908,7 @@ pub extern "C" fn r2il_block_jump(block: *const R2ILBlock) -> u64 {
 
 /// Get the fall-through address (for conditional jumps).
 /// Returns addr + size for conditional branches, 0 otherwise.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_fail(block: *const R2ILBlock) -> u64 {
+pub(crate) fn r2il_block_fail(block: *const R2ILBlock) -> u64 {
     if block.is_null() {
         return 0;
     }
@@ -927,21 +925,24 @@ pub extern "C" fn r2il_block_fail(block: *const R2ILBlock) -> u64 {
     0
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_has_trailing_indirect_branch(block: *const R2ILBlock) -> bool {
-    if block.is_null() {
-        return false;
-    }
-
-    let blk = unsafe { &*block };
-    matches!(blk.ops.last(), Some(R2ILOp::BranchInd { .. }))
-}
-
-/// Free a string returned by r2il functions.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_string_free(s: *mut c_char) {
+#[cfg(test)]
+fn drop_test_ffi_string(s: *mut c_char) {
     if !s.is_null() {
         unsafe { drop(CString::from_raw(s)) };
+    }
+}
+
+#[cfg(test)]
+fn drop_test_context(context: *mut R2ILContext) {
+    if !context.is_null() {
+        unsafe { drop(Box::from_raw(context)) };
+    }
+}
+
+#[cfg(test)]
+fn drop_test_block(block: *mut R2ILBlock) {
+    if !block.is_null() {
+        unsafe { drop(Box::from_raw(block)) };
     }
 }
 
@@ -949,387 +950,69 @@ pub extern "C" fn r2il_string_free(s: *mut c_char) {
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct R2ILBlockMemAccess {
+    is_write: i32,
+    size: u32,
+    addr_reg: *const c_char,
+    base: u64,
+    has_base: i32,
+    delta: i64,
+    is_stack: i32,
+    stack_base: *const c_char,
+    stack_offset: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct R2ILBlockImmediateValue {
+    value: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct R2ILBlockRegValue {
+    name: *const c_char,
+}
+
+pub struct R2ILBlockAnalValues {
+    memory: Vec<R2ILBlockMemAccess>,
+    immediates: Vec<R2ILBlockImmediateValue>,
+    reg_reads: Vec<R2ILBlockRegValue>,
+    reg_writes: Vec<R2ILBlockRegValue>,
+    _strings: Vec<CString>,
+}
+
+fn ffi_values_push_string(strings: &mut Vec<CString>, value: impl AsRef<str>) -> *const c_char {
+    match CString::new(value.as_ref()) {
+        Ok(s) => {
+            strings.push(s);
+            strings.last().map_or(ptr::null(), |s| s.as_ptr())
+        }
+        Err(_) => ptr::null(),
+    }
+}
+
 /// Helper: extract all register varnodes that are read by an operation.
 fn op_regs_read(op: &R2ILOp) -> Vec<&Varnode> {
-    let mut regs = Vec::new();
-
-    match op {
-        // Data movement - src is read
-        R2ILOp::Copy { src, .. } => {
-            if src.is_register() {
-                regs.push(src);
-            }
-        }
-        R2ILOp::Load { addr, .. } => {
-            if addr.is_register() {
-                regs.push(addr);
-            }
-        }
-        R2ILOp::LoadLinked { addr, .. } => {
-            if addr.is_register() {
-                regs.push(addr);
-            }
-        }
-        R2ILOp::Store { addr, val, .. } => {
-            if addr.is_register() {
-                regs.push(addr);
-            }
-            if val.is_register() {
-                regs.push(val);
-            }
-        }
-        R2ILOp::StoreConditional { addr, val, .. } => {
-            if addr.is_register() {
-                regs.push(addr);
-            }
-            if val.is_register() {
-                regs.push(val);
-            }
-        }
-        R2ILOp::AtomicCAS {
-            addr,
-            expected,
-            replacement,
-            ..
-        } => {
-            if addr.is_register() {
-                regs.push(addr);
-            }
-            if expected.is_register() {
-                regs.push(expected);
-            }
-            if replacement.is_register() {
-                regs.push(replacement);
-            }
-        }
-        R2ILOp::LoadGuarded { addr, guard, .. } => {
-            if addr.is_register() {
-                regs.push(addr);
-            }
-            if guard.is_register() {
-                regs.push(guard);
-            }
-        }
-        R2ILOp::StoreGuarded {
-            addr, val, guard, ..
-        } => {
-            if addr.is_register() {
-                regs.push(addr);
-            }
-            if val.is_register() {
-                regs.push(val);
-            }
-            if guard.is_register() {
-                regs.push(guard);
-            }
-        }
-
-        // Binary ops - a and b are read
-        R2ILOp::IntAdd { a, b, .. }
-        | R2ILOp::IntSub { a, b, .. }
-        | R2ILOp::IntMult { a, b, .. }
-        | R2ILOp::IntDiv { a, b, .. }
-        | R2ILOp::IntSDiv { a, b, .. }
-        | R2ILOp::IntRem { a, b, .. }
-        | R2ILOp::IntSRem { a, b, .. }
-        | R2ILOp::IntAnd { a, b, .. }
-        | R2ILOp::IntOr { a, b, .. }
-        | R2ILOp::IntXor { a, b, .. }
-        | R2ILOp::IntLeft { a, b, .. }
-        | R2ILOp::IntRight { a, b, .. }
-        | R2ILOp::IntSRight { a, b, .. }
-        | R2ILOp::IntEqual { a, b, .. }
-        | R2ILOp::IntNotEqual { a, b, .. }
-        | R2ILOp::IntLess { a, b, .. }
-        | R2ILOp::IntSLess { a, b, .. }
-        | R2ILOp::IntLessEqual { a, b, .. }
-        | R2ILOp::IntSLessEqual { a, b, .. }
-        | R2ILOp::IntCarry { a, b, .. }
-        | R2ILOp::IntSCarry { a, b, .. }
-        | R2ILOp::IntSBorrow { a, b, .. }
-        | R2ILOp::BoolAnd { a, b, .. }
-        | R2ILOp::BoolOr { a, b, .. }
-        | R2ILOp::BoolXor { a, b, .. }
-        | R2ILOp::Piece { hi: a, lo: b, .. }
-        | R2ILOp::FloatAdd { a, b, .. }
-        | R2ILOp::FloatSub { a, b, .. }
-        | R2ILOp::FloatMult { a, b, .. }
-        | R2ILOp::FloatDiv { a, b, .. }
-        | R2ILOp::FloatEqual { a, b, .. }
-        | R2ILOp::FloatNotEqual { a, b, .. }
-        | R2ILOp::FloatLess { a, b, .. }
-        | R2ILOp::FloatLessEqual { a, b, .. } => {
-            if a.is_register() {
-                regs.push(a);
-            }
-            if b.is_register() {
-                regs.push(b);
-            }
-        }
-
-        // Unary ops - src is read
-        R2ILOp::IntNegate { src, .. }
-        | R2ILOp::IntNot { src, .. }
-        | R2ILOp::IntZExt { src, .. }
-        | R2ILOp::IntSExt { src, .. }
-        | R2ILOp::BoolNot { src, .. }
-        | R2ILOp::PopCount { src, .. }
-        | R2ILOp::Lzcount { src, .. }
-        | R2ILOp::Subpiece { src, .. }
-        | R2ILOp::FloatNeg { src, .. }
-        | R2ILOp::FloatAbs { src, .. }
-        | R2ILOp::FloatSqrt { src, .. }
-        | R2ILOp::FloatNaN { src, .. }
-        | R2ILOp::Int2Float { src, .. }
-        | R2ILOp::FloatFloat { src, .. }
-        | R2ILOp::Trunc { src, .. }
-        | R2ILOp::FloatCeil { src, .. }
-        | R2ILOp::FloatFloor { src, .. }
-        | R2ILOp::FloatRound { src, .. } => {
-            if src.is_register() {
-                regs.push(src);
-            }
-        }
-
-        // Control flow - target/cond are read
-        R2ILOp::Branch { target }
-        | R2ILOp::BranchInd { target }
-        | R2ILOp::Call { target }
-        | R2ILOp::CallInd { target }
-        | R2ILOp::Return { target } => {
-            if target.is_register() {
-                regs.push(target);
-            }
-        }
-        R2ILOp::CBranch { cond, target } => {
-            if cond.is_register() {
-                regs.push(cond);
-            }
-            if target.is_register() {
-                regs.push(target);
-            }
-        }
-
-        // CallOther - inputs are read
-        R2ILOp::CallOther { inputs, .. } => {
-            for inp in inputs {
-                if inp.is_register() {
-                    regs.push(inp);
-                }
-            }
-        }
-
-        // Float2Int - src is read
-        R2ILOp::Float2Int { src, .. } | R2ILOp::New { src, .. } | R2ILOp::Cast { src, .. } => {
-            if src.is_register() {
-                regs.push(src);
-            }
-        }
-
-        // Extract - src and position are read
-        R2ILOp::Extract { src, position, .. } => {
-            if src.is_register() {
-                regs.push(src);
-            }
-            if position.is_register() {
-                regs.push(position);
-            }
-        }
-
-        // Insert - src, value, position are read
-        R2ILOp::Insert {
-            src,
-            value,
-            position,
-            ..
-        } => {
-            if src.is_register() {
-                regs.push(src);
-            }
-            if value.is_register() {
-                regs.push(value);
-            }
-            if position.is_register() {
-                regs.push(position);
-            }
-        }
-
-        // SegmentOp - segment and offset are read
-        R2ILOp::SegmentOp {
-            segment, offset, ..
-        } => {
-            if segment.is_register() {
-                regs.push(segment);
-            }
-            if offset.is_register() {
-                regs.push(offset);
-            }
-        }
-
-        // PtrAdd/PtrSub - base and index are read
-        R2ILOp::PtrAdd { base, index, .. } | R2ILOp::PtrSub { base, index, .. } => {
-            if base.is_register() {
-                regs.push(base);
-            }
-            if index.is_register() {
-                regs.push(index);
-            }
-        }
-
-        // Multiequal - inputs are read
-        R2ILOp::Multiequal { inputs, .. } => {
-            for inp in inputs {
-                if inp.is_register() {
-                    regs.push(inp);
-                }
-            }
-        }
-
-        // Indirect - src and indirect are read
-        R2ILOp::Indirect { src, indirect, .. } => {
-            if src.is_register() {
-                regs.push(src);
-            }
-            if indirect.is_register() {
-                regs.push(indirect);
-            }
-        }
-
-        // Ops with no register reads
-        R2ILOp::Fence { .. }
-        | R2ILOp::Nop
-        | R2ILOp::Unimplemented
-        | R2ILOp::Breakpoint
-        | R2ILOp::CpuId { .. } => {}
-    }
-
-    regs
+    op.inputs()
+        .into_iter()
+        .filter(|varnode| varnode.is_register())
+        .collect()
 }
 
 /// Helper: extract all register varnodes that are written by an operation.
 fn op_regs_write(op: &R2ILOp) -> Vec<&Varnode> {
-    let mut regs = Vec::new();
-
-    match op {
-        // All ops with dst field write to dst
-        R2ILOp::Copy { dst, .. }
-        | R2ILOp::Load { dst, .. }
-        | R2ILOp::LoadLinked { dst, .. }
-        | R2ILOp::AtomicCAS { dst, .. }
-        | R2ILOp::LoadGuarded { dst, .. }
-        | R2ILOp::IntAdd { dst, .. }
-        | R2ILOp::IntSub { dst, .. }
-        | R2ILOp::IntMult { dst, .. }
-        | R2ILOp::IntDiv { dst, .. }
-        | R2ILOp::IntSDiv { dst, .. }
-        | R2ILOp::IntRem { dst, .. }
-        | R2ILOp::IntSRem { dst, .. }
-        | R2ILOp::IntNegate { dst, .. }
-        | R2ILOp::IntAnd { dst, .. }
-        | R2ILOp::IntOr { dst, .. }
-        | R2ILOp::IntXor { dst, .. }
-        | R2ILOp::IntNot { dst, .. }
-        | R2ILOp::IntLeft { dst, .. }
-        | R2ILOp::IntRight { dst, .. }
-        | R2ILOp::IntSRight { dst, .. }
-        | R2ILOp::IntEqual { dst, .. }
-        | R2ILOp::IntNotEqual { dst, .. }
-        | R2ILOp::IntLess { dst, .. }
-        | R2ILOp::IntSLess { dst, .. }
-        | R2ILOp::IntLessEqual { dst, .. }
-        | R2ILOp::IntSLessEqual { dst, .. }
-        | R2ILOp::IntZExt { dst, .. }
-        | R2ILOp::IntSExt { dst, .. }
-        | R2ILOp::IntCarry { dst, .. }
-        | R2ILOp::IntSCarry { dst, .. }
-        | R2ILOp::IntSBorrow { dst, .. }
-        | R2ILOp::BoolAnd { dst, .. }
-        | R2ILOp::BoolOr { dst, .. }
-        | R2ILOp::BoolXor { dst, .. }
-        | R2ILOp::BoolNot { dst, .. }
-        | R2ILOp::PopCount { dst, .. }
-        | R2ILOp::Lzcount { dst, .. }
-        | R2ILOp::Piece { dst, .. }
-        | R2ILOp::Subpiece { dst, .. }
-        | R2ILOp::FloatAdd { dst, .. }
-        | R2ILOp::FloatSub { dst, .. }
-        | R2ILOp::FloatMult { dst, .. }
-        | R2ILOp::FloatDiv { dst, .. }
-        | R2ILOp::FloatNeg { dst, .. }
-        | R2ILOp::FloatAbs { dst, .. }
-        | R2ILOp::FloatSqrt { dst, .. }
-        | R2ILOp::FloatEqual { dst, .. }
-        | R2ILOp::FloatNotEqual { dst, .. }
-        | R2ILOp::FloatLess { dst, .. }
-        | R2ILOp::FloatLessEqual { dst, .. }
-        | R2ILOp::FloatNaN { dst, .. }
-        | R2ILOp::Int2Float { dst, .. }
-        | R2ILOp::FloatFloat { dst, .. }
-        | R2ILOp::Trunc { dst, .. }
-        | R2ILOp::FloatCeil { dst, .. }
-        | R2ILOp::FloatFloor { dst, .. }
-        | R2ILOp::FloatRound { dst, .. } => {
-            if dst.is_register() {
-                regs.push(dst);
-            }
-        }
-
-        // Store doesn't have a register dst
-        R2ILOp::Store { .. } => {}
-        R2ILOp::StoreConditional { result, .. } => {
-            if let Some(out) = result
-                && out.is_register()
-            {
-                regs.push(out);
-            }
-        }
-        R2ILOp::StoreGuarded { .. } => {}
-
-        // Control flow ops don't write registers directly
-        R2ILOp::Branch { .. }
-        | R2ILOp::BranchInd { .. }
-        | R2ILOp::CBranch { .. }
-        | R2ILOp::Call { .. }
-        | R2ILOp::CallInd { .. }
-        | R2ILOp::Return { .. } => {}
-
-        // CallOther may have output
-        R2ILOp::CallOther { output, .. } => {
-            if let Some(out) = output
-                && out.is_register()
-            {
-                regs.push(out);
-            }
-        }
-
-        // Ops with dst field that write
-        R2ILOp::Float2Int { dst, .. }
-        | R2ILOp::CpuId { dst, .. }
-        | R2ILOp::SegmentOp { dst, .. }
-        | R2ILOp::New { dst, .. }
-        | R2ILOp::Cast { dst, .. }
-        | R2ILOp::Extract { dst, .. }
-        | R2ILOp::Insert { dst, .. }
-        | R2ILOp::Multiequal { dst, .. }
-        | R2ILOp::Indirect { dst, .. }
-        | R2ILOp::PtrAdd { dst, .. }
-        | R2ILOp::PtrSub { dst, .. } => {
-            if dst.is_register() {
-                regs.push(dst);
-            }
-        }
-
-        // Ops with no register writes
-        R2ILOp::Fence { .. } | R2ILOp::Nop | R2ILOp::Unimplemented | R2ILOp::Breakpoint => {}
-    }
-
-    regs
+    op.output()
+        .into_iter()
+        .filter(|varnode| varnode.is_register())
+        .collect()
 }
 
 /// Get registers read by the block as JSON array of names.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_regs_read(
+/// Internal V2 wrapper immediately adopts the returned CString allocation.
+pub(crate) fn r2il_block_regs_read(
     ctx: *const R2ILContext,
     block: *const R2ILBlock,
 ) -> *mut c_char {
@@ -1359,11 +1042,78 @@ pub extern "C" fn r2il_block_regs_read(
     CString::new(json_array).map_or(ptr::null_mut(), |c| c.into_raw())
 }
 
-/// Get memory accesses by the block as JSON array.
-/// Each entry includes legacy fields (`addr`, `size`, `write`) and richer metadata.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_mem_access(
+const R2IL_MEMORY_ACCESS_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, serde::Serialize)]
+struct R2ILMemoryStackAddress {
+    base: String,
+    offset: i64,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+struct R2ILMemoryAccessSemantics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guarded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ordering: Option<r2il::MemoryOrdering>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    atomic_kind: Option<r2il::AtomicKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_class: Option<r2il::MemoryClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permissions: Option<r2il::MemoryPermissions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    range: Option<r2il::MemoryRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bank_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segment_id: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct R2ILMemoryAccess {
+    schema_version: u32,
+    #[serde(rename = "type")]
+    access_type: &'static str,
+    size_bytes: u32,
+    address: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stack_address: Option<R2ILMemoryStackAddress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replacement: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guard: Option<serde_json::Value>,
+    #[serde(flatten)]
+    semantics: R2ILMemoryAccessSemantics,
+}
+
+impl R2ILMemoryAccess {
+    fn new(access_type: &'static str, size_bytes: u32, address: serde_json::Value) -> Self {
+        Self {
+            schema_version: R2IL_MEMORY_ACCESS_SCHEMA_VERSION,
+            access_type,
+            size_bytes,
+            address,
+            stack_address: None,
+            value: None,
+            expected: None,
+            replacement: None,
+            result: None,
+            guard: None,
+            semantics: R2ILMemoryAccessSemantics::default(),
+        }
+    }
+}
+
+/// Get memory accesses by the block as one canonical JSON array.
+/// Internal V2 wrapper immediately adopts the returned CString allocation.
+pub(crate) fn r2il_block_mem_access(
     ctx: *const R2ILContext,
     block: *const R2ILBlock,
 ) -> *mut c_char {
@@ -1381,45 +1131,26 @@ pub extern "C" fn r2il_block_mem_access(
     let defs = build_stack_defs(&blk.ops);
     let mut accesses = Vec::new();
 
-    let apply_additive_fields = |access: &mut serde_json::Value,
-                                 op_index: usize,
-                                 space_id: Option<r2il::SpaceId>,
-                                 ordering: Option<r2il::MemoryOrdering>,
-                                 atomic_kind: Option<r2il::AtomicKind>,
-                                 guarded: bool| {
-        if guarded {
-            access["guarded"] = serde_json::Value::Bool(true);
-        }
-        if let Some(ord) = ordering.or_else(|| {
+    let apply_semantics = |access: &mut R2ILMemoryAccess,
+                           op_index: usize,
+                           space_id: Option<r2il::SpaceId>,
+                           ordering: Option<r2il::MemoryOrdering>,
+                           atomic_kind: Option<r2il::AtomicKind>,
+                           guarded: bool| {
+        access.semantics.guarded = guarded.then_some(true);
+        access.semantics.ordering = ordering.or_else(|| {
             blk.op_metadata
                 .get(&op_index)
                 .and_then(|m| m.memory_ordering)
-        }) {
-            access["ordering"] = serde_json::to_value(ord).unwrap_or(serde_json::Value::Null);
-        }
-        if let Some(kind) =
-            atomic_kind.or_else(|| blk.op_metadata.get(&op_index).and_then(|m| m.atomic_kind))
-        {
-            access["atomic_kind"] = serde_json::to_value(kind).unwrap_or(serde_json::Value::Null);
-        }
+        });
+        access.semantics.atomic_kind =
+            atomic_kind.or_else(|| blk.op_metadata.get(&op_index).and_then(|m| m.atomic_kind));
         if let Some(meta) = blk.op_metadata.get(&op_index) {
-            if let Some(memory_class) = meta.memory_class {
-                access["memory_class"] =
-                    serde_json::to_value(memory_class).unwrap_or(serde_json::Value::Null);
-            }
-            if let Some(perms) = meta.permissions {
-                access["permissions"] =
-                    serde_json::to_value(perms).unwrap_or(serde_json::Value::Null);
-            }
-            if let Some(range) = meta.valid_range {
-                access["range"] = serde_json::to_value(range).unwrap_or(serde_json::Value::Null);
-            }
-            if let Some(bank_id) = &meta.bank_id {
-                access["bank_id"] = serde_json::Value::String(bank_id.clone());
-            }
-            if let Some(segment_id) = &meta.segment_id {
-                access["segment_id"] = serde_json::Value::String(segment_id.clone());
-            }
+            access.semantics.memory_class = meta.memory_class;
+            access.semantics.permissions = meta.permissions;
+            access.semantics.range = meta.valid_range;
+            access.semantics.bank_id = meta.bank_id.clone();
+            access.semantics.segment_id = meta.segment_id.clone();
         }
 
         if let Some(space_id) = space_id
@@ -1427,29 +1158,19 @@ pub extern "C" fn r2il_block_mem_access(
             && let Some(space) = arch.spaces.iter().find(|s| s.id == space_id)
         {
             if let Some(memory_class) = space.memory_class {
-                access["memory_class"] =
-                    serde_json::to_value(memory_class).unwrap_or(serde_json::Value::Null);
+                access.semantics.memory_class = Some(memory_class);
             }
-            if access.get("permissions").is_none()
-                && let Some(perms) = space.permissions
-            {
-                access["permissions"] =
-                    serde_json::to_value(perms).unwrap_or(serde_json::Value::Null);
+            if access.semantics.permissions.is_none() {
+                access.semantics.permissions = space.permissions;
             }
-            if access.get("range").is_none()
-                && let Some(range) = space.valid_ranges.first()
-            {
-                access["range"] = serde_json::to_value(range).unwrap_or(serde_json::Value::Null);
+            if access.semantics.range.is_none() {
+                access.semantics.range = space.valid_ranges.first().copied();
             }
-            if access.get("bank_id").is_none()
-                && let Some(bank_id) = &space.bank_id
-            {
-                access["bank_id"] = serde_json::Value::String(bank_id.clone());
+            if access.semantics.bank_id.is_none() {
+                access.semantics.bank_id = space.bank_id.clone();
             }
-            if access.get("segment_id").is_none()
-                && let Some(segment_id) = &space.segment_id
-            {
-                access["segment_id"] = serde_json::Value::String(segment_id.clone());
+            if access.semantics.segment_id.is_none() {
+                access.semantics.segment_id = space.segment_id.clone();
             }
         }
     };
@@ -1457,24 +1178,16 @@ pub extern "C" fn r2il_block_mem_access(
     for (op_index, op) in blk.ops.iter().enumerate() {
         match op {
             R2ILOp::Load { dst, space, addr } => {
-                let mut access = serde_json::json!({
-                    "type": "load",
-                    "size": dst.size,
-                    "write": false,
-                    "addr": disasm.format_varnode(addr),
-                });
-
-                if let Some(detail) = varnode_to_json(addr, disasm) {
-                    access["addr_detail"] = detail;
-                }
+                let Some(address) = varnode_to_json(addr, disasm) else {
+                    return ptr::null_mut();
+                };
+                let mut access = R2ILMemoryAccess::new("load", dst.size, address);
 
                 if let Some((base, offset)) = resolve_stack_addr(addr, disasm, &defs, &blk.ops) {
-                    access["stack"] = serde_json::Value::Bool(true);
-                    access["stack_offset"] = serde_json::Value::Number(offset.into());
-                    access["stack_base"] = serde_json::Value::String(base);
+                    access.stack_address = Some(R2ILMemoryStackAddress { base, offset });
                 }
 
-                apply_additive_fields(&mut access, op_index, Some(*space), None, None, false);
+                apply_semantics(&mut access, op_index, Some(*space), None, None, false);
                 accesses.push(access);
             }
             R2ILOp::LoadLinked {
@@ -1483,17 +1196,11 @@ pub extern "C" fn r2il_block_mem_access(
                 addr,
                 ordering,
             } => {
-                let mut access = serde_json::json!({
-                    "type": "load_linked",
-                    "size": dst.size,
-                    "write": false,
-                    "addr": disasm.format_varnode(addr),
-                });
-
-                if let Some(detail) = varnode_to_json(addr, disasm) {
-                    access["addr_detail"] = detail;
-                }
-                apply_additive_fields(
+                let Some(address) = varnode_to_json(addr, disasm) else {
+                    return ptr::null_mut();
+                };
+                let mut access = R2ILMemoryAccess::new("load_linked", dst.size, address);
+                apply_semantics(
                     &mut access,
                     op_index,
                     Some(*space),
@@ -1504,27 +1211,19 @@ pub extern "C" fn r2il_block_mem_access(
                 accesses.push(access);
             }
             R2ILOp::Store { space, addr, val } => {
-                let mut access = serde_json::json!({
-                    "type": "store",
-                    "size": val.size,
-                    "write": true,
-                    "addr": disasm.format_varnode(addr),
-                });
-
-                if let Some(detail) = varnode_to_json(addr, disasm) {
-                    access["addr_detail"] = detail;
-                }
-                if let Some(value) = varnode_to_json(val, disasm) {
-                    access["value"] = value;
-                }
+                let (Some(address), Some(value)) =
+                    (varnode_to_json(addr, disasm), varnode_to_json(val, disasm))
+                else {
+                    return ptr::null_mut();
+                };
+                let mut access = R2ILMemoryAccess::new("store", val.size, address);
+                access.value = Some(value);
 
                 if let Some((base, offset)) = resolve_stack_addr(addr, disasm, &defs, &blk.ops) {
-                    access["stack"] = serde_json::Value::Bool(true);
-                    access["stack_offset"] = serde_json::Value::Number(offset.into());
-                    access["stack_base"] = serde_json::Value::String(base);
+                    access.stack_address = Some(R2ILMemoryStackAddress { base, offset });
                 }
 
-                apply_additive_fields(&mut access, op_index, Some(*space), None, None, false);
+                apply_semantics(&mut access, op_index, Some(*space), None, None, false);
                 accesses.push(access);
             }
             R2ILOp::StoreConditional {
@@ -1534,24 +1233,23 @@ pub extern "C" fn r2il_block_mem_access(
                 val,
                 ordering,
             } => {
-                let mut access = serde_json::json!({
-                    "type": "store_conditional",
-                    "size": val.size,
-                    "write": true,
-                    "addr": disasm.format_varnode(addr),
-                });
-                if let Some(detail) = varnode_to_json(addr, disasm) {
-                    access["addr_detail"] = detail;
-                }
-                if let Some(value) = varnode_to_json(val, disasm) {
-                    access["value"] = value;
-                }
-                if let Some(dst) = result
-                    && let Some(result_json) = varnode_to_json(dst, disasm)
-                {
-                    access["result"] = result_json;
-                }
-                apply_additive_fields(
+                let (Some(address), Some(value)) =
+                    (varnode_to_json(addr, disasm), varnode_to_json(val, disasm))
+                else {
+                    return ptr::null_mut();
+                };
+                let mut access = R2ILMemoryAccess::new("store_conditional", val.size, address);
+                access.value = Some(value);
+                access.result = match result {
+                    Some(dst) => {
+                        let Some(result) = varnode_to_json(dst, disasm) else {
+                            return ptr::null_mut();
+                        };
+                        Some(result)
+                    }
+                    None => None,
+                };
+                apply_semantics(
                     &mut access,
                     op_index,
                     Some(*space),
@@ -1569,25 +1267,19 @@ pub extern "C" fn r2il_block_mem_access(
                 replacement,
                 ordering,
             } => {
-                let mut access = serde_json::json!({
-                    "type": "atomic_cas",
-                    "size": dst.size,
-                    "write": true,
-                    "addr": disasm.format_varnode(addr),
-                });
-                if let Some(detail) = varnode_to_json(addr, disasm) {
-                    access["addr_detail"] = detail;
-                }
-                if let Some(value) = varnode_to_json(expected, disasm) {
-                    access["expected"] = value;
-                }
-                if let Some(value) = varnode_to_json(replacement, disasm) {
-                    access["replacement"] = value;
-                }
-                if let Some(value) = varnode_to_json(dst, disasm) {
-                    access["result"] = value;
-                }
-                apply_additive_fields(
+                let (Some(address), Some(expected), Some(replacement), Some(result)) = (
+                    varnode_to_json(addr, disasm),
+                    varnode_to_json(expected, disasm),
+                    varnode_to_json(replacement, disasm),
+                    varnode_to_json(dst, disasm),
+                ) else {
+                    return ptr::null_mut();
+                };
+                let mut access = R2ILMemoryAccess::new("atomic_cas", dst.size, address);
+                access.expected = Some(expected);
+                access.replacement = Some(replacement);
+                access.result = Some(result);
+                apply_semantics(
                     &mut access,
                     op_index,
                     Some(*space),
@@ -1604,19 +1296,15 @@ pub extern "C" fn r2il_block_mem_access(
                 guard,
                 ordering,
             } => {
-                let mut access = serde_json::json!({
-                    "type": "load_guarded",
-                    "size": dst.size,
-                    "write": false,
-                    "addr": disasm.format_varnode(addr),
-                });
-                if let Some(detail) = varnode_to_json(addr, disasm) {
-                    access["addr_detail"] = detail;
-                }
-                if let Some(value) = varnode_to_json(guard, disasm) {
-                    access["guard"] = value;
-                }
-                apply_additive_fields(
+                let (Some(address), Some(guard)) = (
+                    varnode_to_json(addr, disasm),
+                    varnode_to_json(guard, disasm),
+                ) else {
+                    return ptr::null_mut();
+                };
+                let mut access = R2ILMemoryAccess::new("load_guarded", dst.size, address);
+                access.guard = Some(guard);
+                apply_semantics(
                     &mut access,
                     op_index,
                     Some(*space),
@@ -1633,22 +1321,17 @@ pub extern "C" fn r2il_block_mem_access(
                 guard,
                 ordering,
             } => {
-                let mut access = serde_json::json!({
-                    "type": "store_guarded",
-                    "size": val.size,
-                    "write": true,
-                    "addr": disasm.format_varnode(addr),
-                });
-                if let Some(detail) = varnode_to_json(addr, disasm) {
-                    access["addr_detail"] = detail;
-                }
-                if let Some(value) = varnode_to_json(val, disasm) {
-                    access["value"] = value;
-                }
-                if let Some(value) = varnode_to_json(guard, disasm) {
-                    access["guard"] = value;
-                }
-                apply_additive_fields(
+                let (Some(address), Some(value), Some(guard)) = (
+                    varnode_to_json(addr, disasm),
+                    varnode_to_json(val, disasm),
+                    varnode_to_json(guard, disasm),
+                ) else {
+                    return ptr::null_mut();
+                };
+                let mut access = R2ILMemoryAccess::new("store_guarded", val.size, address);
+                access.value = Some(value);
+                access.guard = Some(guard);
+                apply_semantics(
                     &mut access,
                     op_index,
                     Some(*space),
@@ -1668,12 +1351,8 @@ pub extern "C" fn r2il_block_mem_access(
 
 /// Get all varnodes used by the block as JSON.
 /// Includes registers, memory locations, constants, and temporaries.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_varnodes(
-    ctx: *const R2ILContext,
-    block: *const R2ILBlock,
-) -> *mut c_char {
+/// Internal V2 wrapper immediately adopts the returned CString allocation.
+pub(crate) fn r2il_block_varnodes(ctx: *const R2ILContext, block: *const R2ILBlock) -> *mut c_char {
     if ctx.is_null() || block.is_null() {
         return ptr::null_mut();
     }
@@ -1685,23 +1364,14 @@ pub extern "C" fn r2il_block_varnodes(
     };
 
     let blk = unsafe { &*block };
-    let mut seen: HashSet<(u8, u64, u32)> = HashSet::new();
+    let mut seen: HashSet<VarnodeKey> = HashSet::new();
     let mut varnodes: Vec<VarnodeInfo> = Vec::new();
 
     for op in &blk.ops {
         for vn in op_all_varnodes(op) {
-            let space_id = match vn.space {
-                r2il::SpaceId::Const => 0,
-                r2il::SpaceId::Register => 1,
-                r2il::SpaceId::Ram => 2,
-                r2il::SpaceId::Unique => 3,
-                r2il::SpaceId::Custom(n) => 4 + (n as u8),
-            };
-            let key = (space_id, vn.offset, vn.size);
-            if seen.contains(&key) {
+            if !seen.insert(varnode_key(vn)) {
                 continue;
             }
-            seen.insert(key);
 
             let (name, space_str) = match vn.space {
                 r2il::SpaceId::Const => (format!("0x{:x}", vn.offset), space_label(vn.space)),
@@ -1731,6 +1401,219 @@ pub extern "C" fn r2il_block_varnodes(
 
     let json = serde_json::to_string(&varnodes).unwrap_or_default();
     CString::new(json).map_or(ptr::null_mut(), |c| c.into_raw())
+}
+
+fn block_values_for_ffi(
+    ctx_ref: &R2ILContext,
+    blk: &R2ILBlock,
+    disasm: &Disassembler,
+) -> R2ILBlockAnalValues {
+    let defs = build_stack_defs(&blk.ops);
+    let mut strings = Vec::new();
+    let mut memory = Vec::new();
+    let mut immediates = Vec::new();
+    let mut seen_immediates: HashSet<(u64, u32)> = HashSet::new();
+    let mut reg_reads = BTreeSet::new();
+    let mut reg_writes = BTreeSet::new();
+
+    for op in &blk.ops {
+        for reg in op_regs_read(op) {
+            if let Some(name) = disasm.register_name(reg) {
+                reg_reads.insert(name);
+            }
+        }
+        for reg in op_regs_write(op) {
+            if let Some(name) = disasm.register_name(reg) {
+                reg_writes.insert(name);
+            }
+        }
+        for vn in op_all_varnodes(op) {
+            if vn.space.is_const() && seen_immediates.insert((vn.offset, vn.size)) {
+                immediates.push(R2ILBlockImmediateValue { value: vn.offset });
+            }
+        }
+    }
+
+    let mut push_mem = |addr: &Varnode, size: u32, is_write: bool| {
+        let stack = resolve_stack_addr(addr, disasm, &defs, &blk.ops);
+        let addr_reg = if addr.is_register() {
+            disasm
+                .register_name(addr)
+                .map(|name| ffi_values_push_string(&mut strings, name))
+                .unwrap_or(ptr::null())
+        } else {
+            ptr::null()
+        };
+        let (stack_base, stack_offset, is_stack) = match stack {
+            Some((base, offset)) => (ffi_values_push_string(&mut strings, base), offset, 1),
+            None => (ptr::null(), 0, 0),
+        };
+        memory.push(R2ILBlockMemAccess {
+            is_write: i32::from(is_write),
+            size,
+            addr_reg,
+            base: if addr.is_register() { 0 } else { addr.offset },
+            has_base: i32::from(!addr.is_register()),
+            delta: if addr.is_register() {
+                addr.offset as i64
+            } else {
+                0
+            },
+            is_stack,
+            stack_base,
+            stack_offset,
+        });
+    };
+
+    for op in &blk.ops {
+        match op {
+            R2ILOp::Load { dst, addr, .. }
+            | R2ILOp::LoadLinked { dst, addr, .. }
+            | R2ILOp::LoadGuarded { dst, addr, .. } => {
+                push_mem(addr, dst.size, false);
+            }
+            R2ILOp::Store { addr, val, .. }
+            | R2ILOp::StoreConditional { addr, val, .. }
+            | R2ILOp::StoreGuarded { addr, val, .. } => {
+                push_mem(addr, val.size, true);
+            }
+            R2ILOp::AtomicCAS { dst, addr, .. } => {
+                push_mem(addr, dst.size, true);
+            }
+            _ => {}
+        }
+    }
+
+    let reg_reads = reg_reads
+        .into_iter()
+        .filter_map(|name| {
+            let ptr = ffi_values_push_string(&mut strings, name);
+            (!ptr.is_null()).then_some(R2ILBlockRegValue { name: ptr })
+        })
+        .collect();
+    let reg_writes = reg_writes
+        .into_iter()
+        .filter_map(|name| {
+            let ptr = ffi_values_push_string(&mut strings, name);
+            (!ptr.is_null()).then_some(R2ILBlockRegValue { name: ptr })
+        })
+        .collect();
+
+    let _ = ctx_ref;
+    R2ILBlockAnalValues {
+        memory,
+        immediates,
+        reg_reads,
+        reg_writes,
+        _strings: strings,
+    }
+}
+
+pub(crate) fn r2il_block_values_typed(
+    ctx: *const R2ILContext,
+    block: *const R2ILBlock,
+) -> *mut R2ILBlockAnalValues {
+    if ctx.is_null() || block.is_null() {
+        return ptr::null_mut();
+    }
+    let ctx_ref = unsafe { &*ctx };
+    let Some(disasm) = ctx_ref.disasm.as_ref() else {
+        return ptr::null_mut();
+    };
+    let blk = unsafe { &*block };
+    Box::into_raw(Box::new(block_values_for_ffi(ctx_ref, blk, disasm)))
+}
+
+pub(crate) fn r2il_block_values_memory(
+    values: *const R2ILBlockAnalValues,
+    count: *mut usize,
+) -> *const R2ILBlockMemAccess {
+    if values.is_null() {
+        if !count.is_null() {
+            unsafe {
+                *count = 0;
+            }
+        }
+        return ptr::null();
+    }
+    let values = unsafe { &*values };
+    if !count.is_null() {
+        unsafe {
+            *count = values.memory.len();
+        }
+    }
+    values.memory.as_ptr()
+}
+
+pub(crate) fn r2il_block_values_immediates(
+    values: *const R2ILBlockAnalValues,
+    count: *mut usize,
+) -> *const R2ILBlockImmediateValue {
+    if values.is_null() {
+        if !count.is_null() {
+            unsafe {
+                *count = 0;
+            }
+        }
+        return ptr::null();
+    }
+    let values = unsafe { &*values };
+    if !count.is_null() {
+        unsafe {
+            *count = values.immediates.len();
+        }
+    }
+    values.immediates.as_ptr()
+}
+
+pub(crate) fn r2il_block_values_reg_reads(
+    values: *const R2ILBlockAnalValues,
+    count: *mut usize,
+) -> *const R2ILBlockRegValue {
+    if values.is_null() {
+        if !count.is_null() {
+            unsafe {
+                *count = 0;
+            }
+        }
+        return ptr::null();
+    }
+    let values = unsafe { &*values };
+    if !count.is_null() {
+        unsafe {
+            *count = values.reg_reads.len();
+        }
+    }
+    values.reg_reads.as_ptr()
+}
+
+pub(crate) fn r2il_block_values_reg_writes(
+    values: *const R2ILBlockAnalValues,
+    count: *mut usize,
+) -> *const R2ILBlockRegValue {
+    if values.is_null() {
+        if !count.is_null() {
+            unsafe {
+                *count = 0;
+            }
+        }
+        return ptr::null();
+    }
+    let values = unsafe { &*values };
+    if !count.is_null() {
+        unsafe {
+            *count = values.reg_writes.len();
+        }
+    }
+    values.reg_writes.as_ptr()
+}
+
+pub(crate) fn r2il_block_values_free(values: *mut R2ILBlockAnalValues) {
+    if !values.is_null() {
+        unsafe {
+            drop(Box::from_raw(values));
+        }
+    }
 }
 
 fn space_label(space: r2il::SpaceId) -> String {
@@ -1763,7 +1646,7 @@ fn varnode_to_json(vn: &Varnode, disasm: &Disassembler) -> Option<serde_json::Va
     Some(json)
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 struct VarnodeKey {
     space: r2il::SpaceId,
     offset: u64,
@@ -1928,9 +1811,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Get registers written by the block as JSON array of names.
-/// Caller must free the returned string with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2il_block_regs_write(
+/// Internal V2 wrapper immediately adopts the returned CString allocation.
+pub(crate) fn r2il_block_regs_write(
     ctx: *const R2ILContext,
     block: *const R2ILBlock,
 ) -> *mut c_char {
@@ -2100,265 +1982,183 @@ fn op_all_varnodes(op: &R2ILOp) -> Vec<&Varnode> {
 // SSA Functions
 // ============================================================================
 
-/// SSA operation info for JSON output.
-#[derive(Serialize)]
-struct SSAOpInfo {
-    op: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    dst: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    sources: Vec<String>,
-}
-
-/// Convert SSAOp to JSON-serializable info.
-fn ssa_op_to_info(op: &r2ssa::SSAOp) -> SSAOpInfo {
-    use r2ssa::SSAOp::*;
-
-    let op_name = match op {
-        Phi { .. } => "Phi",
-        Copy { .. } => "Copy",
-        Load { .. } => "Load",
-        Store { .. } => "Store",
-        Fence { .. } => "Fence",
-        LoadLinked { .. } => "LoadLinked",
-        StoreConditional { .. } => "StoreConditional",
-        AtomicCAS { .. } => "AtomicCAS",
-        LoadGuarded { .. } => "LoadGuarded",
-        StoreGuarded { .. } => "StoreGuarded",
-        IntAdd { .. } => "IntAdd",
-        IntSub { .. } => "IntSub",
-        IntMult { .. } => "IntMult",
-        IntDiv { .. } => "IntDiv",
-        IntSDiv { .. } => "IntSDiv",
-        IntRem { .. } => "IntRem",
-        IntSRem { .. } => "IntSRem",
-        IntNegate { .. } => "IntNegate",
-        IntCarry { .. } => "IntCarry",
-        IntSCarry { .. } => "IntSCarry",
-        IntSBorrow { .. } => "IntSBorrow",
-        IntAnd { .. } => "IntAnd",
-        IntOr { .. } => "IntOr",
-        IntXor { .. } => "IntXor",
-        IntNot { .. } => "IntNot",
-        IntLeft { .. } => "IntLeft",
-        IntRight { .. } => "IntRight",
-        IntSRight { .. } => "IntSRight",
-        IntEqual { .. } => "IntEqual",
-        IntNotEqual { .. } => "IntNotEqual",
-        IntLess { .. } => "IntLess",
-        IntSLess { .. } => "IntSLess",
-        IntLessEqual { .. } => "IntLessEqual",
-        IntSLessEqual { .. } => "IntSLessEqual",
-        IntZExt { .. } => "IntZExt",
-        IntSExt { .. } => "IntSExt",
-        BoolNot { .. } => "BoolNot",
-        BoolAnd { .. } => "BoolAnd",
-        BoolOr { .. } => "BoolOr",
-        BoolXor { .. } => "BoolXor",
-        Piece { .. } => "Piece",
-        Subpiece { .. } => "Subpiece",
-        PopCount { .. } => "PopCount",
-        Lzcount { .. } => "Lzcount",
-        Branch { .. } => "Branch",
-        CBranch { .. } => "CBranch",
-        BranchInd { .. } => "BranchInd",
-        Call { .. } => "Call",
-        CallInd { .. } => "CallInd",
-        CallDefine { .. } => "CallDefine",
-        Return { .. } => "Return",
-        FloatAdd { .. } => "FloatAdd",
-        FloatSub { .. } => "FloatSub",
-        FloatMult { .. } => "FloatMult",
-        FloatDiv { .. } => "FloatDiv",
-        FloatNeg { .. } => "FloatNeg",
-        FloatAbs { .. } => "FloatAbs",
-        FloatSqrt { .. } => "FloatSqrt",
-        FloatCeil { .. } => "FloatCeil",
-        FloatFloor { .. } => "FloatFloor",
-        FloatRound { .. } => "FloatRound",
-        FloatNaN { .. } => "FloatNaN",
-        FloatEqual { .. } => "FloatEqual",
-        FloatNotEqual { .. } => "FloatNotEqual",
-        FloatLess { .. } => "FloatLess",
-        FloatLessEqual { .. } => "FloatLessEqual",
-        Int2Float { .. } => "Int2Float",
-        Float2Int { .. } => "Float2Int",
-        FloatFloat { .. } => "FloatFloat",
-        Trunc { .. } => "Trunc",
-        CallOther { .. } => "CallOther",
-        Nop => "Nop",
-        Unimplemented => "Unimplemented",
-        CpuId { .. } => "CpuId",
-        Breakpoint => "Breakpoint",
-        PtrAdd { .. } => "PtrAdd",
-        PtrSub { .. } => "PtrSub",
-        SegmentOp { .. } => "SegmentOp",
-        New { .. } => "New",
-        Cast { .. } => "Cast",
-        Extract { .. } => "Extract",
-        Insert { .. } => "Insert",
-    };
-
-    SSAOpInfo {
-        op: op_name.to_string(),
-        dst: op.dst().map(|v| v.display_name()),
-        sources: op.sources().iter().map(|v| v.display_name()).collect(),
-    }
-}
-
 // Remaining taint/SSA/CFG/sym surfaces are implemented under r2plugin/src/analysis/.
 
 // ============================================================================
 // Architecture Helpers
 // ============================================================================
 
-/// Helper: build a disassembler and ArchSpec for a given arch string.
-fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), String> {
-    match arch.to_lowercase().as_str() {
-        #[cfg(feature = "x86")]
-        "x86-64" | "x86_64" | "x64" | "amd64" => {
-            let spec = build_arch_spec(
-                sleigh_config::processor_x86::SLA_X86_64,
-                sleigh_config::processor_x86::PSPEC_X86_64,
-                "x86-64",
-            )
-            .map_err(|e| e.to_string())?;
-            let dis = Disassembler::from_sla(
-                sleigh_config::processor_x86::SLA_X86_64,
-                sleigh_config::processor_x86::PSPEC_X86_64,
-                "x86-64",
-            )
-            .map_err(|e| e.to_string())?;
-            let (spec, dis) = apply_userop_map(spec, dis, "x86-64");
-            Ok((spec, dis))
-        }
-        #[cfg(feature = "x86")]
-        "x86" | "x86-32" | "i386" | "i686" => {
-            let spec = build_arch_spec(
-                sleigh_config::processor_x86::SLA_X86,
-                sleigh_config::processor_x86::PSPEC_X86,
-                "x86",
-            )
-            .map_err(|e| e.to_string())?;
-            let dis = Disassembler::from_sla(
-                sleigh_config::processor_x86::SLA_X86,
-                sleigh_config::processor_x86::PSPEC_X86,
-                "x86",
-            )
-            .map_err(|e| e.to_string())?;
-            let (spec, dis) = apply_userop_map(spec, dis, "x86");
-            Ok((spec, dis))
-        }
-        #[cfg(feature = "arm")]
-        "arm" | "arm32" | "arm-le" => {
-            let spec = build_arch_spec(
-                sleigh_config::processor_arm::SLA_ARM8_LE,
-                // sleigh-config 1.x does not ship an ARM8 pspec; use a Cortex pspec instead.
-                sleigh_config::processor_arm::PSPEC_ARMCORTEX,
-                "ARM",
-            )
-            .map_err(|e| e.to_string())?;
-            let dis = Disassembler::from_sla(
-                sleigh_config::processor_arm::SLA_ARM8_LE,
-                // sleigh-config 1.x does not ship an ARM8 pspec; use a Cortex pspec instead.
-                sleigh_config::processor_arm::PSPEC_ARMCORTEX,
-                "ARM",
-            )
-            .map_err(|e| e.to_string())?;
-            let (spec, dis) = apply_userop_map(spec, dis, "arm");
-            Ok((spec, dis))
-        }
-        #[cfg(feature = "arm")]
-        "arm64" | "arm64e" | "aarch64" => {
-            let spec = build_arch_spec(
-                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
-                sleigh_config::processor_aarch64::PSPEC_AARCH64,
-                "aarch64",
-            )
-            .map_err(|e| e.to_string())?;
-            let dis = Disassembler::from_sla(
-                sleigh_config::processor_aarch64::SLA_AARCH64_APPLESILICON,
-                sleigh_config::processor_aarch64::PSPEC_AARCH64,
-                "aarch64",
-            )
-            .map_err(|e| e.to_string())?;
-            let (spec, dis) = apply_userop_map(spec, dis, "arm64");
-            Ok((spec, dis))
-        }
-        #[cfg(feature = "riscv")]
-        "riscv64" | "rv64" | "rv64gc" => {
-            let spec = build_arch_spec(
-                sleigh_config::processor_riscv::SLA_RISCV_LP64D,
-                sleigh_config::processor_riscv::PSPEC_RV64GC,
-                "riscv64",
-            )
-            .map_err(|e| e.to_string())?;
-            let dis = Disassembler::from_sla(
-                sleigh_config::processor_riscv::SLA_RISCV_LP64D,
-                sleigh_config::processor_riscv::PSPEC_RV64GC,
-                "riscv64",
-            )
-            .map_err(|e| e.to_string())?;
-            let (spec, dis) = apply_userop_map(spec, dis, "riscv64");
-            Ok((spec, dis))
-        }
-        #[cfg(feature = "riscv")]
-        "riscv32" | "rv32" | "rv32gc" => {
-            let spec = build_arch_spec(
-                sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
-                sleigh_config::processor_riscv::PSPEC_RV32GC,
-                "riscv32",
-            )
-            .map_err(|e| e.to_string())?;
-            let dis = Disassembler::from_sla(
-                sleigh_config::processor_riscv::SLA_RISCV_ILP32D,
-                sleigh_config::processor_riscv::PSPEC_RV32GC,
-                "riscv32",
-            )
-            .map_err(|e| e.to_string())?;
-            let (spec, dis) = apply_userop_map(spec, dis, "riscv32");
-            Ok((spec, dis))
-        }
-        _ => {
-            let mut supported = vec![];
-            #[cfg(feature = "x86")]
-            supported.extend(["x86-64", "x86"]);
-            #[cfg(feature = "arm")]
-            supported.extend(["arm", "arm64", "aarch64"]);
-            #[cfg(feature = "riscv")]
-            supported.extend(["riscv64", "riscv32"]);
+/// One Sleigh language: the compiled slaspec, the processor spec that pins its
+/// decode context, and the architecture name the rest of the pipeline knows it
+/// by.
+///
+/// The slaspec alone does not determine the decode. `ARM8_le.sla` decodes A32
+/// under `ARMt.pspec` (TMode=0) and Thumb under `ARMtTHUMB.pspec` (TMode=1), so
+/// the pspec is part of the language identity, not a detail. Pairings follow
+/// Ghidra's own `*.ldefs`.
+struct SleighLanguage {
+    sla: &'static [u8],
+    pspec: &'static str,
+    /// Name exposed as `ArchSpec::name`. Downstream ABI selection keys off it,
+    /// so ARM32 stays "ARM" across all four A32/Thumb x LE/BE languages; the
+    /// language actually chosen is reported by its selector key instead.
+    name: &'static str,
+    /// The canonical thread-owned profile when this exact bundle is trusted.
+    shared_profile: Option<TrustedSleighProfile>,
+}
 
-            if supported.is_empty() {
-                Err("No architectures enabled; build with feature x86, arm, or riscv".to_string())
-            } else {
-                Err(format!(
-                    "Unknown architecture '{}'. Supported: {}",
-                    arch,
-                    supported.join(", ")
-                ))
-            }
+impl SleighLanguage {
+    fn shared(profile: TrustedSleighProfile) -> Self {
+        let (sla, pspec, name) = profile.specification();
+        Self {
+            sla,
+            pspec,
+            name,
+            shared_profile: Some(profile),
+        }
+    }
+
+    #[cfg(any(feature = "arm", feature = "mips"))]
+    fn analysis_only(sla: &'static [u8], pspec: &'static str, name: &'static str) -> Self {
+        Self {
+            sla,
+            pspec,
+            name,
+            shared_profile: None,
         }
     }
 }
 
-fn apply_userop_map(
-    mut spec: ArchSpec,
-    mut disasm: Disassembler,
-    arch: &str,
-) -> (ArchSpec, Disassembler) {
-    let userop_map = userop_map_for_arch(arch);
-    disasm.set_userop_map(userop_map.clone());
+/// Resolve a selector key to the one Sleigh language it names.
+///
+/// Returns `None` for keys no bundled language covers. Callers refuse on
+/// `None` rather than substituting a neighbouring language: disassembly under
+/// the wrong language is well-formed and confidently wrong, which is worse
+/// than no disassembly at all.
+fn sleigh_language(arch: &str) -> Option<SleighLanguage> {
+    let language = match arch {
+        #[cfg(feature = "x86")]
+        "x86-64" | "x86_64" | "x64" | "amd64" => {
+            SleighLanguage::shared(TrustedSleighProfile::X86_64)
+        }
+        #[cfg(feature = "x86")]
+        "x86" | "x86-32" | "i386" | "i686" => SleighLanguage::shared(TrustedSleighProfile::X86),
+        // ARM32. `ARMt.pspec` sets TMode=0 (A32) and `ARMtTHUMB.pspec` sets
+        // TMode=1 (Thumb); `ARMCortex.pspec` also sets TMode=1 and plants a
+        // Cortex-M vector table over ram:0x0-0x40, so it is only ever right for
+        // a Cortex-M image and never for Linux/Android userland.
+        #[cfg(feature = "arm")]
+        "arm" | "arm32" | "arm-le" => SleighLanguage::shared(TrustedSleighProfile::ArmCortexLe),
+        #[cfg(feature = "arm")]
+        "armbe" | "arm-be" | "armeb" => SleighLanguage::analysis_only(
+            sleigh_config::processor_arm::SLA_ARM8_BE,
+            sleigh_config::processor_arm::PSPEC_ARMT,
+            "ARM",
+        ),
+        #[cfg(feature = "arm")]
+        "thumb" | "thumb-le" => SleighLanguage::analysis_only(
+            sleigh_config::processor_arm::SLA_ARM8_LE,
+            sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
+            "ARM",
+        ),
+        #[cfg(feature = "arm")]
+        "thumbbe" | "thumb-be" | "thumbeb" => SleighLanguage::analysis_only(
+            sleigh_config::processor_arm::SLA_ARM8_BE,
+            sleigh_config::processor_arm::PSPEC_ARMTTHUMB,
+            "ARM",
+        ),
+        #[cfg(feature = "arm")]
+        "arm64" | "arm64e" | "aarch64" => {
+            SleighLanguage::shared(TrustedSleighProfile::Aarch64AppleSilicon)
+        }
+        #[cfg(feature = "arm")]
+        "arm64be" | "aarch64be" | "aarch64_be" => SleighLanguage::analysis_only(
+            sleigh_config::processor_aarch64::SLA_AARCH64BE,
+            sleigh_config::processor_aarch64::PSPEC_AARCH64,
+            "aarch64",
+        ),
+        #[cfg(feature = "mips")]
+        "mips" | "mips32" | "mips32be" | "mipsbe" | "mipseb" => {
+            SleighLanguage::shared(TrustedSleighProfile::Mips32Be)
+        }
+        #[cfg(feature = "mips")]
+        "mipsel" | "mips32le" | "mips32el" => {
+            SleighLanguage::shared(TrustedSleighProfile::Mips32Le)
+        }
+        // MIPS Release 6 dropped and re-encoded instructions the pre-R6
+        // languages still accept, so R6 needs its own slaspec.
+        #[cfg(feature = "mips")]
+        "mips32r6be" => SleighLanguage::analysis_only(
+            sleigh_config::processor_mips::SLA_MIPS32R6BE,
+            sleigh_config::processor_mips::PSPEC_MIPS32R6,
+            "mips32r6be",
+        ),
+        #[cfg(feature = "mips")]
+        "mips32r6le" => SleighLanguage::analysis_only(
+            sleigh_config::processor_mips::SLA_MIPS32R6LE,
+            sleigh_config::processor_mips::PSPEC_MIPS32R6,
+            "mips32r6le",
+        ),
+        #[cfg(feature = "mips")]
+        "mips64" | "mips64be" => SleighLanguage::shared(TrustedSleighProfile::Mips64Be),
+        #[cfg(feature = "mips")]
+        "mips64el" | "mips64le" => SleighLanguage::shared(TrustedSleighProfile::Mips64Le),
+        #[cfg(feature = "riscv")]
+        "riscv64" | "rv64" | "rv64gc" => SleighLanguage::shared(TrustedSleighProfile::RiscV64Gc),
+        #[cfg(feature = "riscv")]
+        "riscv32" | "rv32" | "rv32gc" => SleighLanguage::shared(TrustedSleighProfile::RiscV32Gc),
+        _ => return None,
+    };
+    Some(language)
+}
 
-    if !userop_map.is_empty() {
-        let mut defs: Vec<UserOpDef> = userop_map
-            .into_iter()
-            .map(|(index, name)| UserOpDef { index, name })
-            .collect();
-        defs.sort_by_key(|def| def.index);
-        spec.userops = defs;
+/// Selector keys this build can serve, for the refusal message.
+fn supported_arch_keys() -> Vec<&'static str> {
+    let mut supported: Vec<&'static str> = vec![];
+    #[cfg(feature = "x86")]
+    supported.extend(["x86-64", "x86"]);
+    #[cfg(feature = "arm")]
+    supported.extend([
+        "arm", "armbe", "thumb", "thumbbe", "arm64", "aarch64", "arm64be",
+    ]);
+    #[cfg(feature = "mips")]
+    supported.extend([
+        "mips32be",
+        "mips32le",
+        "mips32r6be",
+        "mips32r6le",
+        "mips64be",
+        "mips64le",
+    ]);
+    #[cfg(feature = "riscv")]
+    supported.extend(["riscv64", "riscv32"]);
+    supported
+}
+
+/// Helper: build a disassembler and ArchSpec for a given arch string.
+fn create_disassembler_for_arch(arch: &str) -> Result<(ArchSpec, Disassembler), String> {
+    let key = arch.to_lowercase();
+    let Some(lang) = sleigh_language(&key) else {
+        let supported = supported_arch_keys();
+        return Err(if supported.is_empty() {
+            "No architectures enabled; build with feature x86, arm, mips, or riscv".to_string()
+        } else {
+            format!(
+                "Unknown architecture '{}'. Supported: {}",
+                arch,
+                supported.join(", ")
+            )
+        });
+    };
+    // Trusted embedded profiles have one thread-owned parse shared with the
+    // certifying lift path. Analysis-only language variants still get one cold
+    // load for their architecture and disassembler pair. Both paths retain the
+    // processor spec's exact program-counter declaration.
+    match lang.shared_profile {
+        Some(profile) => Disassembler::shared_arch_and_disassembler(profile),
+        None => r2sleigh_lift::embedded_arch_and_disassembler(lang.sla, lang.pspec, lang.name),
     }
-
-    (spec, disasm)
+    .map_err(|e| e.to_string())
 }
 
 // Symbolic execution and CFG surfaces are implemented under r2plugin/src/analysis/.
@@ -2366,51 +2166,6 @@ fn apply_userop_map(
 // ============================================================================
 // Decompiler Functions
 // ============================================================================
-
-fn decompiler_max_blocks() -> usize {
-    std::env::var("SLEIGH_DEC_MAX_BLOCKS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(200)
-}
-
-fn decompiler_cfg_guard_reason_from_summary(summary: &r2ssa::CFGRiskSummary) -> Option<String> {
-    if summary.loop_count > 8 || summary.back_edge_count > 16 {
-        return Some(format!(
-            "complex loop graph (loops={}, back_edges={})",
-            summary.loop_count, summary.back_edge_count
-        ));
-    }
-
-    if summary.loop_count > 4 && summary.block_count >= 96 && summary.max_switch_cases >= 32 {
-        return Some(format!(
-            "large dense switch in looped CFG (blocks={}, loops={}, max_switch_cases={})",
-            summary.block_count, summary.loop_count, summary.max_switch_cases
-        ));
-    }
-
-    None
-}
-
-fn decompiler_cfg_guard_reason(blocks: &[R2ILBlock]) -> Option<String> {
-    let ssa_func = r2ssa::SSAFunction::from_blocks_raw_no_arch(blocks)?;
-    decompiler_cfg_guard_reason_from_summary(&ssa_func.cfg_risk_summary())
-}
-
-fn decompile_block_guard_fallback(func_name: &str, blocks: usize, max_blocks: usize) -> String {
-    format!(
-        "/* r2dec fallback: skipped decompilation for {} ({} blocks > limit {}). Set SLEIGH_DEC_MAX_BLOCKS to override. */",
-        func_name, blocks, max_blocks
-    )
-}
-
-fn decompile_artifact_guard_fallback(func_name: &str, reason: &str) -> String {
-    format!(
-        "/* r2dec fallback: skipped decompilation for {} ({}) */",
-        func_name, reason
-    )
-}
 
 #[cfg(test)]
 #[derive(Debug, Deserialize)]
@@ -2437,7 +2192,6 @@ struct AfcfjFunction {
 #[serde(untagged)]
 #[allow(dead_code)]
 enum AfvjRef {
-    Stack { base: String, offset: i64 },
     Register(String),
     Other(serde_json::Value),
 }
@@ -2458,10 +2212,6 @@ struct AfvjVar {
 struct AfvjPayload {
     #[serde(default)]
     reg: Vec<AfvjVar>,
-    #[serde(default)]
-    bp: Vec<AfvjVar>,
-    #[serde(default)]
-    sp: Vec<AfvjVar>,
 }
 
 #[cfg(test)]
@@ -2491,9 +2241,7 @@ fn parse_external_reg_params(
                 ty: entry
                     .ty
                     .as_deref()
-                    .and_then(|raw| parse_external_type(raw, ptr_bits))
-                    .as_ref()
-                    .map(ctype_to_type_like),
+                    .and_then(|raw| parse_external_type(raw, ptr_bits)),
                 reg: entry
                     .reference
                     .and_then(|r| match r {
@@ -2546,24 +2294,7 @@ fn merge_signature_with_reg_params(
     Some(sig)
 }
 
-fn parse_addr_name_map(json_str: &str) -> std::collections::HashMap<u64, String> {
-    serde_json::from_str::<std::collections::HashMap<String, String>>(json_str)
-        .ok()
-        .map(|map| {
-            map.into_iter()
-                .filter_map(|(k, v)| {
-                    let addr = if k.starts_with("0x") || k.starts_with("0X") {
-                        u64::from_str_radix(&k[2..], 16).ok()
-                    } else {
-                        k.parse().ok()
-                    };
-                    addr.map(|a| (a, v))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
+#[cfg(test)]
 fn sanitize_c_identifier(name: &str) -> Option<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -2590,6 +2321,7 @@ fn sanitize_c_identifier(name: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn uniquify_name(base: String, used: &mut std::collections::HashSet<String>) -> String {
     if used.insert(base.clone()) {
         return base;
@@ -2614,19 +2346,8 @@ fn is_generic_arg_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
-fn is_low_quality_stack_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.starts_with("var_")
-        || lower.starts_with("local_")
-        || lower.starts_with("stack_")
-        || lower == "saved_fp"
-        || is_generic_arg_name(&lower)
-}
-
-fn parse_external_type(raw_ty: &str, ptr_bits: u32) -> Option<r2dec::CType> {
-    let normalized = normalize_external_type_name(raw_ty);
-    let parsed = r2types::parse_type_like_spec(&normalized, ptr_bits)?;
-    Some(type_like_to_ctype(&parsed))
+fn parse_external_type(raw_ty: &str, ptr_bits: u32) -> Option<r2types::CTypeLike> {
+    r2types::parse_external_type_like_spec(raw_ty, ptr_bits)
 }
 
 #[cfg(test)]
@@ -2670,9 +2391,7 @@ fn parse_afcfj_signature_entries(
                 ty: arg
                     .ty
                     .as_deref()
-                    .and_then(|raw| parse_external_type(raw, ptr_bits))
-                    .as_ref()
-                    .map(ctype_to_type_like),
+                    .and_then(|raw| parse_external_type(raw, ptr_bits)),
             }
         })
         .collect();
@@ -2686,9 +2405,7 @@ fn parse_afcfj_signature_entries(
     let ret_type_raw = first.return_type.or(first.ret);
     let ret_type = ret_type_raw
         .as_deref()
-        .and_then(|raw| parse_external_type(raw, ptr_bits))
-        .as_ref()
-        .map(ctype_to_type_like);
+        .and_then(|raw| parse_external_type(raw, ptr_bits));
 
     Some(r2types::FunctionSignatureSpec { ret_type, params })
 }
@@ -2756,11 +2473,11 @@ fn parse_known_function_signatures(
                         .get("type")
                         .or_else(|| arg_obj.get("ty"))
                         .and_then(|v| v.as_str())
-                        .and_then(|raw| r2types::parse_type_like_spec(raw, ptr_bits));
+                        .and_then(|raw| r2types::parse_c_type_like(raw, ptr_bits));
                     params.push(ty.unwrap_or(r2types::CTypeLike::Unknown));
                 } else if let Some(raw) = arg.as_str() {
                     params.push(
-                        r2types::parse_type_like_spec(raw, ptr_bits)
+                        r2types::parse_c_type_like(raw, ptr_bits)
                             .unwrap_or(r2types::CTypeLike::Unknown),
                     );
                 }
@@ -2768,7 +2485,7 @@ fn parse_known_function_signatures(
         } else if let Some(argtypes) = obj.get("argtypes").and_then(|v| v.as_array()) {
             for raw in argtypes.iter().filter_map(|v| v.as_str()) {
                 params.push(
-                    r2types::parse_type_like_spec(raw, ptr_bits)
+                    r2types::parse_c_type_like(raw, ptr_bits)
                         .unwrap_or(r2types::CTypeLike::Unknown),
                 );
             }
@@ -2781,7 +2498,7 @@ fn parse_known_function_signatures(
             .or_else(|| obj.get("rettype"))
             .or_else(|| obj.get("type"))
             .and_then(|v| v.as_str())
-            .and_then(|raw| r2types::parse_type_like_spec(raw, ptr_bits))
+            .and_then(|raw| r2types::parse_c_type_like(raw, ptr_bits))
             .unwrap_or(r2types::CTypeLike::Unknown);
 
         let variadic = obj
@@ -2831,251 +2548,219 @@ fn parse_signature_context(json_str: &str, ptr_bits: u32) -> ParsedSignatureCont
     parsed
 }
 
-#[cfg(test)]
-fn parse_external_stack_vars(
-    json_str: &str,
-    ptr_bits: u32,
-) -> std::collections::HashMap<i64, r2types::ExternalStackVarSpec> {
-    let payload = match serde_json::from_str::<AfvjPayload>(json_str) {
-        Ok(v) => v,
-        Err(_) => return std::collections::HashMap::new(),
-    };
-
-    let mut vars = std::collections::HashMap::new();
-    let mut used_names = std::collections::HashSet::new();
-
-    for entry in payload.bp.into_iter().chain(payload.sp.into_iter()) {
-        let Some(AfvjRef::Stack { base, offset }) = entry.reference else {
-            continue;
-        };
-
-        let raw_name = entry
-            .name
-            .unwrap_or_else(|| format!("stack_{:x}", offset.unsigned_abs()));
-        let Some(clean_name) = sanitize_c_identifier(&raw_name) else {
-            continue;
-        };
-        let var_name = uniquify_name(clean_name, &mut used_names);
-        let candidate = r2types::ExternalStackVarSpec {
-            name: var_name,
-            ty: entry
-                .ty
-                .as_deref()
-                .and_then(|raw| parse_external_type(raw, ptr_bits))
-                .as_ref()
-                .map(ctype_to_type_like),
-            base: match base.trim().to_ascii_lowercase().as_str() {
-                "bp" | "ebp" | "rbp" | "fp" => r2types::ExternalStackBase::FramePointer,
-                "sp" | "esp" | "rsp" => r2types::ExternalStackBase::StackPointer,
-                _ => r2types::ExternalStackBase::Named(base),
-            },
-            role: r2types::ExternalStackSlotRole::Unknown,
-            param_index: None,
-            param_name: None,
-            source_reg: None,
-        };
-
-        match vars.get(&offset) {
-            None => {
-                vars.insert(offset, candidate);
-            }
-            Some(existing) => {
-                if is_low_quality_stack_name(&existing.name)
-                    && !is_low_quality_stack_name(&candidate.name)
-                {
-                    vars.insert(offset, candidate);
-                }
-            }
-        }
-    }
-
-    vars
+#[derive(Debug)]
+pub(crate) struct EngineV2Output {
+    pub(crate) output: String,
+    pub(crate) metrics: r2engine::EngineMetrics,
+    pub(crate) diagnostics: r2engine::EngineDiagnostics,
+    pub(crate) binding_audit: Option<r2engine::BindingShadowAuditOutcome>,
+    pub(crate) effect_obligations: Option<r2engine::EffectObligationAudit>,
+    pub(crate) placement_audit: Option<r2engine::PlacementAudit>,
+    pub(crate) render_refusal: Option<r2engine::DecompileRenderRefusal>,
 }
 
-/// Decompile a function with external context (function names, strings, symbols, signature, stack vars).
-/// Returns C code as a string. Caller must free with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2dec_function_with_context(
-    ctx: *const R2ILContext,
-    blocks: *const *const R2ILBlock,
-    num_blocks: usize,
-    func_name: *const c_char,
-    func_names_json: *const c_char,
-    strings_json: *const c_char,
-    symbols_json: *const c_char,
-    external_context_json: *const c_char,
-) -> *mut c_char {
-    let Some(ctx_view) = context::require_ctx_view(ctx) else {
-        return ptr::null_mut();
-    };
-    let Some(block_slice) = (unsafe { blocks::BlockSlice::from_ffi(blocks, num_blocks) }) else {
-        return ptr::null_mut();
-    };
-
-    let func_name_str = helpers::resolve_function_name(0, func_name);
-    let ptr_bits = ctx_view.arch.map(helpers::effective_ptr_bits).unwrap_or(64);
-    let max_blocks = decompiler_max_blocks();
-    if block_slice.len() > max_blocks {
-        let output = decompile_block_guard_fallback(&func_name_str, block_slice.len(), max_blocks);
-        return CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw());
+/// The name the source gives this function, when it gives one.
+///
+/// radare2 already knows what the function is called -- from a symbol, from
+/// debug information, from a name the user set -- and the snapshot carries it.
+/// Deriving a name from the entry address instead discards that and prints
+/// `fcn_1000006b0` for a function the rest of the session calls
+/// `dbg.process_string`. A name radare2 generated from the address itself
+/// carries no more than the address does, so it is not preferred to our own.
+fn source_function_name(trusted: &r2ssa::TrustedSsaArtifact) -> String {
+    let function_addr = trusted.source().function().address();
+    let named = trusted.source().presentation().display_name();
+    if named.is_empty() || r2source::display_names::is_generated_function_name(named) {
+        return format!("fcn_{function_addr:x}");
     }
+    named.to_string()
+}
 
-    // Collect all JSON context strings on the main thread (from C pointers),
-    // then move everything into the large-stack thread for SSA + decompilation.
-    let func_names_str = helpers::cstr_or_default(func_names_json, "{}");
-    let strings_str = helpers::cstr_or_default(strings_json, "{}");
-    let symbols_str = helpers::cstr_or_default(symbols_json, "{}");
-    let external_context_str = helpers::cstr_or_default(external_context_json, "{}");
-    let cached_artifact = types::build_function_input(ctx, blocks, num_blocks, 0, func_name)
-        .and_then(|input| {
-            types::get_cached_function_analysis_artifact(&input, &external_context_str)
-        });
-    let semantic_metadata_enabled = ctx_view.semantic_metadata_enabled;
-    let reg_type_hints = if semantic_metadata_enabled {
-        types::collect_register_type_hints(block_slice.as_slice(), ctx_view.disasm)
-    } else {
-        std::collections::HashMap::new()
-    };
+fn trusted_engine_function_input(
+    trusted: &r2ssa::TrustedSsaArtifact,
+) -> r2engine::EngineFunctionInput {
+    let function_addr = trusted.source().function().address();
+    r2engine::EngineFunctionInput {
+        function_name: source_function_name(trusted),
+        function_addr,
+        blocks: trusted.source_blocks().to_vec(),
+        arch: Some(trusted.arch_spec().clone()),
+        semantic_metadata_enabled: true,
+        source_snapshot: None,
+    }
+}
 
-    let arch_clone = ctx_view.arch.cloned();
+fn r2sleigh_engine_decompile_trusted_output(
+    _input: &R2SleighEngineRequestPayloadV2,
+    ingress: crate::ffi_v2::TrustedIngress,
+    execution: r2engine::EngineExecutionControl,
+) -> Option<EngineV2Output> {
+    let crate::ffi_v2::TrustedIngress {
+        root: trusted,
+        callees,
+        capture: _,
+    } = ingress;
+    let block_count = trusted.source_blocks().len();
+    let function_input = trusted_engine_function_input(&trusted);
+    let ptr_bits = helpers::effective_ptr_bits(trusted.arch_spec());
+    let decompile_input = r2engine::EngineFunctionDecompileRequestInput::single_function(
+        function_input,
+        Some(ptr_bits),
+        r2types::ParsedExternalContext::default(),
+    )
+    .with_input_quality(r2engine::EngineFunctionInputQuality::complete(block_count))
+    .with_execution_control(execution)
+    .with_trusted_ssa(trusted)
+    .with_callee_facts(callees);
+    let response = decompiler::run_engine_decompile(decompile_input);
+    Some(EngineV2Output {
+        output: response.output,
+        metrics: response.metrics,
+        diagnostics: response.diagnostics,
+        binding_audit: Some(response.binding_audit),
+        effect_obligations: Some(response.effect_obligations),
+        placement_audit: Some(response.placement_audit),
+        render_refusal: response.render_refusal,
+    })
+}
 
-    // Run SSA construction + decompilation on a dedicated thread with a large
-    // stack to prevent stack overflow on complex O2-optimized CFGs.
-    let output = decompiler::run_full_decompile_on_large_stack(
-        block_slice.into_inner(),
-        func_name_str,
-        arch_clone,
-        ptr_bits,
-        semantic_metadata_enabled,
-        reg_type_hints,
-        func_names_str,
-        strings_str,
-        symbols_str,
-        external_context_str,
-        cached_artifact,
+fn r2sleigh_engine_type_function_trusted_output(
+    _input: &R2SleighEngineRequestPayloadV2,
+    ingress: crate::ffi_v2::TrustedIngress,
+    execution: r2engine::EngineExecutionControl,
+) -> Option<EngineV2Output> {
+    let crate::ffi_v2::TrustedIngress {
+        root: trusted,
+        callees,
+        capture: _,
+    } = ingress;
+    let function_addr = trusted.source().function().address();
+    let function_name = source_function_name(&trusted);
+    let ptr_bits = helpers::effective_ptr_bits(trusted.arch_spec());
+    let policy = r2engine::analysis_policy_for_radare2_depth(0);
+    let writeback_budget = r2types::TypeWritebackMutationBudget::new(
+        policy.type_global_max_links,
+        policy.type_max_decls,
+        policy.type_max_mutations,
     );
-
-    CString::new(output).map_or(ptr::null_mut(), |c| c.into_raw())
-}
-
-/// Decompile a single basic block to C code.
-/// Returns C code as a string. Caller must free with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2dec_block(ctx: *const R2ILContext, block: *const R2ILBlock) -> *mut c_char {
-    if ctx.is_null() || block.is_null() {
-        return ptr::null_mut();
-    }
-
-    let ctx_ref = unsafe { &*ctx };
-    let disasm = match &ctx_ref.disasm {
-        Some(d) => d,
-        None => return ptr::null_mut(),
-    };
-
-    let blk = unsafe { &*block };
-    let input = InstructionExportInput {
-        disasm,
-        arch: match ctx_ref.arch.as_ref() {
-            Some(a) => a,
-            None => return ptr::null_mut(),
+    let writeback_apply_policy =
+        r2engine::type_writeback_apply_policy_for_mode(policy.type_writeback_mode);
+    let mut request = r2engine::EngineFunctionAnalysisReportRequest::full_semantics_for_function(
+        r2engine::EngineFunctionAnalysisReportRequestInput {
+            function: trusted_engine_function_input(&trusted),
+            ptr_bits: Some(ptr_bits),
+            parsed_context: r2types::ParsedExternalContext::default(),
+            interproc_max_iters: 1,
+            interproc_converged: false,
+            writeback_budget,
+            writeback_apply_policy,
         },
-        block: blk,
-        addr: blk.addr,
-        mnemonic: "",
-        native_size: blk.size as usize,
-    };
-
-    match export_instruction(&input, InstructionAction::Dec, ExportFormat::CLike) {
-        Ok(output) => {
-            let normalized = if output.trim().is_empty() {
-                "/* r2dec: empty output */".to_string()
-            } else {
-                output
-            };
-            CString::new(normalized).map_or(ptr::null_mut(), |c| c.into_raw())
+    );
+    request.analysis = request
+        .analysis
+        .with_execution_control(execution)
+        .with_trusted_ssa(trusted)
+        .with_callee_facts(callees);
+    let response = match r2engine::EngineSession::new().type_function_checked(
+        r2engine::EngineTypeAnalysisRequest::from_interproc_budget(request.analysis, 1, false),
+    ) {
+        Ok(response) => response,
+        Err(refusal) => {
+            return Some(EngineV2Output {
+                output: serde_json::json!({
+                    "refused": true,
+                    "reason": refusal.reason,
+                })
+                .to_string(),
+                metrics: *refusal.metrics,
+                diagnostics: *refusal.diagnostics,
+                binding_audit: None,
+                effect_obligations: None,
+                placement_audit: None,
+                render_refusal: None,
+            });
         }
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-/// Get the C AST for a block as JSON.
-/// Caller must free with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2dec_block_ast_json(
-    ctx: *const R2ILContext,
-    block: *const R2ILBlock,
-) -> *mut c_char {
-    if ctx.is_null() || block.is_null() {
-        return ptr::null_mut();
-    }
-
-    let ctx_ref = unsafe { &*ctx };
-    let disasm = match &ctx_ref.disasm {
-        Some(d) => d,
-        None => return ptr::null_mut(),
     };
+    let metrics = response.metrics().clone();
+    let diagnostics = response.diagnostics().clone();
+    let report = r2engine::function_analysis_report_payload_from_type_response(
+        function_name,
+        function_addr,
+        response,
+        writeback_budget,
+        writeback_apply_policy,
+    );
+    let type_writeback = r2engine::type_writeback_report_json_from_function_analysis(
+        r2engine::EngineFunctionAnalysisTypeWritebackJsonRequest {
+            report: &report,
+            iterations: 1,
+            max_iterations: 1,
+            converged: false,
+            scope_report: None,
+        },
+    );
+    Some(EngineV2Output {
+        output: serde_json::to_string(&type_writeback).ok()?,
+        metrics,
+        diagnostics,
+        binding_audit: None,
+        effect_obligations: None,
+        placement_audit: None,
+        render_refusal: None,
+    })
+}
 
-    let blk = unsafe { &*block };
-
-    // Convert to SSA
-    let ssa_block = r2ssa::block::to_ssa(blk, disasm);
-
-    // Build statements from SSA ops
-    let stmts: Vec<r2dec::CStmt> = r2dec::lower_ssa_ops_to_stmts(64, &ssa_block.ops);
-
-    match serde_json::to_string_pretty(&stmts) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
-    }
+/// The facts the function proves, projected for radare2's analysis stores.
+///
+/// Nothing here is a suggestion. Every entry survived a proof that fails closed,
+/// so radare2 can write it into its own stores next to what its own analysis
+/// found without a reader having to know which came from where.
+fn r2sleigh_engine_proven_facts_trusted_output(
+    _input: &R2SleighEngineRequestPayloadV2,
+    ingress: crate::ffi_v2::TrustedIngress,
+    _execution: r2engine::EngineExecutionControl,
+) -> Option<EngineV2Output> {
+    let crate::ffi_v2::TrustedIngress { root: trusted, .. } = ingress;
+    let facts = trusted.proven_facts();
+    let output = serde_json::json!({
+        "function": trusted.source().function().address(),
+        "indirect_calls": facts
+            .indirect_calls
+            .iter()
+            .map(|call| serde_json::json!({
+                "block": call.block_addr,
+                "table": call.table_address,
+                "targets": call.targets,
+            }))
+            .collect::<Vec<_>>(),
+        "unreachable_blocks": facts
+            .unreachable_blocks
+            .iter()
+            .map(|block| serde_json::json!({
+                "addr": block.addr,
+                "reason": block.reason,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    Some(EngineV2Output {
+        output: output.to_string(),
+        metrics: r2engine::EngineMetrics::default(),
+        diagnostics: r2engine::EngineDiagnostics::default(),
+        binding_audit: None,
+        effect_obligations: None,
+        placement_audit: None,
+        render_refusal: None,
+    })
 }
 
 // ============================================================================
-// radare2 Deep Integration FFI - Variable Recovery and Data Refs
+// radare2 Deep Integration FFI - Type Evidence and Data Refs
 // ============================================================================
 
-#[derive(Debug, Clone)]
-pub(crate) struct InferredParam {
-    name: String,
-    ty: r2dec::CType,
-    arg_index: usize,
-    size_bytes: u32,
-    evidence: TypeEvidence,
-}
+#[cfg(test)]
+type TypeEvidence = r2types::SignatureTypeEvidence;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TypeEvidence {
-    pointer_proven: u8,
-    pointer_likely: u8,
-    scalar_proven: u8,
-    scalar_likely: u8,
-    bool_like: u8,
-    width_bits: u32,
-}
-
-impl TypeEvidence {
-    fn pointer_score(&self) -> u16 {
-        (self.pointer_proven as u16) * 4 + (self.pointer_likely as u16) * 2
-    }
-
-    fn scalar_score(&self) -> u16 {
-        (self.scalar_proven as u16) * 4
-            + (self.scalar_likely as u16) * 2
-            + (self.bool_like as u16) * 3
-    }
-
-    fn has_pointer_signal(&self) -> bool {
-        self.pointer_proven > 0 || self.pointer_likely > 0
-    }
-
-    fn has_scalar_signal(&self) -> bool {
-        self.scalar_proven > 0 || self.scalar_likely > 0 || self.bool_like > 0
-    }
-
-    fn has_conflict(&self) -> bool {
-        self.has_pointer_signal() && self.has_scalar_signal()
-    }
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct InferredParamJson {
     name: String,
@@ -3083,6 +2768,7 @@ struct InferredParamJson {
     param_type: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct InferredSignatureCcJson {
     function_name: String,
@@ -3096,6 +2782,7 @@ struct InferredSignatureCcJson {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[cfg(test)]
 struct VarTypeCandidateJson {
     name: String,
     kind: String,
@@ -3112,15 +2799,7 @@ struct VarTypeCandidateJson {
 }
 
 #[derive(Debug, serde::Serialize)]
-struct VarRenameCandidateJson {
-    name: String,
-    target_name: String,
-    confidence: u8,
-    source: String,
-    evidence: Vec<String>,
-}
-
-#[derive(Debug, serde::Serialize)]
+#[cfg(test)]
 struct StructFieldCandidateJson {
     name: String,
     offset: u64,
@@ -3130,6 +2809,7 @@ struct StructFieldCandidateJson {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[cfg(test)]
 struct StructDeclCandidateJson {
     name: String,
     decl: String,
@@ -3139,6 +2819,7 @@ struct StructDeclCandidateJson {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[cfg(test)]
 struct GlobalTypeLinkCandidateJson {
     addr: u64,
     #[serde(rename = "type")]
@@ -3147,140 +2828,53 @@ struct GlobalTypeLinkCandidateJson {
     source: String,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct InterprocSummaryJson {
-    callsite_count: usize,
-    iterations: usize,
-    max_iterations: usize,
-    converged: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    summary: Option<r2ssa::FunctionSemanticSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    summary_json: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scope: Option<serde_json::Value>,
-}
-
 #[derive(Debug, serde::Serialize, Default)]
+#[cfg(test)]
 struct TypeWritebackDiagnosticsJson {
     conflicts: Vec<String>,
     warnings: Vec<String>,
     solver_warnings: Vec<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct InferredTypeWritebackJson {
-    function_name: String,
-    signature: String,
-    ret_type: String,
-    params: Vec<InferredParamJson>,
-    callconv: String,
-    arch: String,
-    confidence: u8,
-    callconv_confidence: u8,
-    var_type_candidates: Vec<VarTypeCandidateJson>,
-    var_rename_candidates: Vec<VarRenameCandidateJson>,
-    struct_decls: Vec<StructDeclCandidateJson>,
-    global_type_links: Vec<GlobalTypeLinkCandidateJson>,
-    interproc: InterprocSummaryJson,
-    diagnostics: TypeWritebackDiagnosticsJson,
+#[cfg(test)]
+type InterprocSummaryJson = r2engine::EngineInterprocSummaryJson;
+
+#[repr(C)]
+#[cfg(test)]
+pub struct R2SleighTypeWritebackApplyPolicy {
+    schema_version: u32,
+    mode: u32,
 }
 
-fn evidence_json(evidence: &[r2types::WritebackEvidence]) -> Vec<String> {
-    evidence
-        .iter()
-        .map(|tag| tag.as_str().to_string())
-        .collect()
+#[cfg(test)]
+const R2SLEIGH_TYPE_WRITEBACK_OFF: u32 = 0;
+#[cfg(test)]
+const R2SLEIGH_TYPE_WRITEBACK_BALANCED: u32 = 1;
+#[cfg(test)]
+const R2SLEIGH_TYPE_WRITEBACK_AGGRESSIVE: u32 = 2;
+
+#[cfg(test)]
+fn type_writeback_apply_policy_from_ffi(
+    policy: &R2SleighTypeWritebackApplyPolicy,
+) -> r2types::TypeWritebackApplyPolicy {
+    let mode = match policy.mode {
+        R2SLEIGH_TYPE_WRITEBACK_BALANCED => r2engine::EngineTypeWritebackMode::Balanced,
+        R2SLEIGH_TYPE_WRITEBACK_AGGRESSIVE => r2engine::EngineTypeWritebackMode::Aggressive,
+        _ => r2engine::EngineTypeWritebackMode::Off,
+    };
+    r2engine::type_writeback_apply_policy_for_mode(mode)
 }
 
-fn struct_fields_json(fields: &[r2types::StructFieldCandidate]) -> Vec<StructFieldCandidateJson> {
-    fields
-        .iter()
-        .map(|field| StructFieldCandidateJson {
-            name: field.name.clone(),
-            offset: field.offset,
-            field_type: field.field_type.clone(),
-            confidence: field.confidence,
-        })
-        .collect()
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct R2SleighAnnotation {
+    addr: u64,
+    comment: *const c_char,
 }
 
-fn writeback_plan_json(
-    plan: r2types::TypeWritebackPlan,
-    interproc: InterprocSummaryJson,
-) -> InferredTypeWritebackJson {
-    InferredTypeWritebackJson {
-        function_name: plan.signature.function_name,
-        signature: plan.signature.signature,
-        ret_type: plan.signature.ret_type,
-        params: plan
-            .signature
-            .params
-            .into_iter()
-            .map(|param| InferredParamJson {
-                name: param.name,
-                param_type: param.param_type,
-            })
-            .collect(),
-        callconv: plan.signature.callconv,
-        arch: plan.signature.arch,
-        confidence: plan.signature.confidence,
-        callconv_confidence: plan.signature.callconv_confidence,
-        var_type_candidates: plan
-            .var_type_candidates
-            .into_iter()
-            .map(|candidate| VarTypeCandidateJson {
-                name: candidate.name,
-                kind: candidate.kind,
-                delta: candidate.delta,
-                var_type: candidate.var_type,
-                isarg: candidate.isarg,
-                reg: candidate.reg,
-                size: candidate.size,
-                confidence: candidate.confidence,
-                source: candidate.source.as_str().to_string(),
-                evidence: evidence_json(&candidate.evidence),
-            })
-            .collect(),
-        var_rename_candidates: plan
-            .var_rename_candidates
-            .into_iter()
-            .map(|candidate| VarRenameCandidateJson {
-                name: candidate.name,
-                target_name: candidate.target_name,
-                confidence: candidate.confidence,
-                source: candidate.source.as_str().to_string(),
-                evidence: evidence_json(&candidate.evidence),
-            })
-            .collect(),
-        struct_decls: plan
-            .struct_decls
-            .into_iter()
-            .map(|decl| StructDeclCandidateJson {
-                name: decl.name,
-                decl: decl.decl,
-                confidence: decl.confidence,
-                source: decl.source.as_str().to_string(),
-                fields: struct_fields_json(&decl.fields),
-            })
-            .collect(),
-        global_type_links: plan
-            .global_type_links
-            .into_iter()
-            .map(|candidate| GlobalTypeLinkCandidateJson {
-                addr: candidate.addr,
-                target_type: candidate.target_type,
-                confidence: candidate.confidence,
-                source: candidate.source.as_str().to_string(),
-            })
-            .collect(),
-        interproc,
-        diagnostics: TypeWritebackDiagnosticsJson {
-            conflicts: plan.diagnostics.conflicts,
-            warnings: plan.diagnostics.warnings,
-            solver_warnings: plan.diagnostics.solver_warnings,
-        },
-    }
+pub struct R2SleighAnnotations {
+    items: Vec<R2SleighAnnotation>,
+    _strings: Vec<CString>,
 }
 
 #[cfg(test)]
@@ -3288,590 +2882,99 @@ const SIG_WRITEBACK_CONFIDENCE_MIN: u8 = 70;
 #[cfg(test)]
 const CC_WRITEBACK_CONFIDENCE_MIN: u8 = 80;
 
-#[derive(Debug, Default)]
-struct SignatureTypeEvidenceContext {
-    pointer_vars: std::collections::HashSet<String>,
-    scalar_proven_vars: std::collections::HashSet<String>,
-    scalar_likely_vars: std::collections::HashSet<String>,
-    bool_like_vars: std::collections::HashSet<String>,
-    width_bits: std::collections::HashMap<String, u32>,
+#[cfg(test)]
+fn merge_initial_type_evidence(initial_ty: &r2types::CTypeLike, evidence: &mut TypeEvidence) {
+    r2types::merge_initial_signature_type_evidence(initial_ty, evidence);
 }
 
-fn merge_initial_type_evidence(initial_ty: &r2dec::CType, evidence: &mut TypeEvidence) {
-    match initial_ty {
-        r2dec::CType::Pointer(_) => evidence.pointer_likely = evidence.pointer_likely.max(1),
-        r2dec::CType::Bool => evidence.bool_like = evidence.bool_like.max(1),
-        r2dec::CType::Int(bits) | r2dec::CType::UInt(bits) => {
-            evidence.scalar_likely = evidence.scalar_likely.max(1);
-            if !(evidence.has_scalar_signal()
-                && !evidence.has_pointer_signal()
-                && evidence.width_bits > 0
-                && evidence.width_bits < *bits)
-            {
-                evidence.width_bits = evidence.width_bits.max(*bits);
-            }
-        }
-        r2dec::CType::Float(bits) => {
-            evidence.scalar_proven = evidence.scalar_proven.max(1);
-            evidence.width_bits = evidence.width_bits.max(*bits);
-        }
-        _ => {}
-    }
+#[cfg(test)]
+fn materialize_signature_type_like(ty: r2types::CTypeLike, ptr_bits: u32) -> r2types::CTypeLike {
+    r2types::materialize_signature_type_like(ty, ptr_bits)
 }
 
+#[cfg(test)]
+fn resolve_evidence_driven_type(
+    initial_ty: r2types::CTypeLike,
+    var_size_bytes: u32,
+    ptr_bits: u32,
+    evidence: &TypeEvidence,
+) -> r2types::CTypeLike {
+    r2types::resolve_evidence_driven_signature_type(initial_ty, var_size_bytes, ptr_bits, evidence)
+}
+
+#[cfg(test)]
+fn collect_type_evidence_for_var(
+    evidence_ctx: &r2types::SignatureTypeEvidenceContext,
+    var: &r2ssa::SSAVar,
+    initial_ty: &r2types::CTypeLike,
+) -> TypeEvidence {
+    r2types::collect_signature_type_evidence_for_var(evidence_ctx, var, initial_ty)
+}
+
+#[cfg(test)]
 fn fallback_scalar_type(
     var_size_bytes: u32,
     evidence: &TypeEvidence,
     ptr_bits: u32,
-) -> r2dec::CType {
-    if evidence.bool_like > 0
-        && evidence.pointer_score() == 0
-        && evidence.scalar_proven == 0
-        && evidence.scalar_likely <= 1
-    {
-        return r2dec::CType::Bool;
-    }
-
-    let carrier_bits = var_size_bytes.saturating_mul(8);
-    let width_bits = if evidence.has_scalar_signal()
-        && !evidence.has_pointer_signal()
-        && evidence.width_bits > 0
-    {
-        evidence.width_bits
-    } else {
-        evidence.width_bits.max(carrier_bits)
-    };
-    let width_bits = match width_bits {
-        0 => {
-            if ptr_bits >= 64 {
-                64
-            } else {
-                32
-            }
-        }
-        1 => 8,
-        2..=8 => 8,
-        9..=16 => 16,
-        17..=32 => 32,
-        _ => 64,
-    };
-
-    r2dec::CType::Int(width_bits)
-}
-
-fn materialize_signature_ctype(ty: r2dec::CType, ptr_bits: u32) -> r2dec::CType {
-    match ty {
-        r2dec::CType::Pointer(inner) => {
-            if matches!(*inner, r2dec::CType::Unknown | r2dec::CType::Void)
-                || matches!(
-                    inner.as_ref(),
-                    r2dec::CType::Struct(name)
-                        | r2dec::CType::Union(name)
-                        | r2dec::CType::Enum(name)
-                        if is_unmaterialized_aggregate_name(name)
-                )
-            {
-                return r2dec::CType::void_ptr();
-            }
-            let inner = materialize_signature_ctype(*inner, ptr_bits);
-            r2dec::CType::ptr(inner)
-        }
-        r2dec::CType::Array(inner, len) => {
-            if matches!(*inner, r2dec::CType::Unknown | r2dec::CType::Void) {
-                return r2dec::CType::Array(Box::new(r2dec::CType::u8()), len);
-            }
-            let inner = materialize_signature_ctype(*inner, ptr_bits);
-            r2dec::CType::Array(Box::new(inner), len)
-        }
-        r2dec::CType::Function { ret, params } => {
-            let ret = materialize_signature_ctype(*ret, ptr_bits);
-            let ret = if matches!(ret, r2dec::CType::Unknown) {
-                fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
-            } else {
-                ret
-            };
-            let params = params
-                .into_iter()
-                .map(|param| materialize_signature_ctype(param, ptr_bits))
-                .collect();
-            r2dec::CType::Function {
-                ret: Box::new(ret),
-                params,
-            }
-        }
-        r2dec::CType::Unknown => {
-            fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
-        }
-        r2dec::CType::Struct(name) if is_unmaterialized_aggregate_name(&name) => {
-            fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
-        }
-        r2dec::CType::Union(name) if is_unmaterialized_aggregate_name(&name) => {
-            fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
-        }
-        r2dec::CType::Enum(name) if is_unmaterialized_aggregate_name(&name) => {
-            fallback_scalar_type((ptr_bits / 8).max(1), &TypeEvidence::default(), ptr_bits)
-        }
-        other => other,
-    }
-}
-
-fn resolve_evidence_driven_type(
-    initial_ty: r2dec::CType,
-    var_size_bytes: u32,
-    ptr_bits: u32,
-    evidence: &TypeEvidence,
-) -> r2dec::CType {
-    if matches!(initial_ty, r2dec::CType::Float(_)) {
-        return initial_ty;
-    }
-
-    let pointer_score = evidence.pointer_score();
-    let scalar_score = evidence.scalar_score();
-    let initial_is_pointer = matches!(initial_ty, r2dec::CType::Pointer(_));
-    let initial_is_scalar = matches!(
-        initial_ty,
-        r2dec::CType::Bool | r2dec::CType::Int(_) | r2dec::CType::UInt(_)
-    );
-    let preferred_scalar = fallback_scalar_type(var_size_bytes, evidence, ptr_bits);
-    let scalar_width_narrows = match (&initial_ty, &preferred_scalar) {
-        (r2dec::CType::Bool, r2dec::CType::Bool) => false,
-        (r2dec::CType::Int(initial_bits), r2dec::CType::Int(preferred_bits))
-        | (r2dec::CType::Int(initial_bits), r2dec::CType::UInt(preferred_bits))
-        | (r2dec::CType::UInt(initial_bits), r2dec::CType::Int(preferred_bits))
-        | (r2dec::CType::UInt(initial_bits), r2dec::CType::UInt(preferred_bits)) => {
-            preferred_bits < initial_bits
-        }
-        (r2dec::CType::Int(_), r2dec::CType::Bool)
-        | (r2dec::CType::UInt(_), r2dec::CType::Bool) => true,
-        _ => false,
-    };
-
-    if initial_is_pointer && pointer_score.saturating_add(1) >= scalar_score {
-        return initial_ty;
-    }
-    if initial_is_scalar && scalar_score.saturating_add(1) >= pointer_score {
-        if scalar_width_narrows
-            && evidence.has_scalar_signal()
-            && !evidence.has_pointer_signal()
-            && !evidence.has_conflict()
-        {
-            return preferred_scalar;
-        }
-        return initial_ty;
-    }
-
-    match initial_ty {
-        r2dec::CType::Struct(_)
-        | r2dec::CType::Union(_)
-        | r2dec::CType::Enum(_)
-        | r2dec::CType::Typedef(_) => {
-            if pointer_score > scalar_score.saturating_add(1) {
-                return r2dec::CType::void_ptr();
-            }
-            if scalar_score > pointer_score.saturating_add(2) {
-                return fallback_scalar_type(var_size_bytes, evidence, ptr_bits);
-            }
-            return initial_ty;
-        }
-        _ => {}
-    }
-
-    if pointer_score > scalar_score.saturating_add(1) {
-        return r2dec::CType::void_ptr();
-    }
-    if scalar_score > pointer_score
-        || matches!(initial_ty, r2dec::CType::Void | r2dec::CType::Unknown)
-    {
-        return preferred_scalar;
-    }
-
-    sanitize_inferred_param_type(initial_ty, var_size_bytes, ptr_bits)
-}
-
-fn collect_type_evidence_for_var(
-    evidence_ctx: &SignatureTypeEvidenceContext,
-    var: &r2ssa::SSAVar,
-    initial_ty: &r2dec::CType,
-) -> TypeEvidence {
-    let key = types::ssa_var_key(var);
-    let family = types::scalar_register_family_key(&var.name);
-    let mut evidence = TypeEvidence::default();
-    if evidence_ctx.pointer_vars.contains(&key) {
-        evidence.pointer_proven = 1;
-    }
-    if evidence_ctx.scalar_proven_vars.contains(&key) {
-        evidence.scalar_proven = 1;
-    }
-    if evidence_ctx.scalar_likely_vars.contains(&key) {
-        evidence.scalar_likely = 1;
-    }
-    if evidence_ctx.bool_like_vars.contains(&key) {
-        evidence.bool_like = 1;
-    }
-    if let Some(bits) = evidence_ctx.width_bits.get(&key) {
-        evidence.width_bits = *bits;
-    }
-    if evidence.pointer_proven == 0
-        && signal_present_for_register_family(&evidence_ctx.pointer_vars, &family, var.version)
-    {
-        evidence.pointer_proven = 1;
-    }
-    if evidence.scalar_proven == 0
-        && signal_present_for_register_family(
-            &evidence_ctx.scalar_proven_vars,
-            &family,
-            var.version,
-        )
-    {
-        evidence.scalar_proven = 1;
-    }
-    if evidence.scalar_likely == 0
-        && signal_present_for_register_family(
-            &evidence_ctx.scalar_likely_vars,
-            &family,
-            var.version,
-        )
-    {
-        evidence.scalar_likely = 1;
-    }
-    if evidence.bool_like == 0
-        && signal_present_for_register_family(&evidence_ctx.bool_like_vars, &family, var.version)
-    {
-        evidence.bool_like = 1;
-    }
-    if evidence.width_bits == 0
-        && let Some(bits) =
-            width_hint_for_register_family(&evidence_ctx.width_bits, &family, var.version)
-    {
-        evidence.width_bits = bits;
-    }
-    merge_initial_type_evidence(initial_ty, &mut evidence);
-    evidence
-}
-
-fn signal_present_for_register_family(
-    keys: &std::collections::HashSet<String>,
-    family: &str,
-    version: u32,
-) -> bool {
-    keys.iter()
-        .any(|key| key_matches_register_family_version(key, family, version))
-}
-
-fn width_hint_for_register_family(
-    hints: &std::collections::HashMap<String, u32>,
-    family: &str,
-    version: u32,
-) -> Option<u32> {
-    hints
-        .iter()
-        .filter(|(key, _)| key_matches_register_family_version(key, family, version))
-        .map(|(_, bits)| *bits)
-        .filter(|bits| *bits > 0)
-        .min()
-}
-
-fn key_matches_register_family_version(key: &str, family: &str, version: u32) -> bool {
-    let Some((name, version_str)) = key.rsplit_once('_') else {
-        return false;
-    };
-    version_str.parse::<u32>().ok() == Some(version)
-        && types::scalar_register_family_key(name) == family
-}
-
-fn type_like_to_ctype(ty: &r2types::CTypeLike) -> r2dec::CType {
-    match ty {
-        r2types::CTypeLike::Void => r2dec::CType::Void,
-        r2types::CTypeLike::Bool => r2dec::CType::Bool,
-        r2types::CTypeLike::Int { bits, signedness } => match signedness {
-            r2types::Signedness::Unsigned => r2dec::CType::UInt(*bits),
-            r2types::Signedness::Signed | r2types::Signedness::Unknown => r2dec::CType::Int(*bits),
-        },
-        r2types::CTypeLike::Float(bits) => r2dec::CType::Float(*bits),
-        r2types::CTypeLike::Pointer(inner) => {
-            r2dec::CType::Pointer(Box::new(type_like_to_ctype(inner)))
-        }
-        r2types::CTypeLike::Array(inner, len) => {
-            r2dec::CType::Array(Box::new(type_like_to_ctype(inner)), *len)
-        }
-        r2types::CTypeLike::Struct(name) => r2dec::CType::Struct(name.clone()),
-        r2types::CTypeLike::Union(name) => r2dec::CType::Union(name.clone()),
-        r2types::CTypeLike::Enum(name) => r2dec::CType::Enum(name.clone()),
-        r2types::CTypeLike::Function | r2types::CTypeLike::Unknown => r2dec::CType::Unknown,
-    }
+) -> r2types::CTypeLike {
+    r2types::resolve_evidence_driven_signature_type(
+        r2types::CTypeLike::Unknown,
+        var_size_bytes,
+        ptr_bits,
+        evidence,
+    )
 }
 
 #[cfg(test)]
-fn ctype_to_type_like(ty: &r2dec::CType) -> r2types::CTypeLike {
-    match ty {
-        r2dec::CType::Void => r2types::CTypeLike::Void,
-        r2dec::CType::Bool => r2types::CTypeLike::Bool,
-        r2dec::CType::Int(bits) => r2types::CTypeLike::Int {
-            bits: *bits,
-            signedness: r2types::Signedness::Signed,
-        },
-        r2dec::CType::UInt(bits) => r2types::CTypeLike::Int {
-            bits: *bits,
-            signedness: r2types::Signedness::Unsigned,
-        },
-        r2dec::CType::Float(bits) => r2types::CTypeLike::Float(*bits),
-        r2dec::CType::Pointer(inner) => {
-            r2types::CTypeLike::Pointer(Box::new(ctype_to_type_like(inner)))
-        }
-        r2dec::CType::Array(inner, len) => {
-            r2types::CTypeLike::Array(Box::new(ctype_to_type_like(inner)), *len)
-        }
-        r2dec::CType::Struct(name) => r2types::CTypeLike::Struct(name.clone()),
-        r2dec::CType::Union(name) => r2types::CTypeLike::Union(name.clone()),
-        r2dec::CType::Enum(name) => r2types::CTypeLike::Enum(name.clone()),
-        r2dec::CType::Function { .. } | r2dec::CType::Typedef(_) | r2dec::CType::Unknown => {
-            r2types::CTypeLike::Unknown
-        }
-    }
+fn sanitize_inferred_param_type(
+    ty: r2types::CTypeLike,
+    var_size_bytes: u32,
+    ptr_bits: u32,
+) -> r2types::CTypeLike {
+    r2types::resolve_evidence_driven_signature_type(
+        ty,
+        var_size_bytes,
+        ptr_bits,
+        &TypeEvidence::default(),
+    )
 }
 
+#[cfg(test)]
+fn infer_callconv_x86_64_from_counts(
+    counts: &std::collections::HashMap<String, u32>,
+) -> (String, u8) {
+    r2types::compute_callconv_inference("x86-64", counts)
+}
+
+#[cfg(test)]
 fn infer_signature_return_type(
     func: &r2ssa::SSAFunction,
     type_inference: &r2types::TypeInference,
     ptr_bits: u32,
-    evidence_ctx: &SignatureTypeEvidenceContext,
-) -> (r2dec::CType, TypeEvidence) {
-    let mut candidates = Vec::new();
-    let mut candidate_evidence = Vec::new();
-
-    for block in func.blocks() {
-        for op in &block.ops {
-            let r2ssa::SSAOp::Return { target } = op else {
-                continue;
-            };
-
-            let target_name = target.name.to_ascii_lowercase();
-            if target_name.starts_with("xmm0") || target_name.starts_with("st0") {
-                let bits = if target.size.saturating_mul(8) <= 32 {
-                    32
-                } else {
-                    64
-                };
-                let ty = r2dec::CType::Float(bits);
-                let mut evidence = TypeEvidence::default();
-                merge_initial_type_evidence(&ty, &mut evidence);
-                evidence.width_bits = bits;
-                candidates.push(ty);
-                candidate_evidence.push(evidence);
-                continue;
-            }
-
-            let initial_ty = type_like_to_ctype(&type_inference.get_type(target));
-            let evidence = collect_type_evidence_for_var(evidence_ctx, target, &initial_ty);
-            let ty = resolve_evidence_driven_type(initial_ty, target.size, ptr_bits, &evidence);
-            candidates.push(ty);
-            candidate_evidence.push(evidence);
-        }
-    }
-
-    if candidates.is_empty() {
-        return (r2dec::CType::Void, TypeEvidence::default());
-    }
-
-    let mut meaningful: Vec<r2dec::CType> = candidates
-        .iter()
-        .filter(|ty| !matches!(ty, r2dec::CType::Unknown))
-        .cloned()
-        .collect();
-    if meaningful.is_empty() {
-        let fallback_evidence = candidate_evidence.into_iter().next().unwrap_or_default();
-        return (
-            fallback_scalar_type((ptr_bits / 8).max(1), &fallback_evidence, ptr_bits),
-            fallback_evidence,
-        );
-    }
-    if meaningful.iter().all(|ty| ty == &meaningful[0]) {
-        return (
-            meaningful.remove(0),
-            candidate_evidence.into_iter().next().unwrap_or_default(),
-        );
-    }
-    if let Some(float_ty) = meaningful
-        .iter()
-        .find(|ty| matches!(ty, r2dec::CType::Float(_)))
-        .cloned()
-    {
-        let evidence = candidate_evidence
-            .into_iter()
-            .find(|e| e.width_bits >= 32)
-            .unwrap_or_default();
-        return (float_ty, evidence);
-    }
-    let evidence = candidate_evidence.into_iter().next().unwrap_or_default();
-    (meaningful.remove(0), evidence)
+    evidence_ctx: &r2types::SignatureTypeEvidenceContext,
+) -> (r2types::CTypeLike, TypeEvidence) {
+    r2types::infer_signature_return_type(func, type_inference, ptr_bits, evidence_ctx)
 }
 
-fn canonical_x86_64_arg_reg(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "rdi" | "edi" | "di" | "dil" => Some("rdi"),
-        "rsi" | "esi" | "si" | "sil" => Some("rsi"),
-        "rdx" | "edx" | "dx" | "dl" | "dh" => Some("rdx"),
-        "rcx" | "ecx" | "cx" | "cl" | "ch" => Some("rcx"),
-        "r8" | "r8d" | "r8w" | "r8b" => Some("r8"),
-        "r9" | "r9d" | "r9w" | "r9b" => Some("r9"),
-        _ => None,
-    }
-}
-
+#[cfg(test)]
+#[allow(dead_code)]
 fn collect_version0_input_regs(
     func: &r2ssa::SSAFunction,
 ) -> std::collections::HashMap<String, u32> {
-    let mut counts = std::collections::HashMap::new();
-    for block in func.blocks() {
-        for op in &block.ops {
-            for src in op.sources() {
-                if src.version != 0 {
-                    continue;
-                }
-                if src.name.starts_with("tmp:") || src.name.starts_with("const:") {
-                    continue;
-                }
-                let key = src.name.to_ascii_lowercase();
-                *counts.entry(key).or_insert(0) += 1;
-            }
-        }
-    }
-    counts
+    r2types::collect_version0_input_regs(func)
 }
 
-fn infer_callconv_x86_64_from_counts(
-    counts: &std::collections::HashMap<String, u32>,
-) -> (&'static str, u8) {
-    let mut canonical = std::collections::BTreeMap::new();
-    for (reg, count) in counts {
-        if let Some(name) = canonical_x86_64_arg_reg(reg) {
-            *canonical.entry(name).or_insert(0u32) += *count;
-        }
-    }
-
-    let rdi = *canonical.get("rdi").unwrap_or(&0);
-    let rsi = *canonical.get("rsi").unwrap_or(&0);
-    let rcx = *canonical.get("rcx").unwrap_or(&0);
-    let rdx = *canonical.get("rdx").unwrap_or(&0);
-    let r8 = *canonical.get("r8").unwrap_or(&0);
-    let r9 = *canonical.get("r9").unwrap_or(&0);
-
-    let sysv_primary = rdi + rsi;
-    let sysv_total = rdi + rsi + rdx + rcx + r8 + r9;
-    let ms_total = rcx + rdx + r8 + r9;
-    let ms_regs_used = [rcx, rdx, r8, r9].iter().filter(|&&v| v > 0).count();
-    let ms_dominant = sysv_primary == 0
-        && rcx > 0
-        && ms_regs_used >= 2
-        && ms_total >= 3
-        && ms_total >= (rdi + rsi + rdx + 1);
-
-    if ms_dominant {
-        let confidence = if ms_total >= 3 { 90 } else { 76 };
-        ("ms", confidence)
-    } else {
-        let confidence = if sysv_primary > 0 {
-            92
-        } else if sysv_total > 0 {
-            76
-        } else {
-            60
-        };
-        ("amd64", confidence)
-    }
-}
-
-fn sanitize_inferred_param_type(
-    mut ty: r2dec::CType,
-    var_size_bytes: u32,
-    ptr_bits: u32,
-) -> r2dec::CType {
-    if matches!(ty, r2dec::CType::Void | r2dec::CType::Unknown) {
-        ty = match var_size_bytes {
-            1 => r2dec::CType::Int(8),
-            2 => r2dec::CType::Int(16),
-            4 => r2dec::CType::Int(32),
-            8 => r2dec::CType::Int(64),
-            _ => r2dec::CType::Unknown,
-        };
-    }
-
-    if matches!(ty, r2dec::CType::Void | r2dec::CType::Unknown) {
-        ty = if ptr_bits >= 64 {
-            r2dec::CType::Int(64)
-        } else {
-            r2dec::CType::Int(32)
-        };
-    }
-
-    ty
-}
-
-fn is_informative_type(ty: &r2dec::CType) -> bool {
-    !matches!(ty, r2dec::CType::Void | r2dec::CType::Unknown)
-}
-
-fn compute_signature_confidence(
-    params: &[InferredParam],
-    ret_type: &r2dec::CType,
-    ret_evidence: &TypeEvidence,
-) -> u8 {
-    let mut confidence: i32 = 48;
-    if !params.is_empty() {
-        confidence += 8;
-    }
-
-    for param in params {
-        let evidence = &param.evidence;
-        if evidence.pointer_proven > 0 || evidence.scalar_proven > 0 {
-            confidence += 6;
-        } else if evidence.bool_like > 0
-            || evidence.pointer_likely > 0
-            || evidence.scalar_likely > 0
-        {
-            confidence += 3;
-        } else if is_informative_type(&param.ty) {
-            confidence += 2;
-        } else {
-            confidence -= 2;
-        }
-
-        if evidence.has_conflict() {
-            confidence -= 4;
-        }
-    }
-
-    if is_informative_type(ret_type) {
-        confidence += 4;
-        if ret_evidence.pointer_proven > 0
-            || ret_evidence.scalar_proven > 0
-            || ret_evidence.bool_like > 0
-        {
-            confidence += 2;
-        }
-    } else if ret_evidence.has_pointer_signal() || ret_evidence.has_scalar_signal() {
-        confidence += 2;
-    }
-
-    if ret_evidence.has_conflict() {
-        confidence -= 3;
-    }
-
-    confidence.clamp(0, 100) as u8
-}
-
+#[cfg(test)]
 fn compute_callconv_inference(
     arch_name: &str,
     input_counts: &std::collections::HashMap<String, u32>,
 ) -> (String, u8) {
-    match arch_name {
-        "x86-64" => {
-            let (callconv, confidence) = infer_callconv_x86_64_from_counts(input_counts);
-            (callconv.to_string(), confidence)
-        }
-        "x86" => ("cdecl".to_string(), 64),
-        _ => (String::new(), 0),
-    }
+    r2types::compute_callconv_inference(arch_name, input_counts)
+}
+
+#[cfg(test)]
+fn is_informative_type(ty: &r2types::CTypeLike) -> bool {
+    !matches!(ty, r2types::CTypeLike::Void | r2types::CTypeLike::Unknown)
 }
 
 #[cfg(test)]
@@ -3879,21 +2982,9 @@ fn explicit_signature_context_strength(sig: &r2types::FunctionSignatureSpec) -> 
     let typed_params = sig
         .params
         .iter()
-        .filter(|param| {
-            param
-                .ty
-                .as_ref()
-                .map(type_like_to_ctype)
-                .as_ref()
-                .is_some_and(is_informative_type)
-        })
+        .filter(|param| param.ty.as_ref().is_some_and(is_informative_type))
         .count() as u8;
-    let has_ret = sig
-        .ret_type
-        .as_ref()
-        .map(type_like_to_ctype)
-        .as_ref()
-        .is_some_and(is_informative_type);
+    let has_ret = sig.ret_type.as_ref().is_some_and(is_informative_type);
     let mut confidence = 76u8.saturating_add(typed_params.saturating_mul(4)).min(96);
     if has_ret {
         confidence = confidence.saturating_add(6).min(96);
@@ -3901,6 +2992,7 @@ fn explicit_signature_context_strength(sig: &r2types::FunctionSignatureSpec) -> 
     confidence
 }
 
+#[cfg(test)]
 fn normalize_inferred_param_name(
     raw_name: &str,
     fallback_idx: usize,
@@ -3912,6 +3004,7 @@ fn normalize_inferred_param_name(
     uniquify_name(clean, used)
 }
 
+#[cfg(test)]
 fn format_afs_signature(
     function_name: &str,
     ret_type: &str,
@@ -3929,10 +3022,7 @@ fn format_afs_signature(
     format!("{ret_type} {function_name} ({params_str})")
 }
 
-fn cstr_or_default(ptr: *const c_char, default: &str) -> String {
-    helpers::cstr_or_default(ptr, default)
-}
-
+#[cfg(test)]
 fn is_opaque_placeholder_type_name(ty: &str) -> bool {
     let lower = ty.trim().to_ascii_lowercase();
     if lower.is_empty() {
@@ -3950,6 +3040,7 @@ fn is_opaque_placeholder_type_name(ty: &str) -> bool {
         || lower.contains(" type_0x")
 }
 
+#[cfg(test)]
 fn is_unmaterialized_aggregate_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     lower.is_empty() || lower == "anon" || lower.starts_with("anon_")
@@ -3982,6 +3073,7 @@ fn is_generic_type_string(ty: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn normalize_external_type_name(ty: &str) -> String {
     let normalized = r2types::normalize_external_type_name(ty);
     if normalized.is_empty() || is_opaque_placeholder_type_name(&normalized) {
@@ -3991,29 +3083,35 @@ fn normalize_external_type_name(ty: &str) -> String {
     }
 }
 
-fn estimate_parsed_c_type_size_bytes(ty: &r2dec::CType, ptr_bits: u32) -> Option<u64> {
+#[cfg(test)]
+fn estimate_parsed_c_type_size_bytes(ty: &r2types::CTypeLike, ptr_bits: u32) -> Option<u64> {
     match ty {
-        r2dec::CType::Void => Some(0),
-        r2dec::CType::Bool => Some(1),
-        r2dec::CType::Int(bits) | r2dec::CType::UInt(bits) | r2dec::CType::Float(bits) => {
+        r2types::CTypeLike::Void => Some(0),
+        r2types::CTypeLike::Bool => Some(1),
+        r2types::CTypeLike::Int { bits, .. }
+        | r2types::CTypeLike::Float(bits)
+        | r2types::CTypeLike::BitVector(bits) => {
             Some((u64::from(*bits).saturating_add(7) / 8).max(1))
         }
-        r2dec::CType::Pointer(_) | r2dec::CType::Function { .. } => {
+        r2types::CTypeLike::Pointer(_) | r2types::CTypeLike::Function { .. } => {
             Some((ptr_bits / 8).max(1) as u64)
         }
-        r2dec::CType::Array(inner, Some(count)) => {
+        r2types::CTypeLike::Array(inner, Some(count)) => {
             estimate_parsed_c_type_size_bytes(inner, ptr_bits)
                 .map(|inner_size| inner_size.saturating_mul(*count as u64))
         }
-        r2dec::CType::Array(inner, None) => estimate_parsed_c_type_size_bytes(inner, ptr_bits),
-        r2dec::CType::Enum(_) => Some(4),
-        r2dec::CType::Struct(_)
-        | r2dec::CType::Union(_)
-        | r2dec::CType::Typedef(_)
-        | r2dec::CType::Unknown => None,
+        r2types::CTypeLike::Array(inner, None) => {
+            estimate_parsed_c_type_size_bytes(inner, ptr_bits)
+        }
+        r2types::CTypeLike::Enum(_) => Some(4),
+        r2types::CTypeLike::Struct(_)
+        | r2types::CTypeLike::Union(_)
+        | r2types::CTypeLike::Typedef(_)
+        | r2types::CTypeLike::Unknown => None,
     }
 }
 
+#[cfg(test)]
 fn estimate_c_type_size_bytes(ty: &str, ptr_bits: u32) -> u64 {
     if let Some(parsed) = parse_external_type(ty, ptr_bits)
         && let Some(size) = estimate_parsed_c_type_size_bytes(&parsed, ptr_bits)
@@ -4032,6 +3130,7 @@ fn estimate_c_type_size_bytes(ty: &str, ptr_bits: u32) -> u64 {
     1
 }
 
+#[cfg(test)]
 fn build_struct_decl(
     name: &str,
     fields: &[StructFieldCandidateJson],
@@ -4092,20 +3191,16 @@ fn parse_existing_var_types(json_str: &str) -> std::collections::HashMap<String,
     out
 }
 
+#[cfg(test)]
 fn collect_pointer_arg_slot_map(
     arch: Option<&ArchSpec>,
     ptr_bits: u32,
 ) -> std::collections::HashMap<String, usize> {
-    let (arg_regs, _, _) = recover_vars_arch_profile(arch);
-    let arch_name = arch
-        .map(|a| a.name.to_ascii_lowercase())
-        .unwrap_or_default();
-    let is_arm64 = arch_name.contains("aarch64") || arch_name.contains("arm64");
-    let is_x86_64 = arch_name.contains("x86-64")
-        || arch_name.contains("x86_64")
-        || arch_name.contains("amd64")
-        || arch_name.contains("x64");
-    let is_riscv64 = arch_name.contains("riscv64") || arch_name.contains("rv64");
+    let architecture = r2ssa::MachineArchitectureFamily::from_arch_spec(arch);
+    let (arg_regs, _, _) = recover_vars_arch_profile(architecture);
+    let is_arm64 = matches!(architecture, r2ssa::MachineArchitectureFamily::AArch64);
+    let is_x86_64 = matches!(architecture, r2ssa::MachineArchitectureFamily::X86_64);
+    let is_riscv64 = matches!(architecture, r2ssa::MachineArchitectureFamily::RiscV64);
 
     let mut out = std::collections::HashMap::new();
     for (idx, (canonical, aliases)) in arg_regs.iter().enumerate() {
@@ -4123,7 +3218,7 @@ fn collect_pointer_arg_slot_map(
             if is_riscv64 {
                 return alias.starts_with('x') || alias.starts_with('a');
             }
-            alias == canonical.to_ascii_lowercase()
+            alias == (*canonical).to_ascii_lowercase()
         };
 
         if include_alias(canonical) {
@@ -4139,6 +3234,7 @@ fn collect_pointer_arg_slot_map(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 struct ArgAddrExpr {
     slot: usize,
     offset: i64,
@@ -4154,6 +3250,7 @@ struct GlobalAddrExpr {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg(test)]
 struct StructFieldEvidence {
     reads: u32,
     writes: u32,
@@ -4161,16 +3258,21 @@ struct StructFieldEvidence {
     type_votes: std::collections::BTreeMap<String, u32>,
 }
 
+#[cfg(test)]
 type SlotTypeOverrides = std::collections::HashMap<usize, String>;
+#[cfg(test)]
 type SlotFieldProfiles = std::collections::HashMap<usize, std::collections::BTreeMap<u64, String>>;
+#[cfg(test)]
 type SlotFieldEvidenceMap =
     std::collections::HashMap<usize, std::collections::BTreeMap<u64, StructFieldEvidence>>;
+#[cfg(test)]
 type StructInferenceArtifacts = (
     Vec<StructDeclCandidateJson>,
     SlotTypeOverrides,
     SlotFieldProfiles,
 );
 
+#[cfg(test)]
 fn build_struct_inference_artifacts_from_field_evidence(
     slot_field_evidence: SlotFieldEvidenceMap,
     ptr_bits: u32,
@@ -4257,59 +3359,7 @@ fn build_struct_inference_artifacts_from_field_evidence(
     (struct_decls, slot_type_overrides, slot_fields_for_links)
 }
 
-fn infer_structs_from_semantic_accesses(
-    ssa_func: &r2ssa::SSAFunction,
-    cfg: &r2dec::DecompilerConfig,
-    ptr_bits: u32,
-    diagnostics: &mut TypeWritebackDiagnosticsJson,
-) -> StructInferenceArtifacts {
-    let mut slot_field_evidence: SlotFieldEvidenceMap = HashMap::new();
-    for access in r2dec::infer_local_struct_field_accesses(ssa_func, cfg) {
-        let entry = slot_field_evidence
-            .entry(access.arg_index)
-            .or_default()
-            .entry(access.field_offset)
-            .or_default();
-        if access.is_write {
-            entry.writes = entry.writes.saturating_add(1);
-        } else {
-            entry.reads = entry.reads.saturating_add(1);
-        }
-        *entry.widths.entry(access.access_size).or_insert(0) += 1;
-        *entry
-            .type_votes
-            .entry(size_to_type(access.access_size))
-            .or_insert(0) += 1;
-    }
-    build_struct_inference_artifacts_from_field_evidence(slot_field_evidence, ptr_bits, diagnostics)
-}
-
-fn merge_struct_inference_artifacts(
-    mut base: StructInferenceArtifacts,
-    supplement: StructInferenceArtifacts,
-) -> StructInferenceArtifacts {
-    let (struct_decls, slot_type_overrides, slot_field_profiles) = &mut base;
-    let (supp_structs, supp_types, supp_profiles) = supplement;
-
-    let mut seen_names = struct_decls
-        .iter()
-        .map(|decl| decl.name.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-    for decl in supp_structs {
-        if seen_names.insert(decl.name.to_ascii_lowercase()) {
-            struct_decls.push(decl);
-        }
-    }
-    for (slot, ty) in supp_types {
-        slot_type_overrides.insert(slot, ty);
-    }
-    for (slot, profile) in supp_profiles {
-        slot_field_profiles.insert(slot, profile);
-    }
-
-    base
-}
-
+#[cfg(test)]
 fn parse_ssa_const_offset(name: &str, ptr_bits: u32) -> Option<i64> {
     let val_str = name
         .strip_prefix("const:")
@@ -4333,6 +3383,7 @@ fn parse_ssa_const_offset(name: &str, ptr_bits: u32) -> Option<i64> {
     Some(signed_offset_from_const(raw, ptr_bits))
 }
 
+#[cfg(test)]
 fn signed_offset_from_const(raw: u64, ptr_bits: u32) -> i64 {
     let bits = ptr_bits.clamp(8, 64);
     if bits == 64 {
@@ -4348,6 +3399,17 @@ fn signed_offset_from_const(raw: u64, ptr_bits: u32) -> i64 {
     }
 }
 
+#[cfg(test)]
+fn test_stack_register_names(arch: Option<&ArchSpec>) -> (String, String) {
+    match r2ssa::MachineArchitectureFamily::from_arch_spec(arch) {
+        r2ssa::MachineArchitectureFamily::X86_64 => ("rsp".to_string(), "rbp".to_string()),
+        r2ssa::MachineArchitectureFamily::X86 => ("esp".to_string(), "ebp".to_string()),
+        r2ssa::MachineArchitectureFamily::AArch64 => ("sp".to_string(), "fp".to_string()),
+        _ => ("sp".to_string(), "fp".to_string()),
+    }
+}
+
+#[cfg(test)]
 fn infer_structs_from_ssa(
     ssa_blocks: &[r2ssa::SSABlock],
     arch: Option<&ArchSpec>,
@@ -4357,11 +3419,7 @@ fn infer_structs_from_ssa(
     use std::collections::HashMap;
 
     let pointer_arg_slot_map = collect_pointer_arg_slot_map(arch, ptr_bits);
-    let arch_name =
-        crate::decompiler::normalize_sig_arch_name(arch).unwrap_or_else(|| "unknown".to_string());
-    let cfg = crate::decompiler::decompiler_config_for_arch_name(&arch_name, ptr_bits);
-    let sp_name = cfg.sp_name.to_ascii_lowercase();
-    let fp_name = cfg.fp_name.to_ascii_lowercase();
+    let (sp_name, fp_name) = test_stack_register_names(arch);
     let mut addr_exprs: HashMap<String, ArgAddrExpr> = HashMap::new();
     let mut stack_addr_offsets: HashMap<String, i64> = HashMap::new();
     let mut stack_slot_values: HashMap<(u64, i64), ArgAddrExpr> = HashMap::new();
@@ -4824,7 +3882,7 @@ fn merge_slot_type_overrides_into_signature(
     }
 
     for (slot, raw_ty) in slot_type_overrides {
-        let Some(parsed) = r2types::parse_type_like_spec(raw_ty, ptr_bits) else {
+        let Some(parsed) = r2types::parse_c_type_like(raw_ty, ptr_bits) else {
             continue;
         };
         let param = &mut sig.params[*slot];
@@ -5443,259 +4501,6 @@ fn score_global_type_links(
         .collect()
 }
 
-fn count_callsites(ssa_blocks: &[r2ssa::SSABlock]) -> usize {
-    let mut count = 0usize;
-    for block in ssa_blocks {
-        for op in &block.ops {
-            if matches!(op, r2ssa::SSAOp::Call { .. } | r2ssa::SSAOp::CallInd { .. }) {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
-/// Infer function signature + calling convention for post-analysis write-back.
-///
-/// Returns JSON:
-/// {"function_name":"...","signature":"...","ret_type":"...","params":[...],"callconv":"...","arch":"...","confidence":N}
-///
-/// Caller must free with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2sleigh_infer_signature_cc_json(
-    ctx: *const R2ILContext,
-    blocks: *const *const R2ILBlock,
-    num_blocks: usize,
-    fcn_addr: u64,
-    fcn_name: *const c_char,
-) -> *mut c_char {
-    let Some(input) = types::build_function_input(ctx, blocks, num_blocks, fcn_addr, fcn_name)
-    else {
-        return ptr::null_mut();
-    };
-    let Some(analysis) = types::build_function_analysis(&input) else {
-        return ptr::null_mut();
-    };
-    let Some(signature_cc) = types::infer_signature_cc_from_analysis(&input, &analysis) else {
-        return ptr::null_mut();
-    };
-
-    match serde_json::to_string(&signature_cc) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-fn direct_call_targets_from_analysis(analysis: &types::FunctionAnalysis) -> Vec<u64> {
-    let mut targets = std::collections::BTreeSet::new();
-    for call in analysis.ssa_func.call_sites().by_id.values() {
-        if let Some(target) = call.direct_target {
-            targets.insert(target);
-        }
-    }
-    targets.into_iter().collect()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn r2sleigh_get_direct_call_targets_json(
-    ctx: *const R2ILContext,
-    blocks: *const *const R2ILBlock,
-    num_blocks: usize,
-    fcn_addr: u64,
-    fcn_name: *const c_char,
-) -> *mut c_char {
-    let Some(input) = types::build_function_input(ctx, blocks, num_blocks, fcn_addr, fcn_name)
-    else {
-        return ptr::null_mut();
-    };
-    let Some(analysis) = types::build_function_analysis(&input) else {
-        return ptr::null_mut();
-    };
-    let payload = direct_call_targets_from_analysis(&analysis);
-    match serde_json::to_string(&payload) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-/// Infer full type write-back payload (signature + per-variable + structs + globals).
-///
-/// Returns JSON suitable for plugin-side confidence/conflict policy.
-/// Caller must free with r2il_string_free().
-struct InterprocInferenceInput<'a> {
-    iter: usize,
-    max_iters: usize,
-    converged: bool,
-    scope_json: &'a str,
-}
-
-struct TypeWritebackInferenceInput<'a> {
-    ctx: *const R2ILContext,
-    blocks: *const *const R2ILBlock,
-    num_blocks: usize,
-    fcn_addr: u64,
-    fcn_name: *const c_char,
-    external_context_json: *const c_char,
-    interproc: InterprocInferenceInput<'a>,
-}
-
-fn infer_type_writeback_json_impl(input: TypeWritebackInferenceInput<'_>) -> *mut c_char {
-    let Some(function_input) = types::build_function_input(
-        input.ctx,
-        input.blocks,
-        input.num_blocks,
-        input.fcn_addr,
-        input.fcn_name,
-    ) else {
-        return ptr::null_mut();
-    };
-    let external_context = cstr_or_default(input.external_context_json, "{}");
-    let Some(artifact) = types::build_function_analysis_artifact(
-        &function_input,
-        &external_context,
-        input.interproc.scope_json,
-        input.interproc.max_iters,
-    ) else {
-        return ptr::null_mut();
-    };
-    let ssa_blocks = artifact.pattern_ssa_func.local_ssa_blocks();
-    if ssa_blocks.is_empty() {
-        return ptr::null_mut();
-    }
-    let scope = serde_json::from_str::<serde_json::Value>(input.interproc.scope_json)
-        .ok()
-        .filter(|v| !v.is_null() && v.as_object().map(|obj| !obj.is_empty()).unwrap_or(true));
-
-    let current_summary = artifact
-        .interproc_summary_set
-        .as_ref()
-        .and_then(|summary_set| {
-            summary_set
-                .root
-                .and_then(|root| summary_set.summaries.get(&root).cloned())
-        });
-    let current_summary_json = current_summary
-        .as_ref()
-        .and_then(|summary| serde_json::to_string(summary).ok());
-
-    let payload = writeback_plan_json(
-        artifact.writeback_plan,
-        InterprocSummaryJson {
-            callsite_count: count_callsites(&ssa_blocks),
-            iterations: input.interproc.iter.max(1),
-            max_iterations: input.interproc.max_iters.max(input.interproc.iter.max(1)),
-            converged: input.interproc.converged,
-            summary: current_summary,
-            summary_json: current_summary_json,
-            scope,
-        },
-    );
-
-    match serde_json::to_string(&payload) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn r2sleigh_infer_type_writeback_json(
-    ctx: *const R2ILContext,
-    blocks: *const *const R2ILBlock,
-    num_blocks: usize,
-    fcn_addr: u64,
-    fcn_name: *const c_char,
-    external_context_json: *const c_char,
-) -> *mut c_char {
-    infer_type_writeback_json_impl(TypeWritebackInferenceInput {
-        ctx,
-        blocks,
-        num_blocks,
-        fcn_addr,
-        fcn_name,
-        external_context_json,
-        interproc: InterprocInferenceInput {
-            iter: 1,
-            max_iters: 1,
-            converged: true,
-            scope_json: "{}",
-        },
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn r2sleigh_infer_type_writeback_json_ex(
-    ctx: *const R2ILContext,
-    blocks: *const *const R2ILBlock,
-    num_blocks: usize,
-    fcn_addr: u64,
-    fcn_name: *const c_char,
-    external_context_json: *const c_char,
-    interproc_iter: usize,
-    interproc_max_iters: usize,
-    interproc_converged: i32,
-    interproc_scope_json: *const c_char,
-) -> *mut c_char {
-    let scope = cstr_or_default(interproc_scope_json, "{}");
-    infer_type_writeback_json_impl(TypeWritebackInferenceInput {
-        ctx,
-        blocks,
-        num_blocks,
-        fcn_addr,
-        fcn_name,
-        external_context_json,
-        interproc: InterprocInferenceInput {
-            iter: interproc_iter.max(1),
-            max_iters: interproc_max_iters.max(1),
-            converged: interproc_converged != 0,
-            scope_json: &scope,
-        },
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn r2sleigh_alias_function_analysis_artifact_cache(
-    ctx: *const R2ILContext,
-    blocks: *const *const R2ILBlock,
-    num_blocks: usize,
-    fcn_addr: u64,
-    fcn_name: *const c_char,
-    source_external_context_json: *const c_char,
-    target_external_context_json: *const c_char,
-) -> i32 {
-    let Some(function_input) =
-        types::build_function_input(ctx, blocks, num_blocks, fcn_addr, fcn_name)
-    else {
-        return 0;
-    };
-    let source_external_context = cstr_or_default(source_external_context_json, "{}");
-    let target_external_context = cstr_or_default(target_external_context_json, "{}");
-    types::alias_cached_function_analysis_artifact(
-        &function_input,
-        &source_external_context,
-        &target_external_context,
-    ) as i32
-}
-
-/// Analyze a function and build SSA representation.
-/// This is called after radare2 completes basic function analysis.
-/// Returns 1 on success, 0 on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn r2sleigh_analyze_fcn(
-    ctx: *const R2ILContext,
-    blocks: *const *const R2ILBlock,
-    num_blocks: usize,
-    _fcn_addr: u64,
-) -> i32 {
-    let Some(input) = types::build_function_input(ctx, blocks, num_blocks, 0, ptr::null()) else {
-        return 0;
-    };
-    if types::build_function_analysis(&input).is_none() {
-        return 0;
-    }
-
-    1 // Success
-}
-
 fn enum_label<T: serde::Serialize>(value: T) -> Option<String> {
     serde_json::to_value(value)
         .ok()?
@@ -5787,33 +4592,28 @@ fn is_filtered_cpu_flag_name_lower(name: &str) -> bool {
 
 fn is_real_reg(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    !lower.starts_with("tmp:")
-        && !lower.starts_with("const:")
-        && !lower.starts_with("ram:")
-        && !is_filtered_cpu_flag_name_lower(&lower)
+    let kind = r2ssa::SSAVarNameKind::classify(&lower);
+    !matches!(
+        kind,
+        r2ssa::SSAVarNameKind::Temporary
+            | r2ssa::SSAVarNameKind::Constant
+            | r2ssa::SSAVarNameKind::Memory
+            | r2ssa::SSAVarNameKind::AddressSpace
+    ) && !is_filtered_cpu_flag_name_lower(&lower)
 }
 
 /// Annotation entry for analyze_fcn writeback.
-#[derive(serde::Serialize)]
 struct FcnAnnotation {
     addr: u64,
     comment: String,
 }
 
-/// Analyze a function and return per-block annotations as JSON.
-/// Returns a JSON array of {addr, comment} pairs summarizing SSA def-use info.
-/// Uses function-level SSA with phi nodes for meaningful annotations.
-/// Caller must free with r2il_string_free().
-#[unsafe(no_mangle)]
-pub extern "C" fn r2sleigh_analyze_fcn_annotations(
+fn function_annotations_for_ffi(
     ctx: *const R2ILContext,
     blocks: *const *const R2ILBlock,
     num_blocks: usize,
-    _fcn_addr: u64,
-) -> *mut c_char {
-    let Some(input) = types::build_function_input(ctx, blocks, num_blocks, 0, ptr::null()) else {
-        return ptr::null_mut();
-    };
+) -> Option<Vec<FcnAnnotation>> {
+    let input = types::build_function_input(ctx, blocks, num_blocks)?;
 
     let semantic_by_addr: std::collections::HashMap<u64, String> = input
         .blocks
@@ -5822,19 +4622,15 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
         .filter_map(|block| summarize_block_semantics(block).map(|summary| (block.addr, summary)))
         .collect();
 
-    // Build function-level SSA with phi nodes
+    // Build function-level SSA with phi nodes.
     let ssa_func =
-        match r2ssa::SSAFunction::from_blocks_with_arch(input.blocks.as_slice(), input.ctx.arch) {
-            Some(f) => f,
-            None => return ptr::null_mut(),
-        };
+        r2ssa::SSAFunction::from_blocks_with_arch(input.blocks.as_slice(), input.ctx.arch)?;
 
     let mut annotations = Vec::new();
 
     for block in ssa_func.blocks() {
         let mut parts = Vec::new();
 
-        // Phi nodes show where values merge from different paths
         if !block.phis.is_empty() {
             let phi_vars: Vec<&str> = block
                 .phis
@@ -5854,7 +4650,6 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
             }
         }
 
-        // Collect register reads (version 0 = function input)
         let mut func_inputs = Vec::new();
         for op in &block.ops {
             for src in op.sources() {
@@ -5873,7 +4668,6 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
             parts.push(format!("uses {}", func_inputs.join(",")));
         }
 
-        // Collect register definitions
         let mut defs = Vec::new();
         for op in &block.ops {
             if let Some(dst) = op.dst()
@@ -5910,41 +4704,115 @@ pub extern "C" fn r2sleigh_analyze_fcn_annotations(
     }
 
     if annotations.is_empty() {
-        return ptr::null_mut();
+        return None;
     }
 
-    match serde_json::to_string(&annotations) {
-        Ok(s) => CString::new(s).map_or(ptr::null_mut(), |c| c.into_raw()),
-        Err(_) => ptr::null_mut(),
+    Some(annotations)
+}
+
+fn ffi_annotations_from_annotations(annotations: Vec<FcnAnnotation>) -> R2SleighAnnotations {
+    let mut strings = Vec::with_capacity(annotations.len());
+    let mut items = Vec::with_capacity(annotations.len());
+
+    for annotation in annotations {
+        let comment_ptr = match CString::new(annotation.comment) {
+            Ok(comment) => {
+                strings.push(comment);
+                strings.last().map_or(ptr::null(), |s| s.as_ptr())
+            }
+            Err(_) => ptr::null(),
+        };
+        if !comment_ptr.is_null() {
+            items.push(R2SleighAnnotation {
+                addr: annotation.addr,
+                comment: comment_ptr,
+            });
+        }
+    }
+
+    R2SleighAnnotations {
+        items,
+        _strings: strings,
+    }
+}
+
+pub(crate) fn r2sleigh_analyze_fcn_annotations_typed(
+    ctx: *const R2ILContext,
+    blocks: *const *const R2ILBlock,
+    num_blocks: usize,
+    _fcn_addr: u64,
+) -> *mut R2SleighAnnotations {
+    let Some(annotations) = function_annotations_for_ffi(ctx, blocks, num_blocks) else {
+        return ptr::null_mut();
+    };
+    Box::into_raw(Box::new(ffi_annotations_from_annotations(annotations)))
+}
+
+pub(crate) fn r2sleigh_annotations_items(
+    annotations: *const R2SleighAnnotations,
+    count: *mut usize,
+) -> *const R2SleighAnnotation {
+    if annotations.is_null() {
+        if !count.is_null() {
+            unsafe {
+                *count = 0;
+            }
+        }
+        return ptr::null();
+    }
+    let annotations = unsafe { &*annotations };
+    if !count.is_null() {
+        unsafe {
+            *count = annotations.items.len();
+        }
+    }
+    annotations.items.as_ptr()
+}
+
+pub(crate) fn r2sleigh_annotations_free(annotations: *mut R2SleighAnnotations) {
+    if !annotations.is_null() {
+        unsafe {
+            drop(Box::from_raw(annotations));
+        }
     }
 }
 
 #[cfg(test)]
 fn signature_spec(
-    ret_type: Option<r2dec::CType>,
-    params: Vec<(&str, Option<r2dec::CType>)>,
+    ret_type: Option<r2types::CTypeLike>,
+    params: Vec<(&str, Option<r2types::CTypeLike>)>,
 ) -> r2types::FunctionSignatureSpec {
     r2types::FunctionSignatureSpec {
-        ret_type: ret_type.as_ref().map(ctype_to_type_like),
+        ret_type,
         params: params
             .into_iter()
             .map(|(name, ty)| r2types::FunctionParamSpec {
                 name: name.to_string(),
-                ty: ty.as_ref().map(ctype_to_type_like),
+                ty,
             })
             .collect(),
     }
 }
 
 #[cfg(test)]
-fn set_signature_facts(
-    decompiler: &mut r2dec::Decompiler,
-    signature: Option<r2types::FunctionSignatureSpec>,
-) {
-    decompiler.set_type_facts(r2types::FunctionTypeFacts {
-        merged_signature: signature,
-        ..r2types::FunctionTypeFacts::default()
-    });
+fn signed_type(bits: u32) -> r2types::CTypeLike {
+    r2types::CTypeLike::Int {
+        bits,
+        signedness: r2types::Signedness::Signed,
+    }
+}
+
+#[cfg(test)]
+fn unsigned_type(bits: u32) -> r2types::CTypeLike {
+    r2types::CTypeLike::Int {
+        bits,
+        signedness: r2types::Signedness::Unsigned,
+    }
+}
+
+#[cfg(test)]
+fn ptr_type(inner: r2types::CTypeLike) -> r2types::CTypeLike {
+    r2types::CTypeLike::Pointer(Box::new(inner))
 }
 
 #[cfg(test)]
@@ -5953,18 +4821,482 @@ mod tests {
     use serde_json::Value;
     use std::ffi::{CStr, CString};
 
-    fn type_like(ty: r2dec::CType) -> r2types::CTypeLike {
-        ctype_to_type_like(&ty)
+    #[test]
+    fn varnode_dedup_key_preserves_full_custom_space_id() {
+        let low = Varnode::new(r2il::SpaceId::Custom(0), 0x1234, 8);
+        let high = Varnode::new(r2il::SpaceId::Custom(256), 0x1234, 8);
+
+        assert_ne!(varnode_key(&low), varnode_key(&high));
+        assert_eq!(
+            HashSet::from([varnode_key(&low), varnode_key(&high)]).len(),
+            2
+        );
+    }
+
+    fn signature_param_candidate(
+        name: &str,
+        ty: r2types::CTypeLike,
+        arg_index: usize,
+        size_bytes: u32,
+        evidence: TypeEvidence,
+    ) -> r2types::SignatureParamCandidate {
+        r2types::SignatureParamCandidate {
+            name: name.to_string(),
+            ty,
+            arg_index,
+            size_bytes,
+            evidence,
+        }
+    }
+
+    #[test]
+    fn c_plugin_does_not_invent_empty_decompile_fallback() {
+        let c_source = include_str!("../r_anal_sleigh.c");
+        let rust_decompiler_source = include_str!("decompiler.rs");
+
+        assert!(
+            !c_source.contains("empty decompilation output"),
+            "C glue must not invent decompile fallback text; r2engine/rust output owns refusal policy"
+        );
+        assert_eq!(
+            c_source.matches("r2sleigh refused").count(),
+            1,
+            "the only refusal the C glue writes is the engine complexity limit; \
+             everything else is the engine's own text"
+        );
+        assert!(
+            !rust_decompiler_source.contains("/* r2dec:"),
+            "Rust plugin decompile wrapper must not synthesize r2dec-looking refusal comments"
+        );
+        assert!(
+            !rust_decompiler_source.contains("failed to spawn decompiler thread")
+                && !rust_decompiler_source.contains("decompilation panicked"),
+            "Rust plugin decompile wrapper must fail closed instead of owning decompile error text"
+        );
+    }
+
+    #[test]
+    fn c_plugin_emits_one_versioned_sidecar_with_all_independent_audits() {
+        let c_source = include_str!("../r_anal_sleigh.c");
+        let emitter = c_source
+            .split("static void sleigh_engine_v2_emit_binding_audit")
+            .nth(1)
+            .expect("typed audit sidecar emitter");
+
+        assert!(emitter.contains("r_json_get (diagnostics, \"binding_audit\")"));
+        assert!(emitter.contains("r_json_get (diagnostics, \"effect_obligations\")"));
+        assert!(emitter.contains("r_json_get (diagnostics, \"placement_audit\")"));
+        assert!(emitter.contains("r_json_get (diagnostics, \"render_refusal\")"));
+        assert!(emitter.contains("effect_obligations->type == R_JSON_OBJECT"));
+        assert!(emitter.contains("placement_audit->type == R_JSON_OBJECT"));
+        assert!(emitter.contains("render_refusal->type == R_JSON_OBJECT"));
+        assert!(emitter.contains("pj_kn (pj, \"schema_version\", 5)"));
+        assert!(emitter.contains("pj_k (pj, \"audit\")"));
+        assert!(emitter.contains("pj_k (pj, \"effect_obligations\")"));
+        assert!(emitter.contains("pj_k (pj, \"placement_audit\")"));
+        assert!(emitter.contains("pj_k (pj, \"render_refusal\")"));
+        assert_eq!(
+            emitter.matches("SLEIGH_BINDING_AUDIT_PREFIX").count(),
+            1,
+            "the corpus receives one atomic marker envelope per decompile"
+        );
+    }
+
+    #[test]
+    fn c_plugin_projects_the_engine_response_without_reassembling_it() {
+        let c_source = include_str!("../r_anal_sleigh.c");
+        // What this used to pin was a projector that assembled a decompile
+        // document in C by parsing diagnostics the engine had already produced
+        // as JSON. Nothing ever asked for it: its only caller passed the
+        // projection flag as false, because the commands that would have set it
+        // were withdrawn in favour of the command route. It is gone, and so is the reparsing.
+        assert!(
+            !c_source.contains("sleigh_engine_v2_response_json")
+                && !c_source.contains("r_json_parsedup (diagnostics_text)"),
+            "the C wrapper must not reassemble a document the engine already produced"
+        );
+        let execute = c_source
+            .find("static char *sleigh_engine_execute_v2(")
+            .expect("V2 executor");
+        let project = &c_source[execute..];
+        let bytes = project
+            .find("api->response_bytes (response, &bytes)")
+            .expect("opaque response bytes inspection");
+        let free = project[bytes..]
+            .find("sleigh_engine_v2_release_or_preserve (api, &response, &session)")
+            .map(|offset| bytes + offset)
+            .expect("opaque response owner release");
+        assert!(
+            bytes < free,
+            "every borrowed view must be projected before response_free"
+        );
+        assert!(
+            project.contains("api->response_info (response, &info)"),
+            "response metadata must come from the V2 inspection API"
+        );
+        assert!(
+            c_source.contains("sleigh_json_is_single_object ("),
+            "kernel warnings must still require one complete diagnostics object"
+        );
+
+        // The fact the deleted a:sla.dec / a:sla.decj commands carried: a
+        // decompile that cannot construct source authority is not offered at
+        // all, rather than offered and refused.
+        assert!(
+            !c_source.contains("sla.dec")
+                && !c_source.contains("sleigh_decompile_execute")
+                && !c_source.contains("borrowed_snapshot_required"),
+            "the deleted direct decompile commands must not return as refusal shims"
+        );
+        // That envelope was built by the error JSON only a:sla.decj asked for.
+        // With the command gone the C glue emits no decompile document at all,
+        // which is the stronger form of the same guarantee.
+        assert!(
+            !c_source.contains("pj_ks (pj, \"request_kind\", \"decompile\")"),
+            "the C glue must not build a decompile response document of its own"
+        );
+    }
+
+    #[test]
+    fn c_plugin_never_imports_dwarf_during_analysis_or_decompilation() {
+        let c_source = include_str!("../r_anal_sleigh.c");
+        for forbidden in [
+            "sleigh_import_dwarf_base_types_if_needed",
+            "r_bin_dwarf_parse_",
+            "r_anal_dwarf_process_info",
+        ] {
+            assert!(
+                !c_source.contains(forbidden),
+                "immutable snapshots require DWARF ingestion before plugin analysis: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn c_plugin_keeps_decompile_session_policy_out_of_c_glue() {
+        let c_source = include_str!("../r_anal_sleigh.c");
+        let start = c_source
+            .find("static RCodeMeta *sleigh_decompile(")
+            .expect("decompiler provider callback");
+        let end = c_source[start..]
+            .find("static char *sleigh_cmd(")
+            .map(|offset| start + offset)
+            .expect("command callback after decompiler provider");
+        let decompile_block = &c_source[start..end];
+
+        assert!(
+            c_source.contains("R2SLEIGH_CAP_PLANNER_QUERY_V2")
+                && c_source.contains("api->planner_query"),
+            "non-core analysis/debug C paths must consume the generated V2 planner table"
+        );
+        for forbidden in [
+            "R2SleighSessionPolicyPlan",
+            "sleigh_session_policy_plan_for_function",
+            "r2sleigh_session_policy_plan_for_depth",
+            "session_policy_plan.",
+            concat!("R2SleighSession", "Input session_input"),
+            concat!("sleigh_session_", "input_init (&session_input"),
+            concat!("r2dec_", "function_with_session_context"),
+            "SLEIGH_TYPE_WRITEBACK_OFF",
+        ] {
+            assert!(
+                !decompile_block.contains(forbidden),
+                "the decompile route must not own session policy fragment {forbidden:?}"
+            );
+        }
+        assert!(
+            !decompile_block.contains("sleigh_analysis_policy_for_anal"),
+            "the decompile route must not assemble policy from plugin-local analysis policy"
+        );
+        for forbidden in [
+            "policy.type_writeback_mode",
+            "policy.type_global_max_links",
+            "policy.type_max_decls",
+            "policy.type_max_mutations",
+        ] {
+            assert!(
+                !decompile_block.contains(forbidden),
+                "the decompile route must not own session policy fragment {forbidden:?}"
+            );
+        }
+        for forbidden in [
+            "should_skip_decompile_symbolic_scope",
+            "function_exceeds_helper_scope_budget",
+            "r2sleigh_interproc_helper_scope_budget_allows",
+            "prefer_bounded_semantic_type_plan",
+            "? 1: policy.type_interproc_max_iters",
+            "? false: true",
+            "1, 1, true",
+        ] {
+            assert!(
+                !c_source.contains(forbidden),
+                "C glue must not own interproc/session policy fragment {forbidden:?}"
+            );
+        }
+        for forbidden in [
+            concat!("build_type_", "interproc_scope"),
+            "SymFunctionScope sym_scope",
+            concat!("SleighInterproc", "Seeds interproc_seeds"),
+            "have_sym_scope",
+            "sym_scope.functions",
+            "interproc_seeds.items",
+        ] {
+            assert!(
+                !decompile_block.contains(forbidden),
+                "the decompile route must not build or pass plugin-owned interprocedural scope {forbidden:?}"
+            );
+        }
+        for forbidden in [
+            "build_decompiler_function_names_json",
+            "build_decompiler_strings_json",
+            "build_decompiler_symbols_json",
+            "func_names_json",
+            "strings_json",
+            "symbols_json",
+        ] {
+            assert!(
+                !decompile_block.contains(forbidden),
+                "the decompile route must not collect or pass raw decompiler metadata {forbidden:?}"
+            );
+        }
+        assert!(
+            decompile_block.contains("sleigh_engine_execute_v2 (")
+                && decompile_block.contains("R2SLEIGH_REQUEST_DECOMPILE_V2"),
+            "the decompile route must call the versioned engine boundary with decompile-only typed input"
+        );
+        for forbidden in [
+            "/* r2dec: function target",
+            "r_cons_printf (cons,\n\t\t\t\t\t\t\"/* r2dec:",
+            "not found or could not be materialized",
+        ] {
+            assert!(
+                !decompile_block.contains(forbidden),
+                "the decompile route must not synthesize plugin-owned refusal text {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c_plugin_decompile_uses_only_the_borrowed_snapshot() {
+        let c_source = include_str!("../r_anal_sleigh.c");
+        let provider_start = c_source
+            .find("static RCodeMeta *sleigh_decompile(")
+            .expect("borrowed-snapshot decompile route");
+        let provider_end = c_source[provider_start..]
+            .find("static char *sleigh_cmd(")
+            .map(|offset| provider_start + offset)
+            .expect("command callback after decompiler provider");
+        let provider = &c_source[provider_start..provider_end];
+        // The wire is built by the epoch-keyed capture rather than inline here,
+        // so the provider is checked for routing and the capture for serializing.
+        // The invariant is unchanged: a borrowed snapshot reaches the engine only
+        // through the V2 boundary, and never by rebuilding source state.
+        assert!(
+            provider.contains(".snapshot_buffer = held->wire")
+                && provider.contains("R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2")
+                && provider.contains("sleigh_engine_execute_v2 (")
+        );
+        let capture = c_source
+            .split("static const SleighFunctionCapture *sleigh_function_capture(")
+            .nth(1)
+            .expect("the capture that owns the wire buffer");
+        assert!(
+            capture.contains("r2sleigh_wire_writer_new ()")
+                && capture.contains("r2sleigh_wire_write_snapshot (writer, snapshot)")
+                && capture.contains("r2sleigh_function_snapshot_free (snapshot)"),
+            "the capture must serialize through the V2 wire writer and own the snapshot"
+        );
+        for forbidden in ["get_context (", "lift_function_blocks", "snapshot_collect"] {
+            assert!(
+                !provider.contains(forbidden),
+                "the decompile route must not rebuild source state via {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c_plugin_sla_ssa_func_does_not_own_decompile_cfg_guard() {
+        let c_source = include_str!("../r_anal_sleigh.c");
+        let section = c_source
+            .find("/* ========== Function-level SSA commands ========== */")
+            .expect("function-level SSA command section");
+        let start = c_source[section..]
+            .find("if (!strcmp (cmd, \"sla.ssa.func\"))")
+            .map(|offset| section + offset)
+            .expect("a:sla.debug.ssa.func command block");
+        let end = c_source[start..]
+            .find("if (!strcmp (cmd, \"sla.ssa.func.opt\"))")
+            .map(|offset| start + offset)
+            .expect("next command after a:sla.debug.ssa.func");
+        let ssa_func_block = &c_source[start..end];
+
+        assert!(
+            !c_source.contains("extern char *r2dec_cfg_guard_comment_ffi"),
+            "C glue must not declare the plugin-owned CFG guard comment FFI"
+        );
+        assert!(
+            !ssa_func_block.contains("r2dec_cfg_guard_comment_ffi"),
+            "a:sla.debug.ssa.func must not call the plugin-owned CFG guard comment FFI"
+        );
+        assert!(
+            !ssa_func_block.contains("/* r2dec:"),
+            "a:sla.debug.ssa.func must not print r2dec CFG guard comments"
+        );
+        for forbidden in [
+            "compute_decompile_cfg_risk_summary",
+            "DecompileCFGRiskSummary",
+            "is_autogenerated_function_name",
+        ] {
+            assert!(
+                !c_source.contains(forbidden),
+                "C glue must not retain local decompile CFG guard policy {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c_plugin_post_analysis_does_not_own_type_writeback_fixpoint() {
+        let c_source = include_str!("../r_anal_sleigh.c");
+        let rust_source = include_str!("lib.rs");
+
+        for forbidden in [
+            concat!("r2sleigh_type_writeback_", "fixpoint_"),
+            concat!("collect_", "fixpoint_neighbor_candidates"),
+            concat!("append_", "fixpoint_edge_candidate"),
+            concat!("fixpoint_", "ref_kind_id"),
+            concat!("type ", "fixpoint"),
+            concat!("R2SleighTypeWriteback", "Fixpoint"),
+            concat!("r2sleigh_type_writeback_", "cache_"),
+            concat!("apply_type_writeback_", "session_result"),
+            concat!("compute_callee_", "dependency_hash"),
+            concat!("propagate_signature_", "to_direct_callers"),
+            concat!("apply_inferred_", "signature_fact"),
+            concat!("apply_inferred_", "callconv"),
+            concat!("r2sleigh_session_result_", "mutations"),
+            concat!("r2sleigh_session_result_type_", "writeback_json"),
+            concat!("r2sleigh_bounded_", "type_json_ffi"),
+        ] {
+            assert!(
+                !c_source.contains(forbidden),
+                "C post-analysis must not own type-writeback policy {forbidden:?}"
+            );
+            assert!(
+                !rust_source.contains(forbidden),
+                "plugin Rust must not expose type-writeback policy ABI {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_session_debug_abi_is_deleted() {
+        let rust_source = include_str!("lib.rs");
+        for forbidden in [
+            concat!("pub extern \"C\" fn r2sleigh_session_", "analyze"),
+            concat!(
+                "pub extern \"C\" fn r2sleigh_session_result_",
+                "report_json"
+            ),
+            concat!("pub extern \"C\" fn r2sleigh_session_result_", "free"),
+            concat!(
+                "pub extern \"C\" fn r2sleigh_session_interproc_",
+                "summary_json"
+            ),
+            concat!("pub struct R2SleighSession", "Input"),
+            concat!("fn session_", "analysis_input"),
+            concat!("fn build_function_analysis_", "shared_bundle"),
+        ] {
+            assert!(
+                !rust_source.contains(forbidden),
+                "broad plugin session/debug ABI must stay deleted: {forbidden:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_decompile_boundary_has_no_legacy_direct_decompile_exports() {
+        let rust_source = include_str!("lib.rs");
+        let ffi_source = include_str!("ffi_v2.rs");
+        let c_source = include_str!("../r_anal_sleigh.c");
+        let forbidden_rust = [
+            concat!("pub extern \"C\" fn r2dec_", "function_with_context"),
+            concat!("pub extern \"C\" fn r2dec_", "function_with_context_scope"),
+            concat!("fn r2dec_", "function_with_context_impl"),
+            concat!("struct R2Dec", "FunctionWithContextInputs"),
+            concat!("pub extern \"C\" fn r2dec_", "block("),
+            concat!("pub extern \"C\" fn r2dec_", "block_ast_json"),
+            concat!("pub extern \"C\" fn r2dec_", "named_native_worker_summary"),
+            concat!(
+                "pub extern \"C\" fn r2dec_",
+                "semantic_worker_linearization_scope_ffi"
+            ),
+            concat!("pub extern \"C\" fn r2dec_", "block_guard_comment_ffi"),
+            concat!("pub struct R2SleighEngine", "DecompileInput"),
+            concat!("pub struct R2SleighEngine", "TypeFunctionInput"),
+            concat!("pub extern \"C\" fn r2sleigh_engine_", "decompile_function"),
+            concat!("pub extern \"C\" fn r2sleigh_engine_", "type_function_json"),
+            concat!("execute_", "migration_shim"),
+            concat!("legacy_", "input"),
+            concat!("r2sleigh_ffi_sizeof_", "function_context"),
+            concat!("r2sleigh_ffi_alignof_", "function_context"),
+        ];
+        for forbidden in forbidden_rust {
+            assert!(
+                !rust_source.contains(forbidden),
+                "r2plugin Rust must not expose legacy direct decompile ABI {forbidden:?}"
+            );
+            assert!(
+                !ffi_source.contains(forbidden),
+                "V2 Rust must not retain legacy request transport {forbidden:?}"
+            );
+        }
+
+        let forbidden_c = [
+            concat!("r2dec_", "function_with_context("),
+            concat!("r2dec_", "function_with_context_scope("),
+            concat!("r2dec_", "block("),
+            concat!("r2dec_", "block_ast_json("),
+            concat!("r2dec_", "named_native_worker_summary("),
+            concat!("r2dec_", "semantic_worker_linearization_scope_ffi("),
+            concat!("r2dec_", "block_guard_comment_ffi("),
+            concat!("R2SleighEngine", "DecompileInput"),
+            concat!("R2SleighEngine", "TypeFunctionInput"),
+        ];
+        for forbidden in forbidden_c {
+            assert!(
+                !c_source.contains(forbidden),
+                "C plugin glue must not declare or call legacy direct decompile ABI {forbidden:?}"
+            );
+        }
+        let provider_start = c_source
+            .find("static RCodeMeta *sleigh_decompile(RAnal *anal, RAnalFunction *fcn)")
+            .expect("borrowed-snapshot decompiler provider");
+        let provider_end = c_source[provider_start..]
+            .find("static char *sleigh_cmd(")
+            .map(|offset| provider_start + offset)
+            .expect("command callback after provider");
+        let provider = &c_source[provider_start..provider_end];
+        assert!(
+            provider.contains("const R2SleighEngineRequestPayloadV2 payload")
+                && provider.contains(".snapshot_buffer = held->wire")
+                && provider.contains("R2SLEIGH_REQUEST_DECOMPILE_V2")
+                && provider.contains("R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2")
+                && provider.contains("sleigh_engine_execute_v2 ("),
+            "C plugin glue must route borrowed snapshots exclusively through the native V2 boundary"
+        );
+        assert!(!c_source.contains(concat!(
+            "r2sleigh_engine_",
+            "decompile_function (&decompile_input)"
+        )));
     }
 
     fn register_param(
         name: &str,
-        ty: Option<r2dec::CType>,
+        ty: Option<r2types::CTypeLike>,
         reg: &str,
     ) -> r2types::ExternalRegisterParamSpec {
         r2types::ExternalRegisterParamSpec {
             name: name.to_string(),
-            ty: ty.as_ref().map(ctype_to_type_like),
+            ty,
             reg: reg.to_string(),
         }
     }
@@ -5984,7 +5316,7 @@ mod tests {
             );
         }
 
-        for synthetic in ["tmp:10", "const:4", "ram:1000", "TMP:5"] {
+        for synthetic in ["tmp:10", "const:4", "ram:1000", "space1:20", "TMP:5"] {
             assert!(
                 !is_real_reg(synthetic),
                 "{synthetic} should be excluded as non-register data"
@@ -5992,12 +5324,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn switch_info_ffi_attaches_normalized_switch_facts() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        let cases = [
+            R2ILSwitchCaseFfi {
+                value: 7,
+                target: 0x3000,
+            },
+            R2ILSwitchCaseFfi {
+                value: 0,
+                target: 0x2000,
+            },
+            R2ILSwitchCaseFfi {
+                value: 7,
+                target: 0x3000,
+            },
+        ];
+
+        let ok = r2il_block_set_switch_info(R2ILSwitchInfoInput {
+            block: &mut block,
+            switch_addr: 0x1010,
+            min_val: 0,
+            max_val: 7,
+            default_target: 0x4000,
+            has_default: 1,
+            cases: cases.as_ptr(),
+            case_count: cases.len(),
+        });
+        assert_eq!(ok, 1);
+
+        let info = block.switch_info.as_ref().expect("switch info");
+        assert_eq!(info.switch_addr, 0x1010);
+        assert_eq!(info.min_val, 0);
+        assert_eq!(info.max_val, 7);
+        assert_eq!(info.default_target, Some(0x4000));
+        assert_eq!(
+            info.cases
+                .iter()
+                .map(|case| (case.value, case.target))
+                .collect::<Vec<_>>(),
+            vec![(0, 0x2000), (7, 0x3000)]
+        );
+    }
+
+    #[test]
+    fn switch_info_ffi_rejects_ambiguous_duplicate_case_values() {
+        let mut block = R2ILBlock::new(0x1000, 4);
+        let cases = [
+            R2ILSwitchCaseFfi {
+                value: 1,
+                target: 0x2000,
+            },
+            R2ILSwitchCaseFfi {
+                value: 1,
+                target: 0x3000,
+            },
+        ];
+
+        let ok = r2il_block_set_switch_info(R2ILSwitchInfoInput {
+            block: &mut block,
+            switch_addr: 0x1010,
+            min_val: 0,
+            max_val: 1,
+            default_target: u64::MAX,
+            has_default: 0,
+            cases: cases.as_ptr(),
+            case_count: cases.len(),
+        });
+        assert_eq!(ok, 0);
+        assert!(block.switch_info.is_none());
+    }
+
     #[cfg(feature = "x86")]
     unsafe fn c_string_to_owned(ptr: *mut c_char) -> String {
         let out = unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned();
-        r2il_string_free(ptr);
+        drop_test_ffi_string(ptr);
         out
     }
 
@@ -6021,24 +5425,26 @@ mod tests {
         export_instruction(&input, action, format).expect("export")
     }
 
-    #[test]
-    fn test_context_lifecycle_from_file() {
-        let spec = r2sleigh_lift::create_x86_64_spec();
-        let temp_path = "/tmp/test_r2il_plugin.r2il";
-        serialize::save(&spec, Path::new(temp_path)).unwrap();
+    #[cfg(feature = "x86")]
+    fn block_has_inline_varnode_metadata(block: &R2ILBlock) -> bool {
+        block.ops.iter().any(|op| {
+            op.output().is_some_and(|vn| vn.meta.is_some())
+                || op.inputs().into_iter().any(|vn| vn.meta.is_some())
+        })
+    }
 
-        let path_cstr = CString::new(temp_path).unwrap();
-        let ctx = r2il_load(path_cstr.as_ptr());
-        assert!(!ctx.is_null());
-        assert_eq!(r2il_is_loaded(ctx), 1);
-
-        let name_ptr = r2il_arch_name(ctx);
-        assert!(!name_ptr.is_null());
-        let name = unsafe { CStr::from_ptr(name_ptr) };
-        assert_eq!(name.to_str().unwrap(), "x86-64");
-
-        r2il_free(ctx);
-        std::fs::remove_file(temp_path).ok();
+    #[cfg(feature = "x86")]
+    fn block_has_advisory_semantic_metadata(block: &R2ILBlock) -> bool {
+        block.op_metadata.values().any(|metadata| {
+            metadata.memory_class.is_some()
+                || metadata.endianness.is_some()
+                || metadata.memory_ordering.is_some()
+                || metadata.permissions.is_some()
+                || metadata.valid_range.is_some()
+                || metadata.bank_id.is_some()
+                || metadata.segment_id.is_some()
+                || metadata.atomic_kind.is_some()
+        })
     }
 
     #[test]
@@ -6064,8 +5470,94 @@ mod tests {
         assert!(esil.contains("eax"));
 
         unsafe { drop(CString::from_raw(esil_ptr as *mut c_char)) };
-        r2il_block_free(block);
-        r2il_free(ctx);
+        drop_test_block(block);
+        drop_test_context(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn lift_respects_semantic_metadata_disable_toggle() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        // mov eax, dword ptr [rbp - 4]
+        let mut bytes = vec![0x8b, 0x45, 0xfc];
+        bytes.resize(16, 0);
+
+        let enabled_block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!enabled_block.is_null());
+        let enabled = unsafe { &*enabled_block };
+        assert!(
+            !block_has_inline_varnode_metadata(enabled),
+            "semantic enrichment must not mutate canonical varnodes"
+        );
+        assert!(
+            block_has_advisory_semantic_metadata(enabled),
+            "default lift should retain advisory memory facts out of band"
+        );
+        let enabled_ops = enabled.ops.clone();
+        drop_test_block(enabled_block);
+
+        r2il_set_semantic_metadata_enabled(ctx, false);
+        let disabled_block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert!(!disabled_block.is_null());
+        let disabled = unsafe { &*disabled_block };
+        assert!(
+            !block_has_inline_varnode_metadata(disabled)
+                && !block_has_advisory_semantic_metadata(disabled),
+            "disabled semantic metadata must suppress only out-of-band enrichment"
+        );
+        assert_eq!(enabled_ops, disabled.ops);
+
+        drop_test_block(disabled_block);
+        drop_test_context(ctx);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn lift_block_respects_semantic_metadata_disable_toggle() {
+        let arch = CString::new("x86-64").unwrap();
+        let ctx = r2il_arch_init(arch.as_ptr());
+        assert!(!ctx.is_null());
+
+        // mov eax, dword ptr [rbp - 4]
+        let mut bytes = vec![0x8b, 0x45, 0xfc];
+        bytes.resize(16, 0);
+
+        let enabled_block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), 0x1000, 3);
+        assert!(!enabled_block.is_null());
+        let enabled = unsafe { &*enabled_block };
+        assert!(
+            !block_has_inline_varnode_metadata(enabled),
+            "block enrichment must not mutate canonical varnodes"
+        );
+        assert!(
+            block_has_advisory_semantic_metadata(enabled),
+            "default block lift should retain advisory memory facts out of band"
+        );
+        let enabled_ops = enabled.ops.clone();
+        drop_test_block(enabled_block);
+
+        r2il_set_semantic_metadata_enabled(ctx, false);
+        let disabled_block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), 0x1000, 3);
+        assert!(!disabled_block.is_null());
+        let disabled = unsafe { &*disabled_block };
+        assert!(
+            !block_has_inline_varnode_metadata(disabled)
+                && !block_has_advisory_semantic_metadata(disabled),
+            "disabled semantic metadata must suppress only out-of-band block enrichment"
+        );
+        assert!(
+            disabled
+                .op_metadata
+                .values()
+                .all(|metadata| metadata.instruction_addr.is_some())
+        );
+        assert_eq!(enabled_ops, disabled.ops);
+
+        drop_test_block(disabled_block);
+        drop_test_context(ctx);
     }
 
     #[test]
@@ -6098,8 +5590,8 @@ mod tests {
         let ffi_val: Value = serde_json::from_str(&ffi_json).expect("ffi json value");
         assert_eq!(ffi_val, expected_val);
 
-        r2il_block_free(block);
-        r2il_free(ctx);
+        drop_test_block(block);
+        drop_test_context(ctx);
     }
 
     #[test]
@@ -6133,8 +5625,8 @@ mod tests {
             .join(";");
         assert_eq!(ffi_esil, expected_joined);
 
-        r2il_block_free(block);
-        r2il_free(ctx);
+        drop_test_block(block);
+        drop_test_context(ctx);
     }
 
     #[test]
@@ -6166,8 +5658,8 @@ mod tests {
         let expected_val: Value = serde_json::from_str(&expected).expect("expected json");
         assert_eq!(ffi_val, expected_val);
 
-        r2il_block_free(block);
-        r2il_free(ctx);
+        drop_test_block(block);
+        drop_test_context(ctx);
     }
 
     #[test]
@@ -6199,62 +5691,16 @@ mod tests {
         let expected_val: Value = serde_json::from_str(&expected).expect("expected json");
         assert_eq!(ffi_val, expected_val);
 
-        r2il_block_free(block);
-        r2il_free(ctx);
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn r2dec_block_c_like_matches_exporter_path() {
-        let arch = CString::new("x86-64").unwrap();
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null());
-
-        let mut bytes = vec![0x31, 0xC0];
-        bytes.resize(16, 0);
-        let block = r2il_lift(ctx, bytes.as_ptr(), bytes.len(), 0x1000);
-        assert!(!block.is_null());
-
-        let ffi_ptr = r2dec_block(ctx, block);
-        assert!(!ffi_ptr.is_null());
-        let ffi_c_like = unsafe { c_string_to_owned(ffi_ptr) };
-
-        let ctx_ref = unsafe { &*ctx };
-        let block_ref = unsafe { &*block };
-        let expected = export_from_context(
-            ctx_ref,
-            block_ref,
-            InstructionAction::Dec,
-            ExportFormat::CLike,
-        );
-        assert_eq!(ffi_c_like, expected);
-
-        r2il_block_free(block);
-        r2il_free(ctx);
+        drop_test_block(block);
+        drop_test_context(ctx);
     }
 
     #[test]
     fn test_null_handling() {
-        assert!(r2il_load(ptr::null()).is_null());
         assert_eq!(r2il_is_loaded(ptr::null()), 0);
         assert!(r2il_arch_name(ptr::null()).is_null());
-        r2il_free(ptr::null_mut());
-        r2il_block_free(ptr::null_mut());
-    }
-
-    #[test]
-    fn is_big_endian_uses_memory_endianness_shim() {
-        let mut arch = ArchSpec::new("shim");
-        arch.set_memory_endianness(r2il::Endianness::Big);
-        let ctx = Box::into_raw(Box::new(R2ILContext::with_arch(arch)));
-        assert_eq!(r2il_is_big_endian(ctx), 1);
-        r2il_free(ctx);
-
-        let mut arch = ArchSpec::new("shim2");
-        arch.set_memory_endianness(r2il::Endianness::Mixed);
-        let ctx = Box::into_raw(Box::new(R2ILContext::with_arch(arch)));
-        assert_eq!(r2il_is_big_endian(ctx), 0);
-        r2il_free(ctx);
+        drop_test_context(ptr::null_mut());
+        drop_test_block(ptr::null_mut());
     }
 
     #[test]
@@ -6265,11 +5711,8 @@ mod tests {
         assert_eq!(sig.params.len(), 2);
         assert_eq!(sig.params[0].name, "user_input");
         assert_eq!(sig.params[1].name, "user_len");
-        assert_eq!(
-            sig.params[0].ty,
-            Some(type_like(r2dec::CType::ptr(r2dec::CType::Int(8))))
-        );
-        assert_eq!(sig.params[1].ty, Some(type_like(r2dec::CType::Int(32))));
+        assert_eq!(sig.params[0].ty, Some(ptr_type(signed_type(8))));
+        assert_eq!(sig.params[1].ty, Some(signed_type(32)));
     }
 
     #[test]
@@ -6285,7 +5728,7 @@ mod tests {
         let json =
             r#"[{"name":"dbg.test","args":[{"name":"arg1","type":"void"}],"return":"int32_t"}]"#;
         let sig = parse_external_signature(json, 64).expect("signature should parse");
-        assert_eq!(sig.ret_type, Some(type_like(r2dec::CType::Int(32))));
+        assert_eq!(sig.ret_type, Some(signed_type(32)));
         assert!(
             sig.params.is_empty(),
             "single generic void placeholder should be treated as an empty parameter list"
@@ -6316,60 +5759,81 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_external_type_accepts_type_prefixed_primitives() {
+    fn test_session_policy_plan_ffi_routes_to_engine() {
         assert_eq!(
-            parse_external_type("type.int", 64),
-            Some(r2dec::CType::Int(32))
+            type_writeback_apply_policy_from_ffi(&R2SleighTypeWritebackApplyPolicy {
+                schema_version: 0,
+                mode: R2SLEIGH_TYPE_WRITEBACK_OFF,
+            })
+            .mode,
+            r2types::TypeWritebackApplyMode::Off,
+            "plugin FFI must route off mode through engine-owned policy mapping"
         );
         assert_eq!(
+            type_writeback_apply_policy_from_ffi(&R2SleighTypeWritebackApplyPolicy {
+                schema_version: 0,
+                mode: R2SLEIGH_TYPE_WRITEBACK_BALANCED,
+            })
+            .mode,
+            r2types::TypeWritebackApplyMode::Balanced,
+            "plugin FFI must route balanced mode through engine-owned policy mapping"
+        );
+        assert_eq!(
+            type_writeback_apply_policy_from_ffi(&R2SleighTypeWritebackApplyPolicy {
+                schema_version: 0,
+                mode: R2SLEIGH_TYPE_WRITEBACK_AGGRESSIVE,
+            })
+            .mode,
+            r2types::TypeWritebackApplyMode::Aggressive,
+            "plugin FFI must route aggressive mode through engine-owned policy mapping"
+        );
+    }
+
+    #[test]
+    fn test_parse_external_type_accepts_type_prefixed_primitives() {
+        assert_eq!(parse_external_type("type.int", 64), Some(signed_type(32)));
+        assert_eq!(
             parse_external_type("type.uint16_t *", 64),
-            Some(r2dec::CType::ptr(r2dec::CType::UInt(16)))
+            Some(ptr_type(unsigned_type(16)))
         );
         assert_eq!(
             parse_external_type("struct.sla_node *", 64),
-            Some(r2dec::CType::ptr(r2dec::CType::Struct(
-                "sla_node".to_string()
-            )))
+            Some(ptr_type(r2types::CTypeLike::Struct("sla_node".to_string())))
         );
         assert_eq!(
             parse_external_type("type.IOCPU_VTable.setCPUNumber", 64),
-            Some(r2dec::CType::ptr(r2dec::CType::Void))
+            None,
+            "a dotted member path is not a placeable C type"
         );
     }
 
     #[test]
     fn test_parse_external_type_accepts_canonical_signed_spellings() {
-        assert_eq!(
-            parse_external_type("signed int", 64),
-            Some(r2dec::CType::Int(32))
-        );
+        assert_eq!(parse_external_type("signed int", 64), Some(signed_type(32)));
         assert_eq!(
             parse_external_type("signed short int", 64),
-            Some(r2dec::CType::Int(16))
+            Some(signed_type(16))
         );
         assert_eq!(
             parse_external_type("signed long", 64),
-            Some(r2dec::CType::Int(64))
+            Some(signed_type(64))
         );
         assert_eq!(
             parse_external_type("signed long *", 64),
-            Some(r2dec::CType::ptr(r2dec::CType::Int(64)))
+            Some(ptr_type(signed_type(64)))
         );
     }
 
     #[test]
     fn test_parse_external_type_accepts_canonical_ssize_t_aliases() {
-        assert_eq!(
-            parse_external_type("intptr_t", 64),
-            Some(r2dec::CType::Int(64))
-        );
+        assert_eq!(parse_external_type("intptr_t", 64), Some(signed_type(64)));
         assert_eq!(
             parse_external_type("type.intptr_t", 64),
-            Some(r2dec::CType::Int(64))
+            Some(signed_type(64))
         );
         assert_eq!(
             parse_external_type("ssize_t *", 64),
-            Some(r2dec::CType::ptr(r2dec::CType::Int(64)))
+            Some(ptr_type(signed_type(64)))
         );
     }
 
@@ -6470,15 +5934,14 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_external_stack_vars_bp_sp() {
-        let json = r#"{"sp":[{"name":"var_8h","kind":"var","type":"int64_t","ref":{"base":"RSP","offset":80}}],"bp":[{"name":"buf","kind":"var","type":"char[64]","ref":{"base":"RBP","offset":-64}},{"name":"user_input","kind":"var","type":"char *","ref":{"base":"RBP","offset":-72}}]}"#;
-        let vars = parse_external_stack_vars(json, 64);
-        assert_eq!(vars.get(&-64).map(|v| v.name.as_str()), Some("buf"));
-        assert_eq!(vars.get(&-72).map(|v| v.name.as_str()), Some("user_input"));
-        assert_eq!(
-            vars.get(&80).and_then(|v| v.base.legacy_name()),
-            Some("rsp".to_string())
-        );
+    fn x86_32_pointer_slots_do_not_inherit_sysv64_argument_registers() {
+        let mut arch = ArchSpec::new("x86");
+        arch.addr_size = 4;
+
+        let slots = collect_pointer_arg_slot_map(Some(&arch), 32);
+
+        assert!(slots.is_empty());
+        assert!(!slots.contains_key("ecx"));
     }
 
     #[test]
@@ -6487,37 +5950,30 @@ mod tests {
         let params = parse_external_reg_params(json, 64);
         assert_eq!(params.len(), 2);
         assert_eq!(params[0].name, "arg0");
-        assert_eq!(params[0].ty, Some(type_like(r2dec::CType::Int(32))));
+        assert_eq!(params[0].ty, Some(signed_type(32)));
         assert_eq!(params[0].reg, "RDI");
         assert_eq!(params[1].name, "arg1");
-        assert_eq!(params[1].ty, Some(type_like(r2dec::CType::Int(32))));
+        assert_eq!(params[1].ty, Some(signed_type(32)));
         assert_eq!(params[1].reg, "RSI");
     }
 
     #[test]
     fn test_merge_signature_with_reg_params_fills_missing_host_args() {
         let merged = merge_signature_with_reg_params(
-            Some(signature_spec(Some(r2dec::CType::Int(32)), Vec::new())),
+            Some(r2types::FunctionSignatureSpec {
+                ret_type: Some(signed_type(32)),
+                params: Vec::new(),
+            }),
             vec![
-                register_param("arg0", Some(r2dec::CType::Int(32)), "RDI"),
-                register_param("arg1", Some(r2dec::CType::Int(32)), "RSI"),
+                register_param("arg0", Some(signed_type(32)), "RDI"),
+                register_param("arg1", Some(signed_type(32)), "RSI"),
             ],
         )
         .expect("merged signature");
-        assert_eq!(merged.ret_type, Some(type_like(r2dec::CType::Int(32))));
+        assert_eq!(merged.ret_type, Some(signed_type(32)));
         assert_eq!(merged.params.len(), 2);
-        assert_eq!(merged.params[0].ty, Some(type_like(r2dec::CType::Int(32))));
-        assert_eq!(merged.params[1].ty, Some(type_like(r2dec::CType::Int(32))));
-    }
-
-    #[test]
-    fn test_name_sanitization_and_collisions() {
-        let json = r#"{"bp":[{"name":"bad-name","type":"int","ref":{"base":"RBP","offset":-8}},{"name":"bad name","type":"int","ref":{"base":"RBP","offset":-16}}]}"#;
-        let vars = parse_external_stack_vars(json, 64);
-        let first = vars.get(&-8).expect("first var");
-        let second = vars.get(&-16).expect("second var");
-        assert_eq!(first.name, "bad_name");
-        assert_ne!(first.name, second.name);
+        assert_eq!(merged.params[0].ty, Some(signed_type(32)));
+        assert_eq!(merged.params[1].ty, Some(signed_type(32)));
     }
 
     #[test]
@@ -6546,85 +6002,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "x86")]
-    fn test_r2dec_with_context_uses_tsj_field_name() {
-        let arch = CString::new("x86-64").expect("valid arch string");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-        assert_eq!(
-            r2il_addr_size(ctx),
-            8,
-            "x86-64 FFI context should report an 8-byte address size"
-        );
-
-        // mov eax, [rdi + 0x30]
-        let mut mov_bytes = vec![0x8b, 0x47, 0x30];
-        mov_bytes.resize(16, 0);
-        let block_load = r2il_lift(ctx, mov_bytes.as_ptr(), mov_bytes.len(), 0x1000);
-        assert!(!block_load.is_null(), "load block should lift");
-
-        // ret
-        let mut ret_bytes = vec![0xc3];
-        ret_bytes.resize(16, 0);
-        let block_ret = r2il_lift(ctx, ret_bytes.as_ptr(), ret_bytes.len(), 0x1003);
-        assert!(!block_ret.is_null(), "ret block should lift");
-
-        let blocks: [*const R2ILBlock; 2] = [block_load, block_ret];
-        let func_name = CString::new("demo").expect("valid function name");
-        let empty_map = CString::new("{}").expect("valid empty json");
-        let external_context_json = CString::new(
-            r#"{
-                "base_types":[
-                    {
-                        "kind":"struct",
-                        "name":"DemoStruct",
-                        "members":[
-                            {"name":"thirteenth","offset":48,"type":"int"}
-                        ]
-                    }
-                ]
-            }"#,
-        )
-        .expect("valid tsj json");
-
-        let out = r2dec_function_with_context(
-            ctx,
-            blocks.as_ptr(),
-            blocks.len(),
-            func_name.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            external_context_json.as_ptr(),
-        );
-        assert!(!out.is_null(), "decompilation output should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-
-        r2il_string_free(out);
-        r2il_block_free(block_load);
-        r2il_block_free(block_ret);
-        r2il_free(ctx);
-
-        assert!(
-            output.contains("f_30")
-                || output.contains("thirteenth")
-                || output.contains("*(rdi + 30)")
-                || output.contains("*(rdi + const_30)")
-                || output.contains("*(rdi + 48)")
-                || output.contains("*(rdi + const_48)")
-                || output.contains("saved_fp"),
-            "decompiler should keep decompilation stable with tsj context, got: {}",
-            output
-        );
-    }
-
-    #[test]
     fn effective_ptr_bits_falls_back_to_default_space_when_arch_addr_size_is_degenerate() {
         let arch_name = CString::new("x86-64").expect("valid arch string");
         let ctx = r2il_arch_init(arch_name.as_ptr());
         assert!(!ctx.is_null(), "context should initialize");
         let mut arch = unsafe { (*ctx).arch.clone().expect("arch spec") };
-        r2il_free(ctx);
+        drop_test_context(ctx);
         arch.addr_size = 1;
         assert_eq!(
             crate::helpers::effective_addr_size_bytes(&arch),
@@ -6632,337 +6015,6 @@ mod tests {
             "effective address size should recover from Sleigh word-sized addr_size"
         );
         assert_eq!(crate::helpers::effective_ptr_bits(&arch), 64);
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn r2dec_function_with_context_keeps_live_x86_struct_array_member_shape() {
-        let arch = CString::new("x86-64").expect("valid arch string");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let bytes = [
-            0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0x7d, 0xf8, 0x89, 0x75,
-            0xf4, 0x89, 0x55, 0xf0, 0x8b, 0x45, 0xf4, 0x48, 0x63, 0xd0, 0x48, 0x89, 0xd0, 0x48,
-            0xc1, 0xe0, 0x03, 0x48, 0x29, 0xd0, 0x48, 0xc1, 0xe0, 0x03, 0x48, 0x89, 0xc2, 0x48,
-            0x8b, 0x45, 0xf8, 0x48, 0x01, 0xc2, 0x8b, 0x45, 0xf0, 0x89, 0x42, 0x08, 0x8b, 0x45,
-            0xf4, 0x48, 0x63, 0xd0, 0x48, 0x89, 0xd0, 0x48, 0xc1, 0xe0, 0x03, 0x48, 0x29, 0xd0,
-            0x48, 0xc1, 0xe0, 0x03, 0x48, 0x89, 0xc2, 0x48, 0x8b, 0x45, 0xf8, 0x48, 0x01, 0xd0,
-            0x8b, 0x48, 0x08, 0x8b, 0x45, 0xf4, 0x48, 0x63, 0xd0, 0x48, 0x89, 0xd0, 0x48, 0xc1,
-            0xe0, 0x03, 0x48, 0x29, 0xd0, 0x48, 0xc1, 0xe0, 0x03, 0x48, 0x89, 0xc2, 0x48, 0x8b,
-            0x45, 0xf8, 0x48, 0x01, 0xd0, 0x8b, 0x40, 0x34, 0x01, 0xc8, 0x5d, 0xc3,
-        ];
-        let block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), 0x40182f, 124);
-        assert!(!block.is_null(), "function block should lift");
-
-        let blocks: [*const R2ILBlock; 1] = [block];
-        let func_name = CString::new("dbg.test_struct_array_index").expect("valid function name");
-        let empty_map = CString::new("{}").expect("valid empty json");
-        let external_context_json = CString::new(
-            r#"{
-                "signature": {
-                    "name": "dbg.test_struct_array_index",
-                    "ret": "int32_t",
-                    "callconv": "amd64",
-                    "params": [
-                        {"name": "arr", "type": "void *"},
-                        {"name": "idx", "type": "int32_t"},
-                        {"name": "v", "type": "int32_t"}
-                    ]
-                },
-                "vars": [
-                    {"kind":"register","name":"arg0","type":"void *","reg":"rdi"},
-                    {"kind":"register","name":"arg1","type":"int64_t","reg":"rsi"},
-                    {"kind":"register","name":"arg2","type":"void *","reg":"rdx"},
-                    {"kind":"stack","name":"var_8h","type":"void *","base":"rsp","offset":0},
-                    {"kind":"stack","name":"arr","type":"DemoStruct *","base":"rbp","offset":-8},
-                    {"kind":"stack","name":"var_ch","type":"int32_t","base":"rbp","offset":-12},
-                    {"kind":"stack","name":"var_10h","type":"int32_t","base":"rbp","offset":-16}
-                ],
-                "base_types": []
-            }"#,
-        )
-        .expect("valid external context");
-
-        let out = r2dec_function_with_context(
-            ctx,
-            blocks.as_ptr(),
-            blocks.len(),
-            func_name.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            external_context_json.as_ptr(),
-        );
-        assert!(!out.is_null(), "decompilation output should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-
-        r2il_string_free(out);
-        r2il_block_free(block);
-        r2il_free(ctx);
-
-        assert!(
-            output.contains("[idx].f_8") || output.contains("[idx].third"),
-            "expected indexed-member store rendering in decompiled output, got:\n{output}"
-        );
-        assert!(
-            output.contains("[idx].f_34") || output.contains("[idx].fourteenth"),
-            "expected indexed-member load rendering in decompiled output, got:\n{output}"
-        );
-        assert!(
-            !output.contains("*(arr +") && !output.contains("((rax_"),
-            "expected semantic member rendering without raw pointer math, got:\n{output}"
-        );
-        let return_tail = output
-            .split_once("return")
-            .map(|(_, tail)| tail)
-            .unwrap_or_default();
-        assert!(
-            return_tail.contains('+')
-                && (return_tail.contains("[idx].f_34") || return_tail.contains("[idx].fourteenth"))
-                && (return_tail.contains("[idx].f_8")
-                    || return_tail.contains("[idx].third")
-                    || return_tail.contains(" v")),
-            "expected return expression to keep both struct-array terms, got:\n{output}"
-        );
-        assert!(
-            !output.contains("local_"),
-            "autogenerated stack-home locals should not leak through the live FFI decompile path, got:\n{output}"
-        );
-        assert!(
-            output.contains("arr[idx].f_8 = v;"),
-            "expected live FFI decompile path to keep parameter-home names under x86 context, got:\n{output}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn r2dec_function_with_context_keeps_live_x86_struct_field_offset_zero_member_shape() {
-        let arch = CString::new("x86-64").expect("valid arch string");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let bytes = [
-            0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0x7d, 0xf8, 0x89, 0x75,
-            0xf4, 0x48, 0x8b, 0x45, 0xf8, 0x8b, 0x55, 0xf4, 0x89, 0x50, 0x30, 0x48, 0x8b, 0x45,
-            0xf8, 0x8b, 0x50, 0x30, 0x48, 0x8b, 0x45, 0xf8, 0x8b, 0x00, 0x01, 0xd0, 0x5d, 0xc3,
-        ];
-        let block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), 0x401667, 42);
-        assert!(!block.is_null(), "function block should lift");
-
-        let blocks: [*const R2ILBlock; 1] = [block];
-        let func_name = CString::new("dbg.test_struct_field").expect("valid function name");
-        let empty_map = CString::new("{}").expect("valid empty json");
-        let external_context_json = CString::new(
-            r#"{
-                "signature": {
-                    "name": "dbg.test_struct_field",
-                    "ret": "int32_t",
-                    "callconv": "amd64",
-                    "params": [
-                        {"name": "obj", "type": "DemoStruct *"},
-                        {"name": "v", "type": "int32_t"}
-                    ]
-                },
-                "vars": [
-                    {"kind":"register","name":"obj","type":"DemoStruct *","reg":"rdi","param_index":0},
-                    {"kind":"register","name":"v","type":"int32_t","reg":"rsi","param_index":1},
-                    {"kind":"stack","name":"obj","type":"DemoStruct *","base":"rbp","offset":-8,"role":"param_home","param_index":0,"param_name":"obj","source_reg":"rdi"},
-                    {"kind":"stack","name":"v","type":"int32_t","base":"rbp","offset":-12,"role":"param_home","param_index":1,"param_name":"v","source_reg":"rsi"}
-                ],
-                "base_types": []
-            }"#,
-        )
-        .expect("valid external context");
-
-        let out = r2dec_function_with_context(
-            ctx,
-            blocks.as_ptr(),
-            blocks.len(),
-            func_name.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            external_context_json.as_ptr(),
-        );
-        assert!(!out.is_null(), "decompilation output should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-
-        r2il_string_free(out);
-        r2il_block_free(block);
-        r2il_free(ctx);
-
-        assert!(
-            output.contains("obj->f_30 = v;") || output.contains("obj->thirteenth = v;"),
-            "expected live FFI decompile to keep the field store shape, got:\n{output}"
-        );
-        assert!(
-            (output.contains("obj->f_0") || output.contains("obj->first"))
-                && (output.contains("obj->f_30") || output.contains("obj->thirteenth")),
-            "expected live FFI decompile to keep both field loads, got:\n{output}"
-        );
-        assert!(
-            !output.contains("return obj +"),
-            "offset-zero field load should not collapse to the base pointer, got:\n{output}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn r2dec_function_with_context_keeps_live_x86_setlocale_owner_and_deref() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let arch = CString::new("x86-64").expect("valid arch string");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let lifted = [
-            (
-                "f30f1efa554889e54883ec10488d059c1900004889c6bf06000000e8affaffff488945f848837df8007507",
-                0x401691,
-                43,
-            ),
-            ("b800000000eb0a", 0x4016bc, 7),
-            ("488b45f80fb6000fbec0", 0x4016c3, 10),
-            ("c9c3", 0x4016cd, 2),
-        ];
-        let mut owned_blocks = Vec::new();
-        for (hex, addr, size) in lifted {
-            let bytes = decode_hex(hex);
-            let block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), addr, size);
-            assert!(
-                !block.is_null(),
-                "setlocale wrapper block should lift at 0x{addr:x}"
-            );
-            owned_blocks.push(block);
-        }
-
-        let func_name = CString::new("dbg.test_setlocale_wrapper").expect("valid function name");
-        let function_names =
-            CString::new(r#"{"0x401160":"sym.imp.setlocale"}"#).expect("valid function name map");
-        let strings_json = CString::new(r#"{"0x403040":"C"}"#).expect("valid strings map");
-        let empty_map = CString::new("{}").expect("valid empty json");
-        let external_context_json = CString::new(
-            r#"{
-                "signature": {
-                    "name": "dbg.test_setlocale_wrapper",
-                    "ret": "int32_t",
-                    "callconv": "amd64",
-                    "params": []
-                },
-                "vars": [
-                    {"kind":"stack","name":"loc","type":"int8_t *","base":"rbp","offset":-8,"role":"local"}
-                ],
-                "base_types": []
-            }"#,
-        )
-        .expect("valid setlocale external context");
-
-        let out = r2dec_function_with_context(
-            ctx,
-            owned_blocks.as_ptr().cast(),
-            owned_blocks.len(),
-            func_name.as_ptr(),
-            function_names.as_ptr(),
-            strings_json.as_ptr(),
-            empty_map.as_ptr(),
-            external_context_json.as_ptr(),
-        );
-        assert!(!out.is_null(), "decompilation output should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-
-        r2il_string_free(out);
-        for block in owned_blocks {
-            r2il_block_free(block);
-        }
-        r2il_free(ctx);
-
-        assert!(
-            output.contains("loc = sym.imp.setlocale(6, \"C\");")
-                || output.contains("loc = (int8_t*)sym.imp.setlocale(6, \"C\");"),
-            "expected live FFI decompile to keep the owned call result, got:\n{output}"
-        );
-        assert!(
-            output.contains("if (loc != 0)") || output.contains("if (!loc)"),
-            "expected live FFI decompile to branch on loc, got:\n{output}"
-        );
-        assert!(
-            output.contains("return *loc;")
-                || output.contains("return (int32_t)*loc;")
-                || output.contains("return loc[0];")
-                || output.contains("return (int32_t)loc[0];"),
-            "expected live FFI decompile to keep the dereferenced return, got:\n{output}"
-        );
-        assert!(
-            !output.contains("return loc;"),
-            "pointer local should not collapse to a raw pointer return, got:\n{output}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn r2dec_function_with_context_keeps_live_x86_entry0_no_self_xor_residue() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let arch = CString::new("x86-64").expect("valid arch string");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let bytes = decode_hex(
-            "f30f1efa31ed4989d15e4889e24883e4f050544531c031c948c7c7b61b4000ff15233e0000",
-        );
-        let block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), 0x401190, 37);
-        assert!(!block.is_null(), "entry0 block should lift");
-
-        let blocks: [*const R2ILBlock; 1] = [block];
-        let func_name = CString::new("entry0").expect("valid function name");
-        let function_names =
-            CString::new(r#"{"0x401bb6":"dbg.main"}"#).expect("valid function name map");
-        let empty_map = CString::new("{}").expect("valid empty json");
-
-        let out = r2dec_function_with_context(
-            ctx,
-            blocks.as_ptr(),
-            blocks.len(),
-            func_name.as_ptr(),
-            function_names.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-        );
-        assert!(!out.is_null(), "decompilation output should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-
-        r2il_string_free(out);
-        r2il_block_free(block);
-        r2il_free(ctx);
-
-        assert!(
-            !output.contains(" = eax ^ eax;") && !output.contains(" = rax ^ rax;"),
-            "entry0 decompile should not keep self-xor residue, got:\n{output}"
-        );
     }
 
     #[test]
@@ -7040,21 +6092,21 @@ mod tests {
 
     #[test]
     fn test_sanitize_inferred_param_type_fallbacks_from_void() {
-        let ty = sanitize_inferred_param_type(r2dec::CType::Void, 0, 64);
-        assert_eq!(ty, r2dec::CType::Int(64));
+        let ty = sanitize_inferred_param_type(r2types::CTypeLike::Void, 0, 64);
+        assert_eq!(ty, signed_type(64));
     }
 
     #[test]
     fn materialize_signature_type_rewrites_unknown_pointer_to_void_ptr() {
-        let ty = materialize_signature_ctype(r2dec::CType::ptr(r2dec::CType::Unknown), 64);
-        assert_eq!(ty, r2dec::CType::void_ptr());
-        assert_eq!(ty.to_string(), "void*");
+        let ty = materialize_signature_type_like(ptr_type(r2types::CTypeLike::Unknown), 64);
+        assert_eq!(ty, ptr_type(r2types::CTypeLike::Void));
+        assert_eq!(r2types::render_c_type_like(&ty), "void*");
     }
 
     #[test]
     fn materialize_signature_type_rewrites_unknown_return_to_scalar_fallback() {
-        let ty = materialize_signature_ctype(r2dec::CType::Unknown, 64);
-        assert_eq!(ty, r2dec::CType::Int(64));
+        let ty = materialize_signature_type_like(r2types::CTypeLike::Unknown, 64);
+        assert_eq!(ty, signed_type(64));
     }
 
     #[test]
@@ -7068,13 +6120,13 @@ mod tests {
             },
             64,
         );
-        assert_eq!(ty, r2dec::CType::Int(32));
+        assert_eq!(ty, signed_type(32));
     }
 
     #[test]
     fn resolve_evidence_driven_type_can_narrow_wide_scalar_carrier() {
         let ty = resolve_evidence_driven_type(
-            r2dec::CType::Int(64),
+            signed_type(64),
             8,
             64,
             &TypeEvidence {
@@ -7083,7 +6135,7 @@ mod tests {
                 ..TypeEvidence::default()
             },
         );
-        assert_eq!(ty, r2dec::CType::Int(32));
+        assert_eq!(ty, signed_type(32));
     }
 
     #[test]
@@ -7093,7 +6145,7 @@ mod tests {
             width_bits: 32,
             ..TypeEvidence::default()
         };
-        merge_initial_type_evidence(&r2dec::CType::Int(64), &mut evidence);
+        merge_initial_type_evidence(&signed_type(64), &mut evidence);
         assert_eq!(evidence.width_bits, 32);
     }
 
@@ -7104,7 +6156,7 @@ mod tests {
             size: 4,
             ops: vec![
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:sp8", 1, 8),
                     val: r2ssa::SSAVar::new("W0", 0, 4),
                 },
@@ -7119,21 +6171,21 @@ mod tests {
         let evidence = collect_type_evidence_for_var(
             &evidence_ctx,
             &r2ssa::SSAVar::new("X0", 0, 8),
-            &r2dec::CType::Int(64),
+            &signed_type(64),
         );
-        let ty = resolve_evidence_driven_type(r2dec::CType::Int(64), 8, 64, &evidence);
+        let ty = resolve_evidence_driven_type(signed_type(64), 8, 64, &evidence);
 
         assert_eq!(evidence.width_bits, 32);
-        assert_eq!(ty, r2dec::CType::Int(32));
+        assert_eq!(ty, signed_type(32));
     }
 
     #[test]
     fn materialize_signature_type_rewrites_struct_anon_pointer_to_void_ptr() {
-        let ty = materialize_signature_ctype(
-            r2dec::CType::ptr(r2dec::CType::Struct("anon".to_string())),
+        let ty = materialize_signature_type_like(
+            ptr_type(r2types::CTypeLike::Struct("anon".to_string())),
             64,
         );
-        assert_eq!(ty, r2dec::CType::void_ptr());
+        assert_eq!(ty, ptr_type(r2types::CTypeLike::Void));
     }
 
     #[test]
@@ -7175,9 +6227,27 @@ mod tests {
         };
 
         let reason =
-            decompiler_cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
+            r2engine::cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
         assert!(
             reason.contains("dense switch") || reason.contains("max_switch_cases"),
+            "unexpected reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn decompiler_cfg_guard_reason_trips_on_compact_looped_switch_summary() {
+        let summary = r2ssa::CFGRiskSummary {
+            block_count: 39,
+            loop_count: 2,
+            back_edge_count: 2,
+            switch_block_count: 1,
+            max_switch_cases: 47,
+        };
+
+        let reason =
+            r2engine::cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
+        assert!(
+            reason.contains("dense switch in looped CFG"),
             "unexpected reason: {reason}"
         );
     }
@@ -7193,7 +6263,7 @@ mod tests {
         };
 
         let reason =
-            decompiler_cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
+            r2engine::cfg_guard_reason_from_summary(&summary).expect("guard reason expected");
         assert!(
             reason.contains("back_edges=38"),
             "expected back-edge detail in reason, got: {reason}"
@@ -7210,48 +6280,71 @@ mod tests {
             max_switch_cases: 0,
         };
 
-        assert_eq!(decompiler_cfg_guard_reason_from_summary(&summary), None);
+        assert_eq!(r2engine::cfg_guard_reason_from_summary(&summary), None);
+    }
+
+    #[test]
+    fn moderate_dense_cfg_can_still_use_semantic_type_plan() {
+        let moderate_dense = r2ssa::CFGRiskSummary {
+            block_count: 55,
+            loop_count: 1,
+            back_edge_count: 1,
+            switch_block_count: 1,
+            max_switch_cases: 48,
+        };
+        assert!(r2engine::type_cfg_forces_bounded_plan(&moderate_dense));
+        assert!(r2engine::type_cfg_allows_semantic_plan(&moderate_dense));
+
+        let large_loop = r2ssa::CFGRiskSummary {
+            block_count: 1977,
+            loop_count: 9,
+            back_edge_count: 17,
+            switch_block_count: 0,
+            max_switch_cases: 0,
+        };
+        assert!(r2engine::type_cfg_forces_bounded_plan(&large_loop));
+        assert!(!r2engine::type_cfg_allows_semantic_plan(&large_loop));
     }
 
     #[test]
     fn non_x86_strong_evidence_can_clear_signature_threshold() {
         let params = vec![
-            InferredParam {
-                name: "arg0".to_string(),
-                ty: r2dec::CType::void_ptr(),
-                arg_index: 0,
-                size_bytes: 8,
-                evidence: TypeEvidence {
+            signature_param_candidate(
+                "arg0",
+                ptr_type(r2types::CTypeLike::Void),
+                0,
+                8,
+                TypeEvidence {
                     pointer_proven: 1,
                     ..TypeEvidence::default()
                 },
-            },
-            InferredParam {
-                name: "arg1".to_string(),
-                ty: r2dec::CType::Int(32),
-                arg_index: 1,
-                size_bytes: 4,
-                evidence: TypeEvidence {
+            ),
+            signature_param_candidate(
+                "arg1",
+                signed_type(32),
+                1,
+                4,
+                TypeEvidence {
                     scalar_proven: 1,
                     width_bits: 32,
                     ..TypeEvidence::default()
                 },
-            },
-            InferredParam {
-                name: "arg2".to_string(),
-                ty: r2dec::CType::Bool,
-                arg_index: 2,
-                size_bytes: 1,
-                evidence: TypeEvidence {
+            ),
+            signature_param_candidate(
+                "arg2",
+                r2types::CTypeLike::Bool,
+                2,
+                1,
+                TypeEvidence {
                     bool_like: 1,
                     width_bits: 8,
                     ..TypeEvidence::default()
                 },
-            },
+            ),
         ];
-        let confidence = compute_signature_confidence(
+        let confidence = r2types::compute_signature_confidence(
             &params,
-            &r2dec::CType::Int(32),
+            &signed_type(32),
             &TypeEvidence {
                 scalar_proven: 1,
                 width_bits: 32,
@@ -7263,27 +6356,30 @@ mod tests {
 
     #[test]
     fn unknown_noisy_evidence_stays_below_signature_threshold() {
-        let params = vec![InferredParam {
-            name: "arg0".to_string(),
-            ty: r2dec::CType::Unknown,
-            arg_index: 0,
-            size_bytes: 8,
-            evidence: TypeEvidence {
+        let params = vec![signature_param_candidate(
+            "arg0",
+            r2types::CTypeLike::Unknown,
+            0,
+            8,
+            TypeEvidence {
                 pointer_likely: 1,
                 scalar_likely: 1,
                 ..TypeEvidence::default()
             },
-        }];
-        let confidence =
-            compute_signature_confidence(&params, &r2dec::CType::Unknown, &TypeEvidence::default());
+        )];
+        let confidence = r2types::compute_signature_confidence(
+            &params,
+            &r2types::CTypeLike::Unknown,
+            &TypeEvidence::default(),
+        );
         assert!(confidence < SIG_WRITEBACK_CONFIDENCE_MIN);
     }
 
     #[test]
     fn explicit_external_signature_context_yields_high_confidence() {
         let ctx = signature_spec(
-            Some(r2dec::CType::Int(32)),
-            vec![("items", Some(r2dec::CType::ptr(r2dec::CType::Int(8))))],
+            Some(signed_type(32)),
+            vec![("items", Some(ptr_type(signed_type(8))))],
         );
         let confidence = explicit_signature_context_strength(&ctx);
         assert!(confidence >= SIG_WRITEBACK_CONFIDENCE_MIN);
@@ -7292,31 +6388,31 @@ mod tests {
     #[test]
     fn non_x86_callconv_confidence_stays_low_when_signature_is_high() {
         let params = vec![
-            InferredParam {
-                name: "arg0".to_string(),
-                ty: r2dec::CType::void_ptr(),
-                arg_index: 0,
-                size_bytes: 8,
-                evidence: TypeEvidence {
+            signature_param_candidate(
+                "arg0",
+                ptr_type(r2types::CTypeLike::Void),
+                0,
+                8,
+                TypeEvidence {
                     pointer_proven: 1,
                     ..TypeEvidence::default()
                 },
-            },
-            InferredParam {
-                name: "arg1".to_string(),
-                ty: r2dec::CType::Int(64),
-                arg_index: 1,
-                size_bytes: 8,
-                evidence: TypeEvidence {
+            ),
+            signature_param_candidate(
+                "arg1",
+                signed_type(64),
+                1,
+                8,
+                TypeEvidence {
                     scalar_proven: 1,
                     width_bits: 64,
                     ..TypeEvidence::default()
                 },
-            },
+            ),
         ];
-        let sig_conf = compute_signature_confidence(
+        let sig_conf = r2types::compute_signature_confidence(
             &params,
-            &r2dec::CType::Int(64),
+            &signed_type(64),
             &TypeEvidence {
                 scalar_proven: 1,
                 width_bits: 64,
@@ -7352,6 +6448,203 @@ mod tests {
 mod integration_tests {
     use super::*;
 
+    fn x86_register_storage(arch: &ArchSpec, name: &str) -> r2ssa::CanonicalStorageId {
+        let register = arch.get_register(name).expect("x86-64 source register");
+        r2ssa::CanonicalStorageId {
+            space: r2ssa::CanonicalStorageSpace::Register,
+            offset: register.offset,
+            size: register.size,
+        }
+    }
+
+    fn x86_exact_test_snapshot(
+        arch: &ArchSpec,
+        revision: &str,
+        parameter_registers: &[&str],
+        parameter_homes: &[(u32, i64, u32)],
+        local_slots: &[(i64, u32)],
+        first_parameter_has_exact_struct_pointer: bool,
+        call_sites: Vec<r2ssa::SourceCallSiteInterface>,
+    ) -> std::sync::Arc<r2engine::EngineSourceSnapshot> {
+        let revision = revision.as_bytes().to_vec();
+        let parameter_storages = parameter_registers
+            .iter()
+            .map(|name| x86_register_storage(arch, name))
+            .collect::<Vec<_>>();
+        let parameters = parameter_storages
+            .iter()
+            .enumerate()
+            .map(|(index, storage)| r2ssa::SourceAbiParameterSpec::new(index as u32, *storage))
+            .collect::<Vec<_>>();
+        let rbp = x86_register_storage(arch, "RBP");
+        let mut stack_slots = parameter_homes
+            .iter()
+            .map(|(parameter, offset, size)| {
+                r2ssa::SourceStackSlotSpec::new_parameter_home(
+                    r2ssa::StackAddressBase::FramePointer,
+                    rbp,
+                    *offset,
+                    *size,
+                    *parameter,
+                    parameter_storages[*parameter as usize],
+                )
+            })
+            .collect::<Vec<_>>();
+        stack_slots.extend(local_slots.iter().map(|(offset, size)| {
+            r2ssa::SourceStackSlotSpec::new_local(
+                r2ssa::StackAddressBase::FramePointer,
+                rbp,
+                *offset,
+                *size,
+            )
+        }));
+        let return_kind = r2ssa::SourceFunctionReturn::Register {
+            storage: x86_register_storage(arch, "RAX"),
+        };
+        let interface = if first_parameter_has_exact_struct_pointer {
+            let scalar_carrier =
+                r2ssa::SourceCarrierProjection::new(r2ssa::SourceCarrierKind::LowBits, 0, 32);
+            let parameter_logical_values = parameters
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    if index == 0 {
+                        r2ssa::SourceLogicalValue::new(
+                            2,
+                            r2ssa::SourceCarrierProjection::new(
+                                r2ssa::SourceCarrierKind::Full,
+                                0,
+                                64,
+                            ),
+                        )
+                    } else {
+                        r2ssa::SourceLogicalValue::new(1, scalar_carrier)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let type_graph = r2ssa::SourceTypeGraph::new(
+                [
+                    r2ssa::SourceType::new(
+                        0,
+                        r2ssa::SourceTypeKind::Struct { aggregate_id: 0 },
+                        56 * 8,
+                        32,
+                    ),
+                    r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::SignedInteger, 32, 32),
+                    r2ssa::SourceType::new(
+                        2,
+                        r2ssa::SourceTypeKind::Pointer { target_type_id: 0 },
+                        64,
+                        64,
+                    ),
+                ],
+                [r2ssa::SourceAggregateLayout::new(
+                    0,
+                    0,
+                    56 * 8,
+                    32,
+                    "FixtureStruct",
+                    (0..14).map(|index| {
+                        r2ssa::SourceAggregateMember::new(
+                            index,
+                            1,
+                            u64::from(index) * 32,
+                            32,
+                            format!("field_{index}"),
+                        )
+                    }),
+                )],
+            )
+            .expect("x86-64 pointer parameter type graph");
+            r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
+                revision.clone(),
+                "sysv64",
+                parameters,
+                return_kind,
+                stack_slots,
+                parameter_logical_values,
+                Some(r2ssa::SourceLogicalValue::new(1, scalar_carrier)),
+                Some(type_graph),
+            )
+        } else {
+            let parameter_logical_values = parameters
+                .iter()
+                .enumerate()
+                .map(|(index, storage)| {
+                    let width_bits = parameter_homes
+                        .iter()
+                        .find_map(|(parameter, _, size)| {
+                            (*parameter == index as u32)
+                                .then_some(u64::from(size.saturating_mul(8)))
+                        })
+                        .unwrap_or_else(|| {
+                            u64::from(storage.location().size_bytes().saturating_mul(8))
+                        });
+                    let (type_id, kind) = match width_bits {
+                        32 => (0, r2ssa::SourceCarrierKind::LowBits),
+                        64 => (1, r2ssa::SourceCarrierKind::Full),
+                        other => panic!("unsupported exact fixture parameter width {other}"),
+                    };
+                    r2ssa::SourceLogicalValue::new(
+                        type_id,
+                        r2ssa::SourceCarrierProjection::new(kind, 0, width_bits),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let scalar_carrier =
+                r2ssa::SourceCarrierProjection::new(r2ssa::SourceCarrierKind::LowBits, 0, 32);
+            let type_graph = r2ssa::SourceTypeGraph::new(
+                [
+                    r2ssa::SourceType::new(0, r2ssa::SourceTypeKind::SignedInteger, 32, 32),
+                    r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::UnsignedInteger, 64, 64),
+                ],
+                [],
+            )
+            .expect("x86-64 scalar parameter type graph");
+            r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
+                revision.clone(),
+                "sysv64",
+                parameters,
+                return_kind,
+                stack_slots,
+                parameter_logical_values,
+                Some(r2ssa::SourceLogicalValue::new(0, scalar_carrier)),
+                Some(type_graph),
+            )
+        }
+        .and_then(|interface| {
+            interface.with_return_address_storage(x86_register_storage(arch, "RIP"))
+        })
+        .and_then(|interface| {
+            interface.with_stack_pointer_storage(x86_register_storage(arch, "RSP"))
+        })
+        .and_then(|interface| interface.with_frame_pointer_storage(rbp))
+        .and_then(|interface| interface.with_exact_stacked_return(0, 8, 8, 8))
+        .expect("exact x86-64 test source interface");
+        let machine_roles = r2ssa::SourceMachineRoles::new(
+            Some(x86_register_storage(arch, "RIP")),
+            Some(x86_register_storage(arch, "RSP")),
+        )
+        .and_then(|roles| {
+            roles.with_stack_allocation_contract(
+                r2ssa::SourceStackAllocationContract::with_implicit_active_sp_bytes(
+                    r2ssa::SourceStackGrowth::LowerAddresses,
+                    128,
+                ),
+            )
+        })
+        .expect("exact x86-64 test machine roles");
+        std::sync::Arc::new(
+            r2engine::EngineSourceSnapshot::new_with_machine_roles(
+                revision,
+                Some(interface),
+                machine_roles,
+                call_sites,
+            )
+            .expect("immutable x86-64 test source snapshot"),
+        )
+    }
+
     #[test]
     fn test_init_x86_64() {
         let arch_cstr = CString::new("x86-64").unwrap();
@@ -7377,36 +6670,256 @@ mod integration_tests {
         assert!(!profile_ptr.is_null());
         let profile = unsafe { CStr::from_ptr(profile_ptr).to_str().unwrap() };
         println!("Profile: {}", profile);
-        assert!(profile.contains("=PC\tRIP"));
+        let arch = ctx.arch.as_ref().expect("x86-64 ArchSpec");
+        assert_eq!(arch.addr_size, 8);
+        // The role targets a register by the profile's own spelling, which is
+        // lower case: radare2 keeps upper case for the alias namespace these
+        // roles live in.
+        for (role, target) in [("PC", "rip"), ("SP", "rsp"), ("BP", "rbp")] {
+            assert_eq!(role_target(profile, role).as_deref(), Some(target));
+            let expected = arch
+                .get_register(&target.to_ascii_uppercase())
+                .expect("full-width x86 address register");
+            assert_eq!(expected.size, arch.addr_size);
+            assert_eq!(
+                profile_register(profile, target),
+                Some((expected.size * 8, expected.offset)),
+                "={role} must target the exact full-width ArchSpec coordinates"
+            );
+        }
 
-        r2il_string_free(profile_ptr);
-        r2il_free(ctx_ptr);
+        drop_test_ffi_string(profile_ptr);
+        drop_test_context(ctx_ptr);
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn context_and_trusted_lift_share_one_profile_in_either_order() {
+        for context_first in [true, false] {
+            std::thread::spawn(move || {
+                let arch = CString::new("x86-64").expect("architecture name");
+                let (ctx_ptr, trusted) = if context_first {
+                    let ctx_ptr = r2il_arch_init(arch.as_ptr());
+                    let trusted =
+                        Disassembler::shared_trusted_profile(TrustedSleighProfile::X86_64)
+                            .expect("trusted profile after context");
+                    (ctx_ptr, trusted)
+                } else {
+                    let trusted =
+                        Disassembler::shared_trusted_profile(TrustedSleighProfile::X86_64)
+                            .expect("trusted profile before context");
+                    let ctx_ptr = r2il_arch_init(arch.as_ptr());
+                    (ctx_ptr, trusted)
+                };
+
+                assert!(!ctx_ptr.is_null(), "context must initialize");
+                let context = unsafe { &*ctx_ptr };
+                let analysis = context.disasm.as_ref().expect("analysis disassembler");
+                assert!(
+                    analysis.shares_loaded_specification(&trusted),
+                    "both initialization orders must reach the same parsed profile"
+                );
+
+                let mut bytes = vec![0x90];
+                bytes.resize(16, 0);
+                assert!(
+                    analysis.lift_genuine_block(&bytes, 0x1000, 1).is_err(),
+                    "the C context must remain non-certifying"
+                );
+                assert!(
+                    trusted.lift_genuine_block(&bytes, 0x1000, 1).is_ok(),
+                    "the source-owned view must retain certifying authority"
+                );
+                drop_test_context(ctx_ptr);
+            })
+            .join()
+            .expect("profile ownership test thread");
+        }
+    }
+
+    /// Records cold and repeated `R2ILContext` construction separately. The
+    /// wall clock is evidence for profile sharing, not a CI bound.
+    #[test]
+    #[cfg(feature = "x86")]
+    #[ignore = "measurement, not a gate"]
+    fn r2il_context_creation_cost() {
+        let arch = CString::new("x86-64").expect("architecture name");
+        for round in 0..6 {
+            let started = std::time::Instant::now();
+            let context = r2il_arch_init(arch.as_ptr());
+            let elapsed = started.elapsed();
+            assert!(!context.is_null());
+            assert_eq!(r2il_is_loaded(context), 1);
+            eprintln!(
+                "round {round}: R2ILContext creation = {}us",
+                elapsed.as_micros()
+            );
+            drop_test_context(context);
+        }
     }
 
     #[test]
     #[cfg(feature = "arm")]
     fn create_disassembler_for_arch_arm64() {
-        let (spec, disasm) = create_disassembler_for_arch("arm64").expect("arm64 disassembler");
+        let (spec, _disasm) = create_disassembler_for_arch("arm64").expect("arm64 disassembler");
         assert_eq!(spec.name, "aarch64");
-        assert!(spec.addr_size > 0);
+        assert_eq!(spec.addr_size, 8);
+    }
+
+    /// The A32 and Thumb languages share one slaspec and differ only in the
+    /// TMode their processor spec pins, so a wrong pspec is not a cosmetic
+    /// mismatch: it silently reinterprets every instruction. These decode real
+    /// bytes so the pairing cannot drift back.
+    #[cfg(feature = "arm")]
+    fn decode_one(arch: &str, bytes: &[u8]) -> (String, usize) {
+        let (_, disasm) = create_disassembler_for_arch(arch)
+            .unwrap_or_else(|e| panic!("{arch} disassembler: {e}"));
+        let mut window = bytes.to_vec();
+        window.resize(16, 0);
+        disasm
+            .disasm_native(&window, 0x8000)
+            .unwrap_or_else(|e| panic!("{arch} decode: {e}"))
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm32_decodes_a32_not_thumb() {
+        // e3500000 `cmp r0, #0`, the first instruction of test/bins/elf/errno.
+        let (text, len) = decode_one("arm", &[0x00, 0x00, 0x50, 0xe3]);
+        assert_eq!(len, 4, "A32 instruction must consume 4 bytes, got {text}");
+        assert!(
+            text.to_lowercase().starts_with("cmp r0"),
+            "expected `cmp r0,#0x0`, got {text}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm32_big_endian_decodes_the_same_instruction() {
+        let (text, len) = decode_one("armbe", &[0xe3, 0x50, 0x00, 0x00]);
+        assert_eq!(len, 4, "A32 instruction must consume 4 bytes, got {text}");
+        assert!(
+            text.to_lowercase().starts_with("cmp r0"),
+            "expected `cmp r0,#0x0`, got {text}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn thumb_decodes_thumb2_wide_instruction() {
+        // f04f 0b00 `mov.w r11, #0`, the entry point of
+        // test/bins/elf/armeb_hello_static.
+        let (text, len) = decode_one("thumb", &[0x4f, 0xf0, 0x00, 0x0b]);
+        assert_eq!(len, 4, "Thumb-2 wide instruction is 4 bytes, got {text}");
+        assert!(
+            text.to_lowercase().contains("mov") && text.contains("r11"),
+            "expected `mov.w r11,#0x0`, got {text}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn thumb_big_endian_decodes_the_same_instruction() {
+        let (text, len) = decode_one("thumbbe", &[0xf0, 0x4f, 0x0b, 0x00]);
+        assert_eq!(len, 4, "Thumb-2 wide instruction is 4 bytes, got {text}");
+        assert!(
+            text.to_lowercase().contains("mov") && text.contains("r11"),
+            "expected `mov.w r11,#0x0`, got {text}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn every_arm32_language_reports_the_arm_abi_name() {
+        // Downstream ABI and variable-recovery profiles select ARM32 by this
+        // exact name, so the four A32/Thumb x LE/BE languages must share it.
+        for arch in ["arm", "armbe", "thumb", "thumbbe"] {
+            let (spec, _) = create_disassembler_for_arch(arch)
+                .unwrap_or_else(|e| panic!("{arch} disassembler: {e}"));
+            assert_eq!(spec.name, "ARM", "{arch} must present as ARM");
+            assert_eq!(spec.addr_size, 4);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm_language_endianness_follows_the_selector() {
+        for (arch, endian) in [
+            ("arm", r2il::Endianness::Little),
+            ("thumb", r2il::Endianness::Little),
+            ("armbe", r2il::Endianness::Big),
+            ("thumbbe", r2il::Endianness::Big),
+            ("arm64", r2il::Endianness::Little),
+            ("arm64be", r2il::Endianness::Big),
+        ] {
+            let (spec, _) = create_disassembler_for_arch(arch)
+                .unwrap_or_else(|e| panic!("{arch} disassembler: {e}"));
+            assert_eq!(spec.instruction_endianness, endian, "{arch}");
+            assert_eq!(spec.memory_endianness, endian, "{arch}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "mips")]
+    fn mips32r6_language_is_reachable() {
+        for arch in ["mips32r6be", "mips32r6le"] {
+            let (spec, _) = create_disassembler_for_arch(arch)
+                .unwrap_or_else(|e| panic!("{arch} disassembler: {e}"));
+            assert_eq!(spec.name, arch);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "arm")]
+    fn arm64_callother_stays_numeric_and_construction_stable() {
+        const DMB_ISH: &[u8] = &[0xbf, 0x3b, 0x03, 0xd5];
+        const ADDR: u64 = 0x410000;
+
+        let mut decode_window = DMB_ISH.to_vec();
+        decode_window.resize(16, 0);
+        let (_, first) = create_disassembler_for_arch("arm64").expect("first arm64 disassembler");
+        let (_, second) = create_disassembler_for_arch("arm64").expect("second arm64 disassembler");
+        let first_block = first.lift(&decode_window, ADDR).expect("first DMB lift");
+        let second_block = second.lift(&decode_window, ADDR).expect("second DMB lift");
+
+        assert_eq!(first_block.ops, second_block.ops);
+        let numeric_userops = first_block
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                R2ILOp::CallOther { userop, .. } => Some(*userop),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!numeric_userops.is_empty());
         assert_eq!(
-            disasm.userop_name(0),
-            userop_map_for_arch("arm64").get(&0).map(String::as_str)
+            numeric_userops,
+            second_block
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    R2ILOp::CallOther { userop, .. } => Some(*userop),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            first
+                .lift_genuine_block(&decode_window, ADDR, DMB_ISH.len())
+                .is_err(),
+            "plugin-created analysis disassemblers must not mint genuine authority"
         );
     }
 
     #[test]
     #[cfg(feature = "riscv")]
     fn create_disassembler_for_arch_riscv64() {
-        let (spec, disasm) = create_disassembler_for_arch("riscv64").expect("riscv64 disassembler");
+        let (spec, _disasm) =
+            create_disassembler_for_arch("riscv64").expect("riscv64 disassembler");
         assert_eq!(spec.name, "riscv64");
         assert!(spec.addr_size > 0);
         assert_eq!(spec.instruction_endianness, r2il::Endianness::Little);
         assert_eq!(spec.memory_endianness, r2il::Endianness::Little);
-        assert_eq!(
-            disasm.userop_name(0),
-            userop_map_for_arch("riscv64").get(&0).map(String::as_str)
-        );
     }
 
     #[test]
@@ -7416,10 +6929,10 @@ mod integration_tests {
         let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
         assert!(!ctx_ptr.is_null(), "context pointer should not be null");
         assert_eq!(r2il_is_loaded(ctx_ptr), 1, "arm64 context should be loaded");
-        r2il_free(ctx_ptr);
+        drop_test_context(ctx_ptr);
     }
 
-    #[cfg(feature = "arm")]
+    #[cfg(any(feature = "x86", feature = "arm", feature = "mips"))]
     fn profile_for_arch(arch: &str) -> String {
         let arch_cstr = CString::new(arch).unwrap();
         let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
@@ -7435,18 +6948,53 @@ mod integration_tests {
             "register profile should not be null"
         );
         let profile = unsafe { CStr::from_ptr(profile_ptr).to_str().unwrap().to_string() };
-        r2il_string_free(profile_ptr);
-        r2il_free(ctx_ptr);
+        drop_test_ffi_string(profile_ptr);
+        drop_test_context(ctx_ptr);
         profile
     }
 
-    #[cfg(feature = "arm")]
     fn role_target(profile: &str, role: &str) -> Option<String> {
         profile
             .lines()
             .find_map(|line| line.strip_prefix(&format!("={}\t", role)))
             .map(str::trim)
             .map(str::to_string)
+    }
+
+    fn profile_register(profile: &str, name: &str) -> Option<(u32, u64)> {
+        profile.lines().find_map(|line| {
+            let mut fields = line.split('\t');
+            if fields.next()? != "gpr" || fields.next()? != name {
+                return None;
+            }
+            let bits = fields.next()?.strip_prefix('.')?.parse::<u32>().ok()?;
+            let offset = fields.next()?.parse::<u64>().ok()?;
+            if fields.next()? != "0" || fields.next().is_some() {
+                return None;
+            }
+            Some((bits, offset))
+        })
+    }
+
+    #[test]
+    #[cfg(feature = "x86")]
+    fn x86_32_reg_profile_roles_use_address_width_coordinates() {
+        let (arch, _) = create_disassembler_for_arch("x86").expect("x86 disassembler");
+        assert_eq!(arch.addr_size, 4);
+        let profile = profile_for_arch("x86");
+        // Lower case, as the profile now spells every register.
+        for (role, target) in [("PC", "eip"), ("SP", "esp"), ("BP", "ebp")] {
+            assert_eq!(role_target(&profile, role).as_deref(), Some(target));
+            let expected = arch
+                .get_register(&target.to_ascii_uppercase())
+                .expect("full-width x86 address register");
+            assert_eq!(expected.size, arch.addr_size);
+            assert_eq!(
+                profile_register(&profile, target),
+                Some((expected.size * 8, expected.offset)),
+                "={role} must target the exact address-width ArchSpec coordinates"
+            );
+        }
     }
 
     #[test]
@@ -7514,15 +7062,12 @@ mod integration_tests {
     #[test]
     #[cfg(feature = "riscv")]
     fn create_disassembler_for_arch_riscv32() {
-        let (spec, disasm) = create_disassembler_for_arch("riscv32").expect("riscv32 disassembler");
+        let (spec, _disasm) =
+            create_disassembler_for_arch("riscv32").expect("riscv32 disassembler");
         assert_eq!(spec.name, "riscv32");
         assert!(spec.addr_size > 0);
         assert_eq!(spec.instruction_endianness, r2il::Endianness::Little);
         assert_eq!(spec.memory_endianness, r2il::Endianness::Little);
-        assert_eq!(
-            disasm.userop_name(0),
-            userop_map_for_arch("riscv32").get(&0).map(String::as_str)
-        );
     }
 
     #[test]
@@ -7536,7 +7081,7 @@ mod integration_tests {
             1,
             "riscv64 context should be loaded"
         );
-        r2il_free(ctx_ptr);
+        drop_test_context(ctx_ptr);
     }
 
     #[test]
@@ -7550,7 +7095,44 @@ mod integration_tests {
             1,
             "riscv32 context should be loaded"
         );
-        r2il_free(ctx_ptr);
+        drop_test_context(ctx_ptr);
+    }
+
+    #[test]
+    #[cfg(feature = "mips")]
+    fn create_disassembler_for_arch_mips32be() {
+        let (spec, _disasm) =
+            create_disassembler_for_arch("mips32be").expect("mips32be disassembler");
+        assert_eq!(spec.name, "mips32be");
+        assert_eq!(spec.addr_size, 4);
+        assert_eq!(spec.instruction_endianness, r2il::Endianness::Big);
+        assert_eq!(spec.memory_endianness, r2il::Endianness::Big);
+    }
+
+    #[test]
+    #[cfg(feature = "mips")]
+    fn r2il_arch_init_mips32be_loaded() {
+        let arch_cstr = CString::new("mips32be").unwrap();
+        let ctx_ptr = r2il_arch_init(arch_cstr.as_ptr());
+        assert!(!ctx_ptr.is_null(), "context pointer should not be null");
+        assert_eq!(
+            r2il_is_loaded(ctx_ptr),
+            1,
+            "mips32be context should be loaded"
+        );
+        drop_test_context(ctx_ptr);
+    }
+
+    #[test]
+    #[cfg(feature = "mips")]
+    fn mips32be_reg_profile_includes_arg_roles() {
+        let profile = profile_for_arch("mips32be");
+        for role in ["PC", "SP", "A0", "A1", "A2", "A3", "R0"] {
+            assert!(
+                role_target(&profile, role).is_some(),
+                "mips32be profile should define ={role}"
+            );
+        }
     }
 
     #[test]
@@ -7565,7 +7147,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:v", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:base", 1, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -7575,7 +7157,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:v2", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:base_4", 1, 8),
                 },
             ],
@@ -7647,7 +7229,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:v", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:base", 1, 8),
                 },
             ],
@@ -7683,7 +7265,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:a0", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:base_a", 1, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -7692,7 +7274,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:4", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:base_a_4", 1, 8),
                     val: r2ssa::SSAVar::new("tmp:a1", 1, 4),
                 },
@@ -7702,7 +7284,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:b0", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:base_b", 1, 8),
                 },
             ],
@@ -7769,105 +7351,6 @@ mod integration_tests {
     }
 
     #[test]
-    fn infer_type_writeback_json_ex_uses_interproc_seed_summaries_for_wrapper_return_type() {
-        let arch = CString::new("x86-64").expect("valid arch");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let mut block = R2ILBlock::new(0x401000, 4);
-        block.push(R2ILOp::Call {
-            target: Varnode::constant(0x2000, 8),
-        });
-        block.push(R2ILOp::Return {
-            target: Varnode {
-                space: r2il::SpaceId::Register,
-                offset: 0,
-                size: 8,
-                meta: None,
-            },
-        });
-        let raw_block = Box::into_raw(Box::new(block));
-        let blocks = [raw_block as *const R2ILBlock];
-
-        let func_name = CString::new("sym.alloc_wrapper").expect("valid function name");
-        let external_context = CString::new("{}").expect("valid context");
-        let scope_json = CString::new(r#"{"seeds":[{"id":8192,"name":"sym.imp.malloc"}]}"#)
-            .expect("valid scope json");
-
-        let out = r2sleigh_infer_type_writeback_json_ex(
-            ctx,
-            blocks.as_ptr(),
-            blocks.len(),
-            0x401000,
-            func_name.as_ptr(),
-            external_context.as_ptr(),
-            1,
-            4,
-            1,
-            scope_json.as_ptr(),
-        );
-        assert!(!out.is_null(), "writeback payload should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-        let payload: serde_json::Value =
-            serde_json::from_str(&output).expect("payload should parse");
-
-        r2il_string_free(out);
-        r2il_block_free(raw_block);
-        r2il_free(ctx);
-
-        assert_eq!(
-            payload["interproc"]["summary"]["return_relation"].as_str(),
-            Some("HeapAlloc"),
-            "payload={output}"
-        );
-        assert_eq!(
-            payload["ret_type"].as_str(),
-            Some("void*"),
-            "payload={output}"
-        );
-    }
-
-    #[test]
-    fn direct_call_targets_json_reports_constant_call_target() {
-        let arch = CString::new("x86-64").expect("valid arch");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let mut block = R2ILBlock::new(0x401000, 4);
-        block.push(R2ILOp::Call {
-            target: Varnode::constant(0x2000, 8),
-        });
-        block.push(R2ILOp::Return {
-            target: Varnode {
-                space: r2il::SpaceId::Register,
-                offset: 0,
-                size: 8,
-                meta: None,
-            },
-        });
-        let raw_block = Box::into_raw(Box::new(block));
-        let blocks = [raw_block as *const R2ILBlock];
-        let func_name = CString::new("sym.alloc_wrapper").expect("valid function name");
-
-        let out = r2sleigh_get_direct_call_targets_json(
-            ctx,
-            blocks.as_ptr(),
-            blocks.len(),
-            0x401000,
-            func_name.as_ptr(),
-        );
-        assert!(!out.is_null(), "direct target payload should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-        let targets: Vec<u64> = serde_json::from_str(&output).expect("targets should parse");
-
-        r2il_string_free(out);
-        r2il_block_free(raw_block);
-        r2il_free(ctx);
-
-        assert_eq!(targets, vec![0x2000], "payload={output}");
-    }
-
-    #[test]
     #[cfg(feature = "arm")]
     fn infer_structs_from_ssa_recovers_arm64_spilled_struct_fields() {
         let arch = ArchSpec::new("aarch64");
@@ -7886,7 +7369,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:8", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
                     val: r2ssa::SSAVar::new("X0", 0, 8),
                 },
@@ -7896,7 +7379,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:4", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
                     val: r2ssa::SSAVar::new("W1", 0, 4),
                 },
@@ -7907,7 +7390,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 1, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -7916,7 +7399,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:30", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
                     val: r2ssa::SSAVar::new("W8", 0, 4),
                 },
@@ -7927,7 +7410,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 2, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
                 },
                 r2ssa::SSAOp::Copy {
@@ -7936,7 +7419,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
                 },
             ],
@@ -7972,7 +7455,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:8", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
                     val: r2ssa::SSAVar::new("X0", 0, 8),
                 },
@@ -7982,7 +7465,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:4", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
                     val: r2ssa::SSAVar::new("W1", 0, 4),
                 },
@@ -7993,7 +7476,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 1, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -8002,7 +7485,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:30", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
                     val: r2ssa::SSAVar::new("W8", 0, 4),
                 },
@@ -8013,7 +7496,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 2, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
                 },
                 r2ssa::SSAOp::Copy {
@@ -8022,7 +7505,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
                 },
             ],
@@ -8033,13 +7516,10 @@ mod integration_tests {
             Some(&arch),
             64,
             Some(signature_spec(
-                Some(r2dec::CType::Int(64)),
+                Some(signed_type(64)),
                 vec![
-                    (
-                        "arg1",
-                        Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                    ),
-                    ("arg2", Some(r2dec::CType::Int(32))),
+                    ("arg1", Some(ptr_type(r2types::CTypeLike::Void))),
+                    ("arg2", Some(signed_type(32))),
                 ],
             )),
             r2types::ExternalTypeDb::default(),
@@ -8090,7 +7570,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:8", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
                     val: r2ssa::SSAVar::new("X0", 0, 8),
                 },
@@ -8100,7 +7580,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:4", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
                     val: r2ssa::SSAVar::new("W1", 0, 4),
                 },
@@ -8111,7 +7591,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 1, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -8121,7 +7601,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
                 },
                 r2ssa::SSAOp::IntSExt {
@@ -8144,7 +7624,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:8", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
                     val: r2ssa::SSAVar::new("W8", 0, 4),
                 },
@@ -8155,7 +7635,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 5, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 3, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -8165,7 +7645,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 6, 8),
                 },
                 r2ssa::SSAOp::IntSExt {
@@ -8189,7 +7669,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
                 },
             ],
@@ -8222,7 +7702,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:8", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
                     val: r2ssa::SSAVar::new("X0", 0, 8),
                 },
@@ -8232,7 +7712,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:4", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
                     val: r2ssa::SSAVar::new("W1", 0, 4),
                 },
@@ -8241,7 +7721,7 @@ mod integration_tests {
                     src: r2ssa::SSAVar::new("SP", 1, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
                     val: r2ssa::SSAVar::new("W2", 0, 4),
                 },
@@ -8251,7 +7731,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6780", 2, 8),
                 },
                 r2ssa::SSAOp::IntZExt {
@@ -8265,7 +7745,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 1, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -8275,7 +7755,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
                 },
                 r2ssa::SSAOp::IntSExt {
@@ -8310,7 +7790,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:8", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
                     val: r2ssa::SSAVar::new("W8", 0, 4),
                 },
@@ -8321,7 +7801,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 5, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -8331,7 +7811,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 6, 8),
                 },
                 r2ssa::SSAOp::IntSExt {
@@ -8363,122 +7843,8 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
-                },
-            ],
-        }
-    }
-
-    fn live_arm64_array_index_block(is_negative: bool) -> r2ssa::SSABlock {
-        let addr_op = if is_negative {
-            r2ssa::SSAOp::IntSub {
-                dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
-                a: r2ssa::SSAVar::new("X8", 1, 8),
-                b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
-            }
-        } else {
-            r2ssa::SSAOp::IntAdd {
-                dst: r2ssa::SSAVar::new("tmp:12480", 1, 8),
-                a: r2ssa::SSAVar::new("X8", 1, 8),
-                b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
-            }
-        };
-
-        r2ssa::SSABlock {
-            addr: 0x100000d80,
-            size: 72,
-            ops: vec![
-                r2ssa::SSAOp::IntSub {
-                    dst: r2ssa::SSAVar::new("SP", 1, 8),
-                    a: r2ssa::SSAVar::new("SP", 0, 8),
-                    b: r2ssa::SSAVar::new("const:10", 0, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:6500", 1, 8),
-                    a: r2ssa::SSAVar::new("SP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:8", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
-                    val: r2ssa::SSAVar::new("X0", 0, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:6400", 1, 8),
-                    a: r2ssa::SSAVar::new("SP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:4", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
-                    val: r2ssa::SSAVar::new("W1", 0, 4),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:6500", 2, 8),
-                    a: r2ssa::SSAVar::new("SP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:8", 0, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("X8", 1, 8),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:6400", 2, 8),
-                    a: r2ssa::SSAVar::new("SP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:4", 0, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
-                },
-                r2ssa::SSAOp::IntSExt {
-                    dst: r2ssa::SSAVar::new("X9", 1, 8),
-                    src: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
-                },
-                r2ssa::SSAOp::IntMult {
-                    dst: r2ssa::SSAVar::new("tmp:12380", 1, 8),
-                    a: r2ssa::SSAVar::new("X9", 1, 8),
-                    b: r2ssa::SSAVar::new("const:4", 0, 8),
-                },
-                r2ssa::SSAOp::IntCarry {
-                    dst: r2ssa::SSAVar::new("TMPCY", 1, 1),
-                    a: r2ssa::SSAVar::new("X8", 1, 8),
-                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
-                },
-                r2ssa::SSAOp::IntSCarry {
-                    dst: r2ssa::SSAVar::new("TMPOV", 1, 1),
-                    a: r2ssa::SSAVar::new("X8", 1, 8),
-                    b: r2ssa::SSAVar::new("tmp:12380", 1, 8),
-                },
-                addr_op,
-                r2ssa::SSAOp::IntSLess {
-                    dst: r2ssa::SSAVar::new("TMPNG", 1, 1),
-                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
-                    b: r2ssa::SSAVar::new("const:0", 0, 8),
-                },
-                r2ssa::SSAOp::IntEqual {
-                    dst: r2ssa::SSAVar::new("TMPZR", 1, 1),
-                    a: r2ssa::SSAVar::new("tmp:12480", 1, 8),
-                    b: r2ssa::SSAVar::new("const:0", 0, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("W8", 1, 4),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:12480", 1, 8),
-                },
-                r2ssa::SSAOp::IntZExt {
-                    dst: r2ssa::SSAVar::new("X0", 1, 8),
-                    src: r2ssa::SSAVar::new("W8", 1, 4),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("PC", 1, 8),
-                    src: r2ssa::SSAVar::new("X30", 0, 8),
-                },
-                r2ssa::SSAOp::Return {
-                    target: r2ssa::SSAVar::new("PC", 1, 8),
                 },
             ],
         }
@@ -8500,7 +7866,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:8", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 1, 8),
                     val: r2ssa::SSAVar::new("X0", 0, 8),
                 },
@@ -8510,7 +7876,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:4", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 1, 8),
                     val: r2ssa::SSAVar::new("W1", 0, 4),
                 },
@@ -8519,7 +7885,7 @@ mod integration_tests {
                     src: r2ssa::SSAVar::new("SP", 1, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6780", 1, 8),
                     val: r2ssa::SSAVar::new("W2", 0, 4),
                 },
@@ -8529,7 +7895,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:24c00", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6780", 2, 8),
                 },
                 r2ssa::SSAOp::IntZExt {
@@ -8543,7 +7909,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 1, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 2, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -8553,7 +7919,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:26b00", 1, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 2, 8),
                 },
                 r2ssa::SSAOp::IntSExt {
@@ -8608,7 +7974,7 @@ mod integration_tests {
                     b: r2ssa::SSAVar::new("const:8", 0, 8),
                 },
                 r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 3, 8),
                     val: r2ssa::SSAVar::new("W8", 0, 4),
                 },
@@ -8619,7 +7985,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X8", 2, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 3, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -8629,7 +7995,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:26b00", 2, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 4, 8),
                 },
                 r2ssa::SSAOp::IntSExt {
@@ -8681,7 +8047,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:24c00", 2, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 5, 8),
                 },
                 r2ssa::SSAOp::IntZExt {
@@ -8695,7 +8061,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("X9", 5, 8),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6500", 4, 8),
                 },
                 r2ssa::SSAOp::IntAdd {
@@ -8705,7 +8071,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:26b00", 3, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 6, 8),
                 },
                 r2ssa::SSAOp::IntSExt {
@@ -8757,7 +8123,7 @@ mod integration_tests {
                 },
                 r2ssa::SSAOp::Load {
                     dst: r2ssa::SSAVar::new("tmp:24c00", 3, 4),
-                    space: "ram".to_string(),
+                    space: r2il::SpaceId::Ram,
                     addr: r2ssa::SSAVar::new("tmp:6400", 7, 8),
                 },
                 r2ssa::SSAOp::IntZExt {
@@ -8825,305 +8191,10 @@ mod integration_tests {
     }
 
     #[test]
-    fn infer_structs_from_semantic_accesses_recovers_observed_live_arm64_struct_array_pattern() {
-        let block = observed_live_arm64_struct_array_index_block_full();
-        let raw = r2il::R2ILBlock {
-            addr: block.addr,
-            size: block.size,
-            ops: vec![r2il::R2ILOp::Return {
-                target: r2il::Varnode::constant(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        };
-        let mut func = r2ssa::SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym._test_struct_array_index");
-
-        let mut diagnostics = TypeWritebackDiagnosticsJson::default();
-        let (struct_decls, slot_types, slot_fields) = infer_structs_from_semantic_accesses(
-            &func,
-            &r2dec::DecompilerConfig::aarch64(),
-            64,
-            &mut diagnostics,
-        );
-
-        assert!(
-            !struct_decls.is_empty(),
-            "expected semantic access supplement to infer struct decls; diagnostics={diagnostics:?}"
-        );
-        assert!(slot_types.contains_key(&0), "expected arg0 slot override");
-        let fields = slot_fields.get(&0).expect("slot 0 field profile");
-        assert!(fields.contains_key(&0x8), "expected offset 0x8 field");
-        assert!(fields.contains_key(&0x34), "expected offset 0x34 field");
-    }
-
-    #[test]
-    fn infer_structs_from_semantic_accesses_recovers_observed_live_x86_struct_field_pattern() {
-        let block = r2ssa::SSABlock {
-            addr: 0x401667,
-            size: 42,
-            ops: vec![
-                r2ssa::SSAOp::IntSub {
-                    dst: r2ssa::SSAVar::new("RSP", 1, 8),
-                    a: r2ssa::SSAVar::new("RSP", 0, 8),
-                    b: r2ssa::SSAVar::new("const:8", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("RSP", 1, 8),
-                    val: r2ssa::SSAVar::new("RBP", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("RBP", 1, 8),
-                    src: r2ssa::SSAVar::new("RSP", 1, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:4700", 1, 8),
-                    a: r2ssa::SSAVar::new("RBP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:fffffffffffffff8", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 1, 8),
-                    val: r2ssa::SSAVar::new("RDI", 0, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:4700", 2, 8),
-                    a: r2ssa::SSAVar::new("RBP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:fffffffffffffff4", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 2, 8),
-                    val: r2ssa::SSAVar::new("ESI", 0, 4),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:11f80", 1, 8),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 1, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("RAX", 1, 8),
-                    src: r2ssa::SSAVar::new("tmp:11f80", 1, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:11f00", 1, 4),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 2, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("EDX", 1, 4),
-                    src: r2ssa::SSAVar::new("tmp:11f00", 1, 4),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:4700", 3, 8),
-                    a: r2ssa::SSAVar::new("RAX", 1, 8),
-                    b: r2ssa::SSAVar::new("const:30", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 3, 8),
-                    val: r2ssa::SSAVar::new("EDX", 1, 4),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:11f80", 2, 8),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 1, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("RAX", 2, 8),
-                    src: r2ssa::SSAVar::new("tmp:11f80", 2, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:4700", 4, 8),
-                    a: r2ssa::SSAVar::new("RAX", 2, 8),
-                    b: r2ssa::SSAVar::new("const:30", 0, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:11f00", 2, 4),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 4, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:11f00", 3, 4),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("RAX", 2, 8),
-                },
-            ],
-        };
-        let raw = r2il::R2ILBlock {
-            addr: block.addr,
-            size: block.size,
-            ops: vec![r2il::R2ILOp::Return {
-                target: r2il::Varnode::constant(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        };
-        let mut func = r2ssa::SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym.test_struct_field");
-
-        let mut diagnostics = TypeWritebackDiagnosticsJson::default();
-        let (struct_decls, slot_types, slot_fields) = infer_structs_from_semantic_accesses(
-            &func,
-            &r2dec::DecompilerConfig::x86_64(),
-            64,
-            &mut diagnostics,
-        );
-
-        assert!(
-            !struct_decls.is_empty(),
-            "expected x86 semantic access supplement to infer struct decls; diagnostics={diagnostics:?}"
-        );
-        assert!(slot_types.contains_key(&0), "expected arg0 slot override");
-        let fields = slot_fields.get(&0).expect("slot 0 field profile");
-        assert!(fields.contains_key(&0x0), "expected offset 0x0 field");
-        assert!(fields.contains_key(&0x30), "expected offset 0x30 field");
-    }
-
-    #[test]
-    fn infer_structs_from_semantic_accesses_recovers_observed_live_x86_struct_array_pattern() {
-        let block = r2ssa::SSABlock {
-            addr: 0x40182f,
-            size: 124,
-            ops: vec![
-                r2ssa::SSAOp::IntSub {
-                    dst: r2ssa::SSAVar::new("RSP", 1, 8),
-                    a: r2ssa::SSAVar::new("RSP", 0, 8),
-                    b: r2ssa::SSAVar::new("const:8", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("RSP", 1, 8),
-                    val: r2ssa::SSAVar::new("RBP", 0, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:4700", 1, 8),
-                    a: r2ssa::SSAVar::new("RSP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:fffffffffffffff8", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 1, 8),
-                    val: r2ssa::SSAVar::new("RDI", 0, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:4700", 2, 8),
-                    a: r2ssa::SSAVar::new("RSP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:fffffffffffffff4", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("tmp:6a80", 1, 4),
-                    src: r2ssa::SSAVar::new("ESI", 0, 4),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 2, 8),
-                    val: r2ssa::SSAVar::new("tmp:6a80", 1, 4),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:4700", 3, 8),
-                    a: r2ssa::SSAVar::new("RSP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:fffffffffffffff0", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("tmp:6a80", 2, 4),
-                    src: r2ssa::SSAVar::new("EDX", 0, 4),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 3, 8),
-                    val: r2ssa::SSAVar::new("tmp:6a80", 2, 4),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:11f00", 1, 4),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 2, 8),
-                },
-                r2ssa::SSAOp::IntSExt {
-                    dst: r2ssa::SSAVar::new("RDX", 1, 8),
-                    src: r2ssa::SSAVar::new("tmp:11f00", 1, 4),
-                },
-                r2ssa::SSAOp::IntLeft {
-                    dst: r2ssa::SSAVar::new("RAX", 3, 8),
-                    a: r2ssa::SSAVar::new("RDX", 1, 8),
-                    b: r2ssa::SSAVar::new("const:3", 0, 8),
-                },
-                r2ssa::SSAOp::IntSub {
-                    dst: r2ssa::SSAVar::new("RAX", 4, 8),
-                    a: r2ssa::SSAVar::new("RAX", 3, 8),
-                    b: r2ssa::SSAVar::new("RDX", 1, 8),
-                },
-                r2ssa::SSAOp::IntLeft {
-                    dst: r2ssa::SSAVar::new("RAX", 5, 8),
-                    a: r2ssa::SSAVar::new("RAX", 4, 8),
-                    b: r2ssa::SSAVar::new("const:3", 0, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:11f80", 1, 8),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 1, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("RDX", 3, 8),
-                    a: r2ssa::SSAVar::new("RAX", 5, 8),
-                    b: r2ssa::SSAVar::new("tmp:11f80", 1, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("tmp:11f00", 2, 4),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 3, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:4700", 7, 8),
-                    a: r2ssa::SSAVar::new("RDX", 3, 8),
-                    b: r2ssa::SSAVar::new("const:8", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:4700", 7, 8),
-                    val: r2ssa::SSAVar::new("tmp:11f00", 2, 4),
-                },
-            ],
-        };
-        let raw = r2il::R2ILBlock {
-            addr: block.addr,
-            size: block.size,
-            ops: vec![r2il::R2ILOp::Return {
-                target: r2il::Varnode::constant(0, 8),
-            }],
-            switch_info: None,
-            op_metadata: Default::default(),
-        };
-        let mut func = r2ssa::SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym.test_struct_array_index");
-
-        let mut diagnostics = TypeWritebackDiagnosticsJson::default();
-        let (struct_decls, slot_types, slot_fields) = infer_structs_from_semantic_accesses(
-            &func,
-            &r2dec::DecompilerConfig::x86_64(),
-            64,
-            &mut diagnostics,
-        );
-
-        assert!(
-            !struct_decls.is_empty(),
-            "expected x86 semantic access supplement to infer struct decls; diagnostics={diagnostics:?}"
-        );
-        assert!(slot_types.contains_key(&0), "expected arg0 slot override");
-        let fields = slot_fields.get(&0).expect("slot 0 field profile");
-        assert!(fields.contains_key(&0x8), "expected offset 0x8 field");
-    }
-
-    #[test]
     #[cfg(feature = "x86")]
-    fn lifted_x86_struct_array_analysis_artifact_surfaces_local_struct_override() {
+    fn lifted_x86_sum_array_retains_certified_parameter_home_and_residual() {
         fn decode_hex(bytes: &str) -> Vec<u8> {
             let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
             bytes
                 .chunks_exact(2)
                 .map(|pair| {
@@ -9135,2332 +8206,132 @@ mod integration_tests {
         }
 
         let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let bytes = decode_hex(
-            "f30f1efa554889e548897df88975f48955f08b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801c28b45f08942088b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801d08b48088b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801d08b403401c85dc3",
-        );
-        let block = disasm
-            .lift_block(&bytes, 0x40182f, 124)
-            .expect("lifted block");
-        let pattern_ssa_func =
-            r2ssa::SSAFunction::from_blocks_for_patterns(std::slice::from_ref(&block), Some(&arch))
-                .expect("pattern ssa")
-                .with_name("dbg.test_struct_array_index");
-        let pattern_ssa_blocks: Vec<r2ssa::SSABlock> = pattern_ssa_func
-            .blocks()
-            .map(|block| r2ssa::SSABlock {
-                addr: block.addr,
-                size: block.size,
-                ops: block.ops.clone(),
+        let fixtures = [
+            (
+                0x100000610,
+                "554889e548897df88975f4c745f000000000c745ec00000000",
+            ),
+            (0x100000629, "8b45ec3b45f47d1c"),
+            (
+                0x100000631,
+                "488b45f848634dec8b04880345f08945f08b45ec83c0018945ecebdc",
+            ),
+            (0x10000064d, "8b45f05dc3"),
+        ];
+        let blocks = fixtures
+            .into_iter()
+            .map(|(addr, hex)| {
+                let bytes = decode_hex(hex);
+                disasm
+                    .lift_block(&bytes, addr, bytes.len())
+                    .expect("lifted sum_array block")
             })
-            .collect();
-        let mut semantic_diagnostics = TypeWritebackDiagnosticsJson::default();
-        let semantic_structs = infer_structs_from_semantic_accesses(
-            &pattern_ssa_func,
-            &r2dec::DecompilerConfig::x86_64(),
-            64,
-            &mut semantic_diagnostics,
-        );
-        let mut raw_diagnostics = TypeWritebackDiagnosticsJson::default();
-        let raw_structs =
-            infer_structs_from_ssa(&pattern_ssa_blocks, Some(&arch), 64, &mut raw_diagnostics);
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &[block],
-            "dbg.test_struct_array_index",
-            Some(&arch),
-            64,
-            false,
-            &std::collections::HashMap::new(),
-            "{}",
-        )
-        .expect("analysis artifact");
-
-        let rendered = artifact
-            .type_facts
-            .merged_signature
-            .as_ref()
-            .and_then(|sig| sig.params.first())
-            .and_then(|param| param.ty.as_ref())
-            .map(type_like_to_ctype)
-            .map(|ty| ty.to_string())
-            .unwrap_or_default();
-        let compact = rendered.replace(' ', "");
-        assert!(
-            compact.starts_with("struct")
-                && compact.ends_with('*')
-                && !compact.eq_ignore_ascii_case("void*"),
-            "expected lifted-byte x86 artifact to override arg0 to a struct pointer, got signature={:?}, slot_overrides={:?}, slot_fields={:?}, type_db={:?}, semantic_structs={:?}, semantic_diagnostics={:?}, raw_structs={:?}, raw_diagnostics={:?}, pattern_ssa_blocks={:?}",
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs,
-            semantic_structs,
-            semantic_diagnostics,
-            raw_structs,
-            raw_diagnostics,
-            pattern_ssa_blocks
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn lifted_x86_struct_array_detached_artifact_with_live_context_keeps_struct_override() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let bytes = decode_hex(
-            "f30f1efa554889e548897df88975f48955f08b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801c28b45f08942088b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801d08b48088b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801d08b403401c85dc3",
-        );
-        let block = disasm
-            .lift_block(&bytes, 0x40182f, 124)
-            .expect("lifted block");
-        let reg_type_hints =
-            crate::types::collect_register_type_hints(std::slice::from_ref(&block), &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.test_struct_array_index",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "arr", "type": "void *"},
-                    {"name": "idx", "type": "int32_t"},
-                    {"name": "v", "type": "int32_t"}
-                ]
-            },
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &[block],
-            "dbg.test_struct_array_index",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        assert_eq!(
-            artifact
-                .type_facts
-                .slot_type_overrides
-                .get(&0)
-                .map(String::as_str),
-            Some("struct sla_struct_420703e08f70f00e *"),
-            "expected live-context detached artifact to keep the local struct override, got merged_signature={:?}, slot_overrides={:?}, slot_fields={:?}, type_db={:?}",
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn lifted_x86_struct_array_detached_artifact_keeps_sparse_field_offsets() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let bytes = decode_hex(
-            "f30f1efa554889e548897df88975f48955f08b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801c28b45f08942088b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801d08b48088b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801d08b403401c85dc3",
-        );
-        let block = disasm
-            .lift_block(&bytes, 0x40182f, 124)
-            .expect("lifted block");
-        let reg_type_hints =
-            crate::types::collect_register_type_hints(std::slice::from_ref(&block), &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.test_struct_array_index",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "arr", "type": "void *"},
-                    {"name": "idx", "type": "int32_t"},
-                    {"name": "v", "type": "int32_t"}
-                ]
-            },
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &[block],
-            "dbg.test_struct_array_index",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let struct_decl = artifact
-            .writeback_plan
-            .struct_decls
-            .iter()
-            .find(|decl| decl.name == "sla_struct_420703e08f70f00e")
-            .expect("expected local struct decl");
-        let field_offsets = struct_decl
-            .fields
-            .iter()
-            .map(|field| (field.offset, field.name.as_str()))
             .collect::<Vec<_>>();
-        assert_eq!(
-            field_offsets,
-            vec![(8, "f_8"), (0x34, "f_34")],
-            "expected sparse field offsets to survive writeback plan, got {:?}",
-            struct_decl.fields
-        );
-
-        let db_struct = artifact
-            .type_facts
-            .external_type_db
-            .structs
-            .get("sla_struct_420703e08f70f00e")
-            .expect("expected merged struct in type db");
-        assert_eq!(
-            db_struct.fields.keys().copied().collect::<Vec<_>>(),
-            vec![8, 0x34],
-            "expected sparse field offsets in merged type db, got {:?}",
-            db_struct.fields
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_struct_array_artifact_drives_member_load_return_rendering() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let bytes = decode_hex(
-            "f30f1efa554889e548897df88975f48955f08b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801c28b45f08942088b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801d08b48088b45f44863d04889d048c1e0034829d048c1e0034889c2488b45f84801d08b403401c85dc3",
-        );
-        let block = disasm
-            .lift_block(&bytes, 0x40182f, 124)
-            .expect("lifted block");
-        let reg_type_hints =
-            crate::types::collect_register_type_hints(std::slice::from_ref(&block), &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.test_struct_array_index",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "arr", "type": "void *"},
-                    {"name": "idx", "type": "int32_t"},
-                    {"name": "v", "type": "int32_t"}
-                ]
-            },
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &[block],
-            "dbg.test_struct_array_index",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        decompiler.set_function_names(HashMap::from([
-            (0x401140, "sym.imp.memcpy".to_string()),
-            (0x401150, "sym.imp.malloc".to_string()),
-        ]));
-        decompiler.set_known_function_signatures(HashMap::from([
-            (
-                "sym.imp.malloc".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                    params: vec![r2types::CTypeLike::Int {
-                        bits: 64,
-                        signedness: r2types::Signedness::Unsigned,
-                    }],
-                    variadic: false,
+        let host_signature = r2types::FunctionSignatureSpec {
+            ret_type: Some(r2types::CTypeLike::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Signed,
+            }),
+            params: vec![
+                r2types::FunctionParamSpec {
+                    name: "arg0".to_string(),
+                    ty: None,
                 },
-            ),
-            (
-                "sym.imp.memcpy".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                    params: vec![
-                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                        r2types::CTypeLike::Int {
-                            bits: 64,
-                            signedness: r2types::Signedness::Unsigned,
-                        },
-                    ],
-                    variadic: false,
-                },
-            ),
-        ]));
-        let output = decompiler.decompile(&artifact.ssa_func);
-        let pattern_ssa_blocks = artifact.pattern_ssa_func.local_ssa_blocks();
-        let tail_ops: Vec<_> = artifact
-            .pattern_ssa_func
-            .local_ssa_blocks()
-            .first()
-            .map(|block| block.ops.iter().rev().take(16).cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let mut raw = r2il::R2ILBlock::new(0x40182f, 124);
-        raw.push(r2il::R2ILOp::Return {
-            target: r2il::Varnode::constant(0, 8),
-        });
-        let mut manual_func =
-            r2ssa::SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        manual_func
-            .get_block_mut(0x40182f)
-            .expect("entry block")
-            .ops = pattern_ssa_blocks[0].ops.clone();
-        manual_func = manual_func.with_name("dbg.test_struct_array_index");
-        let mut manual_decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        manual_decompiler.set_type_facts(artifact.type_facts.clone());
-        let manual_output = manual_decompiler.decompile(&manual_func);
-
-        assert!(
-            output.contains("[idx].f_8"),
-            "expected detached artifact store rendering in decompiled output, got:\n{output}\nmanual_output:\n{manual_output}\ntail_ops={tail_ops:?}\nregister_params={:?}\nmerged_signature={:?}\nslot_overrides={:?}\nslot_fields={:?}\ntype_db={:?}",
-            artifact.type_facts.register_params,
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs
-        );
-        assert!(
-            output.contains("[idx].f_34"),
-            "expected detached artifact load rendering in decompiled output, got:\n{output}\nmanual_output:\n{manual_output}\ntail_ops={tail_ops:?}\nregister_params={:?}\nmerged_signature={:?}\nslot_overrides={:?}\nslot_fields={:?}\ntype_db={:?}",
-            artifact.type_facts.register_params,
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs
-        );
-        assert!(
-            output.contains("return arr[idx].f_8 + arr[idx].f_34;")
-                || output.contains("return arr[idx].f_34 + arr[idx].f_8;"),
-            "expected detached artifact return to preserve both member loads, got:\n{output}\nmanual_output:\n{manual_output}\ntail_ops={tail_ops:?}\nregister_params={:?}\nmerged_signature={:?}\nslot_overrides={:?}\nslot_fields={:?}\ntype_db={:?}",
-            artifact.type_facts.register_params,
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs
-        );
-        assert!(
-            !output.contains("local_c ="),
-            "dead x86 stack-home index carrier should not leak into decompiled output, got:\n{output}\nmanual_output:\n{manual_output}\ntail_ops={tail_ops:?}\nregister_params={:?}\nmerged_signature={:?}\nslot_overrides={:?}\nslot_fields={:?}\ntype_db={:?}",
-            artifact.type_facts.register_params,
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs
-        );
-        assert!(
-            !output.contains("local_"),
-            "autogenerated x86 stack-home locals should not leak into decompiled output, got:\n{output}\nmanual_output:\n{manual_output}\ntail_ops={tail_ops:?}\nregister_params={:?}\nmerged_signature={:?}\nslot_overrides={:?}\nslot_fields={:?}\ntype_db={:?}",
-            artifact.type_facts.register_params,
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs
-        );
-        assert!(
-            output.contains("arr[idx].f_8 = v;"),
-            "expected detached artifact store to inline the parameter value, got:\n{output}\nmanual_output:\n{manual_output}\ntail_ops={tail_ops:?}\nregister_params={:?}\nmerged_signature={:?}\nslot_overrides={:?}\nslot_fields={:?}\ntype_db={:?}",
-            artifact.type_facts.register_params,
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs
-        );
-        assert!(
-            !output.contains("(int64_t)arr[idx].f_34"),
-            "x86 scalar return should not widen the member load in decompiled output, got:\n{output}\nmanual_output:\n{manual_output}\ntail_ops={tail_ops:?}\nregister_params={:?}\nmerged_signature={:?}\nslot_overrides={:?}\nslot_fields={:?}\ntype_db={:?}",
-            artifact.type_facts.register_params,
-            artifact.type_facts.merged_signature,
-            artifact.type_facts.slot_type_overrides,
-            artifact.type_facts.slot_field_profiles,
-            artifact.type_facts.external_type_db.structs
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_alloc_and_copy_artifact_keeps_authoritative_two_param_signature() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let bytes = decode_hex(
-            "f30f1efa554889e54883ec2048897de8488975e0488b45e04883c0014889c7e87bfdffff488945f848837df8007507b800000000eb29488b55e0488b4de8488b45f84889ce4889c7e842fdffff488b55f8488b45e04801d0c60000488b45f8c9c3",
-        );
-        let block = disasm
-            .lift_block(&bytes, 0x4013b1, 97)
-            .expect("lifted block");
-        let reg_type_hints =
-            crate::types::collect_register_type_hints(std::slice::from_ref(&block), &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.alloc_and_copy",
-                "ret": "int8_t *",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "src", "type": "int8_t *"},
-                    {"name": "len", "type": "uint8_t"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"src","type":"int8_t *","reg":"rdi","param_index":0},
-                {"kind":"register","name":"len","type":"uint8_t","reg":"rsi","param_index":1},
-                {"kind":"stack","name":"src_home","type":"int8_t *","base":"rbp","offset":-24,"role":"param_home","param_index":0,"param_name":"src","source_reg":"rdi"},
-                {"kind":"stack","name":"len_home","type":"uint8_t","base":"rbp","offset":-32,"role":"param_home","param_index":1,"param_name":"len","source_reg":"rsi"},
-                {"kind":"stack","name":"buf","type":"int8_t *","base":"rbp","offset":-8,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &[block],
-            "dbg.alloc_and_copy",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        assert_eq!(
-            artifact
-                .type_facts
-                .merged_signature
-                .as_ref()
-                .expect("merged signature")
-                .params
-                .len(),
-            2,
-            "expected authoritative external signature to keep two params, got merged_signature={:?}",
-            artifact.type_facts.merged_signature
-        );
-        assert_eq!(
-            artifact.writeback_plan.signature.params.len(),
-            2,
-            "expected writeback signature to stay aligned with merged signature, got {:?}",
-            artifact.writeback_plan.signature.params
-        );
-        assert_eq!(
-            artifact.writeback_plan.signature.params[0].name, "src",
-            "expected first param name to come from external signature, got merged_signature={:?}, writeback_signature={:?}",
-            artifact.type_facts.merged_signature, artifact.writeback_plan.signature
-        );
-        assert_eq!(
-            artifact.writeback_plan.signature.params[1].name, "len",
-            "expected second param name to come from external signature, got merged_signature={:?}, writeback_signature={:?}",
-            artifact.type_facts.merged_signature, artifact.writeback_plan.signature
-        );
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        decompiler.set_function_names(HashMap::from([
-            (0x401140, "sym.imp.memcpy".to_string()),
-            (0x401150, "sym.imp.malloc".to_string()),
-        ]));
-        decompiler.set_known_function_signatures(HashMap::from([
-            (
-                "sym.imp.malloc".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                    params: vec![r2types::CTypeLike::Int {
-                        bits: 64,
-                        signedness: r2types::Signedness::Unsigned,
-                    }],
-                    variadic: false,
-                },
-            ),
-            (
-                "sym.imp.memcpy".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                    params: vec![
-                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                        r2types::CTypeLike::Int {
-                            bits: 64,
-                            signedness: r2types::Signedness::Unsigned,
-                        },
-                    ],
-                    variadic: false,
-                },
-            ),
-        ]));
-        let output = decompiler.decompile(&artifact.ssa_func);
-        let ssa_ops: Vec<String> = artifact
-            .ssa_func
-            .blocks()
-            .flat_map(|block| block.ops.iter().map(|op| format!("{op:?}")))
-            .collect();
-        assert!(
-            output.contains("sym.imp.memcpy(buf, src, len);"),
-            "expected detached x86 alloc_and_copy to keep the malloc owner for memcpy, got:\n{output}\nssa_ops={ssa_ops:?}\nmerged_signature={:?}\nwriteback_signature={:?}",
-            artifact.type_facts.merged_signature,
-            artifact.writeback_plan.signature
-        );
-        assert!(
-            output.contains("buf[len] = 0;"),
-            "expected detached x86 alloc_and_copy to keep the malloc owner for the NUL store, got:\n{output}\nmerged_signature={:?}\nwriteback_signature={:?}",
-            artifact.type_facts.merged_signature,
-            artifact.writeback_plan.signature
-        );
-        assert!(
-            output.contains("return buf;"),
-            "expected detached x86 alloc_and_copy to return the owned malloc result, got:\n{output}\nmerged_signature={:?}\nwriteback_signature={:?}",
-            artifact.type_facts.merged_signature,
-            artifact.writeback_plan.signature
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_vuln_memcpy_artifact_keeps_authoritative_args() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![disasm
-            .lift_block(
-                &decode_hex(
-                    "f30f1efa554889e54883ec5048897db88975b48b45b44863d0488b4db8488d45c04889ce4889c7e84bfeffff488d45c04889c6488d05051d00004889c7b800000000e800feffff90c9c3",
-                ),
-                0x4012c9,
-                74,
-            )
-            .expect("vuln_memcpy block")];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.vuln_memcpy",
-                "ret": "int64_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "user_input", "type": "int8_t *"},
-                    {"name": "user_len", "type": "int32_t"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"user_input","type":"int8_t *","reg":"rdi","param_index":0},
-                {"kind":"register","name":"user_len","type":"int32_t","reg":"rsi","param_index":1},
-                {"kind":"stack","name":"user_input_home","type":"int8_t *","base":"rbp","offset":-72,"role":"param_home","param_index":0,"param_name":"user_input","source_reg":"rdi"},
-                {"kind":"stack","name":"user_len_home","type":"int32_t","base":"rbp","offset":-76,"role":"param_home","param_index":1,"param_name":"user_len","source_reg":"rsi"},
-                {"kind":"stack","name":"buf","type":"int8_t *","base":"rbp","offset":-64,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.vuln_memcpy",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        decompiler.set_function_names(HashMap::from([
-            (0x401110, "sym.imp.printf".to_string()),
-            (0x401140, "sym.imp.memcpy".to_string()),
-        ]));
-        decompiler.set_strings(HashMap::from([(0x403008, "Copied: %s\n".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([
-            (
-                "sym.imp.memcpy".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                    params: vec![
-                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Int {
-                            bits: 8,
-                            signedness: r2types::Signedness::Signed,
-                        })),
-                        r2types::CTypeLike::Int {
-                            bits: 64,
-                            signedness: r2types::Signedness::Unsigned,
-                        },
-                    ],
-                    variadic: false,
-                },
-            ),
-            (
-                "sym.imp.printf".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Int {
+                r2types::FunctionParamSpec {
+                    name: "arg1".to_string(),
+                    ty: Some(r2types::CTypeLike::Int {
                         bits: 32,
                         signedness: r2types::Signedness::Signed,
-                    },
-                    params: vec![r2types::CTypeLike::Pointer(Box::new(
-                        r2types::CTypeLike::Int {
-                            bits: 8,
-                            signedness: r2types::Signedness::Signed,
-                        },
-                    ))],
-                    variadic: true,
+                    }),
                 },
-            ),
-        ]));
-        let output = decompiler.decompile(&artifact.ssa_func);
-        let ssa_ops: Vec<String> = artifact
-            .ssa_func
-            .blocks()
-            .flat_map(|block| block.ops.iter().map(|op| format!("{op:?}")))
-            .collect();
-
-        assert!(
-            output.contains("sym.imp.memcpy(buf, user_input, user_len);"),
-            "expected detached vuln_memcpy to keep authoritative memcpy args, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            output.contains("sym.imp.printf(\"Copied: %s\\n\", buf);"),
-            "expected detached vuln_memcpy to print the recovered buf local, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        for bad in [
-            "arg1",
-            "arg2",
-            "tmp:",
-            "*(rbp",
-            "sym.imp.memcpy(buf, user_len, user_len)",
-        ] {
-            assert!(
-                !output.contains(bad),
-                "detached vuln_memcpy should not regress to {bad:?}, got:\n{output}\nssa_ops={ssa_ops:?}"
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_authenticate_artifact_keeps_strcmp_condition_shape() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec1048897df8488b45f8488d15801c00004889d64889c7e891fdffff85c07507",
-                    ),
-                    0x401379,
-                    42,
-                )
-                .expect("authenticate entry"),
-            disasm
-                .lift_block(&decode_hex("b801000000eb05"), 0x4013a3, 7)
-                .expect("authenticate false arm"),
-            disasm
-                .lift_block(&decode_hex("b800000000"), 0x4013aa, 5)
-                .expect("authenticate true arm"),
-            disasm
-                .lift_block(&decode_hex("c9c3"), 0x4013af, 2)
-                .expect("authenticate exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.authenticate",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "password", "type": "int8_t *"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"password","type":"int8_t *","reg":"rdi","param_index":0},
-                {"kind":"stack","name":"password_home","type":"int8_t *","base":"rbp","offset":-8,"role":"param_home","param_index":0,"param_name":"password","source_reg":"rdi"}
             ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.authenticate",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        decompiler.set_function_names(HashMap::from([(0x401130, "sym.imp.strcmp".to_string())]));
-        decompiler.set_strings(HashMap::from([(0x403014, "secret123".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([(
-            "sym.imp.strcmp".to_string(),
-            r2types::FunctionType {
-                return_type: r2types::CTypeLike::Int {
-                    bits: 32,
-                    signedness: r2types::Signedness::Signed,
+        };
+        let parsed_context = r2types::ParsedExternalContext {
+            current_signature: Some(host_signature.clone()),
+            merged_signature: Some(host_signature),
+            register_params: vec![
+                r2types::ExternalRegisterParamSpec {
+                    name: "arg0".to_string(),
+                    ty: None,
+                    reg: "RDI".to_string(),
                 },
-                params: vec![
-                    r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    })),
-                    r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    })),
-                ],
-                variadic: false,
-            },
-        )]));
-        let output = decompiler.decompile(&artifact.ssa_func);
-        let ssa_ops: Vec<String> = artifact
-            .ssa_func
-            .blocks()
-            .flat_map(|block| block.ops.iter().map(|op| format!("{op:?}")))
-            .collect();
-
-        assert!(
-            output.contains("sym.imp.strcmp(password, \"secret123\")"),
-            "expected detached authenticate to keep the strcmp call in the condition, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            !output.contains("0 != 0") && !output.contains("0 == 0"),
-            "authenticate condition should not collapse to a constant, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_check_secret_artifact_keeps_branch_return_values() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex("f30f1efa554889e5897dfc817dfcadde00007507"),
-                    0x401276,
-                    20,
-                )
-                .expect("check_secret entry"),
-            disasm
-                .lift_block(&decode_hex("b801000000eb05"), 0x40128a, 7)
-                .expect("check_secret then"),
-            disasm
-                .lift_block(&decode_hex("b800000000"), 0x401291, 5)
-                .expect("check_secret else"),
-            disasm
-                .lift_block(&decode_hex("5dc3"), 0x401296, 2)
-                .expect("check_secret exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.check_secret",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "x", "type": "int32_t"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"x","type":"int32_t","reg":"rdi","param_index":0},
-                {"kind":"stack","name":"var_8h","type":"void *","base":"rsp","offset":0,"role":"unknown"},
-                {"kind":"stack","name":"var_4h","type":"int32_t","base":"rbp","offset":-4,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.check_secret",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let then_ops: Vec<String> = artifact
-            .ssa_func
-            .get_block(0x40128a)
-            .expect("then block")
-            .ops
-            .iter()
-            .map(|op| format!("{op:?}"))
-            .collect();
-        let else_ops: Vec<String> = artifact
-            .ssa_func
-            .get_block(0x401291)
-            .expect("else block")
-            .ops
-            .iter()
-            .map(|op| format!("{op:?}"))
-            .collect();
-        let entry_ops: Vec<String> = artifact
-            .ssa_func
-            .get_block(0x401276)
-            .expect("entry block")
-            .ops
-            .iter()
-            .map(|op| format!("{op:?}"))
-            .collect();
-        let exit_block = artifact.ssa_func.get_block(0x401296).expect("exit block");
-        let exit_ops: Vec<String> = exit_block.ops.iter().map(|op| format!("{op:?}")).collect();
-        let exit_phis: Vec<String> = exit_block
-            .phis
-            .iter()
-            .map(|phi| format!("{phi:?}"))
-            .collect();
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        let output = decompiler.decompile(&artifact.ssa_func);
-        let output_without_types =
-            r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64()).decompile(&artifact.ssa_func);
-
-        assert!(
-            then_ops
-                .iter()
-                .any(|op| op.contains("Copy") && op.contains("RAX") && op.contains("const:1")),
-            "prepared SSA should keep the then-arm return value, got then_ops={then_ops:?}"
-        );
-        assert!(
-            else_ops
-                .iter()
-                .any(|op| op.contains("Copy") && op.contains("RAX") && op.contains("const:0")),
-            "prepared SSA should keep the else-arm return value, got else_ops={else_ops:?}"
-        );
-        assert!(
-            output.contains("if") && output.contains("return 1;") && output.contains("return 0;"),
-            "expected detached check_secret to keep branch returns, got:\n{output}\noutput_without_types=\n{output_without_types}\nentry_ops={entry_ops:?}\nthen_ops={then_ops:?}\nelse_ops={else_ops:?}\nexit_ops={exit_ops:?}\nexit_phis={exit_phis:?}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_bool_carrier_artifact_keeps_branch_return_values() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e5897dec8975e88b45ec3b45e80f95c00fb6c08945fc8b45fc4898488945f048837df0007505",
-                    ),
-                    0x401b7f,
-                    45,
-                )
-                .expect("bool-carrier entry"),
-            disasm
-                .lift_block(&decode_hex("8b45e8eb03"), 0x401bac, 5)
-                .expect("bool-carrier else"),
-            disasm
-                .lift_block(&decode_hex("8b45ec"), 0x401bb1, 3)
-                .expect("bool-carrier then"),
-            disasm
-                .lift_block(&decode_hex("5dc3"), 0x401bb4, 2)
-                .expect("bool-carrier exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.test_bool_carrier_chain",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "x", "type": "int32_t"},
-                    {"name": "y", "type": "int32_t"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"arg0","type":"int32_t","reg":"rdi","param_index":0},
-                {"kind":"register","name":"arg1","type":"int32_t","reg":"rsi","param_index":1},
-                {"kind":"stack","name":"var_18h","type":"int32_t","base":"rbp","offset":-24,"role":"local"},
-                {"kind":"stack","name":"var_14h","type":"int32_t","base":"rbp","offset":-20,"role":"local"},
-                {"kind":"stack","name":"var_10h","type":"int64_t","base":"rbp","offset":-16,"role":"local"},
-                {"kind":"stack","name":"var_4h","type":"int32_t","base":"rbp","offset":-4,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.test_bool_carrier_chain",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        let output = decompiler.decompile(&artifact.ssa_func);
-        let visible_bindings = artifact.type_facts.visible_bindings.clone();
-
-        assert!(
-            output.contains("if (x != y)")
-                && output.contains("return x;")
-                && output.contains("return y;")
-                && !output.contains("local_14")
-                && !output.contains("local_18")
-                && !output.contains("var_14h")
-                && !output.contains("var_18h"),
-            "expected detached bool-carrier decompilation to keep param returns, got:\n{output}\nvisible_bindings={visible_bindings:#?}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_setlocale_artifact_keeps_owned_call_result() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec10488d059c1900004889c6bf06000000e8affaffff488945f848837df8007507",
-                    ),
-                    0x401691,
-                    43,
-                )
-                .expect("setlocale entry"),
-            disasm
-                .lift_block(&decode_hex("b800000000eb0a"), 0x4016bc, 7)
-                .expect("setlocale false arm"),
-            disasm
-                .lift_block(&decode_hex("488b45f80fb6000fbec0"), 0x4016c3, 10)
-                .expect("setlocale true arm"),
-            disasm
-                .lift_block(&decode_hex("c9c3"), 0x4016cd, 2)
-                .expect("setlocale exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.test_setlocale_wrapper",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": []
-            },
-            "vars": [
-                {"kind":"stack","name":"loc","type":"int8_t *","base":"rbp","offset":-8,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.test_setlocale_wrapper",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        decompiler.set_function_names(HashMap::from([(0x401160, "sym.imp.setlocale".to_string())]));
-        decompiler.set_strings(HashMap::from([(0x403040, "C".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([(
-            "sym.imp.setlocale".to_string(),
-            r2types::FunctionType {
-                return_type: r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Int {
-                    bits: 8,
-                    signedness: r2types::Signedness::Signed,
-                })),
-                params: vec![
-                    r2types::CTypeLike::Int {
+                r2types::ExternalRegisterParamSpec {
+                    name: "arg1".to_string(),
+                    ty: Some(r2types::CTypeLike::Int {
                         bits: 32,
                         signedness: r2types::Signedness::Signed,
-                    },
-                    r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    })),
-                ],
-                variadic: false,
-            },
-        )]));
-        let output = decompiler.decompile(&artifact.ssa_func);
-        let ssa_ops: Vec<String> = artifact
-            .ssa_func
-            .blocks()
-            .flat_map(|block| block.ops.iter().map(|op| format!("{op:?}")))
-            .collect();
-        let block_succs: Vec<(u64, Vec<u64>)> = artifact
-            .ssa_func
-            .blocks()
-            .map(|block| (block.addr, artifact.ssa_func.successors(block.addr)))
-            .collect();
-
-        assert!(
-            output.contains("loc = (int8_t*)sym.imp.setlocale(6, \"C\");")
-                || output.contains("loc = sym.imp.setlocale(6, \"C\");"),
-            "expected detached setlocale wrapper to assign the owned call result to loc, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-        assert!(
-            output.contains("if (loc != 0)") || output.contains("if (!loc)"),
-            "expected setlocale wrapper to branch on the owned loc value, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-        assert!(
-            !output.contains("loc = (int8_t*)loc;"),
-            "setlocale wrapper should not collapse to self-assignment, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-        assert!(
-            output.contains("return loc[0];")
-                || output.contains("return (int32_t)loc[0];")
-                || output.contains("return *loc;")
-                || output.contains("return (int32_t)*loc;"),
-            "expected detached setlocale wrapper to return the first character of loc, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_setlocale_typed_input_keeps_owned_call_result() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec10488d059c1900004889c6bf06000000e8affaffff488945f848837df8007507",
-                    ),
-                    0x401691,
-                    43,
-                )
-                .expect("setlocale entry"),
-            disasm
-                .lift_block(&decode_hex("b800000000eb0a"), 0x4016bc, 7)
-                .expect("setlocale false arm"),
-            disasm
-                .lift_block(&decode_hex("488b45f80fb6000fbec0"), 0x4016c3, 10)
-                .expect("setlocale true arm"),
-            disasm
-                .lift_block(&decode_hex("c9c3"), 0x4016cd, 2)
-                .expect("setlocale exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.test_setlocale_wrapper",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": []
-            },
-            "vars": [
-                {"kind":"stack","name":"loc","type":"int8_t *","base":"rbp","offset":-8,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let mut artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.test_setlocale_wrapper",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let function_names = HashMap::from([(0x401160, "sym.imp.setlocale".to_string())]);
-        let strings = HashMap::from([(0x403040, "C".to_string())]);
-        crate::types::enrich_known_function_signatures_from_names(
-            &mut artifact.type_facts,
-            &function_names,
-            64,
-        );
-        let input = crate::decompiler::decompiler_input_from_artifact(
-            artifact,
-            function_names,
-            strings,
-            HashMap::new(),
-        );
-        let decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        let output = decompiler.decompile_input(&input);
-
-        assert!(
-            output.contains("loc = (int8_t*)sym.imp.setlocale(6, \"C\");")
-                || output.contains("loc = sym.imp.setlocale(6, \"C\");"),
-            "expected typed-input setlocale wrapper to assign the owned call result to loc, got:\n{output}"
-        );
-        assert!(
-            output.contains("if (loc != 0)") || output.contains("if (!loc)"),
-            "expected typed-input setlocale wrapper to branch on loc, got:\n{output}"
-        );
-        assert!(
-            output.contains("return loc[0];")
-                || output.contains("return (int32_t)loc[0];")
-                || output.contains("return *loc;")
-                || output.contains("return (int32_t)*loc;"),
-            "expected typed-input setlocale wrapper to keep the dereferenced return, got:\n{output}"
-        );
-        assert!(
-            !output.contains("return loc;"),
-            "typed-input setlocale wrapper should not collapse to a raw pointer return, got:\n{output}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_my_strdup_artifact_reuses_owned_call_results() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec2048897de8488b45e84889c7e8b2eeffff488945f8488b45f84883c0014889c7e8eeeeffff488945f048837df000741b",
-                    ),
-                    0x402272,
-                    59,
-                )
-                .expect("my_strdup entry"),
-            disasm
-                .lift_block(
-                    &decode_hex("488b45f8488d5001488b4de8488b45f04889ce4889c7e8a8eeffff"),
-                    0x4022ad,
-                    27,
-                )
-                .expect("my_strdup copy arm"),
-            disasm
-                .lift_block(&decode_hex("488b45f0c9c3"), 0x4022c8, 6)
-                .expect("my_strdup exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.my_strdup",
-                "ret": "int8_t *",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "s", "type": "int8_t *"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"s","type":"int8_t *","reg":"rdi","param_index":0},
-                {"kind":"stack","name":"s_home","type":"int8_t *","base":"rbp","offset":-24,"role":"param_home","param_index":0,"param_name":"s","source_reg":"rdi"},
-                {"kind":"stack","name":"len","type":"uint64_t","base":"rbp","offset":-8,"role":"local"},
-                {"kind":"stack","name":"dup","type":"int8_t *","base":"rbp","offset":-16,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.my_strdup",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut type_facts = artifact.type_facts.clone();
-        type_facts.known_function_signatures.extend(HashMap::from([
-            (
-                "sym.imp.strlen".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Int {
-                        bits: 64,
-                        signedness: r2types::Signedness::Unsigned,
-                    },
-                    params: vec![r2types::CTypeLike::Pointer(Box::new(
-                        r2types::CTypeLike::Int {
-                            bits: 8,
-                            signedness: r2types::Signedness::Signed,
-                        },
-                    ))],
-                    variadic: false,
+                    }),
+                    reg: "RSI".to_string(),
                 },
+            ],
+            ..r2types::ParsedExternalContext::default()
+        };
+        let source_snapshot = x86_exact_test_snapshot(
+            &arch,
+            "sum-array/rev1",
+            &["RDI", "RSI"],
+            &[(0, -8, 8), (1, -12, 4)],
+            &[(-16, 4), (-20, 4)],
+            false,
+            Vec::new(),
+        );
+        let response = r2engine::EngineSession::new().decompile_function_from_input(
+            r2engine::EngineFunctionDecompileRequestInput::single_function(
+                r2engine::EngineFunctionInput {
+                    function_name: "sym._sum_array".to_string(),
+                    function_addr: 0x100000610,
+                    blocks,
+                    arch: Some(arch.clone()),
+                    semantic_metadata_enabled: false,
+                    source_snapshot: Some(source_snapshot),
+                },
+                Some(64),
+                parsed_context,
             ),
-            (
-                "sym.imp.malloc".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                    params: vec![r2types::CTypeLike::Int {
-                        bits: 64,
-                        signedness: r2types::Signedness::Unsigned,
-                    }],
-                    variadic: false,
-                },
-            ),
-            (
-                "sym.imp.memcpy".to_string(),
-                r2types::FunctionType {
-                    return_type: r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                    params: vec![
-                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                        r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Unknown)),
-                        r2types::CTypeLike::Int {
-                            bits: 64,
-                            signedness: r2types::Signedness::Unsigned,
-                        },
-                    ],
-                    variadic: false,
-                },
-            ),
-        ]));
-        let context = r2dec::DecompilerContext::default()
-            .with_type_facts(type_facts)
-            .with_function_names(HashMap::from([
-                (0x401140, "sym.imp.strlen".to_string()),
-                (0x401170, "sym.imp.memcpy".to_string()),
-                (0x401190, "sym.imp.malloc".to_string()),
-            ]));
-        let input = r2dec::DecompilerInput::new(artifact.ssa_func.clone(), context);
-        let decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        let output = decompiler.decompile_input(&input);
-        let ssa_ops: Vec<String> = artifact
-            .ssa_func
-            .blocks()
-            .flat_map(|block| block.ops.iter().map(|op| format!("{op:?}")))
-            .collect();
-        let block_succs: Vec<(u64, Vec<u64>)> = artifact
-            .ssa_func
-            .blocks()
-            .map(|block| (block.addr, artifact.ssa_func.successors(block.addr)))
-            .collect();
-
-        assert!(
-            output.contains("len = sym.imp.strlen(s);"),
-            "expected my_strdup to keep a single owned strlen result, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
         );
-        assert!(
-            output.contains("dup = sym.imp.malloc(len + 1);"),
-            "expected my_strdup to assign the owned malloc result to dup, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-        assert!(
-            output.contains("if (dup == 0)")
-                || output.contains("if (!dup)")
-                || output.contains("if (s_home == 0)")
-                || output.contains("if (!s_home)"),
-            "expected my_strdup null-check to stay source-like without replaying helper calls, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-        assert!(
-            output.contains("sym.imp.memcpy(dup, s, len + 1);"),
-            "expected my_strdup to reuse dup and len in memcpy, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-        assert!(
-            output.contains("return dup;"),
-            "expected my_strdup to return the owned dup result, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-        assert!(
-            !output.contains("sym.imp.malloc(sym.imp.strlen(")
-                && !output.contains("dup = rax;")
-                && !output.contains("return len;"),
-            "my_strdup should not replay helper calls or return the strlen result, got:\n{output}\nssa_ops={ssa_ops:?}\nblock_succs={block_succs:?}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_my_strdup_artifact_reuses_malloc_owner_with_generic_stack_local_name() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec2048897de8488b45e84889c7e8b2eeffff488945f8488b45f84883c0014889c7e8eeeeffff488945f048837df000741b",
-                    ),
-                    0x402272,
-                    59,
+        // Entry-relative, not frame-relative. This home is twelve below the
+        // frame pointer, and the frame pointer is eight below the entry stack
+        // pointer, so the one coordinate objects are identified in puts it at
+        // minus twenty. It was minus twelve while a slot's position was
+        // recorded against whichever register happened to name it.
+        const LEN_HOME_OFFSET: i64 = -20;
+        let len_home_objects = response
+            .function_facts
+            .render_facts()
+            .stack_slots()
+            .filter_map(|(object, _, offset, _)| (offset == LEN_HOME_OFFSET).then_some(object))
+            .collect::<Vec<_>>();
+        let [len_home_object] = len_home_objects.as_slice() else {
+            panic!("expected one parameter home at {LEN_HOME_OFFSET}, got {len_home_objects:?}");
+        };
+        let len_home = response
+            .function_facts
+            .authorized_stack_param_owner_render(*len_home_object, LEN_HOME_OFFSET)
+            .unwrap_or_else(|| {
+                panic!(
+                    "second parameter home should authorize its signature owner; type_facts={:?}",
+                    response.function_facts.type_facts()
                 )
-                .expect("my_strdup entry"),
-            disasm
-                .lift_block(
-                    &decode_hex("488b45f8488d5001488b4de8488b45f04889ce4889c7e8a8eeffff"),
-                    0x4022ad,
-                    27,
-                )
-                .expect("my_strdup copy arm"),
-            disasm
-                .lift_block(&decode_hex("488b45f0c9c3"), 0x4022c8, 6)
-                .expect("my_strdup exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.my_strdup_generic_local",
-                "ret": "char *",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "s", "type": "char const *"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"arg0","type":"int64_t","reg":"rdi","param_index":0},
-                {"kind":"stack","name":"len","type":"size_t","base":"rbp","offset":-8,"role":"local"},
-                {"kind":"stack","name":"var_10h","type":"int64_t","base":"rbp","offset":-16,"role":"local"},
-                {"kind":"stack","name":"s_home","type":"char const *","base":"rbp","offset":-24,"role":"param_home","param_index":0,"param_name":"s","source_reg":"rdi"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.my_strdup_generic_local",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let function_names = HashMap::from([
-            (0x401140, "sym.imp.strlen".to_string()),
-            (0x401170, "sym.imp.memcpy".to_string()),
-            (0x401190, "sym.imp.malloc".to_string()),
-        ]);
-        let input = crate::decompiler::decompiler_input_from_artifact(
-            artifact.clone(),
-            function_names,
-            HashMap::new(),
-            HashMap::new(),
-        );
-        let decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        let output = decompiler.decompile_input(&input);
-        let ssa_ops: Vec<String> = artifact
-            .ssa_func
-            .blocks()
-            .flat_map(|block| block.ops.iter().map(|op| format!("{op:?}")))
-            .collect();
-
+            });
+        assert_eq!(len_home.name, "arg1");
+        // The SIMD worker contains machine operations whose exact C projection
+        // is unavailable. Those are marked as gaps and the rest renders; the
+        // saved frame-pointer object must not be reached through a fabricated
+        // local, which is what the output assertions check.
         assert!(
-            output.contains("len = sym.imp.strlen(s);"),
-            "expected my_strdup to keep a single owned strlen result, got:\n{output}\nssa_ops={ssa_ops:?}"
+            matches!(response.placement_audit, r2engine::PlacementAudit::Applied),
+            "placement applies around the gapped worker: {:?}\n{}",
+            response.placement_audit,
+            response.output
         );
+        assert_eq!(response.render_refusal, None, "{}", response.output);
         assert!(
-            output.contains("var_10h = sym.imp.malloc(len + 1);")
-                || output.contains("var_10h = (void*)sym.imp.malloc(len + 1);"),
-            "expected my_strdup to bind the malloc result to the stack local owner even with a generic local name, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            output.contains("sym.imp.memcpy(var_10h, s, len + 1);"),
-            "expected my_strdup to reuse the generic stack local owner in memcpy, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            output.contains("return var_10h;"),
-            "expected my_strdup to return the generic stack local owner instead of replaying malloc, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            !output.contains("sym.imp.malloc(len + 1)")
-                || output.matches("sym.imp.malloc(len + 1)").count() == 1,
-            "expected my_strdup to keep a single visible malloc call, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_process_string_artifact_keeps_strlen_owner_and_hex_constant_shape() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec2048897de8488b45e84889c7e8adfdffff488945f848837df8647607",
-                    ),
-                    0x401337,
-                    39,
-                )
-                .expect("process_string entry"),
-            disasm
-                .lift_block(&decode_hex("b8ffffffffeb12"), 0x40135e, 7)
-                .expect("process_string too_long"),
-            disasm
-                .lift_block(&decode_hex("48837df8047707"), 0x401365, 7)
-                .expect("process_string second_guard"),
-            disasm
-                .lift_block(&decode_hex("b8feffffffeb04"), 0x40136c, 7)
-                .expect("process_string too_short"),
-            disasm
-                .lift_block(&decode_hex("488b45f8"), 0x401373, 4)
-                .expect("process_string return_len"),
-            disasm
-                .lift_block(&decode_hex("c9c3"), 0x401377, 2)
-                .expect("process_string exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.process_string",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "s", "type": "int8_t *"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"s","type":"int8_t *","reg":"rdi","param_index":0},
-                {"kind":"stack","name":"s_home","type":"int8_t *","base":"rbp","offset":-24,"role":"param_home","param_index":0,"param_name":"s","source_reg":"rdi"},
-                {"kind":"stack","name":"len","type":"uint64_t","base":"rbp","offset":-8,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.process_string",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        decompiler.set_function_names(HashMap::from([(0x401100, "sym.imp.strlen".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([(
-            "sym.imp.strlen".to_string(),
-            r2types::FunctionType {
-                return_type: r2types::CTypeLike::Int {
-                    bits: 64,
-                    signedness: r2types::Signedness::Unsigned,
-                },
-                params: vec![r2types::CTypeLike::Pointer(Box::new(
-                    r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    },
-                ))],
-                variadic: false,
-            },
-        )]));
-        let output = decompiler.decompile(&artifact.ssa_func);
-        let ssa_ops: Vec<String> = artifact
-            .ssa_func
-            .blocks()
-            .flat_map(|block| block.ops.iter().map(|op| format!("{op:?}")))
-            .collect();
-
-        assert!(
-            output.contains("len = sym.imp.strlen(s);"),
-            "expected process_string to keep the strlen owner, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            !output.contains("sym.imp.strlen(s)")
-                || output.matches("sym.imp.strlen(s)").count() == 1,
-            "process_string should not replay strlen, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            output.contains("if (len > 100)") || output.contains("if (len > 0x64)"),
-            "expected process_string to preserve the original 0x64/100 guard, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            output.contains("return len;"),
-            "expected process_string to return the owned len on the success path, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            output.contains("return -1;"),
-            "expected process_string to preserve the too-long return, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-        assert!(
-            output.contains("return -2;"),
-            "expected process_string to preserve the too-short return, got:\n{output}\nssa_ops={ssa_ops:?}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_process_string_artifact_accepts_size_t_external_local_type() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec2048897de8488b45e84889c7e8adfdffff488945f848837df8647607",
-                    ),
-                    0x401337,
-                    39,
-                )
-                .expect("process_string entry"),
-            disasm
-                .lift_block(&decode_hex("b8ffffffffeb12"), 0x40135e, 7)
-                .expect("process_string too_long"),
-            disasm
-                .lift_block(&decode_hex("48837df8047707"), 0x401365, 7)
-                .expect("process_string second_guard"),
-            disasm
-                .lift_block(&decode_hex("b8feffffffeb04"), 0x40136c, 7)
-                .expect("process_string too_short"),
-            disasm
-                .lift_block(&decode_hex("488b45f8"), 0x401373, 4)
-                .expect("process_string return_len"),
-            disasm
-                .lift_block(&decode_hex("c9c3"), 0x401377, 2)
-                .expect("process_string exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.process_string",
-                "ret": "int32_t",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "s", "type": "int8_t *"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"s","type":"int8_t *","reg":"rdi","param_index":0},
-                {"kind":"stack","name":"s_home","type":"int8_t *","base":"rbp","offset":-24,"role":"param_home","param_index":0,"param_name":"s","source_reg":"rdi"},
-                {"kind":"stack","name":"len","type":"size_t","base":"rbp","offset":-8,"role":"local"}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.process_string",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        decompiler.set_function_names(HashMap::from([(0x401100, "sym.imp.strlen".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([(
-            "sym.imp.strlen".to_string(),
-            r2types::FunctionType {
-                return_type: r2types::CTypeLike::Int {
-                    bits: 64,
-                    signedness: r2types::Signedness::Unsigned,
-                },
-                params: vec![r2types::CTypeLike::Pointer(Box::new(
-                    r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    },
-                ))],
-                variadic: false,
-            },
-        )]));
-        let output = decompiler.decompile(&artifact.ssa_func);
-
-        assert!(
-            output.contains("len = sym.imp.strlen(s);"),
-            "expected process_string to keep the strlen owner with a size_t local, got:\n{output}"
-        );
-        assert!(
-            output.contains("if (len > 100)") || output.contains("if (len > 0x64)"),
-            "expected process_string to preserve the upper-bound guard with a size_t local, got:\n{output}"
-        );
-        assert!(
-            output.contains("return -1;"),
-            "expected process_string to preserve the too-long return with a size_t local, got:\n{output}"
-        );
-        assert!(
-            output.contains("return -2;"),
-            "expected process_string to preserve the too-short return with a size_t local, got:\n{output}"
-        );
-        assert!(
-            output.contains("return len;"),
-            "expected process_string to preserve the success return owner with a size_t local, got:\n{output}"
-        );
-        assert!(
-            !output.contains("uint8_t len") && !output.contains("\"\\x7f\""),
-            "size_t local metadata should not collapse process_string into a byte-typed artifact, got:\n{output}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_process_string_artifact_matches_live_external_slot_mix() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec2048897de8488b45e84889c7e8adfdffff488945f848837df8647607",
-                    ),
-                    0x401337,
-                    39,
-                )
-                .expect("process_string entry"),
-            disasm
-                .lift_block(&decode_hex("b8ffffffffeb12"), 0x40135e, 7)
-                .expect("process_string too_long"),
-            disasm
-                .lift_block(&decode_hex("48837df8047707"), 0x401365, 7)
-                .expect("process_string second_guard"),
-            disasm
-                .lift_block(&decode_hex("b8feffffffeb04"), 0x40136c, 7)
-                .expect("process_string too_short"),
-            disasm
-                .lift_block(&decode_hex("488b45f8"), 0x401373, 4)
-                .expect("process_string return_len"),
-            disasm
-                .lift_block(&decode_hex("c9c3"), 0x401377, 2)
-                .expect("process_string exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.process_string",
-                "ret": "int",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "s", "type": "char *"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"arg0","type":"int64_t","reg":"RDI"},
-                {"kind":"stack","name":"s","type":"char *","base":"bp","role":"stack_arg","is_arg":true,"offset":-24},
-                {"kind":"stack","name":"len","type":"size_t","base":"bp","role":"local","is_arg":false,"offset":-8},
-                {"kind":"stack","name":"var_8h","type":"void *","base":"sp","role":"local","is_arg":false,"offset":32}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.process_string",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_type_facts(artifact.type_facts.clone());
-        decompiler.set_function_names(HashMap::from([(0x401100, "sym.imp.strlen".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([(
-            "sym.imp.strlen".to_string(),
-            r2types::FunctionType {
-                return_type: r2types::CTypeLike::Int {
-                    bits: 64,
-                    signedness: r2types::Signedness::Unsigned,
-                },
-                params: vec![r2types::CTypeLike::Pointer(Box::new(
-                    r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    },
-                ))],
-                variadic: false,
-            },
-        )]));
-        let output = decompiler.decompile(&artifact.ssa_func);
-
-        assert!(
-            output.contains("return -1;")
-                && output.contains("return -2;")
-                && output.contains("return len;"),
-            "expected process_string to keep its signed return paths with the live external slot mix, got:\n{output}"
-        );
-        assert!(
-            output.contains("if (len > 100)") || output.contains("if (len > 0x64)"),
-            "expected live external slot mix to keep the upper-bound guard, got:\n{output}"
-        );
-        assert!(
-            !output.contains("uint8_t len"),
-            "live external slot mix should not narrow len to uint8_t, got:\n{output}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn detached_x86_process_string_typed_input_matches_live_external_slot_mix() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let (arch, disasm) = create_disassembler_for_arch("x86-64").expect("disassembler");
-        let blocks = vec![
-            disasm
-                .lift_block(
-                    &decode_hex(
-                        "f30f1efa554889e54883ec2048897de8488b45e84889c7e8adfdffff488945f848837df8647607",
-                    ),
-                    0x401337,
-                    39,
-                )
-                .expect("process_string entry"),
-            disasm
-                .lift_block(&decode_hex("b8ffffffffeb12"), 0x40135e, 7)
-                .expect("process_string too_long"),
-            disasm
-                .lift_block(&decode_hex("48837df8047707"), 0x401365, 7)
-                .expect("process_string second_guard"),
-            disasm
-                .lift_block(&decode_hex("b8feffffffeb04"), 0x40136c, 7)
-                .expect("process_string too_short"),
-            disasm
-                .lift_block(&decode_hex("488b45f8"), 0x401373, 4)
-                .expect("process_string return_len"),
-            disasm
-                .lift_block(&decode_hex("c9c3"), 0x401377, 2)
-                .expect("process_string exit"),
-        ];
-        let reg_type_hints = crate::types::collect_register_type_hints(&blocks, &disasm);
-        let external_context = serde_json::json!({
-            "signature": {
-                "name": "dbg.process_string",
-                "ret": "int",
-                "callconv": "amd64",
-                "params": [
-                    {"name": "s", "type": "char *"}
-                ]
-            },
-            "vars": [
-                {"kind":"register","name":"arg0","type":"int64_t","reg":"RDI"},
-                {"kind":"stack","name":"s","type":"char *","base":"bp","role":"stack_arg","is_arg":true,"offset":-24},
-                {"kind":"stack","name":"len","type":"size_t","base":"bp","role":"local","is_arg":false,"offset":-8},
-                {"kind":"stack","name":"var_8h","type":"void *","base":"sp","role":"local","is_arg":false,"offset":32}
-            ],
-            "base_types": []
-        })
-        .to_string();
-
-        let artifact = crate::types::build_detached_function_analysis_artifact(
-            &blocks,
-            "dbg.process_string",
-            Some(&arch),
-            64,
-            true,
-            &reg_type_hints,
-            &external_context,
-        )
-        .expect("analysis artifact");
-
-        let input = crate::decompiler::decompiler_input_from_artifact(
-            artifact.clone(),
-            HashMap::from([(0x401100, "sym.imp.strlen".to_string())]),
-            HashMap::new(),
-            HashMap::new(),
-        );
-        let empty_input = crate::decompiler::decompiler_input_from_artifact(
-            artifact.clone(),
-            HashMap::new(),
-            HashMap::new(),
-            HashMap::new(),
-        );
-        let decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        let output = decompiler.decompile_input(&input);
-        let empty_output = decompiler.decompile_input(&empty_input);
-        let entry_ops: Vec<String> = artifact
-            .ssa_func
-            .get_block(0x401337)
-            .expect("process_string entry block")
-            .ops
-            .iter()
-            .map(|op| format!("{op:?}"))
-            .collect();
-        let predicate_debug: Vec<String> = artifact
-            .ssa_func
-            .predicates()
-            .predicates
-            .iter()
-            .map(|(id, predicate)| {
-                let comparison = predicate
-                    .comparison
-                    .as_ref()
-                    .map(|cmp| {
-                        let lhs = artifact
-                            .ssa_func
-                            .value_var(cmp.lhs)
-                            .expect("compare lhs var");
-                        let rhs = artifact
-                            .ssa_func
-                            .value_var(cmp.rhs)
-                            .expect("compare rhs var");
-                        format!(
-                            "{:?} {}:{} {}:{}",
-                            cmp.kind,
-                            lhs.display_name(),
-                            lhs.size,
-                            rhs.display_name(),
-                            rhs.size
-                        )
-                    })
-                    .unwrap_or_else(|| "none".to_string());
-                let condition = artifact
-                    .ssa_func
-                    .value_var(predicate.condition)
-                    .expect("predicate condition var");
-                format!(
-                    "{id:?}@0x{:x}: cond={} cmp={comparison}",
-                    predicate.block_addr,
-                    condition.display_name()
-                )
-            })
-            .collect();
-
-        assert!(
-            output.contains("len = sym.imp.strlen(s);"),
-            "expected typed-input process_string to keep the strlen owner, got:\n{output}"
-        );
-        assert!(
-            output.contains("if (len > 100)")
-                || output.contains("if (len > 0x64)")
-                || output.contains("if (len <= 100)")
-                || output.contains("if (len <= 0x64)"),
-            "expected typed-input process_string to keep the upper-bound guard semantically intact, got:\nwith_names=\n{output}\nwithout_names=\n{empty_output}\npredicates={predicate_debug:?}\nentry_ops={entry_ops:?}"
-        );
-        assert!(
-            output.contains("return -1;")
-                && output.contains("return -2;")
-                && output.contains("return len;"),
-            "expected typed-input process_string to keep its signed return paths, got:\n{output}"
-        );
-        assert!(
-            !output.contains("len == 64"),
-            "typed-input process_string should not reinterpret 0x64 as decimal 64, got:\nwith_names=\n{output}\nwithout_names=\n{empty_output}\npredicates={predicate_debug:?}\nentry_ops={entry_ops:?}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn r2dec_function_with_context_keeps_process_string_signed_return_paths() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let arch = CString::new("x86-64").expect("valid arch string");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let lifted = [
-            (
-                "f30f1efa554889e54883ec2048897de8488b45e84889c7e8adfdffff488945f848837df8647607",
-                0x401337,
-                39,
-            ),
-            ("b8ffffffffeb12", 0x40135e, 7),
-            ("48837df8047707", 0x401365, 7),
-            ("b8feffffffeb04", 0x40136c, 7),
-            ("488b45f8", 0x401373, 4),
-            ("c9c3", 0x401377, 2),
-        ];
-        let mut owned_blocks = Vec::new();
-        for (hex, addr, size) in lifted {
-            let bytes = decode_hex(hex);
-            let block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), addr, size);
-            assert!(
-                !block.is_null(),
-                "process_string block should lift at 0x{addr:x}"
-            );
-            owned_blocks.push(block);
-        }
-
-        let func_name = CString::new("dbg.process_string").expect("valid function name");
-        let function_names =
-            CString::new(r#"{"0x401100":"sym.imp.strlen"}"#).expect("valid function name map");
-        let empty_map = CString::new("{}").expect("valid empty json");
-        let external_context_json = CString::new(
-            r#"{
-                "signature": {
-                    "name": "dbg.process_string",
-                    "ret": "int32_t",
-                    "callconv": "amd64",
-                    "params": [
-                        {"name": "s", "type": "int8_t *"}
-                    ]
-                },
-                "vars": [
-                    {"kind":"register","name":"s","type":"int8_t *","reg":"rdi","param_index":0},
-                    {"kind":"stack","name":"s_home","type":"int8_t *","base":"rbp","offset":-24,"role":"param_home","param_index":0,"param_name":"s","source_reg":"rdi"},
-                    {"kind":"stack","name":"len","type":"uint64_t","base":"rbp","offset":-8,"role":"local"}
-                ],
-                "base_types": []
-            }"#,
-        )
-        .expect("valid process_string external context");
-
-        let out = r2dec_function_with_context(
-            ctx,
-            owned_blocks.as_ptr().cast(),
-            owned_blocks.len(),
-            func_name.as_ptr(),
-            function_names.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            external_context_json.as_ptr(),
-        );
-        assert!(!out.is_null(), "decompilation output should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-
-        r2il_string_free(out);
-        for block in owned_blocks {
-            r2il_block_free(block);
-        }
-        r2il_free(ctx);
-
-        assert!(
-            output.contains("return -1;"),
-            "expected FFI decompile to keep the too-long signed return, got:\n{output}"
-        );
-        assert!(
-            output.contains("return -2;"),
-            "expected FFI decompile to keep the too-short signed return, got:\n{output}"
-        );
-        assert!(
-            output.contains("return len;"),
-            "expected FFI decompile to keep the success return owner, got:\n{output}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn r2dec_function_with_context_process_string_live_slot_mix_keeps_wide_len() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let arch = CString::new("x86-64").expect("valid arch string");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let lifted = [
-            (
-                "f30f1efa554889e54883ec2048897de8488b45e84889c7e8adfdffff488945f848837df8647607",
-                0x401337,
-                39,
-            ),
-            ("b8ffffffffeb12", 0x40135e, 7),
-            ("48837df8047707", 0x401365, 7),
-            ("b8feffffffeb04", 0x40136c, 7),
-            ("488b45f8", 0x401373, 4),
-            ("c9c3", 0x401377, 2),
-        ];
-        let mut owned_blocks = Vec::new();
-        for (hex, addr, size) in lifted {
-            let bytes = decode_hex(hex);
-            let block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), addr, size);
-            assert!(
-                !block.is_null(),
-                "process_string block should lift at 0x{addr:x}"
-            );
-            owned_blocks.push(block);
-        }
-
-        let func_name = CString::new("dbg.process_string").expect("valid function name");
-        let empty_map = CString::new("{}").expect("valid empty json");
-        let external_context_json = CString::new(
-            r#"{
-                "signature": {
-                    "name": "dbg.process_string",
-                    "ret": "int",
-                    "callconv": "amd64",
-                    "params": [
-                        {"name": "s", "type": "char *"}
-                    ]
-                },
-                "vars": [
-                    {"kind":"register","name":"arg0","type":"int64_t","reg":"RDI"},
-                    {"kind":"stack","name":"s","type":"char *","base":"bp","role":"stack_arg","is_arg":true,"offset":-24},
-                    {"kind":"stack","name":"len","type":"size_t","base":"bp","role":"local","is_arg":false,"offset":-8},
-                    {"kind":"stack","name":"var_8h","type":"void *","base":"sp","role":"local","is_arg":false,"offset":32}
-                ],
-                "base_types": []
-            }"#,
-        )
-        .expect("valid process_string external context");
-
-        let out = r2dec_function_with_context(
-            ctx,
-            owned_blocks.as_ptr().cast(),
-            owned_blocks.len(),
-            func_name.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            empty_map.as_ptr(),
-            external_context_json.as_ptr(),
-        );
-        assert!(!out.is_null(), "decompilation output should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-
-        r2il_string_free(out);
-        for block in owned_blocks {
-            r2il_block_free(block);
-        }
-        r2il_free(ctx);
-
-        assert!(
-            output.contains("return -1;")
-                && output.contains("return -2;")
-                && output.contains("return len;"),
-            "expected FFI decompile to keep signed return paths with the live slot mix, got:\n{output}"
-        );
-        assert!(
-            output.contains("if (len > 100)")
-                || output.contains("if (len > 0x64)")
-                || output.contains("if (ram:401100(s) > 100)")
-                || output.contains("if (sub_401100(s) > 100)")
-                || (output.contains("< 100") && output.contains("== 100")),
-            "expected FFI decompile to keep the upper-bound guard with the live slot mix, got:\n{output}"
-        );
-        assert!(
-            !output.contains("uint8_t len"),
-            "FFI decompile path should not narrow len to uint8_t with the live slot mix, got:\n{output}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "x86")]
-    fn type_writeback_ffi_process_string_keeps_pointer_width_len_for_live_slot_mix() {
-        fn decode_hex(bytes: &str) -> Vec<u8> {
-            let bytes = bytes.as_bytes();
-            assert_eq!(bytes.len() % 2, 0, "hex input must have even length");
-            bytes
-                .chunks_exact(2)
-                .map(|pair| {
-                    let hi = (pair[0] as char).to_digit(16).expect("valid hex") as u8;
-                    let lo = (pair[1] as char).to_digit(16).expect("valid hex") as u8;
-                    (hi << 4) | lo
-                })
-                .collect()
-        }
-
-        let arch = CString::new("x86-64").expect("valid arch string");
-        let ctx = r2il_arch_init(arch.as_ptr());
-        assert!(!ctx.is_null(), "context should initialize");
-
-        let lifted = [
-            (
-                "f30f1efa554889e54883ec2048897de8488b45e84889c7e8adfdffff488945f848837df8647607",
-                0x401337,
-                39,
-            ),
-            ("b8ffffffffeb12", 0x40135e, 7),
-            ("48837df8047707", 0x401365, 7),
-            ("b8feffffffeb04", 0x40136c, 7),
-            ("488b45f8", 0x401373, 4),
-            ("c9c3", 0x401377, 2),
-        ];
-        let mut owned_blocks = Vec::new();
-        for (hex, addr, size) in lifted {
-            let bytes = decode_hex(hex);
-            let block = r2il_lift_block(ctx, bytes.as_ptr(), bytes.len(), addr, size);
-            assert!(
-                !block.is_null(),
-                "process_string block should lift at 0x{addr:x}"
-            );
-            owned_blocks.push(block);
-        }
-
-        let func_name = CString::new("dbg.process_string").expect("valid function name");
-        let external_context = CString::new(
-            r#"{
-                "signature": {
-                    "name": "dbg.process_string",
-                    "ret": "int",
-                    "callconv": "amd64",
-                    "params": [
-                        {"name": "s", "type": "char *"}
-                    ]
-                },
-                "vars": [
-                    {"kind":"register","name":"arg0","type":"int64_t","reg":"RDI"},
-                    {"kind":"stack","name":"s","type":"char *","base":"bp","role":"stack_arg","is_arg":true,"offset":-24},
-                    {"kind":"stack","name":"len","type":"size_t","base":"bp","role":"local","is_arg":false,"offset":-8},
-                    {"kind":"stack","name":"var_8h","type":"void *","base":"sp","role":"local","is_arg":false,"offset":32}
-                ],
-                "base_types": []
-            }"#,
-        )
-        .expect("valid process_string external context");
-
-        let out = r2sleigh_infer_type_writeback_json(
-            ctx,
-            owned_blocks.as_ptr().cast(),
-            owned_blocks.len(),
-            0,
-            func_name.as_ptr(),
-            external_context.as_ptr(),
-        );
-        assert!(!out.is_null(), "type writeback output should not be null");
-        let output = unsafe { CStr::from_ptr(out) }.to_string_lossy().to_string();
-        let payload: serde_json::Value =
-            serde_json::from_str(&output).expect("type writeback payload should parse");
-        let parsed_context = r2types::parse_external_context_json(
-            external_context.to_str().expect("context str"),
-            64,
-        );
-        let parsed_len_slot = parsed_context.external_stack_vars.get(&-8).cloned();
-        let recovered_out = crate::types::r2sleigh_recover_vars(
-            ctx,
-            owned_blocks.as_ptr().cast(),
-            owned_blocks.len(),
-            0,
-        );
-        assert!(
-            !recovered_out.is_null(),
-            "recover vars output should not be null"
-        );
-        let recovered_output = unsafe { CStr::from_ptr(recovered_out) }
-            .to_string_lossy()
-            .to_string();
-
-        r2il_string_free(out);
-        r2il_string_free(recovered_out);
-        for block in owned_blocks {
-            r2il_block_free(block);
-        }
-        r2il_free(ctx);
-
-        let candidates = payload
-            .get("var_type_candidates")
-            .and_then(|value| value.as_array())
-            .expect("var_type_candidates array");
-        let len_candidate = candidates
-            .iter()
-            .find(|candidate| {
-                candidate.get("delta").and_then(|value| value.as_i64()) == Some(-8)
-                    && candidate.get("target_name").is_none()
-            })
-            .expect("stack local candidate for len");
-        let len_type = len_candidate
-            .get("type")
-            .and_then(|value| value.as_str())
-            .expect("len type string");
-
-        assert_ne!(
-            len_type, "uint8_t",
-            "live FFI type writeback path should not narrow len to uint8_t: {output}\nrecovered_vars={recovered_output}\nparsed_len_slot={parsed_len_slot:?}"
+            response.output.contains("r2dec gap:")
+                && !response.output.contains("for (int32_t var_14h = 0;")
+                && !response.output.contains("return var_10h;"),
+            "certified facts must remain inspectable while the unprojected machine operation leaves a gap; output={} render_facts={:?}",
+            response.output,
+            response.function_facts.render_facts()
         );
     }
 
@@ -11471,12 +8342,9 @@ mod integration_tests {
         let signature = Some(signature_spec(
             None,
             vec![
-                (
-                    "arg1",
-                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                ),
-                ("arg2", Some(r2dec::CType::Int(32))),
-                ("arg3", Some(r2dec::CType::Int(32))),
+                ("arg1", Some(ptr_type(r2types::CTypeLike::Void))),
+                ("arg2", Some(signed_type(32))),
+                ("arg3", Some(signed_type(32))),
             ],
         ));
 
@@ -11490,9 +8358,7 @@ mod integration_tests {
 
         let signature = signature.expect("signature");
         let arg0 = signature.params.first().and_then(|param| param.ty.as_ref());
-        let rendered = arg0
-            .map(|ty| type_like_to_ctype(ty).to_string())
-            .unwrap_or_default();
+        let rendered = arg0.map(r2types::render_c_type_like).unwrap_or_default();
         let compact = rendered.replace(' ', "");
         assert!(
             compact.starts_with("struct")
@@ -11507,531 +8373,335 @@ mod integration_tests {
     }
 
     #[test]
-    fn enrich_decompiler_type_context_drives_live_arm64_struct_array_decompile() {
-        use r2il::{R2ILBlock, R2ILOp, Varnode};
-        use r2ssa::SSAFunction;
-
-        let arch = ArchSpec::new("aarch64");
-        let block = live_arm64_struct_array_index_block();
-        let signature = Some(signature_spec(
-            Some(r2dec::CType::Int(64)),
-            vec![
-                (
-                    "arg1",
-                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                ),
-                ("arg2", Some(r2dec::CType::Int(32))),
-                ("arg3", Some(r2dec::CType::Int(32))),
-            ],
-        ));
-
-        let (signature, type_db) = enrich_decompiler_type_context(
-            std::slice::from_ref(&block),
-            Some(&arch),
-            64,
-            signature,
-            r2types::ExternalTypeDb::default(),
-        );
-
-        let mut raw = R2ILBlock::new(block.addr, block.size);
-        raw.push(R2ILOp::Return {
-            target: Varnode::constant(0, 8),
-        });
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym._test_struct_array_index");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        decompiler.set_type_facts(r2types::FunctionTypeFacts {
-            merged_signature: signature,
-            external_type_db: type_db,
-            ..r2types::FunctionTypeFacts::default()
-        });
-        let output = decompiler.decompile(&func);
-
-        assert!(
-            output.contains("struct ")
-                && output.contains("* arg1")
-                && !output.contains("void* arg1"),
-            "expected struct-typed first argument in decompiled output, got:\n{output}"
-        );
-        assert!(
-            !output.contains("arg1 ="),
-            "indexed-member store path should not synthesize a bogus parameter assignment, got:\n{output}"
-        );
-        assert!(
-            output.contains("f_8") && !output.contains("*(arg1 +"),
-            "expected indexed-member store rendering in decompiled output, got:\n{output}"
-        );
-        assert!(
-            !output.contains("\nx8 =") && !output.contains("\nstack_"),
-            "dead register or stack artifacts should not leak into decompiled output, got:\n{output}"
-        );
+    #[cfg(feature = "x86")]
+    fn semantic_validator_rejects_mutated_copy_width() {
+        let arch = CString::new("x86-64").unwrap();
+        let context = r2il_arch_init(arch.as_ptr());
+        let bytes = [
+            0x31, 0xc0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+            0x90, 0x90,
+        ];
+        let block = r2il_lift(context, bytes.as_ptr(), bytes.len(), 0x1000);
+        assert_eq!(r2il_block_validate(context, block), 1);
+        let block_ref = unsafe { &mut *block };
+        let mut mutated = false;
+        for op in &mut block_ref.ops {
+            if let R2ILOp::Copy { src, .. } = op {
+                src.size = src.size.saturating_add(1);
+                mutated = true;
+                break;
+            }
+        }
+        assert!(mutated);
+        assert_eq!(r2il_block_validate(context, block), 0);
+        let error = unsafe { CStr::from_ptr(r2il_error(context)) }.to_string_lossy();
+        assert!(error.contains("op.copy.width_mismatch") && error.contains("block.ops"));
+        drop_test_block(block);
+        drop_test_context(context);
     }
 
     #[test]
-    fn enrich_decompiler_type_context_drives_observed_live_arm64_struct_array_decompile() {
-        use r2il::{R2ILBlock, R2ILOp, Varnode};
-        use r2ssa::SSAFunction;
-
-        let arch = ArchSpec::new("aarch64");
-        let mut block = observed_live_arm64_struct_array_index_block_full();
-        block.ops.extend([
-            r2ssa::SSAOp::IntAdd {
-                dst: r2ssa::SSAVar::new("tmp:sum", 1, 8),
-                a: r2ssa::SSAVar::new("X8", 4, 8),
-                b: r2ssa::SSAVar::new("X9", 7, 8),
-            },
-            r2ssa::SSAOp::Copy {
-                dst: r2ssa::SSAVar::new("X0", 1, 8),
-                src: r2ssa::SSAVar::new("tmp:sum", 1, 8),
-            },
-            r2ssa::SSAOp::Copy {
-                dst: r2ssa::SSAVar::new("PC", 1, 8),
-                src: r2ssa::SSAVar::new("X30", 0, 8),
-            },
-            r2ssa::SSAOp::Return {
-                target: r2ssa::SSAVar::new("PC", 1, 8),
-            },
-        ]);
-        let signature = Some(signature_spec(
-            Some(r2dec::CType::Int(64)),
-            vec![
-                (
-                    "arg1",
-                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                ),
-                ("arg2", Some(r2dec::CType::Int(32))),
-                ("arg3", Some(r2dec::CType::Int(32))),
-            ],
-        ));
-
-        let (signature, type_db) = enrich_decompiler_type_context(
-            std::slice::from_ref(&block),
-            Some(&arch),
-            64,
-            signature,
-            r2types::ExternalTypeDb::default(),
-        );
-
-        let mut raw = R2ILBlock::new(block.addr, block.size);
-        raw.push(R2ILOp::Return {
-            target: Varnode::constant(0, 8),
-        });
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym._test_struct_array_index");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        decompiler.set_type_facts(r2types::FunctionTypeFacts {
-            merged_signature: signature,
-            external_type_db: type_db,
-            ..r2types::FunctionTypeFacts::default()
-        });
-        let output = decompiler.decompile(&func);
-
-        assert!(
-            output.contains("[arg2].f_8"),
-            "expected indexed-member store rendering in decompiled output, got:\n{output}"
-        );
-        assert!(
-            output.contains("[arg2].f_34"),
-            "expected indexed-member load rendering in decompiled output, got:\n{output}"
-        );
-        assert!(
-            !output.contains("arg1 ="),
-            "indexed-member load path should not synthesize a bogus parameter assignment, got:\n{output}"
-        );
-        assert!(
-            !output.contains("\nx8 =") && !output.contains("\nstack_"),
-            "dead register or stack artifacts should not leak into decompiled output, got:\n{output}"
-        );
+    #[cfg(feature = "x86")]
+    fn semantic_validator_rejects_out_of_range_op_metadata() {
+        let arch = CString::new("x86-64").unwrap();
+        let context = r2il_arch_init(arch.as_ptr());
+        let bytes = [
+            0x31, 0xc0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+            0x90, 0x90,
+        ];
+        let block = r2il_lift(context, bytes.as_ptr(), bytes.len(), 0x1000);
+        let block_ref = unsafe { &mut *block };
+        block_ref.set_op_metadata(block_ref.ops.len(), r2il::OpMetadata::default());
+        assert_eq!(r2il_block_validate(context, block), 0);
+        let error = unsafe { CStr::from_ptr(r2il_error(context)) }.to_string_lossy();
+        assert!(error.contains("block.op_metadata") && error.contains("index_oob"));
+        drop_test_block(block);
+        drop_test_context(context);
     }
 
     #[test]
-    fn live_arm64_array_index_decompile_keeps_plain_subscript_without_flag_noise() {
-        use r2il::{R2ILBlock, R2ILOp, Varnode};
-        use r2ssa::SSAFunction;
-
-        let block = live_arm64_array_index_block(false);
-        let signature = Some(signature_spec(
-            Some(r2dec::CType::Int(64)),
-            vec![
-                (
-                    "arg1",
-                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                ),
-                ("arg2", Some(r2dec::CType::Int(32))),
-            ],
-        ));
-
-        let mut raw = R2ILBlock::new(block.addr, block.size);
-        raw.push(R2ILOp::Return {
-            target: Varnode::constant(0, 8),
+    #[cfg(feature = "x86")]
+    fn semantic_validator_rejects_invalid_guarded_load() {
+        let arch = CString::new("x86-64").unwrap();
+        let context = r2il_arch_init(arch.as_ptr());
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::LoadGuarded {
+            dst: Varnode::register(0, 8),
+            space: r2il::SpaceId::Ram,
+            addr: Varnode::register(8, 8),
+            guard: Varnode::register(16, 8),
+            ordering: r2il::MemoryOrdering::Relaxed,
         });
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym._test_array_index");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        set_signature_facts(&mut decompiler, signature);
-        let output = decompiler.decompile(&func);
-
-        assert!(
-            output.contains("[arg2]"),
-            "expected plain subscript rendering, got:\n{output}"
-        );
-        assert!(
-            !output.contains("arg1 ="),
-            "plain indexed load should not synthesize a bogus parameter assignment, got:\n{output}"
-        );
-        assert!(
-            !output.contains(".p0"),
-            "plain indexed load must not upgrade to a fake member, got:\n{output}"
-        );
-        assert!(
-            !output.contains("tmpng")
-                && !output.contains("tmpzr")
-                && !output.contains("TMPCY")
-                && !output.contains("TMPOV"),
-            "dead arm64 flag temps should not leak into final output, got:\n{output}"
-        );
-        assert!(
-            !output.contains("stack_8 =")
-                && !output.contains("stack_4 =")
-                && !output.contains("stack ="),
-            "dead synthetic stack argument spills should not leak into final output, got:\n{output}"
-        );
+        assert_eq!(r2il_block_validate(context, &block), 0);
+        let error = unsafe { CStr::from_ptr(r2il_error(context)) }.to_string_lossy();
+        assert!(error.contains("op.load_guarded.guard_size"));
+        drop_test_context(context);
     }
 
     #[test]
-    fn live_arm64_array_index_neg_decompile_keeps_negative_subscript_without_flag_noise() {
-        use r2il::{R2ILBlock, R2ILOp, Varnode};
-        use r2ssa::SSAFunction;
-
-        let block = live_arm64_array_index_block(true);
-        let signature = Some(signature_spec(
-            Some(r2dec::CType::Int(64)),
-            vec![
-                (
-                    "arg1",
-                    Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Void))),
-                ),
-                ("arg2", Some(r2dec::CType::Int(32))),
-            ],
-        ));
-
-        let mut raw = R2ILBlock::new(block.addr, block.size);
-        raw.push(R2ILOp::Return {
-            target: Varnode::constant(0, 8),
-        });
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym._test_array_index_neg");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        set_signature_facts(&mut decompiler, signature);
-        let output = decompiler.decompile(&func);
-
-        assert!(
-            output.contains("[0 - arg2]") || output.contains("[-arg2]"),
-            "expected negative subscript rendering, got:\n{output}"
-        );
-        assert!(
-            !output.contains("arg1 ="),
-            "negative indexed load should not synthesize a bogus parameter assignment, got:\n{output}"
-        );
-        assert!(
-            !output.contains("[-0]"),
-            "negative index must preserve the scalar index, got:\n{output}"
-        );
-        assert!(
-            !output.contains("tmpng")
-                && !output.contains("tmpzr")
-                && !output.contains("TMPCY")
-                && !output.contains("TMPOV"),
-            "dead arm64 flag temps should not leak into final output, got:\n{output}"
-        );
-        assert!(
-            !output.contains("stack_8 =")
-                && !output.contains("stack_4 =")
-                && !output.contains("stack ="),
-            "dead synthetic stack argument spills should not leak into final output, got:\n{output}"
-        );
-    }
-
-    #[test]
-    fn live_arm64_main_atoi_arg_keeps_semantic_root() {
-        use r2il::{R2ILBlock, R2ILOp, Varnode};
-        use r2ssa::SSAFunction;
-
-        let block = r2ssa::SSABlock {
-            addr: 0x100001000,
-            size: 4,
-            ops: vec![
-                r2ssa::SSAOp::IntSub {
-                    dst: r2ssa::SSAVar::new("SP", 1, 8),
-                    a: r2ssa::SSAVar::new("SP", 0, 8),
-                    b: r2ssa::SSAVar::new("const:200", 0, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:slot", 1, 8),
-                    a: r2ssa::SSAVar::new("SP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:178", 0, 8),
-                },
-                r2ssa::SSAOp::Store {
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:slot", 1, 8),
-                    val: r2ssa::SSAVar::new("X1", 0, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:slot", 2, 8),
-                    a: r2ssa::SSAVar::new("SP", 1, 8),
-                    b: r2ssa::SSAVar::new("const:178", 0, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("X8", 1, 8),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:slot", 2, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("tmp:arg", 1, 8),
-                    a: r2ssa::SSAVar::new("X8", 1, 8),
-                    b: r2ssa::SSAVar::new("const:8", 0, 8),
-                },
-                r2ssa::SSAOp::Load {
-                    dst: r2ssa::SSAVar::new("X0", 1, 8),
-                    space: "ram".to_string(),
-                    addr: r2ssa::SSAVar::new("tmp:arg", 1, 8),
-                },
-                r2ssa::SSAOp::Call {
-                    target: r2ssa::SSAVar::new("const:401040", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("X0", 2, 8),
-                    src: r2ssa::SSAVar::new("const:0", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("PC", 1, 8),
-                    src: r2ssa::SSAVar::new("X30", 0, 8),
-                },
-                r2ssa::SSAOp::Return {
-                    target: r2ssa::SSAVar::new("PC", 1, 8),
-                },
-            ],
+    #[cfg(feature = "x86")]
+    fn op_json_preserves_mutated_varnode_metadata() {
+        let arch = CString::new("x86-64").unwrap();
+        let context = r2il_arch_init(arch.as_ptr());
+        let bytes = [
+            0x31, 0xc0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+            0x90, 0x90,
+        ];
+        let block = r2il_lift(context, bytes.as_ptr(), bytes.len(), 0x1000);
+        let metadata = r2il::VarnodeMetadata {
+            scalar_kind: Some(r2il::ScalarKind::UnsignedInt),
+            ..r2il::VarnodeMetadata::default()
         };
-
-        let mut raw = R2ILBlock::new(block.addr, block.size);
-        raw.push(R2ILOp::Return {
-            target: Varnode::constant(0, 8),
-        });
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym._main");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        set_signature_facts(
-            &mut decompiler,
-            Some(signature_spec(
-                Some(r2dec::CType::Int(64)),
-                vec![
-                    ("arg1", Some(r2dec::CType::Int(32))),
-                    (
-                        "arg2",
-                        Some(r2dec::CType::Pointer(Box::new(r2dec::CType::Pointer(
-                            Box::new(r2dec::CType::Int(8)),
-                        )))),
-                    ),
-                ],
-            )),
-        );
-        decompiler.set_function_names(HashMap::from([(0x401040, "sym.imp.atoi".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([(
-            "sym.imp.atoi".to_string(),
-            r2types::FunctionType {
-                return_type: r2types::CTypeLike::Int {
-                    bits: 32,
-                    signedness: r2types::Signedness::Signed,
-                },
-                params: vec![r2types::CTypeLike::Pointer(Box::new(
-                    r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    },
-                ))],
-                variadic: false,
-            },
-        )]));
-        let output = decompiler.decompile(&func);
-
-        assert!(
-            output.contains("sym.imp.atoi("),
-            "expected imported atoi call, got:\n{output}"
-        );
-        assert!(
-            output.contains("arg2") && !output.contains("stack_") && !output.contains("&stack"),
-            "expected semantic argv-rooted atoi arg without stack placeholders, got:\n{output}"
-        );
-        assert!(
-            !output.contains("atoi(*") && !output.contains("atoi(lr)"),
-            "atoi imported arg should not regress to deref or transient register form, got:\n{output}"
-        );
+        let block_ref = unsafe { &mut *block };
+        let op_index = block_ref
+            .ops
+            .iter_mut()
+            .enumerate()
+            .find_map(|(index, op)| {
+                let R2ILOp::Copy { dst, .. } = op else {
+                    return None;
+                };
+                dst.set_meta(metadata.clone());
+                Some(index)
+            })
+            .expect("copy op");
+        let raw = r2il_block_op_json_named(context, block, op_index);
+        let json = unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned();
+        drop_test_ffi_string(raw);
+        assert!(json.contains("unsigned_int"));
+        drop_test_block(block);
+        drop_test_context(context);
     }
 
     #[test]
-    fn live_arm64_main_printf_format_arg_keeps_string_literal() {
-        use r2il::{R2ILBlock, R2ILOp, Varnode};
-        use r2ssa::SSAFunction;
-
-        let block = r2ssa::SSABlock {
-            addr: 0x100001100,
-            size: 4,
-            ops: vec![
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("X8", 1, 8),
-                    src: r2ssa::SSAVar::new("const:100002000", 0, 8),
-                },
-                r2ssa::SSAOp::IntAdd {
-                    dst: r2ssa::SSAVar::new("X0", 1, 8),
-                    a: r2ssa::SSAVar::new("X8", 1, 8),
-                    b: r2ssa::SSAVar::new("const:292", 0, 8),
-                },
-                r2ssa::SSAOp::Call {
-                    target: r2ssa::SSAVar::new("const:401030", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("X0", 2, 8),
-                    src: r2ssa::SSAVar::new("const:0", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("PC", 1, 8),
-                    src: r2ssa::SSAVar::new("X30", 0, 8),
-                },
-                r2ssa::SSAOp::Return {
-                    target: r2ssa::SSAVar::new("PC", 1, 8),
-                },
-            ],
-        };
-
-        let mut raw = R2ILBlock::new(block.addr, block.size);
-        raw.push(R2ILOp::Return {
-            target: Varnode::constant(0, 8),
-        });
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("sym._main");
-
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::aarch64());
-        decompiler.set_function_names(HashMap::from([(0x401030, "sym.imp.printf".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([(
-            "sym.imp.printf".to_string(),
-            r2types::FunctionType {
-                return_type: r2types::CTypeLike::Int {
-                    bits: 32,
-                    signedness: r2types::Signedness::Signed,
-                },
-                params: vec![r2types::CTypeLike::Pointer(Box::new(
-                    r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
-                    },
-                ))],
-                variadic: true,
+    #[cfg(feature = "x86")]
+    fn memory_render_has_one_exact_canonical_schema() {
+        let arch = CString::new("x86-64").unwrap();
+        let context = r2il_arch_init(arch.as_ptr());
+        unsafe {
+            (*context).arch = None;
+        }
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push_with_metadata(
+            R2ILOp::Load {
+                dst: Varnode::register(0, 8),
+                space: r2il::SpaceId::Ram,
+                addr: Varnode::constant(0x1000, 8),
             },
-        )]));
-        decompiler.set_strings(HashMap::from([(
-            0x100002292,
-            "usage: vuln_test <n>\\n".to_string(),
-        )]));
-        let output = decompiler.decompile(&func);
-
-        assert!(
-            output.contains("\"usage: vuln_test <n>\\\\n\""),
-            "expected string literal printf arg, got:\n{output}"
+            Some(r2il::OpMetadata {
+                memory_class: Some(r2il::MemoryClass::Stack),
+                memory_ordering: Some(r2il::MemoryOrdering::AcqRel),
+                permissions: Some(r2il::MemoryPermissions {
+                    read: true,
+                    write: false,
+                    execute: false,
+                    volatile: false,
+                    cacheable: true,
+                }),
+                valid_range: Some(r2il::MemoryRange {
+                    start: 0x1000,
+                    end: 0x2000,
+                }),
+                bank_id: Some("bank0".to_string()),
+                segment_id: Some("seg0".to_string()),
+                atomic_kind: Some(r2il::AtomicKind::ReadModifyWrite),
+                ..r2il::OpMetadata::default()
+            }),
         );
-        assert!(
-            !output.contains("0x100002000") && !output.contains("292"),
-            "raw const-add format pointer should not survive, got:\n{output}"
+        let raw = r2il_block_mem_access(context, &block);
+        assert!(!raw.is_null());
+        let json = unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned();
+        drop_test_ffi_string(raw);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!([{
+                "schema_version": 1,
+                "type": "load",
+                "size_bytes": 8,
+                "address": {"space": "const", "offset": 0x1000, "size": 8},
+                "ordering": "acq_rel",
+                "atomic_kind": "read_modify_write",
+                "memory_class": "stack",
+                "permissions": {
+                    "read": true,
+                    "write": false,
+                    "execute": false,
+                    "volatile": false,
+                    "cacheable": true
+                },
+                "range": {"start": 0x1000, "end": 0x2000},
+                "bank_id": "bank0",
+                "segment_id": "seg0"
+            }])
         );
-        assert!(
-            !output.contains("printf(&stack)") && !output.contains("printf(0x"),
-            "printf imported format arg should stay literalized, got:\n{output}"
-        );
+        drop_test_context(context);
     }
 
     #[test]
-    fn live_x86_main_printf_format_arg_keeps_string_literal() {
-        use r2il::{R2ILBlock, R2ILOp, Varnode};
-        use r2ssa::SSAFunction;
-
-        let block = r2ssa::SSABlock {
-            addr: 0x401000,
-            size: 4,
-            ops: vec![
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("RDI", 1, 8),
-                    src: r2ssa::SSAVar::new("const:40229e", 0, 8),
-                },
-                r2ssa::SSAOp::Call {
-                    target: r2ssa::SSAVar::new("const:401030", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("RAX", 1, 8),
-                    src: r2ssa::SSAVar::new("const:0", 0, 8),
-                },
-                r2ssa::SSAOp::Copy {
-                    dst: r2ssa::SSAVar::new("PC", 1, 8),
-                    src: r2ssa::SSAVar::new("RIP", 0, 8),
-                },
-                r2ssa::SSAOp::Return {
-                    target: r2ssa::SSAVar::new("PC", 1, 8),
-                },
-            ],
+    #[cfg(feature = "x86")]
+    fn memory_render_covers_every_access_kind_without_legacy_keys() {
+        let arch = CString::new("x86-64").unwrap();
+        let context = r2il_arch_init(arch.as_ptr());
+        let rsp = unsafe {
+            (*context)
+                .arch
+                .as_ref()
+                .and_then(|arch| arch.get_register("RSP"))
+                .cloned()
+                .expect("RSP register")
         };
+        unsafe {
+            (*context).arch = None;
+        }
 
-        let mut raw = R2ILBlock::new(block.addr, block.size);
-        raw.push(R2ILOp::Return {
-            target: Varnode::constant(0, 8),
+        let address = Varnode::constant(0x2000, 8);
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x10, 4),
+            space: r2il::SpaceId::Ram,
+            addr: Varnode::register(rsp.offset, rsp.size),
         });
-        let mut func = SSAFunction::from_blocks_raw_no_arch(&[raw]).expect("ssa function");
-        func.get_block_mut(block.addr).expect("entry block").ops = block.ops;
-        func = func.with_name("dbg.main");
+        block.push(R2ILOp::LoadLinked {
+            dst: Varnode::unique(0x11, 4),
+            space: r2il::SpaceId::Ram,
+            addr: address.clone(),
+            ordering: r2il::MemoryOrdering::Acquire,
+        });
+        block.push(R2ILOp::Store {
+            space: r2il::SpaceId::Ram,
+            addr: address.clone(),
+            val: Varnode::constant(0x21, 4),
+        });
+        block.push(R2ILOp::StoreConditional {
+            result: Some(Varnode::unique(0x12, 1)),
+            space: r2il::SpaceId::Ram,
+            addr: address.clone(),
+            val: Varnode::constant(0x22, 4),
+            ordering: r2il::MemoryOrdering::Release,
+        });
+        block.push(R2ILOp::AtomicCAS {
+            dst: Varnode::unique(0x13, 4),
+            space: r2il::SpaceId::Ram,
+            addr: address.clone(),
+            expected: Varnode::constant(0x23, 4),
+            replacement: Varnode::constant(0x24, 4),
+            ordering: r2il::MemoryOrdering::SeqCst,
+        });
+        block.push(R2ILOp::LoadGuarded {
+            dst: Varnode::unique(0x14, 4),
+            space: r2il::SpaceId::Ram,
+            addr: address.clone(),
+            guard: Varnode::constant(1, 1),
+            ordering: r2il::MemoryOrdering::Relaxed,
+        });
+        block.push(R2ILOp::StoreGuarded {
+            space: r2il::SpaceId::Ram,
+            addr: address,
+            val: Varnode::constant(0x25, 4),
+            guard: Varnode::constant(1, 1),
+            ordering: r2il::MemoryOrdering::AcqRel,
+        });
 
-        let mut decompiler = r2dec::Decompiler::new(r2dec::DecompilerConfig::x86_64());
-        decompiler.set_function_names(HashMap::from([(0x401030, "sym.imp.printf".to_string())]));
-        decompiler.set_known_function_signatures(HashMap::from([(
-            "sym.imp.printf".to_string(),
-            r2types::FunctionType {
-                return_type: r2types::CTypeLike::Int {
-                    bits: 32,
-                    signedness: r2types::Signedness::Signed,
-                },
-                params: vec![r2types::CTypeLike::Pointer(Box::new(
-                    r2types::CTypeLike::Int {
-                        bits: 8,
-                        signedness: r2types::Signedness::Signed,
+        let raw = r2il_block_mem_access(context, &block);
+        assert!(!raw.is_null());
+        let json = unsafe { CStr::from_ptr(raw) }
+            .to_string_lossy()
+            .into_owned();
+        drop_test_ffi_string(raw);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!([
+                {
+                    "schema_version": 1,
+                    "type": "load",
+                    "size_bytes": 4,
+                    "address": {
+                        "space": "register",
+                        "offset": rsp.offset,
+                        "size": rsp.size,
+                        "name": "RSP"
                     },
-                ))],
-                variadic: true,
-            },
-        )]));
-        decompiler.set_strings(HashMap::from([(
-            0x40229e,
-            "Unknown test: %d\\n".to_string(),
-        )]));
-        let output = decompiler.decompile(&func);
-
-        assert!(
-            output.contains("\"Unknown test: %d\\\\n\""),
-            "expected x86 string literal printf arg, got:\n{output}"
+                    "stack_address": {"base": "RSP", "offset": 0}
+                },
+                {
+                    "schema_version": 1,
+                    "type": "load_linked",
+                    "size_bytes": 4,
+                    "address": {"space": "const", "offset": 0x2000, "size": 8},
+                    "ordering": "acquire",
+                    "atomic_kind": "load_linked"
+                },
+                {
+                    "schema_version": 1,
+                    "type": "store",
+                    "size_bytes": 4,
+                    "address": {"space": "const", "offset": 0x2000, "size": 8},
+                    "value": {"space": "const", "offset": 0x21, "size": 4}
+                },
+                {
+                    "schema_version": 1,
+                    "type": "store_conditional",
+                    "size_bytes": 4,
+                    "address": {"space": "const", "offset": 0x2000, "size": 8},
+                    "value": {"space": "const", "offset": 0x22, "size": 4},
+                    "result": {"space": "unique", "offset": 0x12, "size": 1},
+                    "ordering": "release",
+                    "atomic_kind": "store_conditional"
+                },
+                {
+                    "schema_version": 1,
+                    "type": "atomic_cas",
+                    "size_bytes": 4,
+                    "address": {"space": "const", "offset": 0x2000, "size": 8},
+                    "expected": {"space": "const", "offset": 0x23, "size": 4},
+                    "replacement": {"space": "const", "offset": 0x24, "size": 4},
+                    "result": {"space": "unique", "offset": 0x13, "size": 4},
+                    "ordering": "seq_cst",
+                    "atomic_kind": "compare_exchange"
+                },
+                {
+                    "schema_version": 1,
+                    "type": "load_guarded",
+                    "size_bytes": 4,
+                    "address": {"space": "const", "offset": 0x2000, "size": 8},
+                    "guard": {"space": "const", "offset": 1, "size": 1},
+                    "guarded": true,
+                    "ordering": "relaxed"
+                },
+                {
+                    "schema_version": 1,
+                    "type": "store_guarded",
+                    "size_bytes": 4,
+                    "address": {"space": "const", "offset": 0x2000, "size": 8},
+                    "value": {"space": "const", "offset": 0x25, "size": 4},
+                    "guard": {"space": "const", "offset": 1, "size": 1},
+                    "guarded": true,
+                    "ordering": "acq_rel"
+                }
+            ])
         );
-        assert!(
-            !output.contains("printf(0x") && !output.contains("atoi(*rax)"),
-            "x86 imported-call rendering must not regress to raw literal or deref arg, got:\n{output}"
-        );
-        assert!(
-            !output.contains("printf(&stack)"),
-            "x86 imported-call rendering must not regress to stack placeholder args, got:\n{output}"
-        );
+        for access in parsed.as_array().expect("memory access array") {
+            for legacy in [
+                "addr",
+                "addr_detail",
+                "size",
+                "write",
+                "stack",
+                "stack_base",
+                "stack_offset",
+            ] {
+                assert!(
+                    access.get(legacy).is_none(),
+                    "canonical memory access retained legacy key {legacy}"
+                );
+            }
+        }
+        drop_test_context(context);
     }
 }

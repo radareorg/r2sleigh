@@ -1,0 +1,600 @@
+#ifndef R2SLEIGH_API_V2_H
+#define R2SLEIGH_API_V2_H
+
+/* Generated from Rust declarations in src/ffi_v2.rs. Do not edit. */
+
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+typedef struct R2ILContext R2ILContext;
+typedef struct R2ILBlock R2ILBlock;
+
+#define R2SLEIGH_ABI_V2 2
+
+#define R2SLEIGH_CAP_DECOMPILE_V2 (1 << 0)
+
+#define R2SLEIGH_CAP_TYPE_FUNCTION_V2 (1 << 1)
+
+#define R2SLEIGH_CAP_RESPONSE_INFO_V2 (1 << 5)
+
+#define R2SLEIGH_CAP_EXECUTION_CONTROL_V2 (1 << 6)
+
+#define R2SLEIGH_CAP_LIFT_CORE_V2 (1 << 9)
+
+#define R2SLEIGH_CAP_PLANNER_QUERY_V2 (1 << 10)
+
+#define R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2 (1 << 11)
+
+#define R2SLEIGH_CAPABILITIES_V2 ((((((R2SLEIGH_CAP_DECOMPILE_V2 | R2SLEIGH_CAP_TYPE_FUNCTION_V2) | R2SLEIGH_CAP_RESPONSE_INFO_V2) | R2SLEIGH_CAP_EXECUTION_CONTROL_V2) | R2SLEIGH_CAP_LIFT_CORE_V2) | R2SLEIGH_CAP_PLANNER_QUERY_V2) | R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2)
+
+/**
+ * Contract identity for the borrowed radare2 snapshot transport.
+ *
+ * Deliberately not radare2's `R2_ABIVERSION`: whether this radare2 supports
+ * r2sleigh is answered by `R2SLEIGH_CAP_OPAQUE_RADARE_SNAPSHOT_V2` together
+ * with the snapshot and accessor schema versions, none of which move when an
+ * unrelated radare2 ABI bump happens.
+ */
+#define R2SLEIGH_RADARE_SNAPSHOT_CONTRACT_V2 1
+
+#define R2SLEIGH_RADARE_FUNCTION_SNAPSHOT_SCHEMA_V2 16
+
+#define R2SLEIGH_RADARE_SNAPSHOT_ACCESSOR_SCHEMA_V2 5
+
+#define R2SLEIGH_STATUS_OK_V2 0
+
+#define R2SLEIGH_STATUS_INVALID_ARGUMENT_V2 1
+
+#define R2SLEIGH_STATUS_ABI_MISMATCH_V2 2
+
+#define R2SLEIGH_STATUS_UNSUPPORTED_V2 3
+
+#define R2SLEIGH_STATUS_LIMIT_EXCEEDED_V2 4
+
+#define R2SLEIGH_STATUS_ENGINE_ERROR_V2 5
+
+#define R2SLEIGH_STATUS_PANIC_V2 6
+
+#define R2SLEIGH_REQUEST_DECOMPILE_V2 1
+
+#define R2SLEIGH_REQUEST_TYPE_FUNCTION_V2 2
+
+#define R2SLEIGH_REQUEST_PROVEN_FACTS_V2 3
+
+#define R2SLEIGH_RESPONSE_INFO_SCHEMA_V2 2
+
+#define R2SLEIGH_OUTCOME_COMPLETED_V2 0
+
+#define R2SLEIGH_OUTCOME_REFUSED_V2 1
+
+#define R2SLEIGH_PHASE_SNAPSHOT_CONTEXT_V2 0
+
+#define R2SLEIGH_PHASE_LIFT_NORMALIZE_V2 1
+
+#define R2SLEIGH_PHASE_SSA_V2 2
+
+#define R2SLEIGH_PHASE_OBLIGATIONS_V2 3
+
+#define R2SLEIGH_PHASE_SYMBOLIC_V2 4
+
+#define R2SLEIGH_PHASE_TYPES_V2 5
+
+#define R2SLEIGH_PHASE_CERTIFICATION_V2 6
+
+#define R2SLEIGH_PHASE_STRUCTURING_V2 7
+
+#define R2SLEIGH_PHASE_NORMALIZATION_V2 8
+
+#define R2SLEIGH_PHASE_RENDERING_V2 9
+
+#define R2SLEIGH_PHASE_FFI_CONVERSION_V2 10
+
+#define R2SLEIGH_PHASE_COUNT_V2 11
+
+#define R2SLEIGH_PHASE_STATUS_NOT_EXECUTED_V2 0
+
+#define R2SLEIGH_PHASE_STATUS_EXECUTED_V2 1
+
+#define R2SLEIGH_PHASE_STATUS_FOLDED_V2 2
+
+#define R2SLEIGH_PHASE_STATUS_REFUSED_V2 4
+
+#define R2SLEIGH_SOURCE_STORAGE_RAM_V2 1
+
+#define R2SLEIGH_SOURCE_STORAGE_REGISTER_V2 2
+
+#define R2SLEIGH_SOURCE_STORAGE_UNIQUE_V2 3
+
+#define R2SLEIGH_SOURCE_STORAGE_CONSTANT_V2 4
+
+#define R2SLEIGH_SOURCE_STORAGE_CUSTOM_V2 5
+
+#define R2SLEIGH_MAX_FUNCTION_BLOCKS_V2 200
+
+#define R2SLEIGH_MAX_SWITCH_CASES_V2 4096
+
+#define R2SLEIGH_ANALYSIS_BLOCK_ESIL_V2 1
+
+#define R2SLEIGH_ANALYSIS_BLOCK_OP_JSON_V2 2
+
+#define R2SLEIGH_ANALYSIS_BLOCK_REGS_READ_V2 3
+
+#define R2SLEIGH_ANALYSIS_BLOCK_REGS_WRITE_V2 4
+
+#define R2SLEIGH_ANALYSIS_BLOCK_MEMORY_V2 5
+
+#define R2SLEIGH_ANALYSIS_BLOCK_VARNODES_V2 6
+
+#define R2SLEIGH_ANALYSIS_BLOCK_SSA_V2 7
+
+#define R2SLEIGH_ANALYSIS_BLOCK_DEFUSE_V2 8
+
+#define R2SLEIGH_ANALYSIS_FUNCTION_SSA_V2 9
+
+#define R2SLEIGH_ANALYSIS_FUNCTION_SSA_OPT_V2 10
+
+#define R2SLEIGH_ANALYSIS_FUNCTION_DEFUSE_V2 11
+
+#define R2SLEIGH_ANALYSIS_FUNCTION_DOMTREE_V2 12
+
+#define R2SLEIGH_ANALYSIS_FUNCTION_SLICE_V2 13
+
+#define R2SLEIGH_ANALYSIS_FUNCTION_TAINT_V2 14
+
+#define R2SLEIGH_ANALYSIS_FUNCTION_CFG_ASCII_V2 15
+
+#define R2SLEIGH_ANALYSIS_FUNCTION_CFG_JSON_V2 16
+
+#define R2SLEIGH_QUERY_BLOCK_VALUES_V2 1
+
+#define R2SLEIGH_QUERY_TAINT_SUMMARY_V2 2
+
+#define R2SLEIGH_QUERY_ANNOTATIONS_V2 3
+
+#define R2SLEIGH_QUERY_DATA_REFS_V2 8
+
+#define R2SLEIGH_DATA_REF_SCHEMA_V2 1
+
+#define R2SLEIGH_PLANNER_QUERY_SCHEMA_V2 1
+
+#define R2SLEIGH_PLANNER_ANALYSIS_POLICY_V2 1
+
+#define R2SLEIGH_PLANNER_POST_ANALYSIS_V2 2
+
+#define R2SLEIGH_PLANNER_AUTO_CALLBACK_V2 3
+
+#define R2SLEIGH_MODE_FAST_V2 0
+
+#define R2SLEIGH_MODE_BALANCED_V2 1
+
+#define R2SLEIGH_MODE_FULL_V2 2
+
+#define R2SLEIGH_TYPE_WRITEBACK_OFF_V2 0
+
+#define R2SLEIGH_TYPE_WRITEBACK_BALANCED_V2 1
+
+#define R2SLEIGH_TYPE_WRITEBACK_AGGRESSIVE_V2 2
+
+#define R2SLEIGH_AUTO_CALLBACK_ANALYZE_FUNCTION_V2 0
+
+#define R2SLEIGH_AUTO_CALLBACK_DATA_REFS_V2 2
+
+#define R2SLEIGH_AUTO_CALLBACK_POST_ANALYSIS_TAINT_V2 3
+
+#define R2SLEIGH_AUTO_CALLBACK_POST_ANALYSIS_XREF_V2 4
+
+#define R2SLEIGH_AUTO_CALLBACK_REASON_ALLOWED_V2 0
+
+#define R2SLEIGH_AUTO_CALLBACK_REASON_MODE_NOT_FULL_V2 1
+
+#define R2SLEIGH_AUTO_CALLBACK_REASON_TOO_MANY_BLOCKS_V2 2
+
+#define R2SLEIGH_AUTO_CALLBACK_REASON_TOO_LARGE_V2 3
+
+#define R2SLEIGH_AUTO_CALLBACK_REASON_TOO_COSTLY_V2 4
+
+#define R2SLEIGH_MAX_FUNCTION_INPUT_BYTES_V2 (16 << 20)
+
+#define R2SLEIGH_MAX_STRING_BYTES_V2 (1 << 20)
+
+#define R2SLEIGH_SNAPSHOT_WIRE_DECODE_OK_V2 0
+
+#define R2SLEIGH_SNAPSHOT_WIRE_DECODE_INVALID_ARGUMENT_V2 1
+
+#define R2SLEIGH_SNAPSHOT_WIRE_DECODE_MALFORMED_V2 2
+
+#define R2SLEIGH_SNAPSHOT_WIRE_DECODE_REJECTED_V2 3
+
+/**
+ * Opaque owner of one tagged structured analysis result.
+ */
+typedef struct R2SleighAnalysisResultV2 R2SleighAnalysisResultV2;
+
+/**
+ * Opaque Rust-owned bytes. `owned_bytes_view` borrows its contents and
+ * `owned_bytes_free` is the only valid deallocator.
+ */
+typedef struct R2SleighOwnedBytesV2 R2SleighOwnedBytesV2;
+
+/**
+ * Opaque registry-owned response handle. The caller owns the obligation to
+ * release the handle exactly once with response_free. response_free must not
+ * race response_bytes, response_info, or use of their borrowed views.
+ */
+typedef struct R2SleighResponseV2 R2SleighResponseV2;
+
+/**
+ * Opaque registry-owned session handle. The caller owns the obligation to
+ * release the handle exactly once, after every concurrent session operation
+ * has finished. `session_cancel` may run concurrently with execute;
+ * `session_reset_cancellation` is valid only between execute calls.
+ */
+typedef struct R2SleighSessionV2 R2SleighSessionV2;
+
+/**
+ * Salient facts a decoded snapshot buffer carries, so a producer can assert it
+ * serialized what it intended rather than only that the bytes parsed.
+ */
+typedef struct R2SleighSnapshotWireFactsV2 {
+  uint32_t struct_size;
+  uint64_t entry_address;
+  uint32_t block_count;
+  uint32_t advisory_call_count;
+  uint32_t parameter_count;
+  uint8_t has_function_interface;
+  uint8_t reserved[3];
+} R2SleighSnapshotWireFactsV2;
+
+typedef struct R2SleighSessionConfigV2 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint64_t required_capabilities;
+} R2SleighSessionConfigV2;
+
+/**
+ * Versioned request envelope. `payload` points to one opaque-snapshot
+ * R2SleighEngineRequestPayloadV2 whose operation is selected by `kind`; it is
+ * borrowed only for the duration of execute.
+ */
+typedef struct R2SleighRequestV2 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t kind;
+  uint32_t flags;
+  const void *payload;
+  size_t payload_size;
+} R2SleighRequestV2;
+
+/**
+ * Borrowed bytes. Its producing callback defines the lifetime: response views
+ * survive until response_free, session errors until the next session operation,
+ * lift-context views until the next context operation, lift-last-error views
+ * until the next lift callback on the current thread, and owned-byte views until
+ * owned_bytes_free.
+ */
+typedef struct R2SleighByteViewV2 {
+  const uint8_t *data;
+  size_t len;
+} R2SleighByteViewV2;
+
+/**
+ * One entry in the stable eleven-phase engine timing inventory.
+ */
+typedef struct R2SleighPhaseTimingV2 {
+  uint32_t phase;
+  uint32_t status;
+  uint64_t elapsed_us;
+} R2SleighPhaseTimingV2;
+
+/**
+ * Borrowed response metadata. Every pointed-to byte and timing entry remains
+ * valid until `response_free` is called for the owning response. Schema 2
+ * exposes semantic-kernel render diagnostics as stable structured JSON.
+ */
+typedef struct R2SleighResponseInfoV2 {
+  uint32_t schema_version;
+  uint32_t struct_size;
+  uint32_t request_kind;
+  uint32_t outcome;
+  const struct R2SleighPhaseTimingV2 *phase_timings;
+  size_t num_phase_timings;
+  uint64_t ffi_conversion_elapsed_us;
+  struct R2SleighByteViewV2 diagnostics_json;
+} R2SleighResponseInfoV2;
+
+typedef struct R2SleighStringViewV2 {
+  const uint8_t *data;
+  size_t len;
+} R2SleighStringViewV2;
+
+/**
+ * One immutable switch case copied into a lifted block.
+ */
+typedef struct R2SleighSwitchCaseV2 {
+  uint64_t value;
+  uint64_t target;
+} R2SleighSwitchCaseV2;
+
+/**
+ * Exact identity of one direct call in a lifted block.
+ */
+typedef struct R2SleighDirectCallIdentityV2 {
+  size_t op_index;
+  uint32_t target_space;
+  uint32_t target_custom_space;
+  uint64_t target_offset;
+  uint32_t target_size;
+} R2SleighDirectCallIdentityV2;
+
+/**
+ * Length-tagged UTF-8 source string.
+ * Everything a caller needs to know about one lifted block.
+ *
+ * Six accessors used to answer this, and each one locked the lift registry and
+ * looked the handle up again to read a single field. Six lock acquisitions to
+ * describe one block is the cost; the maintenance is that both sides carry a
+ * declaration per field. One view answers under one lock.
+ */
+typedef struct R2SleighBlockViewV2 {
+  uint32_t struct_size;
+  uint32_t block_type;
+  uint32_t size;
+  uint64_t addr;
+  uint64_t jump;
+  uint64_t fail;
+  size_t op_count;
+} R2SleighBlockViewV2;
+
+/**
+ * One bounded text-analysis request over registry-owned lift handles.
+ */
+typedef struct R2SleighAnalysisRenderRequestV2 {
+  uint32_t kind;
+  const R2ILContext *context;
+  const R2ILBlock *const *blocks;
+  size_t num_blocks;
+  size_t op_index;
+  struct R2SleighStringViewV2 argument;
+} R2SleighAnalysisRenderRequestV2;
+
+/**
+ * One bounded structured-analysis request over registry-owned lift handles.
+ */
+typedef struct R2SleighAnalysisQueryRequestV2 {
+  uint32_t kind;
+  const R2ILContext *context;
+  const R2ILBlock *const *blocks;
+  size_t num_blocks;
+  uint64_t function_addr;
+} R2SleighAnalysisQueryRequestV2;
+
+/**
+ * Borrowed arrays owned by one `R2SleighAnalysisResultV2`.
+ */
+typedef struct R2SleighAnalysisResultViewV2 {
+  uint32_t kind;
+  const void *primary;
+  size_t primary_count;
+  const void *secondary;
+  size_t secondary_count;
+  const void *tertiary;
+  size_t tertiary_count;
+  const void *quaternary;
+  size_t quaternary_count;
+} R2SleighAnalysisResultViewV2;
+
+/**
+ * Versioned scalar planner query. The selected `kind` determines which input
+ * fields are read.
+ */
+typedef struct R2SleighPlannerQueryRequestV2 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t schema_version;
+  uint32_t kind;
+  uint32_t depth;
+  uint32_t callback_kind;
+  size_t function_count;
+  size_t basic_block_count;
+  uint32_t cost;
+  uint64_t linear_size;
+} R2SleighPlannerQueryRequestV2;
+
+typedef struct R2SleighAnalysisPolicyV2 {
+  uint32_t mode;
+  uint32_t type_writeback_mode;
+  int32_t type_interproc_max_iters;
+  int32_t type_max_blocks;
+  int32_t type_global_max_links;
+  int32_t type_max_decls;
+  int32_t type_max_mutations;
+} R2SleighAnalysisPolicyV2;
+
+typedef struct R2SleighPostAnalysisPlanV2 {
+  uint32_t mode;
+  uint32_t type_writeback_mode;
+  int32_t type_interproc_max_iters;
+  int32_t type_max_blocks;
+  int32_t type_global_max_links;
+  int32_t type_max_decls;
+  int32_t type_max_mutations;
+  size_t function_count;
+  uint64_t post_budget_us;
+  int32_t xref_enabled;
+  int32_t taint_enabled;
+  int32_t sigwrite_enabled;
+  int32_t type_writeback_enabled;
+  int32_t semantic_comments_enabled;
+  int32_t sigverify_enabled;
+  int32_t balanced_focus_only;
+  int32_t taint_focus_only;
+  int32_t sigwrite_focus_only;
+  int32_t type_writeback_focus_only;
+} R2SleighPostAnalysisPlanV2;
+
+typedef struct R2SleighAutoCallbackPlanV2 {
+  int32_t allowed;
+  uint32_t kind;
+  uint32_t reason;
+} R2SleighAutoCallbackPlanV2;
+
+/**
+ * Versioned planner response. Only the member selected by `kind` is authoritative.
+ */
+typedef struct R2SleighPlannerQueryResponseV2 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint32_t schema_version;
+  uint32_t kind;
+  struct R2SleighAnalysisPolicyV2 analysis_policy;
+  struct R2SleighPostAnalysisPlanV2 post_analysis;
+  struct R2SleighAutoCallbackPlanV2 auto_callback;
+} R2SleighPlannerQueryResponseV2;
+
+/**
+ * Stable V2 function table. Every callback contains its own unwind barrier.
+ */
+typedef struct R2SleighApiV2 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  uint64_t capabilities;
+  uint32_t radare_snapshot_contract;
+  uint32_t session_config_size;
+  uint32_t request_size;
+  uint32_t engine_request_payload_size;
+  uint32_t byte_view_size;
+  uint32_t string_view_size;
+  uint32_t phase_timing_size;
+  uint32_t response_info_size;
+  uint32_t switch_case_size;
+  uint32_t direct_call_identity_size;
+  uint32_t analysis_render_request_size;
+  uint32_t analysis_query_request_size;
+  uint32_t analysis_result_view_size;
+  uint32_t data_ref_size;
+  uint32_t data_ref_schema_version;
+  uint32_t planner_query_request_size;
+  uint32_t planner_query_response_size;
+  uint32_t (*session_create)(const struct R2SleighSessionConfigV2*, struct R2SleighSessionV2**);
+  uint32_t (*session_free)(struct R2SleighSessionV2*);
+  uint32_t (*session_cancel)(const struct R2SleighSessionV2*);
+  uint32_t (*session_reset_cancellation)(const struct R2SleighSessionV2*);
+  /**
+   * # Safety
+   *
+   * Every borrowed request pointer, opaque source handle, and callback table
+   * must remain valid and immutable for the full synchronous call.
+   */
+  uint32_t (*execute)(struct R2SleighSessionV2*,
+                      const struct R2SleighRequestV2*,
+                      struct R2SleighResponseV2**);
+  uint32_t (*response_bytes)(const struct R2SleighResponseV2*, struct R2SleighByteViewV2*);
+  uint32_t (*response_info)(const struct R2SleighResponseV2*, struct R2SleighResponseInfoV2*);
+  uint32_t (*response_free)(struct R2SleighResponseV2*);
+  uint32_t (*session_error)(const struct R2SleighSessionV2*, struct R2SleighByteViewV2*);
+  uint32_t (*lift_context_create)(struct R2SleighStringViewV2, R2ILContext**);
+  uint32_t (*lift_context_free)(R2ILContext*);
+  uint32_t (*lift_context_is_loaded)(const R2ILContext*, uint32_t*);
+  uint32_t (*lift_context_arch_name)(const R2ILContext*, struct R2SleighByteViewV2*);
+  uint32_t (*lift_context_error)(const R2ILContext*, struct R2SleighByteViewV2*);
+  uint32_t (*lift_last_error)(struct R2SleighByteViewV2*);
+  uint32_t (*lift_context_reg_profile)(const R2ILContext*, struct R2SleighOwnedBytesV2**);
+  uint32_t (*lift_instruction)(R2ILContext*, struct R2SleighByteViewV2, uint64_t, R2ILBlock**);
+  uint32_t (*lift_block)(R2ILContext*, struct R2SleighByteViewV2, uint64_t, uint32_t, R2ILBlock**);
+  uint32_t (*lift_context_set_semantic_metadata)(R2ILContext*, uint32_t);
+  uint32_t (*lift_block_free)(R2ILBlock*);
+  uint32_t (*lift_block_validate)(R2ILContext*, const R2ILBlock*);
+  uint32_t (*lift_block_set_switch_info)(R2ILBlock*,
+                                         uint64_t,
+                                         uint64_t,
+                                         uint64_t,
+                                         uint64_t,
+                                         uint32_t,
+                                         const struct R2SleighSwitchCaseV2*,
+                                         size_t);
+  uint32_t (*lift_block_op_count)(const R2ILBlock*, size_t*);
+  uint32_t (*lift_block_direct_call_identity)(const R2ILBlock*,
+                                              uint64_t,
+                                              uint64_t,
+                                              uint32_t*,
+                                              struct R2SleighDirectCallIdentityV2*);
+  uint32_t (*lift_block_view)(const R2ILBlock*, struct R2SleighBlockViewV2*);
+  uint32_t (*lift_block_mnemonic)(const R2ILContext*,
+                                  struct R2SleighByteViewV2,
+                                  uint64_t,
+                                  struct R2SleighOwnedBytesV2**);
+  uint32_t (*owned_bytes_view)(const struct R2SleighOwnedBytesV2*, struct R2SleighByteViewV2*);
+  uint32_t (*owned_bytes_free)(struct R2SleighOwnedBytesV2*);
+  uint32_t (*analysis_render)(const struct R2SleighAnalysisRenderRequestV2*,
+                              struct R2SleighOwnedBytesV2**);
+  uint32_t (*analysis_query)(const struct R2SleighAnalysisQueryRequestV2*,
+                             struct R2SleighAnalysisResultV2**);
+  uint32_t (*analysis_result_view)(const struct R2SleighAnalysisResultV2*,
+                                   struct R2SleighAnalysisResultViewV2*);
+  uint32_t (*analysis_result_free)(struct R2SleighAnalysisResultV2*);
+  uint32_t (*planner_query)(const struct R2SleighPlannerQueryRequestV2*,
+                            struct R2SleighPlannerQueryResponseV2*);
+} R2SleighApiV2;
+
+/**
+ * Opaque-snapshot engine request shared by decompile and type-function.
+ */
+typedef struct R2SleighEngineRequestPayloadV2 {
+  uint32_t abi_version;
+  uint32_t struct_size;
+  /**
+   * Relative request deadline. Zero disables the deadline.
+   */
+  uint64_t timeout_us;
+  /**
+   * The certifying source, serialized into one flat buffer. This is the
+   * whole input: there is no second way to reach a snapshot.
+   */
+  const uint8_t *snapshot_buffer;
+  size_t snapshot_buffer_len;
+} R2SleighEngineRequestPayloadV2;
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+/**
+ * Decode one flat snapshot buffer and report what it contained.
+ *
+ * This is the boundary's whole input in the flat transport: a producer hands
+ * over one buffer, and this is where it is parsed and validated. It exists
+ * ahead of the producer so a serializer can be checked against the parser that
+ * will actually consume it, rather than against a second hand-written vector.
+ *
+ * # Safety
+ * `buffer` must point to `len` readable bytes, and `out` to one writable
+ * `R2SleighSnapshotWireFactsV2` whose `struct_size` this build agrees with.
+ */
+uint32_t r2sleigh_snapshot_wire_decode_v2(const uint8_t *buffer,
+                                          size_t len,
+                                          struct R2SleighSnapshotWireFactsV2 *out);
+
+/**
+ * The engine budget for a program of this many functions, in microseconds.
+ *
+ * Exported so the C side can give a single engine call a deadline without
+ * restating the policy. A call bounded by the whole sweep's budget cannot make
+ * a sweep worse than it was already allowed to be, and it turns a function that
+ * would run without end into one bounded refusal instead of the loss of every
+ * function queued behind it.
+ */
+uint64_t r2sleigh_engine_budget_usec_v2(size_t function_count);
+
+/**
+ * Return the immutable V2 API table. The table and all callback addresses are
+ * process-lifetime borrows and must not be freed.
+ */
+const struct R2SleighApiV2 *r2sleigh_api_v2(void);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
+
+#endif  /* R2SLEIGH_API_V2_H */

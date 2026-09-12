@@ -1,38 +1,397 @@
 use super::*;
-use r2types::FunctionType;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct CertifiedCallArgs {
+    pub(super) args: Vec<CExpr>,
+    pub(super) values: Vec<r2ssa::ValueId>,
+}
+
+fn exact_indexed_call_arguments(
+    cert: &r2types::CallsiteArgumentFacts,
+    render_fact: &r2types::CallsiteRenderFact,
+) -> Option<Vec<(usize, r2ssa::ValueId)>> {
+    if cert.callsite != render_fact.callsite
+        || render_fact.target != Some(cert.target)
+        || cert.argument_values.len() != render_fact.proof_values.len()
+    {
+        return None;
+    }
+
+    let mut indexed = cert
+        .argument_values
+        .iter()
+        .map(|argument| (argument.index, argument.value))
+        .collect::<Vec<_>>();
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+    for (expected_index, (index, value)) in indexed.iter().copied().enumerate() {
+        if index != expected_index || render_fact.proof_values.get(index).copied() != Some(value) {
+            return None;
+        }
+    }
+    Some(indexed)
+}
+
+fn callee_declaration_return_type(
+    disposition: r2types::CallsiteRenderDisposition,
+    function_return_type: Option<&CType>,
+    call_result_bits: Option<u32>,
+) -> Option<CType> {
+    match disposition {
+        r2types::CallsiteRenderDisposition::TerminalReturn => function_return_type
+            .filter(|return_type| !matches!(return_type, CType::Void))
+            .cloned(),
+        r2types::CallsiteRenderDisposition::TerminalVoidReturn => Some(CType::Void),
+        _ => Some(call_result_bits.map_or(CType::Void, CType::uint)),
+    }
+}
 
 impl<'a> FoldingContext<'a> {
-    fn prepared_call_target_var(&self, target: r2ssa::ValueId) -> Option<&SSAVar> {
-        self.inputs.prepared_ssa?.value_var(target)
+    pub(super) fn prepared_direct_call_target(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> Option<u64> {
+        self.inputs
+            .callsite_facts()?
+            .arguments_for_site(r2types::CallsiteKey {
+                block_addr,
+                op_index: op_idx,
+            })?
+            .direct_target
     }
 
-    fn prepared_constish_target_addr(&self, target: &SSAVar) -> Option<u64> {
-        extract_call_address(&target.name)
-            .or_else(|| {
-                target
-                    .is_const()
-                    .then(|| parse_const_value(&target.name))
-                    .flatten()
-            })
-            .or_else(|| {
-                self.prepared_canonical_value_root(target)
-                    .as_ref()
-                    .and_then(|root| {
-                        extract_call_address(&root.name).or_else(|| {
-                            root.is_const()
-                                .then(|| parse_const_value(&root.name))
-                                .flatten()
-                        })
-                    })
-            })
+    /// A reference to the function being called.
+    ///
+    /// This names something outside the function, so it is an external rather
+    /// than a variable. Spelling it as a variable is what let a machine name
+    /// look exactly like a local, and it leaves the reader a name no
+    /// declaration accounts for.
+    pub(super) fn callee_identity_expr(&self, identity: &CalleeIdentity) -> CExpr {
+        let name = crate::ast::c_identifier(
+            &identity
+                .display_name
+                .clone()
+                .unwrap_or_else(|| identity.primary_key()),
+        );
+        CExpr::External {
+            name,
+            kind: external_kind_for_callee(identity.class),
+        }
     }
 
-    fn prepared_direct_call_target(&self, block_addr: u64, op_idx: usize) -> Option<u64> {
-        let call_site = self.prepared_call_site_for_op(block_addr, op_idx)?;
-        call_site.direct_target.or_else(|| {
-            self.prepared_call_target_var(call_site.target)
-                .and_then(|target| self.prepared_constish_target_addr(target))
-        })
+    /// Note the prototype the rendering owes for a call it just lowered.
+    ///
+    /// C needs a declaration before the call, and this is the point where the
+    /// callee's recovered signature is in hand. Where the signature is not
+    /// recovered the parameter list is left unspecified rather than asserted,
+    /// which is the same distinction `params_known` draws for the function
+    /// being rendered: an empty list would claim the callee takes nothing.
+    ///
+    /// One declaration serves every call to the callee in this function, so it
+    /// may only state what all of them agree on. For a variadic callee that is
+    /// the named parameters and an ellipsis: the tail differs from call to
+    /// call and the ellipsis is precisely the spelling for "and however many
+    /// more". Where two calls disagree about anything the declaration does
+    /// state, there is no declaration that describes both, and the rendering
+    /// refuses rather than declaring one of them and contradicting the other.
+    /// The prototype this call site proves for whatever it calls.
+    ///
+    /// One derivation, two readers: a named callee gets it as a declaration,
+    /// and a callee the program computed gets it as the function-pointer type
+    /// its target is called through. Spelling them apart is how an indirect
+    /// call came to be rendered as `RAX_3(...)`, which is not callable C.
+    pub(super) fn certified_callee_signature(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+        args: &CertifiedCallArgs,
+    ) -> OpLoweringResult<(CType, Vec<CType>, bool)> {
+        // A callee body captured with this caller owns the strongest logical
+        // signature. `r2ssa` admitted it only after its physical carriers
+        // matched this exact call site, and `r2types` projected it here. Where
+        // no such cross-function fact exists, the declaration stays at the
+        // widths the call itself proves rather than trusting a name or an
+        // incomplete recorded prototype.
+        let cert = self
+            .certified_callsite_for_op(block_addr, op_idx)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        let render_fact = self
+            .certified_call_render_fact_for_op(block_addr, op_idx)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        // Only the named parameters go in the list. The tail this call passes
+        // is what differs between call sites, and the ellipsis stands for it.
+        let named = if cert.variadic {
+            let evidence = cert
+                .variadic_argument_count_evidence
+                .filter(|evidence| evidence.total_argument_count == args.values.len())
+                .ok_or_else(|| {
+                    r2il::refusal_evidence!(
+                        "variadic-callsite-count",
+                        "callsite=({block_addr:#x}, {op_idx}) target={:?} arguments={} fixed_argument_count={:?} count_evidence={:?} count_refusal={:?}",
+                        cert.direct_target,
+                        args.values.len(),
+                        cert.fixed_argument_count,
+                        cert.variadic_argument_count_evidence,
+                        cert.variadic_argument_count_refusal
+                    );
+                    OpLoweringRefusal::variadic_callsite_argument_count(
+                        cert.variadic_argument_count_refusal.unwrap_or(
+                            r2ssa::VariadicCallsiteArgumentCountRefusal::MissingFormatParameter,
+                        ),
+                    )
+                })?;
+            cert.fixed_argument_count
+                .filter(|count| *count <= evidence.total_argument_count)
+                .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?
+        } else {
+            args.values.len()
+        };
+        let (ret_type, params, variadic) = if let Some(signature) = &cert.callee_signature {
+            if signature.variadic || signature.params.len() != named {
+                r2il::refusal_evidence!(
+                    "callee-signature-arity",
+                    "callsite=({block_addr:#x}, {op_idx}) target={:?} certified_arguments={} named={named} signature_params={} fixed_argument_count={:?} call_variadic={} signature_variadic={} argument_locations={:?}",
+                    cert.direct_target,
+                    args.values.len(),
+                    signature.params.len(),
+                    cert.fixed_argument_count,
+                    cert.variadic,
+                    signature.variadic,
+                    cert.argument_values
+                        .iter()
+                        .map(|argument| (argument.index, argument.value))
+                        .collect::<Vec<_>>()
+                );
+                return Err(OpLoweringRefusal::missing_machine_projection());
+            }
+            (
+                signature.return_type.clone(),
+                signature.params.clone(),
+                signature.variadic,
+            )
+        } else {
+            let call_result_bits = self
+                .certified_call_result_value((block_addr, op_idx))
+                .and_then(|value| self.machine_value_width_bits(value));
+            let ret_type = callee_declaration_return_type(
+                render_fact.disposition,
+                self.inputs.function_return_type,
+                call_result_bits,
+            )
+            .ok_or_else(|| {
+                r2il::refusal_evidence!(
+                    "callee-declaration-return",
+                    "callsite=({block_addr:#x}, {op_idx}) disposition={:?} function_return_type={:?} call_result_bits={call_result_bits:?}",
+                    render_fact.disposition,
+                    self.inputs.function_return_type
+                );
+                OpLoweringRefusal::missing_machine_projection()
+            })?;
+            let params = args.values[..named]
+                .iter()
+                .map(|value| self.machine_value_width_bits(*value).map(CType::uint))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+            (ret_type, params, cert.variadic)
+        };
+        Ok((ret_type, params, variadic))
+    }
+
+    /// The source declared a call to this callee terminal, so its prototype
+    /// says it never returns.
+    pub(crate) fn mark_callee_noreturn(&self, name: &str) {
+        if let Some(declaration) = self.callee_declarations.borrow_mut().get_mut(name) {
+            declaration.noreturn = true;
+        }
+    }
+
+    pub(super) fn record_callee_declaration(
+        &self,
+        func_expr: &CExpr,
+        block_addr: u64,
+        op_idx: usize,
+        args: &CertifiedCallArgs,
+    ) -> OpLoweringResult<()> {
+        let CExpr::External { name, .. } = func_expr.unobserved() else {
+            return Ok(());
+        };
+        let cert = self
+            .certified_callsite_for_op(block_addr, op_idx)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        let render_fact = self
+            .certified_call_render_fact_for_op(block_addr, op_idx)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        let (ret_type, params, variadic) =
+            self.certified_callee_signature(block_addr, op_idx, args)?;
+        let declaration = crate::ast::CExternDecl {
+            name: name.clone(),
+            ret_type,
+            params: Some(params),
+            variadic,
+            noreturn: false,
+        };
+        match self
+            .callee_declarations
+            .borrow_mut()
+            .entry(declaration.name.clone())
+        {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                r2il::refusal_evidence!(
+                    "callee-declaration",
+                    "callsite=({block_addr:#x}, {op_idx}) name={} signature={} fixed_argument_count={:?} arguments={:?} disposition={:?} declaration={:?}",
+                    declaration.name,
+                    cert.callee_signature.is_some(),
+                    cert.fixed_argument_count,
+                    cert.argument_values
+                        .iter()
+                        .map(|argument| (argument.index, argument.value))
+                        .collect::<Vec<_>>(),
+                    render_fact.disposition,
+                    declaration
+                );
+                slot.insert(declaration);
+                Ok(())
+            }
+            // Two calls that need different declarations for one name have no
+            // declaration between them. Keeping the first, which is what a
+            // name-keyed insert does, declares one call's shape and leaves the
+            // other contradicting it.
+            std::collections::btree_map::Entry::Occupied(slot) => {
+                // `noreturn` is a fact one terminal call site established for
+                // the callee; a later call site does not contradict it.
+                let mut agreed = declaration.clone();
+                agreed.noreturn = slot.get().noreturn;
+                if *slot.get() == agreed {
+                    return Ok(());
+                }
+                r2il::refusal_evidence!(
+                    "callee-declaration-conflict",
+                    "callsite=({block_addr:#x}, {op_idx}) name={} signature={} fixed_argument_count={:?} arguments={:?} registers={:?} stack={:?} disposition={:?} first={:?} this={:?}",
+                    declaration.name,
+                    cert.callee_signature.is_some(),
+                    cert.fixed_argument_count,
+                    cert.argument_values
+                        .iter()
+                        .map(|argument| (argument.index, argument.value))
+                        .collect::<Vec<_>>(),
+                    cert.register_argument_locations
+                        .iter()
+                        .map(|argument| (argument.index, argument.storage))
+                        .collect::<Vec<_>>(),
+                    cert.stack_argument_locations
+                        .iter()
+                        .map(|argument| (argument.index, argument.value))
+                        .collect::<Vec<_>>(),
+                    render_fact.disposition,
+                    slot.get(),
+                    declaration
+                );
+                Err(OpLoweringRefusal::missing_machine_projection())
+            }
+        }
+    }
+
+    /// An argument spelled as the type the declaration says it is.
+    ///
+    /// A call and the declaration it is made through have to agree, and the
+    /// declaration either carries the callee's exact logical type or falls
+    /// back to the call's certified machine word. The rendering may still
+    /// have typed the value something else, so the conversion has to be
+    /// explicit for strict C in either case.
+    ///
+    /// Only where the two differ, and that is the one emitter's answer. What
+    /// the argument has is what a read of the value renders as, which the
+    /// typed boundaries state; asking the rendered expression what type it
+    /// looks like would be deciding a conversion from the text it is about
+    /// to produce.
+    fn call_argument_as_declared(
+        &self,
+        site: (u64, usize),
+        argument_index: usize,
+        value: r2ssa::ValueId,
+        expr: CExpr,
+    ) -> CExpr {
+        let Some(declared) = self
+            .certified_callsite_for_op(site.0, site.1)
+            .and_then(|cert| cert.callee_signature.as_ref())
+            .and_then(|signature| signature.params.get(argument_index))
+            .cloned()
+            .or_else(|| self.machine_value_width_bits(value).map(CType::uint))
+        else {
+            return expr;
+        };
+        let source = self
+            .value_declaration_type(value)
+            .map(CValue::Typed)
+            .or_else(|| self.value_type(value));
+        self.convert_from(expr, source.as_ref(), &declared)
+    }
+
+    /// The width a value occupies in machine storage, in bits.
+    fn machine_value_width_bits(&self, value: r2ssa::ValueId) -> Option<u32> {
+        let graph = self.inputs.prepared_ssa?.graph();
+        let size = graph.value(value)?.canonical_storage?.size;
+        size.checked_mul(8)
+            .filter(|bits| matches!(bits, 8 | 16 | 32 | 64))
+    }
+
+    fn resolved_callee_target(
+        &self,
+        source_call: Option<(u64, usize)>,
+        prepared_direct_target: Option<u64>,
+    ) -> Option<r2types::ResolvedCalleeTarget> {
+        let callsite = source_call.map(|(block_addr, op_idx)| r2types::CallsiteKey {
+            block_addr,
+            op_index: op_idx,
+        });
+        let prepared_call_view = source_call
+            .and_then(|(block_addr, op_idx)| self.prepared_call_view_for_site(block_addr, op_idx));
+        let prepared_identity = prepared_call_view.and_then(|view| view.callee_identity.as_ref());
+        let prepared_direct_target = prepared_direct_target
+            .or_else(|| prepared_call_view.and_then(|view| view.direct_target))
+            .or_else(|| {
+                source_call.and_then(|(block_addr, op_idx)| {
+                    self.prepared_direct_call_target(block_addr, op_idx)
+                })
+            });
+        r2types::CalleeResolutionFacts::resolve_target_policy(
+            r2types::CalleeTargetResolutionRequest {
+                identity: r2types::CalleeTargetIdentityRequest {
+                    resolution: self.inputs.callee_resolution(),
+                    callsite,
+                    prepared_identity,
+                    prepared_direct_target,
+                    direct_target_context: None,
+                },
+                callee_facts: self.inputs.callee_facts(),
+            },
+        )
+    }
+
+    pub(super) fn resolved_callee_target_for_site(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> Option<r2types::ResolvedCalleeTarget> {
+        self.resolved_callee_target(Some((block_addr, op_idx)), None)
+    }
+
+    pub(super) fn callee_identity_for_callsite(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> Option<CalleeIdentity> {
+        self.resolved_callee_target_for_site(block_addr, op_idx)
+            .map(|target| target.identity)
+    }
+
+    pub(super) fn resolved_callee_identity_expr_for_site(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> Option<CExpr> {
+        self.resolved_callee_target_for_site(block_addr, op_idx)
+            .map(|target| self.callee_identity_expr(&target.identity))
     }
 
     pub(super) fn resolve_call_target_for_site(
@@ -40,1527 +399,348 @@ impl<'a> FoldingContext<'a> {
         block_addr: u64,
         op_idx: usize,
         target: &SSAVar,
-    ) -> CExpr {
-        if let Some(name) = self
-            .prepared_call_view_for_site(block_addr, op_idx)
-            .and_then(|view| view.callee_name.clone())
-        {
-            return CExpr::Var(name);
-        }
-        if let Some(addr) = self.prepared_direct_call_target(block_addr, op_idx) {
-            if let Some(name) = self.lookup_function(addr) {
-                return CExpr::Var(name.clone());
-            }
-            if let Some(name) = self.lookup_symbol(addr) {
-                return CExpr::Var(name.clone());
-            }
+    ) -> OpLoweringResult<CExpr> {
+        if let Some(resolved) = self.resolved_callee_identity_expr_for_site(block_addr, op_idx) {
+            return Ok(resolved);
         }
         self.resolve_call_target(target)
     }
 
-    pub(super) fn render_call_args_for_callee(
-        &self,
-        callee: &CExpr,
-        raw_args: Vec<analysis::CallArgBinding>,
-    ) -> Vec<CExpr> {
-        if self.is_imported_call_target(callee) || self.is_modeled_call_target(callee) {
-            let mut rendered = raw_args
-                .iter()
-                .cloned()
-                .map(|binding| self.render_imported_call_arg(binding))
-                .collect::<Vec<_>>();
-            self.repair_imported_result_source_sibling_args(&raw_args, &mut rendered);
-            if let Some(max_arity) = self.non_variadic_call_arity(callee) {
-                rendered.truncate(max_arity);
-            } else if let Some(max_arity) = self.printf_literal_variadic_arity(callee, &rendered) {
-                rendered.truncate(max_arity);
-            }
-            return rendered;
-        }
-
-        let mut rendered = raw_args
-            .into_iter()
-            .map(|binding| self.render_call_arg_for_callee(callee, binding))
-            .collect::<Vec<_>>();
-        if let Some(max_arity) = self.non_variadic_call_arity(callee) {
-            rendered.truncate(max_arity);
-        }
-        rendered
-    }
-
-    pub(super) fn prepared_call_args_for_site(
+    pub(super) fn admitted_callsite(
         &self,
         block_addr: u64,
         op_idx: usize,
-        callee: &CExpr,
-    ) -> Option<Vec<CExpr>> {
-        let args = self
-            .prepared_call_view_for_site(block_addr, op_idx)
-            .map(|view| view.authoritative_args.clone())
-            .filter(|args| !args.is_empty())?;
-        Some(self.normalize_prepared_call_args_for_callee(callee, args))
-    }
-
-    pub(super) fn normalize_prepared_call_args_for_callee(
-        &self,
-        callee: &CExpr,
-        args: Vec<CExpr>,
-    ) -> Vec<CExpr> {
-        let imported_or_modeled =
-            self.is_imported_call_target(callee) || self.is_modeled_call_target(callee);
-        let mut normalized = if imported_or_modeled {
-            args.into_iter()
-                .map(|arg| self.normalize_imported_call_arg_expr(arg, true, false, true))
-                .collect::<Vec<_>>()
-        } else {
-            args.into_iter()
-                .map(|arg| self.normalize_call_arg_expr_for_callee(callee, arg))
-                .collect::<Vec<_>>()
+    ) -> OpLoweringResult<(
+        &r2types::CallsiteArgumentFacts,
+        &r2types::CallsiteRenderFact,
+    )> {
+        let cert = self
+            .certified_callsite_for_op(block_addr, op_idx)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        let render_fact = self
+            .certified_call_render_fact_for_op(block_addr, op_idx)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
+        let expected_site = r2types::CallsiteKey {
+            block_addr,
+            op_index: op_idx,
         };
-        if let Some(max_arity) = self.non_variadic_call_arity(callee) {
-            normalized.truncate(max_arity);
-        } else if imported_or_modeled
-            && let Some(max_arity) = self.printf_literal_variadic_arity(callee, &normalized)
+        if render_fact.disposition == r2types::CallsiteRenderDisposition::Residualized
+            && cert.variadic
         {
-            normalized.truncate(max_arity);
+            r2il::refusal_evidence!(
+                "variadic-callsite-residualized",
+                "callsite=({block_addr:#x}, {op_idx}) target={:?} fixed_argument_count={:?} count_evidence={:?} count_refusal={:?}",
+                cert.direct_target,
+                cert.fixed_argument_count,
+                cert.variadic_argument_count_evidence,
+                cert.variadic_argument_count_refusal
+            );
+            return Err(OpLoweringRefusal::variadic_callsite_argument_count(
+                cert.variadic_argument_count_refusal
+                    .unwrap_or(r2ssa::VariadicCallsiteArgumentCountRefusal::MissingFormatParameter),
+            ));
         }
-        normalized
-    }
-
-    pub(super) fn lookup_known_signature(&self, callee_name: &str) -> Option<&FunctionType> {
-        let normalized = normalize_callee_name(callee_name);
-        self.inputs.known_function_signatures.get(&normalized)
-    }
-
-    pub(super) fn extract_callee_name(expr: &CExpr) -> Option<&str> {
-        match expr {
-            CExpr::Var(name) => Some(name.as_str()),
-            CExpr::Deref(inner) | CExpr::Paren(inner) | CExpr::AddrOf(inner) => {
-                Self::extract_callee_name(inner)
-            }
-            CExpr::Cast { expr: inner, .. } => Self::extract_callee_name(inner),
-            _ => None,
+        // An incomplete argument boundary leaves `argument_values` empty, and
+        // an empty list is indistinguishable from a callee that takes nothing.
+        // Rendering `callee()` for the first would drop arguments the call
+        // really passes, so the call refuses here and a gap covers it.
+        if !cert.arguments_complete {
+            r2il::refusal_evidence!(
+                "callsite-arguments-incomplete",
+                "callsite=({block_addr:#x}, {op_idx}) target={:?} variadic={}                  fixed_argument_count={:?} results_complete={}",
+                cert.direct_target,
+                cert.variadic,
+                cert.fixed_argument_count,
+                cert.results_complete
+            );
+            return Err(OpLoweringRefusal::missing_machine_projection());
         }
-    }
-
-    pub(super) fn non_variadic_call_arity(&self, callee: &CExpr) -> Option<usize> {
-        let name = Self::extract_callee_name(callee)?;
-        if let Some(cached) = self
-            .non_variadic_call_arity_cache
-            .borrow()
-            .get(name)
-            .copied()
-        {
-            return cached;
-        }
-
-        let known_arity = self
-            .lookup_known_signature(name)
-            .and_then(|sig| (!sig.variadic).then_some(sig.params.len()));
-        let summary_arity = self
-            .interproc_summary_for_name(name)
-            .and_then(|summary| summary.arg_count_hint);
-
-        let normalized = normalize_callee_name(name);
-        let mut arena = TypeArena::default();
-        let mut registry_arity = None;
-        for candidate in [name, normalized.as_str()] {
-            if let Some(resolved) =
-                self.signature_registry
-                    .resolve(candidate, &mut arena, self.inputs.arch.ptr_size)
-            {
-                registry_arity = (!resolved.variadic).then_some(resolved.params.len());
-                break;
-            }
-        }
-
-        let result = [known_arity, summary_arity, registry_arity]
-            .into_iter()
-            .flatten()
-            .min();
-        self.non_variadic_call_arity_cache
-            .borrow_mut()
-            .insert(name.to_string(), result);
-        result
-    }
-
-    pub(super) fn resolve_call_target(&self, target: &SSAVar) -> CExpr {
-        if let Some(addr) = self.prepared_constish_target_addr(target) {
-            if let Some(name) = self.lookup_function(addr) {
-                return CExpr::Var(name.clone());
-            }
-            if let Some(name) = self.lookup_symbol(addr) {
-                return CExpr::Var(name.clone());
-            }
-        }
-        self.get_expr(target)
-    }
-
-    fn is_modeled_call_target(&self, callee: &CExpr) -> bool {
-        let Some(name) = Self::extract_callee_name(callee) else {
-            return false;
-        };
-        let normalized = normalize_callee_name(name);
-
-        if self.interproc_summary_for_name(name).is_some() {
-            return true;
-        }
-
-        self.callee_facts_map().iter().any(|(addr, fact)| {
-            fact.name
-                .as_deref()
-                .is_some_and(|fact_name| normalize_callee_name(fact_name) == normalized)
-                || self
-                    .inputs
-                    .function_names
-                    .get(addr)
-                    .is_some_and(|function_name| normalize_callee_name(function_name) == normalized)
-                || self
-                    .inputs
-                    .symbols
-                    .get(addr)
-                    .is_some_and(|symbol_name| normalize_callee_name(symbol_name) == normalized)
-        })
-    }
-
-    pub(super) fn render_call_arg_for_callee(
-        &self,
-        callee: &CExpr,
-        binding: analysis::CallArgBinding,
-    ) -> CExpr {
-        if self.is_imported_call_target(callee) || self.is_modeled_call_target(callee) {
-            return self.render_imported_call_arg(binding);
-        }
-
-        match binding.arg {
-            analysis::SemanticCallArg::Semantic(value) => {
-                let mut visited = HashSet::new();
-                let expr = self
-                    .render_semantic_value(&value, 0, &mut visited)
-                    .unwrap_or_else(|| self.expr_for_semantic_call_arg_fallback(&value));
-                self.normalize_call_arg_expr_for_callee(callee, expr)
-            }
-            analysis::SemanticCallArg::StringAddr(addr) => self
-                .lookup_string(addr)
-                .map(|s| CExpr::StringLit(s.clone()))
-                .or_else(|| {
-                    self.lookup_symbol(addr)
-                        .map(|name| CExpr::Var(name.clone()))
-                })
-                .unwrap_or(CExpr::UIntLit(addr)),
-            analysis::SemanticCallArg::FallbackExpr(expr) => {
-                self.normalize_call_arg_expr_for_callee(callee, expr)
-            }
-        }
-    }
-
-    fn render_imported_call_arg(&self, binding: analysis::CallArgBinding) -> CExpr {
-        let allow_string_like_resolution =
-            !self.imported_input_binding_prefers_pointer_identity(&binding);
-        if let Some((block_addr, op_idx)) = binding.source_call
-            && binding.role == analysis::CallArgRole::Result
-            && let analysis::SemanticCallArg::FallbackExpr(CExpr::Var(name)) = &binding.arg
-            && let Some(owner_name) =
-                self.stable_owned_call_result_name_for_source((block_addr, op_idx))
-            && !owner_name.eq_ignore_ascii_case(name)
-        {
-            return CExpr::Var(owner_name);
-        }
-        if let Some((block_addr, op_idx)) = binding.source_call
-            && binding.role == analysis::CallArgRole::Result
-            && let analysis::SemanticCallArg::FallbackExpr(CExpr::Call {
-                func,
-                args: original_args,
-            }) = binding.arg.clone()
-        {
-            let should_rebuild = original_args.iter().any(|arg| {
-                self.call_arg_contains_transient_name(arg, 0)
-                    || self.call_arg_contains_stack_placeholder(arg, 0)
-                    || self.call_arg_requires_result_rebuild(arg)
-                    || self.expr_is_generic_entry_arg_like(arg)
-            });
-            if !should_rebuild {
-                let mut args = original_args
-                    .into_iter()
-                    .map(|arg| {
-                        self.normalize_imported_call_arg_expr(
-                            arg,
-                            false,
-                            true,
-                            allow_string_like_resolution,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                if let Some(max_arity) = self.non_variadic_call_arity(&func) {
-                    args.truncate(max_arity);
-                }
-                return CExpr::call(*func, args);
-            }
-            let mut args = self.render_authoritative_source_args_for_call((block_addr, op_idx));
-            if let Some(max_arity) = self.non_variadic_call_arity(&func) {
-                args.truncate(max_arity);
-            }
-            return CExpr::call(*func, args);
-        }
-
-        let preserve_stable_input_slot = binding.role == analysis::CallArgRole::Input;
-        let preserve_explicit_call_expr = binding.role == analysis::CallArgRole::Result
+        if cert.callsite != expected_site
+            || render_fact.callsite != expected_site
+            || render_fact.target != Some(cert.target)
             || matches!(
-                binding.arg,
-                analysis::SemanticCallArg::FallbackExpr(CExpr::Call { .. })
-            );
-        let recovered_source_expr = self.recover_call_arg_expr_from_source_var(&binding);
-        match binding.arg {
-            analysis::SemanticCallArg::Semantic(value) => {
-                if preserve_stable_input_slot
-                    && Self::semantic_value_has_negative_stack_slot(&value)
-                    && let Some(expr) = self
-                        .render_imported_semantic_arg_value(&value, !allow_string_like_resolution)
-                    && self.is_preservable_named_stack_slot_expr(&expr)
-                {
-                    return expr;
-                }
-                let expr = self
-                    .render_imported_semantic_arg_value(&value, !allow_string_like_resolution)
-                    .unwrap_or_else(|| self.expr_for_semantic_call_arg_fallback(&value));
-                let recovered_source_expr = if matches!(
-                    value,
-                    analysis::SemanticValue::Load { .. } | analysis::SemanticValue::Address(_)
-                ) {
-                    recovered_source_expr.clone()
-                } else if self.is_direct_constish_visible_expr(&expr, 0)
-                    && !self.call_arg_contains_transient_name(&expr, 0)
-                    && !self.call_arg_contains_stack_placeholder(&expr, 0)
-                    && !self.expr_is_generic_entry_arg_like(&expr)
-                {
-                    None
-                } else {
-                    recovered_source_expr.clone()
-                };
-                let expr = self
-                    .choose_preferred_imported_call_arg_expr(
-                        Some(expr.clone()),
-                        recovered_source_expr.clone(),
-                        preserve_stable_input_slot,
-                        preserve_explicit_call_expr,
-                    )
-                    .unwrap_or(expr);
-                let finalized = self.finalize_authoritative_imported_call_arg_expr(
-                    expr,
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
-                    allow_string_like_resolution,
-                );
-                self.choose_preferred_imported_call_arg_expr(
-                    Some(finalized.clone()),
-                    recovered_source_expr.clone(),
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
-                )
-                .unwrap_or(finalized)
-            }
-            analysis::SemanticCallArg::StringAddr(addr) => self
-                .lookup_string(addr)
-                .map(|s| CExpr::StringLit(s.clone()))
-                .or_else(|| {
-                    self.lookup_symbol(addr)
-                        .map(|name| CExpr::Var(name.clone()))
-                })
-                .unwrap_or(CExpr::UIntLit(addr)),
-            analysis::SemanticCallArg::FallbackExpr(expr) => {
-                let recovered_source_expr = if self.is_direct_constish_visible_expr(&expr, 0)
-                    && !self.call_arg_contains_transient_name(&expr, 0)
-                    && !self.call_arg_contains_stack_placeholder(&expr, 0)
-                    && !self.expr_is_generic_entry_arg_like(&expr)
-                    && !matches!(expr, CExpr::Call { .. })
-                {
-                    None
-                } else {
-                    recovered_source_expr
-                };
-                let normalized = self.normalize_imported_call_arg_expr(
-                    recovered_source_expr
-                        .clone()
-                        .map(|candidate| {
-                            if self.call_arg_contains_transient_name(&expr, 0)
-                                || self.call_arg_contains_stack_placeholder(&expr, 0)
-                            {
-                                candidate
-                            } else {
-                                self.choose_preferred_imported_call_arg_expr(
-                                    Some(expr.clone()),
-                                    Some(candidate),
-                                    preserve_stable_input_slot,
-                                    preserve_explicit_call_expr,
-                                )
-                                .unwrap_or(expr.clone())
-                            }
-                        })
-                        .unwrap_or(expr),
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
-                    allow_string_like_resolution,
-                );
-                self.choose_preferred_imported_call_arg_expr(
-                    recovered_source_expr.clone(),
-                    Some(normalized.clone()),
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
-                )
-                .unwrap_or(normalized)
-            }
-        }
-    }
-
-    fn call_arg_requires_result_rebuild(&self, expr: &CExpr) -> bool {
-        let CExpr::Call { func, args } = expr else {
-            return false;
-        };
-        if !self.is_imported_call_target(func) && !self.is_modeled_call_target(func) {
-            return true;
-        }
-        args.iter().any(|arg| {
-            self.call_arg_contains_transient_name(arg, 0)
-                || self.call_arg_contains_stack_placeholder(arg, 0)
-                || matches!(arg, CExpr::Call { .. })
-                || self.expr_is_generic_entry_arg_like(arg)
-        })
-    }
-
-    fn render_authoritative_source_call_arg(&self, binding: analysis::CallArgBinding) -> CExpr {
-        let allow_string_like_resolution =
-            !self.imported_input_binding_prefers_pointer_identity(&binding);
-        let preserve_stable_input_slot = binding.role == analysis::CallArgRole::Input;
-        let preserve_explicit_call_expr = binding.role == analysis::CallArgRole::Result
-            || matches!(
-                binding.arg,
-                analysis::SemanticCallArg::FallbackExpr(CExpr::Call { .. })
-            );
-        let recovered_source_expr = self.recover_call_arg_expr_from_source_var(&binding);
-        if let Some((block_addr, op_idx)) = binding.source_call
-            && binding.role == analysis::CallArgRole::Result
-            && let Some(owner) = self.stable_owned_call_result_expr_for_source((block_addr, op_idx))
-        {
-            return owner;
-        }
-        if let analysis::SemanticCallArg::FallbackExpr(CExpr::Call { func, args }) = &binding.arg {
-            let should_preserve_direct_call = !args.iter().any(|arg| {
-                self.call_arg_contains_transient_name(arg, 0)
-                    || self.call_arg_contains_stack_placeholder(arg, 0)
-                    || matches!(arg, CExpr::Call { .. })
-                    || self.expr_is_generic_entry_arg_like(arg)
-            });
-            if should_preserve_direct_call {
-                let mut args = args
-                    .iter()
-                    .cloned()
-                    .map(|arg| {
-                        self.normalize_imported_call_arg_expr(
-                            arg,
-                            false,
-                            true,
-                            allow_string_like_resolution,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                if let Some(max_arity) = self.non_variadic_call_arity(func) {
-                    args.truncate(max_arity);
-                }
-                return CExpr::call((**func).clone(), args);
-            }
-        }
-
-        match binding.arg {
-            analysis::SemanticCallArg::Semantic(value) => {
-                if preserve_stable_input_slot
-                    && Self::semantic_value_has_negative_stack_slot(&value)
-                    && let Some(expr) = self
-                        .render_imported_semantic_arg_value(&value, !allow_string_like_resolution)
-                    && self.is_preservable_named_stack_slot_expr(&expr)
-                {
-                    return expr;
-                }
-                let expr = self
-                    .render_imported_semantic_arg_value(&value, !allow_string_like_resolution)
-                    .unwrap_or_else(|| self.expr_for_semantic_call_arg_fallback(&value));
-                let expr = self
-                    .choose_preferred_imported_call_arg_expr(
-                        Some(expr.clone()),
-                        recovered_source_expr.clone(),
-                        preserve_stable_input_slot,
-                        preserve_explicit_call_expr,
-                    )
-                    .unwrap_or(expr);
-                let finalized = self.finalize_authoritative_imported_call_arg_expr(
-                    expr,
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
-                    allow_string_like_resolution,
-                );
-                self.choose_preferred_imported_call_arg_expr(
-                    Some(finalized.clone()),
-                    recovered_source_expr.clone(),
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
-                )
-                .unwrap_or(finalized)
-            }
-            analysis::SemanticCallArg::StringAddr(addr) => self
-                .lookup_string(addr)
-                .map(|s| CExpr::StringLit(s.clone()))
-                .or_else(|| {
-                    self.lookup_symbol(addr)
-                        .map(|name| CExpr::Var(name.clone()))
-                })
-                .unwrap_or(CExpr::UIntLit(addr)),
-            analysis::SemanticCallArg::FallbackExpr(expr) => {
-                let normalized = self.normalize_imported_call_arg_expr(
-                    recovered_source_expr
-                        .clone()
-                        .map(|candidate| {
-                            if self.call_arg_contains_transient_name(&expr, 0)
-                                || self.call_arg_contains_stack_placeholder(&expr, 0)
-                            {
-                                candidate
-                            } else {
-                                self.choose_preferred_imported_call_arg_expr(
-                                    Some(expr.clone()),
-                                    Some(candidate),
-                                    preserve_stable_input_slot,
-                                    preserve_explicit_call_expr,
-                                )
-                                .unwrap_or(expr.clone())
-                            }
-                        })
-                        .unwrap_or(expr),
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
-                    allow_string_like_resolution,
-                );
-                self.choose_preferred_imported_call_arg_expr(
-                    recovered_source_expr.clone(),
-                    Some(normalized.clone()),
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
-                )
-                .unwrap_or(normalized)
-            }
-        }
-    }
-
-    pub(super) fn render_authoritative_source_args_for_call(
-        &self,
-        source_call: (u64, usize),
-    ) -> Vec<CExpr> {
-        if let Some(call_site) = self.prepared_call_site_for_op(source_call.0, source_call.1)
-            && let Some(target) = self.prepared_call_target_var(call_site.target)
-            && let Some(args) = self.prepared_call_args_for_site(
-                source_call.0,
-                source_call.1,
-                &self.resolve_call_target_for_site(source_call.0, source_call.1, target),
+                render_fact.disposition,
+                r2types::CallsiteRenderDisposition::Residualized
             )
         {
-            return args;
+            return Err(OpLoweringRefusal::missing_machine_projection());
         }
-        if let Some(cached) = self
-            .authoritative_source_args_cache
-            .borrow()
-            .get(&source_call)
-            .cloned()
-        {
-            return cached;
-        }
-
-        let args = self
-            .call_args_map()
-            .get(&source_call)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|binding| self.render_authoritative_source_call_arg(binding))
-            .collect::<Vec<_>>();
-
-        self.authoritative_source_args_cache
-            .borrow_mut()
-            .insert(source_call, args.clone());
-        args
+        Ok((cert, render_fact))
     }
 
-    fn recover_call_arg_expr_from_source_var(
+    pub(super) fn certified_call_args_for_site(
         &self,
-        binding: &analysis::CallArgBinding,
-    ) -> Option<CExpr> {
-        let source_value_id = binding.source_value_id.or_else(|| {
-            binding
-                .source_var_name
-                .as_deref()
-                .and_then(|name| self.use_info().value_id_for_name(name))
-        });
-        let source_var_name = binding.source_var_name.clone().or_else(|| {
-            source_value_id.and_then(|value_id| self.use_info().display_name_for_value_id(value_id))
-        })?;
-        let source_var_name = source_var_name.as_str();
-        let preserve_stable_input_slot = binding.role == analysis::CallArgRole::Input;
-        let prefer = |current: Option<CExpr>, candidate: Option<CExpr>| {
-            self.choose_preferred_imported_call_arg_expr(
-                current,
-                candidate,
-                preserve_stable_input_slot,
-                false,
-            )
-        };
-        let mut best = None;
-        let prepared_expr = self
-            .prepared_semantic_view()
-            .and_then(|prepared| {
-                source_value_id
-                    .and_then(|value_id| prepared.owner_expr_for_value_id(value_id))
-                    .or_else(|| prepared.owner_expr_for_name(source_var_name))
-                    .or_else(|| {
-                        self.find_ssa_name_for_rendered_alias(source_var_name)
-                            .as_deref()
-                            .and_then(|resolved| prepared.owner_expr_for_name(resolved))
-                    })
-                    .cloned()
-            })
-            .filter(|expr| !matches!(expr, CExpr::AddrOf(_)));
+        block_addr: u64,
+        op_idx: usize,
+    ) -> OpLoweringResult<CertifiedCallArgs> {
+        let (cert, render_fact) = self.admitted_callsite(block_addr, op_idx)?;
+        let indexed = exact_indexed_call_arguments(cert, render_fact)
+            .ok_or_else(|| OpLoweringRefusal::missing_machine_projection())?;
 
-        if best.is_none()
-            && let Some(owner) = self.stable_owned_call_result_expr_for_name(source_var_name, true)
-        {
-            return Some(owner);
-        }
-
-        let raw_expr = source_value_id
-            .and_then(|value_id| self.definition_for_value_id(value_id).cloned())
-            .or_else(|| self.lookup_definition_raw(source_var_name))
-            .map(|raw| {
-                let mut imported_visited = HashSet::new();
-                self.resolve_imported_call_arg_expr(&raw, 0, &mut imported_visited)
-            });
-        best = prefer(best, raw_expr.clone());
-
-        let visible_expr = source_value_id
-            .and_then(|value_id| {
-                self.use_info()
-                    .render_definition_for_value(value_id)
-                    .cloned()
-            })
-            .or_else(|| self.lookup_definition(source_var_name))
-            .map(|visible_def| {
-                let mut imported_visited = HashSet::new();
-                self.resolve_imported_call_arg_expr(&visible_def, 0, &mut imported_visited)
-            });
-        best = prefer(best, visible_expr.clone());
-
-        best = prefer(best, self.best_visible_definition(source_var_name));
-
-        let best_is_low_signal = best.as_ref().is_none_or(|expr| {
-            self.call_arg_contains_transient_name(expr, 0)
-                || self.call_arg_contains_stack_placeholder(expr, 0)
-                || self.call_arg_contains_low_quality_name(expr, 0)
-                || matches!(expr, CExpr::Var(name) if self.is_autogenerated_stack_home_name(name))
-        });
-        if best_is_low_signal {
-            best = prefer(best, prepared_expr.clone());
-            let mut semantic_visited = HashSet::new();
-            best = prefer(
-                best,
-                source_value_id
-                    .and_then(|value_id| self.use_info().render_semantic_value_for_value(value_id))
-                    .and_then(|value| self.render_semantic_value(value, 0, &mut semantic_visited))
-                    .or_else(|| {
-                        self.render_semantic_value_by_name(
-                            source_var_name,
-                            0,
-                            &mut semantic_visited,
-                        )
-                    }),
-            );
-        } else if best.is_none() {
-            best = prefer(best, prepared_expr.clone());
-        }
-
-        let recovered = best?;
-        let rewritten = self.rewrite_stack_expr(recovered.clone());
-        let best = prefer(Some(recovered), Some(rewritten.clone())).unwrap_or(rewritten);
-        if matches!(&best, CExpr::Var(name) if self.is_autogenerated_stack_home_name(name))
-            && let Some(raw_best) = self
-                .lookup_definition_raw(source_var_name)
-                .or_else(|| self.lookup_definition(source_var_name))
-            && !matches!(&raw_best, CExpr::Var(raw_name) if self.is_autogenerated_stack_home_name(raw_name))
-        {
-            return Some(raw_best);
-        }
-        (!self.call_arg_contains_transient_name(&best, 0)
-            && !self.call_arg_contains_stack_placeholder(&best, 0))
-        .then_some(best)
-    }
-
-    fn repair_imported_result_source_sibling_args(
-        &self,
-        raw_args: &[analysis::CallArgBinding],
-        rendered_args: &mut Vec<CExpr>,
-    ) {
-        let Some(format_string) = rendered_args
-            .first()
-            .and_then(|expr| self.resolved_printf_format_string(expr))
-        else {
-            return;
-        };
-        let Some(result_binding) = raw_args.last() else {
-            return;
-        };
-        let Some((source_block_addr, source_op_idx)) = result_binding.source_call else {
-            return;
-        };
-        if result_binding.role != analysis::CallArgRole::Result || rendered_args.len() < 2 {
-            return;
-        }
-
-        let placeholder_count = count_printf_placeholders(&format_string);
-        if placeholder_count == 0 {
-            return;
-        }
-
-        let final_result_idx = rendered_args.len().saturating_sub(1);
-        let needs_repair = rendered_args.len() > placeholder_count + 1
-            || rendered_args[1..final_result_idx]
-                .iter()
-                .enumerate()
-                .any(|(idx, expr)| {
-                    let rendered_idx = idx + 1;
-                    rendered_args
-                        .get(rendered_idx.saturating_sub(1))
-                        .is_some_and(|previous| *previous == *expr)
-                        || self.call_arg_contains_transient_name(expr, 0)
-                        || self.call_arg_contains_stack_placeholder(expr, 0)
-                        || matches!(expr, CExpr::Call { .. })
-                });
-        if !needs_repair {
-            let sibling_inputs = rendered_args[1..final_result_idx].to_vec();
-            if let Some(CExpr::Call { func, args }) = rendered_args.get(final_result_idx).cloned()
-                && args.len() == sibling_inputs.len()
-                && !sibling_inputs.is_empty()
-                && args != sibling_inputs
-            {
-                rendered_args[final_result_idx] = CExpr::call(*func, sibling_inputs);
-            }
-            return;
-        }
-
-        let source_args =
-            self.render_authoritative_source_args_for_call((source_block_addr, source_op_idx));
-
-        let expected_input_count = source_args.len();
-        if source_args.is_empty()
-            || rendered_args.len() < expected_input_count + 2
-            || placeholder_count != expected_input_count + 1
-        {
-            return;
-        }
-
-        if rendered_args.len() > expected_input_count + 2 {
-            let final_result_idx = rendered_args.len().saturating_sub(1);
-            rendered_args.drain(1 + expected_input_count..final_result_idx);
-        }
-
-        let final_result_idx = rendered_args.len().saturating_sub(1);
-        let current_siblings = rendered_args[1..final_result_idx].to_vec();
-        let final_result_disagrees = rendered_args
-            .get(final_result_idx)
-            .and_then(|expr| match expr {
-                CExpr::Call { args, .. } => Some(args.as_slice() != current_siblings.as_slice()),
-                _ => None,
-            })
-            .unwrap_or(false);
-        let should_sync_all_siblings = current_siblings != source_args && final_result_disagrees;
-
-        for (idx, source_arg) in source_args.into_iter().enumerate() {
-            let target_idx = idx + 1;
-            if target_idx >= rendered_args.len().saturating_sub(1) {
-                break;
-            }
-            let should_replace = should_sync_all_siblings
-                || rendered_args.get(target_idx - 1).is_some_and(|previous| {
-                    rendered_args[target_idx] == *previous
-                        && rendered_args[target_idx] != source_arg
-                })
-                || self.call_arg_contains_transient_name(&rendered_args[target_idx], 0)
-                || self.call_arg_contains_stack_placeholder(&rendered_args[target_idx], 0);
-            let should_replace = should_replace
-                || (self.is_direct_constish_visible_expr(&rendered_args[target_idx], 0)
-                    && self.is_preservable_named_stack_slot_expr(&source_arg))
-                || (matches!(rendered_args[target_idx], CExpr::Call { .. })
-                    && !matches!(source_arg, CExpr::Call { .. }));
-            if should_replace {
-                rendered_args[target_idx] = source_arg;
-            }
-        }
-
-        let final_result_idx = rendered_args.len().saturating_sub(1);
-        let sibling_inputs = rendered_args[1..final_result_idx].to_vec();
-        let should_rebuild_final_result = rendered_args.get(final_result_idx).is_some_and(|expr| {
-            self.call_arg_contains_transient_name(expr, 0)
-                || self.call_arg_contains_stack_placeholder(expr, 0)
-                || self.call_arg_contains_low_quality_name(expr, 0)
-                || !matches!(expr, CExpr::Call { .. })
-        });
-        if should_rebuild_final_result
-            && let Some(rebuilt) = self
-                .synthesized_call_expr_for_source_call((source_block_addr, source_op_idx))
-                .or_else(|| {
-                    self.stable_owned_call_result_expr_for_source((
-                        source_block_addr,
-                        source_op_idx,
-                    ))
-                })
-        {
-            rendered_args[final_result_idx] = rebuilt;
-        }
-        if let Some(CExpr::Call { func, args }) = rendered_args.get(final_result_idx).cloned()
-            && args.len() == sibling_inputs.len()
-            && !sibling_inputs.is_empty()
-        {
-            rendered_args[final_result_idx] = CExpr::call(*func, sibling_inputs);
-        }
-    }
-
-    pub(super) fn printf_literal_variadic_arity(
-        &self,
-        callee: &CExpr,
-        rendered_args: &[CExpr],
-    ) -> Option<usize> {
-        let callee_name = Self::extract_callee_name(callee)?;
-        if normalize_callee_name(callee_name) != "printf" {
-            return None;
-        }
-        let format_string = self.resolved_printf_format_string(rendered_args.first()?)?;
-        Some(1 + count_printf_placeholders(&format_string))
-    }
-
-    fn resolved_printf_format_string(&self, expr: &CExpr) -> Option<String> {
-        match expr {
-            CExpr::StringLit(text) => Some(text.clone()),
-            other => self
-                .resolve_literalish_call_arg_expr(other)
-                .and_then(|resolved| match resolved {
-                    CExpr::StringLit(text) => Some(text),
-                    _ => None,
-                })
-                .or_else(|| {
-                    let mut visited = HashSet::new();
-                    self.resolve_string_like_imported_call_arg_expr(other, 0, &mut visited)
-                        .and_then(|resolved| match resolved {
-                            CExpr::StringLit(text) => Some(text),
-                            _ => None,
-                        })
-                }),
-        }
-    }
-
-    pub(super) fn expr_for_semantic_call_arg_fallback(
-        &self,
-        value: &analysis::SemanticValue,
-    ) -> CExpr {
-        match value {
-            analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr)) => expr.clone(),
-            analysis::SemanticValue::Scalar(analysis::ScalarValue::Root(value_ref)) => {
-                if value_ref.var.is_const() {
-                    self.const_to_expr(&value_ref.var)
-                } else {
-                    let rendered = self.var_name(&value_ref.var);
-                    self.arg_alias_for_rendered_name(&rendered)
-                        .map(CExpr::Var)
-                        .unwrap_or_else(|| CExpr::Var(rendered))
-                }
-            }
-            analysis::SemanticValue::Address(addr) => {
-                let mut visited = HashSet::new();
-                self.render_address_expr_from_addr(addr, 0, &mut visited)
-                    .or_else(|| self.render_base_ref_expr(&addr.base, true, 0, &mut visited))
-                    .unwrap_or(CExpr::UIntLit(0))
-            }
-            analysis::SemanticValue::Load { addr, size } => {
-                let mut visited = HashSet::new();
-                self.render_load_from_addr(addr, *size, 0, &mut visited)
-                    .or_else(|| {
-                        let addr_expr =
-                            self.render_address_expr_from_addr(addr, 0, &mut visited)?;
-                        Some(CExpr::Deref(Box::new(addr_expr)))
-                    })
-                    .unwrap_or(CExpr::UIntLit(0))
-            }
-            analysis::SemanticValue::Unknown => CExpr::UIntLit(0),
-        }
-    }
-
-    pub(super) fn normalize_imported_call_arg_expr(
-        &self,
-        expr: CExpr,
-        preserve_stable_input_slot: bool,
-        preserve_explicit_call_expr: bool,
-        allow_string_like_resolution: bool,
-    ) -> CExpr {
-        let expr =
-            self.rewrite_imported_call_arg_expr_with_prepared_owners(expr, 0, &mut HashSet::new());
-        let rewritten = self.rewrite_stack_expr(expr);
-        let mut best = Some(rewritten.clone());
-        let mut expanded_visited = HashSet::new();
-        let expanded = self.expand_call_arg_expr(&rewritten, 0, &mut expanded_visited);
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(expanded.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let mut semantic_visited = HashSet::new();
-        let semanticized = self.semanticize_visible_expr(&expanded, 0, &mut semantic_visited);
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(semanticized.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let call_normalized = self.normalize_final_call_expr(semanticized.clone());
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(call_normalized.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let mut imported_visited = HashSet::new();
-        let imported_resolved =
-            self.resolve_imported_call_arg_expr(&call_normalized, 0, &mut imported_visited);
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(imported_resolved.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let memoryized = match &imported_resolved {
-            CExpr::Deref(inner) => {
-                let mut memory_visited = HashSet::new();
-                self.render_memory_access_from_visible_expr(
-                    inner,
-                    self.inputs.arch.ptr_size.max(1),
-                    0,
-                    &mut memory_visited,
-                )
-                .or_else(|| self.promote_constant_indexed_call_arg(inner))
-                .unwrap_or_else(|| imported_resolved.clone())
-            }
-            _ => imported_resolved.clone(),
-        };
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(memoryized.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-
-        let literalized = self
-            .resolve_literalish_call_arg_expr(&memoryized)
-            .unwrap_or(memoryized);
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(literalized.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        if allow_string_like_resolution {
-            let mut string_visited = HashSet::new();
-            if let Some(string_like) = self.resolve_string_like_imported_call_arg_expr(
-                &literalized,
-                0,
-                &mut string_visited,
-            ) {
-                best = self.choose_preferred_imported_call_arg_expr(
-                    best,
-                    Some(string_like),
-                    preserve_stable_input_slot,
-                    preserve_explicit_call_expr,
+        let mut args = Vec::with_capacity(indexed.len());
+        for (index, value) in indexed.iter().copied() {
+            let Some(expr) =
+                self.certified_call_arg_expr_for_value_at_site((block_addr, op_idx), index, value)
+            else {
+                // The typed refusal deliberately keeps only its stable kind
+                // and deciding site. The argument identity is per-call
+                // evidence, so keep it on the same diagnostic channel as the
+                // operands of every other refusing predicate. A collected
+                // `Option<Vec<_>>` discarded both operands here and made the
+                // reader reconstruct the one fact this loop already knew.
+                r2il::refusal_evidence!(
+                    "call-argument-spelling",
+                    "callsite=({block_addr:#x}, {op_idx}) argument_index={index} value={value:?}"
                 );
-            }
-        }
-
-        let best = best.unwrap_or(rewritten.clone());
-        if preserve_stable_input_slot
-            && self.is_preservable_named_stack_slot_expr(&rewritten)
-            && self.is_direct_constish_visible_expr(&best, 0)
-        {
-            return rewritten;
-        }
-        let rewritten_best = self.rewrite_stack_expr(best.clone());
-        self.choose_preferred_imported_call_arg_expr(
-            Some(best.clone()),
-            Some(rewritten_best),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        )
-        .unwrap_or(best)
-    }
-
-    fn finalize_authoritative_imported_call_arg_expr(
-        &self,
-        expr: CExpr,
-        preserve_stable_input_slot: bool,
-        preserve_explicit_call_expr: bool,
-        allow_string_like_resolution: bool,
-    ) -> CExpr {
-        let expr =
-            self.rewrite_imported_call_arg_expr_with_prepared_owners(expr, 0, &mut HashSet::new());
-        let rewritten = self.rewrite_stack_expr(expr);
-        let mut best = Some(rewritten.clone());
-        let mut imported_visited = HashSet::new();
-        let imported_resolved =
-            self.resolve_imported_call_arg_expr(&rewritten, 0, &mut imported_visited);
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(imported_resolved.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let call_normalized = self.normalize_final_call_expr(imported_resolved.clone());
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(call_normalized.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let memoryized = match &imported_resolved {
-            CExpr::Deref(inner) => {
-                let mut memory_visited = HashSet::new();
-                self.render_memory_access_from_visible_expr(
-                    inner,
-                    self.inputs.arch.ptr_size.max(1),
-                    0,
-                    &mut memory_visited,
-                )
-                .or_else(|| self.promote_constant_indexed_call_arg(inner))
-                .unwrap_or_else(|| call_normalized.clone())
-            }
-            _ => call_normalized.clone(),
-        };
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(memoryized.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let literalized = self
-            .resolve_literalish_call_arg_expr(&memoryized)
-            .unwrap_or(memoryized);
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(literalized.clone()),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let finalized = if allow_string_like_resolution {
-            let mut string_visited = HashSet::new();
-            self.resolve_string_like_imported_call_arg_expr(&literalized, 0, &mut string_visited)
-                .unwrap_or(literalized)
-        } else {
-            literalized
-        };
-        best = self.choose_preferred_imported_call_arg_expr(
-            best,
-            Some(finalized),
-            preserve_stable_input_slot,
-            preserve_explicit_call_expr,
-        );
-        let best = best.unwrap_or(rewritten.clone());
-        if preserve_stable_input_slot
-            && self.is_preservable_named_stack_slot_expr(&rewritten)
-            && self.is_direct_constish_visible_expr(&best, 0)
-        {
-            return rewritten;
-        }
-        self.rewrite_stack_expr(best)
-    }
-
-    fn imported_input_binding_prefers_pointer_identity(
-        &self,
-        binding: &analysis::CallArgBinding,
-    ) -> bool {
-        if binding.role != analysis::CallArgRole::Input {
-            return false;
-        }
-
-        if let Some(expr) = self.recover_call_arg_expr_from_source_var(binding) {
-            return self.is_preserved_imported_input_expr(&expr)
-                && !self.is_direct_constish_visible_expr(&expr, 0);
-        }
-
-        match &binding.arg {
-            analysis::SemanticCallArg::Semantic(analysis::SemanticValue::Load { addr, .. })
-            | analysis::SemanticCallArg::Semantic(analysis::SemanticValue::Address(addr)) => {
-                if let analysis::BaseRef::StackSlot(offset) = addr.base
-                    && let Some(name) = self.resolve_stack_var(offset)
-                {
-                    let expr = CExpr::Var(name);
-                    return self.is_preserved_imported_input_expr(&expr)
-                        && !self.is_direct_constish_visible_expr(&expr, 0);
-                }
-                false
-            }
-            analysis::SemanticCallArg::FallbackExpr(expr) => {
-                self.is_preserved_imported_input_expr(expr)
-                    && !self.is_direct_constish_visible_expr(expr, 0)
-            }
-            _ => false,
-        }
-    }
-
-    fn semantic_value_has_negative_stack_slot(value: &analysis::SemanticValue) -> bool {
-        match value {
-            analysis::SemanticValue::Load { addr, .. } | analysis::SemanticValue::Address(addr) => {
-                matches!(addr.base, analysis::BaseRef::StackSlot(offset) if offset < 0)
-            }
-            _ => false,
-        }
-    }
-
-    fn render_imported_semantic_arg_value(
-        &self,
-        value: &analysis::SemanticValue,
-        preserve_pointer_identity: bool,
-    ) -> Option<CExpr> {
-        if let Some(expr) =
-            self.prepared_imported_semantic_arg_expr(value, preserve_pointer_identity)
-        {
-            return Some(expr);
-        }
-
-        if preserve_pointer_identity {
-            if let analysis::SemanticValue::Address(addr) = value
-                && let Some(expr) = self.render_stable_stack_offset_scalar_expr(addr)
-            {
-                return Some(expr);
-            }
-            match value {
-                analysis::SemanticValue::Address(addr)
-                    if matches!(addr.base, analysis::BaseRef::StackSlot(_)) =>
-                {
-                    let mut visited = HashSet::new();
-                    return self
-                        .render_address_expr_from_addr(addr, 0, &mut visited)
-                        .or_else(|| self.render_stack_slot_address_expr_fallback(addr, 0));
-                }
-                analysis::SemanticValue::Load { addr, size }
-                    if matches!(addr.base, analysis::BaseRef::StackSlot(_)) =>
-                {
-                    if let analysis::BaseRef::StackSlot(offset) = addr.base
-                        && addr.index.is_none()
-                        && addr.offset_bytes == 0
-                        && let Some(expr) = self.render_stable_stack_scalar_expr(offset)
-                    {
-                        return Some(expr);
-                    }
-                    let mut visited = HashSet::new();
-                    return self
-                        .render_load_from_addr(addr, *size, 0, &mut visited)
-                        .or_else(|| {
-                            self.render_address_expr_from_addr(addr, 0, &mut visited)
-                                .or_else(|| self.render_stack_slot_address_expr_fallback(addr, 0))
-                                .map(|expr| match expr {
-                                    CExpr::AddrOf(inner)
-                                        if addr.index.is_none() && addr.offset_bytes == 0 =>
-                                    {
-                                        *inner
-                                    }
-                                    other => CExpr::Deref(Box::new(other)),
-                                })
-                        });
-                }
-                _ => {}
-            }
-        }
-
-        if let analysis::SemanticValue::Address(addr) = value
-            && addr.index.is_none()
-            && addr.offset_bytes == 0
-            && matches!(addr.base, analysis::BaseRef::Value(_))
-        {
-            if let analysis::BaseRef::Value(base_value) = &addr.base
-                && let Some(expr) = self.best_visible_definition(&base_value.display_name())
-                && !matches!(expr, CExpr::StringLit(_))
-            {
-                return Some(expr);
-            }
-            let mut visited = HashSet::new();
-            if let Some(expr) = self.render_base_ref_expr(&addr.base, false, 0, &mut visited) {
-                return Some(expr);
-            }
-        }
-
-        let mut visited = HashSet::new();
-        self.render_semantic_value(value, 0, &mut visited)
-    }
-
-    fn rewrite_imported_call_arg_expr_with_prepared_owners(
-        &self,
-        expr: CExpr,
-        depth: u32,
-        visited: &mut HashSet<String>,
-    ) -> CExpr {
-        if depth > Self::MAX_SEMANTIC_RENDER_DEPTH {
-            return expr;
-        }
-
-        match expr {
-            CExpr::Var(name) => {
-                if !visited.insert(name.clone()) {
-                    return CExpr::Var(name);
-                }
-                let resolved = self
-                    .prepared_semantic_view()
-                    .and_then(|prepared| prepared.owner_expr_for_name(&name))
-                    .cloned()
-                    .filter(|inner| {
-                        inner != &CExpr::Var(name.clone()) && !matches!(inner, CExpr::AddrOf(_))
-                    })
-                    .map(|inner| {
-                        self.rewrite_imported_call_arg_expr_with_prepared_owners(
-                            inner,
-                            depth + 1,
-                            visited,
-                        )
-                    })
-                    .or_else(|| {
-                        self.stack_offset_for_visible_storage_name(&name)
-                            .and_then(|offset| self.resolve_stack_var(offset))
-                            .filter(|alias| !alias.eq_ignore_ascii_case(&name))
-                            .map(CExpr::Var)
-                    })
-                    .unwrap_or_else(|| CExpr::Var(name.clone()));
-                visited.remove(&name);
-                resolved
-            }
-            other => other.map_children(&mut |child| {
-                self.rewrite_imported_call_arg_expr_with_prepared_owners(child, depth + 1, visited)
-            }),
-        }
-    }
-
-    fn expr_contains_prepared_owner_alias(&self, expr: &CExpr, depth: u32) -> bool {
-        if depth > Self::MAX_SEMANTIC_RENDER_DEPTH {
-            return false;
-        }
-
-        let Some(prepared) = self.prepared_semantic_view() else {
-            return false;
-        };
-
-        match expr {
-            CExpr::Var(name) => prepared.owner_expr_for_name(name).is_some(),
-            CExpr::Deref(inner)
-            | CExpr::AddrOf(inner)
-            | CExpr::Paren(inner)
-            | CExpr::Cast { expr: inner, .. }
-            | CExpr::Unary { operand: inner, .. }
-            | CExpr::Sizeof(inner) => self.expr_contains_prepared_owner_alias(inner, depth + 1),
-            CExpr::Binary { left, right, .. } => {
-                self.expr_contains_prepared_owner_alias(left, depth + 1)
-                    || self.expr_contains_prepared_owner_alias(right, depth + 1)
-            }
-            CExpr::Subscript { base, index } => {
-                self.expr_contains_prepared_owner_alias(base, depth + 1)
-                    || self.expr_contains_prepared_owner_alias(index, depth + 1)
-            }
-            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
-                self.expr_contains_prepared_owner_alias(base, depth + 1)
-            }
-            CExpr::Call { func, args } => {
-                self.expr_contains_prepared_owner_alias(func, depth + 1)
-                    || args
-                        .iter()
-                        .any(|arg| self.expr_contains_prepared_owner_alias(arg, depth + 1))
-            }
-            CExpr::Ternary {
-                cond,
-                then_expr,
-                else_expr,
-            } => {
-                self.expr_contains_prepared_owner_alias(cond, depth + 1)
-                    || self.expr_contains_prepared_owner_alias(then_expr, depth + 1)
-                    || self.expr_contains_prepared_owner_alias(else_expr, depth + 1)
-            }
-            CExpr::Comma(items) => items
-                .iter()
-                .any(|item| self.expr_contains_prepared_owner_alias(item, depth + 1)),
-            CExpr::IntLit(_)
-            | CExpr::UIntLit(_)
-            | CExpr::FloatLit(_)
-            | CExpr::StringLit(_)
-            | CExpr::CharLit(_)
-            | CExpr::SizeofType(_) => false,
-        }
-    }
-
-    pub(super) fn prepared_imported_semantic_arg_expr(
-        &self,
-        value: &analysis::SemanticValue,
-        preserve_pointer_identity: bool,
-    ) -> Option<CExpr> {
-        let prepared = self.prepared_semantic_view()?;
-        let owner_for_var = |var: &r2ssa::SSAVar| {
-            let preferred = prepared
-                .owner_expr_for_var(var)
-                .cloned()
-                .filter(|expr| preserve_pointer_identity || !matches!(expr, CExpr::AddrOf(_)))
-                .map(|expr| self.rewrite_stack_expr(expr))
-                .filter(|expr| {
-                    !self.call_arg_contains_transient_name(expr, 0)
-                        && !self.call_arg_contains_stack_placeholder(expr, 0)
-                        && !self.call_arg_contains_low_quality_name(expr, 0)
-                        && !matches!(
-                            expr,
-                            CExpr::Var(name)
-                                if self.is_autogenerated_stack_home_name(name)
-                                    || self.is_generic_stack_local_owner_name(name)
-                        )
-                });
-
-            preferred
-                .or_else(|| {
-                    let rendered = self.var_name(var);
-                    self.arg_alias_for_rendered_name(&rendered).map(CExpr::Var)
-                })
-                .or_else(|| {
-                    prepared
-                        .stack_offset_for_var(var)
-                        .and_then(|offset| self.resolve_stack_var(offset))
-                        .map(CExpr::Var)
-                })
-        };
-
-        match value {
-            analysis::SemanticValue::Scalar(analysis::ScalarValue::Root(root)) => {
-                owner_for_var(&root.var).or_else(|| {
-                    prepared
-                        .call_result_source_for_var(&root.var)
-                        .and_then(|source_call| {
-                            self.stable_owned_call_result_expr_for_source(source_call)
-                                .or_else(|| self.synthesized_call_expr_for_source_call(source_call))
-                        })
-                })
-            }
-            analysis::SemanticValue::Scalar(analysis::ScalarValue::Expr(expr)) => {
-                let original = self.rewrite_stack_expr(expr.clone());
-                let should_try_prepared_owner_rewrite =
-                    self.expr_contains_prepared_owner_alias(expr, 0);
-                if !self.call_arg_contains_transient_name(&original, 0)
-                    && !self.call_arg_contains_stack_placeholder(&original, 0)
-                    && !self.call_arg_contains_low_quality_name(&original, 0)
-                    && !should_try_prepared_owner_rewrite
-                {
-                    return Some(original);
-                }
-                let rewritten = self.rewrite_imported_call_arg_expr_with_prepared_owners(
-                    expr.clone(),
-                    0,
-                    &mut HashSet::new(),
-                );
-                let rewritten = self.rewrite_stack_expr(rewritten);
-                self.choose_preferred_imported_call_arg_expr(
-                    Some(original),
-                    Some(rewritten.clone()),
-                    true,
-                    false,
-                )
-                .or(Some(rewritten))
-            }
-            analysis::SemanticValue::Address(addr) => match &addr.base {
-                analysis::BaseRef::Value(root)
-                    if addr.index.is_none() && addr.offset_bytes == 0 && addr.scale_bytes == 0 =>
-                {
-                    owner_for_var(&root.var)
-                }
-                analysis::BaseRef::StackSlot(offset)
-                    if addr.index.is_none() && addr.offset_bytes == 0 && addr.scale_bytes == 0 =>
-                {
-                    self.resolve_stack_var(*offset).map(CExpr::Var).map(|expr| {
-                        if preserve_pointer_identity {
-                            CExpr::AddrOf(Box::new(expr))
-                        } else {
-                            expr
-                        }
-                    })
-                }
-                _ => None,
-            },
-            analysis::SemanticValue::Load { addr, .. } => match &addr.base {
-                analysis::BaseRef::Value(root)
-                    if addr.index.is_none() && addr.offset_bytes == 0 && addr.scale_bytes == 0 =>
-                {
-                    owner_for_var(&root.var)
-                }
-                analysis::BaseRef::StackSlot(offset)
-                    if addr.index.is_none() && addr.offset_bytes == 0 && addr.scale_bytes == 0 =>
-                {
-                    self.resolve_stack_var(*offset).map(CExpr::Var)
-                }
-                _ => None,
-            },
-            analysis::SemanticValue::Unknown => None,
-        }
-    }
-
-    fn render_stable_stack_scalar_expr(&self, offset: i64) -> Option<CExpr> {
-        let value = self.use_info().stable_stack_values.get(&offset)?;
-        let mut visited = HashSet::new();
-        let rendered = self.render_semantic_value(value, 0, &mut visited)?;
-        let rewritten = self.rewrite_stack_expr(rendered.clone());
-        let best = self
-            .choose_preferred_visible_expr(Some(rendered), Some(rewritten.clone()))
-            .unwrap_or(rewritten);
-        (!matches!(best, CExpr::AddrOf(_) | CExpr::Deref(_))).then_some(best)
-    }
-
-    fn render_stable_stack_offset_scalar_expr(
-        &self,
-        addr: &analysis::NormalizedAddr,
-    ) -> Option<CExpr> {
-        let analysis::BaseRef::StackSlot(base_offset) = addr.base else {
-            return None;
-        };
-        if addr.index.is_some() || addr.offset_bytes == 0 {
-            return None;
-        }
-
-        let base_expr = self.render_stable_stack_scalar_expr(base_offset)?;
-        let magnitude = addr.offset_bytes.unsigned_abs() as i64;
-        Some(if addr.offset_bytes < 0 {
-            CExpr::binary(
-                crate::ast::BinaryOp::Sub,
-                base_expr,
-                CExpr::IntLit(magnitude),
-            )
-        } else {
-            CExpr::binary(
-                crate::ast::BinaryOp::Add,
-                base_expr,
-                CExpr::IntLit(magnitude),
-            )
-        })
-    }
-
-    fn render_stack_slot_address_expr_fallback(
-        &self,
-        addr: &analysis::NormalizedAddr,
-        depth: u32,
-    ) -> Option<CExpr> {
-        if depth > Self::MAX_SEMANTIC_RENDER_DEPTH {
-            return None;
-        }
-
-        let analysis::BaseRef::StackSlot(base_offset) = addr.base else {
-            return None;
-        };
-
-        let base_name = self
-            .resolve_stack_var(base_offset)
-            .unwrap_or_else(|| stack_slot_synthetic_name(base_offset));
-        let mut expr = CExpr::AddrOf(Box::new(CExpr::Var(base_name)));
-
-        if let Some(index) = &addr.index {
-            let mut visited = HashSet::new();
-            let index_expr = self.render_value_ref(index, depth + 1, &mut visited)?;
-            let scaled = if addr.scale_bytes.unsigned_abs() <= 1 {
-                index_expr
-            } else {
-                CExpr::binary(
-                    crate::ast::BinaryOp::Mul,
-                    index_expr,
-                    CExpr::IntLit(addr.scale_bytes.unsigned_abs() as i64),
-                )
+                return Err(OpLoweringRefusal::missing_machine_projection());
             };
-            expr = CExpr::binary(
-                if addr.scale_bytes < 0 {
-                    crate::ast::BinaryOp::Sub
-                } else {
-                    crate::ast::BinaryOp::Add
-                },
-                expr,
-                scaled,
-            );
+            args.push(expr);
         }
-
-        if addr.offset_bytes != 0 {
-            expr = CExpr::binary(
-                if addr.offset_bytes < 0 {
-                    crate::ast::BinaryOp::Sub
-                } else {
-                    crate::ast::BinaryOp::Add
-                },
-                expr,
-                CExpr::IntLit(addr.offset_bytes.unsigned_abs() as i64),
-            );
-        }
-
-        Some(expr)
+        Ok(CertifiedCallArgs {
+            args,
+            values: indexed.into_iter().map(|(_, value)| value).collect(),
+        })
     }
 
-    fn choose_preferred_imported_call_arg_expr(
+    /// One argument of a call, spelled by the plan and observed as a read.
+    ///
+    /// The callsite and render certificates have already agreed on the exact,
+    /// contiguous `(index, ValueId)` sequence before this method is entered.
+    /// The binding plan then says how that value is read, exactly as it does
+    /// for an operand of any other operation, so the argument is whatever the
+    /// value's own disposition renders as. `ExpressionRenderFact` remains the
+    /// authority for reconstructing an SSA expression, and `PreparedCallView`
+    /// remains an analysis cache; neither is a second spelling authority.
+    ///
+    /// The read itself has no `UseSite`: `SSAOp::Call` takes only the callee
+    /// as an operand, so an argument value is consumed by the call boundary
+    /// and not by the graph. The callsite certificate is the source's record
+    /// that the read happens, which is the same record the return boundary
+    /// keeps for the value a `Return` carries, and it authorizes the marker
+    /// the same way.
+    fn certified_call_arg_expr_for_value_at_site(
         &self,
-        current: Option<CExpr>,
-        candidate: Option<CExpr>,
-        preserve_stable_input_slot: bool,
-        preserve_explicit_call_expr: bool,
+        site: (u64, usize),
+        argument_index: usize,
+        value: r2ssa::ValueId,
     ) -> Option<CExpr> {
-        if preserve_explicit_call_expr
-            && let (Some(CExpr::Call { .. }), Some(candidate_expr)) = (&current, &candidate)
-            && !matches!(candidate_expr, CExpr::Call { .. })
-        {
-            return current;
+        let prepared = self.inputs.prepared_ssa?;
+        let call = prepared.graph().inst_id_for_op_site(site.0, site.1)?;
+        let frame_object = crate::binding_plan::certified_frame_object_call_argument(
+            prepared,
+            call,
+            argument_index,
+            value,
+        );
+        let planned_inline = self.inputs.binding_names.is_some_and(|names| {
+            matches!(
+                names.require_value(value),
+                Ok(crate::binding_plan::PlannedValueSymbol::Inline(_))
+            )
+        });
+        let spelling = frame_object
+            .filter(|_| planned_inline)
+            .and_then(|object| self.certified_stack_address_expr_for_object(object));
+        if frame_object.is_some() && spelling.is_none() {
+            r2il::refusal_evidence!(
+                "call-argument-frame-address",
+                "callsite ({:#x}, {}) argument {argument_index} value {value:?} names frame object {:?}: planned inline={planned_inline} spelled={}",
+                site.0,
+                site.1,
+                frame_object,
+                spelling.is_some()
+            );
+        }
+        if let Some((object, (expr, ty))) = frame_object.zip(spelling) {
+            let expr = self.finish_replacement_expr(PendingReplacementExpr::escaped_stack_address(
+                value,
+                call,
+                argument_index,
+                object,
+                expr,
+            ));
+            let declared = self
+                .certified_callsite_for_op(site.0, site.1)
+                .and_then(|cert| cert.callee_signature.as_ref())
+                .and_then(|signature| signature.params.get(argument_index))
+                .cloned()
+                .or_else(|| self.machine_value_width_bits(value).map(CType::uint))?;
+            return Some(self.convert_from(expr, Some(&CValue::Typed(ty)), &declared));
         }
 
-        if preserve_stable_input_slot
-            && let (Some(current_expr), Some(candidate_expr)) = (&current, &candidate)
-            && self.is_preserved_imported_input_expr(current_expr)
-            && self.expr_is_generic_entry_arg_like(candidate_expr)
-        {
-            return current;
+        let expr = match self.planned_value_expr(value) {
+            Ok(expr) => expr,
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                return None;
+            }
+        };
+        // An inlined constant is spelled as a literal and reads no program
+        // variable, so there is no read for the placement audit to authorize
+        // and nothing for a marker to name.
+        if !matches!(
+            self.inputs
+                .binding_names
+                .and_then(|names| names.disposition_for_value(value)),
+            Some(crate::binding_plan::ValueDisposition::Bound { .. })
+        ) {
+            return Some(self.call_argument_as_declared(site, argument_index, value, expr));
         }
+        let expr = self.observe_certified_value_read_expr(value, call, expr);
+        Some(self.call_argument_as_declared(site, argument_index, value, expr))
+    }
 
-        self.choose_preferred_call_arg_expr_with_slot_policy(
-            current,
-            candidate,
-            true,
-            preserve_stable_input_slot,
+    pub(super) fn known_signature_for_site(
+        &self,
+        block_addr: u64,
+        op_idx: usize,
+    ) -> Option<r2types::FunctionType> {
+        self.certified_callsite_for_op(block_addr, op_idx)
+            .and_then(|cert| cert.callee_signature.clone())
+            .or_else(|| {
+                self.callee_identity_for_callsite(block_addr, op_idx)
+                    .and_then(|identity| identity.known_signature().cloned())
+            })
+    }
+
+    pub(super) fn resolve_call_target(&self, target: &SSAVar) -> OpLoweringResult<CExpr> {
+        if let Some(addr) = self.certified_const_bits(target) {
+            return Ok(self.callee_identity_expr(&self.callee_identity_for_direct_target(addr)));
+        }
+        if target.name_kind().is_constant() {
+            return Err(OpLoweringRefusal::missing_program_variable());
+        }
+        let value = self
+            .prepared_value_id_for_var(target)
+            .ok_or_else(|| OpLoweringRefusal::missing_program_variable())?;
+        match self.planned_value_expr(value) {
+            Ok(expr) => Ok(expr),
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                Err(OpLoweringRefusal::missing_program_variable())
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_modeled_call_target_for_site(&self, block_addr: u64, op_idx: usize) -> bool {
+        self.resolved_callee_target_for_site(block_addr, op_idx)
+            .is_some_and(|target| target.policy.modeled)
+    }
+}
+
+/// What kind of outside thing a call names.
+///
+/// The identity already classified it, so the rendering says what the analysis
+/// concluded rather than guessing from how the name is spelled.
+fn external_kind_for_callee(class: r2types::CalleeClass) -> crate::symbol::ExternalKind {
+    match class {
+        r2types::CalleeClass::Imported => crate::symbol::ExternalKind::Import,
+        r2types::CalleeClass::ExternalSymbol => crate::symbol::ExternalKind::Global,
+        _ => crate::symbol::ExternalKind::Function,
+    }
+}
+
+#[cfg(test)]
+mod indexed_argument_tests {
+    use super::exact_indexed_call_arguments;
+
+    fn facts(
+        arguments: &[(usize, u32)],
+        proof_values: &[u32],
+    ) -> (r2types::CallsiteArgumentFacts, r2types::CallsiteRenderFact) {
+        let callsite = r2types::CallsiteKey {
+            block_addr: 0x1000,
+            op_index: 2,
+        };
+        (
+            r2types::CallsiteArgumentFacts {
+                callsite,
+                call_site_id: r2ssa::CallSiteId(0),
+                at: r2ssa::InstId(0),
+                target: r2ssa::ValueId(9),
+                direct_target: Some(0x401000),
+                argument_values: arguments
+                    .iter()
+                    .map(|(index, value)| r2types::CallArgumentValueFact {
+                        index: *index,
+                        value: r2ssa::ValueId(*value),
+                    })
+                    .collect(),
+                variadic: false,
+                fixed_argument_count: None,
+                callee_signature: None,
+                variadic_argument_count_evidence: None,
+                variadic_argument_count_refusal: None,
+                register_argument_locations: Vec::new(),
+                stack_argument_locations: Vec::new(),
+                arguments_complete: true,
+                results_complete: true,
+            },
+            r2types::CallsiteRenderFact {
+                callsite,
+                target: Some(r2ssa::ValueId(9)),
+                disposition: r2types::CallsiteRenderDisposition::Statement,
+                proof_values: proof_values.iter().copied().map(r2ssa::ValueId).collect(),
+                residual_reason: None,
+            },
         )
     }
 
-    /// Convert an SSA operation to a C statement.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn op_to_stmt(&self, op: &SSAOp) -> Option<CStmt> {
-        let mut frame = LowerFrame::for_stmt(0, 0, false);
-        self.lowered_to_stmt(self.lower_op(op, &mut frame))
+    #[test]
+    fn indexed_arguments_require_one_contiguous_value_per_index() {
+        let (cert, render) = facts(&[(1, 11), (0, 10)], &[10, 11]);
+        assert_eq!(
+            exact_indexed_call_arguments(&cert, &render),
+            Some(vec![(0, r2ssa::ValueId(10)), (1, r2ssa::ValueId(11))])
+        );
+
+        for arguments in [&[(0, 10), (0, 11)][..], &[(0, 10), (2, 11)][..]] {
+            let (cert, render) = facts(arguments, &[10, 11]);
+            assert_eq!(exact_indexed_call_arguments(&cert, &render), None);
+        }
+    }
+
+    #[test]
+    fn indexed_arguments_require_matching_render_proof_slot() {
+        let (cert, render) = facts(&[(0, 10), (1, 11)], &[10, 12]);
+        assert_eq!(exact_indexed_call_arguments(&cert, &render), None);
     }
 }
 
-fn stack_slot_synthetic_name(offset: i64) -> String {
-    if offset < 0 {
-        format!("local_{:x}", (-offset) as u64)
-    } else {
-        format!("stack_{:x}", offset as u64)
-    }
-}
+#[cfg(test)]
+mod callee_return_tests {
+    use super::*;
 
-fn count_printf_placeholders(format_string: &str) -> usize {
-    let mut count = 0;
-    let mut chars = format_string.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '%' {
-            continue;
-        }
-        if matches!(chars.peek(), Some('%')) {
-            chars.next();
-            continue;
-        }
-        count += 1;
+    #[test]
+    fn terminal_callee_declaration_uses_the_function_return_contract() {
+        let pointer = CType::Pointer(Box::new(CType::Int {
+            bits: 8,
+            signedness: r2types::Signedness::Unsigned,
+        }));
+        assert_eq!(
+            callee_declaration_return_type(
+                r2types::CallsiteRenderDisposition::TerminalReturn,
+                Some(&pointer),
+                None,
+            ),
+            Some(pointer)
+        );
+        assert_eq!(
+            callee_declaration_return_type(
+                r2types::CallsiteRenderDisposition::TerminalReturn,
+                Some(&CType::Void),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            callee_declaration_return_type(
+                r2types::CallsiteRenderDisposition::TerminalVoidReturn,
+                Some(&CType::Void),
+                None,
+            ),
+            Some(CType::Void)
+        );
     }
-    count
 }

@@ -1,0 +1,149 @@
+warning: r2plugin must delegate route/budget/fallback policy to r2engine
+  --> $DIR/engine_policy_ownership.rs:31:1
+   |
+LL | / fn caller_prefers_bounded_type_plan() -> bool {
+LL | |     true
+LL | | }
+   | |_^
+   |
+   = note: `#[warn(r2plugin_engine_policy_ownership)]` on by default
+
+warning: r2plugin must delegate route/budget/fallback policy to r2engine
+  --> $DIR/engine_policy_ownership.rs:35:1
+   |
+LL | / fn analysis_policy_for_depth(_: u32) -> usize {
+LL | |     0
+LL | | }
+   | |_^
+
+warning: r2plugin must delegate route/budget/fallback policy to r2engine
+  --> $DIR/engine_policy_ownership.rs:39:1
+   |
+LL | / fn function_exceeds_auto_callback_budget() -> bool {
+LL | |     true
+LL | | }
+   | |_^
+
+warning: r2plugin must delegate route/budget/fallback policy to r2engine
+  --> $DIR/engine_policy_ownership.rs:43:1
+   |
+LL | / fn sleigh_mode_allows_deep_auto_callbacks() -> bool {
+LL | |     true
+LL | | }
+   | |_^
+
+warning: r2plugin must delegate route/budget/fallback policy to r2engine
+  --> $DIR/engine_policy_ownership.rs:47:1
+   |
+LL | / fn auto_callback_policy_for_depth(_: u32) -> bool {
+LL | |     true
+LL | | }
+   | |_^
+
+warning: r2plugin must delegate route/budget/fallback policy to r2engine
+  --> $DIR/engine_policy_ownership.rs:51:1
+   |
+LL | / fn r2sleigh_interproc_helper_scope_budget_allows(_: usize, _: u32) -> i32 {
+LL | |     0
+LL | | }
+   | |_^
+
+warning: r2plugin must delegate route/budget/fallback policy to r2engine
+  --> $DIR/engine_policy_ownership.rs:55:1
+   |
+LL | fn build_prepared_interproc_summary_set() {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:92:13
+   |
+LL |       let _ = EngineTypeAnalysisRequest {
+   |  _____________^
+LL | |         caller_prefers_bounded_type_plan: true,
+LL | |     };
+   | |_____^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:103:13
+   |
+LL |     let _ = r2dec::render_semantic_worker_linearization();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:104:5
+   |
+LL |     r2sym::compile_summary_dense_worker_artifact_from_interproc_summary();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:105:5
+   |
+LL |     r2sym::compile_semantic_artifact_default();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:106:5
+   |
+LL |     r2sym::augment_semantic_artifact_with_interproc_summary();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:107:5
+   |
+LL |     r2engine::decompile_route_decision();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:108:5
+   |
+LL |     r2engine::auto_callback_plan_for_policy();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:110:5
+   |
+LL | /     session.type_function(EngineTypeAnalysisRequest {
+LL | |         caller_prefers_bounded_type_plan: true,
+LL | |     });
+   | |______^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:110:27
+   |
+LL |       session.type_function(EngineTypeAnalysisRequest {
+   |  ___________________________^
+LL | |         caller_prefers_bounded_type_plan: true,
+LL | |     });
+   | |_____^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:113:13
+   |
+LL |     let _ = EngineFunctionDecompileRequest::full_semantics_for_function();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:114:13
+   |
+LL |     let _ = EngineAnalyzeRequest::from_input_with_compile_missing_semantics();
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:115:5
+   |
+LL |     build_prepared_interproc_summary_set();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:116:13
+   |
+LL |     let _ = EngineSemanticMode::Full;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: r2plugin must delegate route/budget/fallback decisions to r2engine
+  --> $DIR/engine_policy_ownership.rs:117:13
+   |
+LL |     let _ = EngineSemanticMode::Optional;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: 21 warnings emitted

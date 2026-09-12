@@ -3,28 +3,101 @@
 //! This module implements the phi-node placement algorithm using the
 //! iterated dominance frontier, as described by Cytron et al.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::cfg::{BasicBlock, CFG};
+use crate::cfg::CFG;
+use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::domtree::DomTree;
+use crate::function::{RegisterFamilyInfo, RegisterFamilySlot};
 use crate::naming::{RegisterNameMap, varnode_to_name};
-use crate::op::SSAOp;
-use crate::var::SSAVar;
+use crate::var::{CanonicalStorageId, SSAVar};
+
+/// Exact identity used by phi placement and SSA renaming.
+///
+/// The semantic name remains presentation advice. Width is part of the
+/// identity because Sleigh may reuse one Unique offset for unrelated scratch
+/// values of different widths, and register-name maps may expose multiple
+/// slices under one spelling. Canonical storage completes the identity; the
+/// name remains a separate presentation projection.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RenameIdentity {
+    pub name: String,
+    pub size: u32,
+    pub storage: CanonicalStorageId,
+}
+
+impl RenameIdentity {
+    pub fn new(name: impl Into<String>, storage: CanonicalStorageId) -> Self {
+        Self {
+            name: name.into(),
+            size: storage.size,
+            storage,
+        }
+    }
+
+    pub fn from_varnode(varnode: &r2il::Varnode, reg_names: Option<&RegisterNameMap>) -> Self {
+        Self::new(
+            varnode_to_name(varnode, reg_names),
+            CanonicalStorageId::from_varnode(varnode),
+        )
+    }
+
+    /// The identity a varnode is renamed under: its register family's root
+    /// when the architecture's geometry puts it inside a wider register, and
+    /// the exact varnode otherwise (doc/adr-register-identity.md §2).
+    pub fn for_varnode(
+        varnode: &r2il::Varnode,
+        reg_names: Option<&RegisterNameMap>,
+        families: Option<&RegisterFamilyInfo>,
+    ) -> Self {
+        match register_root_slot(varnode, families) {
+            Some(root) => Self::for_root_slot(root, reg_names),
+            None => Self::from_varnode(varnode, reg_names),
+        }
+    }
+
+    /// The root's identity is the one its own varnode would get, so a whole
+    /// read of the register and a lane read of it name one value.
+    pub(crate) fn for_root_slot(
+        root: RegisterFamilySlot,
+        reg_names: Option<&RegisterNameMap>,
+    ) -> Self {
+        let varnode = r2il::Varnode {
+            space: r2il::SpaceId::Register,
+            offset: root.offset,
+            size: root.width,
+            meta: None,
+        };
+        Self::from_varnode(&varnode, reg_names)
+    }
+
+    pub fn synthetic(name: impl Into<String>, size: u32) -> Self {
+        Self::new(name, CanonicalStorageId::unknown(0, size))
+    }
+
+    pub fn as_var(&self, version: u32, disambiguator: u32) -> SSAVar {
+        SSAVar::new(&self.name, version, self.size).with_rename_disambiguator(disambiguator)
+    }
+}
+
+pub type DefinitionSitesByIdentity = BTreeMap<RenameIdentity, BTreeSet<u64>>;
+pub type CanonicalStorageByIdentity = BTreeMap<RenameIdentity, CanonicalStorageId>;
+pub type DefinitionCollection = (DefinitionSitesByIdentity, CanonicalStorageByIdentity);
 
 /// Information about phi nodes to be placed in the CFG.
 #[derive(Debug, Clone, Default)]
 pub struct PhiPlacement {
-    /// Phi nodes to place at each block: block addr -> list of (variable name, predecessor addrs)
+    /// Phi nodes to place at each block, keyed internally by exact rename identity.
     pub phis: HashMap<u64, Vec<PhiInfo>>,
 }
 
 /// Information about a single phi node.
 #[derive(Debug, Clone)]
 pub struct PhiInfo {
-    /// The variable name (base name without version).
-    pub var_name: String,
-    /// The size of the variable in bytes.
-    pub var_size: u32,
+    /// Typed rename identity. The name inside it is retained for presentation.
+    pub identity: RenameIdentity,
+    /// Lifted storage identity, independent of register/display names.
+    pub storage: Option<CanonicalStorageId>,
     /// The predecessor blocks that contribute values.
     pub predecessors: Vec<u64>,
 }
@@ -35,38 +108,35 @@ impl PhiPlacement {
         Self::default()
     }
 
-    /// Compute phi placement for a CFG given variable definitions.
-    ///
-    /// # Arguments
-    /// * `cfg` - The control flow graph
-    /// * `domtree` - The dominator tree for the CFG
-    /// * `defs` - Map from variable name to the blocks where it's defined
-    /// * `var_sizes` - Map from variable name to its size in bytes
-    pub fn compute(
+    /// Compute phi placement while polling dominance-frontier worklists.
+    pub fn compute_with_storage_and_control<C: SsaWorkControl + ?Sized>(
         cfg: &CFG,
         domtree: &DomTree,
-        defs: &HashMap<String, HashSet<u64>>,
-        var_sizes: &HashMap<String, u32>,
-    ) -> Self {
+        defs: &DefinitionSitesByIdentity,
+        storage_by_identity: &CanonicalStorageByIdentity,
+        control: &C,
+    ) -> Result<Self, SsaExecutionStopReason> {
+        control.poll()?;
         let mut placement = Self::new();
 
-        let mut defs_by_name: Vec<(&String, &HashSet<u64>)> = defs.iter().collect();
-        defs_by_name.sort_unstable_by(|(lhs, _), (rhs, _)| lhs.cmp(rhs));
-
-        for (var_name, def_blocks) in defs_by_name {
+        for (identity, def_blocks) in defs {
+            control.poll()?;
             let mut def_list: Vec<u64> = def_blocks.iter().copied().collect();
             def_list.sort_unstable();
-            let mut phi_blocks: Vec<u64> =
-                domtree.iterated_frontier(&def_list).into_iter().collect();
+            let mut phi_blocks: Vec<u64> = domtree
+                .iterated_frontier_with_control(&def_list, control)?
+                .into_iter()
+                .collect();
             phi_blocks.sort_unstable();
 
             for phi_block in phi_blocks {
+                control.poll()?;
                 let preds = cfg.predecessors(phi_block);
                 if preds.len() >= 2 {
-                    let size = var_sizes.get(var_name).copied().unwrap_or(8);
+                    let storage = storage_by_identity.get(identity).copied();
                     let phi_info = PhiInfo {
-                        var_name: var_name.clone(),
-                        var_size: size,
+                        identity: identity.clone(),
+                        storage,
                         predecessors: preds,
                     };
                     placement.phis.entry(phi_block).or_default().push(phi_info);
@@ -75,100 +145,278 @@ impl PhiPlacement {
         }
 
         for phis in placement.phis.values_mut() {
+            control.poll()?;
             phis.sort_unstable_by(|lhs, rhs| {
-                lhs.var_name
-                    .cmp(&rhs.var_name)
-                    .then(lhs.var_size.cmp(&rhs.var_size))
+                lhs.identity
+                    .cmp(&rhs.identity)
                     .then(lhs.predecessors.cmp(&rhs.predecessors))
             });
         }
 
-        placement
+        control.poll()?;
+        Ok(placement)
+    }
+
+    /// Take from `complete` the merges this placement lacks, where the
+    /// identity is live at the block that would carry them.
+    pub fn merge_live_additions(
+        &mut self,
+        complete: Self,
+        live_in: &HashMap<u64, BTreeSet<RenameIdentity>>,
+    ) {
+        for (block, phis) in complete.phis {
+            let existing = self.phis.entry(block).or_default();
+            let held = existing
+                .iter()
+                .map(|phi| phi.identity.clone())
+                .collect::<BTreeSet<_>>();
+            let live = live_in.get(&block);
+            for phi in phis {
+                if held.contains(&phi.identity)
+                    || !live.is_some_and(|live| live.contains(&phi.identity))
+                {
+                    continue;
+                }
+                existing.push(phi);
+            }
+            existing.sort_unstable_by(|lhs, rhs| {
+                lhs.identity
+                    .cmp(&rhs.identity)
+                    .then(lhs.predecessors.cmp(&rhs.predecessors))
+            });
+        }
     }
 
     /// Get phi nodes for a specific block.
     pub fn get_phis(&self, block: u64) -> &[PhiInfo] {
         self.phis.get(&block).map(|v| v.as_slice()).unwrap_or(&[])
     }
-
-    /// Check if a block has any phi nodes.
-    pub fn has_phis(&self, block: u64) -> bool {
-        self.phis.get(&block).is_some_and(|v| !v.is_empty())
-    }
-
-    /// Get all blocks that have phi nodes.
-    pub fn blocks_with_phis(&self) -> impl Iterator<Item = u64> + '_ {
-        let mut blocks: Vec<u64> = self.phis.keys().copied().collect();
-        blocks.sort_unstable();
-        blocks.into_iter()
-    }
-
-    /// Get total number of phi nodes.
-    pub fn total_phis(&self) -> usize {
-        self.phis.values().map(|v| v.len()).sum()
-    }
 }
 
-/// Collect variable definitions from a basic block's operations.
-///
-/// Returns a map from variable name to whether it's defined in this block.
-pub fn collect_defs_from_block(block: &BasicBlock) -> HashSet<String> {
-    let mut defs = HashSet::new();
+/// The root slot a register varnode lies inside, when it is a lane of a wider
+/// register the architecture declares.
+pub(crate) fn register_root_slot(
+    varnode: &r2il::Varnode,
+    families: Option<&RegisterFamilyInfo>,
+) -> Option<RegisterFamilySlot> {
+    if !matches!(varnode.space, r2il::SpaceId::Register) {
+        return None;
+    }
+    families?.root_slot_over(varnode.offset, varnode.size)
+}
 
-    for op in &block.ops {
-        if let Some(dst) = get_op_output(op) {
-            defs.insert(dst);
+/// Collect definitions and storage while polling the block/operation scan.
+pub fn collect_defs_from_cfg_with_names_storage_and_control<C: SsaWorkControl + ?Sized>(
+    cfg: &CFG,
+    reg_names: Option<&RegisterNameMap>,
+    families: Option<&RegisterFamilyInfo>,
+    control: &C,
+) -> Result<DefinitionCollection, SsaExecutionStopReason> {
+    control.poll()?;
+    let mut defs = DefinitionSitesByIdentity::new();
+    let mut storage_by_identity = CanonicalStorageByIdentity::new();
+
+    for addr in cfg.block_addrs() {
+        control.poll()?;
+        let Some(block) = cfg.get_block(addr) else {
+            continue;
+        };
+        for op in &block.ops {
+            control.poll()?;
+            for varnode in op.inputs() {
+                if !matches!(varnode.space, r2il::SpaceId::Const) {
+                    let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
+                    defs.entry(identity.clone()).or_default();
+                    storage_by_identity.insert(identity.clone(), identity.storage);
+                }
+            }
+            if let Some(varnode) = get_op_output_varnode(op) {
+                let identity = RenameIdentity::for_varnode(varnode, reg_names, families);
+                defs.entry(identity.clone()).or_default().insert(block.addr);
+                storage_by_identity.insert(identity.clone(), identity.storage);
+            }
         }
     }
 
-    defs
+    control.poll()?;
+    Ok((defs, storage_by_identity))
 }
 
-/// Collect variable definitions from a CFG.
+/// The rename identities one call-boundary register names.
 ///
-/// Returns:
-/// - `defs`: Map from variable name to set of blocks where it's defined
-/// - `var_sizes`: Map from variable name to its size
-pub fn collect_defs_from_cfg(cfg: &CFG) -> (HashMap<String, HashSet<u64>>, HashMap<String, u32>) {
-    collect_defs_from_cfg_with_names(cfg, None)
+/// Renaming resolves these itself and, doing so per call site, could see an
+/// identity a previous site had just created. Resolving once against the
+/// definitions the body already has removes that order dependency.
+pub fn call_boundary_identities(
+    defs: &DefinitionSitesByIdentity,
+    reg: &crate::rename::CallBoundaryDef,
+    reg_names: Option<&RegisterNameMap>,
+    families: Option<&RegisterFamilyInfo>,
+) -> BTreeSet<RenameIdentity> {
+    // A convention register is one family: whatever width it is named at,
+    // the identity it defines or reads is the family's root.
+    if let Some(root) = families.and_then(|families| families.widest_slot_for_name(&reg.name)) {
+        return BTreeSet::from([RenameIdentity::for_root_slot(root, reg_names)]);
+    }
+    let needle = reg.name.to_ascii_lowercase();
+    let mut identities = defs
+        .keys()
+        .filter(|candidate| {
+            candidate.size == reg.size && candidate.name.to_ascii_lowercase() == needle
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if identities.is_empty()
+        && let Some(reg_names) = reg_names
+    {
+        for ((offset, size), candidate) in reg_names {
+            if *size == reg.size && candidate.eq_ignore_ascii_case(&reg.name) {
+                identities.insert(RenameIdentity::new(
+                    candidate,
+                    CanonicalStorageId {
+                        space: crate::CanonicalStorageSpace::Register,
+                        offset: *offset,
+                        size: *size,
+                    },
+                ));
+            }
+        }
+    }
+    if identities.is_empty() {
+        identities.insert(RenameIdentity::synthetic(&reg.name, reg.size));
+    }
+    identities
 }
 
-/// Collect variable definitions from a CFG with optional register names.
-pub fn collect_defs_from_cfg_with_names(
+/// Record the definitions renaming will add at every call.
+///
+/// A call clobbers its convention's registers, and renaming writes a
+/// `CallDefine` for each. Phi placement ran before those existed, so a
+/// register two paths defined -- one by a call and one by an instruction --
+/// reached a join with no phi, and the return that read it had no value.
+pub fn add_call_boundary_def_sites(
     cfg: &CFG,
+    call_boundaries: &crate::rename::CallBoundaryConfig,
     reg_names: Option<&RegisterNameMap>,
-) -> (HashMap<String, HashSet<u64>>, HashMap<String, u32>) {
-    let mut defs: HashMap<String, HashSet<u64>> = HashMap::new();
-    let mut var_sizes: HashMap<String, u32> = HashMap::new();
-
+    families: Option<&RegisterFamilyInfo>,
+    defs: &mut DefinitionSitesByIdentity,
+    storage_by_identity: &mut CanonicalStorageByIdentity,
+) {
+    // Only a carrier the body itself mentions. A register that appears
+    // nowhere but in the clobber list is read by no statement, so no phi for
+    // it can be observed and placing one only invents a live-in value.
+    let resolved = call_boundaries
+        .defined_regs
+        .iter()
+        .map(|reg| {
+            let identities = call_boundary_identities(defs, reg, reg_names, families);
+            identities
+                .into_iter()
+                .filter(|identity| defs.contains_key(identity))
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
     for addr in cfg.block_addrs() {
         let Some(block) = cfg.get_block(addr) else {
             continue;
         };
         for op in &block.ops {
-            if let Some((name, size)) = get_op_output_with_size(op, reg_names) {
-                defs.entry(name.clone()).or_default().insert(block.addr);
-                var_sizes.insert(name, size);
+            // Only a direct call names a callee whose body may have been read;
+            // anything else defines the whole list.
+            let preserved = match op {
+                r2il::R2ILOp::Call { target } if target.is_ram() => {
+                    call_boundaries.preserved_by_target.get(&target.offset)
+                }
+                r2il::R2ILOp::CallInd { .. } => None,
+                _ => continue,
+            };
+            for identity in resolved.iter().flatten() {
+                if preserved.is_some_and(|preserved| preserved.contains(&identity.storage)) {
+                    continue;
+                }
+                defs.entry(identity.clone()).or_default().insert(block.addr);
+                storage_by_identity.insert(identity.clone(), identity.storage);
             }
         }
     }
-
-    (defs, var_sizes)
 }
 
-/// Get the output variable name from an r2il operation.
-fn get_op_output(op: &r2il::R2ILOp) -> Option<String> {
-    get_op_output_with_size(op, None).map(|(name, _)| name)
-}
-
-/// Get the output variable name and size from an r2il operation.
-fn get_op_output_with_size(
-    op: &r2il::R2ILOp,
+/// Where each identity is live, so a phi is placed only where a read can see
+/// it.
+///
+/// A call reads its arguments and a return its value through the convention
+/// rather than through an operand, so both are added to the reads a block
+/// makes; without them the carrier a return hands back looks dead everywhere.
+pub fn live_in_by_block(
+    cfg: &CFG,
+    call_boundaries: &crate::rename::CallBoundaryConfig,
     reg_names: Option<&RegisterNameMap>,
-) -> Option<(String, u32)> {
+    families: Option<&RegisterFamilyInfo>,
+    defs: &DefinitionSitesByIdentity,
+) -> HashMap<u64, BTreeSet<RenameIdentity>> {
+    let resolve = |regs: &[crate::rename::CallBoundaryDef]| {
+        regs.iter()
+            .flat_map(|reg| call_boundary_identities(defs, reg, reg_names, families))
+            .filter(|identity| defs.contains_key(identity))
+            .collect::<BTreeSet<_>>()
+    };
+    let clobbered = resolve(&call_boundaries.defined_regs);
+    let arguments = resolve(&call_boundaries.argument_regs);
+    let returned = resolve(&call_boundaries.return_regs);
+
+    let mut live_in: HashMap<u64, BTreeSet<RenameIdentity>> = HashMap::new();
+    let addrs = cfg.block_addrs().collect::<Vec<_>>();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for addr in addrs.iter().rev() {
+            let Some(block) = cfg.get_block(*addr) else {
+                continue;
+            };
+            let mut live = cfg
+                .successors(*addr)
+                .into_iter()
+                .filter_map(|succ| live_in.get(&succ))
+                .flatten()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for op in block.ops.iter().rev() {
+                match op {
+                    r2il::R2ILOp::Call { .. } | r2il::R2ILOp::CallInd { .. } => {
+                        for identity in &clobbered {
+                            live.remove(identity);
+                        }
+                        live.extend(arguments.iter().cloned());
+                    }
+                    r2il::R2ILOp::Return { .. } => live.extend(returned.iter().cloned()),
+                    _ => {}
+                }
+                // A lane write keeps the rest of its root alive, so only a
+                // write of the whole identity kills it.
+                if let Some(varnode) = get_op_output_varnode(op)
+                    && register_root_slot(varnode, families).is_none()
+                {
+                    live.remove(&RenameIdentity::for_varnode(varnode, reg_names, families));
+                }
+                for varnode in op.inputs() {
+                    if !matches!(varnode.space, r2il::SpaceId::Const) {
+                        live.insert(RenameIdentity::for_varnode(varnode, reg_names, families));
+                    }
+                }
+            }
+            if live_in.get(addr) != Some(&live) {
+                live_in.insert(*addr, live);
+                changed = true;
+            }
+        }
+    }
+    live_in
+}
+
+fn get_op_output_varnode(op: &r2il::R2ILOp) -> Option<&r2il::Varnode> {
     use r2il::R2ILOp::*;
 
-    let varnode = match op {
+    match op {
         Copy { dst, .. }
         | Load { dst, .. }
         | IntAdd { dst, .. }
@@ -236,214 +484,8 @@ fn get_op_output_with_size(
         | Insert { dst, .. } => Some(dst),
         CallOther { output, .. } => output.as_ref(),
         _ => None,
-    };
-
-    varnode.map(|vn| (varnode_to_name(vn, reg_names), vn.size))
-}
-
-/// Create SSA phi operations from phi placement info.
-pub fn create_phi_ops(placement: &PhiPlacement, block_addr: u64) -> Vec<SSAOp> {
-    let mut ops = Vec::new();
-
-    for phi_info in placement.get_phis(block_addr) {
-        // Create placeholder sources - these will be filled in during renaming
-        let sources: Vec<SSAVar> = phi_info
-            .predecessors
-            .iter()
-            .map(|_| SSAVar::new(&phi_info.var_name, 0, phi_info.var_size))
-            .collect();
-
-        let phi_op = SSAOp::Phi {
-            dst: SSAVar::new(&phi_info.var_name, 0, phi_info.var_size),
-            sources,
-        };
-
-        ops.push(phi_op);
     }
-
-    ops
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
-
-    fn make_const(val: u64, size: u32) -> Varnode {
-        Varnode {
-            space: SpaceId::Const,
-            offset: val,
-            size,
-            meta: None,
-        }
-    }
-
-    fn make_reg(offset: u64, size: u32) -> Varnode {
-        Varnode {
-            space: SpaceId::Register,
-            offset,
-            size,
-            meta: None,
-        }
-    }
-
-    fn make_ram(addr: u64, size: u32) -> Varnode {
-        Varnode {
-            space: SpaceId::Ram,
-            offset: addr,
-            size,
-            meta: None,
-        }
-    }
-
-    #[test]
-    fn test_phi_placement_diamond() {
-        // Diamond CFG where both branches write to the same register
-        //     A (0x1000) - entry
-        //    / \
-        //   B   C        - both write to reg:0
-        //    \ /
-        //     D (0x100c) - needs phi for reg:0
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![R2ILOp::CBranch {
-                    target: make_const(0x1008, 8),
-                    cond: make_const(1, 1),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1004,
-                size: 4,
-                ops: vec![
-                    R2ILOp::Copy {
-                        dst: make_reg(0, 8), // Write to reg:0
-                        src: make_const(1, 8),
-                    },
-                    R2ILOp::Branch {
-                        target: make_const(0x100c, 8),
-                    },
-                ],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1008,
-                size: 4,
-                ops: vec![R2ILOp::Copy {
-                    dst: make_reg(0, 8), // Write to reg:0
-                    src: make_const(2, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x100c,
-                size: 4,
-                ops: vec![R2ILOp::Return {
-                    target: make_ram(0, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ];
-
-        let cfg = CFG::from_blocks(&blocks).unwrap();
-        let domtree = DomTree::compute(&cfg);
-        let (defs, var_sizes) = collect_defs_from_cfg(&cfg);
-
-        let placement = PhiPlacement::compute(&cfg, &domtree, &defs, &var_sizes);
-
-        // Should have a phi at block D (0x100c) for reg:0
-        assert!(placement.has_phis(0x100c));
-        let phis = placement.get_phis(0x100c);
-        assert_eq!(phis.len(), 1);
-        assert_eq!(phis[0].var_name, "reg:0");
-        assert_eq!(phis[0].predecessors.len(), 2);
-    }
-
-    #[test]
-    fn test_no_phi_needed() {
-        // Linear CFG - no phi needed
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![R2ILOp::Copy {
-                    dst: make_reg(0, 8),
-                    src: make_const(1, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1004,
-                size: 4,
-                ops: vec![R2ILOp::Return {
-                    target: make_ram(0, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ];
-
-        let cfg = CFG::from_blocks(&blocks).unwrap();
-        let domtree = DomTree::compute(&cfg);
-        let (defs, var_sizes) = collect_defs_from_cfg(&cfg);
-
-        let placement = PhiPlacement::compute(&cfg, &domtree, &defs, &var_sizes);
-
-        // No phis needed in linear CFG
-        assert_eq!(placement.total_phis(), 0);
-    }
-
-    #[test]
-    fn test_collect_defs() {
-        let blocks = vec![
-            R2ILBlock {
-                addr: 0x1000,
-                size: 4,
-                ops: vec![
-                    R2ILOp::Copy {
-                        dst: make_reg(0, 8),
-                        src: make_const(1, 8),
-                    },
-                    R2ILOp::Copy {
-                        dst: make_reg(8, 8),
-                        src: make_const(2, 8),
-                    },
-                ],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-            R2ILBlock {
-                addr: 0x1004,
-                size: 4,
-                ops: vec![R2ILOp::Copy {
-                    dst: make_reg(0, 8),
-                    src: make_const(3, 8),
-                }],
-                switch_info: None,
-                op_metadata: Default::default(),
-            },
-        ];
-
-        let cfg = CFG::from_blocks(&blocks).unwrap();
-        let (defs, var_sizes) = collect_defs_from_cfg(&cfg);
-
-        // reg:0 defined in both blocks
-        assert!(defs.contains_key("reg:0"));
-        assert_eq!(defs["reg:0"].len(), 2);
-
-        // reg:8 defined only in first block
-        assert!(defs.contains_key("reg:8"));
-        assert_eq!(defs["reg:8"].len(), 1);
-
-        // Sizes should be recorded
-        assert_eq!(var_sizes.get("reg:0"), Some(&8));
-        assert_eq!(var_sizes.get("reg:8"), Some(&8));
-    }
-}
+mod tests {}

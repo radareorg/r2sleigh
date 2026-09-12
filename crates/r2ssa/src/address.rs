@@ -1,0 +1,1284 @@
+//! Canonical parameter-relative address provenance.
+//!
+//! This pass owns affine pointer identity for prepared SSA. It propagates
+//! parameter bases through arithmetic and proven stack spills so object,
+//! memory-SSA, summary, symbolic, type, and render consumers share one fact.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+
+use r2il::SpaceId;
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    CanonicalStorageId, SSAFunction, SSAOp, SSAVar, SourceMachineContext, SsaGraph,
+    StackAddressRoot, ValueId,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AffineAddressTerm {
+    pub value: ValueId,
+    pub coefficient: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParameterAddressExpression {
+    pub parameter: usize,
+    /// Canonical full-width register storage that seeded this parameter base.
+    /// Absent only when SSA was prepared without a machine context.
+    pub parameter_storage: Option<CanonicalStorageId>,
+    pub terms: Vec<AffineAddressTerm>,
+    pub offset: i64,
+}
+
+/// One dereference on the way from a parameter to a pointee base.
+///
+/// `offset` is where the pointer was read from inside the object the step
+/// starts in, and `size` is the width of that read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PointeeStep {
+    pub offset: i64,
+    pub size: u32,
+}
+
+/// An address relative to memory reached *through* a parameter.
+///
+/// `*(arg0 + 0x38)` is a pointer the function loaded, and `*(that + 0)` is an
+/// address inside whatever it points to. Before this existed such an address
+/// had no provenance at all: the loaded value is a fresh unknown, so every
+/// access through it fell into the escaped-unknown object, and any analysis
+/// that wanted to summarize it had to ask a solver to enumerate concrete
+/// addresses for a pointer it had already been handed by name. The path is the
+/// identity: the same parameter and the same sequence of loads reach the same
+/// object, and two different paths are two objects that may alias.
+///
+/// A path is finite by construction. Each step is a distinct load on a
+/// definition chain, and a phi only carries an expression its sources agree
+/// on, so a loop that walks `p = p->next` produces no expression rather than an
+/// unbounded one. The collector still bounds the length by the number of loads
+/// in the function, which is the most steps any chain can have.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PointeeAddressExpression {
+    /// The parameter the chain starts from.
+    pub root: usize,
+    pub root_storage: Option<CanonicalStorageId>,
+    /// The loads taken from the parameter to the pointee base, in order.
+    pub path: Vec<PointeeStep>,
+    pub terms: Vec<AffineAddressTerm>,
+    pub offset: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AddressProvenanceFacts {
+    pub parameter_expressions: BTreeMap<ValueId, ParameterAddressExpression>,
+    /// Addresses reached through at least one load from a parameter. Kept
+    /// apart from `parameter_expressions` so that everything reading the
+    /// latter keeps its meaning: a parameter expression is directly
+    /// parameter-relative, a pointee expression never is.
+    pub pointee_expressions: BTreeMap<ValueId, PointeeAddressExpression>,
+}
+
+impl AddressProvenanceFacts {
+    pub fn parameter_expression(&self, value: ValueId) -> Option<&ParameterAddressExpression> {
+        self.parameter_expressions.get(&value)
+    }
+
+    pub fn pointee_expression(&self, value: ValueId) -> Option<&PointeeAddressExpression> {
+        self.pointee_expressions.get(&value)
+    }
+}
+
+/// What an address is relative to, inside the collector.
+///
+/// One affine mechanism serves both bases; only the public view splits them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AddressBase {
+    Parameter {
+        index: usize,
+        storage: Option<CanonicalStorageId>,
+    },
+    Pointee {
+        root: usize,
+        root_storage: Option<CanonicalStorageId>,
+        path: Vec<PointeeStep>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AddressExpression {
+    base: AddressBase,
+    terms: Vec<AffineAddressTerm>,
+    offset: i64,
+}
+
+impl AddressExpression {
+    /// The address one load further along: the value read at this address,
+    /// treated as a pointer, at offset zero inside what it points to.
+    fn dereferenced(&self, size: u32) -> Option<Self> {
+        if !self.terms.is_empty() {
+            return None;
+        }
+        let step = PointeeStep {
+            offset: self.offset,
+            size,
+        };
+        let base = match &self.base {
+            AddressBase::Parameter { index, storage } => AddressBase::Pointee {
+                root: *index,
+                root_storage: *storage,
+                path: vec![step],
+            },
+            AddressBase::Pointee {
+                root,
+                root_storage,
+                path,
+            } => {
+                let mut path = path.clone();
+                path.push(step);
+                AddressBase::Pointee {
+                    root: *root,
+                    root_storage: *root_storage,
+                    path,
+                }
+            }
+        };
+        Some(Self {
+            base,
+            terms: Vec::new(),
+            offset: 0,
+        })
+    }
+
+    fn path_len(&self) -> usize {
+        match &self.base {
+            AddressBase::Parameter { .. } => 0,
+            AddressBase::Pointee { path, .. } => path.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AffineScalar {
+    terms: BTreeMap<ValueId, i128>,
+    constant: i128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SpillSlotKey {
+    root: StackAddressRoot,
+    space: SpaceId,
+}
+
+fn memory_space_order(space: SpaceId) -> (u8, u32) {
+    match space {
+        SpaceId::Ram => (0, 0),
+        SpaceId::Register => (1, 0),
+        SpaceId::Unique => (2, 0),
+        SpaceId::Const => (3, 0),
+        SpaceId::Custom(id) => (4, id),
+    }
+}
+
+impl Ord for SpillSlotKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.root
+            .cmp(&other.root)
+            .then_with(|| memory_space_order(self.space).cmp(&memory_space_order(other.space)))
+    }
+}
+
+impl PartialOrd for SpillSlotKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl AffineScalar {
+    fn constant(value: i64) -> Self {
+        Self {
+            terms: BTreeMap::new(),
+            constant: i128::from(value),
+        }
+    }
+
+    fn term(value: ValueId) -> Self {
+        Self {
+            terms: BTreeMap::from([(value, 1)]),
+            constant: 0,
+        }
+    }
+
+    fn combine(mut self, other: Self, sign: i128) -> Option<Self> {
+        self.constant = self
+            .constant
+            .checked_add(other.constant.checked_mul(sign)?)?;
+        for (value, coefficient) in other.terms {
+            let delta = coefficient.checked_mul(sign)?;
+            let coefficient = self.terms.entry(value).or_default();
+            *coefficient = coefficient.checked_add(delta)?;
+        }
+        self.terms.retain(|_, coefficient| *coefficient != 0);
+        Some(self)
+    }
+
+    fn scale(mut self, factor: i128) -> Option<Self> {
+        self.constant = self.constant.checked_mul(factor)?;
+        for coefficient in self.terms.values_mut() {
+            *coefficient = coefficient.checked_mul(factor)?;
+        }
+        self.terms.retain(|_, coefficient| *coefficient != 0);
+        Some(self)
+    }
+}
+
+struct AddressCollector<'a> {
+    function: &'a SSAFunction,
+    graph: &'a SsaGraph,
+    definitions: HashMap<SSAVar, SSAOp>,
+    expressions: BTreeMap<ValueId, AddressExpression>,
+    scalar_memo: HashMap<ValueId, Option<AffineScalar>>,
+    scalar_visiting: HashSet<ValueId>,
+    stack_in: BTreeMap<u64, BTreeMap<SpillSlotKey, AddressExpression>>,
+    stack_out: BTreeMap<u64, BTreeMap<SpillSlotKey, AddressExpression>>,
+    /// The number of loads in the function: the most dereferences any chain
+    /// can take, and so the bound on a pointee path.
+    load_count: usize,
+}
+
+impl<'a> AddressCollector<'a> {
+    fn new(
+        function: &'a SSAFunction,
+        graph: &'a SsaGraph,
+        _machine_context: Option<&SourceMachineContext>,
+    ) -> Self {
+        let definitions = function
+            .blocks()
+            .flat_map(|block| block.ops.iter())
+            .filter_map(|op| op.dst().map(|dst| (dst.clone(), op.clone())))
+            .collect();
+        let mut expressions = BTreeMap::new();
+        if let Some(prep) = function.decompile_prep_facts() {
+            for (var, parameter) in &prep.formal_parameter_bases {
+                if let Some(value) = graph.value_id_for_var(var) {
+                    expressions.insert(
+                        value,
+                        AddressExpression {
+                            base: AddressBase::Parameter {
+                                index: *parameter,
+                                storage: graph
+                                    .value(value)
+                                    .and_then(|value| value.canonical_storage),
+                            },
+                            terms: Vec::new(),
+                            offset: 0,
+                        },
+                    );
+                }
+            }
+        }
+        let load_count = function
+            .blocks()
+            .flat_map(|block| block.ops.iter())
+            .filter(|op| {
+                matches!(
+                    op,
+                    SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. }
+                )
+            })
+            .count();
+        Self {
+            function,
+            graph,
+            definitions,
+            expressions,
+            scalar_memo: HashMap::new(),
+            scalar_visiting: HashSet::new(),
+            stack_in: BTreeMap::new(),
+            stack_out: BTreeMap::new(),
+            load_count,
+        }
+    }
+
+    fn collect(mut self) -> AddressProvenanceFacts {
+        let mut ready = self
+            .function
+            .block_addrs()
+            .iter()
+            .copied()
+            .collect::<VecDeque<_>>();
+        let mut queued = ready.iter().copied().collect::<BTreeSet<_>>();
+        while let Some(block_addr) = ready.pop_front() {
+            queued.remove(&block_addr);
+            let input = self.merge_predecessor_stack(block_addr);
+            let input_changed = self.stack_in.get(&block_addr) != Some(&input);
+            if input_changed {
+                self.stack_in.insert(block_addr, input.clone());
+            }
+            let (output, expression_changed) = self.transfer_block(block_addr, input);
+            let output_changed = self.stack_out.get(&block_addr) != Some(&output);
+            if output_changed {
+                self.stack_out.insert(block_addr, output);
+            }
+            if input_changed || output_changed || expression_changed {
+                for successor in self.function.successors(block_addr) {
+                    if queued.insert(successor) {
+                        ready.push_back(successor);
+                    }
+                }
+            }
+        }
+        let mut facts = AddressProvenanceFacts::default();
+        for (value, expression) in self.expressions {
+            match expression.base {
+                AddressBase::Parameter { index, storage } => {
+                    facts.parameter_expressions.insert(
+                        value,
+                        ParameterAddressExpression {
+                            parameter: index,
+                            parameter_storage: storage,
+                            terms: expression.terms,
+                            offset: expression.offset,
+                        },
+                    );
+                }
+                AddressBase::Pointee {
+                    root,
+                    root_storage,
+                    path,
+                } => {
+                    facts.pointee_expressions.insert(
+                        value,
+                        PointeeAddressExpression {
+                            root,
+                            root_storage,
+                            path,
+                            terms: expression.terms,
+                            offset: expression.offset,
+                        },
+                    );
+                }
+            }
+        }
+        facts
+    }
+
+    fn merge_predecessor_stack(
+        &self,
+        block_addr: u64,
+    ) -> BTreeMap<SpillSlotKey, AddressExpression> {
+        let predecessors = self.function.predecessors(block_addr);
+        let known = predecessors
+            .iter()
+            .filter_map(|pred| self.stack_out.get(pred))
+            .collect::<Vec<_>>();
+        let Some(first) = known.first() else {
+            return BTreeMap::new();
+        };
+        first
+            .iter()
+            .filter(|(slot, expression)| {
+                known
+                    .iter()
+                    .skip(1)
+                    .all(|state| state.get(slot) == Some(*expression))
+            })
+            .map(|(slot, expression)| (*slot, expression.clone()))
+            .collect()
+    }
+
+    fn transfer_block(
+        &mut self,
+        block_addr: u64,
+        mut stack: BTreeMap<SpillSlotKey, AddressExpression>,
+    ) -> (BTreeMap<SpillSlotKey, AddressExpression>, bool) {
+        let Some(block) = self.function.get_block(block_addr) else {
+            return (stack, false);
+        };
+        let mut changed = false;
+        for phi in &block.phis {
+            let expressions = phi
+                .sources
+                .iter()
+                .map(|(_, source)| self.expression_for_var(source))
+                .collect::<Option<Vec<_>>>();
+            let expression = expressions.and_then(|expressions| {
+                let first = expressions.first()?.clone();
+                expressions
+                    .iter()
+                    .all(|value| *value == first)
+                    .then_some(first)
+            });
+            if let Some(expression) = expression {
+                changed |= self.insert_expression(&phi.dst, expression);
+            }
+        }
+        for op in &block.ops {
+            match op {
+                SSAOp::Store { space, addr, val }
+                | SSAOp::StoreGuarded {
+                    space, addr, val, ..
+                } => {
+                    if let Some(root) = self.stack_root(addr) {
+                        let slot = SpillSlotKey {
+                            root,
+                            space: *space,
+                        };
+                        if let Some(expression) = self.expression_for_var(val) {
+                            stack.insert(slot, expression);
+                        } else {
+                            stack.remove(&slot);
+                        }
+                    }
+                }
+                SSAOp::Load { dst, space, addr }
+                | SSAOp::LoadLinked {
+                    dst, space, addr, ..
+                }
+                | SSAOp::LoadGuarded {
+                    dst, space, addr, ..
+                } => {
+                    if let Some(expression) = self.stack_root(addr).and_then(|root| {
+                        stack
+                            .get(&SpillSlotKey {
+                                root,
+                                space: *space,
+                            })
+                            .cloned()
+                    }) {
+                        changed |= self.insert_expression(dst, expression);
+                    } else if *space == SpaceId::Ram
+                        && let Some(expression) = self.expression_for_var(addr)
+                        && expression.path_len() < self.load_count
+                        && let Some(pointee) = expression.dereferenced(dst.size)
+                    {
+                        // The value read at a known address, taken as a
+                        // pointer: its own address is one step further along
+                        // the chain from the parameter.
+                        changed |= self.insert_expression(dst, pointee);
+                    }
+                }
+                _ => {}
+            }
+            if let Some((dst, expression)) = self.derive_op_expression(op) {
+                changed |= self.insert_expression(dst, expression);
+            }
+        }
+        (stack, changed)
+    }
+
+    fn derive_op_expression<'b>(
+        &mut self,
+        op: &'b SSAOp,
+    ) -> Option<(&'b SSAVar, AddressExpression)> {
+        match op {
+            SSAOp::Copy { dst, src }
+            | SSAOp::Cast { dst, src }
+            | SSAOp::New { dst, src }
+            | SSAOp::IntZExt { dst, src }
+            | SSAOp::IntSExt { dst, src } => self
+                .expression_for_var(src)
+                .map(|expression| (dst, expression)),
+            // A narrowed address is not the address: the low lane of a
+            // pointer parameter is a scalar the body computes with.
+            SSAOp::Trunc { dst, src }
+            | SSAOp::Subpiece {
+                dst,
+                src,
+                offset: 0,
+            } if dst.size == src.size => self
+                .expression_for_var(src)
+                .map(|expression| (dst, expression)),
+            SSAOp::IntAdd { dst, a, b } => self
+                .derive_additive_expression(a, b, 1, 1)
+                .map(|expression| (dst, expression)),
+            SSAOp::PtrAdd {
+                dst,
+                base,
+                index,
+                element_size,
+            } => self
+                .derive_additive_expression(base, index, 1, i128::from(*element_size))
+                .map(|expression| (dst, expression)),
+            SSAOp::IntSub { dst, a, b } => self
+                .derive_additive_expression(a, b, -1, 1)
+                .map(|expression| (dst, expression)),
+            SSAOp::PtrSub {
+                dst,
+                base,
+                index,
+                element_size,
+            } => self
+                .derive_additive_expression(base, index, -1, i128::from(*element_size))
+                .map(|expression| (dst, expression)),
+            _ => None,
+        }
+    }
+
+    fn derive_additive_expression(
+        &mut self,
+        left: &SSAVar,
+        right: &SSAVar,
+        right_sign: i128,
+        right_scale: i128,
+    ) -> Option<AddressExpression> {
+        let left_base = self.expression_for_var(left);
+        let right_base = self.expression_for_var(right);
+        if left_base.is_some() && right_base.is_some() {
+            return None;
+        }
+        if let Some(base) = left_base {
+            let delta = self
+                .scalar_for_var(right)?
+                .scale(right_sign.checked_mul(right_scale)?)?;
+            return add_delta(base, delta);
+        }
+        if right_sign > 0
+            && let Some(base) = right_base
+        {
+            let delta = self.scalar_for_var(left)?;
+            return add_delta(base, delta);
+        }
+        None
+    }
+
+    fn expression_for_var(&self, var: &SSAVar) -> Option<AddressExpression> {
+        let value = self.graph.value_id_for_var(var)?;
+        self.expressions.get(&value).cloned()
+    }
+
+    fn insert_expression(&mut self, var: &SSAVar, expression: AddressExpression) -> bool {
+        let Some(value) = self.graph.value_id_for_var(var) else {
+            return false;
+        };
+        match self.expressions.get(&value) {
+            Some(existing) if *existing == expression => false,
+            Some(_) => false,
+            None => {
+                self.expressions.insert(value, expression);
+                true
+            }
+        }
+    }
+
+    fn stack_root(&self, var: &SSAVar) -> Option<StackAddressRoot> {
+        let prep = self.function.decompile_prep_facts()?;
+        prep.stack_address_root_of(var).copied().or_else(|| {
+            prep.canonical_root_of(var)
+                .and_then(|root| prep.stack_address_root_of(root))
+                .copied()
+        })
+    }
+
+    fn scalar_for_var(&mut self, var: &SSAVar) -> Option<AffineScalar> {
+        let value = self.graph.value_id_for_var(var)?;
+        self.scalar_for_value(value)
+    }
+
+    fn scalar_for_value(&mut self, value: ValueId) -> Option<AffineScalar> {
+        if let Some(cached) = self.scalar_memo.get(&value) {
+            return cached.clone();
+        }
+        if !self.scalar_visiting.insert(value) {
+            return None;
+        }
+        let result = self.compute_scalar(value);
+        self.scalar_visiting.remove(&value);
+        self.scalar_memo.insert(value, result.clone());
+        result
+    }
+
+    fn compute_scalar(&mut self, value: ValueId) -> Option<AffineScalar> {
+        let var = self.graph.value(value)?.var.clone();
+        if let Some(constant) = signed_constant(&var) {
+            return Some(AffineScalar::constant(constant));
+        }
+        let Some(op) = self.definitions.get(&var).cloned() else {
+            return Some(AffineScalar::term(value));
+        };
+        match op {
+            SSAOp::Copy { src, .. }
+            | SSAOp::Cast { src, .. }
+            | SSAOp::New { src, .. }
+            | SSAOp::IntZExt { src, .. }
+            | SSAOp::IntSExt { src, .. }
+            | SSAOp::Trunc { src, .. }
+            | SSAOp::Subpiece { src, offset: 0, .. } => self.scalar_for_var(&src),
+            SSAOp::IntNegate { src, .. } => self.scalar_for_var(&src)?.scale(-1),
+            SSAOp::IntAdd { a, b, .. } => self
+                .scalar_for_var(&a)?
+                .combine(self.scalar_for_var(&b)?, 1),
+            SSAOp::IntSub { a, b, .. } => self
+                .scalar_for_var(&a)?
+                .combine(self.scalar_for_var(&b)?, -1),
+            SSAOp::IntMult { a, b, .. } => {
+                let left = self.scalar_for_var(&a)?;
+                let right = self.scalar_for_var(&b)?;
+                if left.terms.is_empty() {
+                    right.scale(left.constant)
+                } else if right.terms.is_empty() {
+                    left.scale(right.constant)
+                } else {
+                    None
+                }
+            }
+            SSAOp::IntLeft { a, b, .. } => {
+                let shift = self.scalar_for_var(&b)?;
+                if !shift.terms.is_empty() {
+                    return None;
+                }
+                let shift = u32::try_from(shift.constant).ok()?;
+                self.scalar_for_var(&a)?.scale(1i128.checked_shl(shift)?)
+            }
+            _ => Some(AffineScalar::term(value)),
+        }
+    }
+}
+
+fn add_delta(mut base: AddressExpression, delta: AffineScalar) -> Option<AddressExpression> {
+    let mut terms = base
+        .terms
+        .drain(..)
+        .map(|term| (term.value, i128::from(term.coefficient)))
+        .collect::<BTreeMap<_, _>>();
+    for (value, coefficient) in delta.terms {
+        let current = terms.entry(value).or_default();
+        *current = current.checked_add(coefficient)?;
+    }
+    terms.retain(|_, coefficient| *coefficient != 0);
+    base.offset = i64::try_from(i128::from(base.offset).checked_add(delta.constant)?).ok()?;
+    base.terms = terms
+        .into_iter()
+        .map(|(value, coefficient)| {
+            Some(AffineAddressTerm {
+                value,
+                coefficient: i64::try_from(coefficient).ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(base)
+}
+
+fn signed_constant(var: &SSAVar) -> Option<i64> {
+    let value = var.constant_bits()?;
+    let bits = var.size.saturating_mul(8).min(64);
+    if bits == 0 || bits == 64 {
+        return Some(value as i64);
+    }
+    let sign = 1u64.checked_shl(bits - 1)?;
+    let mask = 1u64.checked_shl(bits)?.wrapping_sub(1);
+    let value = value & mask;
+    Some(if value & sign == 0 {
+        value as i64
+    } else {
+        (value | !mask) as i64
+    })
+}
+
+pub(crate) fn collect_address_provenance(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+) -> AddressProvenanceFacts {
+    AddressCollector::new(function, graph, machine_context).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+
+    use crate::{
+        CanonicalStorageId, CanonicalStorageSpace, ObjectKind, PointeeStep, RelativeMemoryAddress,
+        SSAOp, SourceAbiParameterSpec, SourceFunctionInterface, SourceFunctionReturn,
+        SourceStackSlotSpec, SsaArtifact, StackAddressBase,
+    };
+
+    fn aarch64_two_arg_arch() -> ArchSpec {
+        let mut arch = ArchSpec::new("aarch64");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("x0", 0, 8));
+        arch.add_register(RegisterDef::new("w0", 0, 4));
+        arch.add_register(RegisterDef::new("x1", 8, 8));
+        arch.add_register(RegisterDef::new("w1", 8, 4));
+        arch.add_register(RegisterDef::new("sp", 16, 8));
+        arch
+    }
+
+    fn exact_parameter_interface(
+        revision: &[u8],
+        parameter_count: usize,
+    ) -> SourceFunctionInterface {
+        SourceFunctionInterface::new_exact(
+            revision.to_vec(),
+            "aarch64-test",
+            (0..parameter_count).map(|index| {
+                SourceAbiParameterSpec::new(
+                    index as u32,
+                    CanonicalStorageId {
+                        space: CanonicalStorageSpace::Register,
+                        offset: (index as u64) * 8,
+                        size: 8,
+                    },
+                )
+            }),
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .expect("valid exact parameter interface")
+    }
+
+    #[test]
+    fn context_free_parameter_spill_does_not_invent_a_stack_root() {
+        let arch = aarch64_two_arg_arch();
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntSub {
+            dst: Varnode::unique(0x10, 8),
+            a: Varnode::register(16, 8),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x10, 8),
+            val: Varnode::register(0, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x20, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x10, 8),
+        });
+        block.push(R2ILOp::IntMult {
+            dst: Varnode::unique(0x30, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::constant(40, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x40, 8),
+            a: Varnode::unique(0x20, 8),
+            b: Varnode::unique(0x30, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x50, 8),
+            a: Varnode::unique(0x40, 8),
+            b: Varnode::constant(16, 8),
+        });
+        let artifact = SsaArtifact::for_symbolic(&[block], Some(&arch)).expect("artifact");
+        let value = artifact
+            .graph()
+            .values
+            .iter()
+            .find(|value| value.var.name.starts_with("tmp:50"))
+            .expect("address value");
+        assert!(
+            artifact
+                .addresses()
+                .parameter_expression(value.id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_pointer_loaded_from_a_parameter_gets_a_pointee_expression() {
+        let arch = aarch64_two_arg_arch();
+        let interface = exact_parameter_interface(b"pointee-provenance", 1);
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x10, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::constant(0x38, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x20, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x10, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x30, 8),
+            a: Varnode::unique(0x20, 8),
+            b: Varnode::constant(0x10, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x40, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x30, 8),
+        });
+        let artifact = SsaArtifact::for_symbolic_with_interface(&[block], Some(&arch), interface)
+            .expect("artifact");
+        let value = |name: &str| {
+            artifact
+                .graph()
+                .values
+                .iter()
+                .find(|value| value.var.name == name)
+                .map(|value| value.id)
+                .expect(name)
+        };
+        // The address x0 + 0x38 is directly parameter-relative, as before.
+        let first_address = artifact
+            .addresses()
+            .parameter_expression(value("tmp:10"))
+            .expect("parameter expression");
+        assert_eq!((first_address.parameter, first_address.offset), (0, 0x38));
+        assert!(
+            artifact
+                .addresses()
+                .pointee_expression(value("tmp:10"))
+                .is_none()
+        );
+        // The value loaded there is a pointer into a pointee object, and is
+        // deliberately not a parameter expression: everything reading those
+        // keeps its meaning.
+        assert!(
+            artifact
+                .addresses()
+                .parameter_expression(value("tmp:20"))
+                .is_none()
+        );
+        let loaded = artifact
+            .addresses()
+            .pointee_expression(value("tmp:20"))
+            .expect("pointee expression for the loaded pointer");
+        assert_eq!(loaded.root, 0);
+        assert_eq!(
+            loaded.path,
+            vec![PointeeStep {
+                offset: 0x38,
+                size: 8
+            }]
+        );
+        assert_eq!(loaded.offset, 0);
+        // Arithmetic on it stays inside the same object.
+        let inner = artifact
+            .addresses()
+            .pointee_expression(value("tmp:30"))
+            .expect("offset pointee expression");
+        assert_eq!(inner.path, loaded.path);
+        assert_eq!(inner.offset, 0x10);
+        // And a second load is one step further along the chain.
+        let second = artifact
+            .addresses()
+            .pointee_expression(value("tmp:40"))
+            .expect("second-level pointee expression");
+        assert_eq!(second.path.len(), 2);
+        assert_eq!(
+            second.path[1],
+            PointeeStep {
+                offset: 0x10,
+                size: 8
+            }
+        );
+        // The object model names the chain.
+        let object = artifact
+            .objects()
+            .object_for_value(value("tmp:30"), SpaceId::Ram)
+            .expect("pointee object");
+        assert_eq!(
+            artifact.objects().access_path(object).as_deref(),
+            Some("*(arg0 + 0x38)")
+        );
+        assert_eq!(artifact.objects().root_parameter(object), Some(0));
+    }
+
+    #[test]
+    fn parameter_spill_reload_provenance_is_bound_to_exact_memory_space() {
+        let mut arch = aarch64_two_arg_arch();
+        arch.add_register(RegisterDef::new("lr", 24, 8));
+        let register_storage = |offset| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size: 8,
+        };
+        let parameter_storage = register_storage(0);
+        let stack_pointer_storage = register_storage(16);
+        let return_address_storage = register_storage(24);
+        let interface = SourceFunctionInterface::new_exact(
+            b"exact-space-parameter-spill".to_vec(),
+            "aarch64-test",
+            [SourceAbiParameterSpec::new(0, parameter_storage)],
+            SourceFunctionReturn::Void,
+            [SourceStackSlotSpec::new_local(
+                StackAddressBase::StackPointer,
+                stack_pointer_storage,
+                -8,
+                8,
+            )],
+        )
+        .and_then(|interface| interface.with_return_address_storage(return_address_storage))
+        .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer_storage))
+        .expect("exact source interface");
+
+        let mut block = R2ILBlock::new(0x1100, 4);
+        block.push(R2ILOp::IntSub {
+            dst: Varnode::unique(0x10, 8),
+            a: Varnode::register(16, 8),
+            b: Varnode::constant(8, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x10, 8),
+            val: Varnode::register(0, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x20, 8),
+            space: SpaceId::Custom(7),
+            addr: Varnode::unique(0x10, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Custom(7),
+            addr: Varnode::unique(0x10, 8),
+            val: Varnode::register(0, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x28, 8),
+            space: SpaceId::Custom(7),
+            addr: Varnode::unique(0x10, 8),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::register(24, 8),
+        });
+
+        let artifact = SsaArtifact::for_decompile_with_interface(&[block], Some(&arch), interface)
+            .expect("decompile artifact");
+        let loaded_values = artifact
+            .get_block(0x1100)
+            .expect("entry block")
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                SSAOp::Load { dst, space, .. } if *space == SpaceId::Custom(7) => artifact
+                    .graph()
+                    .value_id_for_var(dst)
+                    .map(|value| (dst.name.clone(), value)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(loaded_values.len(), 2);
+        let crossed = loaded_values
+            .iter()
+            .find(|(name, _)| name.starts_with("tmp:20"))
+            .expect("cross-space reload")
+            .1;
+        let exact = loaded_values
+            .iter()
+            .find(|(name, _)| name.starts_with("tmp:28"))
+            .expect("same-space reload")
+            .1;
+        assert!(artifact.addresses().parameter_expression(crossed).is_none());
+        assert_eq!(
+            artifact
+                .addresses()
+                .parameter_expression(exact)
+                .map(|expression| expression.parameter),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn narrow_scalar_formal_is_not_a_parameter_address_base() {
+        let arch = aarch64_two_arg_arch();
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x10, 4),
+            a: Varnode::register(8, 4),
+            b: Varnode::constant(4, 4),
+        });
+        let artifact = SsaArtifact::for_symbolic(&[block], Some(&arch)).expect("artifact");
+        // The body reads four bytes of `x1` and no more, so that read is the
+        // value itself; either way it is not the parameter's address base.
+        let scalar = artifact
+            .graph()
+            .values
+            .iter()
+            .find(|value| {
+                value.var.size == 4
+                    && (value.var.name.eq_ignore_ascii_case("w1")
+                        || value.var.name.starts_with("tmp:lane:"))
+            })
+            .expect("narrow formal read");
+        assert!(
+            artifact
+                .addresses()
+                .parameter_expression(scalar.id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn adding_two_full_width_parameter_bases_is_not_certified() {
+        let arch = aarch64_two_arg_arch();
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x10, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::register(8, 8),
+        });
+        let artifact = SsaArtifact::for_symbolic(&[block], Some(&arch)).expect("artifact");
+        let sum = artifact
+            .graph()
+            .values
+            .iter()
+            .find(|value| value.var.name.starts_with("tmp:10"))
+            .expect("sum");
+        assert!(artifact.addresses().parameter_expression(sum.id).is_none());
+    }
+
+    #[test]
+    fn context_free_pointer_spill_does_not_invent_a_stack_root() {
+        let arch = aarch64_two_arg_arch();
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntSub {
+            dst: Varnode::register(16, 8),
+            a: Varnode::register(16, 8),
+            b: Varnode::constant(32, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x20, 8),
+            a: Varnode::register(16, 8),
+            b: Varnode::constant(16, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x20, 8),
+            val: Varnode::register(0, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x30, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x20, 8),
+        });
+        block.push(R2ILOp::Copy {
+            dst: Varnode::unique(0x38, 8),
+            src: Varnode::constant(40, 8),
+        });
+        block.push(R2ILOp::IntMult {
+            dst: Varnode::unique(0x40, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::unique(0x38, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x50, 8),
+            a: Varnode::unique(0x30, 8),
+            b: Varnode::unique(0x40, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::register(16, 8),
+            val: Varnode::unique(0x50, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x60, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::register(16, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x70, 8),
+            a: Varnode::unique(0x60, 8),
+            b: Varnode::constant(16, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x70, 8),
+            val: Varnode::constant(1, 4),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x80, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::register(16, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x90, 8),
+            a: Varnode::unique(0x80, 8),
+            b: Varnode::constant(4, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0xa0, 2),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x90, 8),
+        });
+
+        let artifact = SsaArtifact::for_decompile(&[block], Some(&arch)).expect("artifact");
+        let value = artifact
+            .graph()
+            .values
+            .iter()
+            .find(|value| value.var.name.starts_with("tmp:90"))
+            .expect("field address value");
+        assert!(
+            artifact
+                .addresses()
+                .parameter_expression(value.id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn context_free_loop_spill_does_not_invent_a_stack_root() {
+        let arch = aarch64_two_arg_arch();
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::IntSub {
+            dst: Varnode::register(16, 8),
+            a: Varnode::register(16, 8),
+            b: Varnode::constant(8, 8),
+        });
+        entry.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::register(16, 8),
+            val: Varnode::register(0, 8),
+        });
+        entry.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1004, 8),
+        });
+
+        let mut header = R2ILBlock::new(0x1004, 4);
+        header.push(R2ILOp::Load {
+            dst: Varnode::unique(0x10, 8),
+            space: SpaceId::Ram,
+            addr: Varnode::register(16, 8),
+        });
+        header.push(R2ILOp::CBranch {
+            target: Varnode::constant(0x100c, 8),
+            cond: Varnode::register(8, 8),
+        });
+
+        let mut backedge = R2ILBlock::new(0x1008, 4);
+        backedge.push(R2ILOp::Branch {
+            target: Varnode::constant(0x1004, 8),
+        });
+
+        let mut exit = R2ILBlock::new(0x100c, 4);
+        exit.push(R2ILOp::Return {
+            target: Varnode::constant(0, 8),
+        });
+
+        let artifact = SsaArtifact::for_decompile(&[entry, header, backedge, exit], Some(&arch))
+            .expect("artifact");
+        let loaded = artifact
+            .graph()
+            .values
+            .iter()
+            .find(|value| {
+                value.var.name == "tmp:10"
+                    && artifact.graph().def_inst(value.id).is_some_and(|inst| {
+                        matches!(
+                            artifact.graph().inst(inst).map(|inst| &inst.payload),
+                            Some(crate::graph::InstPayload::Op(crate::SSAOp::Load { .. }))
+                        )
+                    })
+            })
+            .expect("reloaded parameter");
+        assert!(
+            artifact
+                .addresses()
+                .parameter_expression(loaded.id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn affine_field_ranges_keep_independent_memory_versions() {
+        let arch = aarch64_two_arg_arch();
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::IntMult {
+            dst: Varnode::unique(0x10, 8),
+            a: Varnode::register(8, 8),
+            b: Varnode::constant(40, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x20, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::unique(0x10, 8),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x30, 8),
+            a: Varnode::unique(0x20, 8),
+            b: Varnode::constant(16, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x30, 8),
+            val: Varnode::constant(0, 4),
+        });
+        block.push(R2ILOp::IntAdd {
+            dst: Varnode::unique(0x40, 8),
+            a: Varnode::unique(0x20, 8),
+            b: Varnode::constant(4, 8),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x50, 2),
+            space: SpaceId::Ram,
+            addr: Varnode::unique(0x40, 8),
+        });
+        let artifact = SsaArtifact::for_decompile_with_interface(
+            &[block],
+            Some(&arch),
+            exact_parameter_interface(b"affine-field-ranges", 2),
+        )
+        .expect("source-bound artifact");
+        let (load_index, _) = artifact
+            .get_block(0x1000)
+            .expect("block")
+            .ops
+            .iter()
+            .enumerate()
+            .find(|(_, op)| matches!(op, SSAOp::Load { .. }))
+            .expect("load");
+        let uses = artifact
+            .memory_uses_for_op_site(0x1000, load_index)
+            .expect("memory use");
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].version.version, 0);
+        assert!(matches!(
+            artifact
+                .objects()
+                .object(uses[0].location.object)
+                .map(|object| &object.kind),
+            Some(ObjectKind::Parameter { index: 0, .. })
+        ));
+        assert!(matches!(
+            &uses[0].location.address,
+            RelativeMemoryAddress::Affine { terms, offset }
+                if *offset == 4 && terms.len() == 1 && terms[0].coefficient == 40
+        ));
+    }
+
+    #[test]
+    fn distinct_parameter_bases_remain_may_alias() {
+        let arch = aarch64_two_arg_arch();
+        let mut block = R2ILBlock::new(0x1000, 4);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::register(0, 8),
+            val: Varnode::constant(0x42, 1),
+        });
+        block.push(R2ILOp::Load {
+            dst: Varnode::unique(0x10, 1),
+            space: SpaceId::Ram,
+            addr: Varnode::register(8, 8),
+        });
+        let artifact = SsaArtifact::for_decompile_with_interface(
+            &[block],
+            Some(&arch),
+            exact_parameter_interface(b"distinct-parameter-bases", 2),
+        )
+        .expect("source-bound artifact");
+        let block = artifact.get_block(0x1000).expect("block");
+        let store_index = block
+            .ops
+            .iter()
+            .position(|op| matches!(op, SSAOp::Store { .. }))
+            .expect("store");
+        let load_index = block
+            .ops
+            .iter()
+            .position(|op| matches!(op, SSAOp::Load { .. }))
+            .expect("load");
+        let written = artifact
+            .memory_defs_for_op_site(0x1000, store_index)
+            .and_then(|defs| defs.first())
+            .expect("memory def")
+            .next_version;
+        let uses = artifact
+            .memory_uses_for_op_site(0x1000, load_index)
+            .expect("memory use");
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].version, written);
+        assert_ne!(uses[0].location.object, written.object);
+    }
+}

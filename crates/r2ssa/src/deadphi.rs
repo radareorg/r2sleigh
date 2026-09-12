@@ -1,0 +1,624 @@
+//! Merges that nothing observes.
+//!
+//! A lifted body merges every storage live across a join, so an exit block ends
+//! up holding a phi for each condition-code bit and each Sleigh temporary that
+//! happened to be written on either side. A twelve-instruction function produces
+//! forty-nine of them, twenty-four at one loop header, and every rule that has to
+//! decide what a loop carries, what deserves a name, or what the output owes has
+//! to look at all of them and reject the ones that mean nothing.
+//!
+//! Removing them was not previously safe to attempt, because "nothing reads this"
+//! was not a question the SSA could answer: the value a function returns has no
+//! reader in its own body either. With [`crate::liveout`] saying what leaves
+//! through the calling convention, the question is answerable, and the ordinary
+//! answer applies -- a value is observed if something with an effect depends on
+//! it, and a merge no observation depends on is not part of the program.
+//!
+//! This reports what it found rather than editing the function, and that is not
+//! caution: the symbolic executor propagates machine state through merges, so a
+//! merge no value observation depends on can still be the only thing telling the
+//! executor what a register holds at a loop head. Removing them outright loses a
+//! VM dispatch summary that depended on exactly such a merge. Two consumers hold
+//! different and both-correct views of the same function, so the set is published
+//! for the rules that reason about candidates and the function is left alone for
+//! the rules that simulate it.
+
+use std::collections::{BTreeSet, VecDeque};
+
+use crate::graph::{InstId, SsaGraph, UseSite, ValueId};
+use crate::liveout::FunctionLiveOut;
+use crate::obligation::{SemanticInstructionState, SemanticObligationInventory};
+use crate::semantic::{PreparedFunctionFacts, SourceBoundaryFacts, SourceCallArgumentValue};
+
+/// Which merges no observation depends on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeadPhis {
+    values: BTreeSet<ValueId>,
+    /// Complete pure value domain on which no program observation depends.
+    ///
+    /// This includes dead merge inputs such as an entry condition-code value,
+    /// not only the merge outputs. Outputs of effectful operations are kept out
+    /// even when nobody consumes their result: the operation still owes its
+    /// memory/control/call occurrence.
+    unobserved_values: BTreeSet<ValueId>,
+    unobserved_insts: BTreeSet<InstId>,
+    unobserved_uses: BTreeSet<UseSite>,
+}
+
+/// Values with positive evidence that the program observes them.
+///
+/// This is deliberately not the complement of [`DeadPhis::unobserved_values`].
+/// An unsupported instruction can prevent a value from being proven dead, but
+/// that uncertainty is refusal evidence, not positive proof that the source
+/// program reads the value. Consumers such as interface recovery may make a
+/// positive claim only from this narrower certificate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProvenProgramObservations {
+    values: BTreeSet<ValueId>,
+    /// The bits of each observed value some observation reaches.
+    bytes: std::collections::BTreeMap<ValueId, u64>,
+    /// The value through which each observed value was reached, so a claim
+    /// that something is observed can name the observation it rests on.
+    parents: std::collections::BTreeMap<ValueId, ValueId>,
+    /// Why each root is one: the obligation that reads it, or the return.
+    roots: std::collections::BTreeMap<ValueId, String>,
+}
+
+struct Closure {
+    values: BTreeSet<ValueId>,
+    bytes: std::collections::BTreeMap<ValueId, u64>,
+    parents: std::collections::BTreeMap<ValueId, ValueId>,
+}
+
+/// The bytes of a value an observation reaches, as one bit per byte.
+///
+/// A value wider than the mask is taken whole; nothing this decides is about
+/// vectors, and taking every byte is the conservative side.
+fn byte_mask(size_bytes: u32) -> u64 {
+    if size_bytes >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (8 * size_bytes)) - 1
+    }
+}
+
+/// Which bytes of a constant could pass through an `and` with it.
+fn nonzero_byte_mask(bits: u64, size_bytes: u32) -> u64 {
+    let mut mask = 0u64;
+    for byte in 0..size_bytes.min(8) {
+        if (bits >> (8 * byte)) & 0xff != 0 {
+            mask |= 1 << byte;
+        }
+    }
+    mask
+}
+
+/// What an observation of `observed` bytes of a value asks of each input.
+///
+/// A slice, a concatenation, a widening, a copy, a merge and a mask with a
+/// constant each read only some bytes of what feeds them; everything else is
+/// taken to read all of its operands. A byte no observation reaches is not
+/// observed, which is what stops a byte the program overwrote from admitting
+/// the caller's register as a parameter.
+fn observed_input_bytes(
+    graph: &SsaGraph,
+    inst: &crate::graph::GraphInst,
+    observed: u64,
+) -> Vec<(ValueId, u64)> {
+    use crate::graph::InstPayload;
+    let size_of = |value: ValueId| graph.value(value).map_or(8, |value| value.var.size);
+    let constant = |value: ValueId| {
+        graph
+            .value(value)
+            .and_then(|value| value.var.constant_bits())
+    };
+    let whole = |value: ValueId| (value, byte_mask(size_of(value)));
+    let inputs = &inst.inputs;
+    match &inst.payload {
+        InstPayload::Phi { .. } => inputs.iter().map(|input| (*input, observed)).collect(),
+        InstPayload::Op(op) => match op {
+            crate::SSAOp::Copy { .. } if inputs.len() == 1 => vec![(inputs[0], observed)],
+            crate::SSAOp::Subpiece { offset, .. } if inputs.len() == 1 => {
+                vec![(inputs[0], observed.checked_shl(8 * offset).unwrap_or(0))]
+            }
+            crate::SSAOp::Piece { .. } if inputs.len() == 2 => {
+                let lo_bytes = size_of(inputs[1]);
+                let lo = observed & byte_mask(lo_bytes);
+                let hi = observed.checked_shr(8 * lo_bytes).unwrap_or(0);
+                vec![(inputs[0], hi), (inputs[1], lo)]
+            }
+            crate::SSAOp::IntZExt { .. } if inputs.len() == 1 => {
+                vec![(inputs[0], observed & byte_mask(size_of(inputs[0])))]
+            }
+            crate::SSAOp::IntAnd { .. } if inputs.len() == 2 => {
+                let mask_of = |value: ValueId| {
+                    constant(value).map(|bits| nonzero_byte_mask(bits, size_of(value)))
+                };
+                match (mask_of(inputs[0]), mask_of(inputs[1])) {
+                    (None, Some(mask)) => vec![(inputs[0], observed & mask)],
+                    (Some(mask), None) => vec![(inputs[1], observed & mask)],
+                    _ => inputs.iter().map(|input| (*input, observed)).collect(),
+                }
+            }
+            _ => inputs.iter().map(|input| whole(*input)).collect(),
+        },
+    }
+}
+
+fn dependency_closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
+    let mut bytes: std::collections::BTreeMap<ValueId, u64> = std::collections::BTreeMap::new();
+    let mut parents = std::collections::BTreeMap::new();
+    let mut pending = VecDeque::new();
+    for value in roots {
+        let mask = byte_mask(graph.value(value).map_or(8, |value| value.var.size));
+        if mask != 0 && bytes.insert(value, mask).is_none() {
+            pending.push_back(value);
+        }
+    }
+    while let Some(value) = pending.pop_front() {
+        let observed = bytes.get(&value).copied().unwrap_or(0);
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            continue;
+        };
+        for (input, mask) in observed_input_bytes(graph, inst, observed) {
+            if mask == 0 {
+                continue;
+            }
+            let entry = bytes.entry(input).or_insert(0);
+            let before = *entry;
+            *entry |= mask;
+            if before == 0 {
+                parents.insert(input, value);
+            }
+            if *entry != before {
+                pending.push_back(input);
+            }
+        }
+    }
+    Closure {
+        values: bytes.keys().copied().collect(),
+        bytes,
+        parents,
+    }
+}
+
+impl ProvenProgramObservations {
+    /// Close exact live outputs and non-refusal obligations over SSA def-use.
+    pub fn find(
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        facts: &PreparedFunctionFacts,
+    ) -> Option<Self> {
+        if !facts.obligations.is_complete() {
+            return None;
+        }
+        let mut roots = std::collections::BTreeMap::new();
+        for value in live_out.iter() {
+            roots.entry(value).or_insert_with(|| "return".to_string());
+        }
+        for obligation in facts.obligations.obligations().values() {
+            if !obligation.id.kind.is_positive_observation_root() {
+                continue;
+            }
+            for input in obligation.inputs.iter().copied() {
+                roots
+                    .entry(input)
+                    .or_insert_with(|| format!("{:?}", obligation.id));
+            }
+        }
+        let closure = dependency_closure(graph, roots.keys().copied());
+        Some(Self {
+            values: closure.values,
+            bytes: closure.bytes,
+            parents: closure.parents,
+            roots,
+        })
+    }
+
+    pub fn contains(&self, value: ValueId) -> bool {
+        self.values.contains(&value)
+    }
+
+    /// The bits of a value some observation reaches.
+    pub fn observed_bytes(&self, value: ValueId) -> Option<u64> {
+        self.bytes.get(&value).copied()
+    }
+
+    /// How many of a value's least significant bytes some observation
+    /// reaches, when the observed bits are exactly that low prefix of whole
+    /// bytes; `None` for a value nothing observes or one observed at a
+    /// higher lane only.
+    pub fn observed_low_bytes(&self, value: ValueId) -> Option<u32> {
+        let mask = *self.bytes.get(&value)?;
+        let bits = mask.trailing_ones();
+        (bits > 0 && bits % 8 == 0 && mask.checked_shr(bits).unwrap_or(0) == 0).then_some(bits / 8)
+    }
+
+    /// The chain of values from the root that observes `value` down to it.
+    pub fn witness(&self, value: ValueId) -> (Option<&str>, Vec<ValueId>) {
+        let mut chain = vec![value];
+        let mut current = value;
+        while let Some(parent) = self.parents.get(&current) {
+            chain.push(*parent);
+            current = *parent;
+        }
+        chain.reverse();
+        (self.roots.get(&current).map(String::as_str), chain)
+    }
+}
+
+impl DeadPhis {
+    /// Find the merges nothing observes, following what observation depends on.
+    pub fn find(
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        facts: &PreparedFunctionFacts,
+    ) -> Self {
+        Self::find_from(graph, live_out, &facts.obligations, &facts.boundaries)
+    }
+
+    /// The same answer, from the two fact tables it actually reads.
+    ///
+    /// Fact collection itself needs this set: a rule that asks whether the
+    /// program reads a value must ask it before the certificates that depend
+    /// on the answer are formed, and both inputs are complete by then.
+    pub(crate) fn find_from(
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        obligations: &SemanticObligationInventory,
+        boundaries: &SourceBoundaryFacts,
+    ) -> Self {
+        // The obligation inventory is the canonical answer to whether an
+        // instruction is observable. In particular, exact ABI call arguments
+        // are boundary inputs rather than graph inputs, so reconstructing the
+        // answer here from opcodes would silently delete their producers.
+        if !obligations.is_complete() {
+            return Self::default();
+        }
+        let mut roots = BTreeSet::from_iter(live_out.iter());
+        for obligation in obligations.obligations().values() {
+            roots.extend(obligation.inputs.iter().copied());
+        }
+        // Parameters are rendered program variables even when the body does
+        // not read them, so their canonical entry values remain in the named
+        // domain independently of effect liveness.
+        for parameter in boundaries.parameters.values() {
+            roots.insert(parameter.value);
+        }
+        for boundary in boundaries.calls.values() {
+            for argument in &boundary.arguments {
+                if let SourceCallArgumentValue::Value(value) = argument.value {
+                    roots.insert(value);
+                }
+            }
+        }
+        // Whatever an observation depends on is observed, transitively. The walk
+        // is over the graph's own instruction inputs, so it visits each edge once.
+        let observed = dependency_closure(graph, roots).values;
+
+        let unobserved_values = graph
+            .values
+            .iter()
+            .filter(|value| {
+                !observed.contains(&value.id)
+                    && graph
+                        .def_inst(value.id)
+                        .and_then(|inst| obligations.instruction_for_inst(inst))
+                        .is_none_or(|instruction| {
+                            instruction.state == SemanticInstructionState::ProvenDead
+                        })
+            })
+            .map(|value| value.id)
+            .collect();
+        let mut dead = Self {
+            unobserved_values,
+            ..Self::default()
+        };
+        for inst in &graph.insts {
+            // An operation the inventory proved dead and that produces no value
+            // is unobserved too. Only outputs were asked about, so a store that
+            // owes nothing -- the write half of a memory round trip is the
+            // case -- was never marked, and the renderer went on to lower it
+            // and ask for an operand the plan had already elided.
+            let proven_dead_effect = inst.output.is_none()
+                && obligations
+                    .instruction_for_inst(inst.id)
+                    .is_some_and(|instruction| {
+                        instruction.state == SemanticInstructionState::ProvenDead
+                    });
+            if !proven_dead_effect
+                && !inst
+                    .output
+                    .is_some_and(|output| dead.unobserved_values.contains(&output))
+            {
+                continue;
+            }
+            dead.unobserved_insts.insert(inst.id);
+            dead.unobserved_uses
+                .extend((0..inst.inputs.len()).map(|input_idx| UseSite {
+                    inst: inst.id,
+                    input_idx,
+                }));
+        }
+        for inst in &graph.insts {
+            if matches!(inst.payload, crate::graph::InstPayload::Phi { .. })
+                && inst
+                    .output
+                    .is_some_and(|value| dead.unobserved_values.contains(&value))
+            {
+                dead.values.insert(inst.output.expect("checked phi output"));
+            }
+        }
+        dead.report_values_observed_only_through_dead_merges(
+            graph,
+            live_out,
+            obligations,
+            &observed,
+        );
+        dead
+    }
+
+    /// Name a value this analysis calls observed and also renders unreachable.
+    ///
+    /// A value whose every graph use sits inside an instruction the same walk
+    /// proved unobserved has no occurrence any rendering can own, so the plan
+    /// binds a cell the seal then demands and nothing can fill. It is reached
+    /// from a root rather than through its uses, and which root decides whether
+    /// the obligation's inputs are wrong or the merge is not dead.
+    fn report_values_observed_only_through_dead_merges(
+        &self,
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        obligations: &SemanticObligationInventory,
+        observed: &BTreeSet<ValueId>,
+    ) {
+        if !r2il::refusal_evidence::tracing() {
+            return;
+        }
+        for value in &graph.values {
+            if self.unobserved_values.contains(&value.id) {
+                continue;
+            }
+            let uses = graph.use_sites(value.id);
+            if uses.is_empty()
+                || !uses
+                    .iter()
+                    .all(|site| self.unobserved_insts.contains(&site.inst))
+            {
+                continue;
+            }
+            let rooted_by = obligations
+                .obligations()
+                .values()
+                .filter(|obligation| obligation.inputs.contains(&value.id))
+                .map(|obligation| {
+                    format!("{:?}/{:?}", obligation.id.kind, obligation.id.instruction)
+                })
+                .collect::<Vec<_>>();
+            let definition_state = graph
+                .def_inst(value.id)
+                .and_then(|inst| obligations.instruction_for_inst(inst))
+                .map(|instruction| format!("{:?}", instruction.state));
+            r2il::refusal_evidence!(
+                "observed-through-dead-merge",
+                "{:?} keeps a cell while every one of its {} uses is inside an unobserved merge; in_observed_closure={} live_out={} definition_state={definition_state:?} obligations={rooted_by:?}",
+                value.id,
+                uses.len(),
+                observed.contains(&value.id),
+                live_out.contains(value.id)
+            );
+        }
+    }
+
+    pub fn contains(&self, value: ValueId) -> bool {
+        self.values.contains(&value)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = ValueId> + '_ {
+        self.values.iter().copied()
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Every pure value outside the transitive observation slice.
+    pub const fn unobserved_values(&self) -> &BTreeSet<ValueId> {
+        &self.unobserved_values
+    }
+
+    /// Every pure definition whose output is in [`Self::unobserved_values`].
+    pub const fn unobserved_insts(&self) -> &BTreeSet<InstId> {
+        &self.unobserved_insts
+    }
+
+    /// Complete input-use domain of [`Self::unobserved_insts`].
+    pub const fn unobserved_uses(&self) -> &BTreeSet<UseSite> {
+        &self.unobserved_uses
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CanonicalStorageId, CanonicalStorageSpace, SSAFunction};
+    use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+
+    fn reg(offset: u64, size: u32) -> Varnode {
+        Varnode::new(SpaceId::Register, offset, size)
+    }
+
+    fn return_storages() -> [CanonicalStorageId; 1] {
+        [CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: 0,
+            size: 8,
+        }]
+    }
+
+    fn arch() -> ArchSpec {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("RAX", 0, 8));
+        arch.add_register(RegisterDef::new("RCX", 8, 8));
+        arch.add_register(RegisterDef::new("RDX", 16, 8));
+        arch.add_register(RegisterDef::new("ZF", 0x206, 1));
+        arch.add_register(RegisterDef::new("RIP", 0x288, 8));
+        arch
+    }
+
+    /// A diamond that merges one effect input and one dead condition code at exit.
+    fn merging_function() -> SSAFunction {
+        let entry = R2ILBlock {
+            addr: 0x1000,
+            size: 4,
+            ops: vec![
+                R2ILOp::IntEqual {
+                    dst: reg(0x206, 1),
+                    a: reg(8, 8),
+                    b: Varnode::constant(0, 8),
+                },
+                R2ILOp::CBranch {
+                    cond: reg(0x206, 1),
+                    target: Varnode::constant(0x1008, 8),
+                },
+            ],
+            ..R2ILBlock::default()
+        };
+        let left = R2ILBlock {
+            addr: 0x1004,
+            size: 4,
+            ops: vec![
+                R2ILOp::Copy {
+                    dst: reg(0, 8),
+                    src: Varnode::constant(1, 8),
+                },
+                R2ILOp::IntEqual {
+                    dst: reg(0x206, 1),
+                    a: reg(16, 8),
+                    b: Varnode::constant(0, 8),
+                },
+                R2ILOp::Branch {
+                    target: Varnode::constant(0x100c, 8),
+                },
+            ],
+            ..R2ILBlock::default()
+        };
+        let right = R2ILBlock {
+            addr: 0x1008,
+            size: 4,
+            ops: vec![
+                R2ILOp::Copy {
+                    dst: reg(0, 8),
+                    src: Varnode::constant(2, 8),
+                },
+                R2ILOp::IntEqual {
+                    dst: reg(0x206, 1),
+                    a: reg(16, 8),
+                    b: Varnode::constant(1, 8),
+                },
+                R2ILOp::Branch {
+                    target: Varnode::constant(0x100c, 8),
+                },
+            ],
+            ..R2ILBlock::default()
+        };
+        let exit = R2ILBlock {
+            addr: 0x100c,
+            size: 4,
+            ops: vec![R2ILOp::Store {
+                space: SpaceId::Ram,
+                addr: Varnode::constant(0x2000, 8),
+                val: reg(0, 8),
+            }],
+            ..R2ILBlock::default()
+        };
+        SSAFunction::from_blocks_with_arch(&[entry, left, right, exit], Some(&arch())).expect("ssa")
+    }
+
+    #[test]
+    fn a_flag_merged_at_a_join_and_never_tested_again_is_not_part_of_the_program() {
+        let func = merging_function();
+        let graph = SsaGraph::from_function(&func);
+        let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
+
+        let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
+        let dead = DeadPhis::find(&graph, &live, &facts);
+
+        let exit = func.get_block(0x100c).expect("exit block");
+        let zf = exit
+            .phis
+            .iter()
+            .find(|phi| phi.dst.name.eq_ignore_ascii_case("zf"))
+            .and_then(|phi| graph.value_id_for_var(&phi.dst));
+        assert!(
+            zf.is_some_and(|value| dead.contains(value)),
+            "a condition code merged and never tested is dead"
+        );
+        let zf = zf.expect("dead condition-code merge");
+        let definition = graph
+            .def_inst(zf)
+            .and_then(|inst| graph.inst(inst))
+            .expect("dead merge definition");
+        assert!(dead.unobserved_values().contains(&zf));
+        assert!(dead.unobserved_insts().contains(&definition.id));
+        for (input_idx, input) in definition.inputs.iter().copied().enumerate() {
+            assert!(
+                dead.unobserved_values().contains(&input),
+                "a value used only by the dead merge belongs to its pure support domain"
+            );
+            assert!(dead.unobserved_uses().contains(&UseSite {
+                inst: definition.id,
+                input_idx,
+            }));
+        }
+    }
+
+    #[test]
+    fn the_merge_consumed_by_an_observable_effect_survives() {
+        let func = merging_function();
+        let graph = SsaGraph::from_function(&func);
+        let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
+
+        let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
+        let dead = DeadPhis::find(&graph, &live, &facts);
+
+        let exit = func.get_block(0x100c).expect("exit block");
+        let rax = exit
+            .phis
+            .iter()
+            .find(|phi| phi.dst.name.eq_ignore_ascii_case("rax"))
+            .and_then(|phi| graph.value_id_for_var(&phi.dst))
+            .expect("the return register is merged at the exit");
+        assert!(
+            !dead.contains(rax),
+            "the value written to memory is observed"
+        );
+        assert_eq!(graph.use_sites(rax).len(), 1, "the store owns its use site");
+    }
+
+    #[test]
+    fn a_flag_a_branch_still_tests_survives() {
+        let func = merging_function();
+        let graph = SsaGraph::from_function(&func);
+        let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
+
+        let facts = crate::semantic::PreparedFunctionFacts::collect(&func, &graph);
+        let dead = DeadPhis::find(&graph, &live, &facts);
+
+        // The entry block's condition is tested by its own CBranch, so nothing
+        // about merging flags elsewhere may reach back and call it unobserved.
+        let entry = func.get_block(0x1000).expect("entry block");
+        let tested = entry
+            .ops
+            .iter()
+            .find_map(|op| op.dst())
+            .and_then(|dst| graph.value_id_for_var(dst))
+            .expect("a defined condition");
+        assert!(!dead.contains(tested));
+    }
+}

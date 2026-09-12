@@ -1,0 +1,5305 @@
+//! Pure declaration-placement and reaching-definition analysis.
+//!
+//! The sealed structured-region tree owns lexical ancestry. The canonical SSA
+//! function owns CFG predecessors and dominance. This module joins those facts
+//! with the read and write occurrences that survived final AST rewriting, then
+//! returns an ephemeral decision. It deliberately retains neither a placement
+//! table nor a dominance proof beside the tree that produced the answer.
+//!
+//! The region walk and occurrence grouping are linear. Must-assignment is a
+//! forward bitset analysis over a sorted worklist, with cost
+//! `O((bindings / word_bits) * (blocks + edges))` per fixpoint sweep.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::ast::{
+    BinaryOp, CExpr, CFunction, CStmt, RenderObservationId, RenderObservationNode,
+    inspect_render_observations,
+};
+use crate::binding_plan::{
+    BindingId, BindingNameResolution, CertifiedValueReadSource, PlacementRead, PlacementRefusal,
+    ValueDisposition, certified_value_read,
+};
+use crate::structured_region::{RegionId, SealedStructuredRegionArtifact};
+use r2ssa::{InstId, SSAFunction, UseSite};
+
+/// Final render-order position of an occurrence after every AST rewrite.
+///
+/// The final marker walk assigns this monotonically. Equal positions are
+/// permitted for one expression: reads are evaluated before its write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct FinalOccurrenceOrder(pub(crate) u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalObservationScope {
+    Exact {
+        region: RegionId,
+        order: FinalOccurrenceOrder,
+        /// Which rendered statement this observation belongs to.
+        ///
+        /// Not the same as `order`: one statement contributes two ordered
+        /// groups, its reads and then its writes, because a statement reads
+        /// its operands before it assigns its destination. Both groups carry
+        /// the same statement here, so a read can be recognised as naming a
+        /// value its own statement defines.
+        statement: u64,
+    },
+    Ambiguous,
+}
+
+/// One binding read that survived all AST rewriting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FinalBindingRead {
+    pub(crate) binding: BindingId,
+    pub(crate) source: PlacementRead,
+    /// The SSA value this read names, where the read has one.
+    ///
+    /// A read of a value that the *same* statement defines is not a read of
+    /// the object before it is assigned, however the two are ordered inside
+    /// the statement. See `Occurrence::self_defined`.
+    pub(crate) value: Option<r2ssa::ValueId>,
+    /// The rendered statement this read belongs to.
+    pub(crate) statement: u64,
+    pub(crate) region: RegionId,
+    pub(crate) block: u64,
+    pub(crate) order: FinalOccurrenceOrder,
+}
+
+/// One binding write that survived all AST rewriting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FinalBindingWrite {
+    pub(crate) binding: BindingId,
+    pub(crate) inst: InstId,
+    /// The SSA value this write defines, where it defines one.
+    pub(crate) defines: Option<r2ssa::ValueId>,
+    /// The rendered statement this write belongs to.
+    pub(crate) statement: u64,
+    pub(crate) region: RegionId,
+    pub(crate) block: u64,
+    pub(crate) order: FinalOccurrenceOrder,
+    /// Exact surviving marker that owns this write occurrence.
+    pub(crate) observation: RenderObservationId,
+    /// Whether this exact occurrence is a statement assignment that C permits
+    /// the final emitter to replace with a declaration initializer.
+    pub(crate) inline_eligible: bool,
+    /// Whether removing this write's statement would lose an effect nothing
+    /// else answers for.
+    pub(crate) effectful: bool,
+}
+
+/// Placement-relevant projection of the observation journal's private target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlacementObservationTarget {
+    Use {
+        site: UseSite,
+        /// Where the normalized operation consuming this use is emitted, which
+        /// is not the consuming instruction's own block when normalization
+        /// materialized that operation on an edge.
+        block: u64,
+    },
+    CertifiedValueRead {
+        value: r2ssa::ValueId,
+        source: CertifiedValueReadSource,
+        binding: BindingId,
+        symbol: crate::symbol::SymbolId,
+    },
+    CertifiedArrayIndexRead {
+        access: r2ssa::StructuredAccessId,
+        value: r2ssa::ValueId,
+        binding: BindingId,
+        symbol: crate::symbol::SymbolId,
+    },
+    Write {
+        inst: InstId,
+        projection: r2ssa::MachineWriteProjection,
+        /// Where the normalized definition is emitted.
+        ///
+        /// Normalization materializes one phi definition as a copy on each
+        /// incoming edge, so several emitted operations implement one original
+        /// instruction and each lives in the predecessor that supplies its
+        /// edge. Taking the block from `inst` gave every copy the phi's own
+        /// block, which put an occurrence in a region whose entry cannot
+        /// dominate it.
+        block: u64,
+    },
+    StackAccess {
+        access: r2ssa::StructuredAccessId,
+        object: r2ssa::ObjectId,
+        binding: BindingId,
+        symbol: crate::symbol::SymbolId,
+        is_write: bool,
+    },
+    EscapedStackAddress {
+        call: InstId,
+        argument_index: usize,
+        value: r2ssa::ValueId,
+        object: r2ssa::ObjectId,
+        binding: BindingId,
+        symbol: crate::symbol::SymbolId,
+    },
+    Other,
+}
+
+/// The instruction an observation names, where it names one.
+pub(crate) fn placement_target_inst(target: &PlacementObservationTarget) -> Option<InstId> {
+    match target {
+        PlacementObservationTarget::Use { site, .. } => Some(site.inst),
+        PlacementObservationTarget::CertifiedValueRead { source, .. } => Some(source.inst()),
+        PlacementObservationTarget::CertifiedArrayIndexRead { access, .. }
+        | PlacementObservationTarget::StackAccess { access, .. } => Some(access.inst),
+        PlacementObservationTarget::Write { inst, .. } => Some(*inst),
+        PlacementObservationTarget::EscapedStackAddress { call, .. } => Some(*call),
+        PlacementObservationTarget::Other => None,
+    }
+}
+
+/// The binding an observation names, where it names one.
+pub(crate) fn placement_target_binding(target: &PlacementObservationTarget) -> Option<BindingId> {
+    match target {
+        PlacementObservationTarget::CertifiedValueRead { binding, .. }
+        | PlacementObservationTarget::CertifiedArrayIndexRead { binding, .. }
+        | PlacementObservationTarget::StackAccess { binding, .. }
+        | PlacementObservationTarget::EscapedStackAddress { binding, .. } => Some(*binding),
+        PlacementObservationTarget::Use { .. }
+        | PlacementObservationTarget::Write { .. }
+        | PlacementObservationTarget::Other => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinalPlacementOccurrences {
+    reads: Box<[FinalBindingRead]>,
+    writes: Box<[FinalBindingWrite]>,
+    escaped_stack_bindings: BTreeSet<BindingId>,
+}
+
+impl FinalPlacementOccurrences {
+    pub(crate) fn reads(&self) -> &[FinalBindingRead] {
+        &self.reads
+    }
+
+    pub(crate) fn writes(&self) -> &[FinalBindingWrite] {
+        &self.writes
+    }
+
+    pub(crate) fn escaped_stack_bindings(&self) -> &BTreeSet<BindingId> {
+        &self.escaped_stack_bindings
+    }
+}
+
+/// Join the final marker-bearing AST to the canonical source graph and sealed
+/// binding plan. This is intentionally a one-shot emit-time calculation.
+pub(crate) fn collect_final_placement_occurrences(
+    function: &CFunction,
+    regions: &SealedStructuredRegionArtifact,
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    expected_observations: usize,
+    mut target_for: impl FnMut(RenderObservationId) -> Option<PlacementObservationTarget>,
+) -> Result<FinalPlacementOccurrences, PlacementAnalysisError> {
+    if !regions.matches_source(source.authority()) {
+        return Err(PlacementAnalysisError::SourceAuthorityMismatch);
+    }
+    crate::structured_region::validate_final_region_marker_tree(&function.body, regions)
+        .map_err(PlacementAnalysisError::RegionMarkers)?;
+    let mut targets = vec![None; expected_observations];
+    let mut statement_assignment = vec![None; expected_observations];
+    inspect_render_observations(function, expected_observations, |id, node| {
+        let target = target_for(id)
+            .ok_or(PlacementAnalysisError::MissingObservationTarget { observation: id })?;
+        if let PlacementObservationTarget::CertifiedValueRead {
+            value,
+            source: read_source,
+            binding,
+            symbol,
+        } = target
+        {
+            if !certified_value_read_matches(source, names, value, read_source, binding, symbol) {
+                return Err(PlacementAnalysisError::InvalidCertifiedValueRead {
+                    value,
+                    at: read_source.inst(),
+                });
+            }
+            let RenderObservationNode::Expr(expr) = node else {
+                r2il::refusal_evidence!(
+                    "certified-value-read-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} value={value:?}: \
+                     the observation marks a statement rather than an expression"
+                );
+                return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
+            };
+            if !expr_reads_symbol(expr, symbol) {
+                r2il::refusal_evidence!(
+                    "certified-value-read-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} value={value:?}: \
+                     the marked expression {expr:?} does not read the symbol"
+                );
+                return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
+            }
+        }
+        if let PlacementObservationTarget::CertifiedArrayIndexRead {
+            access,
+            value,
+            binding,
+            symbol,
+        } = target
+        {
+            if !certified_array_index_read_matches(source, names, access, value, binding, symbol) {
+                return Err(PlacementAnalysisError::InvalidUse {
+                    site: UseSite {
+                        inst: access.inst,
+                        input_idx: 0,
+                    },
+                });
+            }
+            let RenderObservationNode::Expr(expr) = node else {
+                r2il::refusal_evidence!(
+                    "array-index-read-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} access={access:?}: \
+                     the observation marks a statement rather than an expression"
+                );
+                return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
+            };
+            if !expr_reads_symbol(expr, symbol) {
+                r2il::refusal_evidence!(
+                    "array-index-read-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} access={access:?}: \
+                     the marked expression {expr:?} does not read the symbol"
+                );
+                return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
+            }
+        }
+        if let PlacementObservationTarget::StackAccess {
+            access,
+            object,
+            binding,
+            symbol,
+            is_write,
+        } = target
+        {
+            if !stack_access_matches(source, names, access, object, binding, symbol, is_write) {
+                return Err(PlacementAnalysisError::InvalidUse {
+                    site: UseSite {
+                        inst: access.inst,
+                        input_idx: 0,
+                    },
+                });
+            }
+            let RenderObservationNode::Expr(expr) = node else {
+                r2il::refusal_evidence!(
+                    "stack-access-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} \
+                     access={access:?} object={object:?} is_write={is_write}: \
+                     the observation marks a statement rather than an expression"
+                );
+                return Err(if is_write {
+                    PlacementAnalysisError::UnobservedBindingWrite { binding }
+                } else {
+                    PlacementAnalysisError::UnobservedBindingRead { binding }
+                });
+            };
+            if !stack_access_expr_mentions_slot(source, names, access, expr, symbol) {
+                r2il::refusal_evidence!(
+                    "stack-access-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} \
+                     access={access:?} object={object:?} is_write={is_write}: \
+                     the marked expression {expr:?} does not read the symbol"
+                );
+                return Err(if is_write {
+                    PlacementAnalysisError::UnobservedBindingWrite { binding }
+                } else {
+                    PlacementAnalysisError::UnobservedBindingRead { binding }
+                });
+            }
+        }
+        if let PlacementObservationTarget::EscapedStackAddress {
+            call,
+            argument_index: _,
+            value,
+            object: _,
+            binding,
+            symbol,
+        } = target
+        {
+            if !frame_object_address_matches(source, names, target) {
+                return Err(PlacementAnalysisError::InvalidCertifiedValueRead { value, at: call });
+            }
+            let RenderObservationNode::Expr(expr) = node else {
+                r2il::refusal_evidence!(
+                    "frame-address-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} call={call:?}: \
+                     the observation marks a statement rather than an expression"
+                );
+                return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
+            };
+            let is_array = names.plan().binding(binding).is_some_and(|binding| {
+                matches!(binding.declaration_type(), crate::ast::CType::Array(_, _))
+            });
+            if !frame_object_address_expr_matches(expr, symbol, is_array) {
+                r2il::refusal_evidence!(
+                    "frame-address-unobserved",
+                    "observation={id:?} binding={binding:?} symbol={symbol:?} call={call:?} \
+                     is_array={is_array}: the marked expression {expr:?} is not that \
+                     object's address"
+                );
+                return Err(PlacementAnalysisError::UnobservedBindingRead { binding });
+            }
+        }
+        let index = id.index() as usize;
+        targets[index] = Some(target);
+        statement_assignment[index] = match node {
+            RenderObservationNode::Stmt(stmt) => assigned_symbol(stmt),
+            RenderObservationNode::Expr(_) => None,
+        };
+        Ok(())
+    })
+    .map_err(|error| match error {
+        crate::ast::RenderObservationInspectError::Markers(error) => {
+            PlacementAnalysisError::ObservationMarkers(error)
+        }
+        crate::ast::RenderObservationInspectError::Observer(error) => error,
+    })?;
+
+    let mut after_label = BTreeSet::new();
+    observations_directly_after_a_label(&function.body, &mut after_label);
+    let scoped = collect_final_observation_scopes(&function.body, regions, &targets);
+
+    for (index, target) in targets.iter().copied().enumerate() {
+        if matches!(
+            target,
+            Some(
+                PlacementObservationTarget::Use { .. }
+                    | PlacementObservationTarget::CertifiedValueRead { .. }
+                    | PlacementObservationTarget::CertifiedArrayIndexRead { .. }
+                    | PlacementObservationTarget::Write { .. }
+                    | PlacementObservationTarget::StackAccess { .. }
+                    | PlacementObservationTarget::EscapedStackAddress { .. }
+            )
+        ) {
+            match scoped[index] {
+                None => {
+                    return Err(PlacementAnalysisError::UnscopedObservation {
+                        observation: RenderObservationId::from_dense_index(index),
+                    });
+                }
+                Some(FinalObservationScope::Ambiguous) => {
+                    // The refusal names an observation id, and an id alone
+                    // says nothing about which occurrence could not be
+                    // ordered. What the observation stands for, and -- for a
+                    // write -- the instruction and value behind it, is what
+                    // an investigation starts from; finding it back from the
+                    // id cost a whole session once. The group that declared
+                    // the ambiguity names itself in `record_observation_group`
+                    // under the same switch.
+                    if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                        eprintln!("ambiguous observation {index} target {target:?}");
+                        if let Some(PlacementObservationTarget::Write { inst, .. }) = target {
+                            let output = source.graph().inst(inst).and_then(|inst| inst.output);
+                            eprintln!(
+                                "  write of {inst:?} output {output:?} disposition {:?}",
+                                output.and_then(|value| names.plan().disposition(value))
+                            );
+                        }
+                    }
+                    return Err(PlacementAnalysisError::AmbiguousExecutionOrder {
+                        observation: RenderObservationId::from_dense_index(index),
+                    });
+                }
+                Some(FinalObservationScope::Exact { .. }) => {}
+            }
+        }
+    }
+
+    let graph = source.graph();
+    let answered_effect_sites = crate::binding_plan::certified_dead_frame_slot_accesses(source);
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    let mut escaped_stack_bindings = BTreeSet::new();
+    for (index, target) in targets.iter().copied().enumerate() {
+        let Some(FinalObservationScope::Exact {
+            region,
+            order,
+            statement,
+        }) = scoped[index]
+        else {
+            continue;
+        };
+        let observation = RenderObservationId::from_dense_index(index);
+        match target.expect("only reachable observations receive a scope") {
+            PlacementObservationTarget::Use { site, block } => {
+                let inst = graph
+                    .inst(site.inst)
+                    .ok_or(PlacementAnalysisError::InvalidUse { site })?;
+                let value = *inst
+                    .inputs
+                    .get(site.input_idx)
+                    .ok_or(PlacementAnalysisError::InvalidUse { site })?;
+                if let Some(binding) = bound_value(names, value)? {
+                    reads.push(FinalBindingRead {
+                        binding,
+                        value: Some(value),
+                        statement,
+                        source: PlacementRead::Use(site),
+                        region,
+                        block,
+                        order,
+                    });
+                }
+            }
+            PlacementObservationTarget::CertifiedValueRead {
+                value,
+                source: read_source,
+                binding,
+                symbol: _,
+            } => {
+                let at = read_source.inst();
+                let inst = graph
+                    .inst(at)
+                    .ok_or(PlacementAnalysisError::InvalidWrite { inst: at })?;
+                if bound_value(names, value)? == Some(binding) {
+                    let block = graph
+                        .block(inst.block)
+                        .ok_or(PlacementAnalysisError::InvalidWrite { inst: at })?
+                        .addr;
+                    reads.push(FinalBindingRead {
+                        binding,
+                        value: Some(value),
+                        statement,
+                        source: PlacementRead::CertifiedValue { value, at },
+                        region,
+                        block,
+                        order,
+                    });
+                }
+            }
+            PlacementObservationTarget::CertifiedArrayIndexRead {
+                access,
+                value,
+                binding,
+                symbol: _,
+            } => {
+                let inst = graph
+                    .inst(access.inst)
+                    .ok_or(PlacementAnalysisError::InvalidUse {
+                        site: UseSite {
+                            inst: access.inst,
+                            input_idx: 0,
+                        },
+                    })?;
+                if bound_value(names, value)? == Some(binding) {
+                    let block = graph
+                        .block(inst.block)
+                        .ok_or(PlacementAnalysisError::InvalidUse {
+                            site: UseSite {
+                                inst: access.inst,
+                                input_idx: 0,
+                            },
+                        })?
+                        .addr;
+                    reads.push(FinalBindingRead {
+                        binding,
+                        value: Some(value),
+                        statement,
+                        source: PlacementRead::ArrayIndex { access, value },
+                        region,
+                        block,
+                        order,
+                    });
+                }
+            }
+            PlacementObservationTarget::Write {
+                inst: inst_id,
+                projection: _,
+                block,
+            } => {
+                let inst = graph
+                    .inst(inst_id)
+                    .ok_or(PlacementAnalysisError::InvalidWrite { inst: inst_id })?;
+                let value = inst
+                    .output
+                    .ok_or(PlacementAnalysisError::InvalidWrite { inst: inst_id })?;
+                if let Some(binding) = bound_value(names, value)? {
+                    writes.push(FinalBindingWrite {
+                        binding,
+                        inst: inst_id,
+                        defines: Some(value),
+                        statement,
+                        region,
+                        block,
+                        order,
+                        observation,
+                        inline_eligible: statement_assignment[index]
+                            == names.symbol_for_binding(binding)
+                            && !after_label.contains(&observation),
+                        effectful: removing_statement_would_lose_an_effect(
+                            source,
+                            inst_id,
+                            &answered_effect_sites,
+                        ),
+                    });
+                }
+            }
+            PlacementObservationTarget::StackAccess {
+                access,
+                object: _,
+                binding,
+                symbol: _,
+                is_write,
+            } => {
+                let inst = graph
+                    .inst(access.inst)
+                    .ok_or(PlacementAnalysisError::InvalidUse {
+                        site: UseSite {
+                            inst: access.inst,
+                            input_idx: 0,
+                        },
+                    })?;
+                let block = graph
+                    .block(inst.block)
+                    .ok_or(PlacementAnalysisError::InvalidUse {
+                        site: UseSite {
+                            inst: access.inst,
+                            input_idx: 0,
+                        },
+                    })?
+                    .addr;
+                if is_write {
+                    writes.push(FinalBindingWrite {
+                        binding,
+                        inst: access.inst,
+                        defines: None,
+                        statement,
+                        region,
+                        block,
+                        order,
+                        observation,
+                        inline_eligible: false,
+                        effectful: removing_statement_would_lose_an_effect(
+                            source,
+                            access.inst,
+                            &answered_effect_sites,
+                        ),
+                    });
+                } else {
+                    let indexed = source
+                        .certificates()
+                        .memory_accesses
+                        .get(&access)
+                        .is_some_and(|fact| source.objects().address_is_indexed(fact.address));
+                    reads.push(FinalBindingRead {
+                        binding,
+                        value: None,
+                        statement,
+                        source: if indexed {
+                            PlacementRead::IndexedStackAccess(access)
+                        } else {
+                            PlacementRead::StackAccess(access)
+                        },
+                        region,
+                        block,
+                        order,
+                    });
+                }
+            }
+            PlacementObservationTarget::EscapedStackAddress {
+                call,
+                argument_index: _,
+                value,
+                object: _,
+                binding,
+                symbol: _,
+            } => {
+                let inst = graph
+                    .inst(call)
+                    .ok_or(PlacementAnalysisError::InvalidWrite { inst: call })?;
+                let block = graph
+                    .block(inst.block)
+                    .ok_or(PlacementAnalysisError::InvalidWrite { inst: call })?
+                    .addr;
+                escaped_stack_bindings.insert(binding);
+                reads.push(FinalBindingRead {
+                    binding,
+                    value: Some(value),
+                    statement,
+                    source: PlacementRead::EscapedStackAddress { call, value },
+                    region,
+                    block,
+                    order,
+                });
+            }
+            PlacementObservationTarget::Other => {}
+        }
+    }
+
+    audit_plan_symbols(function, source, names, &targets)?;
+    reads.sort_by_key(|read| (read.order, read.binding, read.source));
+    writes.sort_by_key(|write| (write.order, write.binding, write.inst));
+    Ok(FinalPlacementOccurrences {
+        reads: reads.into_boxed_slice(),
+        writes: writes.into_boxed_slice(),
+        escaped_stack_bindings,
+    })
+}
+
+/// Whether removing this instruction's statement would lose an effect.
+///
+/// A dead store drops the statements that write an object nothing reads, and
+/// the effect ledger answers separately for whatever else those statements did.
+/// That holds for producing a value and for a read whose result nothing wants.
+/// It does not hold for an effect the program can observe from outside: a store
+/// into memory is one, and dropping it leaves the ledger with an obligation no
+/// rendering answers.
+///
+/// Unless something already answers it. A slot certified to lie in this
+/// function's own frame, written and never read, has its stores elided by the
+/// effect ledger on that certificate, and those may go.
+fn removing_statement_would_lose_an_effect(
+    source: &r2ssa::SsaArtifact,
+    inst: InstId,
+    answered: &BTreeSet<(u64, usize)>,
+) -> bool {
+    use r2ssa::SemanticObligationKind as Kind;
+    let site = source.graph().op_site_for_inst(inst);
+    if site.is_some_and(|site| answered.contains(&site)) {
+        return false;
+    }
+    // A `CallDefine` is judged by the call it names.
+    //
+    // The call operation itself deliberately renders nothing when a
+    // `CallDefine` names its result, so that the function is not called twice;
+    // the assignment is the call's only statement. Its obligations, though, sit
+    // on the call operation rather than on the `CallDefine`, so asking only
+    // about the `CallDefine` found nothing observable and the assignment was
+    // removed as a dead store -- taking the call with it. That is how
+    // `fprintf(stderr, "...")`, whose result nobody reads, disappeared from
+    // every function in a `-O0` binary while the proof line read `0 refused`.
+    let mut instructions = vec![inst];
+    if let Some((block_addr, op_index)) = site
+        && matches!(
+            source.graph().inst(inst).map(|i| &i.payload),
+            Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. }))
+        )
+    {
+        // A call is followed by one `CallDefine` per register the convention
+        // lets it clobber -- ten of them on amd64 -- so the one naming the
+        // result is not necessarily the operation directly after the call.
+        // Walking back over the run of them finds the call that owns them all.
+        let mut previous = op_index;
+        while let Some(earlier) = previous.checked_sub(1) {
+            previous = earlier;
+            let Some(inst_id) = source.graph().inst_id_for_op_site(block_addr, earlier) else {
+                break;
+            };
+            match source.graph().inst(inst_id).map(|i| &i.payload) {
+                Some(r2ssa::InstPayload::Op(r2ssa::SSAOp::CallDefine { .. })) => continue,
+                Some(r2ssa::InstPayload::Op(
+                    r2ssa::SSAOp::Call { .. } | r2ssa::SSAOp::CallInd { .. },
+                )) => {
+                    instructions.push(inst_id);
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+    instructions
+        .into_iter()
+        .flat_map(|inst| source.obligations().obligations_for_inst(inst))
+        .any(|obligation| {
+            // Everything whose absence the reader would never learn about.
+            //
+            // This asked only about a write into memory, on the reasoning that
+            // nothing else in the family could arise on a statement that writes
+            // an object nothing reads. A call can: `RAX_4 = fprintf(...)` writes
+            // a result no one uses *and* calls fprintf. The statement was
+            // removed as a dead store and the call went with it, silently --
+            // fourteen of the twenty-six calls in one `-O0` binary, in every
+            // function rendered, under proof lines reading `0 refused`.
+            //
+            // A trap, a fence and an atomic are the same argument: the effect
+            // belongs to the operation, not to the value it happens to leave
+            // behind, so removing the statement removes the effect.
+            //
+            // A trap is deliberately not here yet, though the argument is the
+            // same. A division carries one, and protecting its statement keeps
+            // an assignment whose result nothing reads, which `-Werror` rejects
+            // as an unused variable. Keeping the effect without the variable
+            // needs a rendering form this does not have -- the operation as a
+            // bare expression statement -- so the trap keeps its old treatment
+            // until that exists rather than trading one wrong answer for a cell
+            // that will not compile.
+            matches!(
+                obligation.id.kind,
+                Kind::ObservableMemoryWrite
+                    | Kind::Call
+                    | Kind::CallResult
+                    | Kind::Atomicity
+                    | Kind::MemoryOrdering
+                    | Kind::VolatileOrUnknownEffect
+            )
+        })
+}
+
+fn bound_value(
+    names: &BindingNameResolution,
+    value: r2ssa::ValueId,
+) -> Result<Option<BindingId>, PlacementAnalysisError> {
+    match names.disposition_for_value(value) {
+        Some(ValueDisposition::Bound { binding }) => Ok(Some(*binding)),
+        Some(ValueDisposition::Inline { .. } | ValueDisposition::Elided { .. }) => Ok(None),
+        Some(ValueDisposition::Refused { .. }) => {
+            Err(PlacementAnalysisError::RefusedPlannedValue { value })
+        }
+        None => Err(PlacementAnalysisError::MissingPlannedValue { value }),
+    }
+}
+
+fn assigned_symbol(statement: &CStmt) -> Option<crate::symbol::SymbolId> {
+    let CStmt::Expr(CExpr::Binary {
+        op: BinaryOp::Assign,
+        left,
+        ..
+    }) = statement.unobserved()
+    else {
+        return None;
+    };
+    match left.unobserved() {
+        CExpr::Var(symbol) => Some(*symbol),
+        _ => None,
+    }
+}
+
+/// The region each surviving observation was finally emitted in.
+///
+/// Placement collects the same answer for the observations it reasons about,
+/// filtered to those and ordered among them, because the filtering and the
+/// order are part of what it proves. The effect ledger needs the region of
+/// every observation and needs no order, so it is collected on its own rather
+/// than by widening a walk whose selectivity is load-bearing.
+pub(crate) fn final_observation_regions(
+    statements: &[CStmt],
+    regions: &SealedStructuredRegionArtifact,
+    count: usize,
+) -> Vec<Option<RegionId>> {
+    let mut scoped = vec![None; count];
+    for statement in statements {
+        collect_stmt_observation_regions(statement, None, regions, &mut scoped);
+    }
+    scoped
+}
+
+fn record_observation_region(
+    id: RenderObservationId,
+    region: Option<RegionId>,
+    scoped: &mut [Option<RegionId>],
+) {
+    if let (Some(region), Some(slot)) = (region, scoped.get_mut(id.index() as usize)) {
+        *slot = Some(region);
+    }
+}
+
+fn collect_expr_observation_regions(
+    expr: &CExpr,
+    region: Option<RegionId>,
+    scoped: &mut [Option<RegionId>],
+) {
+    let mut ids = Vec::new();
+    visit_expr_observations(expr, &mut |id| ids.push(id));
+    for id in ids {
+        record_observation_region(id, region, scoped);
+    }
+}
+
+fn collect_stmt_observation_regions(
+    statement: &CStmt,
+    current: Option<RegionId>,
+    regions: &SealedStructuredRegionArtifact,
+    scoped: &mut [Option<RegionId>],
+) {
+    if let CStmt::StructuredRegion { marker, stmt } = statement {
+        let entered = regions.node_for_marker(marker).map(|(id, _)| id);
+        collect_stmt_observation_regions(stmt, entered.or(current), regions, scoped);
+        return;
+    }
+    let mut semantic = statement;
+    while let CStmt::Observed { id, stmt } = semantic {
+        record_observation_region(*id, current, scoped);
+        semantic = stmt;
+    }
+    match semantic {
+        CStmt::StructuredRegion { .. } => {
+            collect_stmt_observation_regions(semantic, current, regions, scoped);
+        }
+        CStmt::Expr(expr) | CStmt::Return(Some(expr)) => {
+            collect_expr_observation_regions(expr, current, scoped);
+        }
+        CStmt::Decl { init, .. } => {
+            if let Some(init) = init {
+                collect_expr_observation_regions(init, current, scoped);
+            }
+        }
+        CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            collect_expr_observation_regions(cond, current, scoped);
+            collect_stmt_observation_regions(then_body, current, regions, scoped);
+            if let Some(else_body) = else_body {
+                collect_stmt_observation_regions(else_body, current, regions, scoped);
+            }
+        }
+        CStmt::While { cond, body } => {
+            collect_expr_observation_regions(cond, current, scoped);
+            collect_stmt_observation_regions(body, current, regions, scoped);
+        }
+        CStmt::DoWhile { body, cond } => {
+            collect_stmt_observation_regions(body, current, regions, scoped);
+            collect_expr_observation_regions(cond, current, scoped);
+        }
+        CStmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                collect_stmt_observation_regions(init, current, regions, scoped);
+            }
+            if let Some(cond) = cond {
+                collect_expr_observation_regions(cond, current, scoped);
+            }
+            collect_stmt_observation_regions(body, current, regions, scoped);
+            if let Some(update) = update {
+                collect_expr_observation_regions(update, current, scoped);
+            }
+        }
+        CStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            collect_expr_observation_regions(expr, current, scoped);
+            for case in cases {
+                collect_expr_observation_regions(&case.value, current, scoped);
+                for statement in &case.body {
+                    collect_stmt_observation_regions(statement, current, regions, scoped);
+                }
+            }
+            if let Some(default) = default {
+                for statement in default {
+                    collect_stmt_observation_regions(statement, current, regions, scoped);
+                }
+            }
+        }
+        CStmt::Block(statements) => {
+            for statement in statements {
+                collect_stmt_observation_regions(statement, current, regions, scoped);
+            }
+        }
+        CStmt::Observed { .. } => unreachable!("leading observations were consumed"),
+        CStmt::Empty
+        | CStmt::Return(None)
+        | CStmt::Break
+        | CStmt::Continue
+        | CStmt::Goto(_)
+        | CStmt::Label(_)
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
+    }
+}
+
+fn collect_final_observation_scopes(
+    statements: &[CStmt],
+    regions: &SealedStructuredRegionArtifact,
+    targets: &[Option<PlacementObservationTarget>],
+) -> Vec<Option<FinalObservationScope>> {
+    let mut scoped = vec![None; targets.len()];
+    let mut order = 0_u64;
+    for statement in statements {
+        collect_stmt_observation_scopes(statement, None, regions, targets, &mut order, &mut scoped);
+    }
+    scoped
+}
+
+/// Observations carried by a statement that directly follows a label.
+///
+/// C requires a label to be followed by a statement, so a declaration cannot be
+/// emitted there. A write in that position therefore cannot become a
+/// declaration with an initializer; it keeps its assignment and takes its
+/// declaration from the enclosing region, which is where a jump to the label
+/// needs the object to already exist in any case.
+///
+/// Every observation of the following statement is collected. Being generous
+/// here only falls back to a lexical declaration, which is legal in every
+/// position an inline declaration is.
+fn observations_directly_after_a_label(
+    statements: &[CStmt],
+    after: &mut BTreeSet<RenderObservationId>,
+) {
+    let mut previous_was_label = false;
+    for statement in statements {
+        if previous_was_label {
+            collect_statement_observations(statement, after);
+        }
+        previous_was_label = matches!(statement.unobserved(), CStmt::Label(_));
+        visit_nested_statement_lists(statement, after);
+    }
+}
+
+/// Every observation marker carried by one statement, including its own.
+fn collect_statement_observations(statement: &CStmt, into: &mut BTreeSet<RenderObservationId>) {
+    match statement {
+        CStmt::Observed { id, stmt } => {
+            into.insert(*id);
+            collect_statement_observations(stmt, into);
+        }
+        CStmt::StructuredRegion { stmt, .. } => collect_statement_observations(stmt, into),
+        CStmt::Expr(expr) => {
+            visit_expr_observations(expr, &mut |id| {
+                into.insert(id);
+            });
+        }
+        CStmt::Decl {
+            init: Some(expr), ..
+        } => {
+            visit_expr_observations(expr, &mut |id| {
+                into.insert(id);
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Walk into every statement list a statement owns.
+fn visit_nested_statement_lists(statement: &CStmt, after: &mut BTreeSet<RenderObservationId>) {
+    match statement.unobserved() {
+        CStmt::Block(statements) => observations_directly_after_a_label(statements, after),
+        CStmt::StructuredRegion { stmt, .. } => visit_nested_statement_lists(stmt, after),
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            visit_nested_statement_lists(then_body, after);
+            if let Some(else_body) = else_body {
+                visit_nested_statement_lists(else_body, after);
+            }
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
+            visit_nested_statement_lists(body, after);
+        }
+        CStmt::For { init, body, .. } => {
+            if let Some(init) = init {
+                visit_nested_statement_lists(init, after);
+            }
+            visit_nested_statement_lists(body, after);
+        }
+        CStmt::Switch { cases, default, .. } => {
+            for case in cases {
+                observations_directly_after_a_label(&case.body, after);
+            }
+            if let Some(default) = default {
+                observations_directly_after_a_label(default, after);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[track_caller]
+fn record_observation_group(
+    ids: &[RenderObservationId],
+    region: Option<RegionId>,
+    ambiguous: bool,
+    statement: u64,
+    order: &mut u64,
+    scoped: &mut [Option<FinalObservationScope>],
+) {
+    if ids.is_empty() {
+        return;
+    }
+    // Which construct declared the group unorderable. Several do, and the
+    // refusal reports only the observation, so the caller's line is the one
+    // fact that says whether the answer is a call, an assignment, an operand
+    // of a binary, or a control statement's own marker.
+    if ambiguous && std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+        eprintln!(
+            "ambiguous group {ids:?} recorded at {}",
+            std::panic::Location::caller()
+        );
+    }
+    let current = FinalOccurrenceOrder(*order);
+    *order = order.saturating_add(1);
+    let Some(region) = region else { return };
+    for id in ids {
+        scoped[id.index() as usize] = Some(if ambiguous {
+            FinalObservationScope::Ambiguous
+        } else {
+            FinalObservationScope::Exact {
+                region,
+                order: current,
+                statement,
+            }
+        });
+    }
+}
+
+fn observation_target(
+    targets: &[Option<PlacementObservationTarget>],
+    id: RenderObservationId,
+) -> Option<PlacementObservationTarget> {
+    targets.get(id.index() as usize).copied().flatten()
+}
+
+fn observation_is_placement_relevant(
+    targets: &[Option<PlacementObservationTarget>],
+    id: RenderObservationId,
+) -> bool {
+    matches!(
+        observation_target(targets, id),
+        Some(
+            PlacementObservationTarget::Use { .. }
+                | PlacementObservationTarget::CertifiedValueRead { .. }
+                | PlacementObservationTarget::Write { .. }
+                | PlacementObservationTarget::StackAccess { .. }
+                | PlacementObservationTarget::EscapedStackAddress { .. }
+        )
+    )
+}
+
+fn observation_is_write(
+    targets: &[Option<PlacementObservationTarget>],
+    id: RenderObservationId,
+) -> bool {
+    matches!(
+        observation_target(targets, id),
+        Some(
+            PlacementObservationTarget::Write { .. }
+                | PlacementObservationTarget::StackAccess { is_write: true, .. }
+        )
+    )
+}
+
+/// Whether any observation in this expression is one placement orders.
+fn expression_has_placement_observation(
+    expr: &CExpr,
+    targets: &[Option<PlacementObservationTarget>],
+) -> bool {
+    let mut observed = false;
+    visit_expr_observations(expr, &mut |id| {
+        observed |= !matches!(
+            observation_target(targets, id),
+            None | Some(PlacementObservationTarget::Other)
+        );
+    });
+    observed
+}
+
+fn expression_has_placement_write(
+    expr: &CExpr,
+    targets: &[Option<PlacementObservationTarget>],
+) -> bool {
+    let mut has_write = false;
+    visit_expr_observations(expr, &mut |id| {
+        has_write |= observation_is_write(targets, id);
+    });
+    has_write
+}
+
+/// Return the exact stack-write markers on a direct variable assignment
+/// target.
+///
+/// A certified stack-object lvalue is already a `BindingId`-owned C variable,
+/// so evaluating that lvalue has no address computation or side effect.  C
+/// sequences the assignment itself after the right-hand value computation;
+/// retaining this narrow shape lets placement order the stack write without
+/// pretending that arbitrary binary operands have a defined evaluation order.
+/// The exact observations carried by a direct stack-slot assignment target.
+///
+/// The destination of `slot = value` is an lvalue, not an operand whose order
+/// against another operand is unspecified: the address it names is evaluated as
+/// part of that lvalue and the store belongs to it. Every observation the target
+/// carries is therefore ordered -- the address reads before the store that uses
+/// them -- and none of them makes the statement ambiguous.
+///
+/// A chain that bottoms out in a plain variable qualifies, as does a subscript
+/// whose base and index contain only reads. Both subscript operands are part of
+/// evaluating the destination lvalue and therefore precede the store; neither
+/// is allowed to smuggle in another machine write. Anything else is a computed
+/// destination whose order this cannot state, and stays ambiguous.
+fn direct_stack_assignment_observations(
+    expr: &CExpr,
+    targets: &[Option<PlacementObservationTarget>],
+) -> Option<(Vec<RenderObservationId>, Vec<RenderObservationId>)> {
+    fn collect(
+        expr: &CExpr,
+        targets: &[Option<PlacementObservationTarget>],
+        reads: &mut Vec<RenderObservationId>,
+        writes: &mut Vec<RenderObservationId>,
+    ) -> bool {
+        match expr {
+            CExpr::Observed { id, expr } => {
+                match observation_target(targets, *id) {
+                    Some(PlacementObservationTarget::StackAccess { is_write: true, .. }) => {
+                        writes.push(*id);
+                    }
+                    // The address this destination names, and any value read to
+                    // form it. Both are evaluated before the store they serve.
+                    Some(
+                        PlacementObservationTarget::Use { .. }
+                        | PlacementObservationTarget::CertifiedValueRead { .. }
+                        | PlacementObservationTarget::CertifiedArrayIndexRead { .. }
+                        | PlacementObservationTarget::StackAccess {
+                            is_write: false, ..
+                        }
+                        | PlacementObservationTarget::EscapedStackAddress { .. },
+                    ) => {
+                        reads.push(*id);
+                    }
+                    Some(PlacementObservationTarget::Other) => {}
+                    // A write that is not this destination's own store, or an
+                    // observation with no target, is not something this can order.
+                    Some(PlacementObservationTarget::Write { .. }) | None => return false,
+                }
+                collect(expr, targets, reads, writes)
+            }
+            CExpr::Paren(expr) | CExpr::Cast { expr, .. } => collect(expr, targets, reads, writes),
+            CExpr::Subscript { base, index } => {
+                collect(base, targets, reads, writes) && collect(index, targets, reads, writes)
+            }
+            // A member selects inside whatever the base names, so the base is
+            // the only part of the destination that is evaluated.
+            CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+                collect(base, targets, reads, writes)
+            }
+            CExpr::Var(_) => true,
+            // Anything carrying no observation contributes nothing to order:
+            // a constant subscript index is part of the destination, not a
+            // second occurrence competing with the store for a position.
+            other => !expression_has_placement_observation(other, targets),
+        }
+    }
+
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    (collect(expr, targets, &mut reads, &mut writes) && !writes.is_empty())
+        .then_some((reads, writes))
+}
+
+fn record_completion_observations(
+    ids: &[RenderObservationId],
+    current: Option<RegionId>,
+    targets: &[Option<PlacementObservationTarget>],
+    order: &mut u64,
+    scoped: &mut [Option<FinalObservationScope>],
+) {
+    let (writes, reads): (Vec<_>, Vec<_>) = ids
+        .iter()
+        .copied()
+        .partition(|id| observation_is_write(targets, *id));
+    // One statement, two ordered groups: it reads its operands and then
+    // assigns its destination. They share a statement identity so a read of a
+    // value this very statement defines can be told from a read of the value
+    // it replaces.
+    let statement = *order;
+    record_observation_group(&reads, current, false, statement, order, scoped);
+    record_observation_group(&writes, current, false, statement, order, scoped);
+}
+
+#[track_caller]
+fn record_control_observations(
+    ids: &[RenderObservationId],
+    current: Option<RegionId>,
+    targets: &[Option<PlacementObservationTarget>],
+    order: &mut u64,
+    scoped: &mut [Option<FinalObservationScope>],
+) {
+    let ambiguous = ids
+        .iter()
+        .copied()
+        .any(|id| observation_is_placement_relevant(targets, id));
+    let statement = *order;
+    record_observation_group(ids, current, ambiguous, statement, order, scoped);
+}
+
+#[track_caller]
+fn record_ambiguous_expr_group<'a>(
+    exprs: impl IntoIterator<Item = &'a CExpr>,
+    current: Option<RegionId>,
+    order: &mut u64,
+    scoped: &mut [Option<FinalObservationScope>],
+) {
+    let mut ids = Vec::new();
+    for expr in exprs {
+        visit_expr_observations(expr, &mut |id| ids.push(id));
+    }
+    let statement = *order;
+    record_observation_group(&ids, current, true, statement, order, scoped);
+}
+
+fn collect_expr_observation_scopes(
+    expr: &CExpr,
+    current: Option<RegionId>,
+    targets: &[Option<PlacementObservationTarget>],
+    order: &mut u64,
+    scoped: &mut [Option<FinalObservationScope>],
+) {
+    let mut leading = Vec::new();
+    let mut semantic = expr;
+    while let CExpr::Observed { id, expr } = semantic {
+        leading.push(*id);
+        semantic = expr;
+    }
+
+    match semantic {
+        CExpr::Observed { .. } => unreachable!("leading observations were consumed"),
+        CExpr::Comma(items) => {
+            for item in items {
+                collect_expr_observation_scopes(item, current, targets, order, scoped);
+            }
+        }
+        CExpr::Binary {
+            op: BinaryOp::And | BinaryOp::Or,
+            left,
+            right,
+        } => {
+            collect_expr_observation_scopes(left, current, targets, order, scoped);
+            if expression_has_placement_write(right, targets) {
+                record_ambiguous_expr_group([right.as_ref()], current, order, scoped);
+            } else {
+                collect_expr_observation_scopes(right, current, targets, order, scoped);
+            }
+        }
+        CExpr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            if let Some((reads, writes)) = direct_stack_assignment_observations(left, targets) {
+                collect_expr_observation_scopes(right, current, targets, order, scoped);
+                // The destination's address is read before the store that uses
+                // it, and both belong to the one assignment.
+                let statement = *order;
+                record_observation_group(&reads, current, false, statement, order, scoped);
+                record_observation_group(&writes, current, false, statement, order, scoped);
+            } else if expression_has_placement_write(left, targets)
+                || expression_has_placement_write(right, targets)
+            {
+                // Which side carries the write, and what the destination is.
+                // An assignment whose destination this cannot order is the
+                // common way a statement becomes ambiguous.
+                if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
+                    eprintln!(
+                        "ambiguous assignment: left_writes={} right_writes={} left={:?}",
+                        expression_has_placement_write(left, targets),
+                        expression_has_placement_write(right, targets),
+                        {
+                            let mut core = left.as_ref();
+                            while let CExpr::Observed { expr, .. }
+                            | CExpr::Paren(expr)
+                            | CExpr::Cast { expr, .. } = core
+                            {
+                                core = expr;
+                            }
+                            format!("{core:?}").chars().take(200).collect::<String>()
+                        }
+                    );
+                }
+                record_ambiguous_expr_group(
+                    [left.as_ref(), right.as_ref()],
+                    current,
+                    order,
+                    scoped,
+                );
+            } else {
+                collect_expr_observation_scopes(left, current, targets, order, scoped);
+                collect_expr_observation_scopes(right, current, targets, order, scoped);
+            }
+        }
+        CExpr::Binary { left, right, .. } => {
+            if expression_has_placement_write(left, targets)
+                || expression_has_placement_write(right, targets)
+            {
+                record_ambiguous_expr_group(
+                    [left.as_ref(), right.as_ref()],
+                    current,
+                    order,
+                    scoped,
+                );
+            } else {
+                collect_expr_observation_scopes(left, current, targets, order, scoped);
+                collect_expr_observation_scopes(right, current, targets, order, scoped);
+            }
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_observation_scopes(cond, current, targets, order, scoped);
+            if expression_has_placement_write(then_expr, targets)
+                || expression_has_placement_write(else_expr, targets)
+            {
+                record_ambiguous_expr_group(
+                    [then_expr.as_ref(), else_expr.as_ref()],
+                    current,
+                    order,
+                    scoped,
+                );
+            } else {
+                collect_expr_observation_scopes(then_expr, current, targets, order, scoped);
+                collect_expr_observation_scopes(else_expr, current, targets, order, scoped);
+            }
+        }
+        CExpr::Call { func, args, .. } => {
+            if expression_has_placement_write(func, targets)
+                || args
+                    .iter()
+                    .any(|arg| expression_has_placement_write(arg, targets))
+            {
+                record_ambiguous_expr_group(
+                    std::iter::once(func.as_ref()).chain(args.iter()),
+                    current,
+                    order,
+                    scoped,
+                );
+            } else {
+                collect_expr_observation_scopes(func, current, targets, order, scoped);
+                for arg in args {
+                    collect_expr_observation_scopes(arg, current, targets, order, scoped);
+                }
+            }
+        }
+        CExpr::Subscript { base, index } => {
+            if expression_has_placement_write(base, targets)
+                || expression_has_placement_write(index, targets)
+            {
+                record_ambiguous_expr_group(
+                    [base.as_ref(), index.as_ref()],
+                    current,
+                    order,
+                    scoped,
+                );
+            } else {
+                collect_expr_observation_scopes(base, current, targets, order, scoped);
+                collect_expr_observation_scopes(index, current, targets, order, scoped);
+            }
+        }
+        CExpr::Unary { operand, .. }
+        | CExpr::Cast { expr: operand, .. }
+        | CExpr::AddrOf(operand)
+        | CExpr::Deref(operand)
+        | CExpr::Paren(operand)
+        | CExpr::Member { base: operand, .. }
+        | CExpr::PtrMember { base: operand, .. } => {
+            collect_expr_observation_scopes(operand, current, targets, order, scoped);
+        }
+        CExpr::Sizeof(operand) => {
+            record_ambiguous_expr_group([operand.as_ref()], current, order, scoped);
+        }
+        CExpr::IntLit(_)
+        | CExpr::UIntLit(_)
+        | CExpr::FloatLit(_)
+        | CExpr::StringLit(_)
+        | CExpr::CharLit(_)
+        | CExpr::Var(_)
+        | CExpr::External { .. }
+        | CExpr::DataObject { .. }
+        | CExpr::SizeofType(_) => {}
+    }
+
+    record_completion_observations(&leading, current, targets, order, scoped);
+}
+
+fn collect_stmt_observation_scopes(
+    statement: &CStmt,
+    current: Option<RegionId>,
+    regions: &SealedStructuredRegionArtifact,
+    targets: &[Option<PlacementObservationTarget>],
+    order: &mut u64,
+    scoped: &mut [Option<FinalObservationScope>],
+) {
+    if let CStmt::StructuredRegion { marker, stmt } = statement {
+        let (region, _) = regions
+            .node_for_marker(marker)
+            .expect("the final marker tree was validated before scope collection");
+        collect_stmt_observation_scopes(stmt, Some(region), regions, targets, order, scoped);
+        return;
+    }
+    let mut leading = Vec::new();
+    let mut semantic = statement;
+    while let CStmt::Observed { id, stmt } = semantic {
+        leading.push(*id);
+        semantic = stmt;
+    }
+    match semantic {
+        CStmt::StructuredRegion { .. } => {
+            record_control_observations(&leading, current, targets, order, scoped);
+            collect_stmt_observation_scopes(semantic, current, regions, targets, order, scoped);
+        }
+        CStmt::Expr(expr) | CStmt::Return(Some(expr)) => {
+            collect_expr_observation_scopes(expr, current, targets, order, scoped);
+            record_completion_observations(&leading, current, targets, order, scoped);
+        }
+        CStmt::Decl { init, .. } => {
+            if let Some(init) = init {
+                collect_expr_observation_scopes(init, current, targets, order, scoped);
+            }
+            record_completion_observations(&leading, current, targets, order, scoped);
+        }
+        CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            record_control_observations(&leading, current, targets, order, scoped);
+            collect_expr_observation_scopes(cond, current, targets, order, scoped);
+            collect_stmt_observation_scopes(then_body, current, regions, targets, order, scoped);
+            if let Some(else_body) = else_body {
+                collect_stmt_observation_scopes(
+                    else_body, current, regions, targets, order, scoped,
+                );
+            }
+        }
+        CStmt::While { cond, body } => {
+            record_control_observations(&leading, current, targets, order, scoped);
+            collect_expr_observation_scopes(cond, current, targets, order, scoped);
+            collect_stmt_observation_scopes(body, current, regions, targets, order, scoped);
+        }
+        CStmt::DoWhile { body, cond } => {
+            record_control_observations(&leading, current, targets, order, scoped);
+            collect_stmt_observation_scopes(body, current, regions, targets, order, scoped);
+            collect_expr_observation_scopes(cond, current, targets, order, scoped);
+        }
+        CStmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            record_control_observations(&leading, current, targets, order, scoped);
+            if let Some(init) = init {
+                collect_stmt_observation_scopes(init, current, regions, targets, order, scoped);
+            }
+            if let Some(cond) = cond {
+                collect_expr_observation_scopes(cond, current, targets, order, scoped);
+            }
+            collect_stmt_observation_scopes(body, current, regions, targets, order, scoped);
+            if let Some(update) = update {
+                collect_expr_observation_scopes(update, current, targets, order, scoped);
+            }
+        }
+        CStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            record_control_observations(&leading, current, targets, order, scoped);
+            collect_expr_observation_scopes(expr, current, targets, order, scoped);
+            for case in cases {
+                record_ambiguous_expr_group([&case.value], current, order, scoped);
+                for statement in &case.body {
+                    collect_stmt_observation_scopes(
+                        statement, current, regions, targets, order, scoped,
+                    );
+                }
+            }
+            if let Some(default) = default {
+                for statement in default {
+                    collect_stmt_observation_scopes(
+                        statement, current, regions, targets, order, scoped,
+                    );
+                }
+            }
+        }
+        CStmt::Block(statements) => {
+            record_control_observations(&leading, current, targets, order, scoped);
+            for statement in statements {
+                collect_stmt_observation_scopes(
+                    statement, current, regions, targets, order, scoped,
+                );
+            }
+        }
+        CStmt::Observed { .. } => unreachable!("leading observations were consumed"),
+        CStmt::Empty
+        | CStmt::Return(None)
+        | CStmt::Break
+        | CStmt::Continue
+        | CStmt::Goto(_)
+        | CStmt::Label(_)
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {
+            record_completion_observations(&leading, current, targets, order, scoped);
+        }
+    }
+}
+
+fn visit_expr_observations(expr: &CExpr, visit: &mut impl FnMut(RenderObservationId)) {
+    if let CExpr::Observed { id, expr } = expr {
+        visit(*id);
+        visit_expr_observations(expr, visit);
+        return;
+    }
+    match expr {
+        CExpr::Observed { .. } => unreachable!("leading observation was consumed"),
+        CExpr::Unary { operand, .. }
+        | CExpr::Cast { expr: operand, .. }
+        | CExpr::Sizeof(operand)
+        | CExpr::AddrOf(operand)
+        | CExpr::Deref(operand)
+        | CExpr::Paren(operand) => visit_expr_observations(operand, visit),
+        CExpr::Binary { left, right, .. } => {
+            visit_expr_observations(left, visit);
+            visit_expr_observations(right, visit);
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            visit_expr_observations(cond, visit);
+            visit_expr_observations(then_expr, visit);
+            visit_expr_observations(else_expr, visit);
+        }
+        CExpr::Call { func, args, .. } => {
+            visit_expr_observations(func, visit);
+            for arg in args {
+                visit_expr_observations(arg, visit);
+            }
+        }
+        CExpr::Subscript { base, index } => {
+            visit_expr_observations(base, visit);
+            visit_expr_observations(index, visit);
+        }
+        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+            visit_expr_observations(base, visit);
+        }
+        CExpr::Comma(items) => {
+            for item in items {
+                visit_expr_observations(item, visit);
+            }
+        }
+        CExpr::IntLit(_)
+        | CExpr::UIntLit(_)
+        | CExpr::FloatLit(_)
+        | CExpr::StringLit(_)
+        | CExpr::CharLit(_)
+        | CExpr::Var(_)
+        | CExpr::External { .. }
+        | CExpr::DataObject { .. }
+        | CExpr::SizeofType(_) => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SymbolAccess {
+    Read,
+    Write,
+}
+
+fn audit_plan_symbols(
+    function: &CFunction,
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    targets: &[Option<PlacementObservationTarget>],
+) -> Result<(), PlacementAnalysisError> {
+    let by_symbol = names
+        .plan()
+        .bindings()
+        .filter_map(|(binding, _)| {
+            names
+                .symbol_for_binding(binding)
+                .map(|symbol| (symbol, binding))
+        })
+        .collect::<BTreeMap<_, _>>();
+    for local in &function.locals {
+        if !by_symbol.contains_key(&local.name) {
+            return Err(PlacementAnalysisError::UnauthorizedProgramVariable { symbol: local.name });
+        }
+    }
+    for statement in &function.body {
+        audit_statement(statement, source, names, targets, &by_symbol)?;
+    }
+    Ok(())
+}
+
+fn audit_statement(
+    statement: &CStmt,
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    targets: &[Option<PlacementObservationTarget>],
+    by_symbol: &BTreeMap<crate::symbol::SymbolId, BindingId>,
+) -> Result<(), PlacementAnalysisError> {
+    if let CStmt::StructuredRegion { stmt, .. } = statement {
+        return audit_statement(stmt, source, names, targets, by_symbol);
+    }
+    let mut active = Vec::new();
+    let mut semantic = statement;
+    while let CStmt::Observed { id, stmt } = semantic {
+        if let Some(target) = targets.get(id.index() as usize).copied().flatten() {
+            active.push(target);
+        }
+        semantic = stmt;
+    }
+    match semantic {
+        CStmt::StructuredRegion { stmt, .. } => {
+            audit_statement(stmt, source, names, targets, by_symbol)?;
+        }
+        CStmt::Observed { .. } => unreachable!("leading observations were consumed"),
+        CStmt::Expr(expr) | CStmt::Return(Some(expr)) => {
+            audit_expr(
+                expr,
+                SymbolAccess::Read,
+                &active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )
+            .map_err(|error| {
+                // The refusal names a symbol; the statement it sits in is
+                // what says which rendering path spelled it.
+                fn bare(expr: &CExpr) -> &CExpr {
+                    let mut expr = expr;
+                    while let CExpr::Observed { expr: inner, .. } = expr {
+                        expr = inner;
+                    }
+                    expr
+                }
+                let shape = match bare(expr) {
+                    CExpr::Binary { op, left, right } => {
+                        format!("{op:?}: {:?} <- {:?}", bare(left), bare(right))
+                    }
+                    other => format!("{other:?}"),
+                };
+                r2il::refusal_evidence!("unauthorized-symbol-statement", "{error:?} in {shape}");
+                error
+            })?;
+        }
+        CStmt::Decl { name, init, .. } => {
+            audit_program_symbol(
+                *name,
+                SymbolAccess::Write,
+                &active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+            if let Some(init) = init {
+                audit_expr(
+                    init,
+                    SymbolAccess::Read,
+                    &active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            }
+        }
+        CStmt::Block(statements) => {
+            for statement in statements {
+                audit_statement(statement, source, names, targets, by_symbol)?;
+            }
+        }
+        CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
+            audit_expr(
+                cond,
+                SymbolAccess::Read,
+                &active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+            audit_statement(then_body, source, names, targets, by_symbol)?;
+            if let Some(else_body) = else_body {
+                audit_statement(else_body, source, names, targets, by_symbol)?;
+            }
+        }
+        CStmt::While { cond, body } => {
+            audit_expr(
+                cond,
+                SymbolAccess::Read,
+                &active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+            audit_statement(body, source, names, targets, by_symbol)?;
+        }
+        CStmt::DoWhile { body, cond } => {
+            audit_statement(body, source, names, targets, by_symbol)?;
+            audit_expr(
+                cond,
+                SymbolAccess::Read,
+                &active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+        }
+        CStmt::For {
+            init,
+            cond,
+            update,
+            body,
+        } => {
+            if let Some(init) = init {
+                audit_statement(init, source, names, targets, by_symbol)?;
+            }
+            if let Some(cond) = cond {
+                audit_expr(
+                    cond,
+                    SymbolAccess::Read,
+                    &active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            }
+            if let Some(update) = update {
+                audit_expr(
+                    update,
+                    SymbolAccess::Read,
+                    &active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            }
+            audit_statement(body, source, names, targets, by_symbol)?;
+        }
+        CStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
+            audit_expr(
+                expr,
+                SymbolAccess::Read,
+                &active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+            for case in cases {
+                audit_expr(
+                    &case.value,
+                    SymbolAccess::Read,
+                    &active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+                for statement in &case.body {
+                    audit_statement(statement, source, names, targets, by_symbol)?;
+                }
+            }
+            if let Some(default) = default {
+                for statement in default {
+                    audit_statement(statement, source, names, targets, by_symbol)?;
+                }
+            }
+        }
+        CStmt::Empty
+        | CStmt::Return(None)
+        | CStmt::Break
+        | CStmt::Continue
+        | CStmt::Goto(_)
+        | CStmt::Label(_)
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => {}
+    }
+    Ok(())
+}
+
+fn audit_expr(
+    expr: &CExpr,
+    access: SymbolAccess,
+    active: &[PlacementObservationTarget],
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    targets: &[Option<PlacementObservationTarget>],
+    by_symbol: &BTreeMap<crate::symbol::SymbolId, BindingId>,
+) -> Result<(), PlacementAnalysisError> {
+    if let CExpr::Observed { id, expr } = expr {
+        let mut nested = active.to_vec();
+        if let Some(target) = targets.get(id.index() as usize).copied().flatten() {
+            nested.push(target);
+        }
+        return audit_expr(expr, access, &nested, source, names, targets, by_symbol);
+    }
+    match expr {
+        CExpr::Var(symbol) => {
+            audit_program_symbol(*symbol, access, active, source, names, targets, by_symbol)?;
+        }
+        CExpr::Observed { .. } => unreachable!("leading observation was consumed"),
+        CExpr::Unary { op, operand } => {
+            if matches!(
+                op,
+                crate::ast::UnaryOp::PreInc
+                    | crate::ast::UnaryOp::PreDec
+                    | crate::ast::UnaryOp::PostInc
+                    | crate::ast::UnaryOp::PostDec
+            ) && matches!(operand.unobserved(), CExpr::Var(_))
+            {
+                audit_expr(
+                    operand,
+                    SymbolAccess::Read,
+                    active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+                audit_expr(
+                    operand,
+                    SymbolAccess::Write,
+                    active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            } else {
+                audit_expr(
+                    operand,
+                    SymbolAccess::Read,
+                    active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            }
+        }
+        CExpr::Binary { op, left, right } => {
+            let assignment = matches!(
+                op,
+                BinaryOp::Assign
+                    | BinaryOp::AddAssign
+                    | BinaryOp::SubAssign
+                    | BinaryOp::MulAssign
+                    | BinaryOp::DivAssign
+                    | BinaryOp::ModAssign
+                    | BinaryOp::BitAndAssign
+                    | BinaryOp::BitOrAssign
+                    | BinaryOp::BitXorAssign
+                    | BinaryOp::ShlAssign
+                    | BinaryOp::ShrAssign
+            );
+            if assignment
+                && matches!(
+                    left.unobserved(),
+                    CExpr::Var(_) | CExpr::Subscript { .. } | CExpr::Member { .. }
+                )
+            {
+                if *op != BinaryOp::Assign {
+                    audit_expr(
+                        left,
+                        SymbolAccess::Read,
+                        active,
+                        source,
+                        names,
+                        targets,
+                        by_symbol,
+                    )?;
+                }
+                audit_expr(
+                    left,
+                    SymbolAccess::Write,
+                    active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            } else {
+                audit_expr(
+                    left,
+                    SymbolAccess::Read,
+                    active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            }
+            audit_expr(
+                right,
+                SymbolAccess::Read,
+                active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            for expr in [cond.as_ref(), then_expr.as_ref(), else_expr.as_ref()] {
+                audit_expr(
+                    expr,
+                    SymbolAccess::Read,
+                    active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            }
+        }
+        CExpr::Cast { expr, .. } | CExpr::Paren(expr) => {
+            audit_expr(expr, access, active, source, names, targets, by_symbol)?;
+        }
+        CExpr::Sizeof(expr) | CExpr::AddrOf(expr) | CExpr::Deref(expr) => {
+            audit_expr(
+                expr,
+                SymbolAccess::Read,
+                active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+        }
+        CExpr::Call { func, args, .. } => {
+            audit_expr(
+                func,
+                SymbolAccess::Read,
+                active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+            for arg in args {
+                audit_expr(
+                    arg,
+                    SymbolAccess::Read,
+                    active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            }
+        }
+        CExpr::Subscript { base, index } => {
+            let base_access = if access == SymbolAccess::Write
+                && subscript_base_is_array_stack_object(base, names, by_symbol)
+            {
+                SymbolAccess::Write
+            } else {
+                SymbolAccess::Read
+            };
+            audit_expr(base, base_access, active, source, names, targets, by_symbol)?;
+            audit_expr(
+                index,
+                SymbolAccess::Read,
+                active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+        }
+        CExpr::Member { base, .. } => {
+            // `s.f` names a place inside `s`, so a write to it writes `s`.
+            // `p->f` is different: `p` is read whichever side it sits on.
+            audit_expr(base, access, active, source, names, targets, by_symbol)?;
+        }
+        CExpr::PtrMember { base, .. } => {
+            audit_expr(
+                base,
+                SymbolAccess::Read,
+                active,
+                source,
+                names,
+                targets,
+                by_symbol,
+            )?;
+        }
+        CExpr::Comma(items) => {
+            for item in items {
+                audit_expr(
+                    item,
+                    SymbolAccess::Read,
+                    active,
+                    source,
+                    names,
+                    targets,
+                    by_symbol,
+                )?;
+            }
+        }
+        CExpr::IntLit(_)
+        | CExpr::UIntLit(_)
+        | CExpr::FloatLit(_)
+        | CExpr::StringLit(_)
+        | CExpr::CharLit(_)
+        | CExpr::External { .. }
+        | CExpr::DataObject { .. }
+        | CExpr::SizeofType(_) => {}
+    }
+    Ok(())
+}
+
+/// Whether a subscript base is the name of one certified stack array.
+///
+/// A pointer variable is read by `p[i] = value`; an array object is the
+/// destination written by `array[i] = value`. The declaration type and stack
+/// role are sealed binding facts, so this distinction does not depend on a
+/// spelling or on reinterpreting the address expression in placement.
+fn subscript_base_is_array_stack_object(
+    expr: &CExpr,
+    names: &BindingNameResolution,
+    by_symbol: &BTreeMap<crate::symbol::SymbolId, BindingId>,
+) -> bool {
+    let symbol = match expr {
+        CExpr::Observed { expr, .. } | CExpr::Paren(expr) | CExpr::Cast { expr, .. } => {
+            return subscript_base_is_array_stack_object(expr, names, by_symbol);
+        }
+        CExpr::Var(symbol) => *symbol,
+        _ => return false,
+    };
+    let Some(binding) = by_symbol.get(&symbol).copied() else {
+        return false;
+    };
+    matches!(
+        (
+            names.plan().binding_role(binding),
+            names
+                .plan()
+                .binding(binding)
+                .map(|binding| binding.declaration_type()),
+        ),
+        (
+            Some(crate::binding_plan::BindingRole::StackObject { .. }),
+            Some(crate::ast::CType::Array(_, Some(_))),
+        )
+    )
+}
+
+fn audit_program_symbol(
+    symbol: crate::symbol::SymbolId,
+    access: SymbolAccess,
+    active: &[PlacementObservationTarget],
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    targets: &[Option<PlacementObservationTarget>],
+    by_symbol: &BTreeMap<crate::symbol::SymbolId, BindingId>,
+) -> Result<(), PlacementAnalysisError> {
+    // A cursor a lowering introduced answers for itself: it holds no value the
+    // program computed, so no binding owns it and none is asked for.
+    if names.symbol_is_render_cursor(symbol) {
+        return Ok(());
+    }
+    let binding = by_symbol
+        .get(&symbol)
+        .copied()
+        .ok_or(PlacementAnalysisError::UnauthorizedProgramVariable { symbol })?;
+    if active
+        .iter()
+        .copied()
+        .any(|target| target_authorizes_binding(target, access, binding, source, names))
+    {
+        return Ok(());
+    }
+    // A refusal here has two very different causes and the reader cannot tell
+    // them apart from the active set alone: either the journal never recorded
+    // a marker that would authorise this binding, or it recorded one and the
+    // marker did not survive onto the node being audited. Naming the markers
+    // that exist elsewhere in the journal separates the two.
+    let elsewhere = targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| {
+            target.is_some_and(|target| {
+                target_authorizes_binding(target, access, binding, source, names)
+            })
+        })
+        .map(|(index, target)| format!("{index}:{:?}", target.expect("filtered to Some")))
+        .collect::<Vec<_>>();
+    r2il::refusal_evidence!(
+        "binding-symbol-observed",
+        "{access:?} binding={binding:?} name={:?} role={:?} type={:?} members={:?} authorizing_elsewhere={elsewhere:?} active={:?}",
+        names.spelling(symbol),
+        names.plan().binding_role(binding),
+        names
+            .plan()
+            .binding(binding)
+            .map(|binding| format!("{:?}", binding.declaration_type())),
+        (0..source.graph().values.len())
+            .filter(|index| {
+                u32::try_from(*index).ok().is_some_and(|index| {
+                    names
+                        .disposition_for_value(r2ssa::ValueId(index))
+                        .is_some_and(|disposition| {
+                            matches!(disposition, ValueDisposition::Bound { binding: owner } if *owner == binding)
+                        })
+                })
+            })
+            .collect::<Vec<_>>(),
+        active.iter().map(|t| format!("{t:?}")).collect::<Vec<_>>()
+    );
+    Err(match access {
+        SymbolAccess::Read => PlacementAnalysisError::UnobservedBindingRead { binding },
+        SymbolAccess::Write => PlacementAnalysisError::UnobservedBindingWrite { binding },
+    })
+}
+
+fn target_authorizes_binding(
+    target: PlacementObservationTarget,
+    access: SymbolAccess,
+    binding: BindingId,
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+) -> bool {
+    let graph = source.graph();
+    match (target, access) {
+        (PlacementObservationTarget::Use { site, .. }, SymbolAccess::Read) => graph
+            .inst(site.inst)
+            .and_then(|inst| inst.inputs.get(site.input_idx))
+            .and_then(|value| names.disposition_for_value(*value))
+            .is_some_and(|disposition| {
+                matches!(disposition, ValueDisposition::Bound { binding: owner } if *owner == binding)
+            }),
+        (
+            PlacementObservationTarget::CertifiedValueRead {
+                value,
+                source: read_source,
+                binding: certified_binding,
+                symbol,
+            },
+            SymbolAccess::Read,
+        ) => {
+            certified_binding == binding
+                && certified_value_read_matches(
+                    source,
+                    names,
+                    value,
+                    read_source,
+                    certified_binding,
+                    symbol,
+            )
+        }
+        (
+            PlacementObservationTarget::CertifiedArrayIndexRead {
+                access,
+                value,
+                binding: certified_binding,
+                symbol,
+            },
+            SymbolAccess::Read,
+        ) => {
+            certified_binding == binding
+                && certified_array_index_read_matches(
+                    source,
+                    names,
+                    access,
+                    value,
+                    certified_binding,
+                    symbol,
+                )
+        }
+        (
+            PlacementObservationTarget::Write {
+                inst,
+                projection: _,
+                block: _,
+            },
+            SymbolAccess::Write,
+        ) => graph
+            .inst(inst)
+            .and_then(|inst| inst.output)
+            .and_then(|value| names.disposition_for_value(value))
+            .is_some_and(|disposition| {
+                matches!(disposition, ValueDisposition::Bound { binding: owner } if *owner == binding)
+            }),
+        (PlacementObservationTarget::Write { .. }, SymbolAccess::Read) => false,
+        (
+            PlacementObservationTarget::StackAccess {
+                access,
+                object,
+                binding: stack_binding,
+                symbol,
+                is_write,
+            },
+            SymbolAccess::Write,
+        ) => {
+            is_write
+                && stack_binding == binding
+                && stack_access_matches(
+                    source,
+                    names,
+                    access,
+                    object,
+                    stack_binding,
+                    symbol,
+                    true,
+                )
+        }
+        (
+            PlacementObservationTarget::StackAccess {
+                access,
+                object,
+                binding: stack_binding,
+                symbol,
+                is_write,
+            },
+            SymbolAccess::Read,
+        ) => {
+            // An access through a computed address into the slot spells the
+            // pointer the plan bound for that address, and reads it here.
+            let reads_pointer = source
+                .structured()
+                .memory_accesses
+                .get(&access)
+                .filter(|fact| source.objects().address_is_indexed(fact.address))
+                .and_then(|fact| names.disposition_for_value(fact.address))
+                .is_some_and(|disposition| {
+                    matches!(disposition, ValueDisposition::Bound { binding: pointer } if *pointer == binding)
+                });
+            if reads_pointer
+                && stack_access_matches(
+                    source,
+                    names,
+                    access,
+                    object,
+                    stack_binding,
+                    symbol,
+                    is_write,
+                )
+            {
+                return true;
+            }
+            // The access's own expression may name its slot on either side:
+            // a store through a subscript spells `&slot` as the base it writes.
+            stack_binding == binding
+                && stack_access_matches(
+                    source,
+                    names,
+                    access,
+                    object,
+                    stack_binding,
+                    symbol,
+                    is_write,
+                )
+        }
+        (
+            PlacementObservationTarget::EscapedStackAddress {
+                call,
+                argument_index,
+                value,
+                object,
+                binding: escaped_binding,
+                symbol,
+            },
+            SymbolAccess::Read,
+        ) => {
+            escaped_binding == binding
+                && frame_object_address_matches(
+                    source,
+                    names,
+                    PlacementObservationTarget::EscapedStackAddress {
+                        call,
+                        argument_index,
+                        value,
+                        object,
+                        binding: escaped_binding,
+                        symbol,
+                    },
+                )
+        }
+        (PlacementObservationTarget::Use { .. }, SymbolAccess::Write)
+        | (PlacementObservationTarget::CertifiedValueRead { .. }, SymbolAccess::Write)
+        | (PlacementObservationTarget::CertifiedArrayIndexRead { .. }, SymbolAccess::Write)
+        | (PlacementObservationTarget::EscapedStackAddress { .. }, SymbolAccess::Write)
+        | (PlacementObservationTarget::Other, _) => false,
+    }
+}
+
+/// Revalidate the complete source-to-render identity chain carried by a
+/// certified value-read marker. The boundary or address certificate owns the
+/// read identity; the sealed binding plan owns `ValueId -> BindingId`; and name
+/// resolution owns `BindingId -> SymbolId`. No one of those links is a
+/// substitute for the others.
+fn certified_value_read_matches(
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    value: r2ssa::ValueId,
+    read_source: CertifiedValueReadSource,
+    binding: BindingId,
+    symbol: crate::symbol::SymbolId,
+) -> bool {
+    certified_value_read(source, value, read_source)
+        && matches!(
+            names.disposition_for_value(value),
+            Some(ValueDisposition::Bound { binding: owner }) if *owner == binding
+        )
+        && names.symbol_for_binding(binding) == Some(symbol)
+}
+
+/// Revalidate the replacement read introduced when a certified stack address
+/// is rendered as `array[index]`.
+pub(super) fn certified_array_index_read_matches(
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    access: r2ssa::StructuredAccessId,
+    value: r2ssa::ValueId,
+    binding: BindingId,
+    symbol: crate::symbol::SymbolId,
+) -> bool {
+    let Some(memory) = source
+        .structured()
+        .memory_accesses
+        .get(&access)
+        .filter(|memory| memory.id == access && memory.provenance_complete)
+    else {
+        return false;
+    };
+    let Some(layout) = source
+        .certificates()
+        .stack_slots
+        .get(&memory.object)
+        .and_then(|slot| match &slot.array_layout {
+            r2ssa::StackArrayLayoutDisposition::Proven(layout) => Some(layout),
+            r2ssa::StackArrayLayoutDisposition::NotIndexed
+            | r2ssa::StackArrayLayoutDisposition::Refused(_) => None,
+        })
+    else {
+        return false;
+    };
+    layout.object == memory.object
+        && layout.indexed_elements.iter().any(|element| {
+            element.address == memory.address
+                && element.element_index == Some(r2ssa::StackArrayElementIndex::Value(value))
+        })
+        && matches!(
+            names.disposition_for_value(value),
+            Some(ValueDisposition::Bound { binding: owner }) if *owner == binding
+        )
+        && names.symbol_for_binding(binding) == Some(symbol)
+}
+
+fn frame_object_address_matches(
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    target: PlacementObservationTarget,
+) -> bool {
+    let PlacementObservationTarget::EscapedStackAddress {
+        call,
+        argument_index,
+        value,
+        object,
+        binding,
+        symbol,
+    } = target
+    else {
+        return false;
+    };
+    crate::binding_plan::certified_frame_object_call_argument(source, call, argument_index, value)
+        == Some(object)
+        && matches!(
+            names.plan().stack_object_disposition(object),
+            Some(crate::binding_plan::StackObjectDisposition::Bound { binding: owner })
+                if owner == binding
+        )
+        && names.symbol_for_binding(binding) == Some(symbol)
+}
+
+/// Whether an expression gives one frame object its exact address spelling.
+///
+/// Arrays decay from a bare name; scalar and aggregate objects use `&name`.
+/// Casts belong to the call boundary outside this marker and therefore do not
+/// broaden the spelling accepted here.
+pub(crate) fn frame_object_address_expr_matches(
+    expr: &CExpr,
+    symbol: crate::symbol::SymbolId,
+    is_array: bool,
+) -> bool {
+    if is_array {
+        return matches!(expr.unobserved(), CExpr::Var(actual) if *actual == symbol);
+    }
+    matches!(
+        expr.unobserved(),
+        CExpr::AddrOf(inner)
+            if matches!(inner.unobserved(), CExpr::Var(actual) if *actual == symbol)
+    )
+}
+
+/// Revalidate one stack-object occurrence without resolving a stack offset or
+/// inspecting a presentation spelling.
+fn stack_access_matches(
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    access: r2ssa::StructuredAccessId,
+    object: r2ssa::ObjectId,
+    binding: BindingId,
+    symbol: crate::symbol::SymbolId,
+    is_write: bool,
+) -> bool {
+    source
+        .structured()
+        .memory_accesses
+        .get(&access)
+        .is_some_and(|fact| {
+            fact.id == access
+                && fact.object == object
+                && fact.is_write == is_write
+                && fact.provenance_complete
+        })
+        && matches!(
+            names.plan().stack_object_disposition(object),
+            Some(crate::binding_plan::StackObjectDisposition::Bound { binding: owner })
+                if owner == binding
+        )
+        && names.symbol_for_binding(binding) == Some(symbol)
+}
+
+/// Whether evaluating this expression reads the exact program symbol.
+///
+/// This follows C read semantics closely enough to reject a forged marker on
+/// `symbol = literal`, `&symbol`, or `sizeof(symbol)`, while retaining exact
+/// casts and slice projections produced from the planned value expression.
+/// Whether a rendered stack access mentions the slot it is filed under.
+///
+/// An access through a computed address into a named slot renders through the
+/// pointer the plan bound for that address, and the slot is mentioned where
+/// the pointer was computed from it. The access still reads the slot, which
+/// is what placement records; the symbol it spells is the pointer's.
+pub(crate) fn stack_access_expr_mentions_slot(
+    source: &r2ssa::SsaArtifact,
+    names: &BindingNameResolution,
+    access: r2ssa::StructuredAccessId,
+    expr: &CExpr,
+    symbol: crate::symbol::SymbolId,
+) -> bool {
+    if expr_reads_symbol(expr, symbol) {
+        return true;
+    }
+    let Some(fact) = source.structured().memory_accesses.get(&access) else {
+        return false;
+    };
+    if !source.objects().address_is_indexed(fact.address) {
+        return false;
+    }
+    let Some(ValueDisposition::Bound { binding }) = names.disposition_for_value(fact.address)
+    else {
+        return false;
+    };
+    names
+        .symbol_for_binding(*binding)
+        .is_some_and(|pointer| expr_reads_symbol(expr, pointer))
+}
+
+pub(crate) fn expr_reads_symbol(expr: &CExpr, symbol: crate::symbol::SymbolId) -> bool {
+    match expr.unobserved() {
+        CExpr::Var(actual) => *actual == symbol,
+        CExpr::Unary { operand, .. }
+        | CExpr::Cast { expr: operand, .. }
+        | CExpr::Deref(operand)
+        | CExpr::AddrOf(operand)
+        | CExpr::Paren(operand) => expr_reads_symbol(operand, symbol),
+        CExpr::Binary { op, left, right } => {
+            expr_reads_symbol(right, symbol)
+                || (!matches!(op, BinaryOp::Assign) || !matches!(left.unobserved(), CExpr::Var(_)))
+                    && expr_reads_symbol(left, symbol)
+        }
+        CExpr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            expr_reads_symbol(cond, symbol)
+                || expr_reads_symbol(then_expr, symbol)
+                || expr_reads_symbol(else_expr, symbol)
+        }
+        CExpr::Call { func, args, .. } => {
+            expr_reads_symbol(func, symbol) || args.iter().any(|arg| expr_reads_symbol(arg, symbol))
+        }
+        CExpr::Subscript { base, index } => {
+            expr_reads_symbol(base, symbol) || expr_reads_symbol(index, symbol)
+        }
+        CExpr::Member { base, .. } | CExpr::PtrMember { base, .. } => {
+            expr_reads_symbol(base, symbol)
+        }
+        CExpr::Comma(items) => items.iter().any(|item| expr_reads_symbol(item, symbol)),
+        CExpr::Observed { .. } => unreachable!("unobserved expression returned a wrapper"),
+        CExpr::IntLit(_)
+        | CExpr::UIntLit(_)
+        | CExpr::FloatLit(_)
+        | CExpr::StringLit(_)
+        | CExpr::CharLit(_)
+        | CExpr::External { .. }
+        | CExpr::DataObject { .. }
+        | CExpr::Sizeof(_)
+        | CExpr::SizeofType(_) => false,
+    }
+}
+
+/// A decision consumed immediately by final emission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlacementDecision {
+    /// The binding is already declared by the function signature and is
+    /// assigned on function entry by the calling convention.
+    ExternallyDeclared,
+    /// Declare at the start of the lowest valid lexical region, then assign at
+    /// each surviving write occurrence.
+    LexicalDeclaration { region: RegionId },
+    /// Replace the sole dominating assignment with a declaration initializer.
+    ///
+    /// `region` is where the binding is declared if the inline turns out not to
+    /// be expressible. Folding a write into a declaration moves the declaration
+    /// to wherever that write is written, and C's scopes do not always follow
+    /// the nesting of the tree: a `do { ... } while (cond)` evaluates its
+    /// condition outside the braces, so a write inside the body becomes a
+    /// declaration the condition's read cannot see. Whether that has happened
+    /// is a fact about the emitted tree, so it is settled after the decisions
+    /// are applied, and this is what the binding falls back to.
+    Inline { write: InstId, region: RegionId },
+    /// Nothing reads this object, so it needs no declaration and its writes
+    /// need no statement. The obligations those statements carried are
+    /// accounted as elided when the journal seals.
+    ///
+    /// `region` is where the binding is declared if the removal turns out not
+    /// to be expressible, for the same reason `Inline` carries one. The
+    /// occurrence set records placement-relevant reads, which is not every
+    /// mention: a read folded into another expression names the symbol without
+    /// leaving an occurrence. When the trial removal finds the name still
+    /// there, the object is not dead after all, and it needs the declaration
+    /// this names. Leaving the decision as it was dropped the declaration and
+    /// kept the statements -- an undeclared identifier, which is the one thing
+    /// placement must never emit.
+    DeadStore { region: Option<RegionId> },
+    /// Honest C cannot be emitted for this binding.
+    Refused(PlacementRefusal),
+}
+
+/// Dense result in ascending `BindingId` order.
+///
+/// `None` means that the binding has no surviving occurrence and needs no C
+/// declaration. The vector is transient and is not retained by `BindingPlan`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlacementDecisions {
+    decisions: Box<[Option<PlacementDecision>]>,
+}
+
+impl PlacementDecisions {
+    /// A decision set stated directly, for tests that need one specific
+    /// decision rather than whatever the derivation would choose.
+    #[cfg(test)]
+    pub(crate) fn from_decisions_for_test(decisions: Vec<Option<PlacementDecision>>) -> Self {
+        Self {
+            decisions: decisions.into_boxed_slice(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decision(&self, binding: BindingId) -> Option<PlacementDecision> {
+        self.decisions.get(binding.index()).copied().flatten()
+    }
+
+    pub(crate) fn iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (BindingId, Option<PlacementDecision>)> + '_ {
+        self.decisions.iter().enumerate().map(|(index, decision)| {
+            let binding = BindingId::from_dense_index(index)
+                .expect("placement decision count fits BindingId");
+            (binding, *decision)
+        })
+    }
+}
+
+/// Structural mismatch between final occurrences and their two authorities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlacementAnalysisError {
+    SourceAuthorityMismatch,
+    BindingOutsidePlan { binding: BindingId },
+    RegionOutsideArtifact { region: RegionId },
+    BlockOutsideFunction { block: u64 },
+    RegionDoesNotDominateOccurrence { region: RegionId, block: u64 },
+    ExternalBindingOutsidePlan { binding: BindingId },
+    RegionMarkers(crate::structured_region::StructuredRegionFinalizationError),
+    ObservationMarkers(crate::ast::RenderObservationStripError),
+    MissingObservationTarget { observation: RenderObservationId },
+    InvalidUse { site: UseSite },
+    InvalidWrite { inst: InstId },
+    InvalidCertifiedValueRead { value: r2ssa::ValueId, at: InstId },
+    MissingPlannedValue { value: r2ssa::ValueId },
+    RefusedPlannedValue { value: r2ssa::ValueId },
+    UnscopedObservation { observation: RenderObservationId },
+    AmbiguousExecutionOrder { observation: RenderObservationId },
+    UnauthorizedProgramVariable { symbol: crate::symbol::SymbolId },
+    UnobservedBindingRead { binding: BindingId },
+    UnobservedBindingWrite { binding: BindingId },
+}
+
+/// Failure to apply a derived decision to the exact final marked tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlacementApplicationError {
+    Refused(PlacementRefusal),
+    MissingBinding { binding: BindingId },
+    MissingBindingSymbol { binding: BindingId },
+    ExternalBindingMissingParameter { binding: BindingId },
+    MissingRegion { region: RegionId },
+    DuplicateRegion { region: RegionId },
+    MissingInlineWrite { inst: InstId },
+    DuplicateInlineWrite { inst: InstId },
+}
+
+/// Apply a decision set transactionally to the exact marker-bearing function.
+/// Apply the derived decisions, reporting which bindings actually lost their
+/// statements.
+///
+/// The caller has to tell the ledger which writes were elided so their
+/// obligations are closed out at the seal. It used to predict that set from the
+/// decisions, before this ran. The prediction and the action can disagree --
+/// a decision can be declined here because the tree still mentions the symbol,
+/// and a binding the derivation never called dead can lose its last reader to
+/// another binding's removal -- so what is reported is what happened, not what
+/// was planned.
+pub(crate) fn apply_placement_decisions(
+    function: &mut CFunction,
+    regions: &SealedStructuredRegionArtifact,
+    names: &BindingNameResolution,
+    decisions: &PlacementDecisions,
+    writes: &[FinalBindingWrite],
+) -> Result<PlacementRemovals, PlacementApplicationError> {
+    // Inlining a write moves the binding's declaration to wherever that write
+    // is written, and whether the result is in scope for the reads is a fact
+    // about the emitted tree, not about the occurrence set the decisions were
+    // derived from. So the tree is asked: apply, check the property, and demote
+    // any inline the check reports to the lexical declaration it carries as its
+    // fallback. A demotion can only ever turn an inline into a declaration, so
+    // the loop terminates.
+    // One copy, kept because a demotion has to start again from the tree as it
+    // was and because an application that refuses must leave the emitted
+    // function untouched -- `finish_enforcing` goes on to inspect it. The
+    // decisions are applied to the real tree rather than to a second copy of
+    // this one, so the common case, where nothing is demoted, pays for this
+    // snapshot and nothing else.
+    let original = function.clone();
+    let mut demoted = BTreeMap::<BindingId, PlacementDecision>::new();
+    loop {
+        let removals =
+            match apply_decisions_once(function, regions, names, decisions, writes, &demoted) {
+                Ok(removals) => removals,
+                Err(error) => {
+                    *function = original;
+                    return Err(error);
+                }
+            };
+        let undeclared = crate::unrendered::names_mentioned_without_a_declaration(function);
+        let mut progressed = false;
+        for symbol in undeclared {
+            let Some((binding, region)) =
+                decisions
+                    .iter()
+                    .find_map(|(binding, decision)| match decision {
+                        Some(PlacementDecision::Inline { region, .. })
+                            if names.symbol_for_binding(binding) == Some(symbol) =>
+                        {
+                            Some((binding, region))
+                        }
+                        _ => None,
+                    })
+            else {
+                continue;
+            };
+            if demoted.contains_key(&binding) {
+                continue;
+            }
+            demoted.insert(binding, PlacementDecision::LexicalDeclaration { region });
+            progressed = true;
+        }
+        if !progressed {
+            return Ok(removals);
+        }
+        *function = original.clone();
+    }
+}
+
+fn apply_decisions_once(
+    function: &mut CFunction,
+    regions: &SealedStructuredRegionArtifact,
+    names: &BindingNameResolution,
+    decisions: &PlacementDecisions,
+    writes: &[FinalBindingWrite],
+    demoted: &BTreeMap<BindingId, PlacementDecision>,
+) -> Result<PlacementRemovals, PlacementApplicationError> {
+    // The caller hands over a copy it discards unless the whole application
+    // succeeds, and it is the caller that writes the result back to the real
+    // tree. Cloning again here bought nothing: the transactional property --
+    // an early `return Err` leaves the emitted function untouched -- is the
+    // caller's, not this function's.
+    let candidate = &mut *function;
+    // One pass over the body, then every "does anything still name this?"
+    // question below is a lookup. The body only shrinks while those questions
+    // are asked, and each discard subtracts what it removed.
+    let mut mentions = SymbolMentions::of_body(&candidate.body);
+    let writes_by_binding = WritesByBinding::of(writes);
+    let mut discarded_bindings = BTreeSet::new();
+    let mut discarded_observations = BTreeSet::<RenderObservationId>::new();
+    let mut declarations =
+        BTreeMap::<RegionId, Vec<(BindingId, crate::ast::CType, crate::symbol::SymbolId)>>::new();
+    let plan = names.plan();
+
+    for (binding, decision) in decisions.iter() {
+        let decision = demoted.get(&binding).copied().or(decision);
+        let symbol = names
+            .symbol_for_binding(binding)
+            .ok_or(PlacementApplicationError::MissingBindingSymbol { binding })?;
+        let binding_fact = plan
+            .binding(binding)
+            .ok_or(PlacementApplicationError::MissingBinding { binding })?;
+        match decision {
+            None => candidate.locals.retain(|local| local.name != symbol),
+            Some(PlacementDecision::ExternallyDeclared) => {
+                if !candidate.params.iter().any(|param| param.name == symbol) {
+                    return Err(PlacementApplicationError::ExternalBindingMissingParameter {
+                        binding,
+                    });
+                }
+                candidate.locals.retain(|local| local.name != symbol);
+            }
+            Some(PlacementDecision::LexicalDeclaration { region }) => {
+                candidate.locals.retain(|local| local.name != symbol);
+                declarations.entry(region).or_default().push((
+                    binding,
+                    binding_fact.declaration_type().clone(),
+                    symbol,
+                ));
+            }
+            Some(PlacementDecision::DeadStore { region }) => {
+                // The occurrence set records placement-relevant reads, which is
+                // not the same as every mention: a read folded into another
+                // expression leaves no occurrence but still names the symbol.
+                // Dropping the declaration then emits an undeclared identifier,
+                // which is the one thing this must never do, so the tree itself
+                // is asked before anything is removed.
+                let targets = writes_by_binding.observations(binding);
+                if mentions.discarding_clears(&targets, symbol) {
+                    let mut removed_observations = BTreeSet::new();
+                    for target in &targets {
+                        discard_marked_statement(
+                            &mentions,
+                            &mut candidate.body,
+                            *target,
+                            &mut removed_observations,
+                        );
+                        mentions.forget_target(*target);
+                    }
+                    candidate.locals.retain(|local| local.name != symbol);
+                    discarded_bindings.insert(binding);
+                    discarded_observations.append(&mut removed_observations);
+                } else if mentions.mentions(symbol)
+                    && let Some(region) = region
+                {
+                    // The name survived the removal, so something reads the
+                    // object without leaving a placement occurrence, and it is
+                    // not dead after all. The trial is dropped -- every
+                    // statement stays -- and the binding takes the declaration
+                    // it would have had. Keeping the dead-store decision here
+                    // would leave those statements naming a symbol nothing
+                    // declares. A binding whose name is nowhere in the body is
+                    // the ordinary dead store and still gets no declaration.
+                    candidate.locals.retain(|local| local.name != symbol);
+                    declarations.entry(region).or_default().push((
+                        binding,
+                        binding_fact.declaration_type().clone(),
+                        symbol,
+                    ));
+                }
+            }
+            Some(PlacementDecision::Inline { write, .. }) => {
+                candidate.locals.retain(|local| local.name != symbol);
+                let matching = writes_by_binding
+                    .of_binding(binding)
+                    .iter()
+                    .filter(|occurrence| occurrence.inst == write)
+                    .collect::<Vec<_>>();
+                let [occurrence] = matching.as_slice() else {
+                    return Err(if matching.is_empty() {
+                        PlacementApplicationError::MissingInlineWrite { inst: write }
+                    } else {
+                        PlacementApplicationError::DuplicateInlineWrite { inst: write }
+                    });
+                };
+                let replacements = inline_marked_write(
+                    &mentions,
+                    &mut candidate.body,
+                    occurrence.observation,
+                    symbol,
+                    binding_fact.declaration_type(),
+                );
+                if replacements != 1 {
+                    return Err(if replacements == 0 {
+                        PlacementApplicationError::MissingInlineWrite { inst: write }
+                    } else {
+                        PlacementApplicationError::DuplicateInlineWrite { inst: write }
+                    });
+                }
+            }
+            Some(PlacementDecision::Refused(reason)) => {
+                return Err(PlacementApplicationError::Refused(reason));
+            }
+        }
+    }
+
+    // Deadness is transitive. Discarding a dead binding's statements discards
+    // the reads they performed, which can leave another binding with no reader
+    // at all -- an address temporary the stack-object rendering had already
+    // replaced everywhere else, and behind it the stack pointer's own update,
+    // which by then reads nothing but itself.
+    //
+    // This is the same rule the derivation applies, asked again once the tree
+    // says something new, not a wider one: a binding is only reconsidered
+    // because a removal took its last mention away, and it is still only
+    // removed when the trial copy shows no mention survives discarding its own
+    // writes.
+    //
+    // An inlined binding is reconsidered along with the rest. Inlining turns its
+    // write into a declaration that carries the value, which is spoken for only
+    // as long as something still reads it -- once the reader goes, what is left
+    // is a declaration nothing consumes. Externally declared bindings are the
+    // exception: a parameter is named by the signature and cannot be dropped
+    // just because the body stopped mentioning it.
+    loop {
+        let reconsider = decisions
+            .iter()
+            .filter(|(binding, decision)| {
+                !discarded_bindings.contains(binding)
+                    && matches!(
+                        decision,
+                        None | Some(PlacementDecision::DeadStore { .. })
+                            | Some(PlacementDecision::LexicalDeclaration { .. })
+                            | Some(PlacementDecision::Inline { .. })
+                    )
+            })
+            .collect::<Vec<_>>();
+        let mut removed_any = false;
+        for (binding, _) in reconsider {
+            let Some(symbol) = names.symbol_for_binding(binding) else {
+                continue;
+            };
+            if !mentions.mentions(symbol) {
+                // Nothing names it any more. Something this pass already
+                // removed took its last mention with it -- a frame slot's
+                // store, say, whose address was the only thing that read the
+                // entry frame pointer -- and a declaration for an object the
+                // body never mentions states nothing. `RBP_0` was left declared
+                // and unused exactly this way.
+                let was_declared = candidate.locals.iter().any(|local| local.name == symbol)
+                    || declarations
+                        .values()
+                        .any(|declared| declared.iter().any(|(id, _, _)| *id == binding));
+                if was_declared {
+                    candidate.locals.retain(|local| local.name != symbol);
+                    for declared in declarations.values_mut() {
+                        declared.retain(|(declared, _, _)| *declared != binding);
+                    }
+                    discarded_bindings.insert(binding);
+                    removed_any = true;
+                }
+                continue;
+            }
+            // The same bar the dead-store decision keeps: a statement whose
+            // effect nothing else answers for is not removable, however unread
+            // the object it writes.
+            if writes_by_binding
+                .of_binding(binding)
+                .iter()
+                .any(|write| write.effectful)
+            {
+                continue;
+            }
+            let targets = writes_by_binding.observations(binding);
+            if !mentions.discarding_clears(&targets, symbol) {
+                continue;
+            }
+            let mut removed_observations = BTreeSet::new();
+            for target in &targets {
+                discard_marked_statement(
+                    &mentions,
+                    &mut candidate.body,
+                    *target,
+                    &mut removed_observations,
+                );
+                mentions.forget_target(*target);
+            }
+            candidate.locals.retain(|local| local.name != symbol);
+            discarded_observations.append(&mut removed_observations);
+            for declared in declarations.values_mut() {
+                declared.retain(|(declared, _, _)| *declared != binding);
+            }
+            discarded_bindings.insert(binding);
+            removed_any = true;
+        }
+        if !removed_any {
+            break;
+        }
+    }
+
+    // A trailing parameter the body never mentions is not one the function has.
+    //
+    // The slot list comes from radare2's argument detection, which counts a
+    // register the function writes without ever reading: `xor edx, edx` at -O2
+    // makes `edx` look like a third argument to `djb2`, which has two. Whether
+    // any read of it survives is a fact about the emitted tree, so it is asked
+    // here rather than assumed from the slot claim, and a strict compile
+    // rejects the whole function over the unused parameter otherwise.
+    //
+    // Only from the end. Dropping a parameter from the middle would renumber
+    // every slot after it, and the caller passes arguments by position.
+    while let Some(last) = candidate.params.last() {
+        if mentions.mentions(last.name) {
+            break;
+        }
+        candidate.params.pop();
+    }
+
+    for (region, declarations) in &mut declarations {
+        declarations.sort_by_key(|(binding, _, _)| *binding);
+        let statements = declarations
+            .iter()
+            .map(|(_, ty, name)| CStmt::Decl {
+                ty: ty.clone(),
+                name: *name,
+                init: None,
+            })
+            .collect::<Vec<_>>();
+        match insert_region_declarations(&mut candidate.body, regions, *region, &statements) {
+            0 => return Err(PlacementApplicationError::MissingRegion { region: *region }),
+            1 => {}
+            _ => return Err(PlacementApplicationError::DuplicateRegion { region: *region }),
+        }
+    }
+
+    Ok(PlacementRemovals {
+        bindings: discarded_bindings,
+        observations: discarded_observations,
+    })
+}
+
+/// What applying the decisions actually removed.
+///
+/// Both halves are needed. The bindings say which writes lost their statements,
+/// while the observations say which value, use, write, and effect cells those
+/// statements carried. The latter is also the only way to reach a
+/// caller-supplied value: it is version zero with no defining instruction, so
+/// no write answers for it.
+#[derive(Debug, Default)]
+pub(crate) struct PlacementRemovals {
+    bindings: BTreeSet<BindingId>,
+    observations: BTreeSet<RenderObservationId>,
+}
+
+impl PlacementRemovals {
+    /// Consume both halves as one contract. A caller cannot apply the removed
+    /// writes while forgetting the observations that carried value, use,
+    /// write, stack, certified-read, and effect cells beside them.
+    pub(crate) fn into_contract(self) -> (BTreeSet<BindingId>, BTreeSet<RenderObservationId>) {
+        (self.bindings, self.observations)
+    }
+}
+
+fn insert_region_declarations(
+    statements: &mut [CStmt],
+    regions: &SealedStructuredRegionArtifact,
+    target: RegionId,
+    declarations: &[CStmt],
+) -> usize {
+    statements
+        .iter_mut()
+        .map(|statement| {
+            insert_region_declarations_in_stmt(statement, regions, target, declarations)
+        })
+        .sum()
+}
+
+fn insert_region_declarations_in_stmt(
+    statement: &mut CStmt,
+    regions: &SealedStructuredRegionArtifact,
+    target: RegionId,
+    declarations: &[CStmt],
+) -> usize {
+    if let CStmt::StructuredRegion { marker, stmt } = statement {
+        let is_target = regions
+            .node_for_marker(marker)
+            .is_some_and(|(region, _)| region == target);
+        if is_target {
+            let semantic = std::mem::replace(stmt.as_mut(), CStmt::Empty);
+            **stmt = match semantic {
+                CStmt::Block(mut statements) => {
+                    let mut placed = declarations.to_vec();
+                    placed.append(&mut statements);
+                    CStmt::Block(placed)
+                }
+                semantic => {
+                    let mut placed = declarations.to_vec();
+                    placed.push(semantic);
+                    CStmt::Block(placed)
+                }
+            };
+            return 1;
+        }
+        return insert_region_declarations_in_stmt(stmt, regions, target, declarations);
+    }
+
+    if let CStmt::Observed { stmt, .. } = statement {
+        return insert_region_declarations_in_stmt(stmt, regions, target, declarations);
+    }
+
+    match statement {
+        CStmt::StructuredRegion { .. } | CStmt::Observed { .. } => {
+            unreachable!("leading wrappers handled above")
+        }
+        CStmt::Block(statements) => {
+            insert_region_declarations(statements, regions, target, declarations)
+        }
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            insert_region_declarations_in_stmt(then_body, regions, target, declarations)
+                + else_body.as_deref_mut().map_or(0, |body| {
+                    insert_region_declarations_in_stmt(body, regions, target, declarations)
+                })
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
+            insert_region_declarations_in_stmt(body, regions, target, declarations)
+        }
+        CStmt::For { init, body, .. } => {
+            init.as_deref_mut().map_or(0, |init| {
+                insert_region_declarations_in_stmt(init, regions, target, declarations)
+            }) + insert_region_declarations_in_stmt(body, regions, target, declarations)
+        }
+        CStmt::Switch { cases, default, .. } => {
+            let cases = cases
+                .iter_mut()
+                .map(|case| {
+                    insert_region_declarations(&mut case.body, regions, target, declarations)
+                })
+                .sum::<usize>();
+            cases
+                + default.as_mut().map_or(0, |body| {
+                    insert_region_declarations(body, regions, target, declarations)
+                })
+        }
+        CStmt::Empty
+        | CStmt::Expr(_)
+        | CStmt::Decl { .. }
+        | CStmt::Return(_)
+        | CStmt::Break
+        | CStmt::Continue
+        | CStmt::Goto(_)
+        | CStmt::Label(_)
+        | CStmt::Comment(_)
+        | CStmt::Gap(_) => 0,
+    }
+}
+
+/// The statement under any observation markers wrapping it.
+///
+/// Markers are layers on a statement, not statements of their own, which is how
+/// the discard path reads them: it looks for a marker on any wrapping layer and
+/// empties the statement underneath.
+fn statement_core(statement: &CStmt) -> &CStmt {
+    let mut current = statement;
+    while let CStmt::Observed { stmt, .. } = current {
+        current = stmt;
+    }
+    current
+}
+
+/// The symbols this statement names itself, not counting nested statements.
+fn statement_visit_own_symbols(statement: &CStmt, visit: &mut impl FnMut(crate::symbol::SymbolId)) {
+    let expr_symbols = |expr: &CExpr, visit: &mut dyn FnMut(crate::symbol::SymbolId)| {
+        expr.visit(&mut |node| {
+            if let CExpr::Var(name) = node {
+                visit(*name);
+            }
+        });
+    };
+    match statement_core(statement) {
+        CStmt::Expr(expr) | CStmt::Return(Some(expr)) => expr_symbols(expr, visit),
+        CStmt::Decl { name, init, .. } => {
+            visit(*name);
+            if let Some(init) = init.as_ref() {
+                expr_symbols(init, visit);
+            }
+        }
+        CStmt::If { cond, .. } => expr_symbols(cond, visit),
+        CStmt::While { cond, .. } | CStmt::DoWhile { cond, .. } => expr_symbols(cond, visit),
+        CStmt::For { cond, update, .. } => {
+            if let Some(cond) = cond.as_ref() {
+                expr_symbols(cond, visit);
+            }
+            if let Some(update) = update.as_ref() {
+                expr_symbols(update, visit);
+            }
+        }
+        CStmt::Switch { expr, .. } => expr_symbols(expr, visit),
+        _ => {}
+    }
+}
+
+/// The statements nested directly inside this one.
+fn statement_visit_children(statement: &CStmt, visit: &mut impl FnMut(&CStmt)) {
+    match statement_core(statement) {
+        CStmt::StructuredRegion { stmt, .. } => visit(stmt),
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            visit(then_body);
+            if let Some(body) = else_body.as_ref() {
+                visit(body);
+            }
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => visit(body),
+        CStmt::For { init, body, .. } => {
+            if let Some(init) = init.as_ref() {
+                visit(init);
+            }
+            visit(body);
+        }
+        _ => {}
+    }
+}
+
+/// The nested statement at this ordinal, in the order the index numbered them.
+///
+/// One enumeration, so a route recorded by the indexing walk addresses the same
+/// statement when the tree is reached for writing: the directly nested
+/// statements first, then the statements of each nested body in turn.
+fn statement_child_mut(statement: &mut CStmt, ordinal: usize) -> Option<&mut CStmt> {
+    let mut core = statement;
+    while let CStmt::Observed { stmt, .. } = core {
+        core = stmt;
+    }
+    let mut children: Vec<&mut CStmt> = Vec::new();
+    match core {
+        CStmt::StructuredRegion { stmt, .. } => children.push(stmt),
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            children.push(then_body);
+            if let Some(body) = else_body.as_deref_mut() {
+                children.push(body);
+            }
+        }
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => children.push(body),
+        CStmt::For { init, body, .. } => {
+            if let Some(init) = init.as_deref_mut() {
+                children.push(init);
+            }
+            children.push(body);
+        }
+        CStmt::Block(statements) => children.extend(statements.iter_mut()),
+        CStmt::Switch { cases, default, .. } => {
+            for case in cases.iter_mut() {
+                children.extend(case.body.iter_mut());
+            }
+            if let Some(body) = default.as_mut() {
+                children.extend(body.iter_mut());
+            }
+        }
+        _ => {}
+    }
+    children.into_iter().nth(ordinal)
+}
+
+/// The statement lists nested directly inside this one.
+fn statement_visit_child_bodies(statement: &CStmt, visit: &mut impl FnMut(&[CStmt])) {
+    match statement_core(statement) {
+        CStmt::Block(statements) => visit(statements),
+        CStmt::Switch { cases, default, .. } => {
+            for case in cases {
+                visit(&case.body);
+            }
+            if let Some(body) = default.as_ref() {
+                visit(body);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// What the body says about each symbol, read once.
+///
+/// Every decision loop asks two questions per binding, and each answer used to
+/// walk the whole tree: whether anything still names one symbol, and whether
+/// discarding a given set of statements would leave nothing naming it. Those
+/// two walks are the pass's cost on a large function.
+///
+/// Both are answered here from one depth-first pass. Statements are numbered in
+/// entry order, so a statement owns the half-open span from its own number to
+/// the next number after its subtree, and "this mention is inside that
+/// statement" is a comparison. Each mention records the number of the statement
+/// it sits in; each observation that would discard a statement records that
+/// statement's span.
+///
+/// The body only shrinks while those questions are asked -- the single mutation
+/// in those phases is discarding a statement -- so the counts stay exact by
+/// subtracting what each discard removes, and a span that no longer holds
+/// anything simply stops matching. Declarations are inserted afterwards, when
+/// nothing asks any more.
+#[derive(Debug, Default)]
+struct SymbolMentions {
+    /// For each symbol, the statement number of every place it is named.
+    sites: std::collections::HashMap<crate::symbol::SymbolId, Vec<u32>>,
+    /// For each observation that would empty a statement, that statement's span.
+    discards: std::collections::HashMap<RenderObservationId, (u32, u32)>,
+    /// The spans already emptied, which hold nothing any more.
+    removed: Vec<(u32, u32)>,
+    /// For each of those observations, every statement it marks: the route to
+    /// it and which of the two ways it is marked. An observation marks one
+    /// statement in a well-formed body, and the list is what lets a body that
+    /// repeats one be answered exactly rather than by picking a route.
+    routes: std::collections::HashMap<RenderObservationId, Vec<(Vec<u32>, ObservationMark)>>,
+}
+
+/// How an observation marks the statement it is recorded against.
+///
+/// A marker wrapping the statement stands for the statement; a marker on an
+/// assignment's target stands for the write. Discarding treats them alike --
+/// both mean "this statement performs it" -- while inlining a write into a
+/// declaration needs the wrapping form, because it is the wrapped assignment
+/// that becomes the declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservationMark {
+    Statement,
+    AssignmentTarget,
+}
+
+impl SymbolMentions {
+    fn of_body(statements: &[CStmt]) -> Self {
+        let mut index = Self::default();
+        let mut next = 0u32;
+        let mut route = Vec::new();
+        index.index_body(statements, &mut next, &mut route);
+        index
+    }
+
+    fn index_body(&mut self, statements: &[CStmt], next: &mut u32, route: &mut Vec<u32>) {
+        for (ordinal, statement) in statements.iter().enumerate() {
+            route.push(ordinal as u32);
+            self.index_statement(statement, next, route);
+            route.pop();
+        }
+    }
+
+    fn index_statement(&mut self, statement: &CStmt, next: &mut u32, route: &mut Vec<u32>) {
+        let enter = *next;
+        *next += 1;
+        // The observations that would empty this statement, which is exactly
+        // what `statement_is_discarded` answers: a marker on any layer wrapping
+        // the statement, or a marker on an assignment's target.
+        let mut own_discards: Vec<(RenderObservationId, ObservationMark)> = Vec::new();
+        let mut current = statement;
+        while let CStmt::Observed { id, stmt } = current {
+            own_discards.push((*id, ObservationMark::Statement));
+            current = stmt;
+        }
+        if let CStmt::Expr(CExpr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            ..
+        }) = current
+        {
+            let mut target = left.as_ref();
+            while let CExpr::Observed { id, expr } = target {
+                own_discards.push((*id, ObservationMark::AssignmentTarget));
+                target = expr;
+            }
+        }
+        // This statement's own mentions, then its children's.
+        statement_visit_own_symbols(statement, &mut |symbol| {
+            self.sites.entry(symbol).or_default().push(enter);
+        });
+        let mut ordinal = 0u32;
+        statement_visit_children(statement, &mut |child| {
+            route.push(ordinal);
+            ordinal += 1;
+            self.index_statement(child, next, route);
+            route.pop();
+        });
+        statement_visit_child_bodies(statement, &mut |body| {
+            for child in body {
+                route.push(ordinal);
+                ordinal += 1;
+                self.index_statement(child, next, route);
+                route.pop();
+            }
+        });
+        // The span is closed on the markers this statement owns. Scanning the
+        // whole map for open spans instead would be a second quadratic in place
+        // of the one this index removes.
+        let exit = *next;
+        for (id, mark) in own_discards {
+            self.discards.insert(id, (enter, exit));
+            self.routes
+                .entry(id)
+                .or_default()
+                .push((route.clone(), mark));
+        }
+    }
+
+    /// The statement this observation marks, reached by its recorded route.
+    ///
+    /// The route is exact for as long as the tree keeps its shape, which is the
+    /// whole of the decision loop: a discard empties a statement in place and
+    /// the declarations that grow the tree are inserted after every query. A
+    /// route whose statement was already emptied no longer leads anywhere, and
+    /// answering `None` there is the same answer the walk it replaces gave.
+    fn marked_statements(&self, target: RenderObservationId) -> &[(Vec<u32>, ObservationMark)] {
+        self.routes.get(&target).map_or(&[], Vec::as_slice)
+    }
+
+    fn mentions(&self, symbol: crate::symbol::SymbolId) -> bool {
+        self.sites
+            .get(&symbol)
+            .is_some_and(|sites| sites.iter().any(|site| !self.is_removed(*site)))
+    }
+
+    fn is_removed(&self, site: u32) -> bool {
+        self.removed
+            .iter()
+            .any(|(enter, exit)| *enter <= site && site < *exit)
+    }
+
+    /// Record that the statement this observation marks has been emptied.
+    ///
+    /// Its span stops holding anything, so every mention inside it is gone from
+    /// both questions at once. Doing it by span rather than by re-counting is
+    /// what keeps the index exact after a discard: a count subtracted per
+    /// symbol cannot say *where* the mention was, and the second question needs
+    /// to know.
+    fn forget_target(&mut self, target: RenderObservationId) {
+        if let Some(span) = self.discards.get(&target).copied() {
+            self.removed.push(span);
+        }
+    }
+
+    /// Whether emptying the statements these observations mark would leave
+    /// nothing naming the symbol.
+    ///
+    /// The old form walked the whole body and stopped descending at a statement
+    /// a discard would remove, counting every mention it passed. This asks the
+    /// same thing of the numbering: a mention survives when it sits outside
+    /// every span that is going, and nesting needs no special case because a
+    /// mention inside a nested discard is inside the outer span too.
+    fn discarding_clears(
+        &self,
+        targets: &BTreeSet<RenderObservationId>,
+        symbol: crate::symbol::SymbolId,
+    ) -> bool {
+        let spans = targets
+            .iter()
+            .filter_map(|target| self.discards.get(target).copied())
+            .collect::<Vec<_>>();
+        if spans.is_empty() {
+            return false;
+        }
+        let Some(sites) = self.sites.get(&symbol) else {
+            return true;
+        };
+        !sites.iter().any(|site| {
+            !self.is_removed(*site)
+                && !spans
+                    .iter()
+                    .any(|(enter, exit)| *enter <= *site && *site < *exit)
+        })
+    }
+}
+
+/// One binding's writes, read rather than searched for.
+///
+/// The decision loop and the reconsideration loop after it each ask twice per
+/// binding which writes belong to it, and each answer used to read every write
+/// in the function. Grouped once, the answers cost what the binding has.
+struct WritesByBinding<'a> {
+    by_binding: std::collections::HashMap<BindingId, Vec<&'a FinalBindingWrite>>,
+}
+
+impl<'a> WritesByBinding<'a> {
+    fn of(writes: &'a [FinalBindingWrite]) -> Self {
+        let mut by_binding =
+            std::collections::HashMap::<BindingId, Vec<&'a FinalBindingWrite>>::new();
+        for write in writes {
+            by_binding.entry(write.binding).or_default().push(write);
+        }
+        Self { by_binding }
+    }
+
+    fn of_binding(&self, binding: BindingId) -> &[&'a FinalBindingWrite] {
+        self.by_binding
+            .get(&binding)
+            .map_or(&[], |writes| writes.as_slice())
+    }
+
+    /// Every observation this binding's writes are marked on.
+    fn observations(&self, binding: BindingId) -> BTreeSet<RenderObservationId> {
+        self.of_binding(binding)
+            .iter()
+            .map(|write| write.observation)
+            .collect()
+    }
+}
+
+fn discard_marked_statement(
+    mentions: &SymbolMentions,
+    body: &mut [CStmt],
+    target: RenderObservationId,
+    discarded: &mut BTreeSet<RenderObservationId>,
+) -> usize {
+    let mut removed = 0;
+    for (route, mark) in mentions.marked_statements(target) {
+        let Some(statement) = follow_route(body, route) else {
+            continue;
+        };
+        // A marker wrapping the statement empties everything from its own layer
+        // down and leaves the layers above it standing. Those outer markers are
+        // observations of this statement in their own right -- an effect one of
+        // them carries is still performed by whatever the layer below renders --
+        // and emptying them here would retract a claim this discard was never
+        // about.
+        let emptied = match mark {
+            ObservationMark::Statement => marked_layer(statement, target),
+            ObservationMark::AssignmentTarget => statement,
+        };
+        collect_statement_observations(emptied, discarded);
+        *emptied = CStmt::Empty;
+        removed += 1;
+    }
+    removed
+}
+
+/// The layer of an observation chain this observation is the marker of.
+///
+/// Counted first and descended after, because the layer wanted is the one whose
+/// own marker matches and a borrow cannot be handed back from inside the walk
+/// that found it.
+fn marked_layer(statement: &mut CStmt, target: RenderObservationId) -> &mut CStmt {
+    let mut depth = 0usize;
+    let mut probe: &CStmt = statement;
+    while let CStmt::Observed { id, stmt } = probe {
+        if *id == target {
+            break;
+        }
+        depth += 1;
+        probe = stmt;
+    }
+    let mut current = statement;
+    for _ in 0..depth {
+        let CStmt::Observed { stmt, .. } = current else {
+            break;
+        };
+        current = stmt;
+    }
+    current
+}
+
+/// The statement a recorded route leads to, or nothing when it leads nowhere.
+///
+/// A route stops leading anywhere once a statement above it was emptied, which
+/// is the same answer the whole-body walk this replaces gave: it found nothing
+/// under an emptied statement either.
+fn follow_route<'a>(body: &'a mut [CStmt], route: &[u32]) -> Option<&'a mut CStmt> {
+    let (&first, rest) = route.split_first()?;
+    let mut statement = body.get_mut(first as usize)?;
+    for step in rest {
+        statement = statement_child_mut(statement, *step as usize)?;
+    }
+    Some(statement)
+}
+
+/// Turn the assignment this observation marks into a declaration of `symbol`.
+///
+/// Answers whether it happened: the marker may name a statement that another
+/// decision already emptied, or may sit on an assignment's target rather than
+/// wrapping the statement, and neither is a write this can inline.
+fn inline_marked_write(
+    mentions: &SymbolMentions,
+    body: &mut [CStmt],
+    target: RenderObservationId,
+    symbol: crate::symbol::SymbolId,
+    ty: &crate::ast::CType,
+) -> usize {
+    let mut replaced = 0;
+    for (route, mark) in mentions.marked_statements(target) {
+        if *mark != ObservationMark::Statement {
+            continue;
+        }
+        let Some(statement) = follow_route(body, route) else {
+            continue;
+        };
+        replaced += usize::from(replace_assignment_with_declaration(statement, symbol, ty));
+    }
+    replaced
+}
+
+fn replace_assignment_with_declaration(
+    statement: &mut CStmt,
+    symbol: crate::symbol::SymbolId,
+    ty: &crate::ast::CType,
+) -> bool {
+    if let CStmt::Observed { stmt, .. } = statement {
+        return replace_assignment_with_declaration(stmt, symbol, ty);
+    }
+    let CStmt::Expr(CExpr::Binary {
+        op: BinaryOp::Assign,
+        left,
+        ..
+    }) = statement
+    else {
+        return false;
+    };
+    if !matches!(left.unobserved(), CExpr::Var(name) if *name == symbol) {
+        return false;
+    }
+    let CStmt::Expr(CExpr::Binary { right, .. }) = std::mem::replace(statement, CStmt::Empty)
+    else {
+        unreachable!("assignment shape was checked before move")
+    };
+    *statement = CStmt::Decl {
+        ty: ty.clone(),
+        name: symbol,
+        init: Some(*right),
+    };
+    true
+}
+
+/// Derive all declaration decisions from canonical facts and final occurrences.
+pub(crate) fn derive_placement_decisions(
+    regions: &SealedStructuredRegionArtifact,
+    function: &SSAFunction,
+    binding_count: usize,
+    externally_declared: &BTreeSet<BindingId>,
+    entry_declared: &BTreeSet<BindingId>,
+    reads: &[FinalBindingRead],
+    writes: &[FinalBindingWrite],
+) -> Result<PlacementDecisions, PlacementAnalysisError> {
+    derive_with_cfg(
+        regions,
+        function,
+        binding_count,
+        externally_declared,
+        entry_declared,
+        reads,
+        writes,
+    )
+}
+
+trait PlacementControlFlow {
+    fn entry(&self) -> u64;
+    fn block_addrs(&self) -> Vec<u64>;
+    fn predecessors(&self, block: u64) -> Vec<u64>;
+    fn successors(&self, block: u64) -> Vec<u64>;
+    fn dominates(&self, dominator: u64, block: u64) -> bool;
+}
+
+impl PlacementControlFlow for SSAFunction {
+    fn entry(&self) -> u64 {
+        self.entry
+    }
+
+    fn block_addrs(&self) -> Vec<u64> {
+        SSAFunction::block_addrs(self).to_vec()
+    }
+
+    fn predecessors(&self, block: u64) -> Vec<u64> {
+        SSAFunction::predecessors(self, block)
+    }
+
+    fn successors(&self, block: u64) -> Vec<u64> {
+        SSAFunction::successors(self, block)
+    }
+
+    fn dominates(&self, dominator: u64, block: u64) -> bool {
+        SSAFunction::dominates(self, dominator, block)
+    }
+}
+
+fn derive_with_cfg<C: PlacementControlFlow + ?Sized>(
+    regions: &SealedStructuredRegionArtifact,
+    cfg: &C,
+    binding_count: usize,
+    externally_declared: &BTreeSet<BindingId>,
+    entry_declared: &BTreeSet<BindingId>,
+    reads: &[FinalBindingRead],
+    writes: &[FinalBindingWrite],
+) -> Result<PlacementDecisions, PlacementAnalysisError> {
+    let mut block_addrs = cfg.block_addrs();
+    block_addrs.sort_unstable();
+    block_addrs.dedup();
+    let block_indices = block_addrs
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, block)| (block, index))
+        .collect::<BTreeMap<_, _>>();
+
+    if let Some(binding) = externally_declared
+        .iter()
+        .copied()
+        .find(|binding| binding.index() >= binding_count)
+    {
+        return Err(PlacementAnalysisError::ExternalBindingOutsidePlan { binding });
+    }
+
+    for read in reads {
+        validate_occurrence(
+            regions,
+            cfg,
+            binding_count,
+            &block_indices,
+            read.binding,
+            read.region,
+            read.block,
+        )?;
+    }
+    for write in writes {
+        validate_occurrence(
+            regions,
+            cfg,
+            binding_count,
+            &block_indices,
+            write.binding,
+            write.region,
+            write.block,
+        )?;
+    }
+
+    // Which value each occurrence group defines, so a read of one of them can
+    // be recognised as naming what its own statement produced.
+    let defined_in_group = writes
+        .iter()
+        .filter_map(|write| {
+            write
+                .defines
+                .map(|value| (write.statement, write.block, value))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut occurrences = vec![Vec::<Occurrence>::new(); binding_count];
+    for read in reads {
+        let self_defined = read
+            .value
+            .is_some_and(|value| defined_in_group.contains(&(read.statement, read.block, value)));
+        occurrences[read.binding.index()].push(Occurrence {
+            region: read.region,
+            block: read.block,
+            order: read.order,
+            kind: OccurrenceKind::Read(read.source),
+            self_defined,
+            statement: read.statement,
+        });
+    }
+    for write in writes {
+        occurrences[write.binding.index()].push(Occurrence {
+            region: write.region,
+            block: write.block,
+            order: write.order,
+            kind: OccurrenceKind::Write {
+                inst: write.inst,
+                inline_eligible: write.inline_eligible,
+            },
+            self_defined: false,
+            statement: write.statement,
+        });
+    }
+    for binding_occurrences in &mut occurrences {
+        binding_occurrences.sort_by_key(Occurrence::sort_key);
+    }
+
+    // Both a parameter and a caller-supplied entry value hold a value when the
+    // function starts, so both are already assigned on entry to the entry
+    // block. Only where they are *declared* differs.
+    let assigned_on_entry = externally_declared
+        .union(entry_declared)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let must_in = match must_assignment_inputs(
+        cfg,
+        binding_count,
+        &block_addrs,
+        &block_indices,
+        &occurrences,
+        &assigned_on_entry,
+    ) {
+        Ok(inputs) => inputs,
+        Err(mismatch) => {
+            return Ok(refuse_unprovable_binding_domain(binding_count, mismatch));
+        }
+    };
+    let mut decisions = vec![None; binding_count];
+
+    for (binding_index, binding_occurrences) in occurrences.iter().enumerate() {
+        if binding_occurrences.is_empty() {
+            continue;
+        }
+        let binding = BindingId::from_dense_index(binding_index)
+            .expect("binding_count is already addressable by BindingId occurrences");
+        let writes_for_binding = binding_occurrences
+            .iter()
+            .filter_map(|occurrence| match occurrence.kind {
+                OccurrenceKind::Write {
+                    inst,
+                    inline_eligible,
+                } => Some((occurrence, inst, inline_eligible)),
+                OccurrenceKind::Read(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if externally_declared.contains(&binding) {
+            decisions[binding_index] = Some(PlacementDecision::ExternallyDeclared);
+            continue;
+        }
+        // Storage read at offsets the machine computes is defined by its own
+        // declaration, as an array is; no element write has to precede it.
+        let only_indexed_reads = binding_occurrences.iter().all(|occurrence| {
+            matches!(
+                occurrence.kind,
+                OccurrenceKind::Read(PlacementRead::IndexedStackAccess(_))
+            )
+        });
+        if writes_for_binding.is_empty()
+            && !entry_declared.contains(&binding)
+            && !only_indexed_reads
+        {
+            r2il::refusal_evidence!(
+                "placement-missing-definition",
+                "{:?} is read {} times and never written; externally_declared={} entry_declared={} (entry set {:?}); reads {:?}",
+                binding,
+                binding_occurrences.len(),
+                externally_declared.contains(&binding),
+                entry_declared.contains(&binding),
+                entry_declared.iter().collect::<Vec<_>>(),
+                reads
+                    .iter()
+                    .filter(|read| read.binding == binding)
+                    .map(|read| (read.source, read.value, read.block))
+                    .collect::<Vec<_>>()
+            );
+            decisions[binding_index] = Some(PlacementDecision::Refused(
+                PlacementRefusal::MissingDefinition { binding },
+            ));
+            continue;
+        }
+
+        // Nothing reads the object, so no declaration is owed and no statement
+        // has to survive to assign it. The effect ledger answers separately for
+        // anything those statements did besides producing this value, which is
+        // what makes dropping them safe rather than a guess.
+        if binding_occurrences
+            .iter()
+            .all(|occurrence| matches!(occurrence.kind, OccurrenceKind::Write { .. }))
+            && !writes
+                .iter()
+                .any(|write| write.binding == binding && write.effectful)
+        {
+            decisions[binding_index] = Some(PlacementDecision::DeadStore {
+                region: lowest_dominating_region(regions, cfg, binding_occurrences),
+            });
+            continue;
+        }
+        if !occurrence_regions_have_proven_order(regions, binding_occurrences) {
+            r2il::refusal_evidence!(
+                "occurrence-region-order",
+                "binding={binding:?} occurrences={:?}",
+                binding_occurrences
+                    .iter()
+                    .map(|occurrence| (
+                        occurrence.block,
+                        occurrence.region,
+                        occurrence.order,
+                        matches!(occurrence.kind, OccurrenceKind::Write { .. })
+                            .then_some("write")
+                            .unwrap_or("read"),
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            decisions[binding_index] = Some(PlacementDecision::Refused(
+                PlacementRefusal::UnprovableExecutionOrder { binding },
+            ));
+            continue;
+        }
+
+        if let Some(read) =
+            first_read_before_assignment(binding, binding_occurrences, &must_in, &block_indices)
+        {
+            decisions[binding_index] = Some(PlacementDecision::Refused(
+                PlacementRefusal::ReadBeforeAssignment { binding, read },
+            ));
+            continue;
+        }
+
+        let Some(region) = lowest_dominating_region(regions, cfg, binding_occurrences) else {
+            decisions[binding_index] = Some(PlacementDecision::Refused(
+                PlacementRefusal::NoDominatingRegion { binding },
+            ));
+            continue;
+        };
+
+        if let [(write, inst, inline_eligible)] = writes_for_binding.as_slice()
+            && *inline_eligible
+            && binding_occurrences.iter().all(|occurrence| {
+                matches!(occurrence.kind, OccurrenceKind::Write { .. })
+                    || (write.order <= occurrence.order
+                        && cfg.dominates(write.block, occurrence.block))
+            })
+        {
+            decisions[binding_index] = Some(PlacementDecision::Inline {
+                write: *inst,
+                region,
+            });
+        } else {
+            decisions[binding_index] = Some(PlacementDecision::LexicalDeclaration { region });
+        }
+    }
+
+    Ok(PlacementDecisions {
+        decisions: decisions.into_boxed_slice(),
+    })
+}
+
+/// Whether the regions a block's occurrences of one binding fall in are ordered
+/// well enough for a block-granular assignment proof to hold.
+///
+/// One machine block can be rendered more than once -- the structured form
+/// duplicates a shared tail rather than jumping to it -- and then two
+/// occurrences of one binding carry the same block address while sitting in
+/// regions that are not nested. The read-before-assignment proof reasons per
+/// block, so it cannot tell the copies apart. Nested regions are ordered, and
+/// regions under different arms of one certified selection are mutually
+/// exclusive; either fact is sufficient to keep the block proof sound.
+///
+/// A copy that assigns the object before it reads it needs nothing from any
+/// other copy, so where it sits relative to them cannot make a read precede an
+/// assignment. Where every copy is self-contained in that sense there is no
+/// ordering question to answer. A comparator whose two `return` tails each
+/// place their own constant in the result register is the case: four
+/// occurrences, two blocks, each block written then read in both of its copies.
+fn occurrence_regions_have_proven_order(
+    regions: &SealedStructuredRegionArtifact,
+    occurrences: &[Occurrence],
+) -> bool {
+    let mut by_block = BTreeMap::<u64, BTreeMap<RegionId, Vec<&Occurrence>>>::new();
+    for occurrence in occurrences {
+        by_block
+            .entry(occurrence.block)
+            .or_default()
+            .entry(occurrence.region)
+            .or_default()
+            .push(occurrence);
+    }
+    by_block.values().all(|block_regions| {
+        let self_contained = |region_occurrences: &Vec<&Occurrence>| {
+            region_occurrences
+                .iter()
+                .min_by_key(|occurrence| occurrence.order)
+                .is_some_and(|first| matches!(first.kind, OccurrenceKind::Write { .. }))
+        };
+        if block_regions.values().all(self_contained) {
+            return true;
+        }
+        block_regions.keys().all(|left| {
+            block_regions.keys().all(|right| {
+                region_is_ancestor(regions, *left, *right)
+                    || region_is_ancestor(regions, *right, *left)
+                    || regions.regions_are_exclusive(*left, *right)
+            })
+        })
+    })
+}
+
+fn region_is_ancestor(
+    regions: &SealedStructuredRegionArtifact,
+    ancestor: RegionId,
+    mut region: RegionId,
+) -> bool {
+    loop {
+        if region == ancestor {
+            return true;
+        }
+        let Some(parent) = regions.node(region).and_then(|node| node.parent()) else {
+            return false;
+        };
+        region = parent;
+    }
+}
+
+fn validate_occurrence<C: PlacementControlFlow + ?Sized>(
+    regions: &SealedStructuredRegionArtifact,
+    cfg: &C,
+    binding_count: usize,
+    block_indices: &BTreeMap<u64, usize>,
+    binding: BindingId,
+    region: RegionId,
+    block: u64,
+) -> Result<(), PlacementAnalysisError> {
+    if binding.index() >= binding_count {
+        return Err(PlacementAnalysisError::BindingOutsidePlan { binding });
+    }
+    let Some(node) = regions.node(region) else {
+        return Err(PlacementAnalysisError::RegionOutsideArtifact { region });
+    };
+    if !block_indices.contains_key(&block) {
+        return Err(PlacementAnalysisError::BlockOutsideFunction { block });
+    }
+    if !cfg.dominates(node.entry(), block) {
+        // A region identifier says nothing on its own; the entry it fails to
+        // dominate from is what a trace needs.
+        r2il::refusal_evidence!(
+            "placement-dominance",
+            "binding {binding:?} occurs at {block:#x}, which region {region:?} at {:#x} does not dominate",
+            node.entry()
+        );
+        return Err(PlacementAnalysisError::RegionDoesNotDominateOccurrence { region, block });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Occurrence {
+    region: RegionId,
+    block: u64,
+    order: FinalOccurrenceOrder,
+    kind: OccurrenceKind,
+    /// A read of a value that a write in this same occurrence group defines.
+    ///
+    /// Every marker on one statement shares an order, and a read sorts before
+    /// a write at equal order, which is right for `x = x + 1`: that read names
+    /// the value the statement replaces. It is wrong when the read names the
+    /// value the statement *produces*. A write projection that absorbed the
+    /// instructions certifying it renders them all as one statement, and the
+    /// absorbed carrier extension reads exactly the value the fused statement
+    /// defines -- `RAX = zext(EAX)` folded into the write of `EAX`. Ordering
+    /// that read first says the object is read before it is assigned, which
+    /// refused ten of the fifty-four corpus cells.
+    ///
+    /// It is an ordering fact, not a smaller kind of occurrence: the read
+    /// still happens and still belongs to the binding, so it is placed after
+    /// the write that produced what it reads rather than dropped.
+    self_defined: bool,
+    /// The rendered statement this occurrence belongs to, which is what the
+    /// sort orders on. A statement contributes its reads at one order and its
+    /// writes at the next, so ordering on `order` alone can never put a read
+    /// after a write of the same statement, however it is ranked.
+    statement: u64,
+}
+
+impl Occurrence {
+    /// Where a read sits against the writes sharing its order: before them,
+    /// as an ordinary read does, or after the one that produced what it reads.
+    const fn read_rank(&self) -> u8 {
+        if self.self_defined { 2 } else { 0 }
+    }
+
+    fn sort_key(&self) -> (u64, u8, u64, usize, u32, usize) {
+        match self.kind {
+            OccurrenceKind::Read(PlacementRead::Use(site)) => (
+                self.statement,
+                self.read_rank(),
+                self.block,
+                self.region.index(),
+                site.inst.0,
+                site.input_idx,
+            ),
+            OccurrenceKind::Read(PlacementRead::CertifiedValue { value, at }) => (
+                self.statement,
+                self.read_rank(),
+                self.block,
+                self.region.index(),
+                at.0,
+                value.0 as usize,
+            ),
+            OccurrenceKind::Read(PlacementRead::ArrayIndex { access, value }) => (
+                self.statement,
+                self.read_rank(),
+                self.block,
+                self.region.index(),
+                access.inst.0,
+                value.0 as usize,
+            ),
+            OccurrenceKind::Read(
+                PlacementRead::StackAccess(access) | PlacementRead::IndexedStackAccess(access),
+            ) => (
+                self.statement,
+                self.read_rank(),
+                self.block,
+                self.region.index(),
+                access.inst.0,
+                access.ordinal as usize,
+            ),
+            OccurrenceKind::Read(PlacementRead::EscapedStackAddress { call, value }) => (
+                self.statement,
+                self.read_rank(),
+                self.block,
+                self.region.index(),
+                call.0,
+                value.0 as usize,
+            ),
+            OccurrenceKind::Write { inst, .. } => (
+                self.statement,
+                1,
+                self.block,
+                self.region.index(),
+                inst.0,
+                0,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OccurrenceKind {
+    Read(PlacementRead),
+    Write { inst: InstId, inline_eligible: bool },
+}
+
+fn lowest_dominating_region<C: PlacementControlFlow + ?Sized>(
+    regions: &SealedStructuredRegionArtifact,
+    cfg: &C,
+    occurrences: &[Occurrence],
+) -> Option<RegionId> {
+    let mut candidate = occurrences.first()?.region;
+    for occurrence in &occurrences[1..] {
+        candidate = lowest_common_ancestor(regions, candidate, occurrence.region)?;
+    }
+
+    loop {
+        let node = regions.node(candidate)?;
+        if occurrences
+            .iter()
+            .all(|occurrence| cfg.dominates(node.entry(), occurrence.block))
+        {
+            return Some(candidate);
+        }
+        candidate = node.parent()?;
+    }
+}
+
+fn lowest_common_ancestor(
+    regions: &SealedStructuredRegionArtifact,
+    mut left: RegionId,
+    mut right: RegionId,
+) -> Option<RegionId> {
+    let mut left_depth = regions.node(left)?.depth();
+    let mut right_depth = regions.node(right)?.depth();
+    while left_depth > right_depth {
+        left = regions.node(left)?.parent()?;
+        left_depth -= 1;
+    }
+    while right_depth > left_depth {
+        right = regions.node(right)?.parent()?;
+        right_depth -= 1;
+    }
+    while left != right {
+        left = regions.node(left)?.parent()?;
+        right = regions.node(right)?.parent()?;
+    }
+    Some(left)
+}
+
+fn first_read_before_assignment(
+    binding: BindingId,
+    occurrences: &[Occurrence],
+    must_in: &[DenseBindingSet],
+    block_indices: &BTreeMap<u64, usize>,
+) -> Option<PlacementRead> {
+    let mut by_rendered_block = BTreeMap::<u64, Vec<&Occurrence>>::new();
+    for occurrence in occurrences {
+        by_rendered_block
+            .entry(occurrence.block)
+            .or_default()
+            .push(occurrence);
+    }
+
+    for (block, mut block_occurrences) in by_rendered_block {
+        block_occurrences.sort_by_key(|occurrence| occurrence.sort_key());
+        let block_index = block_indices[&block];
+        let mut assigned = must_in[block_index].contains(binding);
+        for occurrence in block_occurrences {
+            match occurrence.kind {
+                OccurrenceKind::Read(PlacementRead::IndexedStackAccess(_)) => {}
+                OccurrenceKind::Read(read) if !assigned => {
+                    r2il::refusal_evidence!(
+                        "read-before-assignment",
+                        "binding={binding:?} block={block:#x} order={:?} self_defined={} read={read:?} all={:?}",
+                        occurrence.order,
+                        occurrence.self_defined,
+                        occurrences
+                            .iter()
+                            .map(|o| (o.block, o.order.0, o.self_defined, &o.kind))
+                            .collect::<Vec<_>>()
+                    );
+                    return Some(read);
+                }
+                OccurrenceKind::Read(_) => {}
+                OccurrenceKind::Write { .. } => assigned = true,
+            }
+        }
+    }
+    None
+}
+
+/// A malformed dense-set domain invalidates the must-assignment proof for the
+/// whole binding domain. Refuse every binding so no caller can accidentally
+/// consume a partial `zip` result as a placement proof.
+fn refuse_unprovable_binding_domain(
+    binding_count: usize,
+    _mismatch: DenseBindingDomainMismatch,
+) -> PlacementDecisions {
+    let decisions = (0..binding_count)
+        .map(|index| {
+            let binding = BindingId::from_dense_index(index)
+                .expect("binding_count was already accepted as a dense BindingId domain");
+            Some(PlacementDecision::Refused(
+                PlacementRefusal::UnprovableExecutionOrder { binding },
+            ))
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    PlacementDecisions { decisions }
+}
+
+fn must_assignment_inputs<C: PlacementControlFlow + ?Sized>(
+    cfg: &C,
+    binding_count: usize,
+    block_addrs: &[u64],
+    block_indices: &BTreeMap<u64, usize>,
+    occurrences: &[Vec<Occurrence>],
+    externally_declared: &BTreeSet<BindingId>,
+) -> Result<Vec<DenseBindingSet>, DenseBindingDomainMismatch> {
+    let mut generated = vec![DenseBindingSet::empty(binding_count); block_addrs.len()];
+    for (binding_index, binding_occurrences) in occurrences.iter().enumerate() {
+        let binding = BindingId::from_dense_index(binding_index)
+            .expect("binding occurrence index fits BindingId");
+        for occurrence in binding_occurrences {
+            if matches!(occurrence.kind, OccurrenceKind::Write { .. }) {
+                generated[block_indices[&occurrence.block]].insert(binding)?;
+            }
+        }
+    }
+
+    let mut inputs = vec![DenseBindingSet::all(binding_count); block_addrs.len()];
+    let mut outputs = vec![DenseBindingSet::all(binding_count); block_addrs.len()];
+    let mut worklist = (0..block_addrs.len()).collect::<BTreeSet<_>>();
+    while let Some(block_index) = worklist.pop_first() {
+        let block = block_addrs[block_index];
+        let mut predecessors = cfg.predecessors(block);
+        predecessors.sort_unstable();
+        predecessors.dedup();
+        let next_input = if block == cfg.entry() {
+            DenseBindingSet::from_bindings(binding_count, externally_declared)?
+        } else if predecessors.is_empty() {
+            DenseBindingSet::empty(binding_count)
+        } else {
+            let first = predecessors.remove(0);
+            let mut intersection = outputs[block_indices[&first]].clone();
+            for predecessor in predecessors {
+                intersection.intersect_with(&outputs[block_indices[&predecessor]])?;
+            }
+            intersection
+        };
+        let mut next_output = next_input.clone();
+        next_output.union_with(&generated[block_index])?;
+        let output_changed = next_output != outputs[block_index];
+        inputs[block_index] = next_input;
+        outputs[block_index] = next_output;
+        if output_changed {
+            let mut successors = cfg.successors(block);
+            successors.sort_unstable();
+            successors.dedup();
+            for successor in successors {
+                worklist.insert(block_indices[&successor]);
+            }
+        }
+    }
+    Ok(inputs)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DenseBindingDomainMismatch;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DenseBindingSet {
+    words: Vec<u64>,
+    binding_count: usize,
+}
+
+impl DenseBindingSet {
+    fn empty(binding_count: usize) -> Self {
+        Self {
+            words: vec![0; binding_count.div_ceil(u64::BITS as usize)],
+            binding_count,
+        }
+    }
+
+    fn all(binding_count: usize) -> Self {
+        let mut set = Self {
+            words: vec![u64::MAX; binding_count.div_ceil(u64::BITS as usize)],
+            binding_count,
+        };
+        if let Some(last) = set.words.last_mut() {
+            let used = binding_count % u64::BITS as usize;
+            if used != 0 {
+                *last &= (1_u64 << used) - 1;
+            }
+        }
+        set
+    }
+
+    fn from_bindings(
+        binding_count: usize,
+        bindings: &BTreeSet<BindingId>,
+    ) -> Result<Self, DenseBindingDomainMismatch> {
+        let mut set = Self::empty(binding_count);
+        for binding in bindings {
+            set.insert(*binding)?;
+        }
+        Ok(set)
+    }
+
+    fn contains(&self, binding: BindingId) -> bool {
+        let index = binding.index();
+        index < self.binding_count
+            && self.words[index / u64::BITS as usize] & (1_u64 << (index % u64::BITS as usize)) != 0
+    }
+
+    fn insert(&mut self, binding: BindingId) -> Result<(), DenseBindingDomainMismatch> {
+        let index = binding.index();
+        if index >= self.binding_count {
+            return Err(DenseBindingDomainMismatch);
+        }
+        self.words[index / u64::BITS as usize] |= 1_u64 << (index % u64::BITS as usize);
+        Ok(())
+    }
+
+    fn intersect_with(&mut self, other: &Self) -> Result<(), DenseBindingDomainMismatch> {
+        self.validate_domain(other)?;
+        for (left, right) in self.words.iter_mut().zip(&other.words) {
+            *left &= *right;
+        }
+        Ok(())
+    }
+
+    fn union_with(&mut self, other: &Self) -> Result<(), DenseBindingDomainMismatch> {
+        self.validate_domain(other)?;
+        for (left, right) in self.words.iter_mut().zip(&other.words) {
+            *left |= *right;
+        }
+        Ok(())
+    }
+
+    fn validate_domain(&self, other: &Self) -> Result<(), DenseBindingDomainMismatch> {
+        if self.binding_count == other.binding_count && self.words.len() == other.words.len() {
+            Ok(())
+        } else {
+            Err(DenseBindingDomainMismatch)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structured_region::{
+        StructuredRegionKind, StructuredRegionMarker,
+        seal_structured_body_for_test as seal_structured_body,
+    };
+    use crate::symbol::{SymbolRole, SymbolTable};
+
+    fn observation(index: u32) -> RenderObservationId {
+        crate::observation_journal::test_render_observation_id(index)
+    }
+
+    #[test]
+    fn dense_binding_sets_refuse_mismatched_domains_without_partial_mutation() {
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let mut one_binding = DenseBindingSet::empty(1);
+        one_binding.insert(binding).expect("in-domain binding");
+        let two_bindings = DenseBindingSet::all(2);
+        let original = one_binding.clone();
+        let mismatch = DenseBindingDomainMismatch;
+
+        assert_eq!(one_binding.intersect_with(&two_bindings), Err(mismatch));
+        assert_eq!(one_binding, original);
+        assert_eq!(one_binding.union_with(&two_bindings), Err(mismatch));
+        assert_eq!(one_binding, original);
+        assert_eq!(
+            one_binding.insert(BindingId::from_dense_index(1).expect("binding")),
+            Err(mismatch)
+        );
+        assert_eq!(one_binding, original);
+    }
+
+    #[test]
+    fn invalid_dense_domain_refuses_every_placement_binding() {
+        let decisions = refuse_unprovable_binding_domain(2, DenseBindingDomainMismatch);
+        for index in 0..2 {
+            let binding = BindingId::from_dense_index(index).expect("binding");
+            assert_eq!(
+                decisions.decision(binding),
+                Some(PlacementDecision::Refused(
+                    PlacementRefusal::UnprovableExecutionOrder { binding },
+                ))
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestCfg {
+        entry: u64,
+        successors: BTreeMap<u64, Vec<u64>>,
+        predecessors: BTreeMap<u64, Vec<u64>>,
+        dominators: BTreeMap<u64, BTreeSet<u64>>,
+    }
+
+    impl TestCfg {
+        fn new(entry: u64, edges: &[(u64, u64)]) -> Self {
+            let mut blocks = BTreeSet::from([entry]);
+            let mut successors = BTreeMap::<u64, Vec<u64>>::new();
+            let mut predecessors = BTreeMap::<u64, Vec<u64>>::new();
+            for &(from, to) in edges {
+                blocks.extend([from, to]);
+                successors.entry(from).or_default().push(to);
+                predecessors.entry(to).or_default().push(from);
+            }
+            for block in &blocks {
+                successors.entry(*block).or_default().sort_unstable();
+                predecessors.entry(*block).or_default().sort_unstable();
+            }
+
+            let mut dominators = blocks
+                .iter()
+                .map(|block| {
+                    let set = if *block == entry {
+                        BTreeSet::from([entry])
+                    } else {
+                        blocks.clone()
+                    };
+                    (*block, set)
+                })
+                .collect::<BTreeMap<_, _>>();
+            loop {
+                let mut changed = false;
+                for block in blocks.iter().copied().filter(|block| *block != entry) {
+                    let preds = &predecessors[&block];
+                    let mut next = if let Some(first) = preds.first() {
+                        dominators[first].clone()
+                    } else {
+                        BTreeSet::new()
+                    };
+                    for predecessor in preds.iter().skip(1) {
+                        next = next
+                            .intersection(&dominators[predecessor])
+                            .copied()
+                            .collect();
+                    }
+                    next.insert(block);
+                    if next != dominators[&block] {
+                        dominators.insert(block, next);
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            Self {
+                entry,
+                successors,
+                predecessors,
+                dominators,
+            }
+        }
+    }
+
+    impl PlacementControlFlow for TestCfg {
+        fn entry(&self) -> u64 {
+            self.entry
+        }
+
+        fn block_addrs(&self) -> Vec<u64> {
+            self.successors.keys().copied().collect()
+        }
+
+        fn predecessors(&self, block: u64) -> Vec<u64> {
+            self.predecessors[&block].clone()
+        }
+
+        fn successors(&self, block: u64) -> Vec<u64> {
+            self.successors[&block].clone()
+        }
+
+        fn dominates(&self, dominator: u64, block: u64) -> bool {
+            self.dominators[&block].contains(&dominator)
+        }
+    }
+
+    /// A marker tree sealed the way the structurer seals its own.
+    fn regions_from(entry: u64, body: Vec<CStmt>) -> SealedStructuredRegionArtifact {
+        crate::structured_region::seal_structured_body_for_test(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(entry, StructuredRegionKind::FunctionBody),
+            CStmt::Block(body),
+        ))
+        .expect("marker tree")
+        .into_marked_parts()
+        .1
+    }
+
+    fn block_region(entry: u64) -> CStmt {
+        CStmt::structured_region(
+            StructuredRegionMarker::unsealed(entry, StructuredRegionKind::Block),
+            CStmt::Empty,
+        )
+    }
+
+    fn if_region(cond: u64, then_body: CStmt, else_body: CStmt) -> CStmt {
+        CStmt::structured_region(
+            StructuredRegionMarker::unsealed(cond, StructuredRegionKind::IfThenElse),
+            CStmt::if_stmt(CExpr::IntLit(1), then_body, Some(else_body)),
+        )
+    }
+
+    fn diamond_regions() -> SealedStructuredRegionArtifact {
+        regions_from(
+            0x1000,
+            vec![
+                if_region(0x1000, block_region(0x1010), block_region(0x1020)),
+                block_region(0x1030),
+            ],
+        )
+    }
+
+    fn region_with_entry(
+        regions: &SealedStructuredRegionArtifact,
+        entry: u64,
+        kind: StructuredRegionKind,
+    ) -> RegionId {
+        let index = regions
+            .nodes()
+            .iter()
+            .position(|node| node.entry() == entry && node.kind() == kind)
+            .expect("region entry");
+        regions
+            .node_for_anchor(
+                regions.authority(),
+                regions.nodes()[index].emission_anchor(),
+            )
+            .expect("dense region")
+            .0
+    }
+
+    fn diamond_cfg() -> TestCfg {
+        TestCfg::new(
+            0x1000,
+            &[
+                (0x1000, 0x1010),
+                (0x1000, 0x1020),
+                (0x1010, 0x1030),
+                (0x1020, 0x1030),
+            ],
+        )
+    }
+
+    #[test]
+    fn diamond_with_both_arms_assigned_places_one_lexical_declaration() {
+        let regions = diamond_regions();
+        let cfg = diamond_cfg();
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let then_region = region_with_entry(&regions, 0x1010, StructuredRegionKind::Block);
+        let else_region = region_with_entry(&regions, 0x1020, StructuredRegionKind::Block);
+        let merge_region = region_with_entry(&regions, 0x1030, StructuredRegionKind::Block);
+        let writes = [
+            FinalBindingWrite {
+                statement: 0,
+                defines: None,
+                effectful: false,
+                binding,
+                inst: InstId(1),
+                region: then_region,
+                block: 0x1010,
+                order: FinalOccurrenceOrder(1),
+                observation: observation(1),
+                inline_eligible: true,
+            },
+            FinalBindingWrite {
+                statement: 0,
+                defines: None,
+                effectful: false,
+                binding,
+                inst: InstId(2),
+                region: else_region,
+                block: 0x1020,
+                order: FinalOccurrenceOrder(2),
+                observation: observation(2),
+                inline_eligible: true,
+            },
+        ];
+        let reads = [FinalBindingRead {
+            statement: 0,
+            value: None,
+            binding,
+            source: PlacementRead::Use(UseSite {
+                inst: InstId(3),
+                input_idx: 0,
+            }),
+            region: merge_region,
+            block: 0x1030,
+            order: FinalOccurrenceOrder(3),
+        }];
+
+        let decisions = derive_with_cfg(
+            &regions,
+            &cfg,
+            1,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &reads,
+            &writes,
+        )
+        .expect("placement");
+        // The arms and the merge meet at the function body itself.
+        let body = regions.root();
+        assert_eq!(
+            decisions.decision(binding),
+            Some(PlacementDecision::LexicalDeclaration { region: body })
+        );
+    }
+
+    #[test]
+    fn diamond_with_one_arm_unassigned_refuses_merge_read() {
+        let regions = diamond_regions();
+        let cfg = diamond_cfg();
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let then_region = region_with_entry(&regions, 0x1010, StructuredRegionKind::Block);
+        let merge_region = region_with_entry(&regions, 0x1030, StructuredRegionKind::Block);
+        let site = UseSite {
+            inst: InstId(3),
+            input_idx: 0,
+        };
+        let writes = [FinalBindingWrite {
+            statement: 0,
+            defines: None,
+            effectful: false,
+            binding,
+            inst: InstId(1),
+            region: then_region,
+            block: 0x1010,
+            order: FinalOccurrenceOrder(1),
+            observation: observation(1),
+            inline_eligible: true,
+        }];
+        let reads = [FinalBindingRead {
+            statement: 0,
+            value: None,
+            binding,
+            source: PlacementRead::Use(site),
+            region: merge_region,
+            block: 0x1030,
+            order: FinalOccurrenceOrder(2),
+        }];
+
+        let decisions = derive_with_cfg(
+            &regions,
+            &cfg,
+            1,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &reads,
+            &writes,
+        )
+        .expect("placement");
+        assert_eq!(
+            decisions.decision(binding),
+            Some(PlacementDecision::Refused(
+                PlacementRefusal::ReadBeforeAssignment {
+                    binding,
+                    read: PlacementRead::Use(site),
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn duplicated_merge_reads_in_exclusive_arms_use_the_cfg_assignment_proof() {
+        let regions = regions_from(
+            0x1000,
+            vec![if_region(
+                0x1000,
+                CStmt::Block(vec![block_region(0x1010), block_region(0x1030)]),
+                CStmt::Block(vec![block_region(0x1020), block_region(0x1030)]),
+            )],
+        );
+        let cfg = diamond_cfg();
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let then_region = region_with_entry(&regions, 0x1010, StructuredRegionKind::Block);
+        let else_region = region_with_entry(&regions, 0x1020, StructuredRegionKind::Block);
+        let merge_regions = regions
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.entry() == 0x1030 && node.kind() == StructuredRegionKind::Block
+            })
+            .filter_map(|(_, node)| {
+                regions
+                    .node_for_anchor(regions.authority(), node.emission_anchor())
+                    .map(|(region, _)| region)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(merge_regions.len(), 2);
+        assert!(regions.regions_are_exclusive(merge_regions[0], merge_regions[1]));
+        let writes = [
+            FinalBindingWrite {
+                defines: None,
+                statement: 0x1010,
+                effectful: false,
+                binding,
+                inst: InstId(1),
+                region: then_region,
+                block: 0x1010,
+                order: FinalOccurrenceOrder(1),
+                observation: observation(1),
+                inline_eligible: true,
+            },
+            FinalBindingWrite {
+                defines: None,
+                statement: 0x1020,
+                effectful: false,
+                binding,
+                inst: InstId(2),
+                region: else_region,
+                block: 0x1020,
+                order: FinalOccurrenceOrder(3),
+                observation: observation(2),
+                inline_eligible: true,
+            },
+        ];
+        let reads = [
+            FinalBindingRead {
+                value: None,
+                statement: 0x1030,
+                binding,
+                source: PlacementRead::Use(UseSite {
+                    inst: InstId(3),
+                    input_idx: 0,
+                }),
+                region: merge_regions[0],
+                block: 0x1030,
+                order: FinalOccurrenceOrder(2),
+            },
+            FinalBindingRead {
+                value: None,
+                statement: 0x1030,
+                binding,
+                source: PlacementRead::Use(UseSite {
+                    inst: InstId(3),
+                    input_idx: 0,
+                }),
+                region: merge_regions[1],
+                block: 0x1030,
+                order: FinalOccurrenceOrder(4),
+            },
+        ];
+
+        let decisions = derive_with_cfg(
+            &regions,
+            &cfg,
+            1,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &reads,
+            &writes,
+        )
+        .expect("placement");
+        assert!(matches!(
+            decisions.decision(binding),
+            Some(PlacementDecision::LexicalDeclaration { .. })
+        ));
+    }
+
+    #[test]
+    fn one_dominating_write_is_inlined_at_its_exact_assignment() {
+        let regions = regions_from(0x1000, vec![block_region(0x1000), block_region(0x1010)]);
+        let cfg = TestCfg::new(0x1000, &[(0x1000, 0x1010)]);
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let write_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);
+        let read_region = region_with_entry(&regions, 0x1010, StructuredRegionKind::Block);
+        let write = InstId(1);
+        let decisions = derive_with_cfg(
+            &regions,
+            &cfg,
+            1,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &[FinalBindingRead {
+                statement: 0,
+                value: None,
+                binding,
+                source: PlacementRead::Use(UseSite {
+                    inst: InstId(2),
+                    input_idx: 0,
+                }),
+                region: read_region,
+                block: 0x1010,
+                order: FinalOccurrenceOrder(2),
+            }],
+            &[FinalBindingWrite {
+                statement: 0,
+                defines: None,
+                effectful: false,
+                binding,
+                inst: write,
+                region: write_region,
+                block: 0x1000,
+                order: FinalOccurrenceOrder(1),
+                observation: observation(1),
+                inline_eligible: true,
+            }],
+        )
+        .expect("placement");
+
+        assert_eq!(
+            decisions.decision(binding),
+            Some(PlacementDecision::Inline {
+                write,
+                // The fallback the inline carries if the emitted tree turns out
+                // to put its declaration out of scope: the lowest region that
+                // dominates both the write and the read.
+                region: lowest_common_ancestor(&regions, write_region, read_region)
+                    .expect("common ancestor"),
+            })
+        );
+    }
+
+    #[test]
+    fn certified_parameter_read_uses_entry_assignment_without_a_local() {
+        let regions = regions_from(0x1000, vec![block_region(0x1000)]);
+        let cfg = TestCfg::new(0x1000, &[]);
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let block_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);
+        let reads = [FinalBindingRead {
+            statement: 0,
+            value: None,
+            binding,
+            source: PlacementRead::Use(UseSite {
+                inst: InstId(0),
+                input_idx: 0,
+            }),
+            region: block_region,
+            block: 0x1000,
+            order: FinalOccurrenceOrder(0),
+        }];
+
+        let decisions = derive_with_cfg(
+            &regions,
+            &cfg,
+            1,
+            &BTreeSet::from([binding]),
+            &BTreeSet::new(),
+            &reads,
+            &[],
+        )
+        .expect("parameter placement");
+        assert_eq!(
+            decisions.decision(binding),
+            Some(PlacementDecision::ExternallyDeclared)
+        );
+
+        let uncertified = derive_with_cfg(
+            &regions,
+            &cfg,
+            1,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &reads,
+            &[],
+        )
+        .expect("uncertified placement");
+        assert_eq!(
+            uncertified.decision(binding),
+            Some(PlacementDecision::Refused(
+                PlacementRefusal::MissingDefinition { binding }
+            ))
+        );
+    }
+
+    #[test]
+    fn escaped_frame_object_address_uses_its_declaration_as_definition() {
+        let regions = regions_from(0x1000, vec![block_region(0x1000)]);
+        let cfg = TestCfg::new(0x1000, &[]);
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let block_region = region_with_entry(&regions, 0x1000, StructuredRegionKind::Block);
+        let call = InstId(2);
+        let value = r2ssa::ValueId(3);
+        let reads = [FinalBindingRead {
+            statement: 0,
+            value: Some(value),
+            binding,
+            source: PlacementRead::EscapedStackAddress { call, value },
+            region: block_region,
+            block: 0x1000,
+            order: FinalOccurrenceOrder(0),
+        }];
+
+        let decisions = derive_with_cfg(
+            &regions,
+            &cfg,
+            1,
+            &BTreeSet::new(),
+            &BTreeSet::from([binding]),
+            &reads,
+            &[],
+        )
+        .expect("address-taken frame-object placement");
+        assert_eq!(
+            decisions.decision(binding),
+            Some(PlacementDecision::LexicalDeclaration {
+                region: block_region,
+            })
+        );
+
+        let unescaped = derive_with_cfg(
+            &regions,
+            &cfg,
+            1,
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &reads,
+            &[],
+        )
+        .expect("unescaped frame-object placement");
+        assert_eq!(
+            unescaped.decision(binding),
+            Some(PlacementDecision::Refused(
+                PlacementRefusal::MissingDefinition { binding }
+            ))
+        );
+    }
+
+    #[test]
+    fn exact_region_insertion_uses_the_sealed_anchor_not_the_block_address() {
+        let repeated_entry = CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::Block(vec![
+                CStmt::structured_region(
+                    StructuredRegionMarker::unsealed(0x1010, StructuredRegionKind::Block),
+                    CStmt::comment("first"),
+                ),
+                CStmt::structured_region(
+                    StructuredRegionMarker::unsealed(0x1010, StructuredRegionKind::Block),
+                    CStmt::comment("second"),
+                ),
+            ]),
+        );
+        let sealed = seal_structured_body(repeated_entry).expect("sealed occurrences");
+        let target = sealed
+            .regions()
+            .node_for_anchor(
+                sealed.regions().authority(),
+                sealed.regions().nodes()[2].emission_anchor(),
+            )
+            .expect("second occurrence")
+            .0;
+        let (statement, regions) = sealed.into_marked_parts();
+        let mut statements = vec![statement];
+        let declaration = CStmt::comment("declaration");
+
+        assert_eq!(
+            insert_region_declarations(&mut statements, &regions, target, &[declaration]),
+            1
+        );
+        let CStmt::StructuredRegion { stmt: root, .. } = &statements[0] else {
+            panic!("function marker")
+        };
+        let CStmt::Block(children) = root.as_ref() else {
+            panic!("function body")
+        };
+        let CStmt::StructuredRegion { stmt: first, .. } = &children[0] else {
+            panic!("first marker")
+        };
+        let CStmt::StructuredRegion { stmt: second, .. } = &children[1] else {
+            panic!("second marker")
+        };
+        assert!(!format!("{first:?}").contains("declaration"));
+        assert!(format!("{second:?}").contains("declaration"));
+    }
+
+    #[test]
+    fn inline_replaces_only_the_exact_marked_assignment() {
+        let symbols = std::rc::Rc::new(std::cell::RefCell::new(SymbolTable::new()));
+        let symbol = symbols.borrow_mut().declare(
+            "value",
+            crate::ast::CType::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Unsigned,
+            },
+            SymbolRole::Carrier,
+        );
+        let marker = observation(7);
+        let assignment = CStmt::observed(
+            marker,
+            CStmt::expr(CExpr::assign(CExpr::Var(symbol), CExpr::UIntLit(9))),
+        );
+        let mut statements = vec![assignment, CStmt::comment("untouched")];
+
+        let mentions = SymbolMentions::of_body(&statements);
+        assert_eq!(
+            inline_marked_write(
+                &mentions,
+                &mut statements,
+                marker,
+                symbol,
+                &crate::ast::CType::Int {
+                    bits: 32,
+                    signedness: r2types::Signedness::Unsigned
+                },
+            ),
+            1
+        );
+        assert!(matches!(
+            statements[0].unobserved(),
+            CStmt::Decl {
+                name,
+                init: Some(CExpr::UIntLit(9)),
+                ..
+            } if *name == symbol
+        ));
+    }
+
+    #[test]
+    fn final_scope_order_matches_do_while_execution() {
+        let body_id = observation(0);
+        let condition_id = observation(1);
+        let sealed = seal_structured_body(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::DoWhile {
+                body: Box::new(CStmt::observed(body_id, CStmt::Empty)),
+                cond: CExpr::observed(condition_id, CExpr::UIntLit(1)),
+            },
+        ))
+        .expect("sealed do-while");
+        let (statement, regions) = sealed.into_marked_parts();
+        let targets = vec![Some(PlacementObservationTarget::Other); 2];
+        let scopes = collect_final_observation_scopes(&[statement], &regions, &targets);
+        let order_of = |index| match scopes[index] {
+            Some(FinalObservationScope::Exact { order, .. }) => order,
+            other => panic!("expected exact scope, got {other:?}"),
+        };
+        assert!(order_of(0) < order_of(1));
+    }
+
+    #[test]
+    fn final_scope_order_matches_for_execution_phases() {
+        let init_id = observation(0);
+        let condition_id = observation(1);
+        let body_id = observation(2);
+        let update_id = observation(3);
+        let sealed = seal_structured_body(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::For {
+                init: Some(Box::new(CStmt::observed(init_id, CStmt::Empty))),
+                cond: Some(CExpr::observed(condition_id, CExpr::UIntLit(1))),
+                update: Some(CExpr::observed(update_id, CExpr::UIntLit(0))),
+                body: Box::new(CStmt::observed(body_id, CStmt::Empty)),
+            },
+        ))
+        .expect("sealed for");
+        let (statement, regions) = sealed.into_marked_parts();
+        let targets = vec![Some(PlacementObservationTarget::Other); 4];
+        let scopes = collect_final_observation_scopes(&[statement], &regions, &targets);
+        let order_of = |index| match scopes[index] {
+            Some(FinalObservationScope::Exact { order, .. }) => order,
+            other => panic!("expected exact scope, got {other:?}"),
+        };
+        assert!(order_of(0) < order_of(1));
+        assert!(order_of(1) < order_of(2));
+        assert!(order_of(2) < order_of(3));
+    }
+
+    #[test]
+    fn final_scope_sequences_comma_reads_output_write_and_later_read() {
+        let operand_read = observation(0);
+        let output_write = observation(1);
+        let later_read = observation(2);
+        let expression = CExpr::Comma(vec![
+            CExpr::observed(
+                output_write,
+                CExpr::observed(operand_read, CExpr::UIntLit(1)),
+            ),
+            CExpr::observed(later_read, CExpr::UIntLit(2)),
+        ]);
+        let sealed = seal_structured_body(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::Expr(expression),
+        ))
+        .expect("sealed comma expression");
+        let (statement, regions) = sealed.into_marked_parts();
+        let targets = [
+            Some(PlacementObservationTarget::Use {
+                site: UseSite {
+                    inst: InstId(0),
+                    input_idx: 0,
+                },
+                block: 0x1000,
+            }),
+            Some(PlacementObservationTarget::Write {
+                inst: InstId(1),
+                projection: r2ssa::MachineWriteProjection::Full,
+                block: 0x1000,
+            }),
+            Some(PlacementObservationTarget::Use {
+                site: UseSite {
+                    inst: InstId(2),
+                    input_idx: 0,
+                },
+                block: 0x1000,
+            }),
+        ];
+        let scopes = collect_final_observation_scopes(&[statement], &regions, &targets);
+        let order_of = |index| match scopes[index] {
+            Some(FinalObservationScope::Exact { order, .. }) => order,
+            other => panic!("expected exact scope, got {other:?}"),
+        };
+
+        assert!(order_of(0) < order_of(1));
+        assert!(order_of(1) < order_of(2));
+    }
+
+    #[test]
+    fn final_scope_refuses_alternative_write_phase() {
+        let branch_write = observation(0);
+        let competing_read = observation(1);
+        let expression = CExpr::Ternary {
+            cond: Box::new(CExpr::UIntLit(1)),
+            then_expr: Box::new(CExpr::observed(branch_write, CExpr::UIntLit(2))),
+            else_expr: Box::new(CExpr::observed(competing_read, CExpr::UIntLit(3))),
+        };
+        let sealed = seal_structured_body(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::Expr(expression),
+        ))
+        .expect("sealed alternative expression");
+        let (statement, regions) = sealed.into_marked_parts();
+        let targets = [
+            Some(PlacementObservationTarget::Write {
+                inst: InstId(0),
+                projection: r2ssa::MachineWriteProjection::Full,
+                block: 0x1000,
+            }),
+            Some(PlacementObservationTarget::Use {
+                site: UseSite {
+                    inst: InstId(1),
+                    input_idx: 0,
+                },
+                block: 0x1000,
+            }),
+        ];
+        let scopes = collect_final_observation_scopes(&[statement], &regions, &targets);
+
+        assert_eq!(scopes[0], Some(FinalObservationScope::Ambiguous));
+        assert_eq!(scopes[1], Some(FinalObservationScope::Ambiguous));
+    }
+
+    #[test]
+    fn final_scope_refuses_unsequenced_write_phase() {
+        let operand_write = observation(0);
+        let competing_read = observation(1);
+        let expression = CExpr::binary(
+            BinaryOp::Add,
+            CExpr::observed(operand_write, CExpr::UIntLit(1)),
+            CExpr::observed(competing_read, CExpr::UIntLit(2)),
+        );
+        let sealed = seal_structured_body(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::Expr(expression),
+        ))
+        .expect("sealed unsequenced expression");
+        let (statement, regions) = sealed.into_marked_parts();
+        let targets = [
+            Some(PlacementObservationTarget::Write {
+                inst: InstId(0),
+                projection: r2ssa::MachineWriteProjection::Full,
+                block: 0x1000,
+            }),
+            Some(PlacementObservationTarget::Use {
+                site: UseSite {
+                    inst: InstId(1),
+                    input_idx: 0,
+                },
+                block: 0x1000,
+            }),
+        ];
+        let scopes = collect_final_observation_scopes(&[statement], &regions, &targets);
+
+        assert_eq!(scopes[0], Some(FinalObservationScope::Ambiguous));
+        assert_eq!(scopes[1], Some(FinalObservationScope::Ambiguous));
+    }
+
+    #[test]
+    fn final_scope_sequences_direct_stack_assignment_after_its_value() {
+        let stack_write = observation(0);
+        let elided_address_use = observation(1);
+        let value_read = observation(2);
+        let symbols = std::rc::Rc::new(std::cell::RefCell::new(SymbolTable::new()));
+        let symbol = symbols.borrow_mut().declare(
+            "stack_m16",
+            crate::ast::CType::Int {
+                bits: 32,
+                signedness: r2types::Signedness::Unsigned,
+            },
+            SymbolRole::StackLocal(-16),
+        );
+        let expression = CExpr::assign(
+            CExpr::observed(
+                elided_address_use,
+                CExpr::observed(stack_write, CExpr::Var(symbol)),
+            ),
+            CExpr::observed(value_read, CExpr::UIntLit(7)),
+        );
+        let sealed = seal_structured_body(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::Expr(expression),
+        ))
+        .expect("sealed stack assignment");
+        let (statement, regions) = sealed.into_marked_parts();
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let targets = [
+            Some(PlacementObservationTarget::StackAccess {
+                access: r2ssa::StructuredAccessId {
+                    inst: InstId(0),
+                    ordinal: 0,
+                },
+                object: r2ssa::ObjectId(0),
+                binding,
+                symbol,
+                is_write: true,
+            }),
+            Some(PlacementObservationTarget::Other),
+            Some(PlacementObservationTarget::Use {
+                site: UseSite {
+                    inst: InstId(0),
+                    input_idx: 0,
+                },
+                block: 0x1000,
+            }),
+        ];
+        let scopes = collect_final_observation_scopes(&[statement], &regions, &targets);
+        let order_of = |index| match scopes[index] {
+            Some(FinalObservationScope::Exact { order, .. }) => order,
+            other => panic!("expected exact scope, got {other:?}"),
+        };
+
+        assert!(order_of(2) < order_of(0));
+        assert_eq!(scopes[1], None);
+    }
+
+    #[test]
+    fn final_scope_sequences_direct_stack_array_assignment_after_its_index_and_value() {
+        let stack_write = observation(0);
+        let address_use = observation(1);
+        let index_read = observation(2);
+        let value_read = observation(3);
+        let symbols = std::rc::Rc::new(std::cell::RefCell::new(SymbolTable::new()));
+        let symbol = symbols.borrow_mut().declare(
+            "stack_m64",
+            crate::ast::CType::Array(Box::new(crate::ast::CType::u8()), Some(64)),
+            SymbolRole::StackLocal(-64),
+        );
+        let index =
+            symbols
+                .borrow_mut()
+                .declare("i", crate::ast::CType::u64(), SymbolRole::Carrier);
+        let expression = CExpr::assign(
+            CExpr::observed(
+                address_use,
+                CExpr::observed(
+                    stack_write,
+                    CExpr::Subscript {
+                        base: Box::new(CExpr::cast(
+                            crate::ast::CType::ptr(crate::ast::CType::i8()),
+                            CExpr::Var(symbol),
+                        )),
+                        index: Box::new(CExpr::observed(index_read, CExpr::Var(index))),
+                    },
+                ),
+            ),
+            CExpr::observed(value_read, CExpr::UIntLit(7)),
+        );
+        let sealed = seal_structured_body(CStmt::structured_region(
+            StructuredRegionMarker::unsealed(0x1000, StructuredRegionKind::FunctionBody),
+            CStmt::Expr(expression),
+        ))
+        .expect("sealed stack array assignment");
+        let (statement, regions) = sealed.into_marked_parts();
+        let binding = BindingId::from_dense_index(0).expect("binding");
+        let targets = [
+            Some(PlacementObservationTarget::StackAccess {
+                access: r2ssa::StructuredAccessId {
+                    inst: InstId(0),
+                    ordinal: 0,
+                },
+                object: r2ssa::ObjectId(0),
+                binding,
+                symbol,
+                is_write: true,
+            }),
+            Some(PlacementObservationTarget::Use {
+                site: UseSite {
+                    inst: InstId(0),
+                    input_idx: 0,
+                },
+                block: 0x1000,
+            }),
+            Some(PlacementObservationTarget::Use {
+                site: UseSite {
+                    inst: InstId(0),
+                    input_idx: 1,
+                },
+                block: 0x1000,
+            }),
+            Some(PlacementObservationTarget::Use {
+                site: UseSite {
+                    inst: InstId(0),
+                    input_idx: 2,
+                },
+                block: 0x1000,
+            }),
+        ];
+        let scopes = collect_final_observation_scopes(&[statement], &regions, &targets);
+        let order_of = |index| match scopes[index] {
+            Some(FinalObservationScope::Exact { order, .. }) => order,
+            other => panic!("expected exact scope, got {other:?}"),
+        };
+
+        assert!(order_of(3) < order_of(1));
+        assert_eq!(order_of(1), order_of(2));
+        assert!(order_of(2) < order_of(0));
+    }
+}

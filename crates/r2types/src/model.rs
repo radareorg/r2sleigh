@@ -1,29 +1,29 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 pub type TypeId = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Signedness {
     Signed,
     Unsigned,
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StructField {
     pub name: Option<String>,
     pub ty: TypeId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct StructShape {
     pub name: Option<String>,
     pub fields: BTreeMap<u64, StructField>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Type {
     Top,
     Bottom,
@@ -53,7 +53,7 @@ pub enum Type {
 #[derive(Debug, Clone)]
 pub struct TypeArena {
     types: Vec<Type>,
-    intern_index: HashMap<Type, TypeId>,
+    intern_index: BTreeMap<Type, TypeId>,
     top: TypeId,
     bottom: TypeId,
     bool_ty: TypeId,
@@ -63,7 +63,7 @@ impl Default for TypeArena {
     fn default() -> Self {
         let mut arena = Self {
             types: Vec::new(),
-            intern_index: HashMap::new(),
+            intern_index: BTreeMap::new(),
             top: 0,
             bottom: 0,
             bool_ty: 0,
@@ -191,6 +191,32 @@ impl TypeArena {
 
     pub fn get(&self, id: TypeId) -> &Type {
         self.types.get(id).unwrap_or(&Type::Top)
+    }
+
+    /// Reserve a node whose content is not known yet.
+    ///
+    /// A recursive type is a finite graph with a back edge, and interning
+    /// cannot build one: `intern` needs its children's ids, and a cycle's child
+    /// is the node itself. Reserving hands out the id first so the recursion
+    /// that discovers the cycle has something to point at, and `define` fills
+    /// it once the shape is known.
+    ///
+    /// A reserved node is deliberately absent from the intern index while it is
+    /// a placeholder, so nothing can be unified with a shape that is not
+    /// settled yet, and it stays absent afterwards: two structurally identical
+    /// cyclic nodes are two distinct ids, and it is coinductive subtyping --
+    /// not pointer equality -- that decides whether they mean the same type.
+    pub fn reserve(&mut self) -> TypeId {
+        let id = self.types.len();
+        self.types.push(Type::Bottom);
+        id
+    }
+
+    /// Give a reserved node its shape. Ignores an id that was never reserved.
+    pub fn define(&mut self, id: TypeId, ty: Type) {
+        if let Some(slot) = self.types.get_mut(id) {
+            *slot = ty;
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (TypeId, &Type)> {
