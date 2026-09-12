@@ -21021,6 +21021,20 @@ and double-count coverage.
 
 ## Open items
 
+**The scan stays in executable memory (PR 26720).** The walk PR's fuzz job
+timed out twice on `bins/fuzzed/r2_ir_r_read_me32_arc`: a fuzzed ELF maps a
+null-backed `rw-` segment over most of the address space, the scan's
+per-instruction check only asked whether the address was mapped, and once a
+block ran off the executable map it decoded the zero fill as an ARC branch
+chain, 3.6M one-instruction blocks in 15s and then the later `aaa` stages on
+that function. The depth limit had truncated it at 128 blocks and hidden it.
+`anal.in` already states the rule and the core applied it to the start address
+only; the scan now asks for execute permission per instruction unless
+`opt.noncode`. 26717 depends on it for that job; both are on the fork. The
+sanitizer build recipe that reproduced it: configure with
+`CFLAGS="-fsanitize=address -g -O1 -fno-omit-frame-pointer"` exported (not on
+the make line, which drops the include paths), then `sample` the process.
+
 **The frame is described once now (PRs 26718 merged, 26719 open).** radare2's
 DWARF importer mapped `DW_OP_call_frame_cfa` onto a bp offset with a hard-coded
 `+16`; it now has its own location kind and integrates as an entry-relative
