@@ -21347,3 +21347,97 @@ DecBench sweep 2 (witness `bfdd69d2`) lost its ssh session during
 `diffutils`; the remote run `decbench-20260912T085056-81951` kept going and
 `--resume` finishes `dpkg`. The run from 5 September still holding a `zlib`
 log on the host is stale and is for `--gc-force`.
+
+## An object's address is a value the program may hold (branch `arch/object-address-values`)
+
+The model below is derived, implemented and measured, and it is **not on this
+branch**: it is commit `062dcb57` on `arch/object-address-values`, because it
+gains two functions and loses thirty-eight. The two open classes are named at
+the end of this section, and each is a decision about where an observation
+belongs rather than a missing fact.
+
+`generateMTFValues` (bzip2 `-O2`) refused on the prologue's own stack pointer
+versions, and the trace went through four layers before it named the model
+gap. `sub rsp, 0x110` there produces the base address of `UChar yy[256]`,
+and the program keeps that address: `mov rcx, rsp` copies it into a pointer
+that walks the array, and `lea` off it addresses elements. The frame geometry
+certificate dropped the value because those reads made it a program value,
+the drop cascaded up every push, and the pushes' stack pointers ended as
+unaccounted cells. Before this the address of a stack object could only be
+spelled as a call argument (`stat(x, &statBuf)`) or inside an access; a
+pointer variable initialised to a local's address had no rendering at all.
+
+The model now says: a value that is exactly a declared slot's base address is
+that object's address, a constant of the frame, spelled as the object wherever
+the program reads it.
+
+- The rewriter imports the producer of such a value as
+  `TermKind::ObjectAddress(object)` (`import_root`, rule `object.address`),
+  for declared slots only: the object model makes an object for every frame
+  root, and a push slot is not a C object.
+- The geometry certificate never removes such a value on account of its
+  readers (`object_base_values`), and the operands of an element-address
+  computation into a declared array are absorbed (`absorbed_array_uses`),
+  so the prologue chain stays geometry and its statements stay elided.
+- The renderer spells an elided geometry value whose term is an object
+  address as the object (`planned_value_expr`, the `DeadStackBase` arm) and
+  materialises nested `ObjectAddress` terms through
+  `certified_stack_address_expr_for_object`; each spelling is observed as an
+  escaped stack address at the reading instruction
+  (`observe_frame_object_address_expr`), certified by the reader's canonical
+  term (`CertifiedFrameObjectAddress` with no argument index; the call
+  argument path is the same authority with one).
+- The journal recognises geometry by the certificate rather than by the
+  value's disposition (`stack_geometry_elides`), and the two undeclared
+  carrier audits accept a memory-address use of a frame address as absorbed
+  (`use_is_absorbed`) instead of the operand observation being rewritten.
+
+`generateMTFValues` renders (`uint8_t yy[256]; ... yy[1]`, and
+`((int8_t*)yy)[RAX_11] = ...` where the element type disagrees, which is a
+spelling to improve, not a correctness item). The unit test that expected an
+address operand observed as `MemoryAddress` stands, as it should. The corpus
+gate is 54 of 54 on raw, differential and every audit throughout.
+
+**What it costs, and the two questions left.** The census is 739 of 787
+against 775. Sixteen functions refuse `PlannedElidedValueRendered`:
+`absorbed_array_uses` keeps the operands of an element-address computation in
+the geometry, so a value the program also reads elsewhere is elided with no
+object of its own to spell. That absorption is too broad -- the operand of an
+element address is only absorbed where *every* reader spells the object --
+and the fix is to ask that question per value rather than per instruction.
+Eleven refuse `ambiguous_observation_execution_order` and eight
+`unobserved_binding_read`: an address observation on the left of an
+assignment (`yy[i] = ...`) leaves the placement audit unable to order the two
+sides' observations, which is a question about whether an lvalue's address
+spelling is an occurrence at all when the access itself already carries one.
+
+Two diagnostics from the trace stay: `stack-geometry-kept` names the use that
+keeps a frame address in the program, `stack-geometry-excluded` the admission
+clause an excluded stack pointer version failed, and `stack-geometry-roots` /
+`stack-geometry-certificate` give the counts per function. `entry-stack-roots`
+reports a subtraction that failed to root from a rooted operand.
+
+Still open from the same census pass: `inflate` at `-O0` (`0xe05b`) refuses
+`RenderedValueRequired` on `add rdx, 0x558; add rdx, 0x168c`, where neither
+add's statement renders (`write=None` for both) although both outputs are
+bound to one binding; the reload that feeds the first add is elided as the
+slot's own value. That is a placement or statement-disposition defect, not the
+object model, and it refused before this session too.
+
+The arm64 stub (`sym.imp.printf`) refused because radare2's walk continued
+past `br x16` into the padding `brk`; upstream PR 26726 ends the block at the
+`br` and the fork carries it. The eight expectations it changed all encoded
+the fall-through (thunk sizes, a switch dispatch block's bogus successor, and
+case blocks cut into `case.*` functions); the stub now renders as the
+variadic declaration.
+
+Growth exponents from a timing census (`growth_fit.py`): every stage's tail
+exponent is at or below 1.19; `binding_plan` is the largest absolute cost
+(9.5 s over 772 renders) and `BZ2_compressBlock`'s 2.7 s is size, not a
+superlinear stage.
+
+DecBench sweep 3 runs from the committed tree (`4a194c76`, remote run
+`decbench-20260912T111159-65093`, five projects, `--keep-remote`). Resuming
+sweep 2 failed twice on the tree fingerprint, since the launch tree had
+uncommitted edits the remote copy does not reproduce byte for byte; the old
+interrupted runs were collected with `--gc-force`.
