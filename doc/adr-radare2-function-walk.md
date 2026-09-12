@@ -319,16 +319,30 @@ own measurement, taken only after §4 has landed and been shown identical.
 
 1. **De-recurse `fcn_recurse`** as in §4, with `Enter`/`Exit` frames on an
    `RVec`, matching the idiom `1c643d2ad1` already established in `block.c`.
-   The jump-table layer's re-entry through
-   `r_anal_function_materialize_switch_case` (`fcn.c:694`) enqueues instead of
-   calling, which also retires its hard-coded depths of 50 and 999
-   (`jmptbl.c:390`, `1385`). Delete `R_ANAL_FCN_RECURSE_STACK_LIMIT` and the
-   unreachable warning at `fcn.c:873-876`. Keep `anal.depth` accepted and
-   ignored for one release with a deprecation note, since scripts set it. The
+   Delete `R_ANAL_FCN_RECURSE_STACK_LIMIT`, the unreachable warning at
+   `fcn.c:873-876`, `RAnalOptions.depth`, and the depth parameter of every
+   walker, including the hard-coded 50 and 999 in `jmptbl.c:390`, `1385`. The
    test is that every `afl`, `afb`, `afij`, `afx`, `afvj` and `pdf` output over
    the local corpus and the radare2 test suite is byte-identical before and
    after under the default configuration — §4 promises identity there, so any
    difference is a bug in the transformation, not a judgement call.
+
+   *As built.* Two things differ from the first draft of this item. The
+   jump-table layer's re-entry through `r_anal_function_materialize_switch_case`
+   runs a nested walk with its own frame vector rather than enqueueing onto the
+   outer one, because `function_has_ret_between` and the post-checks in
+   `materialize` consume the case walk's result synchronously; C depth is then
+   bounded by the nesting of distinct switches, not by chain length. And the
+   `anal.depth` config variable is not deprecated but kept, with its
+   description corrected, because `r_core_anal_fcn` still reads it to bound
+   its own recursion into callees (`canal.c:447-560`, `:733`) and the graph
+   path searches read it too; only the walk's use of it is deleted. That
+   callee recursion is the next cap to derive. The one documented deviation is
+   under `anal.jmp.indir`: an indirect jump's targets are walked after its
+   block finishes, not before the scan continues. Identity held over the
+   corpus except for the three functions the old walk truncated, which now
+   have no edges into holes, and `db/anal` passes the same set before and
+   after.
 2. **Give `ret` a definition.** With the frames explicit, the return code
    stops being "the rightmost leaf's leftover" and becomes a function-level
    fact: `END` when the entry block scanned, `ERROR` when it could not, `NOP`
