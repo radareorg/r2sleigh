@@ -615,22 +615,17 @@ pub struct SourceCallArgumentFact {
     pub value: SourceCallArgumentValue,
 }
 
-/// Canonical provenance for a variadic callsite's argument count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum VariadicCallsiteArgumentCountSource {
-    /// The exact radare2 prototype identified the format parameter and the
-    /// exact source snapshot supplied the literal stored at its address.
-    Radare2FormatString,
-    /// The format argument is a merge, and every literal that can reach it
-    /// consumes the same number of arguments. A count is a property of the
-    /// format, so formats that agree prove the count the same way one does.
-    Radare2MergedFormatStrings,
-}
-
 /// Per-callsite proof of a variadic argument count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariadicCallsiteArgumentCountEvidence {
-    pub source: VariadicCallsiteArgumentCountSource,
+    /// Which rule named the format parameter: radare2's recovered prototype,
+    /// or the callee's own body. Orthogonal to `merged_literals`, which is
+    /// about the literal rather than the parameter.
+    pub parameter_rule: r2source::SourceVariadicArgumentCountRule,
+    /// Whether several literals reach the format argument and agree on the
+    /// count. A count is a property of the format, so formats that agree
+    /// prove it the same way one does.
+    pub merged_literals: bool,
     pub format_argument_index: usize,
     pub format_literal_address: u64,
     pub format_consumed_argument_count: usize,
@@ -3580,11 +3575,10 @@ fn variadic_callsite_argument_count(
     interface: &r2source::SourceCallSiteInterface,
     fixed_arguments: &[Option<SourceCallArgumentFact>],
 ) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
-    let Some(r2source::SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index }) =
-        interface.variadic_argument_count_rule()
-    else {
+    let Some(parameter_rule) = interface.variadic_argument_count_rule() else {
         return Err(VariadicCallsiteArgumentCountRefusal::MissingFormatParameter);
     };
+    let parameter_index = parameter_rule.parameter_index();
     let format_argument_index = usize::try_from(parameter_index)
         .map_err(|_| VariadicCallsiteArgumentCountRefusal::FormatArgumentUnavailable)?;
     let format_value = fixed_arguments
@@ -3611,6 +3605,7 @@ fn variadic_callsite_argument_count(
             graph,
             machine_context,
             interface,
+            parameter_rule,
             format_value,
             format_argument_index,
         );
@@ -3664,7 +3659,8 @@ fn variadic_callsite_argument_count(
         .checked_add(format_consumed_argument_count)
         .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
     Ok(VariadicCallsiteArgumentCountEvidence {
-        source: VariadicCallsiteArgumentCountSource::Radare2FormatString,
+        parameter_rule,
+        merged_literals: false,
         format_argument_index,
         format_literal_address,
         format_consumed_argument_count,
@@ -3735,6 +3731,7 @@ fn merged_format_literal_argument_count(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
     interface: &r2source::SourceCallSiteInterface,
+    parameter_rule: r2source::SourceVariadicArgumentCountRule,
     format_value: ValueId,
     format_argument_index: usize,
 ) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
@@ -3801,13 +3798,9 @@ fn merged_format_literal_argument_count(
     );
     // One literal reached through copies is one literal, and saying it was a
     // merge would claim a proof this call did not need.
-    let source = if addresses.len() == 1 {
-        VariadicCallsiteArgumentCountSource::Radare2FormatString
-    } else {
-        VariadicCallsiteArgumentCountSource::Radare2MergedFormatStrings
-    };
     Ok(VariadicCallsiteArgumentCountEvidence {
-        source,
+        parameter_rule,
+        merged_literals: addresses.len() > 1,
         format_argument_index,
         format_literal_address,
         format_consumed_argument_count,

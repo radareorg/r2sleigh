@@ -93,6 +93,7 @@ pub use function::{
     RegisterFamilySlot, RegisterIdentityCensus, SSABlock as FunctionSSABlock, SSAFunction,
     SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
     StackAddressBase, StackAddressRoot, SwitchInfo, TrustedSsaArtifact,
+    body_proven_format_parameter,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -172,7 +173,6 @@ pub use semantic::{
     StructuredDataflowFacts, StructuredLoopFact, StructuredLoopKind, StructuredMemoryAccessFact,
     StructuredRecursiveCallFact, SwitchCertificate, SwitchPredicateFact, ValueOwner,
     VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal,
-    VariadicCallsiteArgumentCountSource,
 };
 pub use slice::{Slice, SliceError, SliceSeed, backward_slice, resolve_slice_seed};
 pub use taint::{DefaultTaintPolicy, TaintAnalysis, TaintLabel, TaintPolicy, TaintResult};

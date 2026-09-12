@@ -1573,12 +1573,249 @@ fn correlate_call_site_interfaces(
                 }
             }
         }
+        // radare2 has a prototype for the printf family and almost never for a
+        // wrapper defined in this binary, so the name above finds nothing for
+        // the wrapper. Its own body proved which parameter it forwards as a
+        // format, and that travels on the callee interface; the builder leaves
+        // an already-bound radare2 rule alone.
+        if prototype.variadic
+            && let Some(callee) = recovered
+            && let Some(index) = callee.body_proven_format_parameter()
+            && let Ok(bound) = interface.clone().with_body_proven_format_parameter(index)
+        {
+            interface = bound;
+        }
         interfaces.push(interface);
     }
     CorrelatedCallSites {
         tail_calls,
         interfaces,
     }
+}
+
+/// Which parameter of this body holds a format string, proven by what the body
+/// forwards.
+///
+/// radare2 names a format parameter `format` only in its own prototypes, so
+/// libc's printf family resolves and nothing else does: with DWARF the name is
+/// whatever the programmer wrote -- `fmt`, `msg`, `templ` -- and without it
+/// there is no name at all. The body says it regardless. A printf-style
+/// wrapper hands one of its own parameters to `vfprintf` or a sibling, and
+/// radare2 does name the format parameter of every one of those, so the claim
+/// composes: the callee's prototype supplies the argument index, and this body
+/// supplies which of its parameters arrives there. The forwarded callee need
+/// not be variadic itself; the whole family takes a `va_list`.
+///
+/// The last fixed parameter would be cheaper and is only a guess:
+/// `void f(const char *fmt, int flags, ...)` is legal C. Two forwards that
+/// disagree prove nothing and refuse.
+pub fn body_proven_format_parameter(artifact: &TrustedSsaArtifact) -> Option<u32> {
+    use crate::semantic::SourceCallArgumentValue;
+    let shared = artifact.shared_artifact();
+    let source = artifact.source();
+    let boundaries = &shared.facts().boundaries;
+    if boundaries.parameters.is_empty() {
+        return None;
+    }
+    let signatures = source.presentation().callee_signatures();
+    let names: BTreeMap<u64, &str> = source
+        .advisory_calls()
+        .iter()
+        .filter_map(|call| call.target_name().map(|name| (call.target_address(), name)))
+        .collect();
+
+    let mut proven: Option<u32> = None;
+    for (call_site, boundary) in &boundaries.calls {
+        let Some(certificate) = shared.certificates().callsites.get(call_site) else {
+            continue;
+        };
+        let Some(target) = certificate.direct_target else {
+            continue;
+        };
+        let Some(name) = names.get(&target) else {
+            r2il::refusal_evidence!(
+                "body-format-parameter",
+                "call {call_site:?} to {target:#x} has no source name to look a prototype up by"
+            );
+            continue;
+        };
+        let Some(format_index) = prototype_format_parameter_index(signatures, name) else {
+            continue;
+        };
+        let Some(argument) = boundary.arguments.get(format_index) else {
+            r2il::refusal_evidence!(
+                "body-format-parameter",
+                "{name} names its format at {format_index} and this call carries {} arguments",
+                boundary.arguments.len()
+            );
+            continue;
+        };
+        let SourceCallArgumentValue::Value(value) = argument.value else {
+            r2il::refusal_evidence!(
+                "body-format-parameter",
+                "the format argument of {name} is this function's entry carrier, not a value"
+            );
+            continue;
+        };
+        let Some(index) = forwarded_parameter_index(&shared, value, &mut BTreeSet::new()) else {
+            r2il::refusal_evidence!(
+                "body-format-parameter",
+                "the format argument {value:?} of {name} is no parameter of this function"
+            );
+            continue;
+        };
+        match proven {
+            Some(existing) if existing != index => {
+                r2il::refusal_evidence!(
+                    "body-format-parameter",
+                    "forwards disagree: parameter {existing} and parameter {index}"
+                );
+                return None;
+            }
+            _ => proven = Some(index),
+        }
+    }
+    if let Some(index) = proven {
+        r2il::refusal_evidence!(
+            "body-format-parameter",
+            "this body forwards parameter {index} as a format"
+        );
+    }
+    proven
+}
+
+/// The parameter index the exact prototype for `name` calls the format string.
+///
+/// Unlike the variadic count rule this does not require the callee to be
+/// variadic: `vfprintf` and its siblings take a `va_list` and are the point.
+fn prototype_format_parameter_index(
+    signatures: &[(Box<str>, r2source::SourceSignaturePresentation)],
+    name: &str,
+) -> Option<usize> {
+    let mut matching = signatures.iter().filter(|(key, _)| key.as_ref() == name);
+    let (_, signature) = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    let mut formats = signature
+        .named_parameters()
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| parameter.name() == Some("format"));
+    let (index, _) = formats.next()?;
+    formats.next().is_none().then_some(index)
+}
+
+/// The parameter this value carries, directly, through a copy or merge, or
+/// through its home.
+///
+/// An unoptimised wrapper spills its format parameter to the parameter home
+/// and reloads it before forwarding, and the reload reaches the call through
+/// the register copy that sets up the argument, so the value at the call is
+/// two steps from the entry carrier. The frame round-trip certificate
+/// deliberately refuses to cover a parameter home -- its job is to prove frame
+/// traffic is an elidable save and restore, and a parameter home is a variable
+/// the program uses -- so the identity is established here instead, and claims
+/// only that: the value holds the parameter, not that the traffic may go.
+fn forwarded_parameter_index(
+    shared: &SsaArtifact,
+    value: crate::ValueId,
+    seen: &mut BTreeSet<crate::ValueId>,
+) -> Option<u32> {
+    use crate::graph::InstPayload;
+    if !seen.insert(value) {
+        return None;
+    }
+    let boundaries = &shared.facts().boundaries;
+    if let Some((index, _)) = boundaries
+        .parameters
+        .iter()
+        .find(|(_, parameter)| parameter.value == value)
+    {
+        return Some(*index);
+    }
+    let graph = shared.graph();
+    let Some(definition) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+        r2il::refusal_evidence!(
+            "body-format-parameter",
+            "{value:?} has no defining instruction and is not a parameter"
+        );
+        return None;
+    };
+    // A copy or a merge carries whatever reached it, so every input has to
+    // name the same parameter for the value to name one.
+    let agreeing = |inputs: &[crate::ValueId], shared: &SsaArtifact, seen: &mut BTreeSet<_>| {
+        let mut answer: Option<u32> = None;
+        for input in inputs {
+            let index = forwarded_parameter_index(shared, *input, seen)?;
+            match answer {
+                Some(existing) if existing != index => return None,
+                _ => answer = Some(index),
+            }
+        }
+        answer
+    };
+    match &definition.payload {
+        InstPayload::Phi { .. } | InstPayload::Op(SSAOp::Copy { .. }) => {
+            return agreeing(&definition.inputs, shared, seen);
+        }
+        InstPayload::Op(SSAOp::Load { .. }) => {}
+        InstPayload::Op(op) => {
+            r2il::refusal_evidence!(
+                "body-format-parameter",
+                "{value:?} is defined by {}, which carries no parameter identity",
+                format!("{op:?}").chars().take(60).collect::<String>()
+            );
+            return None;
+        }
+    }
+    let structured = shared.structured();
+    // The access this load is, and the object it reads.
+    let Some(read) = structured.memory_accesses.values().find(|access| {
+        !access.is_write && access.value == Some(value) && access.provenance_complete
+    }) else {
+        r2il::refusal_evidence!(
+            "body-format-parameter",
+            "the load of {value:?} has no complete structured read to name its object"
+        );
+        return None;
+    };
+    // One store to that object, of the parameter, and every access the same
+    // width: anything else and the home holds something the program changed.
+    let writes = structured
+        .memory_accesses
+        .values()
+        .filter(|access| access.object == read.object && access.is_write)
+        .collect::<Vec<_>>();
+    let [store] = writes.as_slice() else {
+        r2il::refusal_evidence!(
+            "body-format-parameter",
+            "object {:?} behind {value:?} has {} writes, not one",
+            read.object,
+            writes.len()
+        );
+        return None;
+    };
+    if !store.provenance_complete || store.width != read.width {
+        r2il::refusal_evidence!(
+            "body-format-parameter",
+            "the store to {:?} is {} bytes complete={} against a {} byte read",
+            read.object,
+            store.width,
+            store.provenance_complete,
+            read.width
+        );
+        return None;
+    }
+    let stored = store.value?;
+    let index = forwarded_parameter_index(shared, stored, seen);
+    if index.is_none() {
+        r2il::refusal_evidence!(
+            "body-format-parameter",
+            "the home behind {value:?} was written {stored:?}, which is no parameter"
+        );
+    }
+    index
 }
 
 impl TrustedSsaArtifact {
@@ -7968,10 +8205,11 @@ mod tests {
         let evidence = call
             .variadic_argument_count_evidence
             .expect("merged literal count");
-        assert_eq!(
-            evidence.source,
-            crate::VariadicCallsiteArgumentCountSource::Radare2MergedFormatStrings
-        );
+        assert!(evidence.merged_literals);
+        assert!(matches!(
+            evidence.parameter_rule,
+            crate::SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index: 1 }
+        ));
         assert_eq!(evidence.format_argument_index, 1);
         assert_eq!(evidence.format_consumed_argument_count, 1);
         assert_eq!(evidence.total_argument_count, 3);

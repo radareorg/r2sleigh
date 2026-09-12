@@ -1304,10 +1304,15 @@ pub struct SourceFunctionInterface {
     /// consumer may treat them as surviving a call rather than assuming it.
     stack_pointer_preserved_across_calls: bool,
     frame_pointer_preserved_across_calls: bool,
+    /// Which of this function's own parameters its body proves is a format
+    /// string, for callers whose prototype for it names none. A property of
+    /// the function, unlike the per-callsite count rule a literal decides.
+    body_proven_format_parameter: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceFunctionInterfaceError {
+    InvalidFormatParameterIndex,
     EmptyRevisionIdentity,
     EmptyCallingConvention,
     InvalidParameterOrder,
@@ -1695,6 +1700,7 @@ impl SourceFunctionInterface {
             // convention is known; a bare interface claims neither.
             stack_pointer_preserved_across_calls: false,
             frame_pointer_preserved_across_calls: false,
+            body_proven_format_parameter: None,
         })
     }
 
@@ -1780,6 +1786,27 @@ impl SourceFunctionInterface {
         }
         self.return_kind = SourceFunctionReturn::Register { storage };
         Ok(self)
+    }
+
+    /// Record which parameter this function's body forwards as a format
+    /// string. Checked against the parameters the interface actually has, so a
+    /// body-derived index cannot name one that does not exist.
+    pub fn with_body_proven_format_parameter(
+        mut self,
+        parameter_index: u32,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        if usize::try_from(parameter_index)
+            .ok()
+            .is_none_or(|index| index >= self.parameters.len())
+        {
+            return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
+        }
+        self.body_proven_format_parameter = Some(parameter_index);
+        Ok(self)
+    }
+
+    pub const fn body_proven_format_parameter(&self) -> Option<u32> {
+        self.body_proven_format_parameter
     }
 
     pub fn return_address_storage_is_valid(&self, storage: CanonicalStorageId) -> bool {
@@ -2257,6 +2284,21 @@ pub enum SourceCallResult {
 pub enum SourceVariadicArgumentCountRule {
     /// radare2's recovered prototype named this fixed parameter `format`.
     Radare2FormatString { parameter_index: u32 },
+    /// The callee's own body forwards this fixed parameter as the format
+    /// argument of a function whose prototype names one. radare2 has a
+    /// prototype for the whole `v*printf` family and rarely for the wrapper,
+    /// so the body is what identifies the wrapper's format parameter.
+    BodyProvenFormatString { parameter_index: u32 },
+}
+
+impl SourceVariadicArgumentCountRule {
+    /// The fixed parameter the rule names, whichever proved it.
+    pub const fn parameter_index(self) -> u32 {
+        match self {
+            Self::Radare2FormatString { parameter_index }
+            | Self::BodyProvenFormatString { parameter_index } => parameter_index,
+        }
+    }
 }
 
 /// Source-owned prototype and observed carrier contract for one exact raw
@@ -2448,6 +2490,32 @@ impl SourceCallSiteInterface {
         mut self,
         parameter_index: u32,
     ) -> Result<Self, SourceCallSiteInterfaceError> {
+        self.check_format_parameter(parameter_index)?;
+        self.variadic_argument_count_rule =
+            Some(SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index });
+        Ok(self)
+    }
+
+    /// Bind the format parameter the callee's own body proves.
+    ///
+    /// radare2's prototype is not overridden where it has one: a rule already
+    /// bound stands, so the two never disagree silently.
+    pub fn with_body_proven_format_parameter(
+        mut self,
+        parameter_index: u32,
+    ) -> Result<Self, SourceCallSiteInterfaceError> {
+        self.check_format_parameter(parameter_index)?;
+        if self.variadic_argument_count_rule.is_none() {
+            self.variadic_argument_count_rule =
+                Some(SourceVariadicArgumentCountRule::BodyProvenFormatString { parameter_index });
+        }
+        Ok(self)
+    }
+
+    fn check_format_parameter(
+        &self,
+        parameter_index: u32,
+    ) -> Result<(), SourceCallSiteInterfaceError> {
         if !self.variadic {
             return Err(SourceCallSiteInterfaceError::VariadicCountRuleOnFixedPrototype);
         }
@@ -2457,9 +2525,7 @@ impl SourceCallSiteInterface {
         {
             return Err(SourceCallSiteInterfaceError::InvalidFormatParameterIndex);
         }
-        self.variadic_argument_count_rule =
-            Some(SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index });
-        Ok(self)
+        Ok(())
     }
 
     pub const fn variadic_argument_count_rule(&self) -> Option<SourceVariadicArgumentCountRule> {
@@ -2639,6 +2705,84 @@ mod tests {
         assert_eq!(
             fixed.with_radare2_format_parameter(1),
             Err(SourceCallSiteInterfaceError::VariadicCountRuleOnFixedPrototype)
+        );
+    }
+
+    #[test]
+    fn a_body_proven_format_parameter_is_checked_and_never_overrides_radare2() {
+        let identity = SourceCallSiteIdentity::new(
+            0x1000,
+            CanonicalStorageId {
+                space: CanonicalStorageSpace::Constant,
+                offset: 0x2000,
+                size: 8,
+            },
+        );
+        let arguments = [
+            SourceCallArgumentSpec::new(0, register_storage(0, 8)),
+            SourceCallArgumentSpec::new(1, register_storage(8, 8)),
+        ];
+        let bare = || {
+            SourceCallSiteInterface::new(
+                b"body-format-rule".to_vec(),
+                identity,
+                true,
+                "sysv-amd64",
+                arguments,
+                true,
+                false,
+                SourceCallResult::Void,
+            )
+            .expect("variadic interface")
+        };
+
+        let proven = bare()
+            .with_body_proven_format_parameter(0)
+            .expect("first fixed parameter is the format");
+        assert_eq!(
+            proven.variadic_argument_count_rule(),
+            Some(SourceVariadicArgumentCountRule::BodyProvenFormatString { parameter_index: 0 })
+        );
+        assert_eq!(
+            proven
+                .variadic_argument_count_rule()
+                .map(|rule| rule.parameter_index()),
+            Some(0)
+        );
+
+        // The same bound is applied whichever proved it.
+        assert_eq!(
+            bare().with_body_proven_format_parameter(2),
+            Err(SourceCallSiteInterfaceError::InvalidFormatParameterIndex)
+        );
+
+        // radare2's prototype is the exact recovered contract; a body proof
+        // fills a gap rather than contradicting one.
+        let both = bare()
+            .with_radare2_format_parameter(1)
+            .expect("radare2 named the second")
+            .with_body_proven_format_parameter(0)
+            .expect("body proof is accepted and ignored");
+        assert_eq!(
+            both.variadic_argument_count_rule(),
+            Some(SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index: 1 })
+        );
+    }
+
+    #[test]
+    fn a_body_proven_format_parameter_must_name_a_parameter_the_function_has() {
+        let interface = SourceFunctionInterface::new_exact(
+            b"body-format-function".to_vec(),
+            "sysv-amd64",
+            [],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .expect("bare function interface");
+        assert_eq!(interface.body_proven_format_parameter(), None);
+        assert_eq!(
+            interface.with_body_proven_format_parameter(0),
+            Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex)
         );
     }
 

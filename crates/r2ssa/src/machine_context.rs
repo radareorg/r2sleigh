@@ -867,6 +867,16 @@ fn write_function_interface(
     }
     write_type_graph(writer, interface.type_graph());
     writer.bool(interface.stack_slot_roles_complete());
+    // A body-proven format parameter changes what a caller can prove about
+    // every variadic call to this function, so two interfaces that differ only
+    // in it are not the same context.
+    match interface.body_proven_format_parameter() {
+        Some(index) => {
+            writer.u8(1);
+            writer.u32(index);
+        }
+        None => writer.u8(0),
+    }
 }
 
 fn write_call_identity(
@@ -895,6 +905,10 @@ fn write_call_site_interface(
     match interface.variadic_argument_count_rule() {
         Some(SourceVariadicArgumentCountRule::Radare2FormatString { parameter_index }) => {
             writer.u8(1);
+            writer.u32(parameter_index);
+        }
+        Some(SourceVariadicArgumentCountRule::BodyProvenFormatString { parameter_index }) => {
+            writer.u8(2);
             writer.u32(parameter_index);
         }
         None => writer.u8(0),

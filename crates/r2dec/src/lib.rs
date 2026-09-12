@@ -3570,12 +3570,14 @@ impl Decompiler {
             .into_iter()
             .flat_map(|facts| facts.by_callsite.values())
             .filter(|fact| {
+                // Counts radare2's prototype proved, so the proof line keeps
+                // attributing to radare2 only what radare2 named. A count the
+                // callee's own body proved is ours and is not counted here.
                 fact.variadic_argument_count_evidence
                     .is_some_and(|evidence| {
                         matches!(
-                            evidence.source,
-                            r2ssa::VariadicCallsiteArgumentCountSource::Radare2FormatString
-                                | r2ssa::VariadicCallsiteArgumentCountSource::Radare2MergedFormatStrings
+                            evidence.parameter_rule,
+                            r2ssa::SourceVariadicArgumentCountRule::Radare2FormatString { .. }
                         )
                     })
             })

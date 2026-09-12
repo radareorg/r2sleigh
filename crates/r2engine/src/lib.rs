@@ -2018,6 +2018,13 @@ impl CalleeFacts {
             Some(storage) => interface.with_body_proven_return(storage).ok()?,
             None => interface,
         };
+        // radare2 names a format parameter only where it has a prototype, so a
+        // variadic wrapper defined here gets none and its callers lose every
+        // argument count. What it forwards says which parameter it is.
+        let interface = match r2ssa::body_proven_format_parameter(callee) {
+            Some(index) => interface.with_body_proven_format_parameter(index).ok()?,
+            None => interface,
+        };
         let preserved_carriers = shared.facts().boundaries.preserved_call_carriers.clone();
         let summary =
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)
