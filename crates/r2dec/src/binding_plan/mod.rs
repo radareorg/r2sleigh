@@ -1312,6 +1312,8 @@ pub(crate) struct BindingPlan {
     /// on the stack is bound to a temporary rather than inlined, and the escape
     /// is the same fact either way.
     escaped_frame_objects: BTreeSet<r2ssa::ObjectId>,
+    /// How each memory access is spelled, decided from the facts; absent when refused.
+    access_syntax: BTreeMap<r2ssa::StructuredAccessId, access_syntax::AccessSyntax>,
     /// The C type at every boundary of the projection, under these
     /// dispositions and declarations.
     ///
@@ -1353,6 +1355,7 @@ impl BindingPlan {
     }
 }
 
+pub(crate) mod access_syntax;
 mod construction;
 mod name_resolution;
 mod rules;
@@ -1416,6 +1419,14 @@ impl BindingPlan {
                 .expect("sealed binding count fits the BindingId domain");
             (id, binding)
         })
+    }
+
+    /// How the plan spells a memory access; absent when the access is refused.
+    pub(crate) fn access_syntax(
+        &self,
+        access: r2ssa::StructuredAccessId,
+    ) -> Option<&access_syntax::AccessSyntax> {
+        self.access_syntax.get(&access)
     }
 
     pub(crate) fn disposition(&self, value: ValueId) -> Option<&ValueDisposition> {

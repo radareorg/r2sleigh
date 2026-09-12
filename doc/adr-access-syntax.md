@@ -91,6 +91,25 @@ Rung order is preserved as the priority order of `σ`'s derivation, because it
 encodes real precedence (a declared member outranks an address equivalence;
 offset zero of a slot is the slot only when the access is as wide as it).
 
+## What step 1 measured
+
+Over the thirteen-binary corpus the plan's `σ` and the ladder agree at every
+access the ladder renders. The only disagreements, twenty-five of them, are
+accesses where `σ` says `Address` and the ladder refused, and every one has
+the same shape: the access's stack object was refused a binding
+(`ParameterHomeWidthMismatch` 14, `UnclassifiedSourceRole` 6,
+`MissingSourceIdentity` 5), so no slot spelling exists and the address that
+would have stood in for it has no name either.
+
+Two corrections follow. The consistency condition above already holds: a
+geometry address never needs its value, because the renderer spells a bound
+object's address as `&slot`, and the twelve refusals were never a plan-versus-
+renderer disagreement. And "derive `DeadStackBase` from `σ`" is wrong as a
+step: forcing those addresses to bind was tried and cost 26 functions, since a
+bound `sp + k` has no program variable to stand on. The remaining work is the
+three object refusals, each a modelling question about the slot, not about
+its spelling.
+
 ## Steps
 
 1. Add `access_syntax` to the plan, computed at build from the facts above.
@@ -100,7 +119,7 @@ offset zero of a slot is the slot only when the access is as wide as it).
    conditions equal the rendered-state conditions on the corpus.
 2. Switch the renderer to `σ`. Delete the ladder and the three rendered-state
    conditions.
-3. Derive `DeadStackBase` from `σ` as above. The twelve refusals close here.
+3. Close the three stack-object refusals that leave an access with no spelling.
 4. Delete the audit.
 
 Each step keeps the gate at 54 of 54 and is measured by the census.

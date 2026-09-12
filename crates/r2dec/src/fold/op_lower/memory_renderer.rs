@@ -714,28 +714,79 @@ impl<'a> FoldingContext<'a> {
         fact: &r2types::MemoryAccessRenderFact,
         elem_ty: CType,
     ) -> Option<PendingMemoryAccessExpr> {
+        let (rung, expr) = self.render_certified_memory_expr_by_ladder(fact, elem_ty);
+        self.audit_access_syntax(fact, rung, expr.is_some());
+        expr
+    }
+
+    /// The ladder's answer disagrees with the plan's spelling: evidence, until
+    /// the plan is the only owner and the ladder is gone.
+    fn audit_access_syntax(
+        &self,
+        fact: &r2types::MemoryAccessRenderFact,
+        rung: &'static str,
+        rendered: bool,
+    ) {
+        let planned = self
+            .inputs
+            .binding_names
+            .and_then(|names| names.plan().access_syntax(fact.access));
+        let planned_rung = planned.map_or("refused", |syntax| syntax.rung());
+        let ladder_rung = if rendered { rung } else { "refused" };
+        if planned_rung != ladder_rung {
+            r2il::refusal_evidence!(
+                "access-syntax-audit",
+                "({:#x}, {}) access {:?}: plan says {planned_rung}, ladder took {ladder_rung}",
+                fact.block_addr,
+                fact.op_index,
+                fact.access
+            );
+        }
+    }
+
+    fn render_certified_memory_expr_by_ladder(
+        &self,
+        fact: &r2types::MemoryAccessRenderFact,
+        elem_ty: CType,
+    ) -> (&'static str, Option<PendingMemoryAccessExpr>) {
         if fact.space != r2il::SpaceId::Ram {
-            return None;
+            return ("refused", None);
         }
         if let Some(array) = self.certified_array_fact_for_memory(fact)
             && (array.base.is_some() || array.index.is_some())
         {
-            return self
-                .render_certified_semantic_array_expr(fact)
-                .map(PendingMemoryAccessExpr::Replacement);
+            return (
+                "param-array",
+                self.render_certified_semantic_array_expr(fact)
+                    .map(PendingMemoryAccessExpr::Replacement),
+            );
         }
         if let Some(expr) = self.certified_subscript_expr_for_fact(fact, &elem_ty) {
-            return Some(PendingMemoryAccessExpr::Replacement(expr));
+            return (
+                "subscript",
+                Some(PendingMemoryAccessExpr::Replacement(expr)),
+            );
         }
         // A member of a declared slot is asked first: at offset zero the slot's
         // own name would stand for the whole aggregate, not for the member the
         // machine touched.
         if let Some(expr) = self.certified_slot_member_expr_for_memory_fact(fact) {
-            return Some(PendingMemoryAccessExpr::Planned(expr));
+            return ("slot-member", Some(PendingMemoryAccessExpr::Planned(expr)));
         }
         if let Some(expr) = self.certified_stack_owner_expr_for_memory_fact(fact) {
-            return Some(PendingMemoryAccessExpr::Planned(expr));
+            return ("slot-name", Some(PendingMemoryAccessExpr::Planned(expr)));
         }
+        (
+            "address",
+            self.render_certified_memory_address_access(fact, elem_ty),
+        )
+    }
+
+    fn render_certified_memory_address_access(
+        &self,
+        fact: &r2types::MemoryAccessRenderFact,
+        elem_ty: CType,
+    ) -> Option<PendingMemoryAccessExpr> {
         let (_, addr_expr) = self.certified_memory_address_expr(fact)?;
         if let Some(rendered) = self.render_certified_structured_memory_expr(fact, &addr_expr) {
             return Some(PendingMemoryAccessExpr::Planned(rendered));

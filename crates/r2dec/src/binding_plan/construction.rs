@@ -1206,6 +1206,21 @@ impl BindingPlan {
             }
         }
 
+        let access_syntax = source_owned
+            .report()
+            .render()
+            .map(|render| {
+                super::access_syntax::derive(&super::access_syntax::AccessSyntaxInputs {
+                    render,
+                    objects: source.objects(),
+                    canonical: &partition.canonical,
+                    projection: &machine_projection,
+                    dispositions: &dispositions,
+                    stack_objects: &stack_objects,
+                    bindings: &bindings,
+                })
+            })
+            .unwrap_or_default();
         let plan = Self {
             authority: source.authority().clone(),
             machine_projection,
@@ -1216,6 +1231,7 @@ impl BindingPlan {
             stack_objects,
             call_clobbers,
             escaped_frame_objects: super::rules::frame_objects_with_escaped_address(source),
+            access_syntax,
             typed: std::cell::OnceCell::new(),
         };
         plan.validate_seal(source_owned)?;
