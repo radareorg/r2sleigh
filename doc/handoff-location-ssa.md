@@ -21021,6 +21021,20 @@ and double-count coverage.
 
 ## Open items
 
+**The radare2 walk is iterative; the walk's depth is gone (PR 26717).**
+`fcn_recurse` is now `fcn_scan` driven by `fcn_walk` from an explicit `RVec` of
+Enter/Exit frames; the derivation is `doc/adr-radare2-function-walk.md`, and
+its §7 item 1 records what was built. Identity was verified over the thirteen
+corpus binaries (only the three truncated functions changed, none with edges
+into holes afterwards), `db/anal` matches master, the plugin gate is 54 of 54
+and the census moved 761 to 762 by gaining `BZ2_decompress`. The fork branch
+`anal/subregister-argument-spills` carries the same commit, so the installed
+radare2 already walks without a depth. Still open on that side, in order:
+the core's own callee recursion in `r_core_anal_fcn` (`canal.c:447-560`,
+`:733`), which is why the `anal.depth` config variable survives; PR 2, a
+definition for the walk's return value; PR 3, one read-ahead cache per walk;
+PR 4, the superlinear items in the ADR's §5; PR 5, edge-labelled path state.
+
 **A self-looping entry block gets no phi.** Found while rewriting the taint's own
 test. A single block that is its own only predecessor and defines a register
 gets no phi for it, so a read at the top of the block sees the entry version on
