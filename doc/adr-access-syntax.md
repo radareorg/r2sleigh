@@ -120,6 +120,11 @@ its spelling.
 2. Switch the renderer to `σ`. Delete the ladder and the three rendered-state
    conditions.
 3. Close the three stack-object refusals that leave an access with no spelling.
-4. Delete the audit.
+   Done: a parameter home is verified by its stores; an argument slot that is
+   no parameter's own location is a local; a slot read at several widths is a
+   byte array and its accesses spell through the slot's address, which added
+   the `slot-bytes` rung to `σ` and to the ladder alike. The owner path now
+   refuses to let a name stand for a narrower access or an array. 763 to 770.
+4. Switch the renderer to `σ` and delete the ladder and the audit.
 
 Each step keeps the gate at 54 of 54 and is measured by the census.

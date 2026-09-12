@@ -21033,9 +21033,17 @@ and an argument slot that is no parameter's own ABI location is a local (the
 -O0 copy of a stack-passed parameter). The third, `MissingSourceIdentity`, is
 the width-consensus item the plan already names: `fallbackSort` reuses one
 `[rsp]` scratch slot at 8 and 4 bytes around `fprintf` calls, and the object
-has no width. That is plan piece 3 step 5, next. The remaining 21: six
-`RenderedValueRequired`, five `missing_definition`, six lowering sites, two
-placement reads, one program-variable, one switch dispatch outside its block.
+has no width. That was plan piece 3 step 5 and it is in: the certificate marks such a slot
+`byte_array` with the extent its accesses reach, the plan declares it
+`uint8_t[n]`, and each access spells as `*(T *)((uint8_t *)&slot + off)`
+through a new `slot-bytes` rung the plan decides and the ladder mirrors; the
+owner path no longer lets a name stand for a narrower access or an array.
+766 to 770, gate 54, audit still zero. The remaining 17: five
+`RenderedValueRequired`, five `missing_definition`, four lowering sites
+(`calls.rs` two, `lowering.rs`, `place.rs`), two placement reads, one switch
+dispatch outside its block. Next in this family: the renderer switches to `σ`
+and the ladder goes (ADR step 4), then `missing_definition` (the escaped
+address of a frame object passed to a call, traced earlier in this file).
 
 **The scan stays in executable memory (PR 26720).** The walk PR's fuzz job
 timed out twice on `bins/fuzzed/r2_ir_r_read_me32_arc`: a fuzzed ELF maps a
