@@ -1364,9 +1364,6 @@ pub struct StackSlotCertificate {
     /// unique slot at this base and offset. Absence grants no local or
     /// parameter-home role downstream.
     pub source_slot: Option<SourceStackSlotSpec>,
-    /// Coordinate the source declared this slot at, when a source slot owns it.
-    /// A frame-relative declaration is restated, so this is the original key.
-    pub declared_at: Option<(StackAddressBase, i64)>,
     /// Values a reload proves to be this slot's contents at their full width.
     ///
     /// A load whose reaching memory version is one store, at the slot's own
@@ -1840,7 +1837,7 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         phase("call_sites", call_sites.by_id.len());
-        let declared_slots = collect_declared_stack_slots(function, machine_context);
+        let declared_slots = collect_declared_stack_slots(machine_context);
         let (objects, memory) = collect_object_and_memory_facts(
             function,
             graph,
@@ -6961,37 +6958,6 @@ fn stack_array_layout(
     })
 }
 
-/// The one entry-relative position a storage holds, if it holds exactly one.
-///
-/// A frame pointer established once has a single position for the whole body.
-/// A register reused for anything else has several, and then no displacement
-/// describes it and the caller must not pretend one does.
-fn unique_stack_root_for_storage(
-    function: &SSAFunction,
-    storage: crate::CanonicalStorageId,
-) -> Option<StackAddressRoot> {
-    let facts = function.decompile_prep_facts()?;
-    let mut found: Option<StackAddressRoot> = None;
-    for (var, root) in &facts.stack_address_roots {
-        // Only entry-relative positions. The register also carries a seeded
-        // root naming itself as its own base, which says nothing about where
-        // it sits relative to entry and would make every frame pointer look
-        // like it had two positions.
-        if root.base != StackAddressBase::StackPointer {
-            continue;
-        }
-        if function.canonical_storage_for_var(var) != Some(storage) {
-            continue;
-        }
-        match found {
-            None => found = Some(*root),
-            Some(existing) if existing == *root => {}
-            Some(_) => return None,
-        }
-    }
-    found
-}
-
 fn counted_for_loop_certificate(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -7104,12 +7070,11 @@ fn movable_for_clause_value(
 
 /// Declared stack slots, keyed by the coordinate objects are identified in.
 ///
-/// One owner for the table and for the coordinate each slot was declared at,
-/// because the object model and the certificates both have to agree on it.
+/// A source declares every slot in entry coordinates, so the key is the
+/// declaration and the object model and the certificates read the same table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DeclaredStackSlots {
     pub(crate) by_key: BTreeMap<(StackAddressBase, i64), SourceStackSlotSpec>,
-    pub(crate) declared_at: BTreeMap<(StackAddressBase, i64), (StackAddressBase, i64)>,
 }
 
 impl DeclaredStackSlots {
@@ -7208,107 +7173,32 @@ fn declare_stack_slot(
 }
 
 fn collect_declared_stack_slots(
-    function: &SSAFunction,
     machine_context: Option<&SourceMachineContext>,
 ) -> DeclaredStackSlots {
     let mut exact_stack_slots = BTreeMap::new();
-    let mut declared_stack_slot_keys = BTreeMap::new();
     let mut ambiguous_stack_slots = BTreeSet::new();
     if let Some(interface) = machine_context.and_then(SourceMachineContext::function_interface) {
         for slot in interface.stack_slots() {
-            let key = (slot.base(), slot.offset());
+            // Objects are identified by their entry-relative position, and a
+            // source states its slots there; one declared against another
+            // register has no place in the table and is not guessed into one.
+            if slot.base() != StackAddressBase::StackPointer {
+                r2il::refusal_evidence!(
+                    "declared-stack-slot",
+                    "slot {:?} at {} is declared against {:?}, not the entry stack pointer, and is dropped",
+                    slot.base_storage(),
+                    slot.offset(),
+                    slot.base()
+                );
+                continue;
+            }
             declare_stack_slot(
                 interface.type_graph(),
                 &mut exact_stack_slots,
                 &mut ambiguous_stack_slots,
-                key,
+                (slot.base(), slot.offset()),
                 *slot,
             );
-            declared_stack_slot_keys.insert(key, key);
-            // A slot declared against the frame pointer, restated in the one
-            // coordinate objects are identified in.
-            //
-            // Objects are keyed by their entry-relative position now, so a
-            // declared slot that names the frame pointer as its base cannot be
-            // found by that name any more. The frame pointer has an
-            // entry-relative position of its own -- after `push rbp;
-            // mov rbp, rsp` it is the entry stack pointer less eight -- and
-            // adding the slot's displacement to it gives the same coordinate
-            // the object carries.
-            //
-            // Only when the base register has exactly one such position. More
-            // than one means the register is reused for something else and no
-            // single displacement describes it.
-            //
-            // The restated slot carries the translated coordinate itself, not
-            // only its key: the consumer that binds an object to its declared
-            // slot compares the slot's base and offset against the object's,
-            // and a slot still spelling the frame pointer there never
-            // matched, so every frame-pointer local was refused for want of
-            // an identity it had.
-            if slot.base() == StackAddressBase::FramePointer {
-                let base_root = unique_stack_root_for_storage(function, slot.base_storage());
-                match base_root
-                    .and_then(|root| root.offset.checked_add(slot.offset()))
-                    .zip(interface.stack_pointer_storage())
-                {
-                    Some((entry_offset, stack_pointer)) => {
-                        let translated = (StackAddressBase::StackPointer, entry_offset);
-                        let restated = slot.restated(
-                            StackAddressBase::StackPointer,
-                            stack_pointer,
-                            entry_offset,
-                        );
-                        declared_stack_slot_keys.insert(translated, key);
-                        declare_stack_slot(
-                            interface.type_graph(),
-                            &mut exact_stack_slots,
-                            &mut ambiguous_stack_slots,
-                            translated,
-                            restated,
-                        );
-                    }
-                    None => {
-                        // A frame base the body never establishes as a register
-                        // still has a position: DWARF states these locals
-                        // against the call frame address, and radare2 restates
-                        // that as the frame pointer a standard prologue would
-                        // have made, which sits one return address below entry.
-                        match interface
-                            .return_address_storage()
-                            .map(|storage| i64::from(storage.size))
-                            .and_then(|ra_size| slot.offset().checked_sub(ra_size))
-                            .zip(interface.stack_pointer_storage())
-                        {
-                            Some((entry_offset, stack_pointer)) => {
-                                let translated = (StackAddressBase::StackPointer, entry_offset);
-                                let restated = slot.restated(
-                                    StackAddressBase::StackPointer,
-                                    stack_pointer,
-                                    entry_offset,
-                                );
-                                declared_stack_slot_keys.insert(translated, key);
-                                declare_stack_slot(
-                                    interface.type_graph(),
-                                    &mut exact_stack_slots,
-                                    &mut ambiguous_stack_slots,
-                                    translated,
-                                    restated,
-                                );
-                            }
-                            None => {
-                                r2il::refusal_evidence!(
-                                    "stack-slot-translation",
-                                    "slot {:?} at frame offset {} has no unique entry-relative base and no return address size: root={:?}",
-                                    slot.base_storage(),
-                                    slot.offset(),
-                                    base_root
-                                );
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
     for key in ambiguous_stack_slots {
@@ -7317,7 +7207,6 @@ fn collect_declared_stack_slots(
             "key {key:?} was claimed twice and both declarations are dropped"
         );
         exact_stack_slots.remove(&key);
-        declared_stack_slot_keys.remove(&key);
     }
     // What the frame ended up looking like, in the one coordinate objects are
     // identified in. A declared aggregate that never contains the accesses
@@ -7326,13 +7215,11 @@ fn collect_declared_stack_slots(
     for (key, slot) in &exact_stack_slots {
         r2il::refusal_evidence!(
             "declared-stack-slot",
-            "declared {:?} at {} extent {} role {:?} type {:?} restated to {key:?} from {:?}",
-            slot.base(),
-            slot.offset(),
+            "declared {:?} at {key:?} extent {} role {:?} type {:?}",
+            slot.base_storage(),
             slot.size_bytes(),
             slot.role(),
-            slot.logical_type(),
-            declared_stack_slot_keys.get(key)
+            slot.logical_type()
         );
     }
     // A parameter the convention passes on the stack declares its own slot:
@@ -7373,14 +7260,12 @@ fn collect_declared_stack_slots(
                 }
                 None => {
                     exact_stack_slots.insert(key, slot);
-                    declared_stack_slot_keys.insert(key, key);
                 }
             }
         }
     }
     DeclaredStackSlots {
         by_key: exact_stack_slots,
-        declared_at: declared_stack_slot_keys,
     }
 }
 
@@ -7526,7 +7411,6 @@ fn collect_prepared_function_certificates(
 ) -> PreparedFunctionCertificates {
     let DeclaredStackSlots {
         by_key: exact_stack_slots,
-        declared_at: declared_stack_slot_keys,
     } = declared_slots.clone();
 
     let loops = structured
@@ -7735,7 +7619,6 @@ fn collect_prepared_function_certificates(
                         .cloned()
                         .unwrap_or(StackArrayLayoutDisposition::NotIndexed),
                     source_slot: exact_stack_slots.get(&(base, offset)).copied(),
-                    declared_at: declared_stack_slot_keys.get(&(base, offset)).copied(),
                     reload_values: BTreeSet::new(),
                     callee_allocation: callee_stack_allocations.get(object).cloned(),
                 },
@@ -13110,9 +12993,9 @@ mod tests {
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
-                StackAddressBase::FramePointer,
-                storage(8),
-                -32,
+                StackAddressBase::StackPointer,
+                storage(0),
+                -40,
                 16,
             )],
         )
@@ -13219,9 +13102,9 @@ mod tests {
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
-                StackAddressBase::FramePointer,
-                storage(8),
-                -8,
+                StackAddressBase::StackPointer,
+                storage(0),
+                -16,
                 4,
             )],
         )
@@ -13300,26 +13183,13 @@ mod tests {
             Some(4),
             "the prepared certificate must retain the exact source stack-slot width"
         );
-        // The certificate carries the declared slot restated in the coordinate
-        // objects are identified in: the same width and role, at the entry
-        // position the frame pointer's proven offset gives it. A consumer that
-        // binds the object to its declared slot compares base and offset, and
-        // a slot still spelling the frame pointer there never matched.
+        // The certificate carries the declared slot itself: the source states
+        // it in the coordinate objects are identified in.
         let declared = interface.stack_slots()[0];
-        let stack_pointer = interface
-            .stack_pointer_storage()
-            .expect("the interface names its stack pointer");
         assert_eq!(
             local_certificate.source_slot,
-            Some(declared.restated(StackAddressBase::StackPointer, stack_pointer, -16)),
+            Some(declared),
             "the prepared certificate must retain the declared slot's width and role at its entry position"
-        );
-        // Restating loses the coordinate the source declared, and the display
-        // table is keyed by it, so the certificate keeps it.
-        assert_eq!(
-            local_certificate.declared_at,
-            Some((StackAddressBase::FramePointer, declared.offset())),
-            "the certificate must keep the coordinate the source declared the slot at"
         );
         // Each has the width its own accesses give it, and they differ. The
         // concern this replaces was that a resource could borrow a width from

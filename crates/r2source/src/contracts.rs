@@ -1153,29 +1153,6 @@ impl SourceStackSlotSpec {
     pub const fn role(&self) -> SourceStackSlotRole {
         self.role
     }
-
-    /// The same slot stated against another base.
-    ///
-    /// A source declares a slot against the register it saw the code use,
-    /// and a consumer that identifies objects by their entry-relative
-    /// position has to restate a frame-pointer slot before the two can be
-    /// compared. Width and role are properties of the slot, not of the
-    /// coordinate, so they carry over unchanged.
-    pub const fn restated(
-        self,
-        base: StackAddressBase,
-        base_storage: CanonicalStorageId,
-        offset: i64,
-    ) -> Self {
-        Self {
-            base,
-            base_storage,
-            offset,
-            size_bytes: self.size_bytes,
-            role: self.role,
-            logical_type: self.logical_type,
-        }
-    }
 }
 
 /// The register names a source spells for the machine role carriers.

@@ -590,8 +590,8 @@ mod tests {
                 storage: storage(0),
             },
             [r2ssa::SourceStackSlotSpec::new_parameter_home(
-                r2ssa::StackAddressBase::FramePointer,
-                storage(0x20),
+                r2ssa::StackAddressBase::StackPointer,
+                storage(0x28),
                 offset,
                 8,
                 parameter_index,
@@ -1446,7 +1446,7 @@ mod tests {
         let mut entry = R2ILBlock::new(0x1000, 4);
         entry.push(R2ILOp::IntSub {
             dst: Varnode::unique(0x280, 8),
-            a: Varnode::register(0x20, 8),
+            a: Varnode::register(0x28, 8),
             b: Varnode::constant(8, 8),
         });
         entry.push(R2ILOp::Store {

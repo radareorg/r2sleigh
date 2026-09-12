@@ -160,24 +160,22 @@ fn source_parameter_presentation<'a>(
     )
 }
 
-/// The name the source gave the slot this object occupies.
-///
-/// A frame-relative declaration was restated into entry coordinates, so the
-/// certificate's declared key is what the display table is asked about.
+/// The name the source gave the slot this object occupies, asked for at the
+/// coordinate the source declared it.
 fn source_stack_slot_presentation(
     source_owned: &SourceOwnedFunctionFacts,
     object: r2ssa::ObjectId,
 ) -> Option<&str> {
-    let (base, offset) = source_owned
+    let slot = source_owned
         .source()
         .certificates()
         .stack_slots
         .get(&object)?
-        .declared_at?;
+        .source_slot?;
     source_owned
         .report()
         .display_names()
-        .stack_slot(base, offset)
+        .stack_slot(slot.base(), slot.offset())
 }
 
 fn preferred_parameter_presentation<'a>(

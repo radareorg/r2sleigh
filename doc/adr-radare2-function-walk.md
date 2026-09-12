@@ -342,7 +342,8 @@ own measurement, taken only after §4 has landed and been shown identical.
    block finishes, not before the scan continues. Identity held over the
    corpus except for the three functions the old walk truncated, which now
    have no edges into holes, and `db/anal` passes the same set before and
-   after.
+   after. Opened as radare2 PR 26717; the frame-pointer detector fix it
+   uncovered (26718) is merged and the CFA location kind (26719) is open.
 2. **Give `ret` a definition.** With the frames explicit, the return code
    stops being "the rightmost leaf's leftover" and becomes a function-level
    fact: `END` when the entry block scanned, `ERROR` when it could not, `NOP`

@@ -21021,6 +21021,32 @@ and double-count coverage.
 
 ## Open items
 
+**The frame is described once now (PRs 26718 merged, 26719 open).** radare2's
+DWARF importer mapped `DW_OP_call_frame_cfa` onto a bp offset with a hard-coded
+`+16`; it now has its own location kind and integrates as an entry-relative
+delta (`offset + raslot`), adopting the kind of a slot recovery already named
+so the declaration takes the slot over. `op_is_set_bp` no longer treats a load
+through sp as establishing a frame pointer (merged upstream as "Mov into bp is
+required to define frames"). On our side two duplicated descriptions went:
+the capture matched DWARF records to variables by re-deriving kind and offset
+(broke the moment the record kind changed, five functions lost) and now matches
+by the name radare2 gave the variable; and the capture sent bp slots as
+rbp-relative offsets that `collect_declared_stack_slots` restated back through
+its own model of rbp, with the old +16 assumption as fallback. Every slot now
+goes out in entry coordinates, the frame pointer register comes from radare2's
+`bp_off`, and the restatement, `unique_stack_root_for_storage`,
+`SourceStackSlotSpec::restated` and the certificate's `declared_at` are deleted.
+A slot declared against any base but the entry stack pointer is now dropped
+with evidence rather than guessed into place. Census 761 to 763 across the
+sequence; gate 54 of 54 throughout.
+
+Next radare2 defect found on the way: after a stack-probe loop
+(`sub rsp, 0x1000; or [rsp], 0; cmp rsp, r11; jne`) radare2's `fcn->stack`
+counts one iteration, so `maxstack` and any `bp_off` set after the loop are
+short by the remaining probes; minigzip's `gz_uncompress` shows
+`vars(4:sp[0x1038..0x403c])` for a 16KB frame. The loop bound is the
+`lea r11, [rsp - N]` before it, so the net delta is derivable, not guessed.
+
 **The radare2 walk is iterative; the walk's depth is gone (PR 26717).**
 `fcn_recurse` is now `fcn_scan` driven by `fcn_walk` from an explicit `RVec` of
 Enter/Exit frames; the derivation is `doc/adr-radare2-function-walk.md`, and
