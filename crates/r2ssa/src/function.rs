@@ -1613,6 +1613,19 @@ pub fn body_proven_format_parameter(artifact: &TrustedSsaArtifact) -> Option<u32
     use crate::semantic::SourceCallArgumentValue;
     let shared = artifact.shared_artifact();
     let source = artifact.source();
+    // A function with no variadic tail has no format parameter in the sense
+    // this rule means: there is nothing to count. `__snprintf_chk` forwards
+    // its fifth parameter to `__vsnprintf_chk`'s format and is still declared
+    // with five fixed parameters by the prototype a caller uses, and claiming
+    // a format for it turned a call that rendered into one that had to prove a
+    // count it could not.
+    if !source
+        .presentation()
+        .signature()
+        .is_some_and(r2source::SourceSignaturePresentation::is_variadic)
+    {
+        return None;
+    }
     let boundaries = &shared.facts().boundaries;
     if boundaries.parameters.is_empty() {
         return None;
