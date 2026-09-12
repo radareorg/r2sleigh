@@ -6700,7 +6700,11 @@ fn collect_stack_geometry_certificate(
 /// and every one carries complete provenance. A disagreement in width means the
 /// object is read as more than one thing, which is not a geometry this can
 /// state.
-fn accessed_object_width(structured: &StructuredDataflowFacts, object: ObjectId) -> Option<u32> {
+fn accessed_object_width(
+    graph: &SsaGraph,
+    structured: &StructuredDataflowFacts,
+    object: ObjectId,
+) -> Option<u32> {
     let mut width = None;
     let mut seen = 0usize;
     for access in structured.memory_accesses.values() {
@@ -6724,19 +6728,21 @@ fn accessed_object_width(structured: &StructuredDataflowFacts, object: ObjectId)
             Some(existing) => {
                 // Which accesses disagree, at what offsets, is what says
                 // whether this is one object read two ways or two objects.
-                let filed: Vec<(ValueId, u32, Option<i64>, bool)> = structured
+                let site_of = |id: &StructuredAccessId| graph.op_site_for_inst(id.inst);
+                let filed = structured
                     .memory_accesses
-                    .values()
-                    .filter(|access| access.object == object)
-                    .map(|access| {
+                    .iter()
+                    .filter(|(_, access)| access.object == object)
+                    .map(|(id, access)| {
                         (
+                            site_of(id),
                             access.address,
                             access.width,
                             access.object_offset,
                             access.is_write,
                         )
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 r2il::refusal_evidence!(
                     "stack-object-width",
                     "object={object:?} widths disagree: {existing} and {}; accesses={filed:?}",
@@ -7613,7 +7619,7 @@ fn collect_prepared_function_certificates(
                                 .get(object)
                                 .map(|certificate| certificate.size_bytes)
                         })
-                        .or_else(|| accessed_object_width(structured, *object)),
+                        .or_else(|| accessed_object_width(graph, structured, *object)),
                     array_layout: stack_array_layouts
                         .get(object)
                         .cloned()

@@ -21021,6 +21021,22 @@ and double-count coverage.
 
 ## Open items
 
+**The plan decides each access's spelling; three object refusals closed
+(763 to 766).** `doc/adr-access-syntax.md` derives the spelling once in the
+plan (`binding_plan/access_syntax.rs`) and the renderer's ladder is audited
+against it: zero disagreements where the ladder renders, so the ADR's step 3
+(derive `DeadStackBase` from the spelling) was withdrawn after it cost 26
+functions. The twenty-five real cases were stack objects refused a binding.
+Two are closed: a parameter home is now verified by its stores (radare2 links
+a register argument to a slot by register name, and -O2 reuses the register),
+and an argument slot that is no parameter's own ABI location is a local (the
+-O0 copy of a stack-passed parameter). The third, `MissingSourceIdentity`, is
+the width-consensus item the plan already names: `fallbackSort` reuses one
+`[rsp]` scratch slot at 8 and 4 bytes around `fprintf` calls, and the object
+has no width. That is plan piece 3 step 5, next. The remaining 21: six
+`RenderedValueRequired`, five `missing_definition`, six lowering sites, two
+placement reads, one program-variable, one switch dispatch outside its block.
+
 **The scan stays in executable memory (PR 26720).** The walk PR's fuzz job
 timed out twice on `bins/fuzzed/r2_ir_r_read_me32_arc`: a fuzzed ELF maps a
 null-backed `rw-` segment over most of the address space, the scan's
