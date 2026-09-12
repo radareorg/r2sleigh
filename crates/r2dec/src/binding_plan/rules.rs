@@ -131,6 +131,115 @@ pub(super) fn effective_stack_slot_role(
     }
 }
 
+/// Whether the function stores the parameter itself into the slot radare2 calls
+/// its home. radare2 links a register argument to a slot by the register's
+/// name, and a register a compiler reuses stores later values under that name
+/// too; only a store of the parameter, at its width or narrowed to it, makes
+/// the slot its home.
+pub(super) fn parameter_home_is_written(
+    source_owned: &SourceOwnedFunctionFacts,
+    projection: &r2ssa::MachineProjection,
+    canonical: &r2rewrite::CanonicalRoots,
+    dispositions: &[super::ValueDisposition],
+    object: r2ssa::ObjectId,
+    parameter: super::BindingId,
+) -> bool {
+    source_owned.report().render().is_some_and(|render| {
+        render.memory_accesses().any(|fact| {
+            fact.is_write
+                && fact.object == object
+                && fact.value.is_some_and(|value| {
+                    value_is_parameter(projection, canonical, dispositions, value, parameter)
+                })
+        })
+    })
+}
+
+fn value_is_parameter(
+    projection: &r2ssa::MachineProjection,
+    canonical: &r2rewrite::CanonicalRoots,
+    dispositions: &[super::ValueDisposition],
+    value: ValueId,
+    parameter: super::BindingId,
+) -> bool {
+    match dispositions.get(value.0 as usize) {
+        Some(super::ValueDisposition::Bound { binding }) => *binding == parameter,
+        Some(super::ValueDisposition::Inline { term, .. }) => {
+            term_is_parameter(projection, canonical, dispositions, *term, parameter)
+        }
+        _ => false,
+    }
+}
+
+/// The term reads the parameter, possibly through a width change that keeps
+/// its low bits: what a spill of a narrower-than-register parameter looks like.
+fn term_is_parameter(
+    projection: &r2ssa::MachineProjection,
+    canonical: &r2rewrite::CanonicalRoots,
+    dispositions: &[super::ValueDisposition],
+    term: r2rewrite::TermId,
+    parameter: super::BindingId,
+) -> bool {
+    use r2rewrite::TermKind;
+    match canonical.arena().term(term).kind {
+        TermKind::Leaf(expr) => match projection.expr(expr).map(|expr| expr.kind()) {
+            Some(r2ssa::MachineExprKind::Source { binding, .. }) => value_is_parameter(
+                projection,
+                canonical,
+                dispositions,
+                binding.value(),
+                parameter,
+            ),
+            _ => false,
+        },
+        TermKind::Cast {
+            kind:
+                r2ssa::MachineCastKind::Truncate
+                | r2ssa::MachineCastKind::ZeroExtend
+                | r2ssa::MachineCastKind::SignExtend
+                | r2ssa::MachineCastKind::BitReinterpret,
+            input,
+        } => term_is_parameter(projection, canonical, dispositions, input, parameter),
+        TermKind::Extract { input, lsb_bits: 0 } => {
+            term_is_parameter(projection, canonical, dispositions, input, parameter)
+        }
+        _ => false,
+    }
+}
+
+/// The role a slot takes once radare2's home claim is checked against the
+/// stores: an unwritten home is a local of its own.
+pub(super) fn verified_stack_slot_role(
+    source_owned: &SourceOwnedFunctionFacts,
+    projection: &r2ssa::MachineProjection,
+    canonical: &r2rewrite::CanonicalRoots,
+    dispositions: &[super::ValueDisposition],
+    parameter_binding: impl Fn(u32) -> Option<super::BindingId>,
+    object: r2ssa::ObjectId,
+    role: r2ssa::SourceStackSlotRole,
+) -> r2ssa::SourceStackSlotRole {
+    match role {
+        r2ssa::SourceStackSlotRole::ParameterHome {
+            parameter_index, ..
+        } => match parameter_binding(parameter_index) {
+            Some(binding)
+                if !parameter_home_is_written(
+                    source_owned,
+                    projection,
+                    canonical,
+                    dispositions,
+                    object,
+                    binding,
+                ) =>
+            {
+                r2ssa::SourceStackSlotRole::Local
+            }
+            _ => role,
+        },
+        _ => role,
+    }
+}
+
 pub(super) fn parameter_candidates(
     source_owned: &SourceOwnedFunctionFacts,
 ) -> Vec<Option<ParameterCandidate>> {

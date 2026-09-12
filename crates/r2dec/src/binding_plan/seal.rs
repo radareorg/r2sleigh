@@ -1193,12 +1193,25 @@ impl BindingPlan {
                         }
                         continue;
                     };
-                    match super::rules::effective_stack_slot_role(
+                    let role = super::rules::effective_stack_slot_role(
                         source_owned,
                         &source_slot,
                         base,
                         offset,
-                    ) {
+                    );
+                    let role = super::rules::verified_stack_slot_role(
+                        source_owned,
+                        &self.machine_projection,
+                        &self.partition.canonical,
+                        &self.dispositions,
+                        |index| match self.parameter_disposition(index) {
+                            Some(ParameterDisposition::Bound { binding, .. }) => Some(binding),
+                            _ => None,
+                        },
+                        object,
+                        role,
+                    );
+                    match role {
                         r2ssa::SourceStackSlotRole::Local => {
                             // The slot's certified reloads are one object with
                             // it, so the object shares their binding instead of

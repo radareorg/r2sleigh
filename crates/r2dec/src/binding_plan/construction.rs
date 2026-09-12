@@ -1088,12 +1088,25 @@ impl BindingPlan {
                     );
                     continue;
                 }
-                match super::rules::effective_stack_slot_role(
+                let role = super::rules::effective_stack_slot_role(
                     source_owned,
                     &source_slot,
                     *base,
                     *offset,
-                ) {
+                );
+                let role = super::rules::verified_stack_slot_role(
+                    source_owned,
+                    &machine_projection,
+                    canonical,
+                    &dispositions,
+                    |index| match parameters.get(index as usize).copied().flatten() {
+                        Some(ParameterDisposition::Bound { binding, .. }) => Some(binding),
+                        _ => None,
+                    },
+                    *object,
+                    role,
+                );
+                match role {
                     r2ssa::SourceStackSlotRole::Local => {
                         let declaration_type = super::rules::declaration_type_for_stack_object(
                             source_owned,
