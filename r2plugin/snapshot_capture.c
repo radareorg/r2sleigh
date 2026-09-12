@@ -1665,6 +1665,31 @@ static int function_image_target_classify(const RAnalFunctionImageSnapshot *imag
 	}
 	return target < block->addr + block->size? -1: 0;
 }
+/* Whether a successor leaving every block still lands inside this image.
+ *
+ * A truncated analysis keeps the edges it found and drops the blocks they point
+ * at, so a target can be neither a block start nor block-interior and still sit
+ * between the first and last byte this image covers. That is radare2's own
+ * partition contradicting its own edges, and it is the third way it can lie --
+ * beside a successor into the middle of a block and a switch dispatch outside
+ * its block. Calling it an exit would say the function ends there, which is how
+ * a conditional whose arms both "leave" renders as two empty arms and drops the
+ * loop between them. */
+static bool function_image_target_is_interior_hole(RAnal *anal, const RAnalFunctionImageSnapshot *image, ut64 target) {
+	if (!image->num_blocks || target == UT64_MAX) {
+		return false;
+	}
+	const RAnalSnapshotBlock *first = &image->blocks[0];
+	const RAnalSnapshotBlock *last = &image->blocks[image->num_blocks - 1];
+	if (target < first->addr || target >= last->addr + last->size) {
+		return false;
+	}
+	/* radare2 knowing a block there means the target belongs to code it did
+	 * analyse -- another function, or a cold partition of this one -- and the
+	 * edge is a real transfer out rather than a hole. */
+	return !r_anal_get_block_at (anal, target)
+		&& !r_anal_get_function_at (anal, target);
+}
 static bool snapshot_addr_starts_function(RAnal *anal, ut64 addr) {
 	return addr && addr != UT64_MAX && r_anal_get_function_at (anal, addr) != NULL;
 }
@@ -2181,6 +2206,10 @@ static bool function_image_snapshot_collect(RAnal *anal, const RAnalFunction *fc
 				image, successor->target_addr);
 			if (target_class < 0) {
 				IMAGE_REFUSE ("a successor targets the middle of a block");
+			}
+			if (!target_class
+				&& function_image_target_is_interior_hole (anal, image, successor->target_addr)) {
+				IMAGE_REFUSE ("a successor targets a gap between this function's own blocks");
 			}
 			if (!target_class) {
 				successor->external = true;

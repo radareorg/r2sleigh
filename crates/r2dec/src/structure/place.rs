@@ -398,6 +398,36 @@ impl ControlFlowStructurer<'_, '_> {
         }
     }
 
+    /// Whether this block ends in an explicit transfer, as opposed to running
+    /// off the end of the lifted input. Falling out of the last block is not a
+    /// transfer this function performs and has no text to write.
+    fn block_transfer_is_explicit(&self, from: u64) -> bool {
+        self.func.cfg().get_block(from).is_some_and(|block| {
+            matches!(
+                block.terminator,
+                BlockTerminator::Branch { .. }
+                    | BlockTerminator::ConditionalBranch { .. }
+                    | BlockTerminator::Switch { .. }
+            )
+        })
+    }
+
+    /// Whether this block's transfer out was already written by its own
+    /// statement, which only a certified tail call does.
+    fn block_ends_in_certified_tail_call(&self, from: u64) -> bool {
+        let Some(prepared) = self.fold_ctx.inputs.prepared_ssa else {
+            return false;
+        };
+        prepared
+            .certificates()
+            .callsites
+            .values()
+            .any(|certificate| {
+                certificate.block_addr == from
+                    && certificate.transfer == r2ssa::CallSiteTransfer::TailCall
+            })
+    }
+
     /// The text of one edge: the merge it carries, then the transfer.
     fn edge(
         &mut self,
@@ -406,9 +436,21 @@ impl ControlFlowStructurer<'_, '_> {
         to: u64,
     ) -> ControlFlowStructureResult<Vec<CStmt>> {
         if self.func.cfg().get_block(to).is_none() {
-            // A transfer out of the function is the folded statement's own:
-            // a certified tail call already rendered its return.
-            return Ok(Vec::new());
+            // A transfer out of the function is the folded statement's own --
+            // but only a certified tail call actually rendered one. Assuming it
+            // for every non-block target wrote nothing where control leaves,
+            // and a conditional whose arms both leave then became two empty
+            // arms with the text falling into whatever came next.
+            if self.block_ends_in_certified_tail_call(from)
+                || !self.block_transfer_is_explicit(from)
+            {
+                return Ok(Vec::new());
+            }
+            r2il::refusal_evidence!(
+                "external-edge",
+                "edge {from:#x} -> {to:#x} leaves the function and no certified tail call rendered it"
+            );
+            return Err(crate::structure::OpLoweringRefusal::missing_machine_projection().into());
         }
         let mut stmts = self.edge_merge_writes(to, from)?;
         match placement.edge(from, to) {
