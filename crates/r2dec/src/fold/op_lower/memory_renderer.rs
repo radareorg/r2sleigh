@@ -589,26 +589,10 @@ impl<'a> FoldingContext<'a> {
     fn render_certified_semantic_array_expr(
         &self,
         memory: &r2types::MemoryAccessRenderFact,
+        base_value: r2ssa::ValueId,
+        index_value: r2ssa::ValueId,
+        field: Option<&str>,
     ) -> Option<PendingReplacementExpr> {
-        let array = self.certified_array_fact_for_memory(memory)?;
-        let (Some(base), Some(index)) = (array.base, array.index) else {
-            return None;
-        };
-        let r2ssa::SemanticId::Parameter(slot) = base else {
-            return None;
-        };
-        let r2ssa::SemanticId::Expression(index) = index else {
-            return None;
-        };
-        let render = self.inputs.render_facts()?;
-        let slot = usize::try_from(slot).ok()?;
-        let base_value = render.parameter_values(slot).next()?;
-        if !render
-            .certified_expr_for_value(index)
-            .is_some_and(|expr| expr.fact.renderable)
-        {
-            return None;
-        }
         let base = match self.planned_value_expr(base_value) {
             Ok(expr) => expr,
             Err(error) => {
@@ -616,8 +600,7 @@ impl<'a> FoldingContext<'a> {
                 return None;
             }
         };
-        let base = self.observe_certified_address_read_expr(base_value, array.access, base);
-        let index_value = index;
+        let base = self.observe_certified_address_read_expr(base_value, memory.access, base);
         let index = match self.planned_value_expr(index_value) {
             Ok(expr) => expr,
             Err(error) => {
@@ -625,23 +608,15 @@ impl<'a> FoldingContext<'a> {
                 return None;
             }
         };
-        let index = self.observe_certified_address_read_expr(index_value, array.access, index);
-        if !self.name_may_be_subscripted(&base) {
-            return None;
-        }
+        let index = self.observe_certified_address_read_expr(index_value, memory.access, index);
         let indexed = CExpr::Subscript {
             base: Box::new(base),
             index: Box::new(index),
         };
-        let rendered = match self.certified_member_fact_for_memory(memory) {
-            Some(member)
-                if member.field_offset == array.field_offset && member.access == array.access =>
-            {
-                Some(self.member_access_expr(indexed, member.field_name.clone()))
-            }
-            None if array.field_offset == 0 => Some(indexed),
-            _ => None,
-        }?;
+        let rendered = match field {
+            Some(field) => self.member_access_expr(indexed, field.to_string()),
+            None => indexed,
+        };
         Some(PendingReplacementExpr::canonical_access(memory, rendered))
     }
 
@@ -704,13 +679,9 @@ impl<'a> FoldingContext<'a> {
         Some((addr, expr))
     }
 
-    /// The access as C, by whichever authority answers for it first: a
-    /// declared aggregate's element, the rewriter's proven subscript, a stack
-    /// slot's name, a declared member split out of the address, and last the
-    /// address itself dereferenced. Each is one lookup; none takes an
-    /// expression apart to decide.
-    /// The access as C, by the spelling the plan decided for it. Each arm
-    /// asks one helper; none takes an expression apart to decide.
+    /// The access as C, by the spelling the plan decided for it. Every slot
+    /// arm consumes the plan's own payload, so a spelling the plan chose
+    /// cannot be declined here for a reason the plan already weighed.
     fn render_certified_memory_expr_for_fact(
         &self,
         fact: &r2types::MemoryAccessRenderFact,
@@ -719,25 +690,76 @@ impl<'a> FoldingContext<'a> {
         use crate::binding_plan::access_syntax::AccessSyntax;
         let names = self.inputs.binding_names?;
         match names.plan().access_syntax(fact.access)? {
-            AccessSyntax::ParamArray { .. } => self
-                .render_certified_semantic_array_expr(fact)
+            AccessSyntax::ParamArray { base, index, field } => self
+                .render_certified_semantic_array_expr(fact, *base, *index, field.as_deref())
                 .map(PendingMemoryAccessExpr::Replacement),
-            AccessSyntax::Subscript { .. } => self
-                .certified_subscript_expr_for_fact(fact, &elem_ty)
+            AccessSyntax::Subscript { term } => self
+                .certified_subscript_expr_for_fact(fact, &elem_ty, *term)
                 .map(PendingMemoryAccessExpr::Replacement),
-            AccessSyntax::SlotMember { .. } => self
-                .certified_slot_member_expr_for_memory_fact(fact)
+            AccessSyntax::SlotMember { binding, field } => {
+                let field = field.to_string();
+                self.planned_binding_expr(*binding).map(|base| {
+                    PendingMemoryAccessExpr::Planned(CExpr::Member {
+                        base: Box::new(base),
+                        member: field,
+                    })
+                })
+            }
+            AccessSyntax::SlotName { binding } => self
+                .planned_binding_expr(*binding)
                 .map(PendingMemoryAccessExpr::Planned),
-            AccessSyntax::SlotName { .. } => self
-                .certified_stack_owner_expr_for_memory_fact(fact)
-                .map(PendingMemoryAccessExpr::Planned),
-            AccessSyntax::SlotBytes { .. } => self
-                .certified_slot_bytes_expr_for_memory_fact(fact, &elem_ty)
+            AccessSyntax::SlotBytes { binding, offset } => self
+                .planned_slot_bytes_expr(*binding, *offset, &elem_ty)
                 .map(PendingMemoryAccessExpr::Planned),
             AccessSyntax::Address { .. } => {
                 self.render_certified_memory_address_access(fact, elem_ty)
             }
         }
+    }
+
+    /// The program variable the plan bound, spelled by its planned symbol.
+    fn planned_binding_expr(&self, binding: crate::binding_plan::BindingId) -> Option<CExpr> {
+        let names = self.inputs.binding_names?;
+        let Some(symbol) = names.symbol_for_binding(binding) else {
+            r2il::refusal_evidence!(
+                "planned-binding-symbol",
+                "binding {binding:?} the plan bound has no symbol"
+            );
+            self.retain_first_lowering_refusal(OpLoweringRefusal::missing_program_variable());
+            return None;
+        };
+        Some(CExpr::Var(symbol))
+    }
+
+    /// Bytes of the slot at the plan's offset and the access's own width:
+    /// `*(T *)((uint8_t *)&slot + n)`, without the address-of where the
+    /// declaration decays to one already.
+    fn planned_slot_bytes_expr(
+        &self,
+        binding: crate::binding_plan::BindingId,
+        offset: i64,
+        elem_ty: &CType,
+    ) -> Option<CExpr> {
+        let names = self.inputs.binding_names?;
+        let owner = self.planned_binding_expr(binding)?;
+        let decays = matches!(
+            names
+                .plan()
+                .binding(binding)
+                .map(crate::binding_plan::Binding::declaration_type),
+            Some(CType::Array(..))
+        );
+        let base = if decays { owner } else { CExpr::addr_of(owner) };
+        let bytes = CExpr::cast(CType::ptr(CType::uint(8)), base);
+        let address = if offset == 0 {
+            bytes
+        } else {
+            CExpr::binary(BinaryOp::Add, bytes, CExpr::IntLit(offset))
+        };
+        Some(CExpr::Deref(Box::new(CExpr::cast(
+            CType::ptr(elem_ty.clone()),
+            address,
+        ))))
     }
 
     fn render_certified_memory_address_access(
@@ -782,146 +804,6 @@ impl<'a> FoldingContext<'a> {
                 Some(self.finish_replacement_expr(replacement))
             }
         }
-    }
-
-    /// A declared member of a slot the plan gave a name.
-    ///
-    /// The slot's name spells the object, so the member needs no address;
-    /// asking for one demands the frame address the plan elided precisely
-    /// because the slot has a name, and the access then renders as a gap.
-    fn certified_slot_member_expr_for_memory_fact(
-        &self,
-        fact: &r2types::MemoryAccessRenderFact,
-    ) -> Option<CExpr> {
-        let offset = fact.object_offset.filter(|offset| *offset >= 0)?;
-        if fact.width == 0 {
-            return None;
-        }
-        if self
-            .prepared_ssa()
-            .is_some_and(|prepared| prepared.objects().address_is_indexed(fact.address))
-        {
-            return None;
-        }
-        let member = self.certified_member_fact_for_memory(fact)?;
-        if i64::try_from(member.field_offset).ok()? != offset {
-            return None;
-        }
-        let field_name = member.field_name.clone();
-        self.inputs.render_facts()?.stack_slot_offset(fact.object)?;
-        let owner = self.certified_stack_var_expr_for_object(fact.object)?;
-        Some(CExpr::Member {
-            base: Box::new(owner),
-            member: field_name,
-        })
-    }
-
-    /// The slot's name, for an access that sits at the slot's own offset.
-    ///
-    /// An access at an offset the machine computes is inside the slot and
-    /// not at it, so the name alone would read the first element for every
-    /// element; that access is the subscript path's or, failing it, the
-    /// address's.
-    fn certified_stack_owner_expr_for_memory_fact(
-        &self,
-        fact: &r2types::MemoryAccessRenderFact,
-    ) -> Option<CExpr> {
-        let declined = |why: &str| {
-            r2il::refusal_evidence!(
-                "stack-owner-declined",
-                "value={:?} object={:?} kind={:?} width={} object_offset={:?}: {why}",
-                fact.address,
-                fact.object,
-                self.prepared_ssa()
-                    .and_then(|prepared| prepared.objects().object(fact.object))
-                    .map(|object| object.kind.clone()),
-                fact.width,
-                fact.object_offset
-            );
-            None::<CExpr>
-        };
-        if fact.width == 0 {
-            return declined("the access has no width");
-        }
-        if self
-            .prepared_ssa()
-            .is_some_and(|prepared| prepared.objects().address_is_indexed(fact.address))
-        {
-            return declined("the address is indexed");
-        }
-        // An access at a constant offset inside the slot is inside it and not
-        // at it, exactly as an indexed one is. The name alone would say a
-        // four-byte read of `statBuf.st_mode` was the whole `struct stat`.
-        if fact.object_offset.is_some_and(|offset| offset != 0) {
-            return declined("the access sits at an offset inside the slot");
-        }
-        if self
-            .inputs
-            .render_facts()
-            .and_then(|facts| facts.stack_slot_offset(fact.object))
-            .is_none()
-        {
-            return declined("the object has no declared stack slot");
-        }
-        let owner = self.certified_stack_var_expr_for_object(fact.object)?;
-        // The name stands for the whole slot: an array's would decay to its
-        // address, and a narrower access would read the first bytes as all.
-        let declared = self
-            .declared_type_of_name(&owner)
-            .and_then(|declared| declared.as_type().cloned());
-        match declared {
-            Some(CType::Array(..)) => declined("the slot is an array"),
-            Some(ty)
-                if ty
-                    .bits(self.pointer_bits())
-                    .is_some_and(|bits| bits != fact.width * 8) =>
-            {
-                declined("the access is not as wide as the slot")
-            }
-            _ => Some(owner),
-        }
-    }
-
-    /// Bytes of the slot at the access's offset and width: `*(T *)((uint8_t *)&slot + n)`.
-    fn certified_slot_bytes_expr_for_memory_fact(
-        &self,
-        fact: &r2types::MemoryAccessRenderFact,
-        elem_ty: &CType,
-    ) -> Option<CExpr> {
-        let offset = fact.object_offset.filter(|offset| *offset >= 0)?;
-        if fact.width == 0
-            || self
-                .prepared_ssa()
-                .is_some_and(|prepared| prepared.objects().address_is_indexed(fact.address))
-            || self
-                .inputs
-                .render_facts()
-                .and_then(|facts| facts.stack_slot_offset(fact.object))
-                .is_none()
-        {
-            return None;
-        }
-        let owner = self.certified_stack_var_expr_for_object(fact.object)?;
-        let is_array = matches!(
-            self.declared_type_of_name(&owner)
-                .and_then(|declared| declared.as_type().cloned()),
-            Some(CType::Array(..))
-        );
-        let base = if is_array {
-            owner
-        } else {
-            CExpr::addr_of(owner)
-        };
-        let bytes = CExpr::cast(CType::ptr(CType::uint(8)), base);
-        let address = if offset == 0 {
-            bytes
-        } else {
-            CExpr::binary(BinaryOp::Add, bytes, CExpr::IntLit(offset))
-        };
-        Some(CExpr::Deref(Box::new(CExpr::cast(
-            CType::ptr(elem_ty.clone()),
-            address,
-        ))))
     }
 }
 

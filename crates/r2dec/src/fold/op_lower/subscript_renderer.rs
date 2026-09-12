@@ -54,22 +54,13 @@ impl<'a> FoldingContext<'a> {
         &self,
         fact: &r2types::MemoryAccessRenderFact,
         elem_ty: &CType,
+        term: TermId,
     ) -> Option<PendingReplacementExpr> {
-        // A declared aggregate outranks a proven address equivalence. Both
-        // statements are true -- the cell at `p + 8` is `((T *)p)[1]` -- but
-        // the source says that cell is a named struct field, and spelling it
-        // as an array element claims a shape the declared type contradicts.
-        // The member path owns this access, and where it cannot render one
-        // the dereference stands.
-        if self.certified_member_fact_for_memory(fact).is_some() {
-            return None;
-        }
+        // The plan already gave a declared aggregate precedence over a proven
+        // address equivalence, so the term it hands over is the one to spell.
         let names = self.inputs.binding_names?;
-        let plan = names.plan();
-        let canonical = plan.canonical();
-        let access = canonical.access(fact.access)?;
-        let arena = canonical.arena();
-        let TermKind::Subscript { base, index } = arena.term(access.canonical).kind else {
+        let arena = names.plan().canonical().arena();
+        let TermKind::Subscript { base, index } = arena.term(term).kind else {
             return None;
         };
         let base_expr = self.render_subscript_term(arena, base)?;
