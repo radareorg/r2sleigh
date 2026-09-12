@@ -6,7 +6,6 @@
  * everything here runs against radare2's public API while the caller holds
  * anal->lock, which is the one thing the fork still has to provide. */
 
-#include <errno.h>
 #include <r_anal.h>
 #include <r_core.h>
 #include <r_util.h>
@@ -382,81 +381,21 @@ static RAnalFcnSlotRole fcn_context_classify_slot(const RAnalVar *var, RAnalVar 
 	}
 	return R_ANAL_FCN_SLOT_UNKNOWN;
 }
-#define DWARF_EXACT_FORMAL_RECORD_V1 "dwarf-stack-home-v1"
-
-static bool dwarf_parse_st64_local(const char *text, R_OUT st64 *value) {
-	if (R_STR_ISEMPTY (text) || !value) {
-		return false;
-	}
-	errno = 0;
-	char *end = NULL;
-	const long long parsed = strtoll (text, &end, 10);
-	if (errno == ERANGE || !end || *end || (st64)parsed != parsed) {
-		return false;
-	}
-	*value = (st64)parsed;
-	return true;
-}
-
-/* Whether a stack variable's type was declared by DWARF for this function.
+/* Whether a stack variable was declared by DWARF for this function.
  *
  * radare2 keeps the DWARF records it integrated under the "dwarf" namespace of
  * the analysis database: `fcn.<name>.addr`, `fcn.<name>.var.<v>` as
- * `<kind>,<offset>,<type>` and `fcn.<name>.arg.<n>` as `<v>,<kind>,<offset>,<type>`
- * (or the exact-record form). A variable is declared when a record of the
- * same kind sits at the same frame offset. Nothing else counts: a type radare2
- * inferred for a slot is evidence about it, and passing it on as a declaration
- * made a `char *` out of a `size_t` in the corpus and broke the compile. */
+ * `<kind>,<offset>,<type>` and `fcn.<name>.arg.<n>` as `<v>,<kind>,<offset>,<type>`.
+ * Integrating a record creates or takes over the variable under the record's
+ * name, so the name is the identity that ties the two together; the kind and
+ * the offset are the variable's own and are not re-derived from the record.
+ * Nothing else counts: a type radare2 inferred for a slot is evidence about it,
+ * and passing it on as a declaration made a `char *` out of a `size_t` in the
+ * corpus and broke the compile. */
 typedef struct {
-	RAnal *anal;
 	RAnalFunction *fcn;
-	const RAnalVar *var;
 	const char *sname;
-	bool declared;
 } SlotDwarfProvenance;
-
-static bool slot_dwarf_record_matches(const SlotDwarfProvenance *probe, const char *value, bool is_arg) {
-	if (R_STR_ISEMPTY (value)) {
-		return false;
-	}
-	char *copy = strdup (value);
-	if (!copy) {
-		return false;
-	}
-	bool matches = false;
-	char *cursor = copy;
-	if (r_str_startswith (copy, DWARF_EXACT_FORMAL_RECORD_V1 ",")) {
-		// dwarf-stack-home-v1,<ordinal>,<kind>,<offset>,<name64>,<type64>
-		char *fields[4] = {0};
-		size_t i;
-		for (i = 0; i < 4; i++) {
-			fields[i] = sdb_anext (cursor, &cursor);
-			if (!fields[i]) {
-				break;
-			}
-		}
-		if (i == 4) {
-			st64 offset = 0;
-			matches = fields[2][0] == (char)probe->var->kind
-				&& dwarf_parse_st64_local (fields[3], &offset)
-				&& offset == r_anal_var_frame_delta (probe->anal, probe->fcn,
-					probe->var->kind, probe->var->delta);
-		}
-	} else {
-		if (is_arg) {
-			(void)sdb_anext (cursor, &cursor); // the name
-		}
-		char *kind = cursor? sdb_anext (cursor, &cursor): NULL;
-		char *offset_text = cursor? sdb_anext (cursor, &cursor): NULL;
-		st64 offset = 0;
-		matches = kind && offset_text && kind[0] == (char)probe->var->kind
-			&& dwarf_parse_st64_local (offset_text, &offset)
-			&& offset == r_anal_var_frame_delta (probe->anal, probe->fcn,
-				probe->var->kind, probe->var->delta);
-	}
-	free (copy);
-	return matches;
-}
 
 static bool slot_dwarf_sname_cb(void *user, const char *key, const char *value) {
 	SlotDwarfProvenance *probe = user;
@@ -471,19 +410,11 @@ static bool slot_dwarf_sname_cb(void *user, const char *key, const char *value) 
 	return true;
 }
 
-/* The DWARF records belonging to one function, read once.
- *
- * Asking whether a slot was declared used to scan the whole "dwarf" namespace
- * twice per stack variable -- once to find the function's own name and once to
- * look for a record matching that variable -- and the question is asked twice
- * per variable, so a function with thirty slots walked the namespace up to a
- * hundred and twenty times. What the scan finds does not depend on the
- * variable at all: it is this function's record list. So it is read once and
- * every slot is answered from it. */
+/* The names DWARF declared for one function, read once so that every slot is
+ * answered from the same list instead of rescanning the namespace per variable. */
 struct SlotDwarfRecords {
 	char *sname;
-	RList *var_values;
-	RList *arg_values;
+	RList *names;
 };
 
 static bool slot_dwarf_collect_cb(void *user, const char *key, const char *value) {
@@ -497,13 +428,15 @@ static bool slot_dwarf_collect_cb(void *user, const char *key, const char *value
 		return true;
 	}
 	const char *field = rest + name_len + 1;
-	RList *into = r_str_startswith (field, "var.")? records->var_values
-		: r_str_startswith (field, "arg.")? records->arg_values: NULL;
-	if (into) {
-		char *copy = strdup (r_str_get (value));
-		if (copy && !r_list_append (into, copy)) {
-			free (copy);
-		}
+	char *name = NULL;
+	if (r_str_startswith (field, "var.")) {
+		name = strdup (field + strlen ("var."));
+	} else if (r_str_startswith (field, "arg.") && R_STR_ISNOTEMPTY (value)) {
+		const char *comma = strchr (value, ',');
+		name = comma? r_str_ndup (value, comma - value): strdup (value);
+	}
+	if (name && !r_list_append (records->names, name)) {
+		free (name);
 	}
 	return true;
 }
@@ -513,10 +446,8 @@ static void slot_dwarf_records_fini(SlotDwarfRecords *records) {
 		return;
 	}
 	R_FREE (records->sname);
-	r_list_free (records->var_values);
-	r_list_free (records->arg_values);
-	records->var_values = NULL;
-	records->arg_values = NULL;
+	r_list_free (records->names);
+	records->names = NULL;
 }
 
 static void slot_dwarf_records_init(SlotDwarfRecords *records, RAnal *anal, RAnalFunction *fcn) {
@@ -528,15 +459,14 @@ static void slot_dwarf_records_init(SlotDwarfRecords *records, RAnal *anal, RAna
 	if (!dwarf) {
 		return;
 	}
-	SlotDwarfProvenance probe = { .anal = anal, .fcn = fcn, .var = NULL };
+	SlotDwarfProvenance probe = { .fcn = fcn };
 	sdb_foreach (dwarf, slot_dwarf_sname_cb, &probe);
 	if (!probe.sname) {
 		return;
 	}
 	records->sname = (char *)probe.sname;
-	records->var_values = r_list_newf (free);
-	records->arg_values = r_list_newf (free);
-	if (!records->var_values || !records->arg_values) {
+	records->names = r_list_newf (free);
+	if (!records->names) {
 		slot_dwarf_records_fini (records);
 		return;
 	}
@@ -545,22 +475,14 @@ static void slot_dwarf_records_init(SlotDwarfRecords *records, RAnal *anal, RAna
 
 static bool fcn_context_slot_declared_by_dwarf(const SlotDwarfRecords *records,
 		RAnal *anal, RAnalFunction *fcn, const RAnalVar *var) {
-	if (!records || !records->sname || !anal || !fcn || !var
+	if (!records || !records->sname || !anal || !fcn || !var || R_STR_ISEMPTY (var->name)
 		|| (var->kind != R_ANAL_VAR_KIND_BPV && var->kind != R_ANAL_VAR_KIND_SPV)) {
 		return false;
 	}
-	SlotDwarfProvenance probe = {
-		.anal = anal, .fcn = fcn, .var = var, .sname = records->sname
-	};
 	RListIter *iter;
-	const char *value;
-	r_list_foreach (records->var_values, iter, value) {
-		if (slot_dwarf_record_matches (&probe, value, false)) {
-			return true;
-		}
-	}
-	r_list_foreach (records->arg_values, iter, value) {
-		if (slot_dwarf_record_matches (&probe, value, true)) {
+	const char *name;
+	r_list_foreach (records->names, iter, name) {
+		if (!strcmp (name, var->name)) {
 			return true;
 		}
 	}
