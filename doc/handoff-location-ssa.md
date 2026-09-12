@@ -21240,3 +21240,103 @@ become one decision, which is what `plan.access_syntax(StructuredAccessId)` is
 for: the table that says how an access is spelled is the table that knows
 whether its address is needed. The elision then follows from the syntax rather
 than racing it.
+
+## Slot privacy is decided by escape, and what letting it run uncovered
+
+The five `missing_definition` refusals were two defects, neither of them the
+one the earlier trace expected.
+
+**radare2 kept one DWARF variable per name (PR 26723).** `compress` in bzip2
+`-O2` declares `struct stat statBuf`, and `countHardLinks` is inlined into it
+with a `statBuf` of its own. The importer walks every variable under a
+subprogram, inlined calls and lexical blocks included, and stores each under
+`fcn.<name>.var.<varname>`, so the second overwrote the first and the read of
+`statBuf.st_mode` landed in a slot nothing declared. A local whose name is
+already taken by a parameter or an earlier local is now stored as `name_1`,
+`name_2` and so on in DIE order; the existing rust test binary showed the same
+loss, three of four inlined `arg0` slots. The fork carries the commit.
+
+**A slot was private only in a function with no foreign access.**
+`private_stack_objects` withheld privacy from every slot the moment one access
+in the function reached memory the model could not place, and a stack
+protector's `fs:[0x28]` read or any load through a pointer parameter is such
+an access. Measured over the census traces before the change: bzip2 `-O2`
+had no private slot in 34 of 114 functions, minigzip `-O2` in 64 of 166, and
+the corpus binaries in 14 of 15. In those functions every stack read was an
+observable effect, which is how `pop rsi` reading the alignment pad it never
+wrote became a statement placement had to find a definition for.
+
+A pointer from outside the function can name a slot only if the slot's address
+left the function, so escape alone decides. `stack_address_escape` walks
+forward from every value naming the slot: a value that names another slot is
+that slot's address and stops the walk; a store of the value, a call use, a
+value the caller sees at return, or the value's use as the address of an
+access the model could not place is the escape; a flag or a merge computed from
+the address is followed like any other value and is no escape unless what it
+feeds is. The `sub rsp, 8` flags and the dead merges of Sleigh temporaries,
+which the old per-use check called escapes, fall out of that.
+
+Letting privacy run at scale then found three things the corpus had never
+exercised, because no corpus function had a private slot before:
+
+- **A slot shared its binding with a carrier that went on to change.** A
+  private slot adopts the binding of its reloads when they all share one. In
+  `murmur3_32` at `-O0` the reloads of the switch selector were `rax`, and so
+  was `rax - 2` on the next line, so `stack_m88 -= 2` rendered where the
+  program computed a compare, and the differential gate reported three wrong
+  cells. The slot now adopts a binding only when that binding holds nothing but
+  the slot's reloads (`construction::shared_reload_binding`, mirrored in the
+  seal by `adopted_reload_binding`, which the three seal sites now share).
+- **The access's own address operand was a live use of the stack pointer.** A
+  store at `[rsp]` spelled as `uTimBuf` observed its address operand as
+  `MemoryAddress`, and the audit of a coalesced restore of `rsp` wanted every
+  use elided. The rule the discharge path already applied to the operands of a
+  vanished address computation now applies to the access's operand too
+  (`stack_base_absorbed_by`): a frame address bound to a carrier the rendering
+  never names is absorbed, `DeadStackBase`.
+- **A struct slot cannot be assigned the integer the machine moved.** The
+  `slot-name` rung applied to a 16-byte `movaps` into `struct utimbuf`, and
+  `uTimBuf = tmp_6c00_2` is not C. The rung is for scalars now; the store spells
+  through `slot-bytes`. The right spelling is one assignment per member, and
+  the constant member-run certificate already does that for a constant; the
+  generalisation is the next piece: a member's source is a constant slice or a
+  lane value whose bytes land exactly on it (through `Copy`, `IntZExt`,
+  `Insert` and `Piece`), the member access carries that value, the composing
+  chain dies by the obligations alone, and the renderer spells each lane at the
+  composing operation's use site.
+
+Running the census on that state lost two functions, and both were the
+adoption rule again, from the other side: a slot's reloads must be reads of
+the slot's whole value. `inflate_table`'s `count[len]` reads through
+`r12 + rcx` were counted as reloads of the slot the model placed at `count[1]`,
+and a struct-typed `code here` in the same function adopted the binding of the
+4-byte integer that carried it, which the seal's width rule cannot take. A
+round trip's read, an indexed access, and any reload of an aggregate-typed
+slot are no longer reloads for adoption (`semantic.rs`, the certificate loop;
+`shared_reload_binding` refuses aggregates, and the seal mirrors it).
+
+**The lifter left memory operands as ram-space varnodes on every opcode but
+`Copy`.** `movzx eax, byte [obj.noisy]` lifted to `IntZExt` of `ram:21d6a`,
+which SSA construction renamed like a register: an undefined variable
+`ram_21d6a_0` where a load belonged, and the pre-change census shipped 27 such
+declarations. `translate::canonicalize_memory_operands` now rewrites every
+ram-space operand of every operation into a load or a store, in one pass after
+translation, and the `Copy` special case is gone.
+
+Two diagnostics were added on the way and stay: `observation-error` and
+`lowering-refusal` name the op site where the renderer retains its first error,
+and `seal-stack-object` prints the sets the seal compared.
+
+The gate is 54 of 54 on raw, differential and every audit, with the twelve
+`-O0` snapshots re-accepted (locals are variables now). The census is 775 of
+787, from 770: every `missing_definition` is closed, nothing lost, and
+`BZ2_compressBlock` (49,711 instructions, 2.7 s of which the binding plan is
+0.97 s) now renders instead of refusing early, which puts it at the census
+deadline's edge and makes its cost the next thing to measure. The `diagnostic`
+column shows eight wrong; that column is the historical rewriting repair the
+corpus notes say not to trust, and it is not a gate.
+
+DecBench sweep 2 (witness `bfdd69d2`) lost its ssh session during
+`diffutils`; the remote run `decbench-20260912T085056-81951` kept going and
+`--resume` finishes `dpkg`. The run from 5 September still holding a `zlib`
+log on the host is stale and is for `--gc-force`.

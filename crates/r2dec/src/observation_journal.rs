@@ -2908,14 +2908,7 @@ impl LegacyObservationJournal {
                 // pointer it was measured from. That read is not an
                 // occurrence, and saying it was rendered would leave the
                 // pointer's value cell owed to nothing.
-                if expr.is_some()
-                    && let Some(ValueDisposition::Bound { binding }) = self.plan.disposition(input)
-                    && !bound_symbol_spelled(self, *binding)
-                    && self
-                        .source
-                        .entry_stack_address_root_for_value(input)
-                        .is_some()
-                {
+                if expr.is_some() && self.stack_base_absorbed_by(input, &rendered_symbols) {
                     targets.push(ObservationTarget::Use {
                         site,
                         observation: LegacyUseObservation::Elided(
@@ -3882,9 +3875,21 @@ impl LegacyObservationJournal {
             .get(input_idx)
             .cloned()
             .ok_or(LegacyObservationJournalError::InvalidNormalizedInput { site, input_idx })?;
+        let rendered_symbols = Self::expr_symbols(&expr);
         let mut targets = Vec::with_capacity(input.uses.len());
         for use_site in input.uses {
-            let observation = self.rendered_use_observation(use_site)?;
+            // An access spelled by the object it lands in names no stack
+            // base: the address operand is absorbed, exactly as the operands
+            // of a vanished address computation are.
+            let observation = if matches!(
+                self.plan.use_disposition(use_site),
+                Some(MachineUseDisposition::MemoryAddress(_))
+            ) && self.stack_base_absorbed_by(input.value, &rendered_symbols)
+            {
+                LegacyUseObservation::Elided(r2ssa::ledger::ElisionReason::DeadStackBase)
+            } else {
+                self.rendered_use_observation(use_site)?
+            };
             targets.push(ObservationTarget::Use {
                 site: use_site,
                 observation,
@@ -3896,6 +3901,27 @@ impl LegacyObservationJournal {
             marked = CExpr::observed(id, marked);
         }
         Ok(marked)
+    }
+
+    /// Whether a rendering that spells `rendered_symbols` absorbs `value`: a
+    /// frame address bound to a carrier the rendering never names.
+    fn stack_base_absorbed_by(
+        &self,
+        value: ValueId,
+        rendered_symbols: &BTreeSet<SymbolId>,
+    ) -> bool {
+        let Some(ValueDisposition::Bound { binding }) = self.plan.disposition(value) else {
+            return false;
+        };
+        let spelled = self
+            .names
+            .symbol_for_binding(*binding)
+            .is_some_and(|symbol| rendered_symbols.contains(&symbol));
+        !spelled
+            && self
+                .source
+                .entry_stack_address_root_for_value(value)
+                .is_some()
     }
 
     /// Mark one rendered definition and its source write using the exact

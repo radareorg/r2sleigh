@@ -1039,9 +1039,17 @@ impl BindingPlan {
                         }
                         continue;
                     };
-                    let adopted = super::construction::unanimous_value_binding(
+                    let declaration_type = super::rules::declaration_type_for_stack_object(
+                        source_owned,
+                        object,
+                        width_bits,
+                        ptr_bits,
+                    );
+                    let adopted = adopted_reload_binding(
                         &self.dispositions,
-                        reload_values.iter().copied(),
+                        &actual_by_binding,
+                        &reload_values,
+                        Some(&declaration_type),
                     );
                     let Some(binding) =
                         adopted.or_else(|| BindingId::from_dense_index(binding_index))
@@ -1065,6 +1073,14 @@ impl BindingPlan {
                         &actual_by_binding[binding.index()],
                         &reload_values,
                     ) {
+                        r2il::refusal_evidence!(
+                            "seal-stack-object",
+                            "{object:?} at {binding:?} adopted={} sources={:?} bound={:?} reloads={:?}",
+                            adopted.is_some(),
+                            planned.certificate.sources,
+                            actual_by_binding[binding.index()],
+                            reload_values
+                        );
                         return Err(BindingPlanBuildError::Seal(
                             BindingPlanSourceMismatch::StackObjectCertificate { object, binding },
                         ));
@@ -1098,9 +1114,23 @@ impl BindingPlan {
                             reason: StackObjectRefusal::MissingSourceIdentity { object },
                         }
                     } else {
-                        let adopted = super::construction::unanimous_value_binding(
+                        let width_bits = certificate
+                            .size_bytes
+                            .checked_mul(8)
+                            .filter(|width| *width > 0);
+                        let declaration_type = width_bits.map(|width_bits| {
+                            super::rules::declaration_type_for_stack_object(
+                                source_owned,
+                                object,
+                                width_bits,
+                                ptr_bits,
+                            )
+                        });
+                        let adopted = adopted_reload_binding(
                             &self.dispositions,
-                            reload_values.iter().copied(),
+                            &actual_by_binding,
+                            &reload_values,
+                            declaration_type.as_ref(),
                         );
                         let Some(binding) =
                             adopted.or_else(|| BindingId::from_dense_index(binding_index))
@@ -1116,10 +1146,6 @@ impl BindingPlan {
                                 },
                             ),
                         )?;
-                        let width_bits = certificate
-                            .size_bytes
-                            .checked_mul(8)
-                            .filter(|width| *width > 0);
                         if !stack_object_certificate_agrees(
                             planned,
                             entity,
@@ -1216,9 +1242,17 @@ impl BindingPlan {
                             // The slot's certified reloads are one object with
                             // it, so the object shares their binding instead of
                             // taking one of its own.
-                            let adopted = super::construction::unanimous_value_binding(
+                            let declaration_type = super::rules::declaration_type_for_stack_object(
+                                source_owned,
+                                object,
+                                width_bits,
+                                ptr_bits,
+                            );
+                            let adopted = adopted_reload_binding(
                                 &self.dispositions,
-                                reload_values.iter().copied(),
+                                &actual_by_binding,
+                                &reload_values,
+                                Some(&declaration_type),
                             );
                             let Some(binding) =
                                 adopted.or_else(|| BindingId::from_dense_index(binding_index))
@@ -1348,6 +1382,32 @@ impl BindingPlan {
     }
 }
 
+/// The binding a slot adopts from its reloads, when that binding holds
+/// nothing else; the seal's twin of `construction::shared_reload_binding`.
+fn adopted_reload_binding(
+    dispositions: &[ValueDisposition],
+    actual_by_binding: &[BTreeSet<ValueId>],
+    reload_values: &BTreeSet<ValueId>,
+    declaration_type: Option<&CType>,
+) -> Option<BindingId> {
+    if declaration_type.is_some_and(|ty| {
+        matches!(
+            ty,
+            r2types::CTypeLike::Struct(_)
+                | r2types::CTypeLike::Union(_)
+                | r2types::CTypeLike::Array(..)
+        )
+    }) {
+        return None;
+    }
+    super::construction::unanimous_value_binding(dispositions, reload_values.iter().copied())
+        .filter(|binding| {
+            actual_by_binding
+                .get(binding.index())
+                .is_some_and(|actual| actual == reload_values)
+        })
+}
+
 /// Whether the binding a stack object took carries the object's certificate.
 ///
 /// A shared binding also holds the values the object's reloads certify, so it
@@ -1364,7 +1424,7 @@ fn stack_object_certificate_agrees(
             .certificate
             .sources
             .contains(&BindingCertificateSource::CertifiedEntity(entity))
-            && actual.is_superset(reload_values)
+            && actual == reload_values
     } else {
         planned.certificate.sources.as_ref() == [BindingCertificateSource::CertifiedEntity(entity)]
             && actual.is_empty()

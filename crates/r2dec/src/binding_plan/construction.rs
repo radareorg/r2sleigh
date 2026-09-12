@@ -144,6 +144,30 @@ pub(super) fn unanimous_value_binding(
     found
 }
 
+/// The binding a slot shares with its reloads, when that binding holds
+/// nothing else.
+///
+/// A carrier the program goes on to modify in place is a different variable,
+/// and naming the slot after it would turn `rax - 2` into a write of the slot.
+pub(super) fn shared_reload_binding(
+    dispositions: &[ValueDisposition],
+    bound_value_counts: &BTreeMap<BindingId, usize>,
+    reload_values: &BTreeSet<ValueId>,
+    declaration_type: &CType,
+) -> Option<BindingId> {
+    // A register holds the bytes of an aggregate, never the aggregate.
+    if matches!(
+        declaration_type,
+        r2types::CTypeLike::Struct(_)
+            | r2types::CTypeLike::Union(_)
+            | r2types::CTypeLike::Array(..)
+    ) {
+        return None;
+    }
+    unanimous_value_binding(dispositions, reload_values.iter().copied())
+        .filter(|binding| bound_value_counts.get(binding).copied() == Some(reload_values.len()))
+}
+
 /// The binding a stack object takes, sharing one with the values its reloads
 /// Whether a call left this register changed and nothing says what is in it.
 ///
@@ -176,14 +200,13 @@ fn value_is_unclaimed_call_clobber(
 /// certify as its contents where there is one.
 fn bind_stack_object(
     bindings: &mut Vec<Binding>,
-    dispositions: &[ValueDisposition],
-    reload_values: &BTreeSet<ValueId>,
+    shared: Option<BindingId>,
     entity: r2ssa::SemanticId,
     declaration_type: CType,
     presentation_name_hint: Option<String>,
     caller_supplied: bool,
 ) -> Result<BindingId, BindingPlanBuildError> {
-    if let Some(binding) = unanimous_value_binding(dispositions, reload_values.iter().copied()) {
+    if let Some(binding) = shared {
         let existing = &mut bindings[binding.index()];
         existing.declaration_type = declaration_type;
         existing.presentation_name_hint = presentation_name_hint;
@@ -890,6 +913,12 @@ impl BindingPlan {
         );
 
         let mut stack_objects = BTreeMap::new();
+        let mut bound_value_counts = BTreeMap::<BindingId, usize>::new();
+        for disposition in &dispositions {
+            if let ValueDisposition::Bound { binding } = disposition {
+                *bound_value_counts.entry(*binding).or_default() += 1;
+            }
+        }
         if let Some(render) = source_owned.report().render() {
             for entity in render.certified_entities.values() {
                 let r2types::CertifiedEntity::StackSlot {
@@ -1002,20 +1031,25 @@ impl BindingPlan {
                         );
                         continue;
                     }
+                    let declaration_type = super::rules::declaration_type_for_stack_object(
+                        source_owned,
+                        *object,
+                        width_bits,
+                        source
+                            .machine_context()
+                            .memory_model()
+                            .default_address_bits(),
+                    );
                     let binding = bind_stack_object(
                         &mut bindings,
-                        &dispositions,
-                        reload_values,
-                        *id,
-                        super::rules::declaration_type_for_stack_object(
-                            source_owned,
-                            *object,
-                            width_bits,
-                            source
-                                .machine_context()
-                                .memory_model()
-                                .default_address_bits(),
+                        shared_reload_binding(
+                            &dispositions,
+                            &bound_value_counts,
+                            reload_values,
+                            &declaration_type,
                         ),
+                        *id,
+                        declaration_type,
                         Some(if certificate.entry_offset < 0 {
                             format!("stack_m{}", certificate.entry_offset.unsigned_abs())
                         } else {
@@ -1030,20 +1064,25 @@ impl BindingPlan {
                     // Named by the width its own accesses agree on, at the
                     // position the object model proved. A local like any other;
                     // only the origin of its geometry differs.
+                    let declaration_type = super::rules::declaration_type_for_stack_object(
+                        source_owned,
+                        *object,
+                        width_bits,
+                        source
+                            .machine_context()
+                            .memory_model()
+                            .default_address_bits(),
+                    );
                     let binding = bind_stack_object(
                         &mut bindings,
-                        &dispositions,
-                        reload_values,
-                        *id,
-                        super::rules::declaration_type_for_stack_object(
-                            source_owned,
-                            *object,
-                            width_bits,
-                            source
-                                .machine_context()
-                                .memory_model()
-                                .default_address_bits(),
+                        shared_reload_binding(
+                            &dispositions,
+                            &bound_value_counts,
+                            reload_values,
+                            &declaration_type,
                         ),
+                        *id,
+                        declaration_type,
                         Some(if *offset < 0 {
                             format!("stack_m{}", offset.unsigned_abs())
                         } else {
@@ -1124,8 +1163,12 @@ impl BindingPlan {
                         });
                         let binding = bind_stack_object(
                             &mut bindings,
-                            &dispositions,
-                            reload_values,
+                            shared_reload_binding(
+                                &dispositions,
+                                &bound_value_counts,
+                                reload_values,
+                                &declaration_type,
+                            ),
                             *id,
                             declaration_type,
                             name_hint,

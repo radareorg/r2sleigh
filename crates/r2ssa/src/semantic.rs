@@ -1878,7 +1878,7 @@ impl PreparedFunctionFacts {
         phase("structured", structured.memory_accesses.len());
         let control_domains = collect_control_domain_facts(function, &predicates, &structured);
         phase("control_domains", 0);
-        let private_stack_objects = private_stack_objects(function, graph, &objects, &structured);
+        let private_stack_objects = private_stack_objects(graph, &objects, &structured, &live_out);
         // Before the obligations, because whether an access is a statement at
         // all depends on it: a round trip leaves the object as it found it, so
         // neither half is an observable effect.
@@ -2836,113 +2836,18 @@ fn build_memory_ssa(
     }
 }
 
-/// Stack objects no pointer outside their own accesses can name.
-///
-/// A slot whose address never leaves the accesses that read and write it is a
-/// C object rather than a piece of memory, so its loads and stores are variable
-/// accesses and owe no observable memory effect. The proof has two halves: no
-/// address value naming the object is used anywhere but as an access address,
-/// and nothing in the function reaches memory the model could not place, which
-/// may-aliases everything.
-/// Whether an address is computed from the frame and constants alone.
-///
-/// The walk is backward over address arithmetic. Every leaf must be a stack
-/// root or a literal; a load, a call result or a parameter leaves it unproven.
-fn address_is_frame_derived(function: &SSAFunction, graph: &SsaGraph, address: ValueId) -> bool {
-    let facts = function.decompile_prep_facts();
-    let mut seen = BTreeSet::new();
-    let mut pending = vec![address];
-    let mut reached_frame = false;
-    while let Some(value) = pending.pop() {
-        if !seen.insert(value) {
-            continue;
-        }
-        if seen.len() > graph.insts.len().saturating_add(1) {
-            return false;
-        }
-        let Some(graph_value) = graph.value(value) else {
-            return false;
-        };
-        if resolve_stack_root(facts, &graph_value.var).is_some() {
-            reached_frame = true;
-            continue;
-        }
-        if graph_value.var.constant_bits().is_some() {
-            continue;
-        }
-        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
-            return false;
-        };
-        let carries_address = match &inst.payload {
-            InstPayload::Op(op) => matches!(
-                op,
-                SSAOp::Copy { .. }
-                    | SSAOp::Cast { .. }
-                    | SSAOp::IntAdd { .. }
-                    | SSAOp::IntSub { .. }
-                    | SSAOp::IntAnd { .. }
-                    | SSAOp::IntOr { .. }
-                    | SSAOp::IntZExt { .. }
-                    | SSAOp::IntSExt { .. }
-                    | SSAOp::Trunc { .. }
-                    | SSAOp::Subpiece { .. }
-            ),
-            InstPayload::Phi { .. } => true,
-        };
-        if !carries_address {
-            return false;
-        }
-        pending.extend(inst.inputs.iter().copied());
-    }
-    reached_frame
-}
-
 pub(crate) fn private_stack_objects(
-    function: &SSAFunction,
     graph: &SsaGraph,
     objects: &ObjectModel,
     structured: &StructuredDataflowFacts,
+    live_out: &crate::liveout::FunctionLiveOut,
 ) -> BTreeSet<ObjectId> {
     let mut private = BTreeSet::new();
-    let ram_accesses = structured
-        .memory_accesses
-        .values()
-        .filter(|access| access.space == SpaceId::Ram)
-        .collect::<Vec<_>>();
-    // An address the model could not place may name any frame slot, so no slot
-    // in this function is private once one exists.
-    // An address the model could not place threatens privacy only when it
-    // could have come from outside; one computed from the frame cannot make a
-    // slot observable, and the alias model already withholds any certificate
-    // that would have depended on knowing which slot it names.
-    let foreign = |access: &&&StructuredMemoryAccessFact| {
-        objects
-            .object(access.object)
-            .is_some_and(|fact| matches!(fact.kind, ObjectKind::EscapedUnknown { .. }))
-            && !address_is_frame_derived(function, graph, access.address)
-    };
-    let unplaced = ram_accesses.iter().filter(foreign).count();
-    if unplaced > 0 {
-        // Name the addresses, not only the count: the repair is to place them,
-        // and a count alone leaves the next reader searching for which.
-        let named = ram_accesses
-            .iter()
-            .filter(foreign)
-            .take(6)
-            .map(|access| {
-                format!(
-                    "{:?}@{:#x}:{}",
-                    access.address, access.block_addr, access.op_index
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        r2il::refusal_evidence!(
-            "private-stack-objects",
-            "no slot is private: {unplaced} of {} ram accesses reach memory the model could not place: {named}",
-            ram_accesses.len()
-        );
-        return private;
+    let mut access_addresses = BTreeSet::<(InstId, ValueId)>::new();
+    for access in structured.memory_accesses.values() {
+        if access.space == SpaceId::Ram {
+            access_addresses.insert((access.id.inst, access.address));
+        }
     }
     let mut addresses_by_object = BTreeMap::<ObjectId, BTreeSet<ValueId>>::new();
     // Every value that names some stack address. Arithmetic from one slot's
@@ -2978,48 +2883,107 @@ pub(crate) fn private_stack_objects(
         ) {
             continue;
         }
-        let addresses = addresses_by_object.get(object).cloned().unwrap_or_default();
-        if addresses.is_empty() {
+        let Some(addresses) = addresses_by_object.get(object) else {
             continue;
-        }
-        let escape = addresses.iter().find_map(|address| {
-            graph.use_sites(*address).iter().find(|site| {
-                let addresses_this_object = ram_accesses.iter().any(|access| {
-                    access.id.inst == site.inst
-                        && access.object == *object
-                        && access.address == *address
-                        && access.value != Some(*address)
-                });
-                if addresses_this_object {
-                    return false;
-                }
-                // Address arithmetic that lands on another frame address is
-                // not an escape; the frame pointer itself is the common case.
-                let stays_inside = graph
-                    .inst(site.inst)
-                    .and_then(|inst| inst.output)
-                    .is_some_and(|output| stack_addresses.contains(&output));
-                !stays_inside
-            })
-        });
-        if let Some(site) = escape {
-            // Which use, of which address, is what says whether the object
-            // really escapes or the address model lost a frame address.
-            r2il::refusal_evidence!(
+        };
+        match stack_address_escape(
+            graph,
+            &access_addresses,
+            &stack_addresses,
+            live_out,
+            addresses,
+        ) {
+            Some(site) => r2il::refusal_evidence!(
                 "private-stack-objects",
-                "object {object:?} is not private: an address naming it is used outside its own accesses at {site:?} by {:?}",
+                "object {object:?} is not private: an address naming it reaches {site:?} by {:?}",
                 graph
                     .inst(site.inst)
                     .map(|inst| format!("{:?}", inst.payload)
                         .chars()
                         .take(120)
                         .collect::<String>())
-            );
-        } else {
-            private.insert(*object);
+            ),
+            None => {
+                private.insert(*object);
+            }
         }
     }
     private
+}
+
+/// Where a slot's address leaves the function, if anywhere.
+///
+/// A pointer from outside can name a slot only if the slot's address left the
+/// function, so the walk follows everything computed from the address forward
+/// until it is stored, passed to a call, handed back to the caller, or used as
+/// the address of an access the model could not place. A value that names
+/// another stack slot is that slot's address and stops the walk; a flag or a
+/// merge computed from the address is followed like any other value, and is
+/// no escape unless what it feeds is.
+fn stack_address_escape(
+    graph: &SsaGraph,
+    access_addresses: &BTreeSet<(InstId, ValueId)>,
+    stack_addresses: &BTreeSet<ValueId>,
+    live_out: &crate::liveout::FunctionLiveOut,
+    addresses: &BTreeSet<ValueId>,
+) -> Option<UseSite> {
+    let mut pending = addresses.iter().copied().collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        let derived = !addresses.contains(&value);
+        if live_out.contains(value) {
+            return graph.use_sites(value).first().copied().or_else(|| {
+                graph
+                    .def_inst(value)
+                    .map(|inst| UseSite { inst, input_idx: 0 })
+            });
+        }
+        for site in graph.use_sites(value) {
+            let Some(inst) = graph.inst(site.inst) else {
+                return Some(*site);
+            };
+            if site.input_idx == 0 && access_addresses.contains(&(site.inst, value)) {
+                // The object's own access, or an access the model could not
+                // place through a value computed from the address.
+                if derived {
+                    return Some(*site);
+                }
+                continue;
+            }
+            match &inst.payload {
+                InstPayload::Phi { .. } => {}
+                InstPayload::Op(op) => match op {
+                    SSAOp::CBranch { .. } | SSAOp::Branch { .. } => continue,
+                    SSAOp::Store { .. }
+                    | SSAOp::BlockTransfer { .. }
+                    | SSAOp::StoreConditional { .. }
+                    | SSAOp::StoreGuarded { .. }
+                    | SSAOp::AtomicCAS { .. }
+                    | SSAOp::Load { .. }
+                    | SSAOp::LoadLinked { .. }
+                    | SSAOp::LoadGuarded { .. }
+                    | SSAOp::CallUse { .. }
+                    | SSAOp::Call { .. }
+                    | SSAOp::CallInd { .. }
+                    | SSAOp::CallOther { .. }
+                    | SSAOp::BranchInd { .. }
+                    | SSAOp::Return { .. } => return Some(*site),
+                    _ => {}
+                },
+            }
+            let Some(output) = inst.output else {
+                return Some(*site);
+            };
+            if stack_addresses.contains(&output) {
+                continue;
+            }
+            pending.push(output);
+        }
+    }
+    None
 }
 
 pub(crate) fn memory_locations_may_alias(
@@ -7856,6 +7820,17 @@ fn collect_prepared_function_certificates(
             continue;
         }
         if !private_objects.contains(&access.object) {
+            continue;
+        }
+        // A round trip's read is the stored value, already answered by the
+        // store it reads back; it is not a read of the slot the renderer names.
+        if memory_round_trips.values().any(|certificate| {
+            certificate.read == access.id || certificate.redundant_reads.contains(&access.id)
+        }) {
+            continue;
+        }
+        // An address the machine indexes reads an element, not the slot.
+        if objects.address_is_indexed(access.address) {
             continue;
         }
         let Some(value) = access.value else {

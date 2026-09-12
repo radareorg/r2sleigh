@@ -103,17 +103,22 @@ fn syntax_for(
         && let Some(binding) = bound
     {
         // The name stands for the whole slot: only an access at its base, as
-        // wide as it is declared, and not of an array, which would decay.
+        // wide as it is declared, and of a scalar; an array would decay and an
+        // aggregate cannot be assigned the integer the machine moved.
         let declared_type = inputs
             .bindings
             .get(binding.index())
             .map(|binding| binding.declaration_type());
         let whole = fact.object_offset.is_none_or(|offset| offset == 0)
             && declared_type.is_none_or(|ty| {
-                !matches!(ty, r2types::CTypeLike::Array(..))
-                    && ty
-                        .bits(inputs.ptr_bits)
-                        .is_none_or(|bits| bits == fact.width * 8)
+                !matches!(
+                    ty,
+                    r2types::CTypeLike::Array(..)
+                        | r2types::CTypeLike::Struct(..)
+                        | r2types::CTypeLike::Union(..)
+                ) && ty
+                    .bits(inputs.ptr_bits)
+                    .is_none_or(|bits| bits == fact.width * 8)
             });
         if whole {
             return Some(AccessSyntax::SlotName { binding });

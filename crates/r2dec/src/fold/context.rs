@@ -731,9 +731,12 @@ impl<'a> FoldingContext<'a> {
         &self,
         error: crate::observation_journal::LegacyObservationJournalError,
     ) {
-        if std::env::var_os("R2SLEIGH_DEBUG_MERGES").is_some() {
-            eprintln!("OBSERVATION_ERROR {error:?}");
-        }
+        r2il::refusal_evidence!(
+            "observation-error",
+            "{error:?} at {:#x}:{}",
+            self.current_block_addr.get().unwrap_or_default(),
+            self.current_op_idx.get().unwrap_or_default()
+        );
         let mut first = self.observation_error.borrow_mut();
         if first.is_none() {
             *first = Some(error);
@@ -752,12 +755,13 @@ impl<'a> FoldingContext<'a> {
         refusal: crate::fold::op_lower::OpLoweringRefusal,
     ) {
         if self.pending_lowering_refusal.get().is_none() {
-            if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
-                eprintln!(
-                    "refusal {refusal:?} retained at {}",
-                    std::panic::Location::caller()
-                );
-            }
+            r2il::refusal_evidence!(
+                "lowering-refusal",
+                "{refusal:?} at {:#x}:{} retained at {}",
+                self.current_block_addr.get().unwrap_or_default(),
+                self.current_op_idx.get().unwrap_or_default(),
+                std::panic::Location::caller()
+            );
             self.pending_lowering_refusal.set(Some(refusal));
         }
     }

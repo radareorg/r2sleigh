@@ -45,7 +45,7 @@ site. The facts available before rendering are:
 
 A spelling is one of
 
-    SlotName(b)                  the slot's own name
+    SlotName(b)                  the slot's own name; a scalar, whole and at its base
     SlotMember(b, field)         a declared member of the slot
     ParamArray(slot, index[, field])   an element of an array a parameter points at
     Subscript(term)              the rewriter's proven element access
