@@ -21137,3 +21137,28 @@ stack-pointer-based offsets are that minus the frame the prologue allocates. So
 this is derivable rather than unknowable, and it is the next thing to build. It
 is worth more than the eight refusals that led here: no declared aggregate in
 any frameless function currently reaches the accesses that use it.
+
+### The address elision and the slot's name have to be one decision, not two
+
+`memory_renderer.rs:116` is five functions, and the trace is always the same
+pair: `binding_plan/construction.rs:599-606` elides a stack-geometry address as
+`DeadStackBase` because a named slot needs no address, and
+`construction.rs:938` refuses to name that slot. Neither knows about the other,
+so the renderer's ladder falls through every rung that needs no address, reaches
+the rung that does, and is told the address was elided.
+
+The obvious shortcut does not work. Computing "the objects that will get no
+identity" early, from the same three inputs the naming decision uses, and
+skipping `DeadStackBase` for their addresses, took the local census from 761 of
+787 to **253**. The set is far broader than the five functions suggest: most
+`CertifiedEntity::StackSlot` entries have no width at that point, so almost
+every frame address stopped being elided, and 291 functions refused with
+`ConflictingUse` and 234 with a missing program-variable authorization.
+
+That is worth keeping as a result rather than a scar. It says the two decisions
+cannot be reconciled by having one predict the other, because the inputs that
+are final at naming time are not final where the elision is made. They have to
+become one decision, which is what `plan.access_syntax(StructuredAccessId)` is
+for: the table that says how an access is spelled is the table that knows
+whether its address is needed. The elision then follows from the syntax rather
+than racing it.
