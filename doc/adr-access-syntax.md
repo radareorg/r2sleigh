@@ -125,6 +125,9 @@ its spelling.
    byte array and its accesses spell through the slot's address, which added
    the `slot-bytes` rung to `σ` and to the ladder alike. The owner path now
    refuses to let a name stand for a narrower access or an array. 763 to 770.
-4. Switch the renderer to `σ` and delete the ladder and the audit.
+4. Switch the renderer to `σ` and delete the ladder and the audit. Done:
+   `render_certified_memory_expr_for_fact` is one `match` over the plan's
+   answer, each arm one helper, and the corpus renders identically (770,
+   gate 54).
 
 Each step keeps the gate at 54 of 54 and is measured by the census.

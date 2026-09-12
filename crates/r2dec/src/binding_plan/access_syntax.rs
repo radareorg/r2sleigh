@@ -1,10 +1,8 @@
 //! How each memory access is spelled, decided once from the facts.
 //!
 //! The renderer used to find the spelling by a ladder over rendered
-//! expressions while the plan elided address values on the assumption that
-//! the spelling would not need them. Deciding the spelling here, from the
-//! same facts, is what lets the elision be derived from it instead of
-//! assumed. See `doc/adr-access-syntax.md`.
+//! expressions; it is decided here once, from the facts, and the renderer
+//! asks. See `doc/adr-access-syntax.md`.
 
 use std::collections::BTreeMap;
 
@@ -36,20 +34,6 @@ pub(crate) enum AccessSyntax {
     Subscript { term: TermId },
     /// The address itself, dereferenced or decomposed; either way it is rendered.
     Address { address: ValueId },
-}
-
-impl AccessSyntax {
-    /// The name of the rung the renderer's ladder would have taken.
-    pub(crate) fn rung(&self) -> &'static str {
-        match self {
-            Self::SlotName { .. } => "slot-name",
-            Self::SlotMember { .. } => "slot-member",
-            Self::SlotBytes { .. } => "slot-bytes",
-            Self::ParamArray { .. } => "param-array",
-            Self::Subscript { .. } => "subscript",
-            Self::Address { .. } => "address",
-        }
-    }
 }
 
 pub(super) struct AccessSyntaxInputs<'a> {
