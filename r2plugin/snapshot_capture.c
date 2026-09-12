@@ -174,31 +174,18 @@ static bool function_interface_snapshot_collect( RAnal *anal, RAnalFunction *fcn
 static void snapshot_return_mechanism_collect(RAnal *anal, const RAnalFunction *fcn, const RAnalFcnContext *ctx, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotReturnMechanismView *view);
 static void snapshot_stack_allocation_contract_collect(RAnal *anal, const RAnalFunctionInterfaceSnapshot *interface, RAnalSnapshotStackAllocationContractView *view);
 static bool snapshot_frame_pointer_storage_conflicts_interface( const RAnalSnapshotRegisterStorage *storage, const RAnalFunctionInterfaceSnapshot *interface, const RAnalFcnContext *ctx);
-// The base-pointer register every frame-pointer slot agrees on.
-//
-// Radare2 placed those slots against a register and recorded which one; taking
-// it here asserts nothing the slots do not already assert.
-static bool snapshot_frame_pointer_storage_from_slots(RAnal *anal,
+// radare2 records that the function made bp a stack base as a nonzero bp_off. That
+// is its statement of which register the frame pointer is; the slots do not repeat it.
+static bool snapshot_frame_pointer_storage_from_frame(RAnal *anal,
 		const RAnalFunction *fcn,
 		const RAnalFcnContext *ctx,
 		const RAnalFunctionInterfaceSnapshot *interface,
 		RAnalSnapshotRegisterStorage *storage) {
-	const char *name = NULL;
-	RListIter *iter;
-	RAnalFcnSlot *slot;
-	r_list_foreach (ctx->fcn_slots, iter, slot) {
-		if (!slot || slot->base != R_ANAL_FCN_BASE_BP) {
-			continue;
-		}
-		if (!slot->base_name || !slot->base_size) {
-			return true;
-		}
-		if (name && strcmp (name, slot->base_name)) {
-			return true;
-		}
-		name = slot->base_name;
+	if (!fcn->bp_off) {
+		return true;
 	}
-	if (!name) {
+	const char *name = r_reg_alias_getname (anal->reg, R_REG_ALIAS_BP);
+	if (R_STR_ISEMPTY (name)) {
 		return true;
 	}
 	ut32 address_size;
@@ -295,18 +282,12 @@ static RRegItem *fcn_context_var_regitem(RAnal *anal, const RAnalVar *var) {
 	}
 	return NULL;
 }
+// radare2 counts both stack kinds from the entry stack pointer, so a slot's
+// delta is its coordinate; the frame register it was reached through is not
 static bool fcn_context_stack_offset(const RAnalFunction *fcn, const RAnalVar *var, st64 *offset) {
 	R_RETURN_VAL_IF_FAIL (fcn && var && offset, false);
-	switch (var->kind) {
-	case R_ANAL_VAR_KIND_BPV:
-		return !r_add_overflow ((st64)var->delta, fcn->bp_off, offset);
-	case R_ANAL_VAR_KIND_SPV:
-		*offset = var->delta;
-		return true;
-	default:
-		*offset = var->delta;
-		return false;
-	}
+	*offset = var->delta;
+	return var->kind == R_ANAL_VAR_KIND_BPV || var->kind == R_ANAL_VAR_KIND_SPV;
 }
 static RAnalVar *fcn_context_find_register_home_source(RVecAnalVarPtr *rvars, RAnalVar *slot) {
 	if (!rvars) {
@@ -594,8 +575,6 @@ static RAnalFcnSlot *fcn_context_collect_slot(const SlotDwarfRecords *records, R
 	}
 	switch (var->kind) {
 	case R_ANAL_VAR_KIND_BPV:
-		slot->base = R_ANAL_FCN_BASE_BP;
-		break;
 	case R_ANAL_VAR_KIND_SPV:
 		slot->base = R_ANAL_FCN_BASE_SP;
 		break;
@@ -3635,15 +3614,6 @@ static bool snapshot_frame_pointer_storage_conflicts_interface(
 			&& snapshot_register_storages_overlap (storage, &home)) {
 			return true;
 		}
-		if (slot->base == R_ANAL_FCN_BASE_BP) {
-			RAnalSnapshotRegisterStorage base = {
-				.offset = slot->base_offset,
-				.size = slot->base_size,
-			};
-			if (!snapshot_register_storages_equal (storage, &base)) {
-				return true;
-			}
-		}
 	}
 	return false;
 }
@@ -3659,9 +3629,8 @@ static bool snapshot_frame_pointer_storage_collect(RAnal *anal,
 	R2SleighDwarfFrameBase proof = {0};
 	if (!r2sleigh_dwarf_function_frame_base (anal, fcn->addr, &proof)) {
 		// GCC spells the frame base as the call-frame address, which names no
-		// register, so the slots radare2 placed against the base pointer are
-		// what says which register it is.
-		return snapshot_frame_pointer_storage_from_slots (anal, fcn, ctx,
+		// register, so radare2's own record of the frame says which one it is.
+		return snapshot_frame_pointer_storage_from_frame (anal, fcn, ctx,
 			interface, storage);
 	}
 	ut32 address_size;
