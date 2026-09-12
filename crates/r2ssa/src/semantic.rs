@@ -3574,6 +3574,7 @@ fn variadic_callsite_argument_count(
     machine_context: &SourceMachineContext,
     interface: &r2source::SourceCallSiteInterface,
     fixed_arguments: &[Option<SourceCallArgumentFact>],
+    forwarding: &FormatForwardingLookup<'_>,
 ) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
     let Some(parameter_rule) = interface.variadic_argument_count_rule() else {
         return Err(VariadicCallsiteArgumentCountRefusal::MissingFormatParameter);
@@ -3601,9 +3602,12 @@ fn variadic_callsite_argument_count(
     // format, so formats that agree prove it exactly as a single one does.
     if resolve_const_value(function.decompile_prep_facts(), format_var).is_none() {
         return merged_format_literal_argument_count(
-            function,
-            graph,
-            machine_context,
+            FormatLiteralContext {
+                function,
+                graph,
+                machine_context,
+                forwarding,
+            },
             interface,
             parameter_rule,
             format_value,
@@ -3674,12 +3678,17 @@ fn variadic_callsite_argument_count(
 /// copy, or a constant: a count proved from some of the formats would be a
 /// count proved from none of them.
 fn reaching_format_literals(
-    function: &SSAFunction,
-    graph: &SsaGraph,
+    context: FormatLiteralContext<'_>,
     value: ValueId,
     seen: &mut BTreeSet<ValueId>,
     found: &mut BTreeSet<u64>,
 ) -> bool {
+    let FormatLiteralContext {
+        function,
+        graph,
+        machine_context,
+        forwarding,
+    } = context;
     if !seen.insert(value) {
         return true;
     }
@@ -3702,7 +3711,7 @@ fn reaching_format_literals(
         InstPayload::Phi { .. } | InstPayload::Op(SSAOp::Copy { .. }) => definition
             .inputs
             .iter()
-            .all(|input| reaching_format_literals(function, graph, *input, seen, found)),
+            .all(|input| reaching_format_literals(context, *input, seen, found)),
         // A conditional move selects the format the same way a merge does, and
         // `cmov` is how a compiler spells the choice when it does not branch.
         // Only the two results can be the format; the condition is not one.
@@ -3710,8 +3719,15 @@ fn reaching_format_literals(
             .inputs
             .iter()
             .skip(1)
-            .all(|input| reaching_format_literals(function, graph, *input, seen, found)),
+            .all(|input| reaching_format_literals(context, *input, seen, found)),
         InstPayload::Op(op) => {
+            // A translation of a msgid consumes what the msgid consumes, so
+            // the literal handed to the translator is the one that counts.
+            if let Some(msgid) =
+                forwarding.translated_msgid(function, graph, machine_context, value)
+            {
+                return reaching_format_literals(context, msgid, seen, found);
+            }
             // Which operation the walk cannot see through is the fact that
             // decides whether the count is unprovable or merely unproven here.
             r2il::refusal_evidence!(
@@ -3725,24 +3741,128 @@ fn reaching_format_literals(
     }
 }
 
+/// What a format value resolves through beyond copies and merges.
+///
+/// `printf(_("..."), ...)` hands `printf` whatever `gettext` returned, so the
+/// walk over reaching literals meets a call result and stops. The call that
+/// produced it carries the rule saying it returns a translation of its own
+/// argument, and that argument's literal is the one whose conversions count.
+struct FormatForwardingLookup<'a> {
+    call_sites: &'a CallSiteFacts,
+    entry_values: &'a BTreeMap<CanonicalStorageId, Option<ValueId>>,
+}
+
+/// What every step of the format-literal question needs, in one place.
+///
+/// The walk and the merge take the same four invariants, and threading them
+/// one by one had grown the signatures past the point where the varying
+/// arguments were visible. `VariadicCallsiteRecovery` is the same shape for
+/// the carrier question.
+#[derive(Copy, Clone)]
+struct FormatLiteralContext<'a> {
+    function: &'a SSAFunction,
+    graph: &'a SsaGraph,
+    machine_context: &'a SourceMachineContext,
+    forwarding: &'a FormatForwardingLookup<'a>,
+}
+
+impl FormatForwardingLookup<'_> {
+    /// The call whose result this instruction defines.
+    ///
+    /// `CallDefine` operations follow their call in a run, so walking back
+    /// over that run reaches the call itself. An instruction that is a call
+    /// answers for itself.
+    fn call_of_result(
+        &self,
+        function: &SSAFunction,
+        graph: &SsaGraph,
+        definition: InstId,
+    ) -> Option<CallSiteId> {
+        if let Some(call_site) = self.call_sites.by_inst.get(&definition) {
+            return Some(*call_site);
+        }
+        let (block_addr, op_index) = graph.op_site_for_inst(definition)?;
+        let block = function.get_block(block_addr)?;
+        if !matches!(block.ops.get(op_index)?, SSAOp::CallDefine { .. }) {
+            return None;
+        }
+        let mut index = op_index;
+        while index > 0 {
+            index -= 1;
+            if !matches!(block.ops.get(index)?, SSAOp::CallDefine { .. }) {
+                let inst = graph.inst_id_for_op_site(block_addr, index)?;
+                return self.call_sites.by_inst.get(&inst).copied();
+            }
+        }
+        None
+    }
+
+    /// The msgid a translation call was handed, when `value` is its result.
+    fn translated_msgid(
+        &self,
+        function: &SSAFunction,
+        graph: &SsaGraph,
+        machine_context: &SourceMachineContext,
+        value: ValueId,
+    ) -> Option<ValueId> {
+        let definition = graph.def_inst(value)?;
+        // A call's results are `CallDefine` operations that follow it, so the
+        // value's own definition is not the call; the call is the operation
+        // the run of defines began after.
+        let Some(call_site) = self.call_of_result(function, graph, definition) else {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "{value:?} is defined by {definition:?}, which no call of this function results in"
+            );
+            return None;
+        };
+        let call_site = &call_site;
+        let fact = self.call_sites.by_id.get(call_site)?;
+        let interface = machine_context.call_site_interface(fact.raw_identity?)?;
+        let Some(rule) = interface.format_forwarding() else {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "{value:?} came from the call at {:#x}, which returns no translation",
+                fact.direct_target.unwrap_or_default()
+            );
+            return None;
+        };
+        let index = usize::try_from(rule.msgid_argument_index()).ok()?;
+        let storage = interface.arguments().get(index)?.register_storage()?;
+        let (block_addr, op_index) = graph.op_site_for_inst(fact.at)?;
+        match reaching_abi_argument_in_block(
+            function,
+            graph,
+            machine_context,
+            self.entry_values,
+            block_addr,
+            op_index,
+            storage,
+        )? {
+            SourceCallArgumentValue::Value(msgid) => {
+                r2il::refusal_evidence!(
+                    "variadic-format-literal",
+                    "{value:?} is a translation of argument {index}, {msgid:?}"
+                );
+                Some(msgid)
+            }
+            SourceCallArgumentValue::PreservedEntry => None,
+        }
+    }
+}
+
 /// Prove a merged variadic count from formats that agree.
 fn merged_format_literal_argument_count(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    machine_context: &SourceMachineContext,
+    context: FormatLiteralContext<'_>,
     interface: &r2source::SourceCallSiteInterface,
     parameter_rule: r2source::SourceVariadicArgumentCountRule,
     format_value: ValueId,
     format_argument_index: usize,
 ) -> Result<VariadicCallsiteArgumentCountEvidence, VariadicCallsiteArgumentCountRefusal> {
+    let machine_context = context.machine_context;
     let mut addresses = BTreeSet::new();
-    if !reaching_format_literals(
-        function,
-        graph,
-        format_value,
-        &mut BTreeSet::new(),
-        &mut addresses,
-    ) || addresses.is_empty()
+    if !reaching_format_literals(context, format_value, &mut BTreeSet::new(), &mut addresses)
+        || addresses.is_empty()
     {
         r2il::refusal_evidence!(
             "variadic-format-literal",
@@ -4389,6 +4509,10 @@ fn collect_source_boundary_facts(
                         machine_context,
                         interface,
                         &fixed_arguments,
+                        &FormatForwardingLookup {
+                            call_sites,
+                            entry_values: &entry_values,
+                        },
                     ) {
                         Ok(evidence) => {
                             boundary.variadic_argument_count_evidence = Some(evidence);

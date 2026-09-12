@@ -2309,11 +2309,13 @@ impl SourceFormatForwardingRule {
 
     /// The rule for a call target, by the name the call renders with.
     ///
-    /// radare2 spells an import's name with a prefix, so the last path
-    /// component is what is matched.
+    /// radare2 spells a target with a prefix it chose -- `sym.imp.gettext` for
+    /// an ELF import, `sym._gettext` for Mach-O, where the linker's own
+    /// leading underscore survives -- so the last path component is matched
+    /// with leading underscores removed.
     pub fn for_target_name(name: &str) -> Option<Self> {
         let bare = name.rsplit(['.', ':']).next().unwrap_or(name);
-        let bare = bare.strip_prefix("__").unwrap_or(bare);
+        let bare = bare.trim_start_matches('_');
         Self::FAMILY
             .iter()
             .find(|(known, _)| *known == bare)
