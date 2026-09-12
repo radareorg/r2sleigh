@@ -1456,7 +1456,15 @@ fn unique_call_site_identity(
             })
     });
     let identity = matches.next()?;
-    matches.next().is_none().then_some(identity)
+    if let Some(second) = matches.next() {
+        r2il::refusal_evidence!(
+            "call-site-identity",
+            "advisory at {:#x} matches two lifted operations: {identity:?} and {second:?}",
+            call.instruction_address()
+        );
+        return None;
+    }
+    Some(identity)
 }
 
 #[derive(Clone)]
@@ -1478,10 +1486,31 @@ fn correlate_call_site_interfaces(
             // operation for, so nothing here can carry its prototype.
             r2il::refusal_evidence!(
                 "call-site-correlation",
-                "advisory {:?} at {:#x} target {:#x} matches no unique lifted operation",
+                "advisory {:?} at {:#x} target {:#x} matches no unique lifted operation; the block holding it has ops {:?}",
                 call.transfer(),
                 call.instruction_address(),
-                call.target_address()
+                call.target_address(),
+                blocks
+                    .iter()
+                    .find(|block| {
+                        block.addr <= call.instruction_address()
+                            && call.instruction_address() < block.addr + u64::from(block.size)
+                    })
+                    .map(|block| {
+                        block
+                            .ops
+                            .iter()
+                            .enumerate()
+                            .map(|(op_index, op)| {
+                                (
+                                    block
+                                        .op_metadata(op_index)
+                                        .and_then(|metadata| metadata.instruction_addr),
+                                    format!("{op:?}").chars().take(40).collect::<String>(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
             );
             continue;
         };
@@ -4019,6 +4048,24 @@ impl SSAFunction {
                 _ => true,
             })
         });
+        if !entry_stack_roots_are_stable {
+            // Without entry roots no frame geometry is certified; say which
+            // clause withheld them.
+            r2il::refusal_evidence!(
+                "entry-stack-roots",
+                "unstable: stack pointer restored across calls={} frame pointer restored={} interface={} carriers={:?}",
+                stack_pointer_restored_across_calls(
+                    self.call_preserved_carriers,
+                    function_interface
+                ),
+                frame_pointer_restored_across_calls(
+                    self.call_preserved_carriers,
+                    function_interface
+                ),
+                function_interface.is_some(),
+                self.call_preserved_carriers
+            );
+        }
         let mut facts = DecompilePrepFacts::default();
         let mut declared_stack_bases = BTreeMap::new();
         let mut entry_stack_address_size = None;
@@ -4369,6 +4416,23 @@ impl SSAFunction {
                                     &mut facts.entry_stack_address_roots,
                                     dst.clone(),
                                     root,
+                                );
+                            } else if facts.entry_stack_address_roots.contains_key(a)
+                                && !facts.entry_stack_address_roots.contains_key(dst)
+                            {
+                                r2il::refusal_evidence!(
+                                    "entry-stack-roots",
+                                    "{:#x}: {dst:?} not rooted from {a:?} - {b:?}: size={entry_stack_address_size:?} base={:?} delta={:?}",
+                                    self.entry,
+                                    stack_root_from_operand(
+                                        a,
+                                        &facts.canonical_value_roots,
+                                        &facts.entry_stack_address_roots
+                                    ),
+                                    signed_stack_delta_through_roots(
+                                        b,
+                                        &facts.canonical_value_roots
+                                    )
                                 );
                             }
                         }

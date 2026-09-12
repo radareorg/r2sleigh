@@ -131,7 +131,7 @@ pub(crate) enum PlacementObservationTarget {
     },
     EscapedStackAddress {
         call: InstId,
-        argument_index: usize,
+        argument_index: Option<usize>,
         value: r2ssa::ValueId,
         object: r2ssa::ObjectId,
         binding: BindingId,
@@ -2415,8 +2415,13 @@ fn frame_object_address_matches(
     else {
         return false;
     };
-    crate::binding_plan::certified_frame_object_call_argument(source, call, argument_index, value)
-        == Some(object)
+    crate::binding_plan::certified_frame_object_address(
+        source,
+        names.plan(),
+        call,
+        argument_index,
+        value,
+    ) == Some(object)
         && matches!(
             names.plan().stack_object_disposition(object),
             Some(crate::binding_plan::StackObjectDisposition::Bound { binding: owner })

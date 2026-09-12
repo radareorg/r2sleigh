@@ -884,6 +884,31 @@ impl<'a> FoldingContext<'a> {
         }
     }
 
+    /// A frame object's own address, spelled where a value that is that
+    /// address is read.
+    pub(crate) fn observe_frame_object_address_expr(
+        &self,
+        value: r2ssa::ValueId,
+        at: r2ssa::InstId,
+        object: r2ssa::ObjectId,
+        expr: CExpr,
+    ) -> CExpr {
+        let Some(journal) = self.inputs.observation_journal else {
+            return expr;
+        };
+        let fallback = expr.clone();
+        match journal
+            .borrow_mut()
+            .observe_frame_object_address_expr(value, at, object, expr)
+        {
+            Ok(marked) => marked,
+            Err(error) => {
+                self.retain_first_observation_error(error);
+                fallback
+            }
+        }
+    }
+
     /// A bound lane a decomposed wide store assigns to one member, read there.
     pub(crate) fn observe_certified_lane_read_expr(
         &self,

@@ -810,11 +810,28 @@ impl<'a> FoldingContext<'a> {
                     vec![child(0, left)?, child(1, right)?],
                 )
             }
-            Kind::Opaque(_)
-            | Kind::Variable(_)
-            | Kind::Load { .. }
-            | Kind::Subscript { .. }
-            | Kind::ObjectAddress(_) => return Err(invalid()),
+            Kind::ObjectAddress(object) => {
+                // The object's name is read here, and the reader is where
+                // that read is authorized.
+                let spelled = self
+                    .certified_stack_address_expr_for_object(object)
+                    .ok_or_else(invalid)?
+                    .0;
+                match self
+                    .current_source_op_site()
+                    .and_then(|(block_addr, op_idx)| {
+                        self.inputs
+                            .prepared_ssa?
+                            .graph()
+                            .inst_id_for_op_site(block_addr, op_idx)
+                    }) {
+                    Some(at) => self.observe_frame_object_address_expr(value, at, object, spelled),
+                    None => spelled,
+                }
+            }
+            Kind::Opaque(_) | Kind::Variable(_) | Kind::Load { .. } | Kind::Subscript { .. } => {
+                return Err(invalid());
+            }
         })
     }
 
@@ -960,6 +977,45 @@ impl<'a> FoldingContext<'a> {
                 )))
             }
             Ok(crate::binding_plan::PlannedValueSymbol::Elided(reason)) => {
+                // Frame geometry has no statement of its own, but a value in
+                // it that is an object's base address is read by the program
+                // as that object, and is spelled so wherever it is read.
+                if reason == r2ssa::ledger::ElisionReason::DeadStackBase
+                    && let Some(prepared) = self.inputs.prepared_ssa
+                {
+                    let object_term = names
+                        .plan()
+                        .canonical()
+                        .value(value)
+                        .map(|canonical| canonical.canonical)
+                        .filter(|term| {
+                            matches!(
+                                names.plan().canonical().arena().term(*term).kind,
+                                r2rewrite::TermKind::ObjectAddress(_)
+                            )
+                        });
+                    if let Some(term) = object_term {
+                        return self.materialize_term(names, value, term, 0);
+                    }
+                    // The rewriter models the producer only where every
+                    // disposition is exact; the object model answers the same
+                    // question for the rest.
+                    if let Some(object) =
+                        crate::binding_plan::object_base_address_for_value(prepared, value)
+                        && let Some((spelled, _)) =
+                            self.certified_stack_address_expr_for_object(object)
+                    {
+                        return Ok(match self.current_source_op_site().and_then(
+                            |(block_addr, op_idx)| {
+                                prepared.graph().inst_id_for_op_site(block_addr, op_idx)
+                            },
+                        ) {
+                            Some(at) => self
+                                .observe_frame_object_address_expr(value, at, object, spelled),
+                            None => spelled,
+                        });
+                    }
+                }
                 // Which value, and why the plan elided it, is what separates a
                 // wrong plan from a rendering that should not have asked.
                 r2il::refusal_evidence!(

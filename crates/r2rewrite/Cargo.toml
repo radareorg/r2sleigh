@@ -6,6 +6,7 @@ license.workspace = true
 description = "Certified canonicalising rewriter over r2ssa machine expressions"
 
 [dependencies]
+r2il = { path = "../r2il" }
 r2ssa = { path = "../r2ssa" }
 r2types = { path = "../r2types" }
 serde.workspace = true

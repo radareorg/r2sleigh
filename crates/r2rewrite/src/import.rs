@@ -27,6 +27,9 @@ use crate::term::{MAX_TERM_WIDTH_BITS, ObjectPlacement, PointerWalk, TermArena, 
 
 /// Rule id recorded for a `Copy` root elided at import.
 pub const COPY_ELIDE: &str = "copy.elide";
+/// A value that is the base address of a stack object is that object's
+/// address, whatever arithmetic computed it.
+pub const OBJECT_ADDRESS: &str = "object.address";
 
 #[derive(Debug, Clone)]
 pub struct ImportedValue {
@@ -395,6 +398,28 @@ impl Importer<'_> {
             // A root reached through its own operands: a call's definition
             // reads the location it defines. Not a term.
             return opaque_term(self.arena);
+        }
+        if self.dispositions_exact(inst)
+            && let Some(object) = self.object_base_address_of(inst)
+        {
+            // The producer's arithmetic vanishes into the object's name: an
+            // address of a local is a constant of the frame, not a computation.
+            let term = self.arena.intern(ty, TermKind::ObjectAddress(object));
+            self.place_object(object);
+            let from = self.arena.intern(ty, TermKind::Opaque(root));
+            let done = RootImport {
+                term,
+                trace: vec![Rewrite {
+                    rule: OBJECT_ADDRESS,
+                    from,
+                    to: term,
+                }],
+                substituted: BTreeSet::new(),
+                opaque: false,
+            };
+            self.in_progress.remove(&root);
+            self.roots.insert(root, done.clone());
+            return done;
         }
         let done = if self.dispositions_exact(inst) {
             let kind = self
@@ -914,6 +939,45 @@ impl Importer<'_> {
             self.arena
                 .intern(cell_ty, TermKind::Subscript { base, index }),
         )
+    }
+
+    /// The stack object whose base address the instruction's output is.
+    ///
+    /// The object model names the object a value addresses; the entry stack
+    /// root says whether the value is at its base rather than inside it.
+    fn object_base_address_of(&self, inst: InstId) -> Option<ObjectId> {
+        let graph = self.artifact.graph();
+        let value = graph.inst(inst)?.output?;
+        let root = self.stack_root_of(value)?;
+        let objects = self.artifact.objects();
+        // Only a declared slot is a C object with a name to spell; the model
+        // makes an object for every frame root, and a push slot is not one.
+        let declared = |object: ObjectId| {
+            self.artifact
+                .certificates()
+                .stack_slots
+                .get(&object)
+                .is_some_and(|slot| slot.source_slot.is_some())
+        };
+        let at_root = |object: ObjectId| {
+            matches!(
+                objects.object(object).map(|fact| &fact.kind),
+                Some(
+                    ObjectKind::StackSlot { base, offset, .. }
+                    | ObjectKind::FrameObject { base, offset, .. }
+                ) if *base == root.base && *offset == root.offset
+            )
+        };
+        // The access model names the object a value addresses; a value that
+        // only feeds copies and arithmetic is placed by its root instead.
+        match objects.object_for_value(value, r2il::SpaceId::Ram) {
+            Some(object) => (at_root(object) && declared(object)).then_some(object),
+            None => objects
+                .objects
+                .keys()
+                .copied()
+                .find(|object| at_root(*object) && declared(*object)),
+        }
     }
 
     /// Record where the object a load reaches is placed, when it is.

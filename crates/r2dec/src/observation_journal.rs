@@ -116,7 +116,7 @@ enum ObservationTarget {
     /// placement that the object's declaration is its storage definition.
     EscapedStackAddress {
         call: InstId,
-        argument_index: usize,
+        argument_index: Option<usize>,
         value: ValueId,
         object: r2ssa::ObjectId,
         binding: crate::binding_plan::BindingId,
@@ -2672,8 +2672,9 @@ impl LegacyObservationJournal {
         targets.extend(self.discharged_instruction_targets(Some(value), &replaced, Some(&expr))?);
 
         if let Some(frame_address) = frame_address {
-            let Some(object) = crate::binding_plan::certified_frame_object_call_argument(
+            let Some(object) = crate::binding_plan::certified_frame_object_address(
                 &self.source,
+                &self.plan,
                 frame_address.call,
                 frame_address.argument_index,
                 value,
@@ -3000,6 +3001,54 @@ impl LegacyObservationJournal {
             symbol,
             expr,
         )
+    }
+
+    /// One occurrence of a frame object's address, spelled from the rewriter's
+    /// object-address term at the instruction reading the value that is it.
+    pub(crate) fn observe_frame_object_address_expr(
+        &mut self,
+        value: ValueId,
+        at: InstId,
+        object: r2ssa::ObjectId,
+        expr: CExpr,
+    ) -> Result<CExpr, LegacyObservationJournalError> {
+        if crate::binding_plan::certified_frame_object_address(
+            &self.source,
+            &self.plan,
+            at,
+            None,
+            value,
+        ) != Some(object)
+        {
+            return Err(LegacyObservationJournalError::InvalidCertifiedValueRead { value, at });
+        }
+        let Some(StackObjectDisposition::Bound { binding }) =
+            self.plan.stack_object_disposition(object)
+        else {
+            return Err(LegacyObservationJournalError::MissingPlannedValue(value));
+        };
+        let symbol = self
+            .names
+            .symbol_for_binding(binding)
+            .ok_or(LegacyObservationJournalError::MissingPlannedValue(value))?;
+        let is_array = self.plan.binding(binding).is_some_and(|binding| {
+            matches!(binding.declaration_type(), crate::ast::CType::Array(_, _))
+        });
+        if !crate::placement::frame_object_address_expr_matches(&expr, symbol, is_array) {
+            return Err(LegacyObservationJournalError::InvalidCertifiedValueRead { value, at });
+        }
+        let mut marked = expr;
+        for id in self.allocate_many(vec![ObservationTarget::EscapedStackAddress {
+            call: at,
+            argument_index: None,
+            value,
+            object,
+            binding,
+            symbol,
+        }])? {
+            marked = CExpr::observed(id, marked);
+        }
+        Ok(marked)
     }
 
     pub(crate) fn observe_certified_lane_read_expr(
@@ -3357,14 +3406,10 @@ impl LegacyObservationJournal {
                     Some(LegacyValueObservation::Bound { binding: legacy });
                 continue;
             }
-            let every_use_is_elided = graph.use_sites(value).iter().all(|site| {
-                matches!(
-                    self.uses
-                        .get(site.inst.0 as usize)
-                        .and_then(|row| row.get(site.input_idx)),
-                    Some(Some(LegacyUseObservation::Elided(_)))
-                )
-            });
+            let every_use_is_elided = graph
+                .use_sites(value)
+                .iter()
+                .all(|site| self.use_is_absorbed(value, *site));
             if every_use_is_elided {
                 self.values[value.0 as usize] = Some(LegacyValueObservation::Elided(
                     r2ssa::ledger::ElisionReason::CoalescedImmutablePhi,
@@ -3403,14 +3448,10 @@ impl LegacyObservationJournal {
                 self.values[slot] = Some(LegacyValueObservation::Bound { binding });
                 continue;
             }
-            let every_use_is_elided = graph.use_sites(value).iter().all(|site| {
-                matches!(
-                    self.uses
-                        .get(site.inst.0 as usize)
-                        .and_then(|row| row.get(site.input_idx)),
-                    Some(Some(LegacyUseObservation::Elided(_)))
-                )
-            });
+            let every_use_is_elided = graph
+                .use_sites(value)
+                .iter()
+                .all(|site| self.use_is_absorbed(value, *site));
             if every_use_is_elided {
                 self.values[slot] = Some(LegacyValueObservation::Elided(
                     r2ssa::ledger::ElisionReason::CoalescedCopy,
@@ -3890,21 +3931,9 @@ impl LegacyObservationJournal {
             .get(input_idx)
             .cloned()
             .ok_or(LegacyObservationJournalError::InvalidNormalizedInput { site, input_idx })?;
-        let rendered_symbols = Self::expr_symbols(&expr);
         let mut targets = Vec::with_capacity(input.uses.len());
         for use_site in input.uses {
-            // An access spelled by the object it lands in names no stack
-            // base: the address operand is absorbed, exactly as the operands
-            // of a vanished address computation are.
-            let observation = if matches!(
-                self.plan.use_disposition(use_site),
-                Some(MachineUseDisposition::MemoryAddress(_))
-            ) && self.stack_base_absorbed_by(input.value, &rendered_symbols)
-            {
-                LegacyUseObservation::Elided(r2ssa::ledger::ElisionReason::DeadStackBase)
-            } else {
-                self.rendered_use_observation(use_site)?
-            };
+            let observation = self.rendered_use_observation(use_site)?;
             targets.push(ObservationTarget::Use {
                 site: use_site,
                 observation,
@@ -3918,6 +3947,23 @@ impl LegacyObservationJournal {
         Ok(marked)
     }
 
+    /// Whether a use of an undeclared carrier is answered without spelling it:
+    /// an elision, or an access whose object name absorbed the frame address.
+    fn use_is_absorbed(&self, value: ValueId, site: UseSite) -> bool {
+        match self
+            .uses
+            .get(site.inst.0 as usize)
+            .and_then(|row| row.get(site.input_idx))
+        {
+            Some(Some(LegacyUseObservation::Elided(_))) => true,
+            Some(Some(LegacyUseObservation::MemoryAddress(_))) => self
+                .source
+                .entry_stack_address_root_for_value(value)
+                .is_some(),
+            _ => false,
+        }
+    }
+
     /// Whether a rendering that spells `rendered_symbols` absorbs `value`: a
     /// frame address bound to a carrier the rendering never names.
     fn stack_base_absorbed_by(
@@ -3925,13 +3971,29 @@ impl LegacyObservationJournal {
         value: ValueId,
         rendered_symbols: &BTreeSet<SymbolId>,
     ) -> bool {
-        let Some(ValueDisposition::Bound { binding }) = self.plan.disposition(value) else {
-            return false;
+        let spelled = match self.plan.disposition(value) {
+            Some(ValueDisposition::Bound { binding }) => self
+                .names
+                .symbol_for_binding(*binding)
+                .is_some_and(|symbol| rendered_symbols.contains(&symbol)),
+            // A cell the geometry certificate already elided -- a frame base
+            // or the displacement added to one -- is answered and spelled
+            // nowhere, whatever the object's name absorbed it into.
+            Some(ValueDisposition::Elided {
+                reason: r2ssa::ledger::ElisionReason::DeadStackBase,
+                ..
+            }) => return true,
+            // An object's own address is a constant of the frame: an access
+            // spelled through the object absorbs it exactly as it absorbs the
+            // stack pointer the address was measured from.
+            Some(ValueDisposition::Inline { term, .. }) => {
+                return matches!(
+                    self.plan.canonical().arena().term(*term).kind,
+                    r2rewrite::TermKind::ObjectAddress(_)
+                );
+            }
+            _ => return false,
         };
-        let spelled = self
-            .names
-            .symbol_for_binding(*binding)
-            .is_some_and(|symbol| rendered_symbols.contains(&symbol));
         !spelled
             && self
                 .source
@@ -4197,13 +4259,21 @@ impl LegacyObservationJournal {
 
     /// Whether the plan elides `value` as dead stack geometry.
     fn stack_geometry_elides(&self, value: ValueId) -> bool {
-        matches!(
-            self.plan.disposition(value),
-            Some(ValueDisposition::Elided {
-                reason: r2ssa::ledger::ElisionReason::DeadStackBase,
-                ..
-            })
-        )
+        // The certificate is the authority: a geometry value that is an
+        // object's address is spelled as the object rather than elided, and
+        // its producer is still the certificate's, never an occurrence.
+        self.source
+            .certificates()
+            .stack_geometry
+            .values
+            .contains(&value)
+            || matches!(
+                self.plan.disposition(value),
+                Some(ValueDisposition::Elided {
+                    reason: r2ssa::ledger::ElisionReason::DeadStackBase,
+                    ..
+                })
+            )
     }
 
     fn rendered_use_observation(

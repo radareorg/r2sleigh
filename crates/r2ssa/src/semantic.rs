@@ -2289,6 +2289,12 @@ impl<'a> ObjectModelBuilder<'a> {
             stack_roots.sort_unstable();
             stack_roots.dedup();
             for root in stack_roots {
+                // A root inside a declared slot is that slot; an object of its
+                // own would be one nothing ever accesses.
+                let root = self
+                    .declared_slots
+                    .containing(root)
+                    .map_or(root, |(container, _)| container);
                 self.ensure_stack_object(root);
             }
             for var in facts.stack_address_roots.keys() {
@@ -6499,6 +6505,13 @@ fn collect_stack_geometry_certificate(
     let Some(prep) = function.decompile_prep_facts() else {
         return StackGeometryCertificate::default();
     };
+    r2il::refusal_evidence!(
+        "stack-geometry-roots",
+        "{:#x}: entry roots {} stack roots {}",
+        function.entry,
+        prep.entry_stack_address_roots.len(),
+        prep.stack_address_roots.len()
+    );
     let stack_root = |value: ValueId| {
         graph
             .value(value)
@@ -6569,10 +6582,35 @@ fn collect_stack_geometry_certificate(
     };
     let mut geometry_outputs = BTreeMap::<InstId, ValueId>::new();
     let mut geometry_inputs = BTreeSet::<ValueId>::new();
+    // The address of a declared array's element is rendered as the array,
+    // which names no frame base: the operands it was computed from are
+    // absorbed, exactly as an access's address operand is.
+    let mut absorbed_array_uses = BTreeSet::<UseSite>::new();
+    // A value that is exactly a declared object's base address is spelled as
+    // that object wherever the program reads it; no read makes it a value of
+    // its own, and the arithmetic that produced it is the frame's geometry.
+    let mut object_base_values = BTreeSet::<ValueId>::new();
     for inst in &graph.insts {
         let Some(output) = inst.output.filter(|output| stack_root(*output).is_some()) else {
             continue;
         };
+        if matches!(
+            inst.payload,
+            InstPayload::Op(SSAOp::IntAdd { .. } | SSAOp::IntSub { .. })
+        ) && addresses_declared_array(output)
+        {
+            absorbed_array_uses.extend((0..inst.inputs.len()).map(|input_idx| UseSite {
+                inst: inst.id,
+                input_idx,
+            }));
+        }
+        if stack_root(output).is_some_and(|root| {
+            declared_slots
+                .by_key
+                .contains_key(&(root.base, root.offset))
+        }) {
+            object_base_values.insert(output);
+        }
         let output_root = stack_root(output);
         let exact = match &inst.payload {
             InstPayload::Phi { predecessors } => {
@@ -6672,17 +6710,50 @@ fn collect_stack_geometry_certificate(
         program_values.extend(boundary.values.iter().map(|value| value.value));
     }
 
+    let stack_pointer = machine_context
+        .and_then(|context| context.stack_pointer_carrier())
+        .map(|storage| storage.location());
     let mut values = graph
         .values
         .iter()
         .filter(|value| {
-            !program_values.contains(&value.id)
+            let admitted = !program_values.contains(&value.id)
                 && !frame_values.contains(&value.id)
                 && !return_control_values.contains(&value.id)
                 && (stack_root(value.id).is_some() || geometry_inputs.contains(&value.id))
                 && graph
                     .def_inst(value.id)
-                    .is_none_or(|inst| geometry_outputs.get(&inst).copied() == Some(value.id))
+                    .is_none_or(|inst| geometry_outputs.get(&inst).copied() == Some(value.id));
+            // A stack pointer version outside the geometry is what a frame
+            // refusal traces back to, so say which clause kept it out.
+            if !admitted
+                && value
+                    .canonical_storage
+                    .is_some_and(|storage| Some(storage.location()) == stack_pointer)
+            {
+                r2il::refusal_evidence!(
+                    "stack-geometry-excluded",
+                    "{:#x}: {:?} {:?}: program={} frame={} return_control={} rooted={} geometry_input={} def_geometry={} entry_key={} sp_keys={:?}",
+                    function.entry,
+                    value.id,
+                    value.var,
+                    program_values.contains(&value.id),
+                    frame_values.contains(&value.id),
+                    return_control_values.contains(&value.id),
+                    stack_root(value.id).is_some(),
+                    geometry_inputs.contains(&value.id),
+                    graph
+                        .def_inst(value.id)
+                        .is_none_or(|inst| geometry_outputs.get(&inst).copied() == Some(value.id)),
+                    prep.entry_stack_address_roots.contains_key(&value.var),
+                    prep.entry_stack_address_roots
+                        .keys()
+                        .filter(|key| key.name == value.var.name)
+                        .take(4)
+                        .collect::<Vec<_>>()
+                );
+            }
+            admitted
         })
         .map(|value| value.id)
         .collect::<BTreeSet<_>>();
@@ -6690,8 +6761,11 @@ fn collect_stack_geometry_certificate(
         let removed = values
             .iter()
             .copied()
-            .filter(|value| {
-                graph.use_sites(*value).iter().any(|site| {
+            .filter_map(|value| {
+                if object_base_values.contains(&value) {
+                    return None;
+                }
+                let site = graph.use_sites(value).iter().find(|site| {
                     !frame_uses.contains(site)
                         && !return_control_uses.contains(site)
                         && !stack_address_uses.contains(site)
@@ -6703,23 +6777,38 @@ fn collect_stack_geometry_certificate(
                         // `SP_0 = SP_0 - 112` over an entry value no statement
                         // had written.
                         && !unobserved.unobserved_uses().contains(site)
+                        && !absorbed_array_uses.contains(site)
                         && !geometry_outputs
                             .get(&site.inst)
                             .is_some_and(|output| values.contains(output))
-                })
+                })?;
+                Some((value, *site))
             })
             .collect::<Vec<_>>();
         if removed.is_empty() {
             break;
         }
-        for value in removed {
+        for (value, site) in removed {
+            // Which use kept a frame address in the program is what a repair
+            // has to look at; the value alone says only that one did.
+            r2il::refusal_evidence!(
+                "stack-geometry-kept",
+                "{:#x}: {value:?} stays a program value: read at {site:?} by {:?}",
+                function.entry,
+                graph
+                    .inst(site.inst)
+                    .map(|inst| format!("{:?}", inst.payload)
+                        .chars()
+                        .take(80)
+                        .collect::<String>())
+            );
             values.remove(&value);
         }
     }
 
     let insts = geometry_outputs
-        .into_iter()
-        .filter_map(|(inst, output)| values.contains(&output).then_some(inst))
+        .iter()
+        .filter_map(|(inst, output)| values.contains(output).then_some(*inst))
         .collect::<BTreeSet<_>>();
     let mut uses = stack_address_uses
         .difference(&frame_uses)
@@ -6735,6 +6824,31 @@ fn collect_stack_geometry_certificate(
             input_idx,
         }));
     }
+    r2il::refusal_evidence!(
+        "stack-geometry-certificate",
+        "{:#x}: insts {} values {} uses {}; sp insts {:?}; sp values {:?}",
+        function.entry,
+        insts.len(),
+        values.len(),
+        uses.len(),
+        insts
+            .iter()
+            .filter(|inst| graph
+                .inst(**inst)
+                .and_then(|inst| inst.output)
+                .and_then(|output| graph.value(output))
+                .and_then(|value| value.canonical_storage)
+                .is_some_and(|storage| Some(storage.location()) == stack_pointer))
+            .collect::<Vec<_>>(),
+        values
+            .iter()
+            .filter(|value| graph
+                .value(**value)
+                .and_then(|value| value.canonical_storage)
+                .is_some_and(|storage| Some(storage.location()) == stack_pointer))
+            .map(|value| graph.value(*value).map(|value| value.var.to_string()))
+            .collect::<Vec<_>>()
+    );
     StackGeometryCertificate {
         insts,
         values,

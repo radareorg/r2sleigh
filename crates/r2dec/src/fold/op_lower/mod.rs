@@ -151,8 +151,10 @@ enum ReplacementSource {
 /// Source-owned identity behind one frame-object address spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RenderedFrameObjectAddress {
+    /// The instruction whose rendering spells the address: a call passing it,
+    /// or any reader of a value that is the object's address.
     pub(crate) call: r2ssa::InstId,
-    pub(crate) argument_index: usize,
+    pub(crate) argument_index: Option<usize>,
     pub(crate) object: r2ssa::ObjectId,
 }
 
@@ -193,7 +195,7 @@ impl PendingReplacementExpr {
             value,
             source: ReplacementSource::EscapedStackAddress(RenderedFrameObjectAddress {
                 call,
-                argument_index,
+                argument_index: Some(argument_index),
                 object,
             }),
         }

@@ -303,6 +303,80 @@ pub(crate) fn certified_boundary_read(
 /// here keeps the renderer and final placement audit on one predicate. An
 /// indexed address names storage inside the object, not the object's base, and
 /// therefore cannot license the `&object`/array-decay spelling.
+/// The declared stack object whose base address `value` is, if it is one.
+///
+/// One rule, shared by the rewriter's `ObjectAddress` import, the renderer's
+/// spelling of an elided frame address and the audits that certify it: the
+/// value's stack root is exactly a declared slot's coordinate.
+pub(crate) fn object_base_address_for_value(
+    source: &r2ssa::SsaArtifact,
+    value: ValueId,
+) -> Option<r2ssa::ObjectId> {
+    let root = source.stack_address_root_for_value(value)?;
+    let objects = source.objects();
+    let at_root = |object: r2ssa::ObjectId| {
+        matches!(
+            objects.object(object).map(|fact| &fact.kind),
+            Some(
+                r2ssa::ObjectKind::StackSlot { base, offset, .. }
+                | r2ssa::ObjectKind::FrameObject { base, offset, .. }
+            ) if *base == root.base && *offset == root.offset
+        ) && source
+            .certificates()
+            .stack_slots
+            .get(&object)
+            .is_some_and(|slot| slot.source_slot.is_some())
+    };
+    match objects.object_for_value(value, r2il::SpaceId::Ram) {
+        Some(object) => at_root(object).then_some(object),
+        None => objects
+            .objects
+            .keys()
+            .copied()
+            .find(|object| at_root(*object)),
+    }
+}
+
+/// The frame object whose address the instruction at `at` spells for `value`:
+/// as a call argument when `argument_index` names one, otherwise as any reader
+/// of a value the rewriter proved is the object's base address.
+pub(crate) fn certified_frame_object_address(
+    source: &r2ssa::SsaArtifact,
+    plan: &BindingPlan,
+    at: InstId,
+    argument_index: Option<usize>,
+    value: ValueId,
+) -> Option<r2ssa::ObjectId> {
+    match argument_index {
+        Some(index) => certified_frame_object_call_argument(source, at, index, value),
+        None => {
+            if let Some(object) = object_base_address_for_value(source, value) {
+                return Some(object);
+            }
+            // The value's canonical term spells the object's address somewhere
+            // inside it, and the instruction at `at` reads the value.
+            let canonical = plan.canonical();
+            let arena = canonical.arena();
+            let mut pending = vec![canonical.value(value)?.canonical];
+            let mut object = None;
+            while let Some(term) = pending.pop() {
+                let kind = arena.term(term).kind;
+                if let r2rewrite::TermKind::ObjectAddress(found) = kind {
+                    if object.is_some_and(|object| object != found) {
+                        return None;
+                    }
+                    object = Some(found);
+                }
+                pending.extend(kind.children());
+            }
+            // The reader is the instruction being rendered, which reaches the
+            // value through however many inlined terms sit between them.
+            let _ = at;
+            object
+        }
+    }
+}
+
 pub(crate) fn certified_frame_object_call_argument(
     source: &r2ssa::SsaArtifact,
     at: InstId,

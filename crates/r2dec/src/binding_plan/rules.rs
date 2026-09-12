@@ -1594,6 +1594,7 @@ fn term_renders_inline(kind: &r2rewrite::TermKind) -> bool {
         kind,
         Kind::Leaf(_)
             | Kind::Literal(_)
+            | Kind::ObjectAddress(_)
             | Kind::Arithmetic { .. }
             | Kind::Negate(_)
             | Kind::Bitwise { .. }
