@@ -4,8 +4,8 @@
 
 ## North Star
 
-`r2sleigh`, `r2ssa`, `r2sym`, `r2types`, `r2engine`, `r2dec`, `r2plugin`, and
-`../radare2` are one subsystem.
+`r2sleigh`, `r2ssa`, `r2source`, `r2rewrite`, `r2types`, `r2engine`, `r2dec`,
+`r2plugin`, and `../radare2` are one subsystem.
 
 The goal is not "more commands" or "more crates doing similar work." The goal
 is a gold-standard radare2 analysis engine where:
@@ -20,18 +20,7 @@ is a gold-standard radare2 analysis engine where:
 The plugin should feel like radare2 itself got smarter, not like radare2 grew a
 second shell.
 
-## Default Decision Path
-
-When the right move is not obvious, use this short path before touching code:
-
-1. What user-visible behavior or invariant is broken?
-2. Which crate or `../radare2` owns the missing fact?
-3. Which canonical typed contract should carry it?
-4. What evidence proves the result, and when should the system refuse instead?
-5. What is the cheapest deterministic pipeline test that exercises the contract?
-6. What manual command/session confirms the real output is not fake semantics?
-7. Is this failure mode common enough to deserve a Dylint, proof, fuzz target,
-   mutation target, benchmark gate, or script?
+## Where A Fix Belongs
 
 If a fix starts in `r2plugin` or `r2dec`, first prove the missing fact really
 belongs there. Most semantic/type/cache/route fixes should move upstream.
@@ -47,8 +36,9 @@ belongs there. Most semantic/type/cache/route fixes should move upstream.
    `r2types::SourceOwnedFunctionFacts`, retaining the exact
    `Arc<r2ssa::SsaArtifact>`, is the runtime authority seam.
 7. `r2types::FunctionTypeFacts` is the canonical type/layout/signature payload.
-8. `r2sym::SemanticArtifact` is the canonical semantic artifact.
-9. `r2sym` owns semantic policy and evidence; consumers interpret it.
+8. `r2ssa::SsaArtifact`, with its prepared facts and
+   `PreparedFunctionCertificates`, is the canonical semantic artifact.
+9. `r2ssa` owns semantic evidence and refusal evidence; consumers interpret it.
 10. `r2engine` owns request orchestration, route selection, and
     refusal/fallback policy.
 11. Symbol names are hints, not authoritative semantic ownership.
@@ -114,9 +104,9 @@ Rules:
 
 ## Optimization Doctrine
 
-Low-quality implementations tend to optimize the wrong thing. Do not do that.
+Optimize the targets below rather than a local score.
 
-The target is not fantasy "`O(1)` symex." The target is:
+The target is not a fantasy "`O(1)` whole-function proof." The target is:
 
 - `O(1)` or `O(log n)` lookup for metadata, indexes, summaries, and caches
 - `O(n)` passes over blocks, SSA ops, or facts whenever possible
@@ -162,9 +152,9 @@ that requires invasive refactors.
   before building more behavior on top of it.
 - If a crate is carrying policy it should not own, move that policy.
 - Keep the next major direction as a spine rewrite, not a blank-slate rewrite:
-  move orchestration to `r2engine`, evidence to `r2sym`, dataflow facts to
-  `r2ssa`, type constraints to `r2types`, rendering to `r2dec`, and command
-  integration to `r2plugin`.
+  move orchestration to `r2engine`, dataflow facts and evidence to `r2ssa`,
+  type constraints to `r2types`, term rewriting to `r2rewrite`, rendering to
+  `r2dec`, and command integration to `r2plugin`.
 
 The right question is not "what is the smallest diff?" It is "what is the
 cleanest owner and the cheapest long-term design?"
@@ -202,8 +192,8 @@ Correct responses:
 For any non-trivial change, follow this order:
 
 1. Identify the user-visible behavior or broken invariant.
-2. Identify the canonical owner: `../radare2`, lift, SSA, symex, types,
-   engine, decompiler, export, CLI, or plugin.
+2. Identify the canonical owner: `../radare2`, lift, SSA, source snapshot,
+   types, engine, decompiler, export, CLI, or plugin.
 3. Identify the existing typed contract to extend before creating a new one.
 4. State the complexity target: lookup, traversal, search, cache, summary.
 5. Push facts upstream to the owner instead of reconstructing them downstream.
@@ -219,6 +209,8 @@ For any non-trivial change, follow this order:
    the work is complete.
 11. If the task reveals hacky behavior, remove or rewrite that behavior before
    adding new feature work that depends on it.
+12. If the failure mode is common enough, encode it as a Dylint, proof, fuzz
+   target, mutation target, benchmark gate, or script.
 
 ## Ownership Boundaries
 
@@ -241,14 +233,14 @@ Use this map by default:
   - phi handling
   - dominators / def-use
   - prepared function facts
+  - semantic certificates and refusal evidence
   - determinism and SSA-local transforms
-- `crates/r2sym`
-  - symbolic state
-  - semantic artifacts
-  - evidence algebra
-  - query planning
-  - summaries and replay
-  - solver-facing semantic policy
+- `crates/r2source`
+  - the trusted radare2 snapshot and its wire decoding
+  - source-owned facts the engine may treat as authority
+- `crates/r2rewrite`
+  - the term arena over the machine projection
+  - canonical term rewriting and its rule proofs
 - `crates/r2types`
   - signature parsing and normalization
   - type inference
@@ -286,12 +278,10 @@ These are the preferred subsystem seams:
 
 - `r2ssa::SsaArtifact` and `PreparedFunctionFacts`
   - canonical SSA/dataflow preparation
-- `r2sym::SemanticArtifact`
-  - canonical semantic artifact
-- `r2sym::SemanticEvidence`
-  - canonical evidence carrier
-- `r2sym::{ArtifactBuildPlan, QueryPlan, TargetQueryRoutePlan, TypePlan, DecompilePlan}`
-  - canonical plan surfaces
+- `r2ssa::PreparedFunctionCertificates`
+  - canonical evidence carrier for prepared facts
+- `r2source::OwnedFunctionSnapshot`
+  - canonical way radare2's facts reach the engine
 - `r2types::FunctionTypeFacts`
   - canonical type/layout/signature payload
 - `r2types::FunctionFacts`
@@ -333,7 +323,7 @@ name-authoritative behavior.
 
 Rules:
 
-- summary classification belongs in `r2sym`
+- summary classification belongs in `r2engine`, beside route selection
 - classify by CFG shape, loops, memory effects, callsites, constants, def-use,
   typed context, and evidence before trusting symbol names
 - symbol/role names may seed weak hints and tie-breakers
@@ -341,8 +331,9 @@ Rules:
   explicit user assumptions
 - `r2types` may project summary evidence into signatures/types, but it must keep
   confidence and refusal reasons explicit
-- `r2dec` may render summary-backed constructs only when the route/evidence says
-  that is what is being rendered
+- `r2dec` may render summary-backed comments, facts, residuals, and refusals
+  when the route says the output is summary-driven; executable C comes only
+  through the native path (see the Synthetic Output Test Ban)
 - tests must distinguish summary-driven rendering from true reconstructed
   native control flow
 
@@ -382,7 +373,7 @@ Avoid:
 - plugin-side route or request policy
 - decompiler-side type policy
 - decompiler-side call argument or stack-slot repair that should be a canonical fact
-- consumer-local semantic policy that should live in `r2sym`
+- consumer-local semantic policy that should live in `r2ssa` or `r2engine`
 - name-first summaries as authoritative proof
 - compatibility shims that silently become permanent
 
@@ -398,7 +389,7 @@ Before landing any non-trivial change, check these explicitly:
 6. Did I move policy downstream instead of upstream?
 7. Did I preserve a bad seam instead of rewriting it?
 8. Did I add name-first semantic ownership instead of evidence-first classification?
-9. Did I make `r2dec` or `r2plugin` repair facts that `r2ssa`, `r2sym`,
+9. Did I make `r2dec` or `r2plugin` repair facts that `r2ssa`, `r2source`,
    `r2types`, or `r2engine` should own?
 10. Did I render fake C/control/type information instead of an explicit
     residual or summary route?
@@ -572,7 +563,7 @@ audit whether the metric is still measuring the right thing.
 
 Use `tests/r2r` for new regressions involving:
 
-- plugin commands such as `a:sla.*`, `pd:s`, `pdD`
+- plugin commands such as `a:sla.*`, `pd:s`
 - stable JSON/text/ESIL output
 - CFG / SSA / def-use / type payload shape
 - command UX and error text
@@ -595,19 +586,21 @@ Keep Rust E2E tests for:
 
 ## Required Validation Bar
 
-If you touch `r2ssa`, `r2sym`, `r2types`, `r2engine`, `r2dec`, `r2plugin`, or
-the typed `../radare2` seam, the minimum validation bar is:
+If you touch `r2ssa`, `r2source`, `r2rewrite`, `r2types`, `r2engine`, `r2dec`,
+`r2plugin`, or the typed `../radare2` seam, the minimum validation bar is:
 
 ```bash
 cargo fmt --all -- --check
 cargo test -p r2ssa
-cargo test -p r2sym
+cargo test -p r2source
+cargo test -p r2rewrite
 cargo test -p r2types
 cargo test -p r2engine
 cargo test -p r2dec
 cargo test -p r2sleigh-plugin
 cargo clippy -p r2ssa --all-targets -- -D warnings
-cargo clippy -p r2sym --all-targets -- -D warnings
+cargo clippy -p r2source --all-targets -- -D warnings
+cargo clippy -p r2rewrite --all-targets -- -D warnings
 cargo clippy -p r2types --all-targets -- -D warnings
 cargo clippy -p r2engine --all-targets -- -D warnings
 cargo clippy -p r2dec --all-targets -- -D warnings
@@ -634,7 +627,16 @@ Do not claim the seam is fixed without both sides being green.
 - function-level behavior that should stay quick
 
 `tests/r2r/db/extras/r2sleigh_integration_extended`
-- heavier symbolic, taint, decompilation, and larger-CFG coverage
+- heavier decompilation and larger-CFG coverage
+
+`tests/r2r/db/extras/r2sleigh_decompiler_snapshots`
+- rendered-output snapshots for the decompiler
+
+`tests/r2r/db/extras/r2sleigh_signature_snapshots`
+- recovered-signature snapshots
+
+`tests/r2r/db/extras/r2sleigh_plain_o2_fixtures`
+- unoptimized-fixture coverage at `-O2`
 
 ## Common Change Workflows
 
@@ -651,10 +653,10 @@ Do not claim the seam is fixed without both sides being green.
 
 ### Change symbolic / query behavior
 
-1. Put semantic policy in `r2sym`.
-2. Put evidence and ambiguity in canonical artifact/evidence types.
-3. Put request routing in `r2engine` and semantic capability plans in `r2sym`.
-4. Let `r2types` / `r2dec` consume those plans; do not reinvent them.
+1. Put semantic policy in `r2ssa`.
+2. Put evidence and ambiguity in the prepared facts and certificates.
+3. Put request routing and route policy in `r2engine`.
+4. Let `r2types` / `r2dec` consume those facts; do not reinvent them.
 5. Add solver-budget and determinism coverage where applicable.
 
 ### Change summary/native-worker behavior
@@ -662,7 +664,7 @@ Do not claim the seam is fixed without both sides being green.
 1. Prefer structural/evidence classifiers over symbol-name lists.
 2. Keep symbol names as weak hints unless backed by typed context or structural
    evidence.
-3. Put summary policy/evidence in `r2sym`.
+3. Put summary policy/evidence in `r2engine`.
 4. Put signature/type projection in `r2types`.
 5. Put route selection and any trace-proven reuse in `r2engine`.
 6. Put rendering only in `r2dec`.
@@ -681,7 +683,7 @@ Treat this as two tiers:
 
 - public / user-facing
   - `a:sla`, `a:sla.arch`, `a:sla.profilej`
-  - `pd:s`, `pdD`
+  - `pd:s`
 - debug / engine inspection
   - low-level IL / SSA / facts / plan / replay / path listing commands
 
@@ -707,10 +709,10 @@ There are two different block types in `r2ssa`:
 | `crates/r2sleigh-lift/src/disasm.rs` | changing P-code lifting or register naming |
 | `crates/r2sleigh-lift/src/esil.rs` | changing text or ESIL rendering |
 | `crates/r2ssa/src/` | changing SSA construction, def-use, prepared facts |
-| `crates/r2sym/src/` | changing semantic artifacts, query, evidence, summaries, replay, solver policy |
-| `crates/r2sym/src/semantics/native_worker.rs` | changing native-worker summary classification or evidence |
+| `crates/r2ssa/src/semantic.rs` | changing prepared facts, certificates, or refusal evidence |
+| `crates/r2source/src/` | changing the trusted snapshot or its wire decoding |
+| `crates/r2rewrite/src/` | changing term rewriting or its rule proofs |
 | `crates/r2types/src/` | changing type inference, layouts, canonical function facts |
-| `crates/r2types/src/role_registry.rs` | changing role/signature hints or canonical helper signatures |
 | `crates/r2engine/src/` | changing request orchestration, route selection, or engine metrics |
 | `crates/r2dec/src/` | changing lowering, structuring, rendering |
 | `r2plugin/src/lib.rs` | changing plugin-side Rust logic and JSON payloads |
@@ -722,8 +724,8 @@ There are two different block types in `r2ssa`:
 
 Use `scripts/reversing_benchmark.py --closure-gate` when a corpus run is meant
 to check closure pressure rather than just gather signal. The report includes
-owner buckets for `../radare2`, `r2ssa`, `r2sym`, `r2types`, `r2engine`,
-`r2dec`, and plugin glue; treat those buckets as triage hints, then verify the
+owner buckets for `../radare2`, `r2ssa`, `r2types`, `r2engine`, `r2dec`, and
+plugin glue; treat those buckets as triage hints, then verify the
 canonical owner before editing.
 
 Benchmark scores are never semantic proof. Before claiming a benchmark
@@ -742,8 +744,9 @@ control flow, fix the benchmark gate before using it to guide more work.
 6. `#[no_mangle]` is now `#[unsafe(no_mangle)]` under Rust 2024.
 7. Plugin, CLI, and export feature matrices are not identical.
 8. If output stability matters, hash-order nondeterminism is a bug.
-9. Use `r2dec/address.rs::parse_address_from_var_name()` for consistent
-   `const:` / `ram:` parsing.
+9. On the `r2dec` lowering path, resolve call targets through
+   `r2types::CalleeResolutionFacts` rather than parsing `const:` / `ram:`
+   names locally; `tools/dylints/r2sleigh_lints` enforces this.
 10. On the decompiler/type path, do not reintroduce `r2dec` type ownership just
     to make an old test compile.
 11. Summary-driven output must remain visibly summary-driven until real
