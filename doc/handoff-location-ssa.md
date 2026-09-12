@@ -21105,3 +21105,35 @@ does not, and it is silent for both, which means either the object still does no
 resolve for these four or the spelling succeeds and the observation is lost after
 it. Printing `occurrences.escaped_stack_bindings()` beside the four binding ids at
 `observation_journal.rs:1247` separates those two cases in one run.
+
+### The declared slots and the accessed slots are in different coordinate systems
+
+`compressStream` at bzip2 `-O2` reads `[rsp+0x38]` right after `stat(inName,
+&statBuf)`, and that read is `statBuf.st_mode`: `st_mode` sits at offset 0x18
+inside a `struct stat` whose address was just handed to the callee. The read
+should therefore resolve to the escaped object at an interior offset, and need
+no assignment in this function.
+
+It does not, and radare2 shows why:
+
+    var int64_t var_10h  @ rsp+0x20
+    var int32_t var_28h  @ rsp+0x38
+    var stat    statBuf  @ rbp-0xd0
+    var utimbuf uTimBuf  @ rbp-0x170
+
+The first two are slots radare2 inferred from the accesses, stack-pointer
+based. The last two are the DWARF locals, with their real aggregate types, and
+they are frame-pointer based -- in a function that never establishes a frame
+pointer, because DWARF expresses them against its own frame base. The capture
+records each slot's base faithfully, so both arrive at the engine, and
+`declared_slots.containing` compares roots of the same base and never matches
+one against the other. Every declared aggregate in a frameless function is
+therefore invisible to the accesses that read it, which is why the object model
+splits one `struct stat` into unrelated one-field slots.
+
+The two systems differ by a constant the prologue states: the canonical frame
+address is the entry stack pointer plus the return-address slot, and the
+stack-pointer-based offsets are that minus the frame the prologue allocates. So
+this is derivable rather than unknowable, and it is the next thing to build. It
+is worth more than the eight refusals that led here: no declared aggregate in
+any frameless function currently reaches the accesses that use it.
