@@ -1215,6 +1215,7 @@ impl BindingPlan {
             parameters: parameters.into_boxed_slice(),
             stack_objects,
             call_clobbers,
+            escaped_frame_objects: super::rules::frame_objects_with_escaped_address(source),
             typed: std::cell::OnceCell::new(),
         };
         plan.validate_seal(source_owned)?;

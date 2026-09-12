@@ -2160,17 +2160,22 @@ impl LegacyObservationJournal {
             source.source(),
             self.plan.machine_projection(),
         )?;
+        // A redundant phi edge carries no read: the edge's value is the phi's
+        // own, so nothing about it is an operand of a surviving operation. A
+        // certificate that answered the same cell was answering for an operand
+        // that is not there, and the two do not disagree about the disposition
+        // -- both say the cell renders nothing. Normalization owns it, because
+        // its claim is about the SSA form rather than about what an operation
+        // does with an operand it no longer has.
         for site in origins.noop_sites() {
-            match elided_uses.insert(site, r2ssa::ledger::ElisionReason::RedundantPhiEdge) {
-                Some(r2ssa::ledger::ElisionReason::RedundantPhiEdge) | None => {}
-                Some(existing) => {
-                    if std::env::var_os("R2DEC_TRACE_REFUSAL").is_some() {
-                        eprintln!(
-                            "conflicting use {site:?}: certificate reason {existing:?}, normalization reason RedundantPhiEdge"
-                        );
-                    }
-                    return Err(conflicting_use(site));
-                }
+            if let Some(existing) =
+                elided_uses.insert(site, r2ssa::ledger::ElisionReason::RedundantPhiEdge)
+                && existing != r2ssa::ledger::ElisionReason::RedundantPhiEdge
+            {
+                r2il::refusal_evidence!(
+                    "redundant-phi-edge-subsumes",
+                    "{site:?} was answered {existing:?} by a certificate; the edge carries no read"
+                );
             }
         }
         let coalesced_carrier_uses = self

@@ -2079,14 +2079,12 @@ impl SourceFunctionInterface {
                 .frame_pointer_storage_is_valid(storage)
                 .then_some(storage);
         }
-        if !self.stack_slot_roles_complete
-            || self
-                .stack_slots
-                .iter()
-                .any(|slot| slot.role == SourceStackSlotRole::UnclassifiedResource)
-        {
-            return None;
-        }
+        // Derived from the bases, not from the roles. Every frame-pointer
+        // slot names the same carrier or this refuses, and a slot whose role
+        // the analysis could not attribute still names its base -- so one
+        // unclassified local used to hide the frame pointer, and with it every
+        // stack root, every frame object a call takes the address of, and
+        // every escape those addresses stand for.
         let mut frame_slots = self
             .stack_slots
             .iter()

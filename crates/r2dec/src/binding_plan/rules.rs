@@ -382,6 +382,27 @@ fn distinct_reader_count(use_sites: &[r2ssa::UseSite], boundary_readers: &[InstI
             .count()
 }
 
+/// The frame objects whose address leaves this function as a call argument.
+///
+/// An out-parameter is the case: the callee writes through the pointer, so the
+/// object is defined by a statement this function does not contain. Reading it
+/// afterwards is ordinary C and needs no assignment here.
+pub(super) fn frame_objects_with_escaped_address(
+    source: &r2ssa::SsaArtifact,
+) -> BTreeSet<r2ssa::ObjectId> {
+    let mut escaped = BTreeSet::new();
+    for certificate in source.certificates().callsites.values() {
+        for (index, value) in certificate.argument_values.iter().copied().enumerate() {
+            if let Some(object) =
+                super::certified_frame_object_call_argument(source, certificate.at, index, value)
+            {
+                escaped.insert(object);
+            }
+        }
+    }
+    escaped
+}
+
 fn certified_value_readers(source: &r2ssa::SsaArtifact) -> BTreeMap<ValueId, Vec<InstId>> {
     let mut readers = BTreeMap::<ValueId, Vec<InstId>>::new();
     for inst in &source.graph().insts {

@@ -4071,6 +4071,134 @@ impl SSAFunction {
                 }
             }
         }
+        self.propagate_stack_roots(&mut facts, entry_stack_address_size, control)?;
+        // A stack pointer carried around a loop cannot be rooted by a meet: the
+        // phi wants every source rooted, and the back edge derives from the phi,
+        // so neither ever starts. Assume the back edge agrees with the sources
+        // that are rooted, propagate, and keep the assumption only if the back
+        // edge comes back agreeing. An unbalanced loop body disagrees by its own
+        // drift and is rejected, which is the same answer the meet gave -- but
+        // only for the loops that really drift.
+        let mut rejected = BTreeSet::new();
+        loop {
+            control.poll()?;
+            let proven = facts.clone();
+            let speculated = self.speculate_loop_carried_stack_roots(&mut facts, &rejected);
+            if speculated.is_empty() {
+                break;
+            }
+            self.propagate_stack_roots(&mut facts, entry_stack_address_size, control)?;
+            let failed = self.unverified_stack_root_speculations(&facts, &speculated);
+            if failed.is_empty() {
+                break;
+            }
+            facts = proven;
+            rejected.extend(failed);
+        }
+
+        control.poll()?;
+        Ok(facts)
+    }
+
+    /// Root the phis whose rooted sources agree, assuming the rest will.
+    ///
+    /// Returns what was assumed, so a second propagation can judge it. Only a
+    /// phi with at least one rooted source and no disagreement among the rooted
+    /// ones is a candidate: with nothing known there is nothing to assume.
+    fn speculate_loop_carried_stack_roots(
+        &self,
+        facts: &mut DecompilePrepFacts,
+        rejected: &BTreeSet<SSAVar>,
+    ) -> Vec<(SSAVar, StackAddressRoot, bool)> {
+        let mut speculated = Vec::new();
+        for &addr in &self.block_order {
+            let Some(block) = self.get_block(addr) else {
+                continue;
+            };
+            for phi in &block.phis {
+                if rejected.contains(&phi.dst) {
+                    continue;
+                }
+                for entry in [false, true] {
+                    let roots = if entry {
+                        &facts.entry_stack_address_roots
+                    } else {
+                        &facts.stack_address_roots
+                    };
+                    if roots.contains_key(&phi.dst) {
+                        continue;
+                    }
+                    let known = phi
+                        .sources
+                        .iter()
+                        .filter_map(|(_, source)| {
+                            resolve_stack_root(source, &facts.canonical_value_roots, roots)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    let [root] = known.into_iter().collect::<Vec<_>>()[..] else {
+                        continue;
+                    };
+                    speculated.push((phi.dst.clone(), root, entry));
+                }
+            }
+        }
+        for (dst, root, entry) in &speculated {
+            let roots = if *entry {
+                &mut facts.entry_stack_address_roots
+            } else {
+                &mut facts.stack_address_roots
+            };
+            insert_stack_root(roots, dst.clone(), *root);
+        }
+        speculated
+    }
+
+    /// The assumptions a second propagation did not bear out.
+    ///
+    /// A speculation holds when every source of the phi is now rooted and every
+    /// one of them agrees with what was assumed.
+    fn unverified_stack_root_speculations(
+        &self,
+        facts: &DecompilePrepFacts,
+        speculated: &[(SSAVar, StackAddressRoot, bool)],
+    ) -> Vec<SSAVar> {
+        let mut failed = Vec::new();
+        for &addr in &self.block_order {
+            let Some(block) = self.get_block(addr) else {
+                continue;
+            };
+            for phi in &block.phis {
+                for (dst, root, entry) in speculated {
+                    if *dst != phi.dst {
+                        continue;
+                    }
+                    let roots = if *entry {
+                        &facts.entry_stack_address_roots
+                    } else {
+                        &facts.stack_address_roots
+                    };
+                    if common_stack_root(&phi.sources, &facts.canonical_value_roots, roots)
+                        != Some(*root)
+                    {
+                        failed.push(phi.dst.clone());
+                    }
+                }
+            }
+        }
+        failed
+    }
+
+    /// Propagate stack-address roots to a fixpoint.
+    ///
+    /// Separated so it can be re-run: a stack pointer carried around a loop
+    /// is rooted only after a speculation, and the speculation is judged by
+    /// what a second run of this makes of it.
+    fn propagate_stack_roots<C: SsaWorkControl + ?Sized>(
+        &self,
+        facts: &mut DecompilePrepFacts,
+        entry_stack_address_size: Option<u32>,
+        control: &C,
+    ) -> Result<(), SsaExecutionStopReason> {
         let mut changed = true;
         while changed {
             control.poll()?;
@@ -4257,9 +4385,7 @@ impl SSAFunction {
                 }
             }
         }
-
-        control.poll()?;
-        Ok(facts)
+        Ok(())
     }
 
     /// Get the switch-selector SSA value that drives a switch block, if recoverable.

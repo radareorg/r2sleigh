@@ -3942,8 +3942,79 @@ fn call_entering_stack_pointer_offset(
         r2il::refusal_evidence!(
             "call-entering-stack-pointer",
             "call at ({:#x}, {call_op_index}) found {entering}, which has no entry-relative root; \
-             the function has {} entry-relative and {} declared-base roots",
+             it is defined by {:?}; the function has {} entry-relative and {} declared-base roots",
             block.addr,
+            {
+                let defs = function
+                    .blocks()
+                    .flat_map(|block| {
+                        block
+                            .phis
+                            .iter()
+                            .map(|phi| {
+                                (
+                                    phi.dst.clone(),
+                                    format!(
+                                        "Phi{:?}",
+                                        phi.sources
+                                            .iter()
+                                            .map(|(_, source)| source.to_string())
+                                            .collect::<Vec<_>>()
+                                    ),
+                                    phi.sources
+                                        .iter()
+                                        .map(|(_, source)| source.clone())
+                                        .collect::<Vec<_>>(),
+                                )
+                            })
+                            .chain(block.ops.iter().filter_map(|op| {
+                                op.dst().map(|dst| {
+                                    (
+                                        dst.clone(),
+                                        format!("{op}"),
+                                        op.sources().into_iter().cloned().collect::<Vec<_>>(),
+                                    )
+                                })
+                            }))
+                    })
+                    .collect::<Vec<_>>();
+                let mut chain = Vec::new();
+                let mut cursor = Some(entering.clone());
+                while let Some(var) = cursor.take() {
+                    let rooted =
+                        resolve_entry_stack_root(function.decompile_prep_facts(), &var).is_some();
+                    let Some((_, text, sources)) = defs.iter().find(|(dst, _, _)| *dst == var)
+                    else {
+                        chain.push(format!("{var}=<no def> rooted={rooted}"));
+                        break;
+                    };
+                    let source_roots = sources
+                        .iter()
+                        .filter(|source| source.name == var.name)
+                        .map(|source| {
+                            format!(
+                                "{source}:{:?}",
+                                resolve_entry_stack_root(function.decompile_prep_facts(), source)
+                                    .map(|root| root.offset)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    chain.push(format!("{text} rooted={rooted} sources={source_roots:?}"));
+                    if rooted || chain.len() > 12 {
+                        break;
+                    }
+                    cursor = sources
+                        .iter()
+                        .find(|source| {
+                            source.name == var.name
+                                && resolve_entry_stack_root(function.decompile_prep_facts(), source)
+                                    .is_none()
+                        })
+                        .or_else(|| sources.iter().find(|source| source.name == var.name))
+                        .cloned();
+                }
+                chain
+            },
             function
                 .decompile_prep_facts()
                 .map_or(0, |facts| facts.entry_stack_address_roots.len()),

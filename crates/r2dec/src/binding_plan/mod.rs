@@ -1303,6 +1303,15 @@ pub(crate) struct BindingPlan {
     /// Derived once here from the graph and the boundary certificates, so no
     /// consumer re-derives "supplied from outside this function" for itself.
     call_clobbers: BTreeSet<ValueId>,
+    /// The frame objects whose address this function hands to a call.
+    ///
+    /// Whatever the callee does through that pointer is a write this function
+    /// has no statement for, so such an object is written from outside exactly
+    /// as an entry value is. Derived once here from the callsite certificates,
+    /// so it does not depend on how the address is spelled: an argument passed
+    /// on the stack is bound to a temporary rather than inlined, and the escape
+    /// is the same fact either way.
+    escaped_frame_objects: BTreeSet<r2ssa::ObjectId>,
     /// The C type at every boundary of the projection, under these
     /// dispositions and declarations.
     ///
@@ -1482,6 +1491,15 @@ impl BindingPlan {
                     r2types::CTypeLike::Array(_, Some(_))
                 )
             })
+        {
+            return Some(true);
+        }
+        // An object whose address this function passed to a call is written
+        // through that pointer, by a statement this function does not contain.
+        // `unsigned int n; f(&n); use(n);` is ordinary C, and demanding an
+        // assignment here asks for one the program left to the callee.
+        if let BindingRole::StackObject { object } = role
+            && self.escaped_frame_objects.contains(&object)
         {
             return Some(true);
         }
