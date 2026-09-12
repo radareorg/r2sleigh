@@ -1375,6 +1375,9 @@ pub struct StackSlotCertificate {
     /// source slot: compiler-created spills and temporaries are real machine
     /// objects without becoming source variables.
     pub callee_allocation: Option<CalleeStackAllocationCertificate>,
+    /// The slot is storage read at more than one width: `size` is the extent
+    /// its accesses reach and it declares as bytes, not as a scalar.
+    pub byte_array: bool,
 }
 
 /// Upstream decision for declaring one indexed stack object as an array.
@@ -6700,11 +6703,14 @@ fn collect_stack_geometry_certificate(
 /// and every one carries complete provenance. A disagreement in width means the
 /// object is read as more than one thing, which is not a geometry this can
 /// state.
-fn accessed_object_width(
+/// The storage an object's own accesses describe: one width, or, when they
+/// disagree, the extent they reach, which declares as a byte array. Reuse of
+/// a slot and slices of one variable both render through the byte spelling.
+fn accessed_object_storage(
     graph: &SsaGraph,
     structured: &StructuredDataflowFacts,
     object: ObjectId,
-) -> Option<u32> {
+) -> Option<(u32, bool)> {
     let mut width = None;
     let mut seen = 0usize;
     for access in structured.memory_accesses.values() {
@@ -6748,7 +6754,7 @@ fn accessed_object_width(
                     "object={object:?} widths disagree: {existing} and {}; accesses={filed:?}",
                     access.width
                 );
-                return None;
+                return accessed_object_extent(structured, object).map(|extent| (extent, true));
             }
         }
     }
@@ -6772,7 +6778,21 @@ fn accessed_object_width(
             "object={object:?} has no accesses; all accesses={filed:?}"
         );
     }
-    width
+    width.map(|width| (width, false))
+}
+
+/// The extent an object's accesses reach, when every one lands at a known
+/// non-negative offset inside it; the containment proof is the offsets.
+fn accessed_object_extent(structured: &StructuredDataflowFacts, object: ObjectId) -> Option<u32> {
+    let mut extent = 0u32;
+    for access in structured.memory_accesses.values() {
+        if access.object != object {
+            continue;
+        }
+        let offset = u32::try_from(access.object_offset?).ok()?;
+        extent = extent.max(offset.checked_add(access.width)?);
+    }
+    (extent > 0).then_some(extent)
 }
 
 /// Exact unsigned byte bound carried by one index computation.
@@ -7586,49 +7606,62 @@ fn collect_prepared_function_certificates(
                 space: SpaceId::Ram,
                 base,
                 offset,
-            } => Some((
-                *object,
-                StackSlotCertificate {
-                    object: *object,
-                    space: SpaceId::Ram,
-                    base,
-                    offset,
-                    // Failing both, the object's own accesses say how wide it
-                    // is. Every access reaching it at one width, with complete
-                    // provenance, is a fact about the program rather than an
-                    // opinion about it -- and radare2 has no opinion to offer
-                    // for most of these: it reports no stack variables at all
-                    // for `murmur3_32`, which has fourteen of them.
-                    //
-                    size: stack_array_layouts
-                        .get(object)
-                        .and_then(|layout| match layout {
-                            StackArrayLayoutDisposition::Proven(layout) => {
-                                u32::try_from(layout.extent).ok()
-                            }
-                            StackArrayLayoutDisposition::NotIndexed
-                            | StackArrayLayoutDisposition::Refused(_) => None,
-                        })
-                        .or_else(|| {
-                            exact_stack_slots
-                                .get(&(base, offset))
-                                .map(SourceStackSlotSpec::size_bytes)
-                        })
-                        .or_else(|| {
-                            callee_stack_allocations
-                                .get(object)
-                                .map(|certificate| certificate.size_bytes)
-                        })
-                        .or_else(|| accessed_object_width(graph, structured, *object)),
-                    array_layout: stack_array_layouts
-                        .get(object)
-                        .cloned()
-                        .unwrap_or(StackArrayLayoutDisposition::NotIndexed),
-                    source_slot: exact_stack_slots.get(&(base, offset)).copied(),
-                    reload_values: BTreeSet::new(),
-                    callee_allocation: callee_stack_allocations.get(object).cloned(),
-                },
-            )),
+            } => {
+                let declared = matches!(
+                    stack_array_layouts.get(object),
+                    Some(StackArrayLayoutDisposition::Proven(_))
+                ) || exact_stack_slots.contains_key(&(base, offset))
+                    || callee_stack_allocations.contains_key(object);
+                let storage = if declared {
+                    None
+                } else {
+                    accessed_object_storage(graph, structured, *object)
+                };
+                Some((
+                    *object,
+                    StackSlotCertificate {
+                        object: *object,
+                        space: SpaceId::Ram,
+                        base,
+                        offset,
+                        byte_array: storage.is_some_and(|(_, bytes)| bytes),
+                        // Failing both, the object's own accesses say how wide it
+                        // is. Every access reaching it at one width, with complete
+                        // provenance, is a fact about the program rather than an
+                        // opinion about it -- and radare2 has no opinion to offer
+                        // for most of these: it reports no stack variables at all
+                        // for `murmur3_32`, which has fourteen of them.
+                        //
+                        size: stack_array_layouts
+                            .get(object)
+                            .and_then(|layout| match layout {
+                                StackArrayLayoutDisposition::Proven(layout) => {
+                                    u32::try_from(layout.extent).ok()
+                                }
+                                StackArrayLayoutDisposition::NotIndexed
+                                | StackArrayLayoutDisposition::Refused(_) => None,
+                            })
+                            .or_else(|| {
+                                exact_stack_slots
+                                    .get(&(base, offset))
+                                    .map(SourceStackSlotSpec::size_bytes)
+                            })
+                            .or_else(|| {
+                                callee_stack_allocations
+                                    .get(object)
+                                    .map(|certificate| certificate.size_bytes)
+                            })
+                            .or_else(|| storage.map(|(bytes, _)| bytes)),
+                        array_layout: stack_array_layouts
+                            .get(object)
+                            .cloned()
+                            .unwrap_or(StackArrayLayoutDisposition::NotIndexed),
+                        source_slot: exact_stack_slots.get(&(base, offset)).copied(),
+                        reload_values: BTreeSet::new(),
+                        callee_allocation: callee_stack_allocations.get(object).cloned(),
+                    },
+                ))
+            }
             ObjectKind::StackSlot { .. }
             | ObjectKind::FrameObject { .. }
             | ObjectKind::Global { .. }

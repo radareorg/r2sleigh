@@ -23,6 +23,9 @@ pub(crate) enum AccessSyntax {
     SlotName { binding: BindingId },
     /// A declared member of the slot at the access's offset.
     SlotMember { binding: BindingId, field: Box<str> },
+    /// Bytes of the slot at an offset, at the access's own width: a slot read
+    /// at several widths, or narrower than it is declared, or inside it.
+    SlotBytes { binding: BindingId, offset: i64 },
     /// An element of an array a parameter points at, optionally a member of it.
     ParamArray {
         base: ValueId,
@@ -41,6 +44,7 @@ impl AccessSyntax {
         match self {
             Self::SlotName { .. } => "slot-name",
             Self::SlotMember { .. } => "slot-member",
+            Self::SlotBytes { .. } => "slot-bytes",
             Self::ParamArray { .. } => "param-array",
             Self::Subscript { .. } => "subscript",
             Self::Address { .. } => "address",
@@ -56,6 +60,7 @@ pub(super) struct AccessSyntaxInputs<'a> {
     pub dispositions: &'a [ValueDisposition],
     pub stack_objects: &'a BTreeMap<ObjectId, StackObjectDisposition>,
     pub bindings: &'a [Binding],
+    pub ptr_bits: u32,
 }
 
 /// Every RAM access the render facts know, with its spelling. An access the
@@ -110,11 +115,28 @@ fn syntax_for(
     }
     if fact.width > 0
         && !indexed
-        && fact.object_offset.is_none_or(|offset| offset == 0)
         && declared
         && let Some(binding) = bound
     {
-        return Some(AccessSyntax::SlotName { binding });
+        // The name stands for the whole slot: only an access at its base, as
+        // wide as it is declared, and not of an array, which would decay.
+        let declared_type = inputs
+            .bindings
+            .get(binding.index())
+            .map(|binding| binding.declaration_type());
+        let whole = fact.object_offset.is_none_or(|offset| offset == 0)
+            && declared_type.is_none_or(|ty| {
+                !matches!(ty, r2types::CTypeLike::Array(..))
+                    && ty
+                        .bits(inputs.ptr_bits)
+                        .is_none_or(|bits| bits == fact.width * 8)
+            });
+        if whole {
+            return Some(AccessSyntax::SlotName { binding });
+        }
+        if let Some(offset) = fact.object_offset.filter(|offset| *offset >= 0) {
+            return Some(AccessSyntax::SlotBytes { binding, offset });
+        }
     }
     Some(AccessSyntax::Address {
         address: fact.address,

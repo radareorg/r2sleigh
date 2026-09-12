@@ -776,6 +776,9 @@ impl<'a> FoldingContext<'a> {
         if let Some(expr) = self.certified_stack_owner_expr_for_memory_fact(fact) {
             return ("slot-name", Some(PendingMemoryAccessExpr::Planned(expr)));
         }
+        if let Some(expr) = self.certified_slot_bytes_expr_for_memory_fact(fact, &elem_ty) {
+            return ("slot-bytes", Some(PendingMemoryAccessExpr::Planned(expr)));
+        }
         (
             "address",
             self.render_certified_memory_address_access(fact, elem_ty),
@@ -905,7 +908,65 @@ impl<'a> FoldingContext<'a> {
         {
             return declined("the object has no declared stack slot");
         }
-        self.certified_stack_var_expr_for_object(fact.object)
+        let owner = self.certified_stack_var_expr_for_object(fact.object)?;
+        // The name stands for the whole slot: an array's would decay to its
+        // address, and a narrower access would read the first bytes as all.
+        let declared = self
+            .declared_type_of_name(&owner)
+            .and_then(|declared| declared.as_type().cloned());
+        match declared {
+            Some(CType::Array(..)) => declined("the slot is an array"),
+            Some(ty)
+                if ty
+                    .bits(self.pointer_bits())
+                    .is_some_and(|bits| bits != fact.width * 8) =>
+            {
+                declined("the access is not as wide as the slot")
+            }
+            _ => Some(owner),
+        }
+    }
+
+    /// Bytes of the slot at the access's offset and width: `*(T *)((uint8_t *)&slot + n)`.
+    fn certified_slot_bytes_expr_for_memory_fact(
+        &self,
+        fact: &r2types::MemoryAccessRenderFact,
+        elem_ty: &CType,
+    ) -> Option<CExpr> {
+        let offset = fact.object_offset.filter(|offset| *offset >= 0)?;
+        if fact.width == 0
+            || self
+                .prepared_ssa()
+                .is_some_and(|prepared| prepared.objects().address_is_indexed(fact.address))
+            || self
+                .inputs
+                .render_facts()
+                .and_then(|facts| facts.stack_slot_offset(fact.object))
+                .is_none()
+        {
+            return None;
+        }
+        let owner = self.certified_stack_var_expr_for_object(fact.object)?;
+        let is_array = matches!(
+            self.declared_type_of_name(&owner)
+                .and_then(|declared| declared.as_type().cloned()),
+            Some(CType::Array(..))
+        );
+        let base = if is_array {
+            owner
+        } else {
+            CExpr::addr_of(owner)
+        };
+        let bytes = CExpr::cast(CType::ptr(CType::uint(8)), base);
+        let address = if offset == 0 {
+            bytes
+        } else {
+            CExpr::binary(BinaryOp::Add, bytes, CExpr::IntLit(offset))
+        };
+        Some(CExpr::Deref(Box::new(CExpr::cast(
+            CType::ptr(elem_ty.clone()),
+            address,
+        ))))
     }
 }
 

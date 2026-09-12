@@ -582,6 +582,19 @@ pub(super) fn declaration_type_for_stack_object(
 ) -> r2types::CTypeLike {
     let machine = r2types::CTypeLike::machine_bits(width_bits);
     let source = source_owned.source();
+    // Storage read at more than one width is bytes, not a scalar: each access
+    // spells itself through the slot's address at its own width.
+    if source
+        .certificates()
+        .stack_slots
+        .get(&object)
+        .is_some_and(|certificate| certificate.byte_array)
+    {
+        return r2types::CTypeLike::Array(
+            Box::new(r2types::CTypeLike::uint(8)),
+            Some((width_bits / 8) as usize),
+        );
+    }
     // The slot's declared type, when the source interface carries it as a
     // node of its type graph, is exact and outranks every recovered hint: it
     // is what the program declared, at the width the storage has.

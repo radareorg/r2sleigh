@@ -1231,6 +1231,10 @@ impl BindingPlan {
                     dispositions: &dispositions,
                     stack_objects: &stack_objects,
                     bindings: &bindings,
+                    ptr_bits: source
+                        .machine_context()
+                        .memory_model()
+                        .default_address_bits(),
                 })
             })
             .unwrap_or_default();
