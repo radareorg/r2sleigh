@@ -113,14 +113,23 @@ learn.
 
      Measured the same way, at the end of the night's work:
 
-         BZ2_decompress,    30,281 instructions   291.9 MB -> 195.7 MB   10,109 -> 6,776 bytes per instruction
-         BZ2_compressBlock, 49,710 instructions   417.4 MB -> 310.7 MB    8,805 -> 6,553
-         radare2 -c 'a:sla; aaa; pd:s @@F' on bzip2 -O2   24.4 s, 696 MB -> 15.2 s, 660 MB
+         BZ2_decompress,    30,281 instructions   291.9 MB -> 180.5 MB   10,109 -> 6,251 bytes per instruction
+         BZ2_compressBlock, 49,710 instructions   417.4 MB -> 283.6 MB    8,805 -> 5,982
+         radare2 -c 'a:sla; aaa; pd:s @@F' on bzip2 -O2   24.4 s, 696 MB -> 15.0 s, 564 MB
 
      The gate is 54/54 on every axis at every commit and the census is 777 of
      787 functions rendered, which is where it was.
 
      What the last stretch removed, beyond the duplicates in item -7: the
+     variable itself, from fifty-six bytes to forty, by boxing its name and
+     putting a constant's bits beside a flag instead of inside an `Option`,
+     which narrows every operation from 240 bytes to 176 and every graph
+     instruction from 312 to 248 (9.6 MB); the term arena's map from every term
+     to its identifier, which held the term a second time and is now an
+     open-addressed table of identifiers compared against the arena (3.6 MB);
+     a recovered signature's parameter list and a call's site, which set the
+     width of every type and every expression node in a rendered function
+     (2 MB); the
      lifted p-code the control-flow graph kept a copy of, which is the whole
      body again and was held for as long as the function was (14 MB); the
      obligation inventory's two ordered maps over a forty-byte identity, now
