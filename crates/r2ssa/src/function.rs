@@ -2277,10 +2277,18 @@ pub struct SSAFunction {
     query_index: RwLock<Option<SsaQueryIndex>>,
 }
 
+/// Where every variable is defined and read, without saying so twice.
+///
+/// The function already holds each variable once, at the site that names it,
+/// so an index keyed by an owned copy of the variable pays for a second name
+/// per definition and a third per use. These are the sites alone, ordered by
+/// the variable they mention, and a query binary-searches them and reads the
+/// variable back out of the block. One name, one owner, and the answers and
+/// their order are the ones the owned index gave.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SsaQueryIndex {
-    defs: HashMap<SSAVar, (u64, DefLocation)>,
-    uses: HashMap<SSAVar, Vec<(u64, UseLocation)>>,
+    defs: Vec<(u32, DefLocation)>,
+    uses: Vec<(u32, UseLocation)>,
 }
 
 /// One block of a reverse-postorder vector, by address.
@@ -3829,7 +3837,7 @@ impl SSAFunction {
             .read()
             .expect("SSA query index lock poisoned")
             .as_ref()
-            .and_then(|index| index.defs.get(var).copied())
+            .and_then(|index| index.find_def(&self.blocks, var))
     }
 
     /// Find all uses of a variable.
@@ -3841,7 +3849,7 @@ impl SSAFunction {
             .read()
             .expect("SSA query index lock poisoned")
             .as_ref()
-            .and_then(|index| index.uses.get(var).cloned())
+            .map(|index| index.find_uses(&self.blocks, var))
             .unwrap_or_default()
     }
 
@@ -5777,7 +5785,7 @@ fn insert_stack_root(
 }
 
 /// Location of a variable definition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DefLocation {
     /// Defined by a phi node at the given index.
     Phi(usize),
@@ -5786,7 +5794,7 @@ pub enum DefLocation {
 }
 
 /// Location of a variable use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UseLocation {
     /// Used in a phi node.
     Phi { phi_idx: usize, src_idx: usize },
@@ -5794,34 +5802,91 @@ pub enum UseLocation {
     Op { op_idx: usize, src_idx: usize },
 }
 
+/// The variable a definition site names, read back out of the blocks.
+fn defined_var<'a>(blocks: &'a [SSABlock], site: &(u32, DefLocation)) -> Option<&'a SSAVar> {
+    let block = blocks.get(site.0 as usize)?;
+    match site.1 {
+        DefLocation::Phi(phi_idx) => block.phis.get(phi_idx).map(|phi| &phi.dst),
+        DefLocation::Op(op_idx) => block.ops.get(op_idx)?.dst(),
+    }
+}
+
+/// The variable a use site reads, read back out of the blocks.
+fn used_var<'a>(blocks: &'a [SSABlock], site: &(u32, UseLocation)) -> Option<&'a SSAVar> {
+    let block = blocks.get(site.0 as usize)?;
+    match site.1 {
+        UseLocation::Phi { phi_idx, src_idx } => block
+            .phis
+            .get(phi_idx)?
+            .sources
+            .get(src_idx)
+            .map(|(_, src)| src),
+        UseLocation::Op { op_idx, src_idx } => {
+            block.ops.get(op_idx)?.sources().get(src_idx).copied()
+        }
+    }
+}
+
 impl SsaQueryIndex {
     fn build(function: &SSAFunction) -> Self {
-        let mut defs = HashMap::new();
-        let mut uses: HashMap<SSAVar, Vec<(u64, UseLocation)>> = HashMap::new();
-
-        for block in function.blocks() {
+        let blocks = function.blocks();
+        let mut defs = Vec::new();
+        let mut uses = Vec::new();
+        for (index, block) in blocks.iter().enumerate() {
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
             for (phi_idx, phi) in block.phis.iter().enumerate() {
-                defs.insert(phi.dst.clone(), (block.addr, DefLocation::Phi(phi_idx)));
-                for (src_idx, (_, src)) in phi.sources.iter().enumerate() {
-                    uses.entry(src.clone())
-                        .or_default()
-                        .push((block.addr, UseLocation::Phi { phi_idx, src_idx }));
+                defs.push((index, DefLocation::Phi(phi_idx)));
+                for src_idx in 0..phi.sources.len() {
+                    uses.push((index, UseLocation::Phi { phi_idx, src_idx }));
                 }
             }
-
             for (op_idx, op) in block.ops.iter().enumerate() {
-                if let Some(dst) = op.dst() {
-                    defs.insert(dst.clone(), (block.addr, DefLocation::Op(op_idx)));
+                if op.dst().is_some() {
+                    defs.push((index, DefLocation::Op(op_idx)));
                 }
-                for (src_idx, src) in op.sources().into_iter().enumerate() {
-                    uses.entry(src.clone())
-                        .or_default()
-                        .push((block.addr, UseLocation::Op { op_idx, src_idx }));
+                for src_idx in 0..op.sources().len() {
+                    uses.push((index, UseLocation::Op { op_idx, src_idx }));
                 }
             }
         }
-
+        // Ordered by the variable and then by the site, so a query's range is
+        // contiguous and the sites inside it arrive in the order a walk of the
+        // blocks would have produced.
+        defs.sort_by(|left, right| {
+            defined_var(blocks, left)
+                .cmp(&defined_var(blocks, right))
+                .then_with(|| left.cmp(right))
+        });
+        uses.sort_by(|left, right| {
+            used_var(blocks, left)
+                .cmp(&used_var(blocks, right))
+                .then_with(|| left.cmp(right))
+        });
         Self { defs, uses }
+    }
+
+    /// The last site defining `var`, which is the one an insert-ordered map
+    /// kept when a malformed function defines a variable twice.
+    fn find_def(&self, blocks: &[SSABlock], var: &SSAVar) -> Option<(u64, DefLocation)> {
+        let start = self
+            .defs
+            .partition_point(|site| defined_var(blocks, site) < Some(var));
+        let site = self.defs[start..]
+            .iter()
+            .take_while(|site| defined_var(blocks, site) == Some(var))
+            .last()?;
+        Some((blocks.get(site.0 as usize)?.addr, site.1))
+    }
+
+    fn find_uses(&self, blocks: &[SSABlock], var: &SSAVar) -> Vec<(u64, UseLocation)> {
+        let start = self
+            .uses
+            .partition_point(|site| used_var(blocks, site) < Some(var));
+        self.uses[start..]
+            .iter()
+            .take_while(|site| used_var(blocks, site) == Some(var))
+            .filter_map(|site| Some((blocks.get(site.0 as usize)?.addr, site.1)))
+            .collect()
     }
 }
 
