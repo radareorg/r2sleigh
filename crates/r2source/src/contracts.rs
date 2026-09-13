@@ -2482,7 +2482,9 @@ impl SourceCallSiteInterface {
     /// The two are not required to share a revision: a capture set is
     /// consistent by construction, every body in it current by the analysis
     /// epochs when the root was read, and a body kept across roots carries
-    /// the revision of its own capture.
+    /// the revision of its own capture. A variadic call matches on its fixed
+    /// prefix: the callee's interface names only that, and the tail is the
+    /// call site's own.
     pub fn with_exact_callee_interface(
         mut self,
         callee: SourceFunctionInterface,
@@ -2492,7 +2494,6 @@ impl SourceCallSiteInterface {
             SourceFunctionReturn::Register { storage } => SourceCallResult::Register { storage },
         };
         let carriers_match = self.complete
-            && !self.variadic
             && !self.noreturn
             && self.abi_class == callee.abi_class()
             && self.result == expected_result

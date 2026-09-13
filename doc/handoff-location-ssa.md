@@ -139,12 +139,18 @@ learn.
        DWARF-stated `void` from radare2's defaulted one, and `live_out` counts a
        trailing call's RAX as a return, so sealing it for roots today would type
        every void function that ends in a call.
-     * **Variadic callees never get a C signature**, by three agreeing sites:
-       `with_exact_callee_interface` refuses `self.variadic`, r2dec's
-       `calls.rs` refuses `signature.variadic`, and `apply_source_owned_callee_signatures`
-       already sets `logical_signature.variadic = arguments.variadic` as if the
-       first two allowed it. Relaxing all three to "the fixed prefix matches" is
-       one model statement and would type printf-family arguments.
+     * **Variadic callees keep their fixed-prefix C signature now**: the exact
+       callee binding matches on the prefix and the renderer accepts a variadic
+       signature when the call site is variadic, so printf-family arguments are
+       typed (`fprintf(stack_m32, RSI_4, ...)` without casts). One function paid:
+       minigzip -O2 `file_uncompress` (`fcn_2cb0`) refuses `RenderedValueRequired`
+       on the entry stack pointer, the same shape as bzip2 -O2
+       `generateMTFValues` (`fcn_88a0`): the plan binds the stack-pointer chain
+       (`RSP_n = RSP_{n-1} - k`) as a variable when a push's `sub` has no
+       `StackFrame` answer, and the seal then demands the entry `RSP`. That is
+       the address-family question the ADR reserves for the binding plan
+       (`DeadStackBase`), traced in `scratchpad/rvr-88a0.err` and `rvr-2cb0.err`.
+       Census 775 of 787 with it, 776 without.
      * **radare2 declares `snprintf_chk`/`sprintf_chk` without `...`**
        (`libr/anal/d/types.sdb.txt`); upstream PR 26731, cherry-picked onto the
        fork's integration branch. Until merged upstream, any tree built from

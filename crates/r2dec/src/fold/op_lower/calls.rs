@@ -147,7 +147,9 @@ impl<'a> FoldingContext<'a> {
             args.values.len()
         };
         let (ret_type, params, variadic) = if let Some(signature) = &cert.callee_signature {
-            if signature.variadic || signature.params.len() != named {
+            // The signature names the fixed prefix; whether a tail follows is
+            // the call site's fact, and the two have to agree.
+            if signature.variadic != cert.variadic || signature.params.len() != named {
                 r2il::refusal_evidence!(
                     "callee-signature-arity",
                     "callsite=({block_addr:#x}, {op_idx}) target={:?} certified_arguments={} named={named} signature_params={} fixed_argument_count={:?} call_variadic={} signature_variadic={} argument_locations={:?}",
