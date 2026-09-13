@@ -4815,35 +4815,36 @@ impl SSAFunction {
                 }
                 for op in &block.ops {
                     control.poll()?;
+                    // Each operand's root is resolved once for the questions
+                    // below. Asking the helpers to resolve it themselves cost a
+                    // walk of the root map and a copy of a variable's name per
+                    // question, and a sum asks six.
                     match op {
                         SSAOp::Copy { dst, src }
                         | SSAOp::Cast { dst, src }
                         | SSAOp::CallRestore { dst, src } => {
-                            let src_root = resolve_value_root(src, &facts.canonical_value_roots);
+                            let src_root = canonical_root_in(&facts.canonical_value_roots, src);
+                            let stack = stack_root_of(src, src_root, &facts.stack_address_roots);
+                            let entry_stack = entry_stack_address_size
+                                .is_some_and(|size| dst.size == size && src.size == size)
+                                .then(|| {
+                                    stack_root_of(src, src_root, &facts.entry_stack_address_roots)
+                                })
+                                .flatten();
+                            let src_root = src_root.clone();
                             changed |= insert_canonical_root(
                                 &mut facts.canonical_value_roots,
                                 dst.clone(),
-                                src_root.clone(),
+                                src_root,
                             );
-                            if let Some(stack_root) = resolve_stack_root(
-                                src,
-                                &facts.canonical_value_roots,
-                                &facts.stack_address_roots,
-                            ) {
+                            if let Some(stack_root) = stack {
                                 changed |= insert_stack_root(
                                     &mut facts.stack_address_roots,
                                     dst.clone(),
                                     stack_root,
                                 );
                             }
-                            if entry_stack_address_size
-                                .is_some_and(|size| dst.size == size && src.size == size)
-                                && let Some(stack_root) = resolve_stack_root(
-                                    src,
-                                    &facts.canonical_value_roots,
-                                    &facts.entry_stack_address_roots,
-                                )
-                            {
+                            if let Some(stack_root) = entry_stack {
                                 changed |= insert_stack_root(
                                     &mut facts.entry_stack_address_roots,
                                     dst.clone(),
@@ -4852,8 +4853,8 @@ impl SSAFunction {
                             }
                         }
                         SSAOp::Trunc { dst, src } | SSAOp::Subpiece { dst, src, .. } => {
-                            let src_root = resolve_value_root(src, &facts.canonical_value_roots);
-                            let adapted = adapt_root_width(&src_root, dst.size)
+                            let src_root = canonical_root_in(&facts.canonical_value_roots, src);
+                            let adapted = adapt_root_width(src_root, dst.size)
                                 .unwrap_or_else(|| src_root.clone());
                             changed |= insert_canonical_root(
                                 &mut facts.canonical_value_roots,
@@ -4862,44 +4863,59 @@ impl SSAFunction {
                             );
                         }
                         SSAOp::IntAdd { dst, a, b } => {
+                            let a_root = canonical_root_in(&facts.canonical_value_roots, a);
+                            let b_root = canonical_root_in(&facts.canonical_value_roots, b);
                             // An exact root is preferred; this records the
                             // object an address is inside when the offset
                             // within it is computed rather than stated.
-                            if !facts.stack_address_roots.contains_key(dst)
-                                && let Some(root) = indexed_stack_address_root_from_add(
-                                    a,
-                                    b,
-                                    &facts.canonical_value_roots,
-                                    &facts.stack_address_roots,
-                                    &facts.indexed_stack_address_roots,
-                                )
-                            {
+                            let indexed = (!facts.stack_address_roots.contains_key(dst))
+                                .then(|| {
+                                    indexed_stack_address_root_from_add(
+                                        a,
+                                        a_root,
+                                        b,
+                                        b_root,
+                                        &facts.stack_address_roots,
+                                        &facts.indexed_stack_address_roots,
+                                    )
+                                })
+                                .flatten();
+                            let exact = stack_address_root_from_add(
+                                a,
+                                a_root,
+                                b,
+                                b_root,
+                                &facts.stack_address_roots,
+                            );
+                            let entry = entry_stack_address_size
+                                .is_some_and(|size| {
+                                    dst.size == size && a.size == size && b.size == size
+                                })
+                                .then(|| {
+                                    stack_address_root_from_add(
+                                        a,
+                                        a_root,
+                                        b,
+                                        b_root,
+                                        &facts.entry_stack_address_roots,
+                                    )
+                                })
+                                .flatten();
+                            if let Some(root) = indexed {
                                 changed |= insert_stack_root(
                                     &mut facts.indexed_stack_address_roots,
                                     dst.clone(),
                                     root,
                                 );
                             }
-                            if let Some(root) = stack_address_root_from_add(
-                                a,
-                                b,
-                                &facts.canonical_value_roots,
-                                &facts.stack_address_roots,
-                            ) {
+                            if let Some(root) = exact {
                                 changed |= insert_stack_root(
                                     &mut facts.stack_address_roots,
                                     dst.clone(),
                                     root,
                                 );
                             }
-                            if entry_stack_address_size.is_some_and(|size| {
-                                dst.size == size && a.size == size && b.size == size
-                            }) && let Some(root) = stack_address_root_from_add(
-                                a,
-                                b,
-                                &facts.canonical_value_roots,
-                                &facts.entry_stack_address_roots,
-                            ) {
+                            if let Some(root) = entry {
                                 changed |= insert_stack_root(
                                     &mut facts.entry_stack_address_roots,
                                     dst.clone(),
@@ -4908,40 +4924,56 @@ impl SSAFunction {
                             }
                         }
                         SSAOp::IntSub { dst, a, b } => {
-                            if let Some(root) = stack_address_root_from_sub(
+                            let a_root = canonical_root_in(&facts.canonical_value_roots, a);
+                            let b_root = canonical_root_in(&facts.canonical_value_roots, b);
+                            let exact = stack_address_root_from_sub(
                                 a,
+                                a_root,
                                 b,
-                                &facts.canonical_value_roots,
+                                b_root,
                                 &facts.stack_address_roots,
-                            ) {
+                            );
+                            let indexed = (!facts.stack_address_roots.contains_key(dst)
+                                && exact.is_none())
+                            .then(|| {
+                                indexed_stack_address_root_from_sub(
+                                    a,
+                                    a_root,
+                                    b,
+                                    b_root,
+                                    &facts.indexed_stack_address_roots,
+                                )
+                            })
+                            .flatten();
+                            let entry = entry_stack_address_size
+                                .is_some_and(|size| {
+                                    dst.size == size && a.size == size && b.size == size
+                                })
+                                .then(|| {
+                                    stack_address_root_from_sub(
+                                        a,
+                                        a_root,
+                                        b,
+                                        b_root,
+                                        &facts.entry_stack_address_roots,
+                                    )
+                                })
+                                .flatten();
+                            if let Some(root) = exact {
                                 changed |= insert_stack_root(
                                     &mut facts.stack_address_roots,
                                     dst.clone(),
                                     root,
                                 );
                             }
-                            if !facts.stack_address_roots.contains_key(dst)
-                                && let Some(root) = indexed_stack_address_root_from_sub(
-                                    a,
-                                    b,
-                                    &facts.canonical_value_roots,
-                                    &facts.indexed_stack_address_roots,
-                                )
-                            {
+                            if let Some(root) = indexed {
                                 changed |= insert_stack_root(
                                     &mut facts.indexed_stack_address_roots,
                                     dst.clone(),
                                     root,
                                 );
                             }
-                            if entry_stack_address_size.is_some_and(|size| {
-                                dst.size == size && a.size == size && b.size == size
-                            }) && let Some(root) = stack_address_root_from_sub(
-                                a,
-                                b,
-                                &facts.canonical_value_roots,
-                                &facts.entry_stack_address_roots,
-                            ) {
+                            if let Some(root) = entry {
                                 changed |= insert_stack_root(
                                     &mut facts.entry_stack_address_roots,
                                     dst.clone(),
@@ -5650,10 +5682,6 @@ fn common_stack_root_of(
         .then_some(first)
 }
 
-fn resolve_value_root(var: &SSAVar, roots: &HashMap<SSAVar, SSAVar>) -> SSAVar {
-    canonicalize_value_root(var, roots)
-}
-
 fn resolve_stack_root(
     var: &SSAVar,
     roots: &HashMap<SSAVar, SSAVar>,
@@ -5685,33 +5713,43 @@ fn common_stack_root(
     }
 }
 
-fn stack_root_from_operand(
+/// The stack root a variable names, given the root it already resolved to.
+fn stack_root_of(
     var: &SSAVar,
-    roots: &HashMap<SSAVar, SSAVar>,
+    root: &SSAVar,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
-    resolve_stack_root(var, roots, stack_roots)
+    stack_roots
+        .get(var)
+        .copied()
+        .or_else(|| stack_roots.get(root).copied())
+}
+
+/// The displacement a variable adds, given the root it already resolved to.
+fn signed_stack_delta_of(var: &SSAVar, root: &SSAVar) -> Option<i64> {
+    signed_stack_delta(var).or_else(|| (root != var).then(|| signed_stack_delta(root)).flatten())
 }
 
 fn stack_address_root_from_add(
     a: &SSAVar,
+    a_root: &SSAVar,
     b: &SSAVar,
-    roots: &HashMap<SSAVar, SSAVar>,
+    b_root: &SSAVar,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
     // One side at a time: an operand with no stack root is the ordinary case,
-    // and asking for the other side's displacement first cost a root walk for
-    // every sum in the function.
-    if let Some(base) = stack_root_from_operand(a, roots, stack_roots)
-        && let Some(delta) = signed_stack_delta_through_roots(b, roots)
+    // and asking for the other side's displacement first cost work for every
+    // sum in the function.
+    if let Some(base) = stack_root_of(a, a_root, stack_roots)
+        && let Some(delta) = signed_stack_delta_of(b, b_root)
     {
         return Some(StackAddressRoot {
             base: base.base,
             offset: base.offset.checked_add(delta)?,
         });
     }
-    if let Some(base) = stack_root_from_operand(b, roots, stack_roots)
-        && let Some(delta) = signed_stack_delta_through_roots(a, roots)
+    if let Some(base) = stack_root_of(b, b_root, stack_roots)
+        && let Some(delta) = signed_stack_delta_of(a, a_root)
     {
         return Some(StackAddressRoot {
             base: base.base,
@@ -5731,25 +5769,25 @@ fn stack_address_root_from_add(
 /// left to `stack_address_root_from_add`, whose answer is stronger.
 fn indexed_stack_address_root_from_add(
     a: &SSAVar,
+    a_root: &SSAVar,
     b: &SSAVar,
-    roots: &HashMap<SSAVar, SSAVar>,
+    b_root: &SSAVar,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
     indexed_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
-    let base_of = |var: &SSAVar| {
-        stack_root_from_operand(var, roots, stack_roots)
-            .or_else(|| stack_root_from_operand(var, roots, indexed_roots))
+    let base_of = |var: &SSAVar, root: &SSAVar| {
+        stack_root_of(var, root, stack_roots).or_else(|| stack_root_of(var, root, indexed_roots))
     };
-    let index_is_opaque = |var: &SSAVar| {
-        signed_stack_delta_through_roots(var, roots).is_none() && base_of(var).is_none()
+    let index_is_opaque = |var: &SSAVar, root: &SSAVar| {
+        signed_stack_delta_of(var, root).is_none() && base_of(var, root).is_none()
     };
-    if let Some(base) = base_of(a)
-        && index_is_opaque(b)
+    if let Some(base) = base_of(a, a_root)
+        && index_is_opaque(b, b_root)
     {
         return Some(base);
     }
-    if let Some(base) = base_of(b)
-        && index_is_opaque(a)
+    if let Some(base) = base_of(b, b_root)
+        && index_is_opaque(a, a_root)
     {
         return Some(base);
     }
@@ -5764,24 +5802,24 @@ fn indexed_stack_address_root_from_add(
 /// and an exact base less an opaque amount points below the object.
 fn indexed_stack_address_root_from_sub(
     a: &SSAVar,
+    a_root: &SSAVar,
     b: &SSAVar,
-    roots: &HashMap<SSAVar, SSAVar>,
+    b_root: &SSAVar,
     indexed_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
-    let base = stack_root_from_operand(a, roots, indexed_roots)?;
-    signed_stack_delta_through_roots(b, roots)
-        .is_some()
-        .then_some(base)
+    let base = stack_root_of(a, a_root, indexed_roots)?;
+    signed_stack_delta_of(b, b_root).is_some().then_some(base)
 }
 
 fn stack_address_root_from_sub(
     a: &SSAVar,
+    a_root: &SSAVar,
     b: &SSAVar,
-    roots: &HashMap<SSAVar, SSAVar>,
+    b_root: &SSAVar,
     stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
 ) -> Option<StackAddressRoot> {
-    let base = stack_root_from_operand(a, roots, stack_roots)?;
-    let delta = signed_stack_delta_through_roots(b, roots)?;
+    let base = stack_root_of(a, a_root, stack_roots)?;
+    let delta = signed_stack_delta_of(b, b_root)?;
     Some(StackAddressRoot {
         base: base.base,
         offset: base.offset.checked_sub(delta)?,
@@ -5796,14 +5834,6 @@ fn stack_address_root_from_sub(
 /// left every frame pointer established that way without a stack root, and with
 /// it every address derived from the frame pointer -- which is most of a
 /// non-leaf function's locals.
-fn signed_stack_delta_through_roots(var: &SSAVar, roots: &HashMap<SSAVar, SSAVar>) -> Option<i64> {
-    if let Some(delta) = signed_stack_delta(var) {
-        return Some(delta);
-    }
-    let root = canonical_root_in(roots, var);
-    (root != var).then(|| signed_stack_delta(root)).flatten()
-}
-
 fn signed_stack_delta(var: &SSAVar) -> Option<i64> {
     let value = var.constant_bits()?;
     let bits = var.size.checked_mul(8)?;
@@ -6307,14 +6337,26 @@ mod tests {
         );
         let mut roots = HashMap::new();
         assert_eq!(
-            stack_address_root_from_add(&sp, &displacement, &roots, &stack_roots,),
+            stack_address_root_from_add(
+                &sp,
+                canonical_root_in(&roots, &sp),
+                &displacement,
+                canonical_root_in(&roots, &displacement),
+                &stack_roots,
+            ),
             None,
             "with nothing linking the temp to the constant there is no delta to add"
         );
 
         roots.insert(displacement.clone(), literal);
         assert_eq!(
-            stack_address_root_from_add(&sp, &displacement, &roots, &stack_roots,),
+            stack_address_root_from_add(
+                &sp,
+                canonical_root_in(&roots, &sp),
+                &displacement,
+                canonical_root_in(&roots, &displacement),
+                &stack_roots,
+            ),
             Some(StackAddressRoot {
                 base: StackAddressBase::StackPointer,
                 offset: -0x10,
