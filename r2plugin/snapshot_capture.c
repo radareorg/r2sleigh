@@ -667,7 +667,15 @@ static RAnalFcnSlot *fcn_context_collect_slot(const SlotDwarfRecords *records, R
 				bits = r_anal_type_bitsize (anal, rest + strlen ("signed "));
 			}
 		}
+		// C adjusts a parameter declared as an array to a pointer, so an
+		// argument spelled `va_list` -- `__va_list_tag[1]` -- occupies a
+		// pointer, not the array it names.
+		const bool decays = slot->arg_index >= 0 && strchr (spelled, '[');
 		ut64 total_bits;
+		if (decays) {
+			bits = anal->config? (ut64)anal->config->bits: 0;
+			count = 1;
+		}
 		if (bits && count && !r_mul_overflow (bits, count, &total_bits)
 			&& !(total_bits % 8) && total_bits / 8 <= UT32_MAX) {
 			slot->size = (ut32)(total_bits / 8);
@@ -676,8 +684,8 @@ static RAnalFcnSlot *fcn_context_collect_slot(const SlotDwarfRecords *records, R
 			element? element: spelled);
 		free (element);
 		free (resolved);
-		type_is_aggregate = count > 1
-			|| kind == R_TYPE_STRUCT || kind == R_TYPE_UNION;
+		type_is_aggregate = !decays
+			&& (count > 1 || kind == R_TYPE_STRUCT || kind == R_TYPE_UNION);
 	}
 	// An aggregate's extent exceeds any single access, so it stands; a scalar's
 	// tightest sound claim is the narrower of its type and its accesses.

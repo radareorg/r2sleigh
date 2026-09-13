@@ -159,15 +159,26 @@ learn.
      Resolving the typedef before splitting the array extent takes
      dpkg-divert -O0 from 21 refusals to 19.
 
-     What is left in that binary: 11 variadic `missing_format_parameter`, 5
-     `PlannedElidedValueRendered`, 2 `calls.rs:291`, 1 `memory_renderer.rs:116`.
-     All six of the stack-address ones are still
-     `ParameterHomeWidthMismatch`, and they are now the *other* half of the
-     cause: `apply_parameter_declarations` admits a declared type only where
-     its width equals the binding's, and an `int` parameter in a 64-bit
-     register never does. The parameter's width should come from its declared
-     type where the home slot's width agrees with it, which is the same
-     construction-and-seal twin the project uses elsewhere.
+     The other half of the cause is in the plan, and it is fixed too. A
+     parameter's width came from its register carrier, which is eight bytes
+     because registers are; `int flags` in `esi` is four, so its four-byte home
+     never matched and the object was refused. `parameter_candidates` now takes
+     the declared type's width when the parameter's home slot in the frame
+     states the same number, and the carrier otherwise. Two independent
+     statements agreeing is the project's construction-and-seal twin, and it is
+     what keeps this from trusting either source alone.
+
+     One case needed a language rule rather than a measurement. C adjusts a
+     parameter declared as an array to a pointer, so `va_list va`, which is
+     `__va_list_tag[1]`, occupies a pointer and not the array it names; without
+     that, measuring the typedef's extent gave zlib's `gzvprintf` a 24-byte
+     home for an 8-byte parameter and cost the function.
+
+     dpkg-divert -O0 ends at 14 refusals from 64, and 641 of its 659 functions
+     carry a control certificate, up from 607. The 13-binary corpus is
+     unchanged at 777 of 787 and the gate is 54/54. What is left in dpkg: 11
+     variadic `missing_format_parameter`, 2 `calls.rs:291`, 1
+     `PlannedElidedValueRendered`.
      What is left in the capture: 346 "interface incomplete" refusals, which
      are imports with no signature and are not a defect.
 
