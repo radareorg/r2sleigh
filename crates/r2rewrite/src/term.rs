@@ -323,7 +323,13 @@ pub struct PointerWalk {
 #[derive(Debug, Clone, Default)]
 pub struct TermArena {
     nodes: Vec<Term>,
-    interned: HashMap<Term, TermId>,
+    /// Where each interned term sits in `nodes`, by hash.
+    ///
+    /// A map from the term to its identifier held the term a second time --
+    /// fifty-six bytes on every node of every function's arena, on top of the
+    /// node itself. The table holds identifiers and compares against `nodes`,
+    /// which is where the term already is.
+    interned: TermIndex,
     /// What a leaf stands for: the term of the instruction that defines the
     /// value the leaf reads, when that instruction is modelled. A rule may
     /// match through it -- in SSA a value is its definition -- without the
@@ -344,6 +350,66 @@ pub struct TermArena {
     walks: HashMap<TermId, PointerWalk>,
 }
 
+/// An open-addressed table of term identifiers, compared against the arena.
+#[derive(Debug, Clone, Default)]
+struct TermIndex {
+    /// One more than the identifier, so zero is an empty slot.
+    slots: Vec<u32>,
+    occupied: usize,
+}
+
+impl TermIndex {
+    fn hash_of(term: &Term) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        term.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn find(&self, term: &Term, nodes: &[Term]) -> Option<TermId> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut at = Self::hash_of(term) as usize & mask;
+        loop {
+            match self.slots[at] {
+                0 => return None,
+                slot if nodes[(slot - 1) as usize] == *term => return Some(TermId(slot - 1)),
+                _ => at = (at + 1) & mask,
+            }
+        }
+    }
+
+    fn insert(&mut self, id: TermId, nodes: &[Term]) {
+        // Half full at most, so a probe is short and the table never fills.
+        if (self.occupied + 1) * 2 > self.slots.len() {
+            self.grow(nodes);
+        }
+        self.place(id, nodes);
+        self.occupied += 1;
+    }
+
+    fn place(&mut self, id: TermId, nodes: &[Term]) {
+        let mask = self.slots.len() - 1;
+        let mut at = Self::hash_of(&nodes[id.index()]) as usize & mask;
+        while self.slots[at] != 0 {
+            at = (at + 1) & mask;
+        }
+        self.slots[at] = id.0 + 1;
+    }
+
+    fn grow(&mut self, nodes: &[Term]) {
+        let previous = std::mem::take(&mut self.slots);
+        self.slots = vec![0u32; (previous.len() * 2).max(64)];
+        for slot in previous {
+            if slot != 0 {
+                self.place(TermId(slot - 1), nodes);
+            }
+        }
+    }
+}
+
 impl TermArena {
     pub fn new() -> Self {
         Self::default()
@@ -351,12 +417,12 @@ impl TermArena {
 
     pub fn intern(&mut self, ty: MachineType, kind: TermKind) -> TermId {
         let term = Term { ty, kind };
-        if let Some(id) = self.interned.get(&term) {
-            return *id;
+        if let Some(id) = self.interned.find(&term, &self.nodes) {
+            return id;
         }
         let id = TermId(self.nodes.len() as u32);
         self.nodes.push(term);
-        self.interned.insert(term, id);
+        self.interned.insert(id, &self.nodes);
         id
     }
 
