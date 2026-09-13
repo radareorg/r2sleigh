@@ -5168,7 +5168,7 @@ pub(crate) fn source_type_like(
         // an empty parameter list, which in C is an unspecified one.
         r2ssa::SourceTypeKind::Code => CTypeLike::Function {
             ret: Box::new(CTypeLike::Void),
-            params: Vec::new(),
+            params: Box::new([]),
         },
     };
     visiting.remove(&type_id);

@@ -1742,7 +1742,7 @@ impl<'a> FoldingContext<'a> {
         Ok(CExpr::cast(
             CType::Function {
                 ret: Box::new(ret_type),
-                params,
+                params: params.into_boxed_slice(),
             },
             func_expr,
         ))

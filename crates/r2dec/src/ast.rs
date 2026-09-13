@@ -112,7 +112,11 @@ pub enum CExpr {
     Call {
         func: Box<CExpr>,
         args: Vec<CExpr>,
-        site: Option<(u64, usize)>,
+        /// Boxed: the site is present on a minority of calls and a call is a
+        /// minority of expressions, but an inline `Option<(u64, usize)>` is
+        /// twenty-four bytes and so set the width of every expression node in
+        /// a rendered function.
+        site: Option<Box<(u64, usize)>>,
     },
     /// Array/pointer subscript: `arr[index]`.
     Subscript { base: Box<CExpr>, index: Box<CExpr> },
@@ -429,7 +433,7 @@ impl CExpr {
         Self::Call {
             func: Box::new(func),
             args,
-            site: Some(site),
+            site: Some(Box::new(site)),
         }
     }
 

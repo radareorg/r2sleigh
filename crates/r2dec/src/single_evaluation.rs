@@ -36,7 +36,7 @@ fn source_of(expr: &CExpr) -> Option<CallSite> {
     match expr.unobserved() {
         CExpr::Call {
             site: Some(site), ..
-        } => Some(*site),
+        } => Some(**site),
         _ => None,
     }
 }
@@ -206,7 +206,7 @@ mod tests {
         CExpr::Call {
             func: Box::new(CExpr::Var(crate::symbol::declare(symbols, name))),
             args: vec![CExpr::IntLit(16)],
-            site: Some(site),
+            site: Some(Box::new(site)),
         }
     }
 

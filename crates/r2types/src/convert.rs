@@ -29,7 +29,11 @@ pub enum CTypeLike {
     /// and every trip through here erased them.
     Function {
         ret: Box<CTypeLike>,
-        params: Vec<CTypeLike>,
+        /// A boxed slice rather than a growable list: nothing appends to a
+        /// recovered signature after it is made, and the capacity word made
+        /// every type in the tree eight bytes wider -- a type sits inside
+        /// every cast and every declaration a rendering emits.
+        params: Box<[CTypeLike]>,
     },
     Unknown,
 }
@@ -354,7 +358,7 @@ fn parse_normalized(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
         // signature it was written with is not recovered from the text.
         return Some(CTypeLike::Function {
             ret: Box::new(CTypeLike::Unknown),
-            params: Vec::new(),
+            params: Box::new([]),
         });
     }
 
@@ -535,7 +539,7 @@ mod tests {
             CTypeLike::Unknown,
             CTypeLike::Function {
                 ret: Box::new(CTypeLike::Unknown),
-                params: Vec::new(),
+                params: Box::new([]),
             },
         ];
         for bits in [8u32, 16, 32, 64, 128] {
