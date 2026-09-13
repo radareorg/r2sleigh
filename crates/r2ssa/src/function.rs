@@ -4760,38 +4760,50 @@ impl SSAFunction {
 
                 for phi in &block.phis {
                     control.poll()?;
+                    // Resolve each source's root once. The three questions
+                    // below all read it, and asking each of them separately
+                    // walked the root map three times per incoming edge and
+                    // copied a variable's name on every walk.
                     let source_roots = phi
                         .sources
                         .iter()
-                        .map(|(_, src)| resolve_value_root(src, &facts.canonical_value_roots))
+                        .map(|(_, src)| canonical_root_in(&facts.canonical_value_roots, src))
                         .collect::<Vec<_>>();
-                    if let Some(root) = common_root(&source_roots) {
+                    let common = common_root_of(&source_roots).cloned();
+                    let stack_root = common_stack_root_of(
+                        &phi.sources,
+                        &source_roots,
+                        &facts.stack_address_roots,
+                    );
+                    let entry_stack_root = entry_stack_address_size
+                        .is_some_and(|size| {
+                            phi.dst.size == size
+                                && phi.sources.iter().all(|(_, source)| source.size == size)
+                        })
+                        .then(|| {
+                            common_stack_root_of(
+                                &phi.sources,
+                                &source_roots,
+                                &facts.entry_stack_address_roots,
+                            )
+                        })
+                        .flatten();
+                    drop(source_roots);
+                    if let Some(root) = common {
                         changed |= insert_canonical_root(
                             &mut facts.canonical_value_roots,
                             phi.dst.clone(),
                             root,
                         );
                     }
-
-                    if let Some(root) = common_stack_root(
-                        &phi.sources,
-                        &facts.canonical_value_roots,
-                        &facts.stack_address_roots,
-                    ) {
+                    if let Some(root) = stack_root {
                         changed |= insert_stack_root(
                             &mut facts.stack_address_roots,
                             phi.dst.clone(),
                             root,
                         );
                     }
-                    if entry_stack_address_size.is_some_and(|size| {
-                        phi.dst.size == size
-                            && phi.sources.iter().all(|(_, source)| source.size == size)
-                    }) && let Some(root) = common_stack_root(
-                        &phi.sources,
-                        &facts.canonical_value_roots,
-                        &facts.entry_stack_address_roots,
-                    ) {
+                    if let Some(root) = entry_stack_root {
                         changed |= insert_stack_root(
                             &mut facts.entry_stack_address_roots,
                             phi.dst.clone(),
@@ -5611,13 +5623,29 @@ fn insert_canonical_root(roots: &mut HashMap<SSAVar, SSAVar>, dst: SSAVar, root:
     changed
 }
 
-fn common_root(values: &[SSAVar]) -> Option<SSAVar> {
-    let first = values.first()?.clone();
-    if values.iter().all(|value| *value == first) {
-        Some(first)
-    } else {
-        None
-    }
+/// The one root every incoming edge already resolved to, if they agree.
+fn common_root_of<'a>(roots: &[&'a SSAVar]) -> Option<&'a SSAVar> {
+    let first = *roots.first()?;
+    roots.iter().all(|root| *root == first).then_some(first)
+}
+
+/// The one stack root every incoming edge names, given their resolved roots.
+fn common_stack_root_of(
+    sources: &[(u64, SSAVar)],
+    resolved: &[&SSAVar],
+    stack_roots: &BTreeMap<SSAVar, StackAddressRoot>,
+) -> Option<StackAddressRoot> {
+    let of = |index: usize| {
+        let (_, source) = sources.get(index)?;
+        stack_roots
+            .get(source)
+            .copied()
+            .or_else(|| stack_roots.get(*resolved.get(index)?).copied())
+    };
+    let first = of(0)?;
+    (1..sources.len())
+        .all(|index| of(index) == Some(first))
+        .then_some(first)
 }
 
 fn resolve_value_root(var: &SSAVar, roots: &HashMap<SSAVar, SSAVar>) -> SSAVar {
