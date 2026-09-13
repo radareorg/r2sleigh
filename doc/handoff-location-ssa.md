@@ -117,6 +117,26 @@ learn.
          peak 291.9 MB, 10,109 bytes per instruction   before
          peak 225.7 MB,  7,815 bytes per instruction   after
 
+     Measured the same way on the binary's largest function, and on the whole
+     binary as a user runs it:
+
+         BZ2_compressBlock, 49,710 instructions
+             peak 417.4 MB, 8,805 bytes per instruction   before
+             peak 343.9 MB, 7,254 bytes per instruction   after
+
+         radare2 -c 'a:sla; aaa; pd:s @@F' on bzip2 -O2, peak resident
+             696 MB   before
+             644 MB   after
+
+     The resident figure moves less than the live figure, and the reason is
+     worth keeping: `aaa` alone is 86 MB and one render of the largest function
+     takes the process to 602 MB, against 361 MB of live Rust at its peak. The
+     rest is what the allocator holds above what is live. So resident memory is
+     set by the single largest function -- rendering the other 113 adds 42 MB --
+     and cutting live bytes cuts it, but with a fragmentation tax on top that
+     roughly a third of the reduction disappears into. Nothing accumulates
+     across functions: live bytes return to 2-7 MB between renders.
+
      What was removed, largest first.
 
      *The lifted p-code, 14.0 MB.* `TrustedSsaArtifact` retained the blocks its
