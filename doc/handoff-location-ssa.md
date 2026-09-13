@@ -109,6 +109,45 @@ learn.
 
 ### Open, each scoped by measurement
 
+  -9. **Where the arc ended, and what the next one has to be.**
+
+     Measured the same way, at the end of the night's work:
+
+         BZ2_decompress,    30,281 instructions   291.9 MB -> 195.7 MB   10,109 -> 6,776 bytes per instruction
+         BZ2_compressBlock, 49,710 instructions   417.4 MB -> 310.7 MB    8,805 -> 6,553
+         radare2 -c 'a:sla; aaa; pd:s @@F' on bzip2 -O2   24.4 s, 696 MB -> 15.2 s, 660 MB
+
+     The gate is 54/54 on every axis at every commit and the census is 777 of
+     787 functions rendered, which is where it was.
+
+     What the last stretch removed, beyond the duplicates in item -7: the
+     lifted p-code the control-flow graph kept a copy of, which is the whole
+     body again and was held for as long as the function was (14 MB); the
+     obligation inventory's two ordered maps over a forty-byte identity, now
+     dense over the instruction (5.5 MB); the graph's use index and variable
+     index, now runs over the values they index rather than a vector and a
+     name per value (4 MB); what a term discharges, a sorted run rather than
+     an ordered set node per value (2 MB); and the fact report copied into its
+     own enrichment.
+
+     **The next arc is `SSAVar`, and the measurements now agree from three
+     directions.** In bytes: the operation type is 240 bytes because it holds
+     up to four variables inline at 56 each, so the function's operations, the
+     graph's copy of them and normalization's copy are together about fifteen
+     megabytes of variable. In time: a profile of the whole command puts about
+     a quarter of it in comparing and hashing variables, because identity is
+     the name and the name lives behind a pointer. In churn: a function with
+     30,281 instructions holds a hundred thousand heap strings that are
+     duplicates of three thousand distinct names.
+
+     The design the plan already states is the answer: a variable is a dense
+     index into the function that owns it, its storage is the identity, and the
+     name is a rendering of the storage. Two cheaper versions were tried and
+     measured on the way here and both are recorded above as failures. What is
+     done towards it: the name is behind an accessor and cannot be set after
+     construction, so the identity cannot drift from what is derived from it,
+     and `canonical_value_roots` no longer needs an ordered key.
+
   -8. **What the whole command costs, and the three quadratics inside it.**
      With the bytes named, the same instrument was pointed at the clock. One
      command, `radare2 -c 'a:sla; aaa; pd:s @@F'` on bzip2 -O2, 114 functions:
