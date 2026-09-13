@@ -3423,9 +3423,14 @@ impl Decompiler {
         let structure_observation_error = fold_ctx.observation_error.borrow().clone();
         let structure_labels: std::collections::HashMap<u64, String>;
         let structure_rewrites: String;
+        let mut declined_rewrites = std::collections::BTreeSet::new();
         let routed_body = loop {
-            let mut structurer =
-                ControlFlowStructurer::new_with_control(func, &fold_ctx, structuring_work)?;
+            let mut structurer = ControlFlowStructurer::new_with_control(
+                func,
+                &fold_ctx,
+                structuring_work,
+                declined_rewrites.clone(),
+            )?;
             match consumer_structured::primary_native_body(&mut structurer) {
                 Ok(body) => {
                     if let Some(stop) = structurer.execution_stop() {
@@ -3434,6 +3439,20 @@ impl Decompiler {
                     structure_labels = structurer.labels().clone();
                     structure_rewrites = structurer.rewrite_report();
                     break body;
+                }
+                // A rewrite stage that loses the certificate declines the
+                // whole writing rather than returning a copy of the tree it
+                // was handed. Two stages, each declinable once, so the loop
+                // ends for the same reason the gap loop does: every retry
+                // takes one name out of a finite set.
+                Err(structure::ControlFlowStructureError::RewriteDeclined(stage)) => {
+                    declined_rewrites.insert(stage);
+                    observation_journal
+                        .borrow_mut()
+                        .rollback(structure_checkpoint);
+                    *fold_ctx.observation_error.borrow_mut() = structure_observation_error.clone();
+                    fold_ctx.folded_blocks.borrow_mut().clear();
+                    continue;
                 }
                 Err(structure::ControlFlowStructureError::Lowering(refusal)) => {
                     if fold_ctx.plan_gap_for_escaped_refusal(refusal) {

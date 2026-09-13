@@ -25,6 +25,10 @@ use crate::structured_region::{
 pub(crate) enum ControlFlowStructureError {
     Lowering(OpLoweringRefusal),
     StructuredRegion(StructuredRegionBuildError),
+    /// One rewrite stage lost the certificate it was given, or an observed
+    /// occurrence with it. The caller rolls the journal back and writes the
+    /// function again with that stage declined.
+    RewriteDeclined(&'static str),
 }
 
 impl From<OpLoweringRefusal> for ControlFlowStructureError {
@@ -57,6 +61,18 @@ pub(crate) struct ControlFlowStructurer<'a, 'o> {
     label_counter: usize,
     control: Option<DecompileWorkControl<'a>>,
     stop_reason: Cell<Option<DecompileExecutionStop>>,
+    /// Rewrite stages a previous attempt declined, which this one skips.
+    ///
+    /// A stage used to be gated by writing the tree twice: the rewrite ran on
+    /// a copy and the copy was thrown away when it did not certify. That copy
+    /// is the whole function body, held beside the body at exactly the point
+    /// of a render's high-water mark, on every render, against a fallback that
+    /// no corpus binary reaches. The tree is now rewritten in place and a
+    /// stage that fails the gate declines the whole writing instead, which the
+    /// caller repeats from a rolled-back journal with the stage skipped. The
+    /// guarantee is the one it always was -- a rewrite that loses the
+    /// certificate is not applied -- and the cost moved to the path that fails.
+    declined_rewrites: BTreeSet<&'static str>,
     /// Counted loops whose initializer and update move into the `for` header.
     certified_for_regions: BTreeMap<u64, CertifiedForRegion>,
     certified_for_header_sites: BTreeSet<crate::normalize::NormalizedOpSite>,
@@ -83,6 +99,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             label_counter: 0,
             control: None,
             stop_reason: Cell::new(None),
+            declined_rewrites: BTreeSet::new(),
             certified_for_regions: BTreeMap::new(),
             certified_for_header_sites: BTreeSet::new(),
             rewrite_outcomes: Vec::new(),
@@ -94,6 +111,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         func: &'a r2ssa::RewrittenFunction<'a>,
         fold_ctx: &'o FoldingContext<'o>,
         control: DecompileWorkControl<'a>,
+        declined_rewrites: BTreeSet<&'static str>,
     ) -> Result<Self, DecompileExecutionStop> {
         control.poll()?;
         Ok(Self {
@@ -103,6 +121,7 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
             label_counter: 0,
             control: Some(control),
             stop_reason: Cell::new(None),
+            declined_rewrites,
             certified_for_regions: BTreeMap::new(),
             certified_for_header_sites: BTreeSet::new(),
             rewrite_outcomes: Vec::new(),
@@ -174,11 +193,12 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
         // observed occurrence, or it is not applied.
         let placed = self.certificate(&stmt);
         let fold_ctx = self.fold_ctx;
-        let shaped = self.rewrite_stage("shape", &placed, stmt, |tree| Self::shape(fold_ctx, tree));
+        let shaped =
+            self.rewrite_stage("shape", &placed, stmt, |tree| Self::shape(fold_ctx, tree))?;
         let symbols = std::rc::Rc::clone(&self.fold_ctx.symbols);
         let stmt = self.rewrite_stage("cleanup", &placed, shaped, |tree| {
             Self::cleanup(&symbols, tree)
-        });
+        })?;
         crate::stage_timing::mark("structure_cleanup");
         let sealed =
             seal_structured_body(stmt, source_authority).map_err(ControlFlowStructureError::from);
@@ -188,49 +208,49 @@ impl<'a, 'o> ControlFlowStructurer<'a, 'o> {
 
     /// One rewrite stage under the gate: the result must certify at least as
     /// well as the placed tree and keep every observed occurrence.
+    ///
+    /// The tree is handed to the rewrite rather than copied for it, so a stage
+    /// that fails the gate has nothing to return to. It declines the writing
+    /// instead: the caller rolls the observation journal back and writes the
+    /// function again with this stage skipped, which is what the gate always
+    /// meant and no longer costs a second body on every render.
     fn rewrite_stage(
         &mut self,
-        name: &str,
+        name: &'static str,
         placed: &certify::ControlCertificate,
         before: CStmt,
         rewrite: impl FnOnce(CStmt) -> CStmt,
-    ) -> CStmt {
-        let after = rewrite(before.clone());
+    ) -> ControlFlowStructureResult<CStmt> {
+        if self.declined_rewrites.contains(name) {
+            self.rewrite_outcomes.push(format!("{name}:declined"));
+            return Ok(before);
+        }
+        let observed = crate::ast::stmt_render_observation_ids(&before);
+        let tracing = r2il::refusal_evidence::tracing();
+        let before_digest = tracing.then(|| Self::tree_digest(&before));
+        let after = rewrite(before);
         let certificate = self.certificate(&after);
         let kept: BTreeSet<_> = crate::ast::stmt_render_observation_ids(&after)
             .into_iter()
             .collect();
-        let lost: Vec<_> = crate::ast::stmt_render_observation_ids(&before)
-            .into_iter()
-            .filter(|id| !kept.contains(id))
-            .collect();
+        let lost = observed.iter().filter(|id| !kept.contains(id)).count();
         let certified = certificate.ok() || !placed.ok();
-        if r2il::refusal_evidence::tracing() {
+        if let Some(before_digest) = before_digest {
             r2il::refusal_evidence!(
                 "control-shape",
-                "{name}: {certificate}; lost observations {}; before: {}; after: {}",
-                lost.len(),
-                Self::tree_digest(&before),
+                "{name}: {certificate}; lost observations {lost}; before: {before_digest}; after: {}",
                 Self::tree_digest(&after)
             );
         }
-        if certified && lost.is_empty() {
+        if certified && lost == 0 {
             self.rewrite_outcomes.push(format!("{name}:applied"));
-            after
-        } else {
-            let why = if !certified {
-                "certificate"
-            } else {
-                "observations"
-            };
-            self.rewrite_outcomes.push(format!("{name}:{why}"));
-            r2il::refusal_evidence!(
-                "control-rewrite",
-                "{name} not applied: certificate {certificate}; {} observations lost",
-                lost.len()
-            );
-            before
+            return Ok(after);
         }
+        r2il::refusal_evidence!(
+            "control-rewrite",
+            "{name} not applied: certificate {certificate}; {lost} observations lost"
+        );
+        Err(ControlFlowStructureError::RewriteDeclined(name))
     }
 
     /// A one-line sketch of a tree for the trace: control statements and
