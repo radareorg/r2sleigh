@@ -348,9 +348,19 @@ pub struct ObligationInventoryFailure {
 pub struct SemanticObligationInventory {
     schema_version: u32,
     source_instruction_count: usize,
-    instructions: BTreeMap<CanonicalInstructionId, SemanticInstructionDisposition>,
+    /// What every graph instruction owes, indexed by the instruction.
+    ///
+    /// This was an ordered map from the canonical identity, which is forty
+    /// bytes and stored a second time inside each disposition. Every graph
+    /// instruction has an entry and the identity is `by_inst`'s answer, so the
+    /// dense vector holds the same table without the keys or the tree.
+    instructions: Vec<Option<SemanticInstructionDisposition>>,
+    /// The dispositions of native instruction spans the translator emitted no
+    /// canonical operation for. They have no graph instruction to be indexed
+    /// by, and there are none in an ordinary function.
+    span_instructions: BTreeMap<CanonicalInstructionId, SemanticInstructionDisposition>,
     obligations: BTreeMap<SemanticObligationId, SemanticObligation>,
-    by_inst: BTreeMap<InstId, CanonicalInstructionId>,
+    by_inst: Vec<Option<CanonicalInstructionId>>,
     native_spans: BTreeMap<CanonicalInstructionId, crate::GenuineNativeInstructionSpan>,
     construction_failures: Vec<ObligationInventoryFailure>,
     unstructured_cycle_blocks: BTreeSet<u64>,
@@ -369,9 +379,10 @@ impl SemanticObligationInventory {
         Self {
             schema_version: SEMANTIC_OBLIGATION_SCHEMA_VERSION,
             source_instruction_count,
-            instructions: BTreeMap::new(),
+            instructions: vec![None; source_instruction_count],
+            span_instructions: BTreeMap::new(),
             obligations: BTreeMap::new(),
-            by_inst: BTreeMap::new(),
+            by_inst: vec![None; source_instruction_count],
             native_spans: BTreeMap::new(),
             construction_failures: Vec::new(),
             unstructured_cycle_blocks: BTreeSet::new(),
@@ -796,16 +807,13 @@ impl SemanticObligationInventory {
                     },
                 );
             }
-            inventory.by_inst.insert(inst.id, id);
-            inventory.instructions.insert(
+            inventory.by_inst[inst.id.0 as usize] = Some(id);
+            inventory.instructions[inst.id.0 as usize] = Some(SemanticInstructionDisposition {
                 id,
-                SemanticInstructionDisposition {
-                    id,
-                    source: SemanticSourceSite::GraphInstruction(inst.id),
-                    state,
-                    obligations: obligation_ids,
-                },
-            );
+                source: SemanticSourceSite::GraphInstruction(inst.id),
+                state,
+                obligations: obligation_ids,
+            });
         }
         inventory.complete = inventory.derive_is_complete();
         inventory
@@ -840,7 +848,7 @@ impl SemanticObligationInventory {
             let mut obligations = InstructionObligations::default();
             obligations.insert(obligation_id);
             if self
-                .instructions
+                .span_instructions
                 .insert(
                     id,
                     SemanticInstructionDisposition {
@@ -872,9 +880,7 @@ impl SemanticObligationInventory {
     }
 
     pub fn instruction_for_inst(&self, inst: InstId) -> Option<&SemanticInstructionDisposition> {
-        self.by_inst
-            .get(&inst)
-            .and_then(|id| self.instructions.get(id))
+        self.instructions.get(inst.0 as usize)?.as_ref()
     }
 
     /// Values whose exact source instruction is structural, owns no semantic
@@ -902,12 +908,12 @@ impl SemanticObligationInventory {
     ) -> Option<BTreeSet<ValueId>> {
         if !self.is_complete()
             || self.source_instruction_count != graph.insts.len()
-            || self.by_inst.len() != graph.insts.len()
+            || self.by_inst.iter().flatten().count() != graph.insts.len()
         {
             return None;
         }
         let mut values = BTreeSet::new();
-        for instruction in self.instructions.values() {
+        for instruction in self.dispositions() {
             if instruction.state != SemanticInstructionState::StructuralControlOnly
                 || !instruction.obligations.is_empty()
             {
@@ -943,10 +949,42 @@ impl SemanticObligationInventory {
         self.source_instruction_count
     }
 
-    pub fn instructions(
+    /// Every instruction's disposition: the graph's, then the native spans
+    /// that produced no canonical operation.
+    pub fn dispositions(&self) -> impl Iterator<Item = &SemanticInstructionDisposition> {
+        self.instructions
+            .iter()
+            .flatten()
+            .chain(self.span_instructions.values())
+    }
+
+    /// The disposition an obligation's instruction identity names, found the
+    /// way the obligation's own source site says to.
+    fn disposition_of(
         &self,
-    ) -> &BTreeMap<CanonicalInstructionId, SemanticInstructionDisposition> {
-        &self.instructions
+        id: CanonicalInstructionId,
+        source: SemanticSourceSite,
+    ) -> Option<&SemanticInstructionDisposition> {
+        match source {
+            SemanticSourceSite::GraphInstruction(inst) => self.instruction_for_inst(inst),
+            SemanticSourceSite::GenuineNativeSpan(_) => self.span_instructions.get(&id),
+        }
+    }
+
+    /// The disposition with this exact identity, by search.
+    ///
+    /// For fixtures. The runtime asks by graph instruction, which is an index.
+    #[cfg(test)]
+    pub(crate) fn disposition_with_id(
+        &self,
+        id: CanonicalInstructionId,
+    ) -> Option<&SemanticInstructionDisposition> {
+        self.dispositions().find(|disposition| disposition.id == id)
+    }
+
+    /// How many instructions the inventory dispositioned.
+    fn disposition_count(&self) -> usize {
+        self.instructions.iter().flatten().count() + self.span_instructions.len()
     }
 
     /// Exact source-derived native spans bound at the genuine-lift boundary.
@@ -963,16 +1001,12 @@ impl SemanticObligationInventory {
     /// What the inventory holds, for the byte fit.
     pub fn probe_shape(&self) -> String {
         let obligation_inputs: usize = self.obligations.values().map(|o| o.inputs.len()).sum();
-        let owned: usize = self
-            .instructions
-            .values()
-            .map(|d| d.obligations.len())
-            .sum();
+        let owned: usize = self.dispositions().map(|d| d.obligations.len()).sum();
         format!(
             "instructions {} obligations {} by_inst {} native_spans {} inputs {} owned {} sizeof(id) {} sizeof(obligation) {} sizeof(disposition) {} sizeof(instid) {} sizeof(span) {}",
-            self.instructions.len(),
+            self.disposition_count(),
             self.obligations.len(),
-            self.by_inst.len(),
+            self.by_inst.iter().flatten().count(),
             self.native_spans.len(),
             obligation_inputs,
             owned,
@@ -1004,8 +1038,8 @@ impl SemanticObligationInventory {
             .count();
         if self.schema_version != SEMANTIC_OBLIGATION_SCHEMA_VERSION
             || !self.construction_failures.is_empty()
-            || self.instructions.len() != self.source_instruction_count + zero_op_span_count
-            || self.by_inst.len() != self.source_instruction_count
+            || self.disposition_count() != self.source_instruction_count + zero_op_span_count
+            || self.by_inst.iter().flatten().count() != self.source_instruction_count
         {
             // An incomplete inventory refuses the function at the binding
             // plan, and until now it said only that. Which of the five
@@ -1018,46 +1052,49 @@ impl SemanticObligationInventory {
                 self.schema_version,
                 self.construction_failures,
                 self.unstructured_cycle_blocks,
-                self.instructions.len(),
+                self.disposition_count(),
                 self.source_instruction_count,
                 zero_op_span_count,
-                self.by_inst.len()
+                self.by_inst.iter().flatten().count()
             );
             return false;
         }
-        for (id, instruction) in &self.instructions {
-            if instruction.id != *id
-                || match instruction.source {
-                    SemanticSourceSite::GraphInstruction(inst) => {
-                        self.by_inst.get(&inst) != Some(id)
-                    }
-                    SemanticSourceSite::GenuineNativeSpan(source_span) => {
-                        self.native_spans.get(id).is_none_or(|span| {
-                            span.canonical_op_count() != 0
-                                || *span != source_span
-                                || id.block_addr != span.block_addr()
-                                || !matches!(
-                                    id.site,
-                                    CanonicalInstructionSite::NativeSpan {
-                                        instruction_addr,
-                                        size,
-                                    } if instruction_addr == span.instruction_addr()
-                                        && size == span.size()
-                                )
-                        })
-                    }
+        for instruction in self.dispositions() {
+            let id = &instruction.id;
+            if match instruction.source {
+                SemanticSourceSite::GraphInstruction(inst) => {
+                    self.by_inst
+                        .get(inst.0 as usize)
+                        .copied()
+                        .flatten()
+                        .as_ref()
+                        != Some(id)
                 }
-                || !instruction.obligations.iter().all(|obligation_id| {
-                    obligation_id.instruction == *id
-                        && self
-                            .obligations
-                            .get(obligation_id)
-                            .is_some_and(|obligation| {
-                                obligation.id == *obligation_id
-                                    && obligation.source == instruction.source
-                            })
-                })
-            {
+                SemanticSourceSite::GenuineNativeSpan(source_span) => {
+                    self.native_spans.get(id).is_none_or(|span| {
+                        span.canonical_op_count() != 0
+                            || *span != source_span
+                            || id.block_addr != span.block_addr()
+                            || !matches!(
+                                id.site,
+                                CanonicalInstructionSite::NativeSpan {
+                                    instruction_addr,
+                                    size,
+                                } if instruction_addr == span.instruction_addr()
+                                    && size == span.size()
+                            )
+                    })
+                }
+            } || !instruction.obligations.iter().all(|obligation_id| {
+                obligation_id.instruction == *id
+                    && self
+                        .obligations
+                        .get(obligation_id)
+                        .is_some_and(|obligation| {
+                            obligation.id == *obligation_id
+                                && obligation.source == instruction.source
+                        })
+            }) {
                 return false;
             }
             let should_have_obligations = matches!(
@@ -1069,12 +1106,15 @@ impl SemanticObligationInventory {
                 return false;
             }
         }
-        for (inst, id) in &self.by_inst {
+        for (index, id) in self.by_inst.iter().enumerate() {
+            let inst = InstId(index as u32);
+            if id.is_none() {
+                continue;
+            }
             if self
-                .instructions
-                .get(id)
+                .instruction_for_inst(inst)
                 .and_then(|instruction| instruction.source.graph_inst())
-                != Some(*inst)
+                != Some(inst)
             {
                 return false;
             }
@@ -1082,8 +1122,7 @@ impl SemanticObligationInventory {
         for (id, obligation) in &self.obligations {
             if obligation.id != *id
                 || self
-                    .instructions
-                    .get(&id.instruction)
+                    .disposition_of(id.instruction, obligation.source)
                     .is_none_or(|instruction| {
                         instruction.source != obligation.source
                             || !instruction.obligations.contains(id)
@@ -1109,7 +1148,7 @@ impl SemanticObligationInventory {
                         size,
                     } if instruction_addr == span.instruction_addr() && size == span.size()
                 )
-                || (span.canonical_op_count() == 0) != self.instructions.contains_key(id)
+                || (span.canonical_op_count() == 0) != self.span_instructions.contains_key(id)
             {
                 return false;
             }
@@ -1160,8 +1199,7 @@ impl SemanticObligationInventory {
 
     /// Deterministic, human-readable inventory for debug and fixture capture.
     pub fn debug_lines(&self) -> Vec<String> {
-        self.instructions
-            .values()
+        self.dispositions()
             .map(|instruction| {
                 let obligations = instruction
                     .obligations
@@ -1846,9 +1884,12 @@ mod tests {
     fn inventory_classifies_every_canonical_instruction_once() {
         let artifact = SsaArtifact::raw(&obligation_fixture(), None).expect("SSA artifact");
         let inventory = &artifact.facts().obligations;
-        assert_eq!(inventory.instructions.len(), artifact.graph().insts.len());
-        assert_eq!(inventory.by_inst.len(), artifact.graph().insts.len());
-        assert!(inventory.instructions.values().all(|instruction| {
+        assert_eq!(inventory.disposition_count(), artifact.graph().insts.len());
+        assert_eq!(
+            inventory.by_inst.iter().flatten().count(),
+            artifact.graph().insts.len()
+        );
+        assert!(inventory.dispositions().all(|instruction| {
             instruction.state != SemanticInstructionState::LiveObligation
                 || !instruction.obligations.is_empty()
         }));
@@ -1942,8 +1983,7 @@ mod tests {
         assert!(arguments.is_empty());
         let call = artifact
             .obligations()
-            .instructions
-            .get(&CanonicalInstructionId {
+            .disposition_with_id(CanonicalInstructionId {
                 block_addr: 0x3000,
                 site: CanonicalInstructionSite::Op(2),
             })
@@ -1960,8 +2000,7 @@ mod tests {
         for ordinal in 0..2 {
             let setup = artifact
                 .obligations()
-                .instructions
-                .get(&CanonicalInstructionId {
+                .disposition_with_id(CanonicalInstructionId {
                     block_addr: 0x3000,
                     site: CanonicalInstructionSite::Op(ordinal),
                 })
@@ -2393,8 +2432,7 @@ mod tests {
             SsaArtifact::raw(&[block], Some(&x86_64_call_arch())).expect("return artifact");
         let producer = artifact
             .obligations()
-            .instructions
-            .get(&CanonicalInstructionId {
+            .disposition_with_id(CanonicalInstructionId {
                 block_addr: 0x3100,
                 site: CanonicalInstructionSite::Op(0),
             })
@@ -2490,8 +2528,7 @@ mod tests {
         assert_eq!(returned.values.len(), 1);
         let producer = artifact
             .obligations()
-            .instructions()
-            .get(&CanonicalInstructionId {
+            .disposition_with_id(CanonicalInstructionId {
                 block_addr: 0x3140,
                 site: CanonicalInstructionSite::Op(1),
             })
@@ -2542,8 +2579,7 @@ mod tests {
             .expect("argument-carrier definition");
         let next_iteration_argument = artifact
             .obligations()
-            .instructions
-            .get(&CanonicalInstructionId {
+            .disposition_with_id(CanonicalInstructionId {
                 block_addr,
                 site: CanonicalInstructionSite::Op(op_index),
             })
@@ -2671,8 +2707,7 @@ mod tests {
         let artifact = SsaArtifact::raw(&[block], None).expect("atomic artifact");
         let atomic = artifact
             .obligations()
-            .instructions
-            .get(&CanonicalInstructionId {
+            .disposition_with_id(CanonicalInstructionId {
                 block_addr: 0x5000,
                 site: CanonicalInstructionSite::Op(0),
             })
@@ -2724,8 +2759,7 @@ mod tests {
         let artifact = SsaArtifact::raw(&[block], None).expect("fence artifact");
         let fence = artifact
             .obligations()
-            .instructions
-            .get(&CanonicalInstructionId {
+            .disposition_with_id(CanonicalInstructionId {
                 block_addr: 0x6000,
                 site: CanonicalInstructionSite::Op(0),
             })

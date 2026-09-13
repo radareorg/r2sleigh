@@ -86,11 +86,13 @@ fn upstream_zero_occurrence_outcome(
     }
 
     let graph = prepared.graph();
+    // The obligation carries its instruction's own source site, so the
+    // instruction table need not be searched for the same answer.
     let source_inst = prepared
         .obligations()
-        .instructions()
-        .get(&id.instruction)
-        .and_then(|disposition| disposition.source.graph_inst());
+        .obligations()
+        .get(&id)
+        .and_then(|obligation| obligation.source.graph_inst());
     if source_inst.is_some_and(|inst| {
         prepared
             .certificates()
